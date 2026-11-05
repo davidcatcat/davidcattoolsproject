@@ -201,18 +201,32 @@ def _classify_provider_error(raw, *, stderr=b''):
     has_error = False
     has_free_limit = False
     has_rate_limit = False
+    events = []
     try:
         for line in raw.decode('utf-8').splitlines():
             if not line:
                 continue
             event = json.loads(line)
-            if type(event) is not dict or event.get('type') != 'error':
+            if type(event) is not dict:
                 continue
-            has_error = True
+            events.append(event)
+        for index, event in enumerate(events):
+            if event.get('type') != 'error':
+                continue
             error = event.get('error')
+            error_type = error.get('type') if type(error) is dict else None
+            # OpenCode may emit a transient transport error and then continue
+            # the same run. Only a later structured completion event recovers
+            # that error; provider prose is never used as evidence.
+            recovered_transport = (
+                error_type == 'provider.transport' and
+                any(later.get('type') in ('step_finish', 'text')
+                    for later in events[index + 1:])
+            )
+            if not recovered_transport:
+                has_error = True
             if type(error) is not dict:
                 continue
-            error_type = error.get('type')
             if error_type in ('provider.free-limit', 'provider.quota'):
                 has_free_limit = True
             if error_type == 'provider.rate-limit':

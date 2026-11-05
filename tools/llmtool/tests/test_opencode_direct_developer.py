@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from llmtool.opencode_direct_developer import (
     AGENT, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, MAX_SOURCE_FILE_BYTES, MODEL,
-    DirectOpenCodeError, configuration,
+    DirectOpenCodeError, _classify_provider_error, configuration,
     parse_json_events, run,
 )
 from llmtool.providers.cli_lifecycle import CLIHostTermination
@@ -291,6 +291,49 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertNotIn(marker, str(error))
         self.assertNotIn(marker, repr(error.args))
         self.assertNotIn(marker, repr(vars(error)))
+
+    def test_provider_transport_error_is_recovered_by_later_structured_completion(self):
+        transport = self.event('error', error={
+            'type': 'provider.transport', 'message': 'UNTRUSTED TRANSPORT PROSE',
+        })
+        for completion in (
+                self.event('step_finish', part={}),
+                self.event('text', part={'text': 'completed'})):
+            with self.subTest(completion=completion):
+                raw = (transport + '\n' + completion + '\n').encode()
+                self.assertIsNone(_classify_provider_error(raw))
+
+    def test_provider_transport_error_without_later_completion_stays_failed(self):
+        transport = self.event('error', error={
+            'type': 'provider.transport', 'message': 'UNTRUSTED TRANSPORT PROSE',
+        })
+        for events in ((transport,),
+                       (self.event('step_start'), transport)):
+            with self.subTest(events=events):
+                raw = ('\n'.join(events) + '\n').encode()
+                self.assertEqual(_classify_provider_error(raw),
+                                 'OPENCODE_PROVIDER_FAILED')
+
+    def test_other_provider_errors_keep_classification_after_completion(self):
+        cases = (
+            (self.event('error', error={'type': 'provider.auth'}),
+             'OPENCODE_AUTH_REQUIRED'),
+            (self.event('error', error={'type': 'provider.free-limit'}),
+             'OPENCODE_FREE_LIMIT'),
+            (self.event('error', error={'type': 'provider.quota'}),
+             'OPENCODE_FREE_LIMIT'),
+            (self.event('error', error={'type': 'provider.rate-limit'}),
+             'OPENCODE_RATE_LIMITED'),
+            (self.event('tool_use', part={'state': {'status': 'denied'}}),
+             'TOOL_DENIED'),
+            (self.event('error', error={'type': 'output-limit'}),
+             'OPENCODE_OUTPUT_TRUNCATED'),
+        )
+        completion = self.event('text', part={'text': 'completed'})
+        for failure, expected in cases:
+            with self.subTest(expected=expected):
+                raw = (failure + '\n' + completion + '\n').encode()
+                self.assertEqual(_classify_provider_error(raw), expected)
 
     def test_error_event_without_dict_payload_stays_provider_failed(self):
         event = self.event('error', error='malformed provider payload')
