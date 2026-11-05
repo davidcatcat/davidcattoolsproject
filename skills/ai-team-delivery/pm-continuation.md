@@ -36,7 +36,7 @@ These checks prevent refusals that cost a dispatch round (2026-11-02):
 
 - **One Task ID per work package.** A Task ID names exactly one D6. Once a D6 is retired, its Task ID cannot be reused (`D6_TASK_ALREADY_EXISTS`). A standing Owner assignment that covers several slices, such as the TUI slices, needs one registered Task ID per slice in `worker-dispatch.json`.
 - **PM-written Task text is screened.** The goal must be ≤ 512 bytes (`PM_RESPONSE_GOAL_TOO_LONG`); each acceptance item must be ≤ 512 bytes; acceptance must contain 1–16 items (`PM_RESPONSE_ACCEPTANCE_COUNT`). Limits count UTF-8 bytes, so a CJK character is typically about 3 bytes. Request, response and acceptance text must not contain credential-shaped text (a credential keyword followed by an assignment or a value), even when quoting a finding; describe it in words instead. Every write path must also be listed as a read path. Before `record-pm`, run `tools/llmtool/scripts/spec_preflight.py` on a hand-made spec; it prints field names only.
-- **Sync the canonical checkout before dispatch.** While no approved-install pin exists, run `git merge --ff-only origin/main` in the canonical root first; a stale install refuses with `LLMTOOL_SOURCE_STALE`. Once the pin exists (`~/.local/state/llmtool/approved-install.json`, #1019), the install moves only through the Owner's `llmtool self-update`, and PM helpers stop fast-forwarding the canonical checkout.
+- **Sync the canonical checkout before dispatch.** Run `git merge --ff-only origin/main` in the canonical root first; a stale install refuses with `LLMTOOL_SOURCE_STALE`. The install stays automatic: the local repo fast-forwards to `main`, with no Owner step and no self-update tool ([Owner](https://github.com/davidcatcat/davidcattoolsproject/issues/1019#issuecomment-6669350210)).
 - **A branch update needs a new review.** After `gh pr update-branch`, or any merge of main into a PR, the verdict no longer covers the head. Request a merge-delta re-review of the new head before merging, unless the new head equals the reviewed head.
 - **Never wrap dispatch or repair in `timeout`.** It can kill Codex with signal 9. Run `llmtool task delegate` and any helper that runs it in the background, then poll. Set `ANTHROPIC_MODEL` explicitly for a background Claude dispatch until central role config (D1) lands.
 - Stopping a waiting shell kills background work that shell started; account for that before stopping it.
@@ -52,13 +52,13 @@ No real credentials may be used. The older hygiene guidance to describe credenti
 Joined-string credential-shaped fixtures are allowed only in screen-tool tests as synthetic data labelled `# synthetic-fixture: screen-tool test`, confirmed by an independent Reviewer; once merged, check with `tools/llmtool/scripts/fixture_check.py`. This does not permit bypassing a formal security check. [Owner decision](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6651110328).
 A refused local commit must not reach origin, including in history. This is a PM rule under #981, not part of the Owner decision.
 
-### Sensitive PRs and installs (Owner 2026-11-05, #1019)
+### Rule-file PRs (Owner 2026-11-05, #1019)
 
-A PR that changes a path in `tools/llmtool/sensitive-paths.json` needs Owner approval before merge, on top of formal review and exact-head CI. Check the list as installed, not the PR head, and count a rename out of a listed path. If the list cannot be read, treat the PR as sensitive. `CLAUDE.md`, `AGENTS.md` and `skills/` are not listed for now (S3).
+A PR that changes a path in `tools/llmtool/sensitive-paths.json` is a rule-file PR. It needs formal review and exact-head CI like any other PR and no per-PR Owner approval. Check the list as installed, not the PR head, and count a rename out of a listed path. If the list cannot be read, treat the PR as a rule-file PR. `CLAUDE.md`, `AGENTS.md` and `skills/` are not listed for now.
 
-Approval is the Owner's own local terminal confirmation (S1), through `llmtool owner-approval grant` once it lands, bound to the PR and exact HEAD, single use and expiring. A new HEAD needs a new approval. Ask with `pm_owner_marker.py`. No AI answers the challenge, and no response is not consent: remind the Owner, never pass the gate automatically. Until the gate is live, the PM applies this rule by hand.
+Each merge of a rule-file PR raises an alert at the top of the monitor. It stays until the Owner asks the PM to clear it; the PM then runs `scripts/llmtool_monitor.py --clear-rule-alert <PR>`. The PM never clears an alert on its own. The Owner does not need to act before the merge.
 
-These are accident guards, not a security boundary (S2): until the GitHub phase a same-user AI can still run `gh pr merge`, set `LLMTOOL_ALLOW_STALE_SOURCE=1` or fast-forward the checkout itself. Report that plainly and never claim the gates prevent it. Urgent llmtool fixes wait for the Owner like any other sensitive PR.
+This is an accident guard, not a security boundary (S2): a same-user AI can still run `gh pr merge` or edit the alert record. Report that plainly and never claim the alert prevents it. AI never uses `sudo`, `su` or root. Accounts, passwords, credentials and keys need an explicit Owner authorization first.
 
 ### Sub-agent PMs (Owner D8 2026-11-02)
 
