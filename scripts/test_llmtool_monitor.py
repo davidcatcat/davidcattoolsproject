@@ -97,6 +97,7 @@ class MonitorTrustTests(unittest.TestCase):
             successful_read = False
             read_failed = False
             pending = []
+            window = 6 * 3600
         github = Github()
         self.assertEqual(mon.owner_count_line(None), ("等你決定：未讀 GitHub", ""))
         self.assertEqual(mon.owner_count_line(github), ("等你決定：尚未讀取", ""))
@@ -105,9 +106,20 @@ class MonitorTrustTests(unittest.TestCase):
                           mon.OwnerPending(2, "#2", "WAITING", "", "repair_gate")]
         self.assertEqual(mon.owner_count_line(github), ("等你決定：1 件", "!"))
         github.pending = []
-        self.assertEqual(mon.owner_count_line(github), ("等你決定：0 件", ""))
+        self.assertEqual(mon.owner_count_line(github),
+                         ("等你決定：0 件（只看最近 6 小時留言）", ""))
         github.read_failed = True
         self.assertIn("GitHub 讀取失敗，可能過時", mon.owner_count_line(github)[0])
+
+    def test_owner_count_names_other_pending_owner_requests(self):
+        class Github:
+            successful_read = True
+            read_failed = False
+            window = 12 * 3600
+            pending = [mon.OwnerPending(1, "#1", "WAITING", "", "waiting_owner"),
+                       mon.OwnerPending(2, "#2", "WAITING", "", "repair_gate")]
+        self.assertEqual(mon.owner_count_line(Github()),
+                         ("等你決定：1 件（另有 1 筆其他 Owner 請求）", "!"))
 
     def test_d6_phases_and_unknown_pr_state(self):
         self.assertEqual(mon.d6_phase("ACTIVE", True, "", False), "執行中")
@@ -164,6 +176,23 @@ class MonitorTrustTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertEqual(source.main_health.sha, "74f78a4")
         self.assertEqual(source.main_health.linux[1], "success")
+        malformed = mon.GitHubSource("o/r", clock=lambda: self.NOW)
+        bad_paths = dict(paths)
+        commits_key = base + "commits?sha=main&per_page=1"
+        bad_paths[commits_key] = [{**paths[commits_key][0], "sha": "\x1b[31m"}]
+        malformed._get = lambda path: bad_paths[path]
+        malformed.refresh_main()
+        self.assertIsNone(malformed.main_health)
+        self.assertEqual(malformed.main_error, "main commit")
+        malformed_run = mon.GitHubSource("o/r", clock=lambda: self.NOW)
+        bad_paths = dict(paths)
+        linux_key = base + "actions/runs?branch=main&event=push&per_page=30"
+        bad_paths[linux_key] = {"workflow_runs": [
+            {**paths[linux_key]["workflow_runs"][0], "head_sha": "\x1b[31m"}]}
+        malformed_run._get = lambda path: bad_paths[path]
+        malformed_run.refresh_main()
+        self.assertIsNone(malformed_run.main_health)
+        self.assertEqual(malformed_run.main_error, "main workflow run")
         health = source.main_health
         source._get = lambda path: (_ for _ in ()).throw(RuntimeError("offline"))
         source.refresh_main()
@@ -569,6 +598,28 @@ class MonitorTaskBaselineTests(unittest.TestCase):
              patch.object(mon, "office_rows", return_value=[]):
             self.monitor.poll()
         self.assertEqual(self.monitor.opencode_route, previous)
+        self.assertTrue(self.monitor.opencode_route_failed)
+        self.assertEqual(mon.task_lines([], route_failed=True),
+                         ["OpenCode Task 紀錄讀取失敗，狀態未確認"])
+        self.monitor.office_due = 0.0
+        with patch.object(mon, "collect", return_value=self.snapshot), \
+             patch.object(mon, "scan_tasks", return_value=[]), \
+             patch.object(mon, "llmtool_task_records", return_value=[]), \
+             patch.object(mon, "llmtool_route_outcomes", return_value={"opencode": None}), \
+             patch.object(mon, "quota_warnings", return_value=[]), \
+             patch.object(mon, "office_rows", return_value=[]):
+            self.monitor.poll()
+        self.assertFalse(self.monitor.opencode_route_failed)
+
+    def test_tasks_view_reports_opencode_route_read_failure(self):
+        self.monitor.opencode_route_failed = True
+        drawn = {}
+        class Screen:
+            def getmaxyx(self): return (40, 120)
+            def erase(self): pass
+        mon._paint_screen(Screen(), self.monitor, "tasks", 0, False, {},
+                          lambda row, text, attr=0: drawn.__setitem__(row, text))
+        self.assertIn("OpenCode Task 紀錄讀取失敗，狀態未確認", drawn.values())
 
     def test_office_is_rebuilt_at_most_every_office_every_seconds(self):
         with patch.object(mon, "office_rows", return_value=[]) as rows:
@@ -6357,7 +6408,8 @@ class WorkBoardTests(unittest.TestCase):
     @staticmethod
     def _github(pulls=None, verdicts=None, **fields):
         from types import SimpleNamespace
-        values = {"board_pulls": pulls, "verdicts": verdicts or {}, "pending": [],
+        values = {"board_pulls": mon.board_pulls(pulls, "o/r") if pulls is not None else None,
+                  "verdicts": verdicts or {}, "pending": [],
                   "successful_read": pulls is not None, "read_failed": False}
         values.update(fields)
         return SimpleNamespace(**values)
@@ -6394,7 +6446,7 @@ class WorkBoardTests(unittest.TestCase):
             self.assertEqual([item.ref for item in parsed.running], ["#965"])
 
     def test_pm_board_validates_item_shape_and_caps_each_list_at_50(self):
-        entries = [{"ref": f"#{i}", "what": "x" * 80, "next": "", "reason": "r" * 80}
+        entries = [{"ref": f"#{i}", "what": "word " * 20, "next": "", "reason": "note " * 20}
                    for i in range(1, 53)]
         entries += [{"ref": "not a ref", "what": "bad", "next": "PM"},
                     {"ref": "#2", "what": 3, "next": "PM"}]
@@ -6469,11 +6521,15 @@ class WorkBoardTests(unittest.TestCase):
         lines = [line for line, _ in mon.board_view(unknown)]
         self.assertIn("?", lines[1])
         self.assertIn("未知", lines)
-        self.assertIn("無", [line for line, _ in mon.board_view(
+        empty_lines = [line for line, _ in mon.board_view(
             mon.work_board(self._github([], successful_read=True),
-                           mon.PmBoard("ok", 0, [], [], []), NOW))])
-        work = mon.work_board(self._github([self._pull(976, title="long title here")]),
+                           mon.PmBoard("ok", 0, [], [], []), NOW))]
+        self.assertIn("無（只看最近 12 小時留言）", empty_lines)
+        work = mon.work_board(self._github([self._pull(976, title="很長的中文標題用來測試窄螢幕換行")]),
                               mon.PmBoard("ok", 0, [], [], []), NOW)
-        rows = [line for line, _ in mon.board_view(work, width=10) if line.startswith("PR #")]
+        rows = [line for line, _ in mon.board_view(work, width=14)
+                if line.startswith("PR #") or line.startswith("  ")]
         self.assertTrue(rows)
-        self.assertTrue(rows[0].startswith("PR #976"))
+        self.assertEqual(rows[0], "PR #976")
+        self.assertTrue(all(mon._width(line) <= 14 for line in rows))
+        self.assertTrue(all(line.startswith("  ") for line in rows[1:]))

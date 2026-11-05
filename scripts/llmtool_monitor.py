@@ -871,6 +871,7 @@ class Monitor:
         self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
         self.records: list = []   # llmtool task-record lines, refreshed with the office view
         self.opencode_route = None
+        self.opencode_route_failed = False
         self.quota: list[str] = []
         self.quota_due = 0.0
         self.d6: list = []   # D6 task lines, refreshed with the office view
@@ -995,8 +996,9 @@ class Monitor:
                 pass
             try:
                 self.opencode_route = llmtool_route_outcomes(time.time()).get("opencode")
+                self.opencode_route_failed = False
             except Exception:  # preserve the last successful route summary
-                pass
+                self.opencode_route_failed = True
             if time.monotonic() >= self.quota_due:
                 self.quota_due = time.monotonic() + 60.0
                 try:
@@ -1318,12 +1320,15 @@ def edit_failures(stage: Stage) -> tuple[int, int]:
     return sum(tool.status == "error" for tool in edits), len(edits)
 
 
-def task_lines(tasks: list[Task], limit: int = 6, route=None) -> list[str]:
+def task_lines(tasks: list[Task], limit: int = 6, route=None,
+               route_failed: bool = False) -> list[str]:
     if not tasks:
         if route:
             age, total, succeeded, words = route
             return [f"/private/tmp 沒有 OpenCode 階段細節；llmtool Task 紀錄近 7 天 {total} 次，成功 {succeeded} 次，"
                     f"最近一次 {_short_ago(age)}：{words}"]
+        if route_failed:
+            return ["OpenCode Task 紀錄讀取失敗，狀態未確認"]
         return ["近 7 天 llmtool Task 紀錄沒有 OpenCode 執行"]
     lines = []
     for task in tasks[:limit]:
@@ -2029,7 +2034,8 @@ class GitHubSource:
             if type(commits) is not list or not commits:
                 raise ValueError("main commits")
             commit = commits[0]
-            if type(commit) is not dict or type(commit.get("sha")) is not str or not commit["sha"]:
+            if (type(commit) is not dict or type(commit.get("sha")) is not str
+                    or not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit["sha"])):
                 raise ValueError("main commit")
             sha = commit["sha"]
             commit_obj = commit.get("commit")
@@ -2051,7 +2057,8 @@ class GitHubSource:
                 if (type(run) is not dict or type(run.get("name")) is not str
                         or type(run.get("status")) is not str
                         or (run.get("conclusion") is not None and type(run.get("conclusion")) is not str)
-                        or type(run.get("head_sha")) is not str or not run["head_sha"]
+                        or type(run.get("head_sha")) is not str
+                        or not re.fullmatch(r"[0-9a-fA-F]{7,64}", run["head_sha"])
                         or type(run.get("created_at")) is not str):
                     raise ValueError("main workflow run")
                 if not _github_time(run["created_at"]):
@@ -3685,6 +3692,7 @@ class WorkBoard:
     board_age: float | None
     skipped: int
     note: str = ""
+    window_hours: int = 12
 
 
 # File format: a JSON object with schema_version 1, UTC updated_at, string
@@ -3838,7 +3846,8 @@ def work_board(github, board: PmBoard, now) -> WorkBoard:
                      "GitHub 讀取失敗，以下可能過時" if github.read_failed else
                      "GitHub 尚未讀取" if not github_known else "")
     return WorkBoard(owner, running, queue, blocked, done, github_known, board_known,
-                     github_status, board.status, board.age, board.skipped, note)
+                     github_status, board.status, board.age, board.skipped, note,
+                     int(github.window // 3600) if github is not None else 12)
 
 
 def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
@@ -3872,7 +3881,9 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
     for title, items, known in sections:
         out.append((f"── {title} ──", "section"))
         if not items:
-            out.append(("無" if known else "未知", "dim"))
+            empty = (f"無（只看最近 {work.window_hours} 小時留言）"
+                     if known and title == "等你" else "無" if known else "未知")
+            out.append((empty, "dim"))
             continue
         for item in items:
             if isinstance(item, BoardPull):
@@ -3886,9 +3897,13 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
                 rest = f"{item.what}  → {item.next}"
             if width:
                 first_width = max(1, width - _width(ref) - 2)
-                pieces = [ref + "  " + _wrap(rest, first_width)[0]]
-                pieces.extend(" " * (_width(ref) + 2) + line
-                              for line in _wrap(rest, first_width)[1:])
+                if first_width < 12:
+                    wrapped = _wrap(rest, max(1, width - 2))
+                    pieces = [ref, *["  " + line for line in wrapped]]
+                else:
+                    wrapped = _wrap(rest, first_width)
+                    pieces = [ref + "  " + wrapped[0]]
+                    pieces.extend(" " * (_width(ref) + 2) + line for line in wrapped[1:])
             else:
                 pieces = [f"{ref}  {rest}"]
             out.extend((piece, "") for piece in pieces)
@@ -6450,9 +6465,14 @@ def owner_count_line(github) -> tuple[str, str]:
         return text, "!" if github.read_failed else ""
     count = sum(item.kind == "waiting_owner" for item in github.pending)
     text = f"等你決定：{count} 件"
+    others = sum(item.kind != "waiting_owner" for item in github.pending)
+    if others:
+        text += f"（另有 {others} 筆其他 Owner 請求）"
+    elif count == 0:
+        text += f"（只看最近 {int(github.window // 3600)} 小時留言）"
     if github.read_failed:
         text += "（GitHub 讀取失敗，可能過時）"
-    return text, "!" if count else ""
+    return text, "!" if count or others else ""
 
 
 def office_top(github, quota, now) -> list[tuple[str, str]]:
@@ -6617,7 +6637,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     print()
     print("\n".join(table_lines(mon.processes)))
     print("\n".join(["", *d6_lines(mon.d6), "", *record_lines(mon.records), "",
-                     *task_lines(mon.tasks, 3, mon.opencode_route)]))
+                     *task_lines(mon.tasks, 3, mon.opencode_route,
+                                 mon.opencode_route_failed)]))
     print("\n最近動態")
     print("\n".join(activity_lines(mon.tasks, github=github)))
     print(f"說明：{FOOTNOTE}。")
@@ -6752,7 +6773,9 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
         if offset:
             hint = f"[scrolled back {offset}]  " + hint
     elif view == "tasks":
-        lines = d6_lines(mon.d6) + [""] + record_lines(mon.records) + [""] + task_lines(mon.tasks, route=mon.opencode_route)
+        lines = (d6_lines(mon.d6) + [""] + record_lines(mon.records) + [""]
+                 + task_lines(mon.tasks, route=mon.opencode_route,
+                             route_failed=mon.opencode_route_failed))
         offset = max(0, min(offset, len(lines) - body))
         for row, line in enumerate(lines[offset:offset + body]):
             attr = curses.A_BOLD if line.startswith(("任務 ", "llmtool 任務紀錄", "D6 任務")) else 0
