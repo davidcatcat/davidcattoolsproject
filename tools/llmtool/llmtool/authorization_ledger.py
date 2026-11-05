@@ -1,5 +1,8 @@
 """A11b.3 D1 one-use receipt ledger for synthetic fake effects only.
 
+OWNER_APPROVAL is real Owner approval state; D1 remains limited to synthetic
+fake effects, and PROVIDER_REVIEW and NOTIFICATION retain their separate roles.
+
 A receipt is ISSUED from an ALLOW PolicyDecision and redeemed at most once:
 ISSUED -> CONSUMED -> EFFECT_DONE | EFFECT_UNKNOWN (or DENIED / EXPIRED). The
 consume is a conditional UPDATE inside BEGIN IMMEDIATE and is committed with
@@ -64,6 +67,15 @@ _SCHEMA = (
     'issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL CHECK '
     "(status IN ('ISSUED', 'CONSUMED', 'EFFECT_DONE', 'EFFECT_UNKNOWN', 'DENIED', 'EXPIRED')), "
     'redeem_run_id TEXT)',
+)
+_OWNER_APPROVAL_SCHEMA = (
+    _SCHEMA[0],
+    "CREATE TABLE receipts (nonce TEXT PRIMARY KEY, binding TEXT NOT NULL, "
+    "issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL CHECK "
+    "(status IN ('ISSUED','CONSUMED','EXPIRED')))"
+)
+_OWNER_APPROVAL_INDEXES = (
+    "CREATE UNIQUE INDEX owner_approval_live_binding ON receipts(binding) WHERE status = 'ISSUED'",
 )
 _AUX_SUFFIXES = ('-journal', '-wal', '-shm')
 _PROVIDER_SCHEMA = (
@@ -200,6 +212,17 @@ def _fail(code):
     raise LedgerError(code)
 
 
+def _owner_approval_binding(binding):
+    if type(binding) is not str or not binding:
+        _fail(LedgerCode.NOT_ALLOWED)
+    try:
+        size = len(binding.encode('utf-8'))
+    except UnicodeEncodeError:
+        _fail(LedgerCode.NOT_ALLOWED)
+    if size > 512:
+        _fail(LedgerCode.NOT_ALLOWED)
+
+
 def _secure_directory(path):
     try:
         st = os.lstat(path)
@@ -236,6 +259,8 @@ def _layout_schema(kind, notification_layout, provider_layout):
     """(tables in name order, explicit indexes) for exactly one layout."""
     if kind == 'D1':
         return _SCHEMA, ()
+    if kind == 'OWNER_APPROVAL':
+        return _OWNER_APPROVAL_SCHEMA, _OWNER_APPROVAL_INDEXES
     if kind == 'PROVIDER_REVIEW':
         return (_PROVIDER_SCHEMA, ()) if provider_layout == 1 else (_PROVIDER_SCHEMA_V2, _PROVIDER_V2_INDEXES)
     return (_NOTIFICATION_SCHEMA if notification_layout == 1 else _NOTIFICATION_SCHEMA_V2), ()
@@ -246,10 +271,10 @@ class ReceiptLedger:
 
     @classmethod
     def create(cls, path, *, clock, kind='D1', notification_layout=1, provider_layout=1):
-        if kind not in ('D1','PROVIDER_REVIEW','NOTIFICATION'): _fail(LedgerCode.NOT_ALLOWED)
+        if kind not in ('D1','OWNER_APPROVAL','PROVIDER_REVIEW','NOTIFICATION'): _fail(LedgerCode.NOT_ALLOWED)
         if type(notification_layout) is not int or notification_layout not in (1,2) or (kind != 'NOTIFICATION' and notification_layout != 1): _fail(LedgerCode.NOT_ALLOWED)
         _check_provider_layout(kind, provider_layout)
-        creation_nonce = secrets.token_hex(32) if kind != 'D1' else None
+        creation_nonce = secrets.token_hex(32) if kind not in ('D1','OWNER_APPROVAL') else None
         path = os.path.abspath(path)
         _secure_directory(os.path.dirname(path))
         try:
@@ -297,8 +322,8 @@ class ReceiptLedger:
         """clock is the host's time source; callers never pass request times."""
         if not callable(clock):
             _fail(LedgerCode.CLOCK_INVALID)
-        if kind not in ('D1','PROVIDER_REVIEW','NOTIFICATION'): _fail(LedgerCode.NOT_ALLOWED)
-        if kind != 'D1':
+        if kind not in ('D1','OWNER_APPROVAL','PROVIDER_REVIEW','NOTIFICATION'): _fail(LedgerCode.NOT_ALLOWED)
+        if kind not in ('D1','OWNER_APPROVAL'):
             try: _hex(creation_nonce)
             except LLMToolError: _fail(LedgerCode.LEDGER_CORRUPT)
         if type(notification_layout) is not int or notification_layout not in (1,2) or (kind != "NOTIFICATION" and notification_layout != 1): _fail(LedgerCode.NOT_ALLOWED)
@@ -486,6 +511,49 @@ class ReceiptLedger:
                 # This exact binding already has a receipt (any status).
                 _fail(LedgerCode.NOT_ALLOWED)
         return Receipt(decision.binding, now, now + ttl_seconds, nonce)
+
+    def issue_owner_approval(self, binding, *, ttl_seconds):
+        with self._transaction() as now:
+            if self.kind != 'OWNER_APPROVAL':
+                _fail(LedgerCode.NOT_ALLOWED)
+            _owner_approval_binding(binding)
+            if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= MAX_APPROVAL_SECONDS:
+                _fail(LedgerCode.NOT_ALLOWED)
+            if now + ttl_seconds > MAX_EPOCH:
+                _fail(LedgerCode.CLOCK_INVALID)
+            self._db.execute("UPDATE receipts SET status='EXPIRED' WHERE binding=? "
+                             "AND status='ISSUED' AND expires_at <= ?", (binding, now))
+            nonce = secrets.token_hex(32)
+            try:
+                self._db.execute('INSERT INTO receipts VALUES (?, ?, ?, ?, ?)',
+                                 (nonce, binding, now, now + ttl_seconds, 'ISSUED'))
+            except sqlite3.IntegrityError:
+                _fail(LedgerCode.NOT_ALLOWED)
+        return nonce, now + ttl_seconds
+
+    def owner_approval_live(self, binding):
+        with self._transaction() as now:
+            if self.kind != 'OWNER_APPROVAL':
+                _fail(LedgerCode.NOT_ALLOWED)
+            _owner_approval_binding(binding)
+            self._db.execute("UPDATE receipts SET status='EXPIRED' WHERE binding=? "
+                             "AND status='ISSUED' AND expires_at <= ?", (binding, now))
+            row = self._db.execute("SELECT 1 FROM receipts WHERE binding=? AND status='ISSUED' "
+                                   "AND ? < expires_at", (binding, now)).fetchone()
+            return row is not None
+
+    def consume_owner_approval(self, binding):
+        with self._transaction() as now:
+            if self.kind != 'OWNER_APPROVAL':
+                _fail(LedgerCode.NOT_ALLOWED)
+            _owner_approval_binding(binding)
+            cursor = self._db.execute("UPDATE receipts SET status='CONSUMED' WHERE binding=? "
+                                      "AND status='ISSUED' AND ? < expires_at", (binding, now))
+            if cursor.rowcount == 1:
+                return True
+            self._db.execute("UPDATE receipts SET status='EXPIRED' WHERE binding=? "
+                             "AND status='ISSUED' AND expires_at <= ?", (binding, now))
+            return False
 
     def _set(self, nonce, status, expected):
         cursor = self._db.execute('UPDATE receipts SET status = ? WHERE nonce = ? AND status = ?',

@@ -426,6 +426,7 @@ class NoProductionAuthorityTests(unittest.TestCase):
                 'ProviderObservedState', 'decide_provider_review'})),
             ('review_authority.py', 'authorization_ledger', frozenset({'ReceiptLedger', 'LedgerError'})),
             ('review_handoff.py','authorization_ledger',frozenset({'ReceiptLedger'})),
+            ('owner_tty_issuer.py','authorization_ledger',frozenset({'ReceiptLedger','LedgerError'})),
         })
         # R-C: base relative dependencies plus only the accepted lazy increments.
         self.assertEqual(d1_imports, {

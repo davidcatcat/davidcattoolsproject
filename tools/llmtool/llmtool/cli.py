@@ -35,6 +35,7 @@ from . import task_submission_cli
 from .task_review_cli import add_review_parser, run_task_review
 from .review_authority_cli import add_review_authority_parser, run_review_authority_check
 from .dispatch_check import add_dispatch_check_parser, run_dispatch_check
+from .owner_tty_issuer import add_owner_approval_parser, run_owner_approval
 from .trust_cli import add_trust_parser, run_trust
 
 
@@ -177,6 +178,7 @@ def parser_for_cli():
     add_review_parser(task_actions)
     add_review_authority_parser(sub)
     add_dispatch_check_parser(sub)
+    add_owner_approval_parser(sub)
     add_trust_parser(sub)
     validate = sub.add_parser("validate", help="Assess commands or Context Packets offline; never execute")
     actions = validate.add_subparsers(dest="action", required=True)
@@ -535,6 +537,8 @@ def main(argv=None):
             return run_review_authority_check(args)
         if args.command == 'dispatch-check':
             return run_dispatch_check(args)
+        if args.command == 'owner-approval':
+            return run_owner_approval(args)
         if args.command == 'trust':
             return run_trust(args)
         if args.command == 'task':
