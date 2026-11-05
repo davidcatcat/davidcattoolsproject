@@ -535,6 +535,47 @@ def read_background(pm_session, store=None):
     return background_items(records)
 
 
+def attention_items(records, ready_task_ids=()):
+    """Attention-worthy Tasks of a PM session, derived from persisted Task state."""
+    from . import task_status
+
+    ready = set(ready_task_ids)
+    labels = {"BLOCKED": "卡住", "UNAVAILABLE": "供應商不可用", "FAILED": "失敗"}
+    items = []
+    for record in records:
+        state = task_status.derive_state(record)
+        if state == "RUNNING" and record.get("task_id") in ready:
+            label = "證據已就緒，等 PM 處理"
+        else:
+            label = labels.get(state)
+        if label is None:
+            continue
+        items.append({"label": label, "task": str(value(record, "task_id")),
+                      "reason": blocked_reason(record) or ""})
+    return items
+
+
+def read_attention(pm_session, store=None):
+    """Read the connected PM's attention facts and inbox without acknowledging anything."""
+    from .active_pm_inbox import _session_records, peek_inbox, pm_session_key
+    from .task_store import TaskStore
+
+    store = TaskStore() if store is None else store
+    key = pm_session_key(pm_session)
+    records, unreadable = _session_records(store, key)
+    inbox = peek_inbox(store, key)
+    events = inbox.get("events", [])
+    pending = inbox.get("pending", [])
+    ready = {item.get("task_id") for item in pending
+             if item.get("state") == "NOT_YET_RECORDED"}
+    ready.update(item.get("task_id") for item in events
+                 if item.get("current") is True and item.get("state") != "ACKED")
+    return {"items": attention_items(records, ready),
+            "unread": len(events) + len(pending),
+            "task_unreadable_count": unreadable,
+            "inbox_unreadable_count": inbox.get("unreadable_task_count", 0)}
+
+
 def age_text(timestamp, now=None):
     """Compact age of a Core timestamp ("45s", "12m", "3h", "2d"); "?" when unreadable."""
     try:
