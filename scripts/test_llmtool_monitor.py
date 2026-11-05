@@ -2410,7 +2410,9 @@ class InstallLinesTests(unittest.TestCase):
                    mon.OwnerPending(2, "#2", "open", "Other owner request", "waiting_owner"),
                    mon.OwnerPending(3, "#3", "open", "owner-approval", "repair_gate")]
         with tempfile.TemporaryDirectory() as directory:
-            self.assertEqual(mon.install_lines(self._github(pending=pending), directory), [self.APPROVAL])
+            self.assertEqual(mon.install_lines(self._github(pending=pending),
+                                               os.path.join(directory, 'missing.json')),
+                             [self.APPROVAL])
 
     def test_office_top_places_install_after_owner_and_before_main(self):
         github = self._github()
