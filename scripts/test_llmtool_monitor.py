@@ -2354,6 +2354,121 @@ class DispatchFileAgreementTests(_GateMixin, unittest.TestCase):
         self.assertLessEqual({key for _, key, _ in mon.WORKER_ROSTER}, mon.DISPATCH_WORKERS)
 
 
+class InstallLinesTests(unittest.TestCase):
+    APPROVAL = ("等你終端核准：1 件（請在自己的終端執行 llmtool owner-approval grant）", "!")
+    UNREADABLE = ("安裝釘選檔無法讀取", "!")
+
+    def _github(self, *, successful_read=True, pending=None, sha="a" * 7):
+        from types import SimpleNamespace
+        health = mon.MainHealth(sha, "main", 0) if sha is not None else None
+        return SimpleNamespace(successful_read=successful_read, pending=pending or [],
+                               main_health=health, main_error="", read_failed=False,
+                               window=43200)
+
+    def _pin(self, directory, value):
+        path = Path(directory) / "approved-install.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return str(path)
+
+    def test_unavailable_github_and_missing_pin_show_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(mon.install_lines(None, directory), [])
+            self.assertEqual(mon.install_lines(self._github(successful_read=False), directory), [])
+            self.assertEqual(mon.install_lines(self._github(), str(Path(directory) / "missing")), [])
+
+    def test_matching_and_behind_pins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            same = self._pin(directory, {"approved_sha": "a" * 40})
+            self.assertEqual(mon.install_lines(self._github(sha="a" * 7), same), [])
+            behind = self._pin(directory, {"approved_sha": "b" * 40})
+            self.assertEqual(mon.install_lines(self._github(sha="a" * 7), behind),
+                             [("新版本等你安裝：bbbbbbb → aaaaaaa（請在自己的終端執行 llmtool self-update）", "!")])
+
+    def test_bad_json_oversize_and_short_sha_are_unreadable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pin"
+            for raw in (b"{", b" " * 4097, json.dumps({"approved_sha": "a" * 39}).encode()):
+                path.write_bytes(raw)
+                self.assertEqual(mon.install_lines(self._github(), str(path)), [self.UNREADABLE])
+
+    def test_fifo_pin_is_unreadable_without_blocking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pin"
+            os.mkfifo(path)
+            self.assertEqual(mon.install_lines(self._github(), str(path)), [self.UNREADABLE])
+
+    def test_symlink_pin_is_unreadable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "target"
+            target.write_text(json.dumps({"approved_sha": "a" * 40}), encoding="utf-8")
+            path = Path(directory) / "pin"
+            path.symlink_to(target)
+            self.assertEqual(mon.install_lines(self._github(), str(path)), [self.UNREADABLE])
+
+    def test_counts_owner_approval_from_full_waiting_comment_and_carries_forward(self):
+        marker = "<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->\n"
+        prefix = "**Owner decision needed (asked in the PM chat, 2026-11-06T01:02:03Z):**"
+        long_ask = prefix + " " + ("x" * 90) + " owner-approval grant"
+        mixed_case = "Please run OWNER-APPROVAL grant"
+        comments = [
+            comment(101, NOW - 100, marker + long_ask),
+            comment(102, NOW - 90, marker + mixed_case),
+            comment(103, NOW - 80, marker + "An unrelated request"),
+            comment(104, NOW - 70, marker + "owner-approval grant"),
+            comment(104, NOW - 60,
+                    "<!-- activity: type=waiting_owner actor=Owner target=PM status=ANSWERED -->\n"
+                    "Settled"),
+        ]
+        pending = mon.owner_pending(comments, [])
+        self.assertEqual([item.reference for item in pending], ["#101", "#102", "#103"])
+        long_item = pending[0]
+        self.assertEqual(long_item.summary, mon._headline(long_ask))
+        self.assertNotIn("owner-approval", long_item.summary.casefold())
+        self.assertTrue(long_item.needs_owner_approval)
+        self.assertTrue(pending[1].needs_owner_approval)
+        self.assertFalse(pending[2].needs_owner_approval)
+
+        carried = mon.owner_pending([], [], earlier=pending)
+        self.assertEqual([item.needs_owner_approval for item in carried], [True, True, False])
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(mon.install_lines(self._github(pending=carried),
+                                               os.path.join(directory, 'missing.json')),
+                             [("等你終端核准：2 件（請在自己的終端執行 llmtool owner-approval grant）", "!")])
+
+    def test_failed_read_hides_install_lines_and_later_success_restores_them(self):
+        pending = mon.owner_pending([comment(
+            105, NOW - 10,
+            "<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->\n"
+            "owner-approval grant")], [])
+        github = self._github(pending=pending)
+        github.read_failed = True
+        with tempfile.TemporaryDirectory() as directory:
+            pin = os.path.join(directory, "missing.json")
+            self.assertEqual(mon.install_lines(github, pin), [])
+            github.read_failed = False
+            self.assertEqual(mon.install_lines(github, pin), [self.APPROVAL])
+
+    def test_office_top_places_install_after_owner_and_before_main(self):
+        github = self._github()
+        install = [("install", "!")]
+        self.assertEqual(mon.office_top(github, ["quota"], 0, install=install),
+                         [mon.owner_count_line(github), *install,
+                          mon.main_health_line(github.main_health, github.main_error, 0),
+                          ("quota", "!")])
+        self.assertEqual(mon.office_top(github, ["quota"], 0),
+                         [mon.owner_count_line(github),
+                          mon.main_health_line(github.main_health, github.main_error, 0),
+                          ("quota", "!")])
+        self.assertEqual(mon.office_top(None, [], 0), [mon.owner_count_line(None)])
+
+    def test_install_lines_runs_no_subprocess(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pin = self._pin(directory, {"approved_sha": "a" * 40})
+            with patch("subprocess.run", side_effect=AssertionError("subprocess.run called")), \
+                    patch("subprocess.Popen", side_effect=AssertionError("subprocess.Popen called")):
+                self.assertEqual(mon.install_lines(self._github(), pin), [])
+
+
 class OfficeViewTests(unittest.TestCase):
     NOW = 1_800_000_000.0
 
