@@ -691,10 +691,12 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                 try:
                     _write_screen_record(task_id, family, 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
                                          'EVIDENCE', hits, len(raw))
-                    detail = _screen_detail(hits, omitted=max(0, len(hits) - _SCREEN_HIT_LIMIT))
+                    detail = _screen_detail(
+                        hits[:_SCREEN_HIT_LIMIT],
+                        omitted=max(0, len(hits) - _SCREEN_HIT_LIMIT))
                 except Exception:
                     detail = _screen_detail(
-                        hits, 'screen_record=UNRECORDED',
+                        hits[:_SCREEN_HIT_LIMIT], 'screen_record=UNRECORDED',
                         omitted=max(0, len(hits) - _SCREEN_HIT_LIMIT))
                 _refuse('HIGH_DEBUG_EVIDENCE_SENSITIVE', detail)
         except LLMToolError: raise
@@ -753,7 +755,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
             detail = (detail + ' ' if detail else '') + 'github_record=UNPOSTED'
         if screen_hits is not None:
             detail = _screen_detail(
-                screen_hits, detail or '',
+                screen_hits[:_SCREEN_HIT_LIMIT], detail or '',
                 omitted=max(0, len(screen_hits) - _SCREEN_HIT_LIMIT))
         _refuse(code, detail)
 

@@ -590,6 +590,13 @@ class HighDebugTests(unittest.TestCase):
                          for heading in high_debug.REPORT_SECTIONS[:-1])
         return report + '## Outcome/cost\n' + outcome_body
 
+    def _assert_screen_detail_count(self, detail, total_hits):
+        _rules, remainder = detail.split(' lines=', 1)
+        lines, more = remainder.split(' more=', 1)
+        displayed = len(lines.split(','))
+        self.assertEqual(int(more), total_hits - displayed)
+        self.assertLessEqual(len(detail), 128)
+
     def test_blocked_in_prose_does_not_count(self):
         report = self._sections('RCA_CONFIRMED\n').replace(
             'Details.', 'This was BLOCKED earlier.', 1)
@@ -720,7 +727,7 @@ class HighDebugTests(unittest.TestCase):
 
     def test_screen_record_counts_omitted_hits_and_disposition_uses_kept_set(self):
         task_id, family = 'a' * 32, 'family'
-        hits = [(f'rule{number:02}', number) for number in range(35)]
+        hits = [('unclassified', number) for number in range(1, 36)]
         with patch.object(high_debug, '_screen_hits', return_value=hits):
             located = high_debug._screen_hits('benign')
         high_debug._write_screen_record(task_id, family, 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
@@ -728,7 +735,9 @@ class HighDebugTests(unittest.TestCase):
         record = json.loads(high_debug._screen_path(task_id, family).read_text())
         self.assertEqual(record['omitted'], 3)
         self.assertEqual(record['hits'], [list(hit) for hit in hits[:32]])
-        self.assertIn('more=3', high_debug._screen_detail(hits[:32], omitted=record['omitted']))
+        detail = high_debug._screen_detail(hits[:32], omitted=record['omitted'])
+        self._assert_screen_detail_count(
+            detail, record['omitted'] + len(record['hits']))
         record_path = high_debug._screen_path(task_id, family)
         for invalid_omitted in ('3', -1):
             invalid_record = dict(record, omitted=invalid_omitted)
@@ -741,6 +750,63 @@ class HighDebugTests(unittest.TestCase):
         record_path.write_text(json.dumps(record), encoding='utf-8')
         high_debug.record_screen_disposition(task_id, family, hits[:32], 'FALSE_POSITIVE',
             'https://github.com/org/repo/issues/1#issuecomment-2')
+
+    def test_many_screen_hits_evidence_refusal_detail_counts_overflow_once(self):
+        hits = [('unclassified', number) for number in range(1, 36)]
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / 'benign.txt'
+            evidence.write_text('plain input', encoding='utf-8')
+            with patch.object(high_debug, '_emitted_sensitive', return_value=True), \
+                 patch.object(high_debug, '_screen_hits', return_value=hits):
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug(store=_Store(), task_id='a' * 32,
+                        executor_task='executor', pr_number=17, family='family',
+                        failed_corrections=2, evidence=str(evidence))
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_EVIDENCE_SENSITIVE')
+        self._assert_screen_detail_count(caught.exception.high_debug_detail, len(hits))
+
+    def test_many_screen_hits_write_failure_detail_counts_overflow_once(self):
+        hits = [('unclassified', number) for number in range(1, 36)]
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / 'benign.txt'
+            evidence.write_text('plain input', encoding='utf-8')
+            with patch.object(high_debug, '_emitted_sensitive', return_value=True), \
+                 patch.object(high_debug, '_screen_hits', return_value=hits), \
+                 patch.object(high_debug, '_write_screen_record', side_effect=OSError('disk')):
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug(store=_Store(), task_id='a' * 32,
+                        executor_task='executor', pr_number=17, family='family',
+                        failed_corrections=2, evidence=str(evidence))
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_EVIDENCE_SENSITIVE')
+        self.assertTrue(caught.exception.high_debug_detail.startswith('screen_record=UNRECORDED'))
+        self._assert_screen_detail_count(caught.exception.high_debug_detail, len(hits))
+
+    def test_many_screen_hits_report_refusal_detail_counts_overflow_once(self):
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS) + 'RCA_CONFIRMED'
+        hits = [('unclassified', number) for number in range(1, 36)]
+        with patch.object(high_debug, '_emitted_sensitive', return_value=True), \
+             patch.object(high_debug, '_screen_hits', return_value=hits):
+            with self.assertRaises(LLMToolError) as caught:
+                self._run_case(report)
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_REPORT_INVALID')
+        self._assert_screen_detail_count(caught.exception.high_debug_detail, len(hits))
+
+    def test_many_persisted_screen_hits_rerun_detail_counts_overflow_once(self):
+        task_id, family = 'a' * 32, 'family'
+        hits = [('unclassified', number) for number in range(1, 36)]
+        high_debug._write_screen_record(task_id, family, 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
+                                        'EVIDENCE', hits, 35)
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.run_high_debug(store=_Store(), task_id=task_id,
+                executor_task='executor', pr_number=17, family=family,
+                failed_corrections=2)
+        self.assertEqual(caught.exception.high_debug_code,
+                         'HIGH_DEBUG_SCREEN_DISPOSITION_REQUIRED')
+        record = json.loads(high_debug._screen_path(task_id, family).read_text())
+        self.assertEqual(record['omitted'], 3)
+        self._assert_screen_detail_count(
+            caught.exception.high_debug_detail, record['omitted'] + len(record['hits']))
 
     def test_pending_screen_record_blocks_before_missing_evidence_read(self):
         task_id, family = 'a' * 32, 'family'
