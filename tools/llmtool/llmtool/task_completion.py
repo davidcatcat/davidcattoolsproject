@@ -1256,9 +1256,9 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
         write_paths=write_paths, artifact_segments=artifact_segments,
         trusted_base_sha=trusted_base_sha)
     if artifact_segments is None:
-        verify_artifact_applied(registration.root, artifact, artifact_sha256,
-                                source_sha, snapshot.head, paths, write_paths,
-                                scope_paths=developer_paths)
+        artifact_checkpoint, merge_proofs = verify_artifact_checkpoint(
+            registration.root, artifact, artifact_sha256, source_sha,
+            snapshot.head, write_paths, trusted_base_sha)
     else:
         if (type(artifact_segments) is not list or not artifact_segments or
                 any(type(segment) is not tuple or len(segment) != 4
@@ -1310,6 +1310,8 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
         'changed_paths': list(paths),
         'developer_changed_paths': list(developer_paths),
         'diff_sha256': hashlib.sha256(patch).hexdigest(),
+        **({'artifact_checkpoint': artifact_checkpoint,
+            'merge_proofs': merge_proofs} if artifact_segments is None else {}),
     }
 
 
@@ -1547,15 +1549,14 @@ def _proposal_blob_size(root, tree_sha, path):
     return size
 
 
-def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_sha,
-                            changed_paths, write_paths, *, scope_paths=None):
-    """Apply the proposal in a bounded temp tree and compare result blobs/modes."""
+def _artifact_patch_paths(artifact, artifact_sha256, source_sha, result_sha=None):
     if (type(artifact) is not str or not artifact or
             len(artifact.encode('utf-8')) > _GIT_LIMIT or
             type(artifact_sha256) is not str or
             hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha256 or
             type(source_sha) is not str or _HEX40.fullmatch(source_sha) is None or
-            type(result_sha) is not str or _HEX40.fullmatch(result_sha) is None):
+            (result_sha is not None and
+             (type(result_sha) is not str or _HEX40.fullmatch(result_sha) is None))):
         _stop('DEVELOPER_ARTIFACT_BINDING_INVALID')
     patch_paths = []
     for line in artifact.splitlines():
@@ -1564,11 +1565,8 @@ def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_
             if match is None or match.group(1) != match.group(2):
                 _stop('DEVELOPER_ARTIFACT_INVALID')
             patch_paths.append(match.group(1))
-    scope_paths = patch_paths if scope_paths is None else scope_paths
     if (not patch_paths or len(patch_paths) > _PROPOSAL_FILE_LIMIT or
-            len(patch_paths) != len(set(patch_paths)) or
-            set(patch_paths) != set(changed_paths) or
-            not set(scope_paths).issubset(set(write_paths))):
+            len(patch_paths) != len(set(patch_paths))):
         _stop('DEVELOPER_ARTIFACT_RESULT_MISMATCH')
     for path in patch_paths:
         parts = Path(path).parts
@@ -1576,12 +1574,11 @@ def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_
                 any(part in ('', '.', '..') for part in parts) or '\\' in path or
                 '\x00' in path):
             _stop('DEVELOPER_ARTIFACT_INVALID')
-    total_blob_bytes = 0
-    for path in patch_paths:
-        total_blob_bytes += _proposal_blob_size(root, source_sha, path)
-        total_blob_bytes += _proposal_blob_size(root, result_sha, path)
-        if total_blob_bytes > _PROPOSAL_TREE_LIMIT:
-            _stop('DEVELOPER_ARTIFACT_TREE_TOO_LARGE')
+    return tuple(patch_paths)
+
+
+def _apply_artifact_expected(root, artifact, source_sha, patch_paths):
+    """Apply once in a private tree and return bounded expected blobs and modes."""
     env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
            'GIT_ATTR_NOSYSTEM': '1', 'GIT_OPTIONAL_LOCKS': '0',
@@ -1609,26 +1606,266 @@ def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_
                 timeout=_TIMEOUT, env=env, shell=False, check=False)
             if proc.returncode != 0:
                 _stop('DEVELOPER_ARTIFACT_NOT_APPLIED')
+            expected = {}
+            total_blob_bytes = 0
             for path in patch_paths:
-                expected = _tree_blob(root, result_sha, path)
                 target = temp_root.joinpath(*Path(path).parts)
                 try:
                     actual_stat = target.lstat()
                 except FileNotFoundError:
-                    actual_stat = None
-                if expected is None:
-                    if actual_stat is not None:
-                        _stop('DEVELOPER_ARTIFACT_RESULT_TREE_MISMATCH')
+                    expected[path] = None
                     continue
-                mode, content = expected
-                if (actual_stat is None or not stat.S_ISREG(actual_stat.st_mode) or
-                        target.read_bytes() != content or
-                        bool(actual_stat.st_mode & 0o111) != (mode == '100755')):
+                if not stat.S_ISREG(actual_stat.st_mode):
                     _stop('DEVELOPER_ARTIFACT_RESULT_TREE_MISMATCH')
+                content = target.read_bytes()
+                total_blob_bytes += len(content)
+                if total_blob_bytes > _PROPOSAL_TREE_LIMIT:
+                    _stop('DEVELOPER_ARTIFACT_TREE_TOO_LARGE')
+                expected[path] = ('100755' if actual_stat.st_mode & 0o111 else '100644',
+                                  content)
+            return expected
     except LLMToolError:
         raise
     except Exception:
         _stop('DEVELOPER_ARTIFACT_CHECK_UNKNOWN')
+
+
+def _commit_parents(root, commit):
+    try:
+        fields = _git(root, ('rev-list', '--parents', '-n', '1', commit),
+                      limit=4096).decode('ascii').split()
+    except UnicodeError:
+        _stop('RESULT_DIFF_INVALID')
+    if not fields or fields[0] != commit:
+        _stop('RESULT_DIFF_INVALID')
+    return fields[1:]
+
+
+def _commit_tree(root, commit):
+    return _git(root, ('rev-parse', '--verify', commit + '^{tree}'),
+                 limit=4096).decode('ascii').strip()
+
+
+def _tree_changed_paths(root, start_sha, end_sha):
+    raw = _git(root, ('diff-tree', '--no-commit-id', '--name-only', '-r', '-z',
+                      '--no-renames', start_sha, end_sha, '--'), limit=1024 * 1024)
+    try:
+        return tuple(item for item in raw.decode('utf-8', 'strict').split('\x00') if item)
+    except UnicodeError:
+        _stop('RESULT_DIFF_INVALID')
+
+
+def _merge_attributes_safe(root, tree_sha, deadline):
+    raw = _git(root, ('ls-tree', '-r', '-z', tree_sha), limit=_GIT_LIMIT)
+    try:
+        entries = raw.decode('utf-8', 'strict').split('\x00')
+    except UnicodeError:
+        _stop('RESULT_DIFF_INVALID')
+    for entry in entries:
+        if time.monotonic() > deadline:
+            _stop('RESULT_DIFF_INVALID')
+        if not entry:
+            continue
+        try:
+            metadata, path = entry.split('\t', 1)
+            mode, kind, oid = metadata.split(' ')
+        except ValueError:
+            _stop('RESULT_DIFF_INVALID')
+        if kind != 'blob' or Path(path).name != '.gitattributes':
+            continue
+        if mode not in ('100644', '100755') or _HEX40.fullmatch(oid) is None:
+            _stop('RESULT_DIFF_INVALID')
+        content = _git(root, ('cat-file', 'blob', oid), limit=64 * 1024)
+        if not _merge_attribute_content_safe(content):
+            _stop('RESULT_DIFF_INVALID')
+    try:
+        info_attributes = _git(root, ('rev-parse', '--path-format=absolute',
+                                      '--git-path', 'info/attributes'), limit=4096)
+        path = Path(info_attributes.decode('utf-8', 'strict').strip())
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        except FileNotFoundError:
+            return
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_size > 64 * 1024:
+                _stop('RESULT_DIFF_INVALID')
+            content = bytearray()
+            while len(content) <= 64 * 1024:
+                chunk = os.read(fd, min(8192, 64 * 1024 + 1 - len(content)))
+                if not chunk:
+                    break
+                content.extend(chunk)
+            after = os.fstat(fd)
+            current = path.lstat()
+        finally:
+            os.close(fd)
+        identity = lambda value: (value.st_dev, value.st_ino, value.st_size,
+                                  value.st_mtime_ns)
+        if (len(content) > 64 * 1024 or identity(opened) != identity(after) or
+                (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino) or
+                not _merge_attribute_content_safe(bytes(content))):
+            _stop('RESULT_DIFF_INVALID')
+    except LLMToolError:
+        raise
+    except Exception:
+        _stop('RESULT_DIFF_INVALID')
+
+
+def _merge_attribute_content_safe(content):
+    try:
+        lines = content.decode('utf-8', 'strict').splitlines()
+    except UnicodeError:
+        return False
+    allowed = {'text', 'binary', 'union'}
+    for line in lines:
+        if line.lstrip().startswith('#'):
+            continue
+        fields = line.split()
+        for attribute in fields[1:]:
+            if attribute in ('merge', '-merge', '!merge'):
+                continue
+            if attribute.startswith('merge=') and attribute[6:] in allowed:
+                continue
+            if attribute.startswith('merge') or attribute.startswith('-merge') or \
+                    attribute.startswith('!merge'):
+                return False
+    return True
+
+
+def _refuse_custom_merge_drivers(root):
+    _, status = _git(root, ('config', '--null', '--get-regexp',
+                            r'^merge\..*\.driver$'), limit=64 * 1024,
+                     allow_exit_1=True, return_exit_code=True)
+    if status == 0:
+        _stop('RESULT_DIFF_INVALID')
+
+
+def _remerge_tree(root, first_parent, second_parent):
+    try:
+        objects = _git(root, ('rev-parse', '--path-format=absolute', '--git-path',
+                              'objects'), limit=4096).decode('utf-8', 'strict').strip()
+    except UnicodeError:
+        _stop('GIT_INSPECTION_FAILED')
+    if not objects or not os.path.isabs(objects):
+        _stop('GIT_INSPECTION_FAILED')
+    try:
+        with tempfile.TemporaryDirectory(prefix='llmtool-merge-proof-') as temporary:
+            object_dir = Path(temporary) / 'objects'
+            object_dir.mkdir(mode=0o700)
+            raw, status = _git(root, ('-c', 'merge.renames=true', '-c',
+                'merge.conflictStyle=merge', 'merge-tree', '--write-tree',
+                first_parent, second_parent), limit=1024 * 1024,
+                allow_exit_1=True, return_exit_code=True, env_overrides={
+                    'GIT_OBJECT_DIRECTORY': str(object_dir),
+                    'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
+                })
+    except LLMToolError:
+        raise
+    except Exception:
+        _stop('GIT_INSPECTION_FAILED')
+    if status != 0:
+        _stop('RESULT_DIFF_INVALID')
+    first_line = raw.split(b'\n', 1)[0]
+    if not re.fullmatch(rb'[0-9a-f]{40}', first_line):
+        _stop('RESULT_DIFF_INVALID')
+    return first_line.decode('ascii')
+
+
+def verify_artifact_checkpoint(root, artifact, artifact_sha256, source_sha,
+                               endpoint_sha, write_paths, trusted_base_sha=None):
+    """Bind a write-path artifact to its checkpoint and prove a clean merge tail."""
+    started = time.monotonic()
+    _reject_legacy_grafts(root)
+    patch_paths = _artifact_patch_paths(artifact, artifact_sha256, source_sha, endpoint_sha)
+    if not set(patch_paths).issubset(set(write_paths)):
+        _stop('DEVELOPER_ARTIFACT_RESULT_MISMATCH')
+    if trusted_base_sha is None:
+        trusted_base_sha = source_sha
+    if type(trusted_base_sha) is not str or _HEX40.fullmatch(trusted_base_sha) is None:
+        _stop('RESULT_DIFF_INVALID')
+    total = sum(_proposal_blob_size(root, source_sha, path) for path in patch_paths)
+    if total > _PROPOSAL_TREE_LIMIT:
+        _stop('DEVELOPER_ARTIFACT_TREE_TOO_LARGE')
+    expected = _apply_artifact_expected(root, artifact, source_sha, patch_paths)
+    _refuse_custom_merge_drivers(root)
+    raw = _git(root, ('rev-list', '--first-parent', '--reverse', source_sha + '..' +
+                      endpoint_sha), limit=1024 * 1024)
+    try:
+        commits = raw.decode('ascii').splitlines()
+    except UnicodeError:
+        _stop('RESULT_DIFF_INVALID')
+    if len(commits) > 4096:
+        _stop('RESULT_DIFF_INVALID')
+    previous = source_sha
+    checkpoint_index = None
+    for index, commit in enumerate(commits):
+        if time.monotonic() - started > 60:
+            _stop('RESULT_DIFF_INVALID')
+        parents = _commit_parents(root, commit)
+        if not parents or parents[0] != previous:
+            _stop('DEVELOPER_ARTIFACT_RESULT_MISMATCH')
+        previous = commit
+        changed = _tree_changed_paths(root, source_sha, commit)
+        if set(changed) != set(patch_paths):
+            continue
+        if all(_tree_blob(root, commit, path) == expected[path] for path in patch_paths):
+            checkpoint_index = index
+            break
+    if checkpoint_index is None:
+        _stop('DEVELOPER_ARTIFACT_RESULT_MISMATCH')
+    checkpoint = commits[checkpoint_index]
+    merge_proofs = []
+    previous_tail = checkpoint
+    for commit in commits[checkpoint_index + 1:]:
+        if time.monotonic() - started > 60:
+            _stop('RESULT_DIFF_INVALID')
+        parents = _commit_parents(root, commit)
+        if not parents or parents[0] != previous_tail:
+            _stop('DEVELOPER_ARTIFACT_RESULT_MISMATCH')
+        first_parent = parents[0]
+        previous_tail = commit
+        if len(parents) > 2:
+            _stop('RESULT_DIFF_INVALID')
+        if len(parents) == 1:
+            if _commit_tree(root, commit) != _commit_tree(root, first_parent):
+                _stop('DEVELOPER_ARTIFACT_RESULT_MISMATCH')
+            continue
+        second_parent = parents[1]
+        if len(merge_proofs) >= 64:
+            _stop('RESULT_DIFF_INVALID')
+        if not _is_ancestor(root, second_parent, trusted_base_sha):
+            _stop('DEVELOPER_ARTIFACT_RESULT_MISMATCH')
+        _merge_attributes_safe(root, _commit_tree(root, first_parent), started + 60)
+        _merge_attributes_safe(root, _commit_tree(root, second_parent), started + 60)
+        recomputed = _remerge_tree(root, first_parent, second_parent)
+        if recomputed != _commit_tree(root, commit):
+            _stop('RESULT_DIFF_INVALID')
+        merge_proofs.append(commit)
+    return checkpoint, merge_proofs
+
+
+def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_sha,
+                            changed_paths, write_paths, *, scope_paths=None):
+    """Apply the proposal in a bounded temp tree and compare result blobs/modes."""
+    patch_paths = _artifact_patch_paths(artifact, artifact_sha256, source_sha, result_sha)
+    scope_paths = patch_paths if scope_paths is None else scope_paths
+    if (not patch_paths or len(patch_paths) > _PROPOSAL_FILE_LIMIT or
+            len(patch_paths) != len(set(patch_paths)) or
+            set(patch_paths) != set(changed_paths) or
+            not set(scope_paths).issubset(set(write_paths))):
+        _stop('DEVELOPER_ARTIFACT_RESULT_MISMATCH')
+    total_blob_bytes = 0
+    for path in patch_paths:
+        total_blob_bytes += _proposal_blob_size(root, source_sha, path)
+        total_blob_bytes += _proposal_blob_size(root, result_sha, path)
+        if total_blob_bytes > _PROPOSAL_TREE_LIMIT:
+            _stop('DEVELOPER_ARTIFACT_TREE_TOO_LARGE')
+    expected = _apply_artifact_expected(root, artifact, source_sha, patch_paths)
+    for path in patch_paths:
+        actual = _tree_blob(root, result_sha, path)
+        if actual != expected[path]:
+            _stop('DEVELOPER_ARTIFACT_RESULT_TREE_MISMATCH')
 
 
 def _registered_test(path):

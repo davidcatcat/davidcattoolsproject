@@ -253,7 +253,8 @@ class TaskCompletionTests(unittest.TestCase):
             **({'trusted_base_sha': trusted_base_sha}
                if trusted_base_sha is not None else {}))
 
-    def _collect_registered_result(self, result_sha, *, trusted_base_sha=None):
+    def _collect_registered_result(self, result_sha, *, trusted_base_sha=None,
+                                   artifact=None):
         registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
         record = json.loads(registry_path.read_text())
         record['head_sha'] = result_sha
@@ -261,11 +262,43 @@ class TaskCompletionTests(unittest.TestCase):
                                 current_head=result_sha)
         registry_path.write_text(json.dumps(record))
         registry_path.chmod(0o600)
-        artifact = subprocess.check_output(
-            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
-            cwd=self.root, text=True)
+        if artifact is None:
+            artifact = subprocess.check_output(
+                ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+                cwd=self.root, text=True)
         return self._collect_result(result_sha, artifact,
                                     trusted_base_sha=trusted_base_sha)
+
+    def _bind_result_head(self, result_sha):
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = result_sha
+        self._write_env2_marker(record, self.root, submitted_head=result_sha,
+                                current_head=result_sha)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+
+    def _artifact_to(self, commit, path=None):
+        args = ['/usr/bin/git', 'diff', '--binary', self.source_sha, commit]
+        if path is not None:
+            args.extend(['--', path])
+        return subprocess.check_output(args, cwd=self.root, text=True)
+
+    def _worktree_snapshot(self):
+        snapshot = []
+        for path in sorted(self.root.rglob('*')):
+            relative = path.relative_to(self.root)
+            if relative.parts[0] == '.git':
+                continue
+            info = path.lstat()
+            if stat.S_ISREG(info.st_mode):
+                payload = path.read_bytes()
+            elif stat.S_ISLNK(info.st_mode):
+                payload = os.readlink(path)
+            else:
+                payload = None
+            snapshot.append((relative.as_posix(), stat.S_IMODE(info.st_mode), payload))
+        return snapshot
 
     def test_claude_result_collector_binds_head_and_env2(self):
         result_sha, _ = self._make_result()
@@ -310,15 +343,13 @@ class TaskCompletionTests(unittest.TestCase):
         target.write_text(target.read_text() + '\n# developer change\n')
         self._git('add', self.source_path)
         self._git('commit', '-m', 'developer change')
+        checkpoint = self._git('rev-parse', 'HEAD')
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, checkpoint],
+            cwd=self.root, text=True)
         self._git('merge', '--no-ff', 'main', '-m', 'merge main')
-        target.write_text(target.read_text() + '# later developer change\n')
-        self._git('add', self.source_path)
-        self._git('commit', '-m', 'later developer change')
 
         result_sha = self._git('rev-parse', 'HEAD')
-        artifact = subprocess.check_output(
-            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
-            cwd=self.root, text=True)
         registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
         record = json.loads(registry_path.read_text())
         record['head_sha'] = result_sha
@@ -330,6 +361,250 @@ class TaskCompletionTests(unittest.TestCase):
         result = self._collect_result(result_sha, artifact, trusted_base_sha=main_sha)
         self.assertEqual(result['changed_paths'], ['README.md', self.source_path])
         self.assertEqual(result['developer_changed_paths'], [self.source_path])
+        self.assertEqual(result['artifact_checkpoint'], checkpoint)
+        self.assertEqual(result['merge_proofs'], [result_sha])
+
+    def test_write_path_artifact_proves_merge_with_inherited_add_delete_and_mode(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        (self.root / 'README.md').unlink()
+        (self.root / 'main-added.txt').write_text('inherited addition\n')
+        (self.root / self.source_path).chmod(0o755)
+        self._git('add', '-A')
+        self._git('commit', '-m', 'main add delete and mode update')
+        main_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# developer checkpoint\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer checkpoint')
+        checkpoint = self._git('rev-parse', 'HEAD')
+        artifact = self._artifact_to(checkpoint, self.source_path)
+        self._git('merge', '--no-ff', 'main', '-m', 'integrate main')
+        result_sha = self._git('rev-parse', 'HEAD')
+        self._bind_result_head(result_sha)
+
+        index = Path(self.common) / 'index'
+        before = (self._git('count-objects', '-v'), index.read_bytes(),
+                  self._git('show-ref'), self._git('status', '--porcelain=v1'),
+                  self._worktree_snapshot())
+        result = self._collect_result(result_sha, artifact, trusted_base_sha=main_sha)
+        after = (self._git('count-objects', '-v'), index.read_bytes(),
+                 self._git('show-ref'), self._git('status', '--porcelain=v1'),
+                 self._worktree_snapshot())
+        self.assertEqual(before, after)
+        self.assertEqual(result['artifact_checkpoint'], checkpoint)
+        self.assertEqual(result['merge_proofs'], [result_sha])
+        self.assertEqual(result['developer_changed_paths'], [self.source_path])
+
+    def test_write_path_artifact_proves_two_clean_main_merges(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        (self.root / 'README.md').write_text('main first update\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'main first update')
+        self._git('checkout', 'feat/executor')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# developer checkpoint\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer checkpoint')
+        checkpoint = self._git('rev-parse', 'HEAD')
+        artifact = self._artifact_to(checkpoint, self.source_path)
+        self._git('merge', '--no-ff', 'main', '-m', 'first main merge')
+        self._git('checkout', 'main')
+        (self.root / 'main-second.txt').write_text('second inherited update\n')
+        self._git('add', 'main-second.txt')
+        self._git('commit', '-m', 'main second update')
+        main_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        self._git('merge', '--no-ff', 'main', '-m', 'second main merge')
+        result_sha = self._git('rev-parse', 'HEAD')
+        self._bind_result_head(result_sha)
+
+        result = self._collect_result(result_sha, artifact, trusted_base_sha=main_sha)
+        self.assertEqual(result['artifact_checkpoint'], checkpoint)
+        self.assertEqual(result['merge_proofs'], [
+            self._git('rev-parse', 'HEAD^'), result_sha])
+
+    def test_write_path_artifact_proves_clean_different_hunks_overlap(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        (self.root / 'README.md').write_text('main header\nRepository fixture.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'main header hunk')
+        main_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        (self.root / 'README.md').write_text('Repository fixture.\ndeveloper footer\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'developer footer hunk')
+        checkpoint = self._git('rev-parse', 'HEAD')
+        artifact = self._artifact_to(checkpoint, 'README.md')
+        self._git('merge', '--no-ff', 'main', '-m', 'merge disjoint hunks')
+        result_sha = self._git('rev-parse', 'HEAD')
+        self._bind_result_head(result_sha)
+
+        result = task_completion.collect_executor_result(
+            task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(self.root), expected_branch='feat/executor',
+            source_sha=self.source_sha,
+            task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                          'contract_digest': '3' * 64},
+            expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+            expected_native_session_id='native-executor', write_paths=['README.md'],
+            artifact=artifact, artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest(),
+            trusted_base_sha=main_sha)
+        self.assertEqual(result['artifact_checkpoint'], checkpoint)
+        self.assertEqual(result['merge_proofs'], [result_sha])
+
+    def test_checkpoint_verifier_rejects_omitted_and_altered_developer_hunks(self):
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# expected developer hunk\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer checkpoint')
+        endpoint = self._git('rev-parse', 'HEAD')
+        artifact = self._artifact_to(endpoint, self.source_path)
+        for invalid in (artifact[:artifact.index('@@')],
+                        artifact.replace('expected developer hunk',
+                                         'altered developer hunk')):
+            with self.subTest(invalid=invalid[:40]), self.assertRaises(LLMToolError):
+                task_completion.verify_artifact_checkpoint(
+                    str(self.root), invalid, hashlib.sha256(invalid.encode()).hexdigest(),
+                    self.source_sha, endpoint, [self.source_path], self.source_sha)
+
+    def test_checkpoint_verifier_rejects_developer_commit_after_checkpoint(self):
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# checkpoint hunk\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer checkpoint')
+        checkpoint = self._git('rev-parse', 'HEAD')
+        artifact = self._artifact_to(checkpoint, self.source_path)
+        target.write_text(target.read_text() + '# uncovered tail hunk\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'uncovered developer tail')
+        endpoint = self._git('rev-parse', 'HEAD')
+        with self.assertRaises(LLMToolError):
+            task_completion.verify_artifact_checkpoint(
+                str(self.root), artifact, hashlib.sha256(artifact.encode()).hexdigest(),
+                self.source_sha, endpoint, [self.source_path], self.source_sha)
+
+    def test_checkpoint_verifier_rejects_conflict_resolved_by_hand(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        target = self.root / self.source_path
+        target.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                          '    def test_main(self): self.assertTrue(True)\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'main conflicting hunk')
+        main_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        target.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                          '    def test_developer(self): self.assertTrue(True)\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer checkpoint')
+        checkpoint = self._git('rev-parse', 'HEAD')
+        artifact = self._artifact_to(checkpoint, self.source_path)
+        merge = subprocess.run(['/usr/bin/git', 'merge', '--no-ff', 'main', '-m',
+                                'conflicting merge'], cwd=self.root,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               check=False)
+        self.assertNotEqual(merge.returncode, 0)
+        target.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                          '    def test_resolved(self): self.assertTrue(True)\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'manual conflict resolution')
+        endpoint = self._git('rev-parse', 'HEAD')
+        with self.assertRaises(LLMToolError):
+            task_completion.verify_artifact_checkpoint(
+                str(self.root), artifact, hashlib.sha256(artifact.encode()).hexdigest(),
+                self.source_sha, endpoint, [self.source_path], main_sha)
+
+    def test_checkpoint_verifier_rejects_amended_merge_tree(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        (self.root / 'README.md').write_text('main update\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'main update')
+        main_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# developer checkpoint\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer checkpoint')
+        checkpoint = self._git('rev-parse', 'HEAD')
+        artifact = self._artifact_to(checkpoint, self.source_path)
+        self._git('merge', '--no-ff', 'main', '-m', 'clean merge')
+        (self.root / 'README.md').write_text('manually amended merge tree\n')
+        self._git('add', 'README.md')
+        self._git('commit', '--amend', '--no-edit')
+        endpoint = self._git('rev-parse', 'HEAD')
+        with self.assertRaises(LLMToolError):
+            task_completion.verify_artifact_checkpoint(
+                str(self.root), artifact, hashlib.sha256(artifact.encode()).hexdigest(),
+                self.source_sha, endpoint, [self.source_path], main_sha)
+
+    def test_checkpoint_verifier_rejects_untrusted_second_parent_and_octopus(self):
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# developer checkpoint\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer checkpoint')
+        checkpoint = self._git('rev-parse', 'HEAD')
+        artifact = self._artifact_to(checkpoint, self.source_path)
+        self._git('branch', 'untrusted', self.source_sha)
+        self._git('checkout', 'untrusted')
+        (self.root / 'README.md').write_text('untrusted main\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'untrusted base')
+        untrusted = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        tree = self._git('rev-parse', 'HEAD^{tree}')
+        foreign_merge = self._git('commit-tree', tree, '-p', checkpoint, '-p', untrusted,
+                                  '-m', 'foreign-parent merge')
+        with self.assertRaises(LLMToolError):
+            task_completion.verify_artifact_checkpoint(
+                str(self.root), artifact, hashlib.sha256(artifact.encode()).hexdigest(),
+                self.source_sha, foreign_merge, [self.source_path], self.source_sha)
+
+        self._git('checkout', '-b', 'trusted-main', self.source_sha)
+        (self.root / 'README.md').write_text('trusted main\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'trusted main update')
+        trusted = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        octopus = self._git('commit-tree', tree, '-p', checkpoint, '-p', trusted,
+                            '-p', self.source_sha, '-m', 'octopus tail')
+        with self.assertRaises(LLMToolError):
+            task_completion.verify_artifact_checkpoint(
+                str(self.root), artifact, hashlib.sha256(artifact.encode()).hexdigest(),
+                self.source_sha, octopus, [self.source_path], trusted)
+
+    def test_checkpoint_verifier_refuses_configured_merge_driver(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        target = self.root / self.source_path
+        target.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                          '    def test_main(self): self.assertTrue(True)\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'main conflicting edit')
+        main_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        target.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                          '    def test_developer(self): self.assertTrue(True)\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer checkpoint')
+        checkpoint = self._git('rev-parse', 'HEAD')
+        artifact = self._artifact_to(checkpoint, self.source_path)
+        target.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                          '    def test_resolved(self): self.assertTrue(True)\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'manual resolved merge tree')
+        endpoint = self._git('commit-tree', self._git('rev-parse', 'HEAD^{tree}'),
+                             '-p', checkpoint, '-p', main_sha, '-m', 'merge commit')
+        self._git('config', 'merge.testdriver.driver', 'touch should-not-run')
+        with self.assertRaises(LLMToolError):
+            task_completion.verify_artifact_checkpoint(
+                str(self.root), artifact, hashlib.sha256(artifact.encode()).hexdigest(),
+                self.source_sha, endpoint, [self.source_path], main_sha)
+        self.assertFalse((self.root / 'should-not-run').exists())
 
     def test_fake_main_aliases_cannot_hide_malicious_merge(self):
         self._git('branch', 'legitimate-pin', self.source_sha)
