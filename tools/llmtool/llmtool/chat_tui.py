@@ -91,6 +91,7 @@ Talk to the PM: the dedicated PM (/pm …) is the product entry
                         no SESSION is given; "pm>" prompt, Enter sends
   /pm disconnect        End the connection and return to chat mode
   /pm history           Show the turns pm_runtime stored for this PM session
+  /logs                Show recent PM turns
   /pm                   Show the connected PM and its state
   Enter (during a turn) Queue the draft (已排入佇列（第 N 則）): queued messages are sent one turn
                         at a time, in order, each after the previous turn COMPLETED; a
@@ -220,6 +221,7 @@ SLASH_COMMANDS = (
     ("/pm list", "/pm list", "List dedicated PM sessions"),
     ("/pm use", "/pm use ", "Select a dedicated PM session without connecting"),
     ("/pm accounts", "/pm accounts", "List configured PM accounts and folder status"),
+    ("/logs", "/logs", "PM 回合紀錄：時間、狀態、工具"),
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 BACKGROUND_LIMIT = 6  # Most rows of the ↓ background panel shown below its header.
@@ -1575,6 +1577,7 @@ class ChatTUI:
             "  設定 PM（帳號、Codex、工作目錄、預設）：docs/guides/llmtool-pm-setup-zh-tw.md",
             "Chat",
             "  /status                 Show the current chat or PM status",
+            "  /logs                   Show recent PM turns",
             "  /provider [PROFILE]     List or switch chat profiles",
             "  /skill [NAME]           List, choose, or clear a skill",
             "  /history                Show recent chat turns",
@@ -2603,6 +2606,24 @@ class ChatTUI:
             return
         if text.strip() == "/status":
             self.append(self.status_report())
+            return
+        if text.strip() == "/logs":
+            if self.pm_runtime is None or not self.pm_target:
+                self.append("PM 紀錄：尚未連線 PM。先 /pm connect。")
+                return
+            try:
+                turns = self.pm_api.read_recent_turns(
+                    self.pm_target[0], chat_tui_pm.LOGS_SHOWN)
+            except Exception:
+                self.append("PM 紀錄：UNKNOWN（PM 歷史無法讀取）")
+                return
+            rows = chat_tui_pm.log_lines(turns)
+            if not rows:
+                self.append("PM 紀錄：尚無回合.")
+                return
+            self.append("PM 紀錄（最近 %d 回合）\n" % len(rows)
+                        + "\n".join("  " + row for row in rows)
+                        + "\n  不顯示工具指令與輸出")
             return
         if text.strip().split(maxsplit=1)[0] in ("/theme", "/links", "/settings"):
             self.run_display_command(text.strip())

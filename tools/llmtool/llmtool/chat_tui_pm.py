@@ -22,6 +22,7 @@ from .chat_tui_task import UNKNOWN
 from .test_output_excerpts import _emitted_sensitive
 
 HISTORY_SHOWN = 20  # Most recent stored turns rendered on connect.
+LOGS_SHOWN = 20  # Most recent PM turn summaries shown by /logs.
 TOOL_LABEL_CELLS = 120  # W57: most display cells of a tool line's description.
 WITHHELD = "[PM text withheld: it contains credential-like text]"
 # While a PM reply streams, the ASCII token still growing at the end (any run of
@@ -193,6 +194,10 @@ class PMRuntimeAPI:
                 return turns
             turns.extend(page_turns)
             after = page['next_after']
+
+    def read_recent_turns(self, session_id, count):
+        from .pm_runtime import read_history
+        return read_history(session_id, latest=count, state_root=self.state_root)['turns']
 
 
 _USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens',
@@ -439,6 +444,28 @@ def _local_time(value, now=None):
         return "時間不明"
     now = now or datetime.now().astimezone()
     return when.strftime("%H:%M" if when.date() == now.date() else "%m-%d %H:%M")
+
+
+def log_lines(turns, now=None):
+    """Format safe, metadata-only PM turn summaries for /logs."""
+    rows = []
+    status_labels = {"COMPLETED": "完成", "INTERRUPTED": "已中斷",
+                     "ERROR": "錯誤", "ACTIVE": "進行中"}
+    for turn in turns:
+        if type(turn) is not dict:
+            continue
+        status = safe_code(turn.get("status"))
+        origin = "背景" if turn.get("origin") == "background" else "前景"
+        names = turn.get("tool_names")
+        tools = ",".join(safe_name(name) for name in names) if type(names) is list else ""
+        if not tools:
+            tools = "無工具"
+        fields = [_local_time(turn.get("started_at"), now),
+                  status_labels.get(status, status), origin, tools]
+        if "reason" in turn:
+            fields.append(safe_code(turn.get("reason")))
+        rows.append("｜".join(fields))
+    return rows
 
 
 def _local_history_time(value):
