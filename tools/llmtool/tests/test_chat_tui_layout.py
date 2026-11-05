@@ -322,7 +322,8 @@ class PMLayoutTests(Base):
         self.assertIn("  ▸ 執行中：跑 focused 測試… 0s（第 2 個工具；1 次失敗）\n\n  中間",
                       ui.conversation.text)
         self.assertNotIn("      ✗", ui.conversation.text)
-        self.assertTrue(ui.conversation.text.endswith(ui.pm_working_text))   # working line kept last
+        self.assertIn("執行工具中…", ui._pm_busy_line())
+        self.assertNotIn("執行工具中…", ui.conversation.text)
 
     def test_running_seconds_advance_on_the_working_tick(self):
         ui = self.ui
@@ -333,7 +334,8 @@ class PMLayoutTests(Base):
         ui._pm_working_tick()            # the existing 1 s tick, not a new timer
         self.assertIn("▸ 執行中：跑 focused 測試… 23s", ui.conversation.text)
         self.assertEqual(ui.conversation.text.count("執行中："), 1)
-        self.assertTrue(ui.conversation.text.endswith(ui.pm_working_text))
+        self.assertIn("執行工具中…", ui._pm_busy_line())
+        self.assertNotIn("執行工具中…", ui.conversation.text)
         ui.pm_tool_calls[0][2] -= 1.0
         ui._pm_working_tick()
         self.assertIn("… 24s", ui.conversation.text)
@@ -349,6 +351,130 @@ class PMLayoutTests(Base):
         self.start()
         self.event("TOOL_RESULT", tool_use_id="zz", reason="TOOL_ERROR")
         self.assertIn("  ▸ ✗ UNKNOWN（失敗）", ui.conversation.text)
+
+    def test_busy_line_verb_precedence_and_queue(self):
+        ui = self.ui
+        ui.pm_runtime = object()
+        ui.pm_turn_active = True
+        ui.pm_turn_started = time.monotonic() - 34
+        cases = [
+            ("interrupting", True, [["tool", None]], "中斷中…"),
+            ("thinking", True, [["tool", None]], "思考中…"),
+            ("working", True, [["tool", None]], "暖機中…"),
+            ("working", False, [["tool", None]], "執行工具中…"),
+            ("working", False, [], "回答中…"),
+            ("working", False, [], "處理中…"),
+        ]
+        for state, warm, tools, verb in cases:
+            with self.subTest(verb=verb):
+                ui.pm_state, ui.pm_warm, ui.pm_tool_calls = state, warm, tools
+                ui.pm_block_raw = "reply" if verb == "回答中…" else None
+                self.assertIn(verb, ui._pm_busy_line())
+        ui.pm_state, ui.pm_warm, ui.pm_tool_calls = "working", False, []
+        ui.pm_block_raw = None
+        ui.pm_outbox.extend(["one", "two"])
+        self.assertRegex(ui._pm_busy_line(), r"✽ 處理中…（34 秒 · 佇列 2 則）")
+
+    def test_busy_wanted_during_stream_and_clears_at_terminal_events(self):
+        ui = self.ui
+        ui.pm_runtime = object()
+        ui.pm_turn_active = True
+        self.assertTrue(ui._pm_busy_wanted())
+        self.event("TEXT_DELTA", text="stream", block_index=0)
+        self.assertTrue(ui._pm_busy_wanted())
+        self.event("TURN_END", status="COMPLETED", usage={})
+        self.assertFalse(ui._pm_busy_wanted())
+        ui.pm_turn_active, ui.pm_turn_status, ui.pm_turn_error = True, None, None
+        self.event("RUNTIME_ERROR", code="FAILED")
+        self.assertFalse(ui._pm_busy_wanted())
+        ui.pm_turn_error = None
+        ui.pm_runtime = None
+        self.assertFalse(ui._pm_busy_wanted())
+
+    def test_busy_glyph_cycles_and_wraps_on_working_ticks(self):
+        ui = self.ui
+        ui.pm_runtime = object()
+        ui.pm_turn_active = True
+        lines = []
+        for _ in range(len(chat_tui.PM_BUSY_GLYPHS) + 1):
+            lines.append(ui._pm_busy_line()[0])
+            ui._pm_working_tick()
+        self.assertEqual(lines, list(chat_tui.PM_BUSY_GLYPHS) + [chat_tui.PM_BUSY_GLYPHS[0]])
+        self.assertEqual(chat_tui.PM_WORKING_SECONDS, 0.5)
+        self.assertLessEqual(1 / chat_tui.PM_WORKING_SECONDS, 4)
+
+    def test_busy_rows_and_picker_background_reserve_one_row(self):
+        ui = self.ui
+        ui.pm_runtime = object()
+        ui.pm_turn_active = True
+        ui.app.output.get_size = lambda: Size(rows=7, columns=40)
+        ui.searching = True
+        ui.search_matches = ["plain"] * 8
+        ui.pm_turn_active = False
+        picker_without_busy = ui.picker_layout()
+        ui.pm_turn_active = True
+        self.assertEqual(ui.busy_rows(), 1)
+        self.assertEqual(sum(ui.picker_layout()), sum(picker_without_busy) - 1)
+        ui.searching = False
+        ui.search_matches = []
+        ui.show_background = True
+        ui.pm_mode = True
+        ui.app.output.get_size = lambda: Size(rows=6, columns=40)
+        ui.pm_turn_active = False
+        background_without_busy = ui.background_rows()
+        self.assertGreater(background_without_busy, 0)
+        ui.pm_turn_active = True
+        self.assertEqual(ui.background_rows(), background_without_busy - 1)
+        ui.pm_turn_active = False
+        self.assertEqual(ui.busy_rows(), 0)
+        ui.app.output.get_size = lambda: Size(rows=4, columns=40)
+        ui.pm_turn_active = True
+        self.assertEqual(ui.busy_rows(), 0)
+
+    def test_busy_fragments_stay_on_one_row_at_40_columns(self):
+        ui = self.ui
+        ui.pm_runtime = object()
+        ui.pm_turn_active = True
+        ui.app.output.get_size = lambda: Size(rows=24, columns=40)
+        self.assertLessEqual(get_cwidth(ui.busy_fragments()[0][1]), 40)
+
+    def test_several_working_updates_keep_exactly_one_tick_pending(self):
+        class Handle:
+            def __init__(self, callback):
+                self.callback = callback
+                self.cancelled = False
+
+            def cancel(self):
+                self.cancelled = True
+
+        class Loop:
+            def __init__(self):
+                self.handles = []
+
+            def call_later(self, _delay, callback):
+                handle = Handle(callback)
+                self.handles.append(handle)
+                return handle
+
+            def pending(self):
+                return [handle for handle in self.handles if not handle.cancelled]
+
+        ui = self.ui
+        ui.pm_runtime = object()
+        ui.pm_turn_active = True
+        loop = Loop()
+        with patch("llmtool.chat_tui.asyncio.get_running_loop", return_value=loop):
+            for _ in range(5):
+                ui._pm_working_show()
+            self.assertEqual(len(loop.pending()), 1)
+            for _ in range(5):
+                expired = loop.pending()[0]
+                expired.cancel()
+                expired.callback()
+                self.assertEqual(len(loop.pending()), 1)
+                ui._pm_working_show()
+            self.assertEqual(len(loop.pending()), 1)
+            self.assertEqual(len(loop.handles), 6)
 
     def test_account_text_is_a_system_notice(self):
         ui = self.ui
