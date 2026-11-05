@@ -1661,34 +1661,35 @@ class ChatTUI:
         return "\n  ".join(lines)
 
     def attention_lines(self):
-        """Attention facts from the latest snapshot for the currently connected PM only."""
+        """Snapshot facts for the connected PM, plus its local queue and turn state."""
         key = self.pm_target[0] if self.pm_mode and self.pm_target else None
-        value = self.attention if key is not None and self.attention_key == key else None
-        if type(value) is not dict:
+        if key is None:
             return []
-        task_bad = value.get("task_unreadable_count", 0)
-        inbox_bad = value.get("inbox_unreadable_count", 0)
-        partial = ((type(task_bad) is int and task_bad > 0) or
-                   (type(inbox_bad) is int and inbox_bad > 0))
+        value = self.attention if self.attention_key == key else None
         lines = []
-        if partial:
-            lines.append(_attention_text(
-                "部分讀取失敗：Tasks %s；PM inbox %s（計數可能重複；注意事項與未讀事件總數未知）"
-                % (task_bad, inbox_bad)))
-        for item in value.get("items", []):
-            if type(item) is not dict:
-                continue
-            label = _attention_text(item.get("label", ""))
-            task = _attention_text(item.get("task", ""))[:8]
-            reason = _attention_text(item.get("reason", ""))
-            parts = [part for part in (label, task, reason) if part]
-            if parts:
-                lines.append(_attention_text("｜".join(parts)))
-        unread = value.get("unread", 0)
-        if type(unread) is int and unread > 0:
-            text = ("PM 至少有 %d 則未讀事件（總數未知）" % unread if partial else
-                    "PM 有 %d 則未讀事件" % unread)
-            lines.append(_attention_text(text))
+        if type(value) is dict:
+            task_bad = value.get("task_unreadable_count", 0)
+            inbox_bad = value.get("inbox_unreadable_count", 0)
+            partial = ((type(task_bad) is int and task_bad > 0) or
+                       (type(inbox_bad) is int and inbox_bad > 0))
+            if partial:
+                lines.append(_attention_text(
+                    "部分讀取失敗：Tasks %s；PM inbox %s（計數可能重複；注意事項與未讀事件總數未知）"
+                    % (task_bad, inbox_bad)))
+            for item in value.get("items", []):
+                if type(item) is not dict:
+                    continue
+                label = _attention_text(item.get("label", ""))
+                task = _attention_text(item.get("task", ""))[:8]
+                reason = _attention_text(item.get("reason", ""))
+                parts = [part for part in (label, task, reason) if part]
+                if parts:
+                    lines.append(_attention_text("｜".join(parts)))
+            unread = value.get("unread", 0)
+            if type(unread) is int and unread > 0:
+                text = ("PM 至少有 %d 則未讀事件（總數未知）" % unread if partial else
+                        "PM 有 %d 則未讀事件" % unread)
+                lines.append(_attention_text(text))
         if self.pm_outbox and self.pm_outbox_paused:
             lines.append(_attention_text("PM 佇列暫停：" +
                                          _attention_text(self.pm_outbox_paused)))
@@ -1707,8 +1708,10 @@ class ChatTUI:
             if self.attention_read_at:
                 rows.append("  " + _attention_text(
                     "來源：TaskStore（本機）｜讀取於 " + self.attention_read_at))
-            rows.extend("  " + _attention_text(line)
-                        for line in self.attention_lines())
+            lines = self.attention_lines()
+            rows.extend("  " + _attention_text(line) for line in lines[:20])
+            if len(lines) > 20:
+                rows.append("  另有 %d 項未顯示" % (len(lines) - 20))
             rows.append("  需要你決定：無法提供（Core 尚未記錄）")
             return "\n".join(rows)
         value = self.attention

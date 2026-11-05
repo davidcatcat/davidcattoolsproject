@@ -5592,15 +5592,25 @@ class PMConversationTests(BoundedPMTest):
     def test_attention_report_connection_and_snapshot_branches(self):
         ui, _ = self.drive(['/attention\r'])
         self.assertEqual(ui.attention_report(), '注意事項：尚未連線 PM。先 /pm connect。')
+        ui.pm_outbox.append('draft')
+        ui.pm_outbox_paused = 'Esc 中斷'
+        ui.pm_state = 'error(PM_PROCESS_EXITED)'
+        self.assertEqual(ui.attention_lines(), [])
 
         ui, _ = self.drive([self.connect(), self.connected])
         self.assertEqual(ui.attention_report(), '注意事項：讀取中，稍後再試。')
+        ui.pm_outbox.append('draft')
+        ui.pm_outbox_paused = 'Esc 中斷'
         ui.pm_state = 'error(PM_PROCESS_EXITED)'
         ui.finish_attention(self.session_id, None)
         self.assertEqual(ui.attention_report(), '注意事項：UNKNOWN（TaskStore 無法讀取）\n'
                          '  來源：TaskStore（本機）｜讀取於 ' + ui.attention_read_at + '\n'
+                         '  PM 佇列暫停：Esc 中斷\n'
                          '  最近的 PM 回合出錯\n'
                          '  需要你決定：無法提供（Core 尚未記錄）')
+        ui.pm_outbox.clear()
+        ui.pm_outbox_paused = None
+        ui.pm_state = 'idle'
 
         partial = {'items': [], 'unread': 0, 'task_unreadable_count': 1,
                    'inbox_unreadable_count': 0}
@@ -5665,6 +5675,12 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(sum(line.startswith('  卡住｜') for line in report.splitlines()), 20)
         self.assertIn('  另有 5 項未顯示', report)
         self.assertTrue(report.endswith('  需要你決定：無法提供（Core 尚未記錄）'))
+        ui.attention = None
+        with patch.object(ui, 'attention_lines',
+                          return_value=['row %d' % index for index in range(25)]):
+            report = ui.attention_report()
+        self.assertEqual(sum(line.startswith('  row ') for line in report.splitlines()), 20)
+        self.assertIn('  另有 5 項未顯示', report)
         ui.app.output.get_size = lambda: Size(rows=24, columns=140)
         self.assertIn('注意 25', ui.status_text())
         ui.app.output.get_size = lambda: Size(rows=24, columns=70)
