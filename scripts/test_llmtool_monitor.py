@@ -775,6 +775,14 @@ class ActivityViewTests(unittest.TestCase):
         os.chmod(path, 0o600)
         return path
 
+    @staticmethod
+    def _plain_task_file(root, name, mtime):
+        path = Path(root) / f"{name}.json"
+        path.write_text('{"name":"plain"}', encoding="utf-8")
+        os.chmod(path, 0o600)
+        os.utime(path, (mtime, mtime))
+        return path
+
     def test_pm_last_dispatch_header_recent_stale_absent_and_wrapped(self):
         now = NOW
         with tempfile.TemporaryDirectory() as tasks:
@@ -875,6 +883,7 @@ class ActivityViewTests(unittest.TestCase):
             entry, problem = mon.pm_last_dispatch(NOW, tasks)
             self.assertEqual(problem, "")
             self.assertEqual(entry.created, NOW - 100)
+            self.assertIn("1 分鐘前", mon.pm_dispatch_line(entry, problem, NOW))
 
     def test_pm_dispatch_provider_words_issue_and_line_forms(self):
         provider_words = (("codex-cli", "Codex"), ("opencode-cli", "OpenCode"),
@@ -934,6 +943,100 @@ class ActivityViewTests(unittest.TestCase):
                 tasks, {}, budget, lambda record: record.get("name"))
         self.assertEqual(entries, ["second"])
         self.assertEqual(problem, mon.REMOTE_TEST_OVER_BUDGET)
+
+    def test_pm_last_dispatch_requires_dispatch_inside_full_read_window(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            old = self._dispatch_record(tasks, "1" * 32, created=NOW - 5 * 60)
+            os.utime(old, (NOW - 2000, NOW - 2000))
+            rewritten = self._dispatch_record(tasks, "2" * 32, created=NOW - 700)
+            os.utime(rewritten, (NOW - 500, NOW - 500))
+            for index in range(31):
+                self._plain_task_file(tasks, f"plain-{index}", NOW - 490 + index)
+            entry, problem = mon.pm_last_dispatch(NOW, tasks)
+            self.assertEqual(entry.created, NOW - 700)
+            self.assertEqual(problem, "task 僅讀最近 32 筆，上次派工未確認")
+            work = mon.WorkBoard(owner=[], running=[], queue=[object()], blocked=[], done=[],
+                                 github_known=True, board_known=True, github_status="",
+                                 board_status="ok", board_age=0, skipped=0)
+            line, style = mon.pm_progress_line(
+                work, (entry, problem), NOW)
+            self.assertIn("上次派工 ?", line)
+            self.assertEqual(style, "")
+
+    def test_pm_last_dispatch_window_boundaries_and_no_dispatch(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            dispatch = self._dispatch_record(tasks, "3" * 32, created=NOW - 100)
+            os.utime(dispatch, (NOW - 200, NOW - 200))
+            for index in range(mon.REMOTE_TEST_FILES - 1):
+                self._plain_task_file(tasks, f"plain-{index}", NOW - 199 + index)
+            entry, problem = mon.pm_last_dispatch(NOW, tasks)
+            self.assertEqual(problem, "")
+            self.assertEqual(entry.created, NOW - 100)
+
+        with tempfile.TemporaryDirectory() as tasks:
+            dispatch = self._dispatch_record(tasks, "4" * 32, created=NOW - 100)
+            os.utime(dispatch, (NOW - 100, NOW - 100))
+            for index in range(mon.REMOTE_TEST_FILES - 1):
+                self._plain_task_file(tasks, f"plain-{index}", NOW - 99 + index)
+            entry, problem = mon.pm_last_dispatch(NOW, tasks)
+            self.assertEqual(problem, "")
+            self.assertEqual(entry.created, NOW - 100)
+
+        with tempfile.TemporaryDirectory() as tasks:
+            for index in range(mon.REMOTE_TEST_FILES + 1):
+                self._plain_task_file(tasks, f"plain-{index}", NOW - 100 + index)
+            entry, problem = mon.pm_last_dispatch(NOW, tasks)
+            self.assertIsNone(entry)
+            self.assertEqual(problem, "task 僅讀最近 32 筆，上次派工未確認")
+            self.assertNotIn("沒有派工", mon.pm_dispatch_line(entry, problem, NOW))
+
+        with tempfile.TemporaryDirectory() as tasks:
+            for index in range(mon.REMOTE_TEST_FILES - 1):
+                self._plain_task_file(tasks, f"plain-{index}", NOW - 100 + index)
+            entry, problem = mon.pm_last_dispatch(NOW, tasks)
+            self.assertIsNone(entry)
+            self.assertEqual(problem, "")
+            self.assertIn("沒有派工", mon.pm_dispatch_line(entry, problem, NOW))
+
+    def test_pm_last_dispatch_unreadable_folder_is_problem(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            dispatch = self._dispatch_record(tasks, "5" * 32)
+            os.utime(dispatch, (NOW - 100, NOW - 100))
+            os.chmod(tasks, 0)
+            try:
+                entry, problem = mon.pm_last_dispatch(NOW, tasks)
+                self.assertEqual(problem, "本機 Task 紀錄讀取失敗")
+                work = mon.WorkBoard(owner=[], running=[], queue=[], blocked=[], done=[],
+                                     github_known=True, board_known=True, github_status="",
+                                     board_status="ok", board_age=0, skipped=0)
+                line, _ = mon.pm_progress_line(work, (entry, problem), NOW)
+                self.assertIn("上次派工 ?", line)
+            finally:
+                os.chmod(tasks, 0o700)
+
+    def test_pm_progress_uncertain_merges_and_fresh_queue_style(self):
+        from types import SimpleNamespace
+        github = SimpleNamespace(board_pulls=[], successful_read=True, pending=[],
+                                 read_failed=True, window=43200, verdicts={}, ci_heads=None)
+        work = mon.work_board(github, mon.PmBoard(status="ok", age=0, running=[], queue=[],
+                                                 blocked=[]), NOW)
+        text, style = mon.pm_progress_line(
+            work, (mon.DispatchRecord(NOW - 60, "", ""), ""), NOW)
+        self.assertIn("今天合併 ?", text)
+        self.assertNotIn("今天合併 0", text)
+        self.assertEqual(style, "")
+
+        dispatch = (mon.DispatchRecord(NOW - 3600, "", ""), "")
+        stale = mon.WorkBoard(owner=[], running=[], queue=[object()], blocked=[], done=[],
+                              github_known=True, board_known=True, github_status="",
+                              board_status="stale", board_age=0, skipped=0)
+        text, style = mon.pm_progress_line(stale, dispatch, NOW)
+        self.assertIn("（可能過時）", text)
+        self.assertEqual(style, "")
+        fresh = mon.WorkBoard(owner=[], running=[], queue=[object()], blocked=[], done=[],
+                              github_known=True, board_known=True, github_status="",
+                              board_status="ok", board_age=0, skipped=0)
+        self.assertEqual(mon.pm_progress_line(fresh, dispatch, NOW)[1], "!")
 
     def test_pm_dispatch_entry_rejects_wrong_types(self):
         self.assertIsNone(mon._dispatch_entry(None))

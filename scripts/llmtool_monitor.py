@@ -5954,7 +5954,23 @@ def pm_last_dispatch(now: float, root: str | None = None) -> tuple[DispatchRecor
     entries, problem = _bounded_task_entries(root, _dispatch_parsed,
                                              DISPATCH_BUDGET, _dispatch_entry)
     eligible = [entry for entry in entries if entry.created <= now + REMOTE_TEST_SKEW]
-    return (max(eligible, key=lambda entry: entry.created) if eligible else None), problem
+    newest = max(eligible, key=lambda entry: entry.created) if eligible else None
+    if not problem:
+        paths, _ = _remote_test_paths(root)
+        if len(paths) >= REMOTE_TEST_FILES:
+            oldest = None
+            for path in paths:
+                try:
+                    mtime = os.lstat(path).st_mtime
+                except OSError:
+                    continue
+                oldest = mtime if oldest is None else min(oldest, mtime)
+            if oldest is None or newest is None or newest.created < oldest:
+                problem = "task 僅讀最近 32 筆，上次派工未確認"
+    if (not problem and os.path.exists(root)
+            and not os.access(root, os.R_OK | os.X_OK)):
+        problem = "本機 Task 紀錄讀取失敗"
+    return newest, problem
 
 
 def pm_dispatch_line(entry: DispatchRecord | None, problem: str, now: float) -> str:
@@ -7028,7 +7044,7 @@ def pm_progress_line(work: WorkBoard, dispatch, now: float) -> tuple[str, str]:
     if queue_count is not None and work.board_status == "stale":
         queue_text += "（可能過時）"
 
-    if not work.github_known:
+    if not work.github_known or work.github_status:
         merges_text = "?"
     else:
         merges_text = str(len(work.done))
@@ -7036,6 +7052,7 @@ def pm_progress_line(work: WorkBoard, dispatch, now: float) -> tuple[str, str]:
             merges_text += "+"
 
     style = "!" if (queue_count is not None and queue_count > 0
+                    and work.board_status == "ok"
                     and age is not None and age > PM_PROGRESS_STALE) else ""
     return f"PM 進度：上次派工 {age_text} · 排隊 {queue_text} · 今天合併 {merges_text}", style
 
