@@ -13,6 +13,7 @@ from unittest.mock import patch
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 import ci_mac_modules  # noqa: E402
+import ci_path_classes  # noqa: E402
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -92,6 +93,54 @@ class MacTestIdSelectionTests(unittest.TestCase):
         ))
         self.assertEqual(report["fallback_reasons"], [])
         self.assertEqual(report["fallback_paths"], [])
+
+    def test_guidance_drift_inputs_select_checker_and_docs_tests(self):
+        expected = sorted(MAC_REQUIRED | {
+            "test_guidance_drift_check", "test_docs_check",
+        })
+        paths = (
+            "tools/llmtool/guidance-drift.json",
+            "tools/llmtool/scripts/guidance_drift_check.py",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                report = ci_mac_modules.selection_report([path], REPO_ROOT)
+                self.assertEqual(report["level"], "L1")
+                self.assertEqual(report["test_ids"], expected)
+                self.assertEqual(report["fallback_reasons"], [])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(ci_mac_modules, "required_test_ids", return_value=MAC_REQUIRED):
+                deleted = ci_mac_modules.selection_report(
+                    [paths[0]], Path(temporary)
+                )
+        self.assertEqual(deleted["level"], "L3")
+        self.assertEqual(deleted["test_ids"], ["FULL"])
+        self.assertIn("missing_file", deleted["fallback_reasons"])
+        self.assertIn(paths[0], deleted["fallback_paths"])
+
+        for gate in (
+            "tools/llmtool/scripts/docs_check.py",
+            "tools/llmtool/scripts/claude_bg_dispatch.py",
+        ):
+            for changed in ([gate], [paths[0], gate]):
+                with self.subTest(changed=changed):
+                    report = ci_mac_modules.selection_report(changed, REPO_ROOT)
+                    self.assertEqual(report["level"], "L3")
+                    self.assertEqual(report["test_ids"], ["FULL"])
+                    self.assertIn("unmapped_source", report["fallback_reasons"])
+
+        combined = ci_mac_modules.selection_report(
+            ["CLAUDE.md", "AGENTS.md", paths[0]], REPO_ROOT
+        )
+        self.assertEqual(combined["level"], "L1")
+        self.assertEqual(combined["test_ids"], expected)
+        self.assertEqual(combined["fallback_reasons"], [])
+        self.assertEqual(ci_path_classes.classify_path(paths[0]), "runtime")
+        self.assertEqual(
+            ci_path_classes.linux_flags(b"CLAUDE.md\0AGENTS.md\0" + paths[0].encode()),
+            (True, True, False, False),
+        )
 
     def test_deleted_worker_dispatch_policy_still_falls_back_to_full(self):
         with tempfile.TemporaryDirectory() as temporary:
