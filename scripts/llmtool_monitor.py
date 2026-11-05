@@ -832,28 +832,30 @@ def _disk_volume_stats(path: str) -> tuple[int, int, int, int]:
     return usage.f_blocks, usage.f_bfree, usage.f_bavail, usage.f_frsize
 
 
-# Narrow screens keep the fields needed to identify process state on the left.
-TABLE_FULL_WIDTH = 93
-
-
 def table_lines(processes: list[Process], width: int | None = None) -> list[str]:
-    if width is None or width >= TABLE_FULL_WIDTH:
+    elapsed_width = max(len("ELAPSED"), max((len(p.elapsed) for p in processes), default=0))
+    if width is None or width >= 92 + elapsed_width:
         # Keep the full --once and wide-screen table byte-for-byte unchanged.
         lines = [f"{'ROLE':<25} {'NAME':<12} {'PID':<7} {'OWNER':<30} {'PGID':<7} {'STATE':<5} ELAPSED"]
         lines += [f"{_fit(p.role, 25):<25} {_fit(p.name, 12):<12} {p.pid:<7} {_fit(p.owner or '-', 30):<30} "
                   f"{p.pgid:<7} {p.state:<5} {p.elapsed}" for p in processes]
         return lines
-    owner_width = max(0, width - 52)
-    header = f"{'ROLE':<25} {'PID':<7} {'STATE':<5} {'ELAPSED':<11}"
+    elapsed_cols = max(11, elapsed_width)
+    minimum = 23 + elapsed_cols
+    if width < minimum:
+        return _wrap(f'Process table needs {minimum} columns', width) if width > 0 else ['']
+    role_cols = max(8, min(25, width - (15 + elapsed_cols)))
+    owner_width = max(0, width - (role_cols + 16 + elapsed_cols))
+    header = f"{'ROLE':<{role_cols}} {'PID':<7} {'STATE':<5} {'ELAPSED':<{elapsed_cols}}"
     if owner_width:
         header += f" {_fit('OWNER', owner_width):<{owner_width}}"
     lines = [header]
     for process in processes:
-        line = (f"{_fit(process.role, 25):<25} {process.pid:<7} "
-                f"{process.state:<5} {process.elapsed:<11}")
+        line = (f"{_fit(process.role, role_cols):<{role_cols}} {process.pid:<7} "
+                f"{process.state:<5} {process.elapsed:<{elapsed_cols}}")
         if owner_width:
             owner = process.owner or "-"
-            fitted = _fit(owner, owner_width) if owner_width >= 2 else "…"
+            fitted = _fit(owner, owner_width)
             line += f" {fitted:<{owner_width}}"
         lines.append(line)
     return lines

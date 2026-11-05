@@ -5921,12 +5921,12 @@ class OfficeViewTests(unittest.TestCase):
             sub_style = mon._row_style(mon.ATTENTION)
             main_lines = [listed[main_at]]
             for line, style in listed[main_at + 1:]:
-                if not line.startswith("  ") or style != main_style:
+                if not line.startswith("  "):
                     break
                 main_lines.append((line, style))
             sub_lines = [listed[sub_at]]
             for line, style in listed[sub_at + 1:]:
-                if not line.startswith("  ") or style != sub_style:
+                if not line.startswith("  "):
                     break
                 sub_lines.append((line, style))
             self.assertTrue(all(style == main_style for _, style in main_lines))
@@ -6853,7 +6853,7 @@ class ProcessTableDisplayTests(unittest.TestCase):
         expected = ["ROLE                      NAME         PID     OWNER                          PGID    STATE ELAPSED",
                     "Codex Developer           codex        1       owner with a long name         1       S     00:12"]
         self.assertEqual(mon.table_lines([self.process]), expected)
-        self.assertEqual(mon.table_lines([self.process], 93), expected)
+        self.assertEqual(mon.table_lines([self.process], 99), expected)
         long_owner = replace(self.process,
                              owner="owner with a very long name that does not fit here")
         narrow = mon.table_lines([long_owner], 80)
@@ -6866,6 +6866,7 @@ class ProcessTableDisplayTests(unittest.TestCase):
     def test_minimum_narrow_widths_and_missing_owner(self):
         process = mon.Process(2, 0, 2, "01:02", "S", "Role", "codex", "")
         at_52 = mon.table_lines([process], 52)
+        self.assertEqual([len(line) for line in at_52], [51, 51])
         self.assertTrue(at_52[0].endswith("ELAPSED    "))
         self.assertNotIn("OWNER", at_52[0])
         self.assertTrue(at_52[1].endswith("01:02      "))
@@ -6874,8 +6875,75 @@ class ProcessTableDisplayTests(unittest.TestCase):
         self.assertEqual(len(at_53[0]), 53)
         self.assertEqual(len(at_53[1]), 53)
         self.assertEqual(at_53[0][-1], "…")
-        self.assertTrue(mon.table_lines([process], 52))
-        self.assertTrue(mon.table_lines([process], 1))
+        self.assertTrue(at_53[1].endswith(" -"))
+        long_owner = replace(process, owner="plain long owner")
+        self.assertTrue(mon.table_lines([long_owner], 53)[1].endswith(" …"))
+
+    def test_elapsed_width_sets_full_and_compact_thresholds(self):
+        short = replace(self.process, elapsed="00:12")
+        full_short = mon.table_lines([short])
+        for width in (93, 98):
+            compact = mon.table_lines([short], width)
+            self.assertNotIn("NAME", compact[0])
+            self.assertTrue(all(mon._width(line) <= width for line in compact))
+        self.assertEqual(mon.table_lines([short], 99), full_short)
+
+        long = replace(self.process, elapsed="07-06:00:31")
+        full_long = mon.table_lines([long])
+        for width in range(93, 103):
+            compact = mon.table_lines([long], width)
+            self.assertNotIn("NAME", compact[0])
+            self.assertTrue(all(mon._width(line) <= width for line in compact))
+            self.assertIn("07-06:00:31", compact[1])
+        self.assertEqual(mon.table_lines([long], 103), full_long)
+        self.assertEqual(mon.table_lines([], 98)[0].split()[0], "ROLE")
+        self.assertIn("NAME", mon.table_lines([], 99)[0])
+
+    def test_compact_minimum_width_and_elapsed_preservation(self):
+        process = replace(self.process, elapsed="07-06:00:31")
+        for width in (34, 35, 40, 50, 51):
+            lines = mon.table_lines([process], width)
+            row = lines[1]
+            self.assertIn(f"{process.pid:<7}", row)
+            self.assertIn(f"{process.state:<5}", row)
+            self.assertIn("07-06:00:31", row)
+            self.assertNotIn("NAME", lines[0])
+            self.assertNotIn("PGID", lines[0])
+            self.assertNotIn("OWNER", lines[0])
+            self.assertTrue(all(mon._width(line) <= width for line in lines))
+        role = "plain role name much longer"
+        at_minimum = replace(process, role=role)
+        self.assertEqual(mon.table_lines([at_minimum], 34)[1][:8], mon._fit(role, 8))
+
+    def test_elapsed_minimum_owner_threshold_and_mixed_rows(self):
+        long = replace(self.process, elapsed="100-06:00:31", owner="plain owner")
+        self.assertIn("needs 35 columns", " ".join(mon.table_lines([long], 34)))
+        for width in range(35, 104):
+            lines = mon.table_lines([long], width)
+            self.assertNotIn("NAME", lines[0])
+            self.assertIn("100-06:00:31", lines[1])
+            self.assertTrue(all(mon._width(line) <= width for line in lines))
+        self.assertIn("NAME", mon.table_lines([long], 104)[0])
+        self.assertIn("100-06:00:31", mon.table_lines([long], 35)[1])
+        self.assertNotIn("OWNER", mon.table_lines([long], 53)[0])
+        one_owner_col = mon.table_lines([replace(long, owner="")], 54)
+        self.assertTrue(one_owner_col[1].endswith(" -"))
+
+        first = replace(self.process, pid=2, elapsed="00:12")
+        long = replace(long, pid=3)
+        for processes in ([first, long], [long, first]):
+            self.assertIn("NAME", mon.table_lines(processes, 103)[0])
+            compact = mon.table_lines(processes, 102)
+            self.assertNotIn("NAME", compact[0])
+            self.assertTrue(all("100-06:00:31" in line for line in compact[1:]
+                                if str(long.pid) in line))
+
+    def test_too_narrow_process_table_shows_wrapped_warning(self):
+        for width in (1, 8, 20, 33):
+            lines = mon.table_lines([self.process], width)
+            self.assertEqual("".join(lines).replace(" ", ""), "Processtableneeds34columns")
+            self.assertTrue(all(mon._width(line) <= width for line in lines))
+        self.assertEqual(mon.table_lines([self.process], 0), [""])
 
     def test_narrow_table_separates_elapsed_and_owner(self):
         process = mon.Process(3, 0, 3, "07-06:00:31", "S", "Role", "codex", "-")
@@ -6884,22 +6952,30 @@ class ProcessTableDisplayTests(unittest.TestCase):
 
     def test_process_view_supplies_narrow_width(self):
         class Screen:
-            def getmaxyx(self): return (12, 81)
+            def __init__(self, width): self.width = width
+            def getmaxyx(self): return (12, self.width)
             def erase(self): pass
             def move(self, y, x): pass
             def refresh(self): pass
 
+        process = replace(self.process, elapsed="07-06:00:31")
         monitor = type("MonitorFixture", (), {
             "version": "test", "disk_usage": None, "polls": 1, "error": None,
-            "processes": [self.process], "lingering": [], "tasks": [], "stale": False,
+            "processes": [process], "lingering": [], "tasks": [], "stale": False,
             "github": None})()
-        drawn = []
-        with patch.object(mon, "summary", return_value=""), \
-                patch.object(mon, "running_stages", return_value=0), \
-                patch.object(mon, "behind_line", return_value=""):
-            mon._paint_screen(Screen(), monitor, "table", 0, False, {},
-                              lambda row, text, attr=0: drawn.append((row, text, attr)))
-        self.assertTrue(any("00:12" in line for _, line, _ in drawn))
+        for width in (81, 103, 104):
+            drawn = []
+            with patch.object(mon, "summary", return_value=""), \
+                    patch.object(mon, "running_stages", return_value=0), \
+                    patch.object(mon, "behind_line", return_value=""), \
+                    patch.object(mon, "table_lines", wraps=mon.table_lines) as table:
+                mon._paint_screen(Screen(width), monitor, "table", 0, False, {},
+                                  lambda row, text, attr=0: drawn.append((row, text, attr)))
+            table.assert_called_once_with(monitor.processes, width - 1)
+            expected = mon.table_lines(monitor.processes, width - 1)
+            body = [line for row, line, _ in drawn if 3 <= row < 11 and line]
+            self.assertEqual(body, expected)
+            self.assertTrue(all(mon._width(line) <= width - 1 for line in body))
 
 
 class TasksScreenWrappingTests(unittest.TestCase):
@@ -6931,6 +7007,7 @@ class TasksScreenWrappingTests(unittest.TestCase):
         self.assertGreaterEqual(len(body), 2)
         self.assertTrue(any("phase" in text for _, text, _ in body))
         self.assertTrue(any("who" in text for _, text, _ in body))
+        self.assertTrue(all(mon._width(text) <= 60 for _, text, _ in body))
         self.assertTrue(all(attr == (curses.A_BOLD | 16) for _, _, attr in body))
         self.assertGreater(offset, 0)
 
@@ -8654,7 +8731,8 @@ class StuckAlertTests(unittest.TestCase):
 
         class FakeMonitor:
             def __init__(self):
-                self.version, self.processes, self.lingering = "test", [], []
+                self.version, self.processes, self.lingering = "test", [
+                    mon.Process(1, 0, 1, "00:12", "S", "plain role", "plain name", "plain owner")], []
                 self.disk_usage, self.error, self.office, self.office_error = None, None, [], None
                 self.quota, self.pm_board, self.ec2_heads = [], mon.PmBoard("ok", 0, [], [], []), None
                 self.records, self.opencode_route, self.opencode_route_failed = [], None, False
@@ -8691,6 +8769,7 @@ class StuckAlertTests(unittest.TestCase):
         self.assertIn("修復已到上限：D6 wp-1（至少 2 輪）", rendered)
         self.assertIn("PM 進度：上次派工 12 分鐘前 · 排隊 0", rendered)
         self.assertIn("辦公室 · 工作中 0 · 等你 1", rendered)
+        self.assertIn("ROLE                      NAME         PID     OWNER", rendered)
         self.assertIn(mon.BEHIND_WARNING, rendered)
         self.assertTrue(any("macOS 超過 45 分鐘" in line for line in drawn.values()))
         self.assertTrue(any("修復已到上限：D6 wp-1（至少 2 輪）" in line for line in drawn.values()))
