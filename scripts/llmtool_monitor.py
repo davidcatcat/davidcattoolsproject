@@ -3805,6 +3805,7 @@ def review_verdicts(comments) -> dict:
 
 PM_BOARD = os.path.expanduser("~/.local/state/llmtool/pm-board.json")
 PM_BOARD_STALE = 1800
+PM_PROGRESS_STALE = 1800
 PM_BOARD_LIMIT = 64 * 1024
 PM_BOARD_REF = re.compile(r"(?:PR )?#[0-9]{1,7}")
 
@@ -5953,7 +5954,23 @@ def pm_last_dispatch(now: float, root: str | None = None) -> tuple[DispatchRecor
     entries, problem = _bounded_task_entries(root, _dispatch_parsed,
                                              DISPATCH_BUDGET, _dispatch_entry)
     eligible = [entry for entry in entries if entry.created <= now + REMOTE_TEST_SKEW]
-    return (max(eligible, key=lambda entry: entry.created) if eligible else None), problem
+    newest = max(eligible, key=lambda entry: entry.created) if eligible else None
+    if not problem:
+        paths, _ = _remote_test_paths(root)
+        if len(paths) >= REMOTE_TEST_FILES:
+            oldest = None
+            for path in paths:
+                try:
+                    mtime = os.lstat(path).st_mtime
+                except OSError:
+                    continue
+                oldest = mtime if oldest is None else min(oldest, mtime)
+            if oldest is None or newest is None or newest.created < oldest:
+                problem = "task 僅讀最近 32 筆，上次派工未確認"
+    if (not problem and os.path.exists(root)
+            and not os.access(root, os.R_OK | os.X_OK)):
+        problem = "本機 Task 紀錄讀取失敗"
+    return newest, problem
 
 
 def pm_dispatch_line(entry: DispatchRecord | None, problem: str, now: float) -> str:
@@ -7012,6 +7029,46 @@ def _ago(age: float | None) -> str:
     return f"{int(age // 3600)} 小時前"
 
 
+def pm_progress_line(work: WorkBoard, dispatch, now: float) -> tuple[str, str]:
+    entry, problem = dispatch if dispatch is not None else (None, "")
+    if dispatch is None or problem:
+        age_text, age = "?", None
+    elif entry is None:
+        age_text, age = "沒有紀錄", None
+    else:
+        age = max(0.0, now - entry.created)
+        age_text = _ago(age)
+
+    queue_count = len(work.queue) if work.board_known else None
+    queue_text = "?" if queue_count is None else str(queue_count)
+    if queue_count is not None and work.board_status == "stale":
+        queue_text += "（可能過時）"
+
+    if not work.github_known or work.github_status:
+        merges_text = "?"
+    else:
+        merges_text = str(len(work.done))
+        if "今天完成可能不完整" in work.note:
+            merges_text += "+"
+
+    style = "!" if (queue_count is not None and queue_count > 0
+                    and work.board_status == "ok"
+                    and age is not None and age > PM_PROGRESS_STALE) else ""
+    return f"PM 進度：上次派工 {age_text} · 排隊 {queue_text} · 今天合併 {merges_text}", style
+
+
+def pm_progress(mon, now: float) -> tuple[str, str]:
+    try:
+        work = work_board(mon.github, mon.pm_board, now)
+    except Exception:
+        return "PM 進度：未確認", ""
+    try:
+        dispatch = pm_last_dispatch(now)
+    except Exception:
+        dispatch = None
+    return pm_progress_line(work, dispatch, now)
+
+
 LIVE_SECTION = "即時（讀得到 session 紀錄）"
 STATUS_SECTION = "只看得到狀態（依派工紀錄和程序推算）"
 
@@ -7196,10 +7253,12 @@ def stuck_lines(mon, now) -> list[str]:
         return []
 
 
-def office_top(github, quota, now, stuck=None) -> list[tuple[str, str]]:
+def office_top(github, quota, now, stuck=None, progress=None) -> list[tuple[str, str]]:
     out = [owner_count_line(github)]
     if github is not None:
         out.append(main_health_line(github.main_health, github.main_error, now))
+    if progress is not None:
+        out.append(progress)
     out.extend((line, "!") for line in (quota or []))
     out.extend((line, "!") for line in (stuck or []))
     return out
@@ -7355,7 +7414,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
                                  pending=github.pending if github is not None else None,
                                  scope=github.scope if github is not None else "",
                                  top=office_top(github, mon.quota, time.time(),
-                                                stuck=stuck_lines(mon, time.time())))))
+                                                stuck=stuck_lines(mon, time.time()),
+                                                progress=pm_progress(mon, time.time())))))
     print("\n".join(line for line, _ in board_view(
         work_board(github, mon.pm_board, time.time(), ec2=mon.ec2_heads,
                    reviewing=pr_reviewing(mon.office)))))
@@ -7543,7 +7603,8 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
                             pending=mon.github.pending if mon.github is not None else None,
                             scope=mon.github.scope if mon.github is not None else "",
                             top=office_top(mon.github, mon.quota, time.time(),
-                                           stuck=stuck_lines(mon, time.time())))
+                                           stuck=stuck_lines(mon, time.time()),
+                                           progress=pm_progress(mon, time.time())))
         offset = max(0, min(offset, len(lines) - body))
         styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
                   "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
