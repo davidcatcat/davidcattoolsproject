@@ -886,6 +886,34 @@ class ActivityViewTests(unittest.TestCase):
                 lines = mon.activity_lines([], github=None, tasks_root=tasks)
             self.assertEqual(lines[0], "⚠ PM 上次派工：未確認（本機 Task 紀錄讀取失敗）")
 
+    def test_successful_github_read_with_local_dispatch_problem_is_unconfirmed(self):
+        class Source:
+            window = 12 * 3600
+            status = "GitHub：讀取完成"
+            successful_read = True
+            events = [mon.ActivityEvent(NOW, "developer_dispatch", "", "",
+                                        "ASSIGNED", "#965", actor="PM", target="AGY")]
+            clock = staticmethod(lambda: NOW)
+            def refresh(self): pass
+
+        with patch.object(mon, "pm_last_dispatch", return_value=(None, "problem")):
+            lines = mon.activity_lines([], github=Source(), tasks_root="unused")
+        self.assertEqual(lines[0], "⚠ PM 上次派工：未確認（problem）")
+
+    def test_bounded_task_entries_returns_fit_entry_and_over_budget_problem(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            older = Path(tasks) / "wp-1.json"
+            newer = Path(tasks) / "wp-2.json"
+            older.write_text(json.dumps({"name": "first"}), encoding="utf-8")
+            newer.write_text(json.dumps({"name": "second"}), encoding="utf-8")
+            os.utime(older, (NOW - 20, NOW - 20))
+            os.utime(newer, (NOW - 10, NOW - 10))
+            budget = newer.stat().st_size
+            entries, problem = mon._bounded_task_entries(
+                tasks, {}, budget, lambda record: record.get("name"))
+        self.assertEqual(entries, ["second"])
+        self.assertEqual(problem, mon.REMOTE_TEST_OVER_BUDGET)
+
     def test_pm_dispatch_entry_rejects_wrong_types(self):
         self.assertIsNone(mon._dispatch_entry(None))
         self.assertIsNone(mon._dispatch_entry({"task_id": "x" * 32, "developer": {}}))
@@ -938,6 +966,29 @@ class ActivityViewTests(unittest.TestCase):
                               lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertIn("監控程式已更新", drawn[2])
         self.assertIn("PM 上次派工", drawn[3])
+
+    def test_activity_paint_passes_noise_state_and_updates_hint(self):
+        monitor = mon.Monitor()
+        class Screen:
+            def getmaxyx(self): return (20, 120)
+            def erase(self): pass
+            def refresh(self): pass
+            def move(self, *args): pass
+            def clearok(self, *args): pass
+        calls = []
+        drawn = {}
+        def activity_lines(*args, **kwargs):
+            calls.append(kwargs.get("show_noise"))
+            return ["header", "event"]
+        with patch.object(mon, "activity_lines", side_effect=activity_lines):
+            mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
+                              lambda row, text, attr=0: drawn.__setitem__(row, text))
+            self.assertTrue(any("a: 顯示雜訊" in text for text in drawn.values()))
+            drawn.clear()
+            mon._paint_screen(Screen(), monitor, "activity", 0, True, {},
+                              lambda row, text, attr=0: drawn.__setitem__(row, text))
+        self.assertEqual(calls, [False, True])
+        self.assertTrue(any("a: 隱藏雜訊" in text for text in drawn.values()))
 
     def test_curses_activity_events_do_not_overwrite_hint_on_short_terminal(self):
         class Source:
@@ -1079,6 +1130,60 @@ def comment(number, seconds, body, kind="issues", association="OWNER"):
 
 
 class GitHubActivityTests(unittest.TestCase):
+    def test_progress_summary_shows_only_valid_d6_and_family_labels(self):
+        marker = "<!-- activity: type=developer_progress actor=Codex target=Root status=ACTIVE -->\n"
+        task = "Task: " + "a" * 32
+        cases = (
+            (task + "\nD6: wp-1\nFamily: fixture-family", "Family fixture-family（D6 wp-1）"),
+            (task + "\nD6: wp-1", "D6 wp-1"),
+            (task + "\nFamily: fixture-family", "Family fixture-family"),
+            (task, "Task: [已遮蔽]"),
+            ("Ordinary progress headline\nD6: wp-1\nFamily: fixture-family",
+             "Ordinary progress headline"),
+            (task + "\nD6: bad name\nFamily: fixture-family", "Family fixture-family"),
+        )
+        for body, expected in cases:
+            with self.subTest(expected=expected):
+                events = mon.github_events([comment(51, NOW - 9, marker + body)], [], NOW - 99)
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0].event_type, "developer_progress")
+                self.assertEqual(events[0].summary, expected)
+                self.assertNotIn("a" * 32, events[0].summary)
+        other = marker.replace("developer_progress", "test_result").replace(
+            "target=Root", "target=Tests").replace("status=ACTIVE", "status=PASS")
+        other += task + "\nD6: wp-1\nFamily: fixture-family"
+        event = mon.github_events([comment(52, NOW - 9, other)], [], NOW - 99)[0]
+        self.assertEqual(event.event_type, "test_result")
+        self.assertEqual(event.summary, "Task: [已遮蔽]")
+
+    def test_lease_and_correction_noise_is_hidden_counted_and_revealed(self):
+        comments = [comment(61, NOW - 6, "subpm-lease started"),
+                    comment(62, NOW - 5, "Correction updated details"),
+                    comment(63, NOW - 4, "ordinary text mentions subpm-lease"),
+                    comment(64, NOW - 3,
+                            "<!-- activity: type=developer_progress actor=Codex target=Root status=ACTIVE -->\n"
+                            "Correction progress"),
+                    comment(65, NOW - 2, "final visible comment")]
+        events = mon.github_events(comments, [], NOW - 99)
+        hidden = mon.render_activity(events, limit=1)
+        self.assertIn("已隱藏 2 筆 lease／更正留言", hidden)
+        visible_events = [line for line in hidden if line.startswith("GitHub") or "Codex → Root" in line]
+        self.assertEqual(len(visible_events), 1)
+        self.assertIn("final visible comment", visible_events[0])
+        shown = mon.render_activity(events, show_noise=True)
+        self.assertFalse(any("已隱藏" in line for line in shown))
+        self.assertTrue(any("subpm-lease started" in line for line in shown))
+        self.assertTrue(any("Correction updated details" in line for line in shown))
+        self.assertTrue(any("subpm-lease" in line for line in shown))
+        self.assertTrue(any("Correction progress" in line for line in shown))
+        self.assertFalse(any("已隱藏" in line for line in
+                             mon.render_activity(events, limit=10, show_noise=True)))
+        self.assertFalse(any("已隱藏" in line for line in
+                             mon.render_activity([events[2]], limit=10)))
+        typed_default = mon.render_activity([events[3]], limit=10)
+        self.assertTrue(any("Correction progress" in line for line in typed_default))
+        self.assertFalse(any("已隱藏" in line for line in typed_default))
+
     def test_marked_comment_becomes_typed_undelivered_reply(self):
         body = ("<!-- activity: type=undelivered_reply actor=Claude target=PM status=NOT_DELIVERED -->\n"
                 "**Claude Reviewer → PM**: verdicts below")
