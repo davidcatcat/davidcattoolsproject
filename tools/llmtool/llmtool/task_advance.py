@@ -150,7 +150,7 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     paths = [item.get('filename') for item in files if type(item) is dict]
     if len(paths) != len(files) or any(type(path) is not str for path in paths):
         return 'MERGE_CHECKS_UNAVAILABLE'
-    docs_only = bool(paths) and all(path.endswith('.md') for path in paths)
+    docs_only = task_completion._docs_only_ci(paths)
     required_checks = ['check (docs)'] if docs_only else ['check (Linux 3.14)']
     requires_macos = not docs_only
     if requires_macos:
