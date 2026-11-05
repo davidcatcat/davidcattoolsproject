@@ -277,7 +277,7 @@ family gets at most two failed repair attempts before coordinator
 reassessment; overall review/token/time escalation does not waive a
 failing mandatory gate. Place independent QA in the feature PR or
 tracking Issue instead of opening a new report-only PR for every round.
-Only the three cases in the [Owner escalation reference](../../skills/ai-team-delivery/owner-escalation.md)—a wrong product requirement, root/sudo, or a macOS core/system change—require direct Owner escalation. Provider egress and spending still require distinct pre-existing authorization.
+Direct Owner escalation follows the [Owner escalation reference](../../skills/ai-team-delivery/owner-escalation.md): an incorrect or changed product requirement, accounts, passwords, credentials or keys, or a macOS core/system change. AI never uses `sudo`, `su` or root. Provider egress and spending still require distinct pre-existing authorization.
 
 ## Execution environment
 
