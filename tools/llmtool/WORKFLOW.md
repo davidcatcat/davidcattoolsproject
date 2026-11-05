@@ -8,6 +8,12 @@ Codex and OpenCode are Developer routes assigned by the existing PM only after c
 
 The formal Reviewer is from the other model family than the Developer under [AGENTS.md](../../AGENTS.md) (Claude for Codex Developer changes, Codex for Claude Developer and PM changes); other reviews are advisory. Formal reviews remain exact-head, read-only and subject to all applicable security, CI and Mac-native gates. Owner dispatch switches are in [worker-dispatch.json](worker-dispatch.json); the local monitor at [scripts/llmtool_monitor.py](../../scripts/llmtool_monitor.py) reports live technical state separately. The PM's next-step duty after each result is the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md). Company LLM unavailability is recorded and does not block unrelated Developers.
 
+A Claude Developer D6 bound with `task claude-bind` must commit a change to a
+`tools/llmtool/tests/test_*.py` file: remote-test admits only test modules
+derived from changed paths, and the Claude route has no local test fallback.
+Complete the steps in this order: commit, `--record-result-task-id`,
+`--bind-native-session-task-id`, then `task claude-bind`.
+
 
 [Historical role and stop decisions are archived](../../docs/history/governance-archive-20261103.md#historical-role-and-stop-decisions).
 

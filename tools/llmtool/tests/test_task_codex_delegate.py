@@ -275,6 +275,18 @@ class CodexDelegateTests(unittest.TestCase):
             os.chdir(original_cwd)
         return result, self.store.get(task['task_id']), callback
 
+    def test_codex_delegate_refuses_claude_reserved_d6_before_task_mutation(self):
+        task = self._task()
+        record = Path(self.common_dir) / 'llmtool-worktrees' / 'executor-task-1.json'
+        value = json.loads(record.read_text(encoding='utf-8'))
+        value['trusted_agent_id'] = 'claude-developer'
+        record.write_text(json.dumps(value), encoding='utf-8')
+        record.chmod(0o600)
+        with self.assertRaisesRegex(task_submission_cli.LLMToolError,
+                                    'D6_CLAUDE_RESERVED'):
+            self._dispatch(task)
+        self.assertIsNone(self.store.get(task['task_id'])['developer'])
+
     def test_background_returns_at_child_launch_then_persists_foreground_result(self):
         task = self._task()
         result = task_submission_cli.codex_direct_developer.DirectResult(

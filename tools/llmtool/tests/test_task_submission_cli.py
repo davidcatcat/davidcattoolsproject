@@ -995,6 +995,10 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(bound['completion']['executor_task_id'], d6_task_id)
         self.assertEqual(bound['completion']['evidence']['source_sha'],
                          self.executor_head)
+        self.assertEqual(bound['completion']['evidence']['executor_native_session'],
+                         'VERIFIED')
+        self.assertEqual(bound['completion']['evidence']['executor_native_session_id'],
+                         'claude-native-session')
         self.assertEqual(_select_reviewer(bound), 'codex-reviewer')
         second_task = run_task_record_pm(
             Namespace(stdin_json=True), store=store,
@@ -1254,6 +1258,21 @@ class TaskSubmissionCLITests(unittest.TestCase):
                       egress_basis='Owner approved non-sensitive source files')
         values.update(changes)
         return Namespace(**values)
+
+    def test_opencode_delegate_refuses_claude_reserved_d6_before_assignment(self):
+        task = self._pm_task_with_opencode_assignment()
+        registry_path = (Path(self.executor_common_dir) / 'llmtool-worktrees' /
+                         'executor-task-1.json')
+        registration = json.loads(registry_path.read_text(encoding='utf-8'))
+        registration['trusted_agent_id'] = 'claude-developer'
+        registry_path.write_text(json.dumps(registration), encoding='utf-8')
+        registry_path.chmod(0o600)
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                self.assertRaisesRegex(LLMToolError, 'D6_CLAUDE_RESERVED'):
+            run_task_delegate(self._opencode_delegate_args(task))
+        saved = TaskStore(self.home / '.local' / 'state' / 'llmtool' / 'tasks').get(
+            task['task_id'])
+        self.assertIsNone(saved['developer'])
 
     def test_opencode_direct_route_records_scoped_diff_and_cli_evidence(self):
         task = self._pm_task_with_opencode_assignment()

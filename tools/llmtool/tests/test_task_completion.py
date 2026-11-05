@@ -4200,6 +4200,48 @@ class TaskCompletionTests(unittest.TestCase):
                          (10, context['head'], context['reviewer_task']))
         self.assertEqual(claim['review_result']['review_text'], context['body'])
 
+    def test_abandoned_claude_task_is_refused_by_completion_review_and_remote_test(self):
+        from llmtool import remote_test, review_dispatch
+
+        context = self._claude_bound_task_context()
+        store = context['store']
+        task = store.get(context['task_id'])
+        store.abandon(context['task_id'], pm_session_id=task['pm_session_id'],
+                      reason='superseded')
+        with self.assertRaisesRegex(LLMToolError, 'CLAUDE_TASK_ABANDONED'):
+            self._complete_claude_bound_context(context)
+
+        with self.assertRaises(LLMToolError) as review_error:
+            review_dispatch._preflight(store, context['task_id'], '4' * 32, 10, 'v1')
+        self.assertEqual(review_error.exception.review_dispatch_code,
+                         'CLAUDE_TASK_ABANDONED')
+
+        ssh_calls = []
+        result = remote_test.run_remote_test(
+            context['task_id'], executor_task='4' * 32, sha=context['head'],
+            ref='refs/heads/feat/executor', modules=('test_fixture',), store=store,
+            config_path=Path(self.base) / 'missing-remote-config',
+            transport=lambda *args: ssh_calls.append(args))
+        self.assertEqual((result['result'], result['code']),
+                         ('ADMISSION_DENIED', 'CLAUDE_TASK_ABANDONED'))
+        self.assertEqual(ssh_calls, [])
+
+    def test_abandonment_does_not_apply_to_non_claude_task(self):
+        from llmtool import review_dispatch
+
+        context = self._claude_bound_task_context()
+        store = context['store']
+        task = store.get(context['task_id'])
+        developer = dict(task['developer'])
+        developer['provider_profile'] = 'opencode'
+        store.update(context['task_id'], developer=developer)
+        store.abandon(context['task_id'], pm_session_id=task['pm_session_id'],
+                      reason='superseded')
+        with self.assertRaises(LLMToolError) as review_error:
+            review_dispatch._preflight(store, context['task_id'], '4' * 32, 10, 'v1')
+        self.assertNotEqual(getattr(review_error.exception, 'review_dispatch_code', None),
+                            'CLAUDE_TASK_ABANDONED')
+
     def _assert_cli_completion_waits(self, context, expected_gate, expected_state):
         rc, result = self._complete_claude_bound_context(context)
         self.assertEqual(rc, 1)
