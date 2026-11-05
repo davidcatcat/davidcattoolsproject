@@ -148,6 +148,8 @@ class TaskAdvanceCiGateTests(unittest.TestCase):
         self.assertTrue(body.startswith(
             '<!-- activity: type=task actor=PM target=PR status=TRACKING -->\n'))
         self.assertIn('EC2 remote-test', body)
+        self.assertIn('D6=executor-1', body)
+        self.assertNotIn(d6()['root'], body)
         self.assertNotIn('private failure text', body)
 
     def test_remote_test_comment_failure_adds_only_warning_code(self):

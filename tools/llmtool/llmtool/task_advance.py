@@ -263,7 +263,7 @@ def _post_remote_test_comment(gh_runner, root, number, task_id, d6, head, summar
     body = ('<!-- activity: type=task actor=PM target=PR status=TRACKING -->\n'
             f"EC2 remote-test, result={summary['result']}, modules={modules}, "
             f"tests run={summary['ran_total']}, seconds={summary['elapsed_s']}, "
-            f"receipt={summary['receipt_digest']}, Task={task_id}, D6={d6.get('root')}, head={head}")
+            f"receipt={summary['receipt_digest']}, Task={task_id}, D6={d6.get('task_id')}, head={head}")
     response = gh_runner(root, ['pr', 'comment', str(number), '--body', body])
     if getattr(response, 'returncode', 1) != 0:
         raise _PublishRefusal('REMOTE_TEST_COMMENT_FAILED')
@@ -1108,9 +1108,11 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         except Exception as exc:
             codes.append(_refusal(exc, 'remote_test_code'))
     elif step == 'DISPATCH_REVIEW':
-        step, ci_code = _review_ci_gate(number, d6['result_head'], get)
-        if ci_code is not None:
-            codes.append(ci_code)
+        gate_step, ci_code = _review_ci_gate(number, d6['result_head'], get)
+        if gate_step is not None:
+            step = gate_step
+            if ci_code is not None:
+                codes.append(ci_code)
     if step == 'DISPATCH_REVIEW':
         claims = _claims(record)
         versions = [c.get('version', 0) for c in claims if type(c) is dict and

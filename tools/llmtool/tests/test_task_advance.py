@@ -35,7 +35,7 @@ def base_record(**changes):
 
 
 def d6(clean=True, recorded=HEAD):
-    return {'root': '/repo/task', 'result_head': HEAD,
+    return {'root': '/repo/task', 'task_id': 'executor-1', 'result_head': HEAD,
             'recorded_result_head': recorded, 'registered_result_head': recorded,
             'dirty': not clean}
 
