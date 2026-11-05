@@ -708,7 +708,7 @@ class HighDebugTests(unittest.TestCase):
 
     def test_sensitive_rejection_report_is_bounded_and_real_store_validates(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = TaskStore(Path(directory) / 'tasks')
+            store = TaskStore(Path(directory).resolve() / 'tasks')
             task = self._real_task_store_task()
             store.create(task)
             hits = [('rule', line) for line in range(1, 601)]
@@ -736,7 +736,7 @@ class HighDebugTests(unittest.TestCase):
 
     def test_real_store_rejects_clean_oversized_high_debug_report(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = TaskStore(Path(directory) / 'tasks')
+            store = TaskStore(Path(directory).resolve() / 'tasks')
             task = self._real_task_store_task()
             store.create(task)
             prior = high_debug._failed_entry(
