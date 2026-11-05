@@ -1548,22 +1548,58 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertEqual(len(full.calls), mon.GITHUB_PAGES + 3)
         self.assertIn("per_page=1&page=501", full.calls[mon.GITHUB_PAGES][0][4])
         self.assertIn("只讀了最新 500 則", source.status)
+        self.assertTrue(source.comments_cut)
         self.assertEqual(len(source.events), 500)   # the probe's item (#900) never lands
         self.assertNotIn("#900", [e.reference for e in source.events])
+        self.assertIsNone(mon.owner_waiting(source))
+        self.assertEqual(mon.owner_count_line(source)[0],
+                         "等你決定：未確認（留言太多，只讀了最新 500 則）")
+        self.assertEqual(mon.office_view([], waiting=mon.owner_waiting(source))[0][0],
+                         "辦公室 · 工作中 0 · 等你 ?")
         failed = FakeRun(*([(0, page(1, 100))] * mon.GITHUB_PAGES), (1, b""), (0, []))
         with patch.object(mon.shutil, "which", return_value="/opt/gh"):
             source = mon.GitHubSource("o/r", runner=failed, clock=lambda: NOW)
             source.refresh()
         self.assertIn("只讀了最新 500 則", source.status)   # unknown: stay conservative
+        self.assertTrue(source.comments_cut)
         self.assertNotIn("讀取失敗", source.status)
         self.assertEqual(len(source.events), 500)
+        self.assertIsNone(mon.owner_waiting(source))
+        self.assertEqual(mon.owner_count_line(source)[0],
+                         "等你決定：未確認（留言太多，只讀了最新 500 則）")
+        self.assertEqual(mon.office_view([], waiting=mon.owner_waiting(source))[0][0],
+                         "辦公室 · 工作中 0 · 等你 ?")
         exact = FakeRun(*([(0, page(1, 100))] * mon.GITHUB_PAGES), (0, []), (0, []))
         with patch.object(mon.shutil, "which", return_value="/opt/gh"):
             source = mon.GitHubSource("o/r", runner=exact, clock=lambda: NOW)
             source.refresh()
         self.assertNotIn("留言太多", source.status)   # exactly 500: nothing was cut
+        self.assertFalse(source.comments_cut)
         self.assertEqual(len(exact.calls), mon.GITHUB_PAGES + 3)
         self.assertIn("per_page=1&page=501", exact.calls[mon.GITHUB_PAGES][0][4])
+        self.assertEqual(mon.owner_waiting(source), 0)
+        self.assertEqual(mon.owner_count_line(source)[0], "等你決定：0 件（只看最近 12 小時留言）")
+
+        marked = comment(10, NOW - 30,
+                         "<!-- activity: type=repair_gate actor=PM target=Owner status=WAITING -->\nNeed a decision")
+        pages = [page(1, 100) for _ in range(mon.GITHUB_PAGES)]
+        pages[0][0] = marked
+        waiting = FakeRun(*([(0, batch) for batch in pages]), (0, page(900, 1)), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=waiting, clock=lambda: NOW)
+            source.refresh()
+        self.assertTrue(source.comments_cut)
+        self.assertEqual(mon.owner_waiting(source), 1)
+        self.assertEqual(mon.owner_count_line(source)[0],
+                         "等你決定：1 件以上（留言太多，只讀了最新 500 則）")
+
+        cleared = FakeRun(*([(0, batch) for batch in pages]), (0, []), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source.runner = cleared
+            source.refresh(force=True)
+        self.assertFalse(source.comments_cut)
+        self.assertEqual(mon.owner_waiting(source), 1)
+        self.assertEqual(mon.owner_count_line(source)[0], "等你決定：1 件")
 
     def test_comment_page_failures_keep_old_events_and_duplicates_show_once(self):
         first = [comment(1, NOW - 30, "a")]
@@ -2677,7 +2713,7 @@ class OfficeViewTests(unittest.TestCase):
         words = {
             "已完成，待收尾": "已結束",
             "審查已結束，待收尾": "已結束",
-            "診斷沒在跑，待收尾": "已結束",
+            "診斷沒在跑，待收尾": "未確認",
             "已驗收，可收尾": "已結束",
             "等審查或 CI": "等結果",
             "修復中": "等結果",
@@ -5749,6 +5785,9 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("x" * 200, "\n".join(mon.office_lines(rows)))
 
     def test_office_header_shows_working_and_waiting_counts_or_unknown(self):
+        self.assertEqual(mon.office_view([], error="OSError")[0][0],
+                         "辦公室 · 工作中 ? · 等你 ?")
+        self.assertEqual(mon.office_view([])[0][0], "辦公室 · 工作中 0 · 等你 ?")
         rows = [mon.OfficeRow("working", mon.WORKING, "", 0, 1),
                 mon.OfficeRow("shared", mon.IDLE, "", 0, 2, kind="shared"),
                 mon.OfficeRow("idle", mon.IDLE, "", 0, 3)]

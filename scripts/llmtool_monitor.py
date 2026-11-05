@@ -1879,6 +1879,7 @@ class GitHubSource:
         self.events: list[ActivityEvent] = []
         self.successful_read = False
         self.read_failed = False
+        self.comments_cut = False
         self.pending: list[OwnerPending] = []
         self.scope = ""   # what the ★ list could see, said next to it
         self.branch_prs: dict[str, tuple[int, str]] = {}   # head branch -> (PR, MERGED/CLOSED/OPEN)
@@ -2065,6 +2066,7 @@ class GitHubSource:
                      + (f"（只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則）" if more else "")
                      + "；監控開著時，更早還沒回覆的也會留著")
             self.events, self.pending, self.branch_prs, self.scope = events, pending, prs, scope
+            self.comments_cut = more
             self.board_pulls = work_pulls
             self.board_page_count = board_page_count
             self.board_oldest_updated = board_oldest_updated
@@ -2681,8 +2683,7 @@ AGENT_ID = re.compile(r"[A-Za-z0-9._-]{1,96}")
 
 
 def d6_idle_word(phase: str) -> str:
-    if phase in ("已完成，待收尾", "審查已結束，待收尾", "診斷沒在跑，待收尾",
-                 "已驗收，可收尾"):
+    if phase in ("已完成，待收尾", "審查已結束，待收尾", "已驗收，可收尾"):
         return "已結束"
     if phase in ("等審查或 CI", "修復中", "等審查"):
         return "等結果"
@@ -7240,11 +7241,20 @@ def owner_count_line(github) -> tuple[str, str]:
             text += "（GitHub 讀取失敗，可能過時）"
         return text, "!" if github.read_failed else ""
     count = sum(item.kind == "waiting_owner" for item in github.pending)
-    text = f"等你決定：{count} 件"
+    cut = getattr(github, "comments_cut", False)
+    if cut:
+        if count == 0:
+            text = (f"等你決定：未確認（留言太多，只讀了最新 "
+                    f"{GITHUB_PAGE * GITHUB_PAGES} 則）")
+        else:
+            text = (f"等你決定：{count} 件以上（留言太多，只讀了最新 "
+                    f"{GITHUB_PAGE * GITHUB_PAGES} 則）")
+    else:
+        text = f"等你決定：{count} 件"
     others = sum(item.kind != "waiting_owner" for item in github.pending)
     if others:
         text += f"（另有 {others} 筆其他 Owner 請求）"
-    elif count == 0:
+    elif count == 0 and not cut:
         text += f"（只看最近 {int(github.window // 3600)} 小時留言）"
     if github.read_failed:
         text += "（GitHub 讀取失敗，可能過時）"
@@ -7254,7 +7264,10 @@ def owner_count_line(github) -> tuple[str, str]:
 def owner_waiting(github) -> int | None:
     if (github is None or not github.successful_read or github.read_failed):
         return None
-    return sum(item.kind == "waiting_owner" for item in github.pending)
+    count = sum(item.kind == "waiting_owner" for item in github.pending)
+    if getattr(github, "comments_cut", False) and count == 0:
+        return None
+    return count
 
 
 def stuck_lines(mon, now) -> list[str]:
@@ -7294,7 +7307,8 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     pending: GitHub requests waiting for the Owner, shown first."""
     working = sum(row.state == WORKING for row in rows)
     waiting_text = "?" if waiting is None else str(waiting)
-    out = [(f"辦公室 · 工作中 {working} · 等你 {waiting_text}", "title")]
+    working_text = "?" if error else str(working)
+    out = [(f"辦公室 · 工作中 {working_text} · 等你 {waiting_text}", "title")]
     now = time.time() if now is None else now
     for text, style in top or []:
         out += [(('  ' if i else '') + piece, style) for i, piece in
