@@ -106,6 +106,8 @@
 - For CI failures, consult the [CI Knowledge Base](docs/ci/README.md) and [debug-ci](skills/debug-ci/SKILL.md).
 - Documentation-only changes need a successful exact-head `check (docs)` job of `llmtool Linux CI` (relative links and anchors, a sensitive-content screen of added lines, SKILL.md frontmatter and the source-revision check), plus formal review (Owner decision [#352](https://github.com/davidcatcat/davidcattoolsproject/issues/352#issuecomment-6442123420)); report any missing check.
 - Independent review and exact-head CI are separate merge gates.
+- Sensitive PRs (Owner S1-S3, [#1019](https://github.com/davidcatcat/davidcattoolsproject/issues/1019#issuecomment-6665895546)): a PR that changes a path in `tools/llmtool/sensitive-paths.json` merges only with Owner approval. Approval is the Owner's own local terminal confirmation, bound to the PR and exact HEAD, single use and expiring. A relayed PM comment is not approval for this gate, and no AI answers the terminal challenge. Ask with `pm_owner_marker.py`. Until `llmtool approval grant` and the merge gate are live, the PM applies this rule by hand and records the Owner's answer. `CLAUDE.md`, `AGENTS.md` and `skills/` are not on the list for now.
+- Accepted residual (Owner S2, same record): until the GitHub phase, a same-user AI can still merge directly or update its own install. These gates are accident guards, not a security boundary; never claim they prevent this.
 - Apply [Owner outcome reporting v1.1](docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) for milestone outcomes and G1–G4 checkpoints.
 
 ### Merge gates (Owner decision #425, issuecomment-6434005860)
