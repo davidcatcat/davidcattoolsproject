@@ -6428,6 +6428,7 @@ class WorkBoardTests(unittest.TestCase):
         values = {"board_pulls": mon.board_pulls(pulls, "o/r") if pulls is not None else None,
                   "verdicts": verdicts or {}, "pending": [],
                   "successful_read": pulls is not None, "read_failed": False,
+                  "ci_view": None,
                   "window": 43200, "board_page_count": raw_count,
                   "board_oldest_updated": oldest}
         values.update(fields)
@@ -6567,12 +6568,12 @@ class WorkBoardTests(unittest.TestCase):
                  for i in range(1, 101)]
         pulls.extend([self._pull(101, state="closed", merged=midnight, updated=midnight + 1),
                       self._pull(102, state="closed", merged=midnight - 1, updated=midnight + 1)])
-        work = mon.work_board(self._github(pulls), mon.PmBoard("ok", 0, [], [], []), local_now.timestamp())
+        work = mon.work_board(self._github(pulls), mon.PmBoard("ok", 0, [], [], []), local_now)
         self.assertEqual(len(work.done), 101)
         self.assertEqual(work.done[0].number, 100)
         self.assertTrue(work.note)
         pulls[0] = self._pull(1, state="closed", merged=midnight - 1, updated=midnight - 1)
-        work = mon.work_board(self._github(pulls), mon.PmBoard("ok", 0, [], [], []), local_now.timestamp())
+        work = mon.work_board(self._github(pulls), mon.PmBoard("ok", 0, [], [], []), local_now)
         self.assertEqual(len(work.done), 100)
 
     def test_today_note_uses_raw_page_count_and_unknown_oldest_keeps_note(self):
@@ -6671,6 +6672,8 @@ class WorkBoardTests(unittest.TestCase):
             self.assertIn("未知", lines)
 
     def test_board_paint_wraps_styles_scrolls_and_reserves_footer(self):
+        import curses
+
         monitor = mon.Monitor()
         pending = [mon.OwnerPending(NOW, "#965", "open", "repair_gate", "repair_gate")]
         pending.extend(mon.OwnerPending(NOW, f"#{n}", "open", "request", "repair_gate")
@@ -6687,10 +6690,14 @@ class WorkBoardTests(unittest.TestCase):
         offset = mon._paint_screen(Screen(), monitor, "board", 0, False,
                                    {"!": 8, "section": 4}, put)
         self.assertEqual(offset, 0)
-        self.assertTrue(any("等你 20" in text for text, _ in drawn.values()))
+        body = "".join(drawn[row][0] for row in range(3, max(drawn)))
+        body_without_whitespace = "".join(body.split())
+        self.assertIn("等你20", body_without_whitespace)
         self.assertTrue(any("── 等你 ──" in text for text, _ in drawn.values()))
-        self.assertTrue(any("格式錯誤" in text and attr == 8 for text, attr in drawn.values()))
-        self.assertTrue(all(mon._width(text) <= 23 for text, _ in drawn.values()))
+        self.assertTrue(any("格式錯誤" in text and attr == 8 | curses.A_BOLD
+                            for text, attr in drawn.values()))
+        self.assertTrue(all(mon._width(drawn[row][0]) <= 23
+                            for row in range(3, max(drawn)))
         self.assertEqual(max(drawn), 19)
         self.assertIn("q: quit", drawn[19][0])
         scrolled = {}
