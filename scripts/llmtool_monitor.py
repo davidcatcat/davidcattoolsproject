@@ -5540,7 +5540,7 @@ def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
         if stat.S_ISREG(info.st_mode):
             stamped.append((info.st_mtime, path,
                             (info.st_ino, info.st_mtime_ns, info.st_size), info.st_nlink))
-    budget, short, kept, entries = budget, False, {}, []
+    short, kept, entries = False, {}, []
     parsed = cache.get(root, {})
     for _, path, key, link_count in sorted(stamped, reverse=True)[:REMOTE_TEST_FILES]:
         if link_count != 1:

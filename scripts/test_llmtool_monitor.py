@@ -800,9 +800,39 @@ class ActivityViewTests(unittest.TestCase):
             self.assertEqual(mon.activity_lines([], github=Source(), tasks_root=tasks)[0],
                              "⚠ PM 上次派工：本機紀錄沒有派工")
 
+    def test_successful_github_dispatch_markers_never_move_pm_dispatch_line(self):
+        class Source:
+            window = 12 * 3600
+            status = "GitHub：讀取完成"
+            successful_read = True
+            clock = staticmethod(lambda: NOW)
+            def __init__(self, events): self.events = events
+            def refresh(self): pass
+
+        with tempfile.TemporaryDirectory() as tasks:
+            empty_marker = mon.ActivityEvent(NOW, "developer_dispatch", "", "",
+                                             "ASSIGNED", "#965", actor="PM",
+                                             target="AGY")
+            self.assertEqual(
+                mon.activity_lines([], github=Source([empty_marker]),
+                                   tasks_root=tasks)[0],
+                "⚠ PM 上次派工：本機紀錄沒有派工")
+
+            self._dispatch_record(tasks, "c" * 32, provider="codex-cli",
+                                  created=NOW - 12 * 60, request="Repair round: #763 work")
+            newer_marker = mon.ActivityEvent(NOW, "developer_dispatch", "", "",
+                                             "ASSIGNED", "#965", actor="PM",
+                                             target="AGY")
+            self.assertEqual(
+                mon.activity_lines([], github=Source([newer_marker]),
+                                   tasks_root=tasks)[0],
+                "PM 上次派工：12 分鐘前（→ Codex，#763）")
+
     def test_pm_dispatch_accepted_states_refused_states_newest_and_future(self):
         with tempfile.TemporaryDirectory() as tasks:
-            accepted = tuple(mon.DISPATCH_ACCEPTED)
+            accepted = ("DEVELOPER_DISPATCHING", "DEVELOPER_RESPONDED",
+                        "DEVELOPER_OUTCOME_UNKNOWN", "DEVELOPER_OUTPUT_REJECTED")
+            self.assertEqual(mon.DISPATCH_ACCEPTED, frozenset(accepted))
             for index, state in enumerate(accepted):
                 record = {"task_id": f"{index + 1:032x}", "developer": {
                     "state": state, "created_at": mon.time.strftime("%Y-%m-%dT%H:%M:%SZ",
