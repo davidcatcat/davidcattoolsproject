@@ -1090,12 +1090,29 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
     if len(commit_ids) > 4096:
         _stop('RESULT_DIFF_INVALID')
 
+    listed_commits = set(commit_ids)
+    commit_parents = {}
+    for commit in commit_ids:
+        raw = _git(root, ('rev-list', '--parents', '-n', '1', commit), limit=4096)
+        fields = raw.decode('ascii').split()
+        if len(fields) < 2:
+            _stop('SOURCE_NOT_ANCESTOR')
+        commit_parents[commit] = fields[1:]
+
+    current = result_sha
+    while current != source_sha:
+        if current not in listed_commits:
+            _stop('SOURCE_NOT_ANCESTOR')
+        parents = commit_parents[current]
+        if not parents:
+            _stop('SOURCE_NOT_ANCESTOR')
+        current = parents[0]
+
     inherited = set()
     merge_parents = {}
     merge_resolution_paths = {}
     for commit in commit_ids:
-        raw = _git(root, ('rev-list', '--parents', '-n', '1', commit), limit=4096)
-        fields = raw.decode('ascii').split()
+        fields = [commit, *commit_parents[commit]]
         if len(fields) < 3:
             continue
         second_parent = fields[2]
@@ -1108,6 +1125,8 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
         if len(inherited_commits) > 4096:
             _stop('RESULT_DIFF_INVALID')
         inherited.update(inherited_commits)
+        if len(fields) > 3:
+            continue
         resolution_raw = _remerge_diff_paths_raw(root, commit)
         try:
             merge_resolution_paths[commit] = set(
@@ -1120,10 +1139,9 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
     for commit in commit_ids:
         if commit in inherited:
             continue
-        parents = _git(root, ('rev-list', '--parents', '-n', '1', commit), limit=4096)
-        fields = parents.decode('ascii').split()
-        if len(fields) < 2:
-            continue
+        fields = [commit, *commit_parents[commit]]
+        if len(fields) > 3 and commit in merge_parents:
+            _stop('RESULT_DIFF_INVALID')
         first_parent = fields[1]
         changed = _git(root, ('diff-tree', '--no-commit-id', '--name-only', '-r', '-z',
                               '--no-renames', first_parent, commit, '--'),
@@ -1160,7 +1178,7 @@ def _remerge_diff_paths_raw(root, commit):
         with tempfile.TemporaryDirectory(prefix='llmtool-remerge-objects-') as temporary:
             object_dir = Path(temporary) / 'objects'
             object_dir.mkdir(mode=0o700)
-            return _git(root, ('show', '--remerge-diff', '--format=',
+            return _git(root, ('show', '--remerge-diff', '--format=', '--no-renames',
                                '--name-only', '-z', commit), limit=1024 * 1024,
                         env_overrides={
                             'GIT_OBJECT_DIRECTORY': str(object_dir),
