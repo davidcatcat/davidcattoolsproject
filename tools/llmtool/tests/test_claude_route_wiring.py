@@ -398,19 +398,32 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         class Store:
             def __init__(self, value):
                 self.value = value
+                self.updates = []
 
             def get(self, _task_id):
+                return self.value
+
+            def compare_and_update(self, _task_id, *, expected, **updates):
+                self.value.update(updates)
+                self.updates.append(updates)
+                return self.value
+
+            def update(self, _task_id, **updates):
+                self.value.update(updates)
+                self.updates.append(updates)
                 return self.value
 
         cli_developer = {'provider_profile': 'claude',
             'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
             'state': 'DEVELOPER_RESPONDED', 'executor_task_id': 'd6-owner-task'}
         cli_task = dict(common, developer=cli_developer)
+        cli_store = Store(cli_task)
         sentinel = LLMToolError('AFTER_CLAUDE_BINDING')
         with patch.object(task_submission_cli.task_completion, 'validate_task_binding',
                           side_effect=sentinel):
             with self.assertRaisesRegex(LLMToolError, 'AFTER_CLAUDE_BINDING'):
-                task_submission_cli.run_task_complete(args, store=Store(cli_task))
+                task_submission_cli.run_task_complete(args, store=cli_store)
+        self.assertEqual(cli_store.updates[-1]['completion']['state'], 'WAITING_EXECUTOR')
 
         record_only = dict(cli_developer,
             backend_session_semantics='NO_NATIVE_SESSION_ID_EXPOSED')
