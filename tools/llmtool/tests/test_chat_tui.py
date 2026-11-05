@@ -4818,16 +4818,16 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(list(ui.pm_outbox), ['next one'])
         self.assertEqual(ui.pm_outbox_paused, 'Esc 中斷')
 
-    def test_disconnect_mid_turn_leaves_no_working_timer_and_ignores_the_old_worker(self):
+    def test_disconnect_mid_turn_leaves_no_busy_timer_and_ignores_the_old_worker(self):
         # #636 Codex review v2 finding 2: after a disconnect mid-turn, append() redrew the
-        # working line and scheduled another tick.
+        # busy line and scheduled another tick.
         self.turns = [_thinking() + ['HOLD', _result('late')]]
         seen = {}
 
         async def thinking(ui):
             await self.until(ui, lambda ui: '思考中…（' in ui._pm_busy_line(),
-                             'working line')
-            self.assertIsNotNone(ui._pm_working_handle)
+                             'busy line')
+            self.assertIsNotNone(ui._pm_busy_handle)
             seen['seq'] = ui._pm_turn_seq
 
         async def disconnected(ui):
@@ -4835,9 +4835,9 @@ class PMConversationTests(BoundedPMTest):
                              'disconnected')
             self.assertFalse(ui.pm_turn_active)
             self.assertFalse(ui._pm_busy_wanted())
-            self.assertIsNone(ui._pm_working_handle)
+            self.assertIsNone(ui._pm_busy_handle)
             ui.append('later output')
-            self.assertIsNone(ui._pm_working_handle)
+            self.assertIsNone(ui._pm_busy_handle)
             self.assertTrue(ui.conversation.text.endswith('later output'))
             await asyncio.sleep(1.3)                  # a surviving tick would redraw by now
             self.assertTrue(ui.conversation.text.endswith('later output'))
@@ -4856,12 +4856,12 @@ class PMConversationTests(BoundedPMTest):
         self.turns = [_thinking() + ['HOLD', _result('late')]]
 
         async def thinking(ui):
-            await self.until(ui, lambda ui: ui._pm_working_handle is not None, 'working line')
+            await self.until(ui, lambda ui: ui._pm_busy_handle is not None, 'busy line')
 
         ui, _ = self.drive([self.connect(), self.connected, 'think\r', thinking])
         # drive() exits the app and runs close_pm(), as run() does on exit.
         self.assertFalse(ui.pm_turn_active)
-        self.assertIsNone(ui._pm_working_handle)
+        self.assertIsNone(ui._pm_busy_handle)
         self.assertIsNone(ui._pm_tick_handle)
         self.assertIsNone(ui._autoscroll_handle)
         self.assertIsNone(ui._drag_copy_handle)
@@ -5041,7 +5041,7 @@ class PMConversationTests(BoundedPMTest):
         self.assertFalse(ui._pm_busy_wanted())
         self.assertNotIn('思考中', ui.conversation.text)
         self.assertNotIn('處理中', ui.conversation.text)
-        self.assertIsNone(ui._pm_working_handle)
+        self.assertIsNone(ui._pm_busy_handle)
 
     def test_escape_interrupts_and_ctrl_c_interrupts_then_exits(self):
         self.turns = [[_delta('working…'), 'HOLD', _result('stopped')],

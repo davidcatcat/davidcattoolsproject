@@ -436,7 +436,7 @@ BACKGROUND_ROLES = {"RUNNING": "Developer", "WAITING_EXECUTOR_EVIDENCE": "Develo
 
 
 def background_items(records):
-    """In-flight work of a PM's Tasks, oldest update first: role, Task, PR, state, update."""
+    """In-flight work of a PM's Tasks, oldest update first."""
     items = []
     for record in records:
         derived, _reason = stage(record)
@@ -444,11 +444,51 @@ def background_items(records):
         if role is None:
             continue
         numbers = sorted({number for number, _label in _pr_sources(record)})
+        developer = _dict(record.get("developer")) or {}
+        started_at = developer.get("created_at")
+        if type(started_at) is not str:
+            started_at = record.get("created_at")
+        if type(started_at) is not str:
+            started_at = None
         items.append({"role": role, "task": str(value(record, "task_id")),
                       "pr": " ".join("#%d" % number for number in numbers),
-                      "state": derived, "updated_at": record.get("updated_at")})
+                      "state": derived, "updated_at": record.get("updated_at"),
+                      "started_at": started_at})
     items.sort(key=lambda item: str(item["updated_at"] or ""))
     return items
+
+
+def background_summary(item, now=None):
+    """Compact live summary for one in-flight item; omit elapsed time when unknown."""
+    item = _dict(item) or {}
+    prs = item.get("pr")
+    label = next((word for word in prs.split() if word), "") if type(prs) is str else ""
+    if not label:
+        task = item.get("task")
+        label = task[:8] if type(task) is str else ""
+    role = item.get("role")
+    doing = {"Developer": "開發中", "Reviewer": "審查中"}.get(role, item.get("state", ""))
+    parts = [part for part in (label, doing) if type(part) is str and part]
+    started_at = item.get("started_at")
+    if type(started_at) is str:
+        try:
+            started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            current = now or datetime.now(timezone.utc)
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=timezone.utc)
+            seconds = max(0, int((current - started).total_seconds()))
+            if seconds < 3600:
+                elapsed = "%d:%02d" % divmod(seconds, 60)
+            else:
+                hours, remainder = divmod(seconds, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                elapsed = "%d:%02d:%02d" % (hours, minutes, seconds)
+            parts.append(elapsed)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            pass
+    return " · ".join(parts)
 
 
 def group_rows(records, now, show_all):

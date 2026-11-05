@@ -331,6 +331,33 @@ class PaneLinkTests(unittest.TestCase):
 
 
 class BackgroundItemTests(unittest.TestCase):
+    def test_background_summary_labels_and_elapsed_formats(self):
+        now = datetime(2026, 11, 6, 12, 0, 0, tzinfo=timezone.utc)
+        cases = [
+            ({"pr": "#654 #655", "task": "task-id", "role": "Developer",
+              "started_at": "2026-11-06T11:56:48Z"}, "#654 · 開發中 · 3:12"),
+            ({"pr": "", "task": "12345678abcdef", "role": "Reviewer",
+              "started_at": "2026-11-06T10:57:57Z"}, "12345678 · 審查中 · 1:02:03"),
+            ({"task": "task-id", "role": "PM", "state": "BACKGROUND_TURN",
+              "started_at": "not a timestamp"}, "task-id · BACKGROUND_TURN"),
+            ({"task": "task-id", "role": "Developer"}, "task-id · 開發中"),
+        ]
+        for item, expected in cases:
+            with self.subTest(item=item):
+                self.assertEqual(chat_tui_status.background_summary(item, now), expected)
+
+    def test_background_items_choose_started_at_from_developer_then_record(self):
+        developer = _record("dev-time", created_at="2026-11-01T00:00:00Z")
+        developer["developer"]["created_at"] = "2026-11-02T00:00:00Z"
+        record = _record("record-time", created_at="2026-11-03T00:00:00Z")
+        absent = _record("no-time")
+        items = chat_tui_status.background_items([developer, record, absent])
+        self.assertEqual({item["task"]: item["started_at"] for item in items}, {
+            "dev-time": "2026-11-02T00:00:00Z",
+            "record-time": "2026-11-03T00:00:00Z",
+            "no-time": None,
+        })
+
     def test_items_roles_prs_and_age(self):
         records = [
             _record("t-run", updated="2026-10-30T01:00:00Z"),
@@ -385,6 +412,7 @@ class StatusLineTests(Base):
         ui = self.ui
         self.assertTrue(ui.status_text().startswith("▸▸ PM 模式 · auto | claude/default | abcdef01 | 待命"))
         self.loaded([])
+        self.assertNotIn("background_item", ui.pm_status_fields(lambda value, _width: value))
         self.assertTrue(ui.status_text().startswith("▸▸ PM 模式 · auto · 背景 0 | "))
         items = chat_tui_status.background_items([_record("t1"), _record("t2")])
         self.loaded(items)
@@ -401,6 +429,57 @@ class StatusLineTests(Base):
         self.assertIn("背景 ? · 佇列 1", ui.status_text())
         ui.pm_target = (SESSION.replace("a", "b"), "/tmp")   # another PM: no stale count
         self.assertNotIn("背景", ui.status_text())
+
+    def test_background_summary_is_first_status_field_dropped(self):
+        ui = self.ui
+        ui.pm_runtime = object()
+        ui.background_key = SESSION
+        ui.background = [{"role": "Developer", "task": "1234567890", "pr": "#654",
+                          "state": "RUNNING", "started_at": "2026-11-06T11:56:48Z"}]
+        columns = [140]
+        ui.app.output.get_size = lambda: Size(rows=24, columns=columns[0])
+        full = ui.status_text()
+        self.assertIn("#654 · 開發中 · ", full)
+        columns[0] = ui._get_cwidth(full) - 1
+        dropped = ui.status_text()
+        self.assertNotIn("#654 · 開發中", dropped)
+        self.assertIn("claude/default", dropped)
+
+    def test_waiting_row_needs_items_and_turn_yields_to_busy_line(self):
+        ui = self.ui
+        ui.pm_runtime = object()
+        ui.background_key = ui.pm_target[0]
+        ui.app.output.get_size = lambda: Size(rows=24, columns=140)
+        self.assertFalse(ui._pm_waiting_wanted())
+        self.assertEqual(ui.busy_rows(), 0)
+        item = {"role": "Developer", "task": "task1234", "pr": "#654",
+                "state": "RUNNING", "started_at": "2026-11-06T11:56:48Z"}
+        ui.finish_background(SESSION, ([item, dict(item, task="task2345", pr="#655")], None))
+        self.assertTrue(ui._pm_waiting_wanted())
+        self.assertEqual(ui.busy_rows(), 1)
+        line = ui.busy_fragments()[0][1]
+        self.assertIn("◌ PM 在等背景工作，完成會自動通知：#654 · 開發中 · ", line)
+        self.assertIn("（另 1 項）", line)
+        ui.pm_turn_active = True
+        ui.pm_turn_started = time.monotonic()
+        self.assertEqual(ui.busy_fragments()[0][1], ui._pm_busy_line())
+        self.assertFalse(ui._pm_waiting_wanted())
+
+    def test_waiting_row_disappears_for_unknown_count_and_disconnect(self):
+        ui = self.ui
+        ui.pm_runtime = object()
+        ui.background_key = SESSION
+        ui.background = [{"role": "Reviewer", "task": "review-task", "pr": "#77",
+                          "state": "WAITING_REVIEW"}]
+        ui.background_error = "read failed"
+        self.assertEqual(ui.background_count(), "?")
+        self.assertFalse(ui._pm_waiting_wanted())
+        self.assertEqual(ui.busy_rows(), 0)
+        ui.background_error = None
+        self.assertTrue(ui._pm_waiting_wanted())
+        ui.pm_runtime = None
+        self.assertFalse(ui._pm_waiting_wanted())
+        self.assertEqual(ui.busy_rows(), 0)
 
     def test_panel_lists_role_task_pr_state_and_age(self):
         ui = self.ui

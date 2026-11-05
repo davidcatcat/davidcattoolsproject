@@ -325,26 +325,39 @@ class PMLayoutTests(Base):
         self.assertIn("執行工具中…", ui._pm_busy_line())
         self.assertNotIn("執行工具中…", ui.conversation.text)
 
-    def test_running_seconds_advance_on_the_working_tick(self):
+    def test_running_seconds_advance_on_the_busy_tick(self):
         ui = self.ui
         self.start()
         self.event("TOOL_USE", tool_use_id="a", name="Bash", description="跑 focused 測試")
         self.assertIn("▸ 執行中：跑 focused 測試… 0s", ui.conversation.text)
         ui.pm_tool_calls[0][2] -= 23.2   # the call started 23 s ago
-        ui._pm_working_tick()            # the existing 1 s tick, not a new timer
+        ui._pm_busy_tick()            # the existing busy tick, not a new timer
         self.assertIn("▸ 執行中：跑 focused 測試… 23s", ui.conversation.text)
         self.assertEqual(ui.conversation.text.count("執行中："), 1)
         self.assertIn("執行工具中…", ui._pm_busy_line())
         self.assertNotIn("執行工具中…", ui.conversation.text)
         ui.pm_tool_calls[0][2] -= 1.0
-        ui._pm_working_tick()
+        ui._pm_busy_tick()
         self.assertIn("… 24s", ui.conversation.text)
         self.event("TOOL_RESULT", tool_use_id="a", reason="OK")
         self.assertRegex(ui.conversation.text, "  ▸ ✓ 跑 focused 測試（24s）")
         before = ui.conversation.text
-        ui._pm_working_tick()            # nothing running: the finished line stays as it is
+        ui._pm_busy_tick()            # nothing running: the finished line stays as it is
         self.assertIn("✓ 跑 focused 測試（24s）", ui.conversation.text)
         self.assertEqual(before.count("✓"), ui.conversation.text.count("✓"))
+
+    def test_tool_tick_skips_identical_text_and_replaces_changed_seconds(self):
+        ui = self.ui
+        call = ["tool", None, time.monotonic() - 3, None]
+        shown = "".join(part for part, _token in chat_tui.tool_summary_lines([call], False))
+        ui.pm_tool_block = [0, len(shown), [call], ui._pm_turn_seq, shown]
+        with patch.object(ui, "_tool_block_valid", return_value=True), \
+                patch.object(ui, "_replace_block") as replace:
+            ui._pm_tool_tick()
+            replace.assert_not_called()
+            call[2] -= 1.2
+            ui._pm_tool_tick()
+            replace.assert_called_once()
 
     def test_result_without_tool_use_has_no_duration(self):
         ui = self.ui
@@ -391,17 +404,17 @@ class PMLayoutTests(Base):
         ui.pm_runtime = None
         self.assertFalse(ui._pm_busy_wanted())
 
-    def test_busy_glyph_cycles_and_wraps_on_working_ticks(self):
+    def test_busy_glyph_cycles_and_wraps_on_busy_ticks(self):
         ui = self.ui
         ui.pm_runtime = object()
         ui.pm_turn_active = True
         lines = []
         for _ in range(len(chat_tui.PM_BUSY_GLYPHS) + 1):
             lines.append(ui._pm_busy_line()[0])
-            ui._pm_working_tick()
+            ui._pm_busy_tick()
         self.assertEqual(lines, list(chat_tui.PM_BUSY_GLYPHS) + [chat_tui.PM_BUSY_GLYPHS[0]])
-        self.assertEqual(chat_tui.PM_WORKING_SECONDS, 0.5)
-        self.assertLessEqual(1 / chat_tui.PM_WORKING_SECONDS, 4)
+        self.assertEqual(chat_tui.PM_BUSY_SECONDS, 0.5)
+        self.assertLessEqual(1 / chat_tui.PM_BUSY_SECONDS, 4)
 
     def test_busy_rows_and_picker_background_reserve_one_row(self):
         ui = self.ui
@@ -438,10 +451,11 @@ class PMLayoutTests(Base):
         ui.app.output.get_size = lambda: Size(rows=24, columns=40)
         self.assertLessEqual(get_cwidth(ui.busy_fragments()[0][1]), 40)
 
-    def test_several_working_updates_keep_exactly_one_tick_pending(self):
+    def test_several_busy_updates_keep_exactly_one_tick_pending(self):
         class Handle:
-            def __init__(self, callback):
+            def __init__(self, callback, delay):
                 self.callback = callback
+                self.delay = delay
                 self.cancelled = False
 
             def cancel(self):
@@ -451,8 +465,8 @@ class PMLayoutTests(Base):
             def __init__(self):
                 self.handles = []
 
-            def call_later(self, _delay, callback):
-                handle = Handle(callback)
+            def call_later(self, delay, callback):
+                handle = Handle(callback, delay)
                 self.handles.append(handle)
                 return handle
 
@@ -465,16 +479,27 @@ class PMLayoutTests(Base):
         loop = Loop()
         with patch("llmtool.chat_tui.asyncio.get_running_loop", return_value=loop):
             for _ in range(5):
-                ui._pm_working_show()
+                ui._pm_busy_show()
             self.assertEqual(len(loop.pending()), 1)
             for _ in range(5):
                 expired = loop.pending()[0]
                 expired.cancel()
                 expired.callback()
                 self.assertEqual(len(loop.pending()), 1)
-                ui._pm_working_show()
+                ui._pm_busy_show()
             self.assertEqual(len(loop.pending()), 1)
             self.assertEqual(len(loop.handles), 6)
+            self.assertEqual(loop.pending()[0].delay, chat_tui.PM_BUSY_SECONDS)
+            ui._pm_busy_cancel()
+            ui.pm_turn_active = False
+            ui.pm_target = ("abcdef0123456789", "/tmp")
+            ui.background_key = ui.pm_target[0]
+            ui.background = [{"role": "Developer", "task": "task1234", "pr": "#654",
+                              "state": "RUNNING"}]
+            ui._pm_busy_show()
+            self.assertEqual(loop.pending()[0].delay, chat_tui.PM_WAIT_SECONDS)
+            ui.finish_background(ui.pm_target[0], ([], None))
+            self.assertEqual(loop.pending(), [])
 
     def test_account_text_is_a_system_notice(self):
         ui = self.ui
