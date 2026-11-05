@@ -3387,6 +3387,27 @@ class AutoResumeWidgetTests(Base):
         self.assertFalse(ui._auto_resume_pending)
         self.assertTrue(ui._auto_resume_sent)
 
+    def test_background_end_sends_deferred_resume_once(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui._auto_resume_pending = True
+        turn = dict(runtime=ui.pm_runtime, seq=None,
+                    events=[], ended=False)
+        ui.pm_background_start(turn)
+        self.assertTrue(ui.pm_turn_active)
+        ui._maybe_auto_resume()
+        ui._pm_start_turn.assert_not_called()
+        self.assertTrue(ui._auto_resume_pending)
+        ui.pm_background_event(
+            turn, {"type": "TURN_END", "status": "COMPLETED"})
+        ui.pm_background_end(turn)
+        ui.pm_background_end(turn)
+        ui._pm_start_turn.assert_called_once()
+        self.assertIn("自動恢復",
+                      ui._pm_start_turn.call_args.args[1])
+        self.assertFalse(ui._auto_resume_pending)
+        self.assertTrue(ui._auto_resume_sent)
+
     def test_settings_switch_persists_off_and_prevents_resume(self):
         ui = self.make_ui()
         self.prepare(ui)
