@@ -4142,7 +4142,8 @@ class DelegateRepairCapTests(unittest.TestCase):
         authorization.start()
         self.addCleanup(authorization.stop)
 
-    def _task(self, *, executor='executor-task-1', developer=False, route='codex'):
+    def _task(self, *, executor='executor-task-1', developer=False, route='codex',
+              state='DEVELOPER_PENDING', provider_type=None):
         task_id, run_id = new_id(), new_id()
         request = 'Bounded repair-cap fixture.'
         request_sha = hashlib.sha256(request.encode()).hexdigest()
@@ -4169,8 +4170,8 @@ class DelegateRepairCapTests(unittest.TestCase):
             )
             developer_record = {
                 'assignment_id': new_id(), 'selection_source': 'PM',
-                'state': 'DEVELOPER_PENDING', 'provider_profile': route,
-                'provider_type': None, 'model': None,
+                'state': state, 'provider_profile': route,
+                'provider_type': provider_type, 'model': None,
                 'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
                 'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
                 'source_sha_binding': 'D6_REGISTRY_OBSERVED',
@@ -4199,7 +4200,8 @@ class DelegateRepairCapTests(unittest.TestCase):
 
     def _prior_assignments(self, count=3, *, executor='executor-task-1'):
         for _ in range(count):
-            self._task(executor=executor, developer=True)
+            self._task(executor=executor, developer=True,
+                       state='DEVELOPER_DISPATCHING', provider_type='codex-cli')
 
     def _args(self, task, provider, **changes):
         values = dict(task_id=task['task_id'], provider=provider,
@@ -4229,6 +4231,15 @@ class DelegateRepairCapTests(unittest.TestCase):
                                                 'DELEGATE_REPAIR_LIMIT_REACHED'):
                         run_task_delegate(self._args(task, provider), store=self.store)
                     route.assert_not_called()
+
+    def test_three_pending_assignments_do_not_count_toward_cap(self):
+        for _ in range(3):
+            self._task(developer=True)
+        task = self._task(route='opencode')
+        args = self._args(task, 'opencode')
+        with patch.object(submission_cli, 'run_task_opencode_delegate', return_value=7) as route:
+            self.assertEqual(run_task_delegate(args, store=self.store), 7)
+        route.assert_called_once()
 
     def test_two_prior_assignments_allow_next_and_other_d6_is_unaffected(self):
         self._prior_assignments(2)
