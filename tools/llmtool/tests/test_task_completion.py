@@ -4202,6 +4202,30 @@ class TaskCompletionTests(unittest.TestCase):
                          (10, context['head'], context['reviewer_task']))
         self.assertEqual(claim['review_result']['review_text'], context['body'])
 
+    def test_claude_completion_racing_with_abandon_does_not_persist_ready(self):
+        context = self._claude_bound_task_context()
+        store = context['store']
+        collect = task_completion.collect_claude_result
+
+        def collect_then_abandon(*args, **kwargs):
+            result = collect(*args, **kwargs)
+            current = store.get(context['task_id'])
+            store.abandon(context['task_id'],
+                          pm_session_id=current['pm_session_id'],
+                          reason='raced completion')
+            return result
+
+        with patch.object(task_completion, 'collect_claude_result',
+                          side_effect=collect_then_abandon), \
+                patch('llmtool.task_completion._github_get',
+                      side_effect=context['github_responses']):
+            rc, _result = context['call'](context['completion_argv'])
+        self.assertNotEqual(rc, 0)
+        saved = store.get(context['task_id'])
+        self.assertIsNotNone(saved.get('abandonment'))
+        self.assertNotEqual((saved.get('completion') or {}).get('state'),
+                            'PM_EVIDENCE_READY')
+
     def test_abandoned_claude_task_is_refused_by_completion_review_and_remote_test(self):
         from llmtool import remote_test, review_dispatch
 

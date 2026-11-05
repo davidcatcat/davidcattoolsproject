@@ -1361,6 +1361,23 @@ class TaskSubmissionCLITests(unittest.TestCase):
             task['task_id'])
         self.assertIsNone(saved['developer'])
 
+    def test_company_gw_delegate_refuses_claude_reserved_d6_before_provider_call(self):
+        task = self._pm_task_with_assignment()
+        registry_path = (Path(self.executor_common_dir) / 'llmtool-worktrees' /
+                         'executor-task-1.json')
+        registration = json.loads(registry_path.read_text(encoding='utf-8'))
+        registration['trusted_agent_id'] = 'claude-developer'
+        registry_path.write_text(json.dumps(registration), encoding='utf-8')
+        registry_path.chmod(0o600)
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.create_client') as provider_call, \
+                self.assertRaisesRegex(LLMToolError, 'D6_CLAUDE_RESERVED'):
+            run_task_delegate(self._delegate_args(task))
+        saved = TaskStore(self.home / '.local' / 'state' / 'llmtool' / 'tasks').get(
+            task['task_id'])
+        self.assertIsNone(saved['developer'])
+        provider_call.assert_not_called()
+
     def test_opencode_direct_route_records_scoped_diff_and_cli_evidence(self):
         task = self._pm_task_with_opencode_assignment()
         output = io.StringIO()

@@ -3280,6 +3280,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             assignment.get('risk') != 'LOW' or args.acceptance != assignment.get('acceptance')):
         raise LLMToolError('no matching low-risk gw-agent recommendation from the selected PM route')
     registration, snapshot = _delegate_d6_binding(args)
+    _reject_claude_reserved_d6(registration)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
@@ -4388,7 +4389,7 @@ def run_task_delegate(args, *, store=None):
         if args.acceptance != pm_assignment['acceptance']:
             raise LLMToolError('acceptance differs from the selected PM assignment')
     registration, snapshot = _delegate_d6_binding(args)
-    if args.provider == 'codex' and task.get('developer') is None:
+    if task.get('developer') is None:
         _reject_claude_reserved_d6(registration)
     _check_delegate_repair_cap(args, store, (registration, snapshot))
     source_sha = snapshot.head
@@ -5195,8 +5196,21 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                  'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
                  'pm_recommendation': None, 'pm_usage': None,
                  'pm_error_code': None}
-        store.compare_and_update(task['task_id'],
-            expected={'completion': completion}, completion=ready)
+        expected = {'completion': completion}
+        claude_route = developer.get('provider_profile') == 'claude'
+        if claude_route:
+            fresh = store.get(task['task_id'])
+            if fresh.get('abandonment') is not None:
+                raise LLMToolError('CLAUDE_TASK_ABANDONED')
+            expected['record_sha256'] = fresh['record_sha256']
+        try:
+            store.compare_and_update(task['task_id'], expected=expected,
+                                     completion=ready)
+        except TaskStoreConflict:
+            if (claude_route and
+                    store.get(task['task_id']).get('abandonment') is not None):
+                raise LLMToolError('CLAUDE_TASK_ABANDONED') from None
+            raise
         _record_ready_event(store, task['task_id'])
         _print(_task_view(store.get(task['task_id'])))
         return 0
