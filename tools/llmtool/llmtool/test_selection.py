@@ -52,6 +52,16 @@ IMPACT_TEST_MAP = {
     "tools/llmtool/worker-dispatch.json": (
         "tools/llmtool/tests/test_worker_dispatch.py",
     ),
+    # docs_check.py imports the checker; test_guidance_drift_check also holds
+    # the real-repository check for the guidance-drift configuration.
+    "tools/llmtool/guidance-drift.json": (
+        "tools/llmtool/tests/test_guidance_drift_check.py",
+        "tools/llmtool/tests/test_docs_check.py",
+    ),
+    "tools/llmtool/scripts/guidance_drift_check.py": (
+        "tools/llmtool/tests/test_guidance_drift_check.py",
+        "tools/llmtool/tests/test_docs_check.py",
+    ),
 }
 
 # Changes in these areas receive the full repository check even if a direct
