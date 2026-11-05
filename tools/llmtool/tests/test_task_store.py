@@ -457,7 +457,7 @@ class TaskStoreTests(unittest.TestCase):
         with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
             self.store.compare_and_update(
                 task['task_id'], expected={'developer': None}, developer=developer)
-        return task
+        return self.store.get(task["task_id"])
 
     def test_claude_assignment_rejects_invalid_repository_config(self):
         task = self._codex_dispatch_task()

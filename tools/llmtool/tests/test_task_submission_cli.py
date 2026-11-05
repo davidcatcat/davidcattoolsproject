@@ -1023,8 +1023,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
             submission_cli.run_task_claude_result(Namespace(
                 task_id=abandoned_task['task_id'], executor_task=d6_task_id,
                 head=result_head, pm_session=abandoned_task['pm_session_id']), store=store)
-        self.assertEqual(abandoned_result.exception.task_store_error_code,
-                         'CLAUDE_TASK_ABANDONED')
+        self.assertEqual(str(abandoned_result.exception), 'CLAUDE_TASK_ABANDONED')
         self.assertEqual(store.get(abandoned_task['task_id'])['record_sha256'],
                          abandoned_before['record_sha256'])
         output = io.StringIO()
