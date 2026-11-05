@@ -100,6 +100,26 @@ class _ModuleScan:
         self.hits: list[tuple[int, tuple[str, ...]]] = []
 
     def _expr(self, node: ast.AST, names: dict[str, str], statement_line: int) -> tuple[str, list[str]] | None:
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            local_names = dict(names)
+            for generator in node.generators:
+                self._expr(generator.iter, local_names, statement_line)
+                self._expr(generator.target, local_names, statement_line)
+                for name in self._target_names(generator.target):
+                    local_names.pop(name, None)
+                for condition in generator.ifs:
+                    self._expr(condition, local_names, statement_line)
+            if isinstance(node, ast.DictComp):
+                self._expr(node.key, local_names, statement_line)
+                self._expr(node.value, local_names, statement_line)
+            else:
+                self._expr(node.elt, local_names, statement_line)
+            return None
+        if isinstance(node, ast.NamedExpr):
+            self._expr(node.value, names, statement_line)
+            for name in self._target_names(node.target):
+                names.pop(name, None)
+            return None
         folded = _fold(node, names)
         if folded is not None:
             # A folded outer expression owns its descendants; don't count them twice.
@@ -126,18 +146,50 @@ class _ModuleScan:
             for item in target.elts:
                 yield from self._target_names(item)
 
+    def _pattern_names(self, pattern: ast.AST) -> Iterable[str]:
+        pattern_as = getattr(ast, "MatchAs", None)
+        pattern_star = getattr(ast, "MatchStar", None)
+        pattern_mapping = getattr(ast, "MatchMapping", None)
+        if pattern_as is not None and isinstance(pattern, pattern_as) and pattern.name:
+            yield pattern.name
+        if pattern_star is not None and isinstance(pattern, pattern_star) and pattern.name:
+            yield pattern.name
+        if pattern_mapping is not None and isinstance(pattern, pattern_mapping) and pattern.rest:
+            yield pattern.rest
+        pattern_base = getattr(ast, "pattern", None)
+        if pattern_base is not None:
+            for child in ast.iter_child_nodes(pattern):
+                if isinstance(child, pattern_base):
+                    yield from self._pattern_names(child)
+
     def _block(self, statements: list[ast.stmt], names: dict[str, str]) -> None:
         for statement in statements:
             line = getattr(statement, "lineno", 1)
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for expr in [*statement.decorator_list, *statement.args.defaults, *statement.args.kw_defaults]:
+                decorator_line = min((getattr(item, "lineno", line) for item in statement.decorator_list), default=line)
+                for expr in statement.decorator_list:
+                    self._expr(expr, names, decorator_line)
+                for expr in [*statement.args.defaults, *statement.args.kw_defaults]:
                     if expr is not None:
                         self._expr(expr, names, line)
+                arguments = [*statement.args.posonlyargs, *statement.args.args, *statement.args.kwonlyargs]
+                if statement.args.vararg is not None:
+                    arguments.append(statement.args.vararg)
+                if statement.args.kwarg is not None:
+                    arguments.append(statement.args.kwarg)
+                for argument in arguments:
+                    if argument.annotation is not None:
+                        self._expr(argument.annotation, names, line)
+                if statement.returns is not None:
+                    self._expr(statement.returns, names, line)
                 self._block(statement.body, {})
                 names.pop(statement.name, None)
                 continue
             if isinstance(statement, ast.ClassDef):
-                for expr in [*statement.decorator_list, *statement.bases, *(keyword.value for keyword in statement.keywords)]:
+                decorator_line = min((getattr(item, "lineno", line) for item in statement.decorator_list), default=line)
+                for expr in statement.decorator_list:
+                    self._expr(expr, names, decorator_line)
+                for expr in [*statement.bases, *(keyword.value for keyword in statement.keywords)]:
                     self._expr(expr, names, line)
                 self._block(statement.body, {})
                 names.pop(statement.name, None)
@@ -145,6 +197,7 @@ class _ModuleScan:
             if isinstance(statement, ast.Assign):
                 folded = self._expr(statement.value, names, line)
                 for target in statement.targets:
+                    self._expr(target, names, line)
                     for name in self._target_names(target):
                         if folded is not None:
                             names[name] = folded[0]
@@ -152,6 +205,8 @@ class _ModuleScan:
                             names.pop(name, None)
                 continue
             if isinstance(statement, ast.AnnAssign):
+                self._expr(statement.annotation, names, line)
+                self._expr(statement.target, names, line)
                 if statement.value is not None:
                     folded = self._expr(statement.value, names, line)
                     for name in self._target_names(statement.target):
@@ -161,6 +216,7 @@ class _ModuleScan:
                             names.pop(name, None)
                 continue
             if isinstance(statement, ast.AugAssign):
+                self._expr(statement.target, names, line)
                 expression = ast.copy_location(ast.BinOp(statement.target, statement.op, statement.value), statement)
                 folded = self._expr(expression, names, line)
                 for name in self._target_names(statement.target):
@@ -171,6 +227,16 @@ class _ModuleScan:
                 continue
             if isinstance(statement, ast.Expr):
                 self._expr(statement.value, names, line)
+                continue
+            if isinstance(statement, ast.Delete):
+                for target in statement.targets:
+                    self._expr(target, names, line)
+                    for name in self._target_names(target):
+                        names.pop(name, None)
+                continue
+            if isinstance(statement, (ast.Import, ast.ImportFrom)):
+                for alias in statement.names:
+                    names.pop(alias.asname or alias.name.split(".")[0], None)
                 continue
             if isinstance(statement, (ast.For, ast.AsyncFor)):
                 self._expr(statement.iter, names, line)
@@ -189,21 +255,28 @@ class _ModuleScan:
                             names.pop(name, None)
                 self._block(statement.body, names)
                 continue
-            if isinstance(statement, ast.Try):
+            try_star = getattr(ast, "TryStar", None)
+            try_types = (ast.Try,) if try_star is None else (ast.Try, try_star)
+            if isinstance(statement, try_types):
                 self._block(statement.body, names)
                 for handler in statement.handlers:
                     if handler.type is not None:
                         self._expr(handler.type, names, line)
+                    if handler.name:
+                        names.pop(handler.name, None)
                     self._block(handler.body, names)
                     if handler.name:
                         names.pop(handler.name, None)
                 self._block(statement.orelse, names)
                 self._block(statement.finalbody, names)
                 continue
-            if isinstance(statement, ast.Match):
+            match_type = getattr(ast, "Match", None)
+            if match_type is not None and isinstance(statement, match_type):
                 self._expr(statement.subject, names, line)
                 for case in statement.cases:
                     self._expr(case.pattern, names, line)
+                    for name in self._pattern_names(case.pattern):
+                        names.pop(name, None)
                     if case.guard is not None:
                         self._expr(case.guard, names, line)
                     self._block(case.body, names)

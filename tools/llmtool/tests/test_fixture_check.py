@@ -68,6 +68,7 @@ class FixtureCheckTests(unittest.TestCase):
         self.assertEqual(len(self.findings(
             "try:\n    pass\nexcept Exception:\n    value = 'mark' + 'er'")), 1)
 
+    @unittest.skipUnless(sys.version_info >= (3, 10), "match syntax requires Python 3.10")
     def test_match_case_body_is_scanned(self):
         self.assertEqual(len(self.findings(
             "match value:\n    case _:\n        result = 'mark' + 'er'")), 1)
@@ -85,6 +86,35 @@ class FixtureCheckTests(unittest.TestCase):
             "def sample(value='mark' + 'er'): pass\n"
             "class Example:\n    @decorate('mark' + 'er')\n"
             "    def method(self, value='mark' + 'er'): pass")), 4)
+
+    def test_assignment_subscript_target_is_scanned(self):
+        self.assertEqual(self.findings("mapping['mar' + 'ker'] = value"), [
+            "ordinary_test.py:2: cloud_key",
+        ])
+
+    @unittest.skipUnless(sys.version_info >= (3, 11), "except-star syntax requires Python 3.11")
+    def test_except_star_handler_is_scanned(self):
+        self.assertEqual(self.findings(
+            "try:\n    pass\nexcept* Exception:\n    value = 'mar' + 'ker'"), [
+                "ordinary_test.py:5: cloud_key",
+            ])
+
+    def test_variable_annotation_is_scanned(self):
+        self.assertEqual(self.findings("value: 'mar' + 'ker'"), [
+            "ordinary_test.py:2: cloud_key",
+        ])
+
+    def test_argument_annotation_is_scanned(self):
+        self.assertEqual(self.findings_source(
+            "def sample(value: 'mar' + 'ker'): pass\n"), [
+                "ordinary_test.py:1: cloud_key",
+            ])
+
+    def test_return_annotation_is_scanned(self):
+        self.assertEqual(self.findings_source(
+            "def sample() -> 'mar' + 'ker': pass\n"), [
+                "ordinary_test.py:1: cloud_key",
+            ])
 
     def test_augmented_assignment_uses_statement_line(self):
         findings = self.findings("value = 'mark'\nvalue += 'er'")
@@ -116,6 +146,22 @@ class FixtureCheckTests(unittest.TestCase):
             "test_fixture_check",
         )), 1)
 
+    def test_decorator_label_belongs_above_first_decorator(self):
+        self.assertEqual(self.findings_source(
+            "# synthetic-fixture: screen-tool test\n"
+            "@decorate('mar' + 'ker')\n"
+            "def sample(): pass\n",
+            "test_fixture_check",
+        ), [])
+
+    def test_label_between_decorator_and_definition_is_refused(self):
+        self.assertEqual(len(self.findings_source(
+            "@decorate('mar' + 'ker')\n"
+            "# synthetic-fixture: screen-tool test\n"
+            "def sample(): pass\n",
+            "test_fixture_check",
+        )), 1)
+
     def test_allowlist_does_not_allow_other_modules(self):
         self.assertEqual(len(self.findings(
             "# synthetic-fixture: screen-tool test\nvalue = 'mar' + 'ker'",
@@ -136,6 +182,27 @@ class FixtureCheckTests(unittest.TestCase):
 
     def test_with_as_target_clears_tracked_names(self):
         source = "part = 'mark'\nwith context as part:\n    pass\nvalue = part + 'er'"
+        self.assertEqual(self.findings(source), [])
+
+    def test_except_as_clears_tracked_name_before_handler_body(self):
+        source = "part = 'mark'\ntry:\n    pass\nexcept Exception as part:\n    value = part + 'er'"
+        self.assertEqual(self.findings(source), [])
+
+    def test_walrus_clears_tracked_name(self):
+        source = "part = 'mark'\nvalue = (part := 'other')\nresult = part + 'er'"
+        self.assertEqual(self.findings(source), [])
+
+    def test_del_clears_tracked_name(self):
+        source = "part = 'mark'\ndel part\nvalue = part + 'er'"
+        self.assertEqual(self.findings(source), [])
+
+    @unittest.skipUnless(sys.version_info >= (3, 10), "match syntax requires Python 3.10")
+    def test_match_capture_clears_tracked_name(self):
+        source = "part = 'mark'\nmatch value:\n    case part:\n        pass\nvalue = part + 'er'"
+        self.assertEqual(self.findings(source), [])
+
+    def test_comprehension_target_shadows_tracked_name(self):
+        source = "part = 'mark'\nvalue = [part + 'er' for part in values]"
         self.assertEqual(self.findings(source), [])
 
     def test_deep_expression_is_rejected_with_fixed_limit_error(self):
@@ -166,6 +233,10 @@ class FixtureCheckTests(unittest.TestCase):
 
 
 class RepositoryFixtureCheckTests(unittest.TestCase):
+    def test_repository_check_passes_against_real_baseline(self):
+        status, findings = fixture_check.check()
+        self.assertEqual(status, 0, findings)
+
     def test_repository_check_fails_above_lowered_temporary_baseline(self):
         with tempfile.TemporaryDirectory() as directory:
             baseline = Path(directory) / "baseline.json"
