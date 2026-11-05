@@ -391,8 +391,10 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
         binding = self.f._review_binding(task_id=task['task_id'], run_id=task['run_id'],
             contract_digest=task['task_binding']['contract_digest'], head=self.result_sha)
         comments = [self._comment('\n'.join((self._head(), ACCEPT, binding)))]
-        api = self.f._github_response_sequence(self.result_sha, self.pr, [], self.checks,
-                                               comments=comments)
+        api = [{'ref': 'refs/heads/main',
+                'object': {'type': 'commit', 'sha': self.f.source_sha}}]
+        api.extend(self.f._github_response_sequence(self.result_sha, self.pr, [], self.checks,
+                                                   comments=comments))
         git = {'task_id': task['task_id'], 'run_id': task['run_id'],
                'executor_task_id': self.f.task_id, 'executor_identity': 'executor-agent',
                'executor_session_ref': 'Executor D6 session', 'root': str(self.f.root),
@@ -410,7 +412,7 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
                    return_value=git), \
              patch('llmtool.task_submission_cli.task_completion.run_bounded_tests',
                    return_value=tests), \
-             patch('llmtool.task_completion._github_get', side_effect=api), \
+             patch('llmtool.task_completion._github_get', side_effect=api) as github_get, \
              patch('llmtool.task_store.default_root', return_value=store.root), \
              patch('llmtool.task_submission_cli.resolve_profile_config',
                    return_value=fixtures.pm_config('original-pm')), \
@@ -420,6 +422,7 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
              patch('llmtool.task_submission_cli.create_client', return_value=client), \
              redirect_stdout(StringIO()):
             self.assertEqual(run_task_complete(args, store=store), 0)
+        self.assertEqual(github_get.call_args_list[0].args[0], 'git/ref/heads/main')
         completion = store.get(task['task_id'])['completion']
         self.assertEqual(completion['missing_gates'], [])
         self.assertEqual(completion['reviewer_task_id'], 'reviewer-task')
