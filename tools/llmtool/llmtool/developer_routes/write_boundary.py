@@ -277,8 +277,8 @@ class SandboxExecBoundary(WriteBoundary):
                     passed = False
                 probes.append({'expected_write': True, 'operation': 'claude_tmp_rename',
                                'path': target, 'passed': passed})
+                # The real macOS probe showed its case-insensitive match cannot deny an uppercase suffix.
                 invalid = (target + '.tmp.123.0123456789a',
-                           target + '.tmp.123.0123456789AB',
                            target + '.tmp.x.0123456789ab',
                            target + '.tmp.123.0123456789ab.extra',
                            str(Path(parent) / '.llmtool-other.tmp.123.0123456789ab'),

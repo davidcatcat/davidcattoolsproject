@@ -180,10 +180,17 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
                         '(deny file-write*)\n(allow file-write* (literal "' + source_path + '"))\n'
                         '(allow file-write* (literal "/dev/null"))\n'
                         '(allow file-write* (literal "/dev/tty"))')
-            opted_in = SandboxExecBoundary(executable='/bin/true',
-                                           allow_claude_tmp=True)._profile([source_path])
+            opted_in = SandboxExecBoundary._profile([source_path],
+                                                    claude_tmp_paths=[source_path])
             self.assertEqual(opted_out, expected)
             self.assertNotEqual(opted_in, opted_out)
+            prepared_opt_in = SandboxExecBoundary(
+                executable='/bin/true', allow_claude_tmp=True).prepare(
+                    str(root), ['source.py'])[0][2]
+            prepared_default = SandboxExecBoundary(executable='/bin/true').prepare(
+                str(root), ['source.py'])[0][2]
+            self.assertIn('(allow file-write* (regex #', prepared_opt_in)
+            self.assertNotIn('(allow file-write* (regex #', prepared_default)
             with self.assertRaises(ValueError):
                 SandboxExecBoundary(allow_claude_tmp=1)
 
@@ -287,6 +294,10 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
             self.assertTrue(proof['verified'], proof['probes'])
             self.assertEqual(target.read_bytes(), b'original')
             self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+            unwrapped_probe = target.with_name(target.name + '.tmp.x.0123456789ab')
+            unwrapped_probe.write_bytes(b'probe')
+            self.assertEqual(unwrapped_probe.read_bytes(), b'probe')
+            unwrapped_probe.unlink()
             claude_probes = [probe for probe in proof['probes']
                              if probe.get('operation', '').startswith('claude_tmp')]
             self.assertEqual(len(claude_probes), 8)
