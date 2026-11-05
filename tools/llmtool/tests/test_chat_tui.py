@@ -3798,8 +3798,6 @@ class PMTypewriterTests(Base):
     def shown(self):
         """Text of the last PM block as the pane shows it (None: no block opened)."""
         text = self.ui.conversation.text
-        if self.ui.pm_working_at is not None:   # the working line below the block (W52 F1)
-            text = text[:self.ui.pm_working_at]
         if text.endswith('\nPM'):
             return ''                                # the label opened; no text yet
         if '\nPM\n' not in text:
@@ -4826,7 +4824,7 @@ class PMConversationTests(BoundedPMTest):
         seen = {}
 
         async def thinking(ui):
-            await self.until(ui, lambda ui: ui.conversation.text.endswith('PM 思考中… 0s'),
+            await self.until(ui, lambda ui: '思考中…（' in ui._pm_busy_line(),
                              'working line')
             self.assertIsNotNone(ui._pm_working_handle)
             seen['seq'] = ui._pm_turn_seq
@@ -4835,8 +4833,8 @@ class PMConversationTests(BoundedPMTest):
             await self.until(ui, lambda ui: ui.pm_runtime is None and not ui.pm_pending,
                              'disconnected')
             self.assertFalse(ui.pm_turn_active)
+            self.assertFalse(ui._pm_busy_wanted())
             self.assertIsNone(ui._pm_working_handle)
-            self.assertIsNone(ui.pm_working_at)
             ui.append('later output')
             self.assertIsNone(ui._pm_working_handle)
             self.assertTrue(ui.conversation.text.endswith('later output'))
@@ -4850,8 +4848,8 @@ class PMConversationTests(BoundedPMTest):
 
         ui, _ = self.drive([self.connect(), self.connected, 'think\r', thinking,
                             '/pm disconnect\r', disconnected])
-        self.assertNotIn('PM 思考中', ui.conversation.text)
-        self.assertNotIn('PM 處理中', ui.conversation.text)
+        self.assertNotIn('思考中', ui.conversation.text)
+        self.assertNotIn('處理中', ui.conversation.text)
 
     def test_exit_mid_turn_cancels_every_timer(self):
         self.turns = [_thinking() + ['HOLD', _result('late')]]
@@ -5017,19 +5015,17 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
                          ['PM request', 'queued'])     # Esc paused the queue; send resumed it
 
-    def test_working_line_shows_at_once_ticks_each_second_and_gives_way_to_text(self):
-        # W52 F1: a long think showed only "owner → PM:"; now the pane says so, every second.
+    def test_busy_line_ticks_while_reply_streams_and_disappears_at_turn_end(self):
         self.turns = [_thinking() + ['HOLD', _delta('答案', index=1), 'HOLD',
                                      _assistant({'type': 'text', 'text': '答案'}), _result('答案')]]
         seen = {}
 
         async def working(ui):
-            await self.until(ui, lambda ui: '\n\nPM ' in ui.conversation.text, 'working line')
             await self.until(ui, lambda ui: ui.pm_state == 'thinking', 'thinking')
-            self.assertTrue(ui.conversation.text.endswith('PM 思考中… 0s'))
+            self.assertIn('思考中…（0 秒）', ui._pm_busy_line())
             await asyncio.sleep(1.2)
-            self.assertTrue(ui.conversation.text.endswith('PM 思考中… 1s'))
-            self.assertEqual(ui.conversation.text.count('PM 思考中…'), 1)   # redrawn in place
+            self.assertIn('思考中…（1 秒）', ui._pm_busy_line())
+            self.assertNotIn('思考中', ui.conversation.text)
             self.assertNotIn('PRIVATE_REASONING', ui.conversation.text)
             self.fakes[0].gate.set()
 
@@ -5040,9 +5036,10 @@ class PMConversationTests(BoundedPMTest):
 
         ui, _ = self.drive([self.connect(), self.connected, '想一想\r', working, text_arrived,
                             self.turn_done])
-        self.assertNotIn('思考中', seen['text'])     # replaced when the text arrived
-        self.assertNotIn('PM 思考中', ui.conversation.text)
-        self.assertNotIn('PM 處理中', ui.conversation.text)
+        self.assertNotIn('思考中', seen['text'])
+        self.assertFalse(ui._pm_busy_wanted())
+        self.assertNotIn('思考中', ui.conversation.text)
+        self.assertNotIn('處理中', ui.conversation.text)
         self.assertIsNone(ui._pm_working_handle)
 
     def test_escape_interrupts_and_ctrl_c_interrupts_then_exits(self):
