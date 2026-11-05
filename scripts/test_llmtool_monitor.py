@@ -193,7 +193,7 @@ class MonitorTrustTests(unittest.TestCase):
         malformed_run._get = lambda path: bad_paths[path]
         malformed_run.refresh_main()
         self.assertIsNone(malformed_run.main_health)
-        self.assertEqual(malformed_run.main_error, "main workflow run")
+        self.assertEqual(malformed_run.main_error, "ValueError")
         health = source.main_health
         source._get = lambda path: (_ for _ in ()).throw(RuntimeError("offline"))
         source.refresh_main()
@@ -619,6 +619,7 @@ class MonitorTaskBaselineTests(unittest.TestCase):
             def getmaxyx(self): return (40, 120)
             def erase(self): pass
             def move(self, y, x): pass
+            def refresh(self): pass
         mon._paint_screen(Screen(), self.monitor, "tasks", 0, False, {},
                           lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertIn("OpenCode Task 紀錄讀取失敗，狀態未確認", drawn.values())

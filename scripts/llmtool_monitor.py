@@ -3890,7 +3890,7 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
         if not items:
             empty = (f"無（只看最近 {work.window_hours} 小時留言）"
                      if known and title == "等你" else "無" if known else "未知")
-            out.append((empty, "dim"))
+            append_header(empty, "dim")
             continue
         for item in items:
             if isinstance(item, BoardPull):
