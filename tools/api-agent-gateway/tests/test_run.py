@@ -239,6 +239,8 @@ class StandaloneTests(unittest.TestCase):
                 os.path.join(llmtool, 'llmtool', 'developer_routes', 'gw_agent.py'),
                 os.path.join(llmtool, 'tests', 'test_developer_route_gw_agent.py'),
                 os.path.join(llmtool, 'tests', 'test_gw_agent_route_wiring.py'),
+                # This only names a path string.
+                os.path.join(llmtool, 'tests', 'test_sensitive_paths.py'),
             }
             self.assertLessEqual(set(hits.stdout.splitlines()), allowed)
 
