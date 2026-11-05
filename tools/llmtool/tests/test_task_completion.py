@@ -4212,7 +4212,9 @@ class TaskCompletionTests(unittest.TestCase):
                       reason='superseded')
         rc, result = self._complete_claude_bound_context(context)
         self.assertNotEqual(rc, 0)
-        self.assertNotEqual(result['completion']['state'], 'PM_EVIDENCE_READY')
+        saved = store.get(context['task_id'])
+        self.assertNotEqual((saved.get('completion') or {}).get('state'),
+                            'PM_EVIDENCE_READY')
 
         with self.assertRaises(LLMToolError) as review_error:
             review_dispatch._preflight(store, context['task_id'], '4' * 32, 10, 'v1')
@@ -4242,8 +4244,10 @@ class TaskCompletionTests(unittest.TestCase):
         task['developer'] = developer
         task['abandonment'] = {'reason': 'superseded'}
         store = SimpleNamespace(get=lambda _task_id: dict(task))
-        with self.assertRaises(LLMToolError) as review_error:
-            review_dispatch._preflight(store, context['task_id'], '4' * 32, 10, 'v1')
+        with patch('llmtool.task_completion._github_get',
+                   side_effect=LLMToolError('offline')):
+            with self.assertRaises(LLMToolError) as review_error:
+                review_dispatch._preflight(store, context['task_id'], '4' * 32, 10, 'v1')
         self.assertNotEqual(getattr(review_error.exception, 'review_dispatch_code', None),
                             'CLAUDE_TASK_ABANDONED')
 

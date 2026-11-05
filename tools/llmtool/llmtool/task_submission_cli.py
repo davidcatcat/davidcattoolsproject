@@ -2619,7 +2619,7 @@ def _agy_developer_profile(route_config):
     return model, effort
 
 
-def run_task_opencode_delegate(args, *, store):
+def run_task_opencode_delegate(args, *, store, d6_binding=None):
     """Claim one PM-bound OpenCode run and capture its real scoped workspace diff."""
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
@@ -2642,7 +2642,8 @@ def run_task_opencode_delegate(args, *, store):
             raise LLMToolError('no validated low-risk OpenCode recommendation from the selected PM')
         if args.acceptance != pm_assignment['acceptance']:
             raise LLMToolError('acceptance differs from the selected PM assignment')
-    registration, snapshot = _delegate_d6_binding(args)
+    registration, snapshot = (d6_binding if d6_binding is not None else
+                              _delegate_d6_binding(args))
     if previous_developer is None:
         _reject_claude_reserved_d6(registration)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
@@ -3713,7 +3714,7 @@ def _reject_claude_reserved_d6(registration):
         raise LLMToolError('D6_CLAUDE_RESERVED')
 
 
-def run_task_codex_delegate(args, *, store):
+def run_task_codex_delegate(args, *, store, d6_binding=None):
     """Run Codex's own agent loop inside the assigned D6 workspace."""
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
@@ -3768,7 +3769,8 @@ def run_task_codex_delegate(args, *, store):
         run_id=task.get('run_id'),
         contract_digest=task.get('task_binding', {}).get('contract_digest'))
     try:
-        registration, snapshot = _delegate_d6_binding(args)
+        registration, snapshot = (d6_binding if d6_binding is not None else
+                                  _delegate_d6_binding(args))
     except LLMToolError as exc:
         raise LLMToolError(
             'Codex direct D6 binding failed (' + codex_direct_developer.adapter_error_code(

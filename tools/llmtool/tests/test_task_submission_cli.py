@@ -1091,20 +1091,25 @@ class TaskSubmissionCLITests(unittest.TestCase):
                          d6_task_id)
         holder_developer = completed['developer']
         holder_completion = completed['completion']
+        real_get = store.get
         for holder_dev, holder_comp in (
                 (holder_developer, None),
                 (None, holder_completion),
                 (None, dict(holder_completion, evidence=None))):
-            store.update(task['task_id'], developer=holder_dev, completion=holder_comp)
-            with self.assertRaises(LLMToolError) as d6_collision:
-                store.claude_bind_compare_and_update(
-                    second_task['task_id'], executor_task_id=d6_task_id,
-                    expected={'developer': None, 'completion': None},
-                    developer=None, completion=None)
+            def get_with_holder(task_id):
+                record = real_get(task_id)
+                if task_id == task['task_id']:
+                    record = dict(record, developer=holder_dev, completion=holder_comp)
+                return record
+
+            with patch.object(store, 'get', side_effect=get_with_holder):
+                with self.assertRaises(LLMToolError) as d6_collision:
+                    store.claude_bind_compare_and_update(
+                        second_task['task_id'], executor_task_id=d6_task_id,
+                        expected={'developer': None, 'completion': None},
+                        developer=None, completion=None)
             self.assertEqual(d6_collision.exception.task_store_error_code,
                              'TASK_D6_ALREADY_BOUND')
-        store.update(task['task_id'], developer=holder_developer,
-                     completion=holder_completion)
 
         policy['workers']['codex-reviewer']['dispatch'] = 'ALLOWED'
         policy['workers']['codex-reviewer']['reason'] = 'test fixture allows isolated route checks'
