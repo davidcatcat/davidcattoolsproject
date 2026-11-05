@@ -674,7 +674,13 @@ def main(argv=None):
                 getattr(args, 'action', None) in ('review-prompt', 'review-dispatch', 'review-result', 'repair', 'high-debug') and
                 type(refusal_code) is str and
                 re.fullmatch(r'[A-Z0-9_]{1,64}', refusal_code)):
-            print('llmtool: ' + refusal_label + ' refused: ' + refusal_code, file=sys.stderr)
+            line = 'llmtool: ' + refusal_label + ' refused: ' + refusal_code
+            detail = getattr(exc, 'high_debug_detail', None)
+            if (getattr(args, 'action', None) == 'high-debug' and
+                    type(detail) is str and len(detail) <= 128 and
+                    re.fullmatch(r'[A-Za-z0-9_,= ]+', detail)):
+                line += ' (' + detail + ')'
+            print(line, file=sys.stderr)
         else:
             print("llmtool: " + str(exc), file=sys.stderr)
         return 1
