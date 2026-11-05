@@ -238,10 +238,12 @@ class ClaudeRouteWiringTests(unittest.TestCase):
 
     def test_success_records_cli_result_and_uses_d6_policy_binding(self):
         cli, store, args, registration, evaluations, prompts, requests, patches, runner = self._setup()
+        boundary_factory = next(item for item in patches if item.attribute == 'for_platform')
         with contextlib.ExitStack() as stack:
-            for item in patches:
-                stack.enter_context(item)
+            entered = {id(item): stack.enter_context(item) for item in patches}
             status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+        entered[id(boundary_factory)].assert_called_once_with(
+            denied_dirs=['.claude'], allow_claude_tmp=True)
         developer = store.task['developer']
         self.assertEqual(status, 0)
         self.assertEqual(developer['provider_type'], 'claude-cli')
@@ -299,6 +301,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         self.assertEqual(developer['state'], 'BLOCKED')
         self.assertEqual(developer['error_code'], 'BLOCKED_WRITE_ISOLATION')
         self.assertIsNone(developer['artifact'])
+        self.assertIsNone(developer['execution'])
 
     def test_out_of_scope_diff_is_blocked_without_artifact(self):
         cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = self._setup(
@@ -312,6 +315,8 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         self.assertEqual(developer['state'], 'BLOCKED')
         self.assertEqual(developer['error_code'], 'CLAUDE_WRITE_SCOPE_VIOLATION')
         self.assertIsNone(developer['artifact'])
+        self.assertEqual(developer['execution']['status'], 'BLOCKED')
+        self.assertEqual(developer['usage']['total_tokens'], 5)
 
     def test_empty_claude_diff_is_blocked_without_direct_result_event(self):
         for changed_paths, raw in (((), b'diff --git a/src.py b/src.py\n'),
@@ -329,6 +334,15 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                 self.assertEqual(developer['state'], 'BLOCKED')
                 self.assertEqual(developer['error_code'], 'CLAUDE_NO_CHANGES')
                 self.assertIsNone(developer['artifact'])
+                self.assertEqual(developer['execution']['status'], 'BLOCKED')
+                self.assertEqual(developer['execution']['native_session_id'],
+                                 '12345678-1234-4234-8234-123456789abc')
+                self.assertEqual(developer['execution']['process_exit_code'], 0)
+                self.assertEqual(developer['execution']['stdout_sha256'], 'e' * 64)
+                self.assertEqual(developer['execution']['elapsed_ms'], 42)
+                self.assertEqual(developer['execution']['cleanup_status'], 'CONFIRMED')
+                self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
+                self.assertEqual(developer['usage']['total_tokens'], 5)
                 entered[id(direct_event)].assert_not_called()
 
     def test_repair_packet_is_embedded_as_untrusted_reference(self):
@@ -607,6 +621,19 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             stored = store.compare_and_update(task_id, expected={'developer': pending},
                                                developer=dispatching)
             self.assertEqual(stored['developer']['state'], 'DEVELOPER_DISPATCHING')
+            blocked = dict(dispatching, state='BLOCKED', error_code='CLAUDE_NO_CHANGES',
+                usage={'prompt_tokens': 15, 'completion_tokens': 2, 'total_tokens': 17,
+                       'cached_prompt_tokens': 5},
+                execution={'status': 'BLOCKED',
+                    'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                    'process_exit_code': 0, 'stdout_sha256': 'e' * 64,
+                    'elapsed_ms': 42, 'cleanup_status': 'CONFIRMED',
+                    'usage_source': 'CLI_REPORTED', 'source_bytes': None,
+                    'source_file_count': None, 'source_manifest_sha256': None})
+            stored = store.compare_and_update(task_id, expected={'developer': dispatching},
+                                               developer=blocked)
+            self.assertEqual(stored['developer']['execution']['status'], 'BLOCKED')
+            self.assertEqual(stored['developer']['usage']['total_tokens'], 17)
 
             second = record_for(second_task_id, d6_id)
             store.create(second)

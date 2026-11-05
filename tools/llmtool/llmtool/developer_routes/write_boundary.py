@@ -50,13 +50,16 @@ class SandboxExecBoundary(WriteBoundary):
     """macOS sandbox-exec wrapper restricted to configured writable paths."""
 
     def __init__(self, *, executable='/usr/bin/sandbox-exec', denied_dirs=(),
-                 tmpdir=None, allow_gw_agent_tmp=False):
+                 tmpdir=None, allow_gw_agent_tmp=False, allow_claude_tmp=False):
         self.executable = executable
         self.denied_dirs = tuple(denied_dirs)
         self.tmpdir = tmpdir
         if type(allow_gw_agent_tmp) is not bool:
             raise ValueError('invalid gw-agent temporary allowance')
         self.allow_gw_agent_tmp = allow_gw_agent_tmp
+        if type(allow_claude_tmp) is not bool:
+            raise ValueError('invalid Claude temporary allowance')
+        self.allow_claude_tmp = allow_claude_tmp
         self._prepared = None
 
     def _policy(self, root, write_paths, state_dirs):
@@ -129,7 +132,7 @@ class SandboxExecBoundary(WriteBoundary):
         return root, sorted(set(allowed)), sorted(set(states))
 
     @staticmethod
-    def _profile(paths, state_paths=(), gw_tmp_parents=()):
+    def _profile(paths, state_paths=(), gw_tmp_parents=(), claude_tmp_paths=()):
         rows = [
             '(version 1)',
             '(deny default)',
@@ -152,6 +155,14 @@ class SandboxExecBoundary(WriteBoundary):
             suffix = '.gw-agent-tmp-' + '[0-9a-f]' * 16
             pattern = '^' + literal_parent + suffix + '$'
             rows.append('(allow file-write* (regex #' + _sbpl_quote(pattern) + '))')
+        for path in claude_tmp_paths:
+            escaped = ''.join(
+                char if char.isalnum() or char in '/_-' else '[' + char + ']'
+                for char in path)
+            suffix = '[.]tmp[.][0-9]+[.]' + '[0-9a-f]' * 12
+            pattern = '^' + escaped + suffix + '$'
+            # An abandoned CLI temp file remains outside write_paths and blocks the run.
+            rows.append('(allow file-write* (regex #' + _sbpl_quote(pattern) + '))')
         rows.extend('(allow file-write* (literal ' + _sbpl_quote(path) + '))'
                     for path in ('/dev/null', '/dev/tty'))
         return '\n'.join(rows)
@@ -168,7 +179,8 @@ class SandboxExecBoundary(WriteBoundary):
         root, paths, states = self._policy(root, write_paths, state_dirs)
         gw_tmp_parents = (self._gw_tmp_parents(root, write_paths)
                           if self.allow_gw_agent_tmp else ())
-        profile = self._profile(paths, states, gw_tmp_parents)
+        claude_tmp_paths = tuple(paths) if self.allow_claude_tmp else ()
+        profile = self._profile(paths, states, gw_tmp_parents, claude_tmp_paths)
         digest = hashlib.sha256(profile.encode('utf-8')).hexdigest()
         self._prepared = (str(root), tuple(write_paths), tuple(state_dirs), paths, states, profile, digest)
         return [self.executable, '-p', profile], digest
@@ -186,6 +198,7 @@ class SandboxExecBoundary(WriteBoundary):
             return {'verified': False, 'policy_sha256': digest, 'probes': []}
         gw_tmp_parents = (self._gw_tmp_parents(root, write_paths)
                           if self.allow_gw_agent_tmp else ())
+        claude_tmp_paths = tuple(paths) if self.allow_claude_tmp else ()
         # The same kernel wrapper must allow a write at an authorized target
         # and deny root, Git, sibling-task, configured denied locations, and
         # hard links from outside the boundary into an allowed literal path.
@@ -239,6 +252,76 @@ class SandboxExecBoundary(WriteBoundary):
                         passed = False
                     probes.append({'expected_write': expected, 'operation': 'gw_agent_tmp',
                                    'passed': passed})
+        if claude_tmp_paths:
+            for target in claude_tmp_paths:
+                parent = str(Path(target).parent)
+                allowed_tmp = target + '.tmp.123.0123456789ab'
+                allowed_program = (
+                    'import os,stat\nfrom pathlib import Path\n'
+                    'p=Path(' + repr(target) + ')\n'
+                    't=Path(' + repr(allowed_tmp) + ')\n'
+                    'old=p.read_bytes() if p.exists() else None\n'
+                    'mode=stat.S_IMODE(p.stat().st_mode) if old is not None else None\n'
+                    'try:\n t.write_bytes(b"probe")\n os.replace(t,p)\n'
+                    'finally:\n'
+                    ' if t.exists(): t.unlink()\n'
+                    ' if old is not None: p.write_bytes(old); p.chmod(mode)\n'
+                    ' elif p.exists(): p.unlink()\n')
+                try:
+                    rc, out, err = runner([self.executable, '-p', profile, python, '-c',
+                                           allowed_program], str(root),
+                                          {'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+                                           'PYTHONDONTWRITEBYTECODE': '1'}, 10)
+                    passed = type(rc) is int and rc == 0
+                except Exception:
+                    passed = False
+                probes.append({'expected_write': True, 'operation': 'claude_tmp_rename',
+                               'path': target, 'passed': passed})
+                invalid = (target + '.tmp.123.0123456789a',
+                           target + '.tmp.123.0123456789AB',
+                           target + '.tmp.x.0123456789ab',
+                           target + '.tmp.123.0123456789ab.extra',
+                           str(Path(parent) / '.llmtool-other.tmp.123.0123456789ab'),
+                           str(Path(root).resolve() / '.llmtool-other.tmp.123.0123456789ab'))
+                for path in invalid:
+                    code = ('from pathlib import Path\n'
+                            'p=Path(' + repr(path) + ')\n'
+                            'p.write_bytes(b"probe")\n p.unlink()\n')
+                    try:
+                        rc, out, err = runner([self.executable, '-p', profile, python, '-c', code],
+                                              str(root), {'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+                                                          'PYTHONDONTWRITEBYTECODE': '1'}, 10)
+                        passed = type(rc) is int and rc != 0
+                    except Exception:
+                        passed = False
+                    probes.append({'expected_write': False, 'operation': 'claude_tmp_name',
+                                   'path': path, 'passed': passed})
+                source = None
+                hardlink_tmp = target + '.tmp.123.0123456789ab'
+                try:
+                    fd, source = tempfile.mkstemp(prefix='llmtool-claude-hardlink-')
+                    os.write(fd, b'probe-source')
+                    os.close(fd)
+                    program = ('import os,sys\nfrom pathlib import Path\n'
+                               's=Path(' + repr(source) + ')\n'
+                               'p=Path(' + repr(hardlink_tmp) + ')\n'
+                               'try:\n os.link(s,p)\n'
+                               'except OSError:\n sys.exit(0)\n'
+                               'else:\n p.unlink()\n sys.exit(7)\n')
+                    rc, out, err = runner([self.executable, '-p', profile, python, '-c', program],
+                                          str(root), {'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+                                                      'PYTHONDONTWRITEBYTECODE': '1'}, 10)
+                    passed = type(rc) is int and rc == 0
+                except Exception:
+                    passed = False
+                finally:
+                    if source is not None:
+                        try:
+                            os.unlink(source)
+                        except OSError:
+                            pass
+                probes.append({'expected_write': False, 'operation': 'claude_tmp_hardlink',
+                               'path': hardlink_tmp, 'passed': passed})
         if targets:
             target = targets[0]
             source = None
