@@ -2258,32 +2258,17 @@ def render_activity(events: list[ActivityEvent], limit: int = 60,
 
 
 def activity_lines(tasks: list[Task], limit: int = 60,
-                   github: "GitHubSource | None" = None, background: bool = False) -> list[str]:
+                   github: "GitHubSource | None" = None, background: bool = False,
+                   tasks_root: str | None = None) -> list[str]:
     if github is not None:
         github.refresh_in_background() if background else github.refresh()
     lines = render_activity(activity_events(tasks), limit, github)
-    window_hours = int(github.window // 3600) if github is not None else 12
     now = github.clock() if github is not None else time.time()
-    successful_read = bool(github is not None and getattr(github, "successful_read", False))
-    dispatches = ([event for event in github.events
-                   if type(event) is ActivityEvent and event.event_type == "developer_dispatch"
-                   and event.actor == "PM"] if successful_read else [])
-    if dispatches:
-        event = max(dispatches, key=lambda item: item.occurred_at)
-        age = max(0.0, now - event.occurred_at)
-        line = f"PM 上次派工：{_ago(age)}"
-        if age > 30 * 60:
-            line += "；超過 30 分鐘沒有派工"
-            line = "⚠ " + line
-        if event.target:
-            line += f"（→ {MARKER_NAMES.get(event.target, event.target)}"
-            if re.fullmatch(r"#\d{1,7}", event.reference or ""):
-                line += f"，{event.reference}"
-            line += "）"
-    elif successful_read:
-        line = f"⚠ PM 上次派工：最近 {window_hours} 小時沒有"
-    else:
-        line = "⚠ PM 上次派工：未知（GitHub 尚未成功讀取）"
+    try:
+        entry, problem = pm_last_dispatch(now, tasks_root)
+    except Exception:
+        entry, problem = None, "本機 Task 紀錄讀取失敗"
+    line = pm_dispatch_line(entry, problem, now)
     return [line, *lines]
 
 
@@ -5501,10 +5486,119 @@ def _remote_test_time(value) -> float:
 
 
 CODEX_WORK_BUDGET = 4 << 20
+DISPATCH_BUDGET = 4 << 20
 CODEX_WORK_BEFORE = 5.0
 CODEX_WORK_AFTER = 300.0
 _codex_work_parsed: dict = {}  # root -> {path: ((st_ino, st_mtime_ns, st_size), entries)}
+_dispatch_parsed: dict = {}  # root -> {path: ((st_ino, st_mtime_ns, st_size), entries)}
 CODEX_WORK_ISSUE = re.compile(r"^(?:Repair round: )*#([1-9][0-9]{0,6})\b")
+DISPATCH_ACCEPTED = frozenset({"DEVELOPER_DISPATCHING", "DEVELOPER_RESPONDED",
+                               "DEVELOPER_OUTCOME_UNKNOWN", "DEVELOPER_OUTPUT_REJECTED"})
+# A refused dispatch can still leave a GitHub marker, so markers do not count.
+DISPATCH_PROVIDERS = {"codex-cli": "Codex", "opencode-cli": "OpenCode",
+                      "agy-cli": "AGY", "openai-compatible": "公司 gw",
+                      "gw-agent-cli": "gw agent"}
+
+
+@dataclass(frozen=True)
+class DispatchRecord:
+    created: float
+    provider: str
+    issue: str
+
+
+def _dispatch_entry(record) -> DispatchRecord | None:
+    """Extract only fields that prove an admitted Developer dispatch."""
+    if type(record) is not dict:
+        return None
+    task = record.get("task_id")
+    developer = record.get("developer")
+    state = developer.get("state") if type(developer) is dict else None
+    if (type(task) is not str or not re.fullmatch(r"[0-9a-f]{32}", task)
+            or type(developer) is not dict
+            or type(state) is not str or state not in DISPATCH_ACCEPTED):
+        return None
+    created = _remote_test_time(developer.get("created_at"))
+    if created <= 0:
+        return None
+    provider = developer.get("provider_type")
+    provider = provider if type(provider) is str else ""
+    request = record.get("request")
+    found = CODEX_WORK_ISSUE.match(request) if type(request) is str else None
+    return DispatchRecord(created, provider, found.group(1) if found else "")
+
+
+def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
+    """Read bounded, unchanged-cached Task records through a field extractor."""
+    paths, capped = _remote_test_paths(root)
+    stamped = []
+    for path in paths:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            stamped.append((info.st_mtime, path,
+                            (info.st_ino, info.st_mtime_ns, info.st_size), info.st_nlink))
+    short, kept, entries = False, {}, []
+    parsed = cache.get(root, {})
+    for _, path, key, link_count in sorted(stamped, reverse=True)[:REMOTE_TEST_FILES]:
+        if link_count != 1:
+            continue
+        if key[2] > REMOTE_TEST_READ:
+            short = True
+            continue
+        cached = parsed.get(path)
+        if cached and cached[0] == key:
+            record_entries = cached[1]
+        else:
+            opened = _remote_test_open(path, budget)
+            if opened is None:
+                short = True
+                continue
+            key, raw = opened
+            if raw is False:
+                short = True
+                continue
+            budget -= len(raw or b"")
+            record = _remote_test_json(raw) if raw else None
+            entry = extract(record)
+            record_entries = (entry,) if entry is not None else ()
+        kept[path] = (key, record_entries)
+        entries.extend(record_entries)
+    if root not in cache and len(cache) >= 8:
+        cache.clear()
+    cache[root] = kept
+    problem = REMOTE_TEST_CAPPED if capped else REMOTE_TEST_OVER_BUDGET if short else ""
+    return entries, problem
+
+
+def pm_last_dispatch(now: float, root: str | None = None) -> tuple[DispatchRecord | None, str]:
+    """Return the newest locally recorded admitted Developer dispatch."""
+    root = LLMTOOL_TASKS if root is None else root
+    entries, problem = _bounded_task_entries(root, _dispatch_parsed,
+                                             DISPATCH_BUDGET, _dispatch_entry)
+    eligible = [entry for entry in entries if entry.created <= now + REMOTE_TEST_SKEW]
+    return (max(eligible, key=lambda entry: entry.created) if eligible else None), problem
+
+
+def pm_dispatch_line(entry: DispatchRecord | None, problem: str, now: float) -> str:
+    if problem:
+        line = f"⚠ PM 上次派工：未確認（{problem}）"
+        if entry is not None:
+            line += f"；已讀到的最近一次：{_ago(max(0.0, now - entry.created))}"
+        return line
+    if entry is None:
+        return "⚠ PM 上次派工：本機紀錄沒有派工"
+    age = max(0.0, now - entry.created)
+    line = f"PM 上次派工：{_ago(age)}"
+    if age > 30 * 60:
+        line = f"⚠ {line}；超過 30 分鐘沒有派工"
+    provider = DISPATCH_PROVIDERS.get(entry.provider, "Developer")
+    line += f"（→ {provider}"
+    if entry.issue:
+        line += f"，#{entry.issue}"
+    return line + "）"
 
 
 def _codex_work_entry(record) -> CodexWork | None:
@@ -5544,47 +5638,8 @@ def _codex_work_entry(record) -> CodexWork | None:
 def codex_work_records(root: str | None = None) -> tuple[list[CodexWork], str]:
     """Read bounded, unchanged-cached Codex Task records from the local Task store."""
     root = LLMTOOL_TASKS if root is None else root
-    paths, capped = _remote_test_paths(root)
-    stamped = []
-    for path in paths:
-        try:
-            info = os.lstat(path)
-        except OSError:
-            continue
-        if stat.S_ISREG(info.st_mode):
-            stamped.append((info.st_mtime, path,
-                            (info.st_ino, info.st_mtime_ns, info.st_size), info.st_nlink))
-    budget, short, kept, entries = CODEX_WORK_BUDGET, False, {}, []
-    parsed = _codex_work_parsed.get(root, {})
-    for _, path, key, link_count in sorted(stamped, reverse=True)[:REMOTE_TEST_FILES]:
-        if link_count != 1:
-            continue
-        if key[2] > REMOTE_TEST_READ:
-            short = True
-            continue
-        cached = parsed.get(path)
-        if cached and cached[0] == key:
-            record_entries = cached[1]
-        else:
-            opened = _remote_test_open(path, budget)
-            if opened is None:
-                short = True
-                continue
-            key, raw = opened
-            if raw is False:
-                short = True
-                continue
-            budget -= len(raw or b"")
-            record = _remote_test_json(raw) if raw else None
-            entry = _codex_work_entry(record)
-            record_entries = (entry,) if entry is not None else ()
-        kept[path] = (key, record_entries)
-        entries.extend(record_entries)
-    if root not in _codex_work_parsed and len(_codex_work_parsed) >= 8:
-        _codex_work_parsed.clear()
-    _codex_work_parsed[root] = kept
-    problem = REMOTE_TEST_CAPPED if capped else REMOTE_TEST_OVER_BUDGET if short else ""
-    return entries, problem
+    return _bounded_task_entries(root, _codex_work_parsed,
+                                 CODEX_WORK_BUDGET, _codex_work_entry)
 
 
 def _codex_work_match(entries: list[CodexWork], d6: str, session: str,
