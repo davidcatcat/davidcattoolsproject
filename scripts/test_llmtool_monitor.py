@@ -981,7 +981,7 @@ class ActivityViewTests(unittest.TestCase):
             calls.append(kwargs.get("show_noise"))
             return ["header", "event"]
         with patch.object(mon, "activity_lines", side_effect=activity_lines):
-            mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
+            mon._paint_screen(Screen(), monitor, "activity", 0, True, {},
                               lambda row, text, attr=0: drawn.__setitem__(row, text))
             self.assertTrue(any("a: 顯示雜訊" in text for text in drawn.values()))
             drawn.clear()
@@ -7292,16 +7292,10 @@ class WorkBoardTests(unittest.TestCase):
                 mon.run_curses(screen, 60, False, monitor)
             return painted
 
-        office = run("4a5")
-        self.assertIn(("office", False, False), office)
-        self.assertNotIn(("office", True, False), office)
-        activity = run("5a4")
-        self.assertIn(("activity", False, False), activity)
-        self.assertNotIn(("activity", False, True), activity)
-        revealed = run("4a")
-        self.assertIn(("activity", False, True), revealed)
-        other_view = run("1a")
-        self.assertIn(("log", False, False), other_view)
+        self.assertEqual(run("4a5")[-1], ("office", False, True))
+        self.assertEqual(run("5a4")[-1], ("activity", True, False))
+        self.assertEqual(run("4a")[-1], ("activity", False, True))
+        self.assertEqual(run("1a")[-1], ("log", False, False))
 
     def test_unknown_counts_sections_and_narrow_rows_preserve_refs(self):
         unknown = mon.work_board(self._github(None, successful_read=False),
