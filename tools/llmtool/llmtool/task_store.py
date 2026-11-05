@@ -1506,7 +1506,7 @@ def _validate(record):
             if 'execution' in developer:
                 execution = developer['execution']
                 if execution is not None:
-                    if (developer['provider_profile'] not in ('opencode', 'codex', 'agy') or
+                    if (developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'gw-agent') or
                             type(execution) is not dict or
                             set(execution) not in (
                                 _DIRECT_EXECUTION_FIELDS, _DIRECT_EXECUTION_BINDING_FIELDS,

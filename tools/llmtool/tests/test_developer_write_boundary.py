@@ -163,6 +163,17 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _sbpl_quote('/tmp/bad\npath')
 
+    def test_gw_agent_tmp_copy_is_unprepared_and_leaves_the_original_closed(self):
+        original = SandboxExecBoundary(executable='/bin/true', denied_dirs=('blocked',),
+                                       tmpdir='/tmp')
+        original._prepared = ('stale',)
+        copy = original.with_gw_agent_tmp()
+        self.assertTrue(copy.allow_gw_agent_tmp)
+        self.assertIsNone(copy._prepared)
+        self.assertEqual((copy.executable, copy.denied_dirs, copy.tmpdir),
+                         ('/bin/true', ('blocked',), '/tmp'))
+        self.assertFalse(original.allow_gw_agent_tmp)
+
     @unittest.skipUnless(sys.platform == 'darwin', 'requires real macOS sandbox-exec')
     def test_real_sandbox_gw_temp_rule_and_out_of_scope_hardlink(self):
         executable = '/usr/bin/sandbox-exec'

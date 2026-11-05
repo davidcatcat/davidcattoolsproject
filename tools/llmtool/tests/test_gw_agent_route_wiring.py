@@ -4,10 +4,13 @@ import inspect
 import io
 import json
 import os
+import stat
+import subprocess
 import sys
 import tempfile
 import unittest
 from argparse import Namespace
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -620,7 +623,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             '    model: authorized-model\n',
             encoding='utf-8')
         result = SimpleNamespace(model='authorized-model', usage={
-            'input_tokens': 1, 'output_tokens': None, 'status': 'PARTIAL'},
+            'prompt_tokens': 1, 'completion_tokens': 2, 'total_tokens': 3},
             session_id='provider-session', exit_code=0, stdout_sha256='f' * 64,
             elapsed_ms=10, cleanup_status='CLEAN')
         decision = worker_dispatch.PolicyDecision('company-gw-agent', True,
@@ -725,8 +728,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             'max_turns', 'max_input_tokens', 'max_output_tokens', 'max_wall_seconds',
             'max_tool_result_bytes', 'max_sent_bytes'})
         self.assertNotIn('stdout_bytes', seen['task']['budgets'])
-        self.assertEqual(developer['usage']['input_tokens'], 1)
-        self.assertIsNone(developer['usage']['output_tokens'])
+        self.assertEqual(developer['usage']['prompt_tokens'], 1)
+        self.assertEqual(developer['usage']['completion_tokens'], 2)
+        self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
 
     def test_old_audit_copies_are_removed_and_recent_copies_retained(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -742,6 +746,181 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             self.assertEqual(removed, [old.name])
             self.assertFalse(old.exists())
             self.assertTrue(recent.exists())
+
+
+
+class _NoSandboxBoundary:
+    """The OS sandbox is proven by the real-sandbox route test; this runs on any host."""
+
+    def prepare(self, root, write_paths, state_dirs=()):
+        return [], 'a' * 64
+
+    def verify(self, root, write_paths, state_dirs=(), *, runner):
+        return {'verified': True, 'policy_sha256': 'a' * 64, 'probes': []}
+
+
+class GwAgentRealStoreTests(unittest.TestCase):
+    """Real TaskStore, D6 record, gateway process and result event; fake model only."""
+
+    def setUp(self):
+        review_trust_fixture.install_for_case(self)
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name).resolve()
+        scratch = self.base / 'tmp'
+        scratch.mkdir(mode=0o700)
+        for patcher in (patch.dict(os.environ, {'HOME': str(self.base)}),
+                        patch.object(tempfile, 'tempdir', str(scratch))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        gateway_tests = Path(__file__).resolve().parents[2] / 'api-agent-gateway' / 'tests'
+        sys.path.insert(0, str(gateway_tests))
+        try:
+            from helpers import FakeServer, reply, tool_call
+        finally:
+            sys.path.remove(str(gateway_tests))
+        self.reply, self.tool_call = reply, tool_call
+        self.server = FakeServer()
+        self.addCleanup(self.server.close)
+        config = self.base / '.config' / 'llmtool' / 'config.yaml'
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'active_provider: company-gw\n'
+            'generation:\n  max_tokens: 49152\n'
+            'providers:\n  company-gw:\n    type: openai-compatible\n'
+            f'    base_url: http://127.0.0.1:{self.server.port}\n    model: gw\n',
+            encoding='utf-8')
+        self.root = self.base / 'd6'
+        (self.root / 'tools' / 'llmtool').mkdir(parents=True)
+        self._git('init', '-b', 'task-branch')
+        self._git('config', 'user.name', 'Test')
+        self._git('config', 'user.email', 'test@example.invalid')
+        (self.root / 'tools' / 'llmtool' / '.gitignore').write_text(
+            '/.d6-bootstrap-report.json\n', encoding='utf-8')
+        (self.root / 'README.md').write_text('fixture\n', encoding='utf-8')
+        self._git('add', 'README.md', 'tools/llmtool/.gitignore')
+        self._git('commit', '-m', 'source')
+        self.head = self._git('rev-parse', 'HEAD')
+        self.common = str(self.root / '.git')
+        self._register_d6()
+        self.store = task_store.TaskStore(self.base / 'tasks')
+
+    def _git(self, *args):
+        return subprocess.check_output(['/usr/bin/git', '-C', str(self.root), *args],
+                                       text=True, stderr=subprocess.DEVNULL).strip()
+
+    def _register_d6(self):
+        self.root.chmod(0o700)
+        info = self.root.stat()
+        report = (json.dumps({'schema_version': 1, 'result': 'PASS', 'status': 'env_reused',
+            'task_id': 'executor-d6', 'root_realpath': str(self.root), 'head_sha': self.head,
+            'tooling_sha': self.head,
+            'cache_fingerprint': 'cpython3.13-darwin-arm64-012345abcdef'},
+            sort_keys=True, separators=(',', ':')) + '\n').encode()
+        report_path = self.root / 'tools' / 'llmtool' / '.d6-bootstrap-report.json'
+        report_path.write_bytes(report)
+        report_path.chmod(0o600)
+        record = {'schema_version': 1, 'task_id': 'executor-d6',
+            'trusted_agent_id': 'gw-agent-developer', 'session_ref': 'gw agent D6 session',
+            'root_realpath': str(self.root),
+            'physical_identity': {'device': info.st_dev, 'inode': info.st_ino,
+                                  'uid': info.st_uid, 'mode': oct(stat.S_IMODE(info.st_mode))},
+            'git_common_dir': self.common, 'branch': 'task-branch', 'base_sha': self.head,
+            'head_sha': self.head, 'state': 'ACTIVE', 'lock_state': 'LOCKED',
+            'env2_pass_marker': {'schema_version': 1, 'result': 'PASS',
+                'task_id': 'executor-d6', 'root_realpath': str(self.root),
+                'submitted_head_sha': self.head, 'current_head_sha': self.head,
+                'tooling_sha': self.head,
+                'environment_fingerprint': 'cpython3.13-darwin-arm64-012345abcdef',
+                'report_sha256': hashlib.sha256(report).hexdigest()}}
+        registry = Path(self.common) / 'llmtool-worktrees'
+        registry.mkdir(mode=0o700)
+        path = registry / 'executor-d6.json'
+        path.write_text(json.dumps(record), encoding='utf-8')
+        path.chmod(0o600)
+
+    def _active_pm_task(self, target):
+        task_id, run_id = task_store.new_id(), task_store.new_id()
+        prompt = 'Create one synthetic file.'
+        digest = hashlib.sha256(prompt.encode()).hexdigest()
+        record = task_submission_cli._record(
+            task_id, run_id, 'pm-' + task_store.new_id(), 'active-pm-runtime', prompt,
+            state='PM_RESPONDED', provider_type='active-pm-runtime', model=None,
+            backend='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL', request_sha=digest)
+        assignment = {'route': 'gw-agent', 'risk': 'LOW', 'goal': 'Create one synthetic file.',
+                      'acceptance': [f'Only {target} is created.']}
+        record.update(
+            pm_route_binding={'type': 'active-pm-runtime', 'model': None, 'base_url': None},
+            response=json.dumps({'schema_version': 1, 'summary': 'bounded',
+                                 'developer_assignment': assignment}),
+            usage=None, error_code=None,
+            pm_assignment={'schema_version': 1, **assignment},
+            pm_provenance={'source': 'ACTIVE_PM_RUNTIME', 'provider_invoked': False,
+                           'native_session_id_status': 'UNAVAILABLE',
+                           'usage_status': 'UNKNOWN', 'session_restored': False,
+                           'automatic_callback': False})
+        self.store.create(record)
+        return task_id
+
+    def _delegate(self, target):
+        task_id = self._active_pm_task(target)
+        self.server.script.extend((
+            self.reply(self.tool_call('apply_edit', path=target, new='hello synthetic\n',
+                                      create=True), model='qwen3.8-27b', usage=(1026, 49)),
+            self.reply(self.tool_call('finish', summary='done'), model='qwen3.8-27b',
+                       usage=(1092, 105))))
+        args = Namespace(task_id=task_id, mode='direct', context_stdin=False,
+            data_class='SYNTHETIC', egress_basis='Synthetic test content only.',
+            acceptance=[f'Only {target} is created.'], selection_source='PM',
+            executor_task='executor-d6', read_path=[target], write_path=[target],
+            cwd=str(self.root))
+        real_config = load_route_config()
+        real_config['routes']['gw-agent']['package_path'] = str(
+            Path(__file__).resolve().parents[2] / 'api-agent-gateway')
+        decision = worker_dispatch.PolicyDecision('company-gw-agent', True,
+                                                  'OWNER_POLICY_ALLOWED', 'f' * 64)
+        with patch.object(task_submission_cli, 'load_route_config',
+                          return_value=real_config), \
+             patch.object(task_submission_cli, 'for_platform',
+                          return_value=_NoSandboxBoundary()), \
+             patch.object(worker_dispatch, 'authorize_dispatch'), \
+             patch.object(worker_dispatch, 'evaluate', return_value=decision), \
+             redirect_stdout(io.StringIO()):
+            code = task_submission_cli.run_task_gw_agent_delegate(args, store=self.store)
+        # A fresh store proves the record is on disk and still passes validation.
+        return code, task_store.TaskStore(self.base / 'tasks').get(task_id)
+
+    def _assert_success_persisted(self, task, target):
+        developer = task['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertIsNone(developer['error_code'])
+        self.assertEqual(developer['changed_files'], [target])
+        self.assertEqual(developer['model'], 'gw')
+        self.assertEqual(developer['usage'], {
+            'prompt_tokens': 2118, 'completion_tokens': 154, 'total_tokens': 2272,
+            'served_model': 'qwen3.8-27b'})
+        self.assertEqual(developer['execution']['status'], 'DONE')
+        self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
+        self.assertIn('+hello synthetic\n', developer['artifact'])
+        self.assertEqual((self.root / target).read_text(), 'hello synthetic\n')
+        self.assertEqual(self._git('status', '--porcelain'), f'?? {target}')
+
+    def test_docs_success_persists_and_reaches_the_active_pm(self):
+        target = 'gw-agent-synthetic.md'
+        code, task = self._delegate(target)
+        self._assert_success_persisted(task, target)
+        callback = task['developer']['direct_result_callback']
+        self.assertEqual((code, callback['state'], callback['missing_gates']),
+                         (0, 'PM_EVIDENCE_READY', []))
+        self.assertEqual(callback['evidence']['verification_state'], 'READY')
+
+    def test_untestable_file_persists_but_waits_with_a_named_gate(self):
+        target = 'gw-agent-synthetic.txt'
+        code, task = self._delegate(target)
+        self._assert_success_persisted(task, target)
+        callback = task['developer']['direct_result_callback']
+        self.assertEqual((code, callback['state'], callback['missing_gates']),
+                         (1, 'WAITING_EXECUTOR', ['TEST_SCOPE_MISSING']))
 
 
 if __name__ == '__main__':

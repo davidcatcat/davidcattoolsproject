@@ -17,6 +17,7 @@ import tempfile
 from urllib.parse import urlsplit
 
 from .base import DeveloperRoute, RouteError
+from .write_boundary import SandboxExecBoundary
 from .. import config as llm_config
 
 _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
@@ -32,30 +33,58 @@ _GATEWAY_BUDGETS = {
 _STATUS_EXIT = {'DONE': 0, 'BLOCKED': 3, 'MODEL_ERROR': 4,
                 'POLICY_REFUSED': 5, 'BUDGET_EXCEEDED': 6}
 _AUDIT_RETENTION_SECONDS = 30 * 24 * 60 * 60
+_MAX_USAGE_TOKENS = 50_000_000
+# Names the company gateway routes on. They are not model identities: the
+# provider answers with the model it really served, which is what gets recorded.
+_ROUTING_ALIASES = frozenset({'gw'})
+_AUDIT_TOOLS = frozenset({'list_dir', 'read_file', 'grep', 'apply_edit', 'finish'})
+# The Task error code is at most 64 characters and starts with
+# DEVELOPER_GW_AGENT_BLOCKED_, so a longer reason would be cut off.
+_TOOL_FAILURE = re.compile(r'[A-Z0-9_]{1,37}\Z')
 
 
 def _normalize_gw_agent_usage(value):
-    """Keep gateway UNKNOWN and partial counters without AGY's all-fields rule."""
-    allowed = {'status', 'calls', 'calls_without_usage', 'input_tokens',
-               'output_tokens', 'total_tokens'}
-    unknown = {'status': 'UNKNOWN', 'calls': 0, 'calls_without_usage': 0,
-               'input_tokens': None, 'output_tokens': None}
+    """Return the Task store's token triplet, or None unless fully reported."""
     if type(value) is not dict:
-        return unknown
-    normalized = {}
-    for key, item in value.items():
-        if key not in allowed:
+        return None
+    if {'prompt_tokens', 'completion_tokens', 'total_tokens'} == set(value):
+        prompt, completion = value['prompt_tokens'], value['completion_tokens']
+    elif value.get('status') == 'REPORTED':
+        prompt, completion = value.get('input_tokens'), value.get('output_tokens')
+    else:
+        return None
+    if (type(prompt) is not int or type(completion) is not int or
+            not 0 <= prompt <= _MAX_USAGE_TOKENS or
+            not 0 <= completion <= _MAX_USAGE_TOKENS):
+        return None
+    return {'prompt_tokens': prompt, 'completion_tokens': completion,
+            'total_tokens': prompt + completion}
+
+
+def _last_tool_failure(audit_lines):
+    """Return a bounded TOOL_CODE from verified audit metadata, or None.
+
+    A failed write outranks later reads: a model that cannot write usually
+    probes around afterwards, and those reads are symptoms. Audit records hold
+    fixed tool names and codes, never model or provider text.
+    """
+    last = last_write = None
+    for line in audit_lines:
+        try:
+            record = json.loads(line)
+        except (UnicodeError, ValueError, RecursionError):
             continue
-        if key == 'status':
-            if type(item) is str and len(item) <= 32:
-                normalized[key] = item
-        elif item is None and key in ('input_tokens', 'output_tokens', 'total_tokens'):
-            normalized[key] = None
-        elif type(item) is int and 0 <= item <= 50_000_000:
-            normalized[key] = item
-    if not normalized:
-        return unknown
-    return normalized
+        if (type(record) is not dict or record.get('type') != 'tool' or
+                record.get('ok') is not False or record.get('tool') not in _AUDIT_TOOLS or
+                type(record.get('code')) is not str):
+            continue
+        reason = record['tool'].upper() + '_' + record['code']
+        if _TOOL_FAILURE.fullmatch(reason) is None:
+            continue
+        last = reason
+        if record['tool'] == 'apply_edit':
+            last_write = reason
+    return last_write or last
 
 
 def cleanup_audit_copies(*, now=None, temp_root=None):
@@ -200,7 +229,15 @@ class GwAgentRoute(DeveloperRoute):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
         self.allowed_data_classes = frozenset(classes)
         self._result = None
+        self._tool_failure = None
         self.audit_copy_path = None
+
+    def configure_boundary(self, boundary):
+        # The gateway writes through a temp file beside the target, so a literal
+        # write path alone refuses every edit. Other boundaries stay fail-closed.
+        if isinstance(boundary, SandboxExecBoundary):
+            return boundary.with_gw_agent_tmp()
+        return boundary
 
     @property
     def default_model(self):
@@ -419,10 +456,13 @@ class GwAgentRoute(DeveloperRoute):
             raise RouteError('GW_AGENT_OUTPUT_INVALID')
         self._status = result['status']
         self._gateway_code = result['code']
-        if self.expected_served_model is None and self._validated_request is not None:
+        if ((self.expected_served_model is None or
+                self.expected_served_model in _ROUTING_ALIASES) and
+                self._validated_request is not None):
             self._validated_request['model'] = result['served_model']
         return {'status': result['status'], 'summary': result['summary'][:4000],
-                'session_id': result.get('session_id'), 'usage': result.get('usage'),
+                'session_id': result.get('session_id'),
+                'usage': _normalize_gw_agent_usage(result.get('usage')),
                 'changed_paths': result['changed_paths']}
 
     def validate_exit(self, exit_code, parsed):
@@ -432,8 +472,10 @@ class GwAgentRoute(DeveloperRoute):
 
     def validate_status(self, parsed):
         if self._status != 'DONE':
-            raise RouteError('GW_AGENT_' + self._status,
-                             facts={'gateway_code': self._gateway_code})
+            code = self._gateway_code
+            if code == 'MODEL_REPORTED_BLOCKED' and self._tool_failure is not None:
+                code = self._tool_failure
+            raise RouteError('GW_AGENT_' + self._status, facts={'gateway_code': code})
 
     def _verified_audit_digest(self, path):
         """Load the verifier from the configured gateway package, isolated by name."""
@@ -522,6 +564,7 @@ class GwAgentRoute(DeveloperRoute):
             if (type(expected) is not str or not re.fullmatch(r'[0-9a-f]{64}', expected) or
                     expected != actual):
                 raise RouteError('GW_AGENT_AUDIT_INVALID')
+            self._tool_failure = _last_tool_failure(lines)
             # Audit copies are retained outside the D6 and pruned after 30 days.
             audit_dir = tempfile.mkdtemp(prefix='llmtool-gw-agent-audit-')
             os.chmod(audit_dir, 0o700)
