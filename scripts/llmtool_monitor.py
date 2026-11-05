@@ -1591,11 +1591,13 @@ def _progress_summary(body: str) -> str:
     d6 = family = ""
     for line in body.splitlines() if type(body) is str else []:
         match = re.fullmatch(r"D6:\s*(.+)", line)
-        if match and AGENT_ID.fullmatch(match.group(1)):
+        if (match and not re.search(r"[0-9A-Fa-f]{32,}", match.group(1))
+                and AGENT_ID.fullmatch(match.group(1))):
             d6 = match.group(1)
             continue
         match = re.fullmatch(r"Family:\s*(.+)", line)
-        if match and AGENT_ID.fullmatch(match.group(1)):
+        if (match and not re.search(r"[0-9A-Fa-f]{32,}", match.group(1))
+                and AGENT_ID.fullmatch(match.group(1))):
             family = match.group(1)
     if family and d6:
         summary = f"Family {family}（D6 {d6}）"
@@ -7045,6 +7047,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             colors[key] = curses.color_pair(n)
     view, offset, next_poll = "office", 0, 0.0
     expanded = False   # office view: gray rows folded (default) or listed (key a)
+    noise = False      # Activity view: feed noise hidden (default) or shown (key a)
     next_draw, dirty = 0.0, True
 
     def put(y: int, text: str, attr: int = 0) -> None:
@@ -7066,7 +7069,8 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
         # the clock; getch() still wakes every 100 ms so keys answer at once.
         if dirty or time.monotonic() >= next_draw:
             dirty, next_draw = False, time.monotonic() + DRAW_EVERY
-            offset = _paint_screen(stdscr, mon, view, offset, expanded, colors, put)
+            offset = _paint_screen(stdscr, mon, view, offset, expanded, colors, put,
+                                   noise=noise)
         key = stdscr.getch()
         if key == -1:
             continue
@@ -7085,8 +7089,10 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             view, offset = views[(views.index(view) + 1) % len(views)], 0
         elif key in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6")):
             view, offset = views[key - ord("1")], 0
-        elif key in (ord("a"), ord("A")) and view in ("office", "activity"):
+        elif key in (ord("a"), ord("A")) and view == "office":
             expanded = not expanded
+        elif key in (ord("a"), ord("A")) and view == "activity":
+            noise = not noise
         elif key == curses.KEY_UP:
             offset += 1 if view in FOLLOW_VIEWS else -1
         elif key == curses.KEY_DOWN:
@@ -7107,7 +7113,7 @@ def body_lines(stdscr) -> int:
     return max(1, stdscr.getmaxyx()[0] - 4)
 
 
-def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
+def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=False) -> int:
     """One repaint of the current view (the loop above decides when);
     returns the scroll offset clamped to the view."""
     import curses
@@ -7156,7 +7162,7 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
         hint = "Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  q: quit"
     elif view == "activity":
         all_lines = activity_lines(mon.tasks, github=mon.github, background=True,
-                                   show_noise=expanded)
+                                   show_noise=noise)
         header = _activity_screen_lines(all_lines[:1], w - 1)
         # Keep the header on the first Activity body row, but never on the
         # navigation hint row on very short terminals.
@@ -7173,8 +7179,9 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
         for row, line in enumerate(lines[max(0, end - available):end]):
             attr = colors.get("!", 0) if "未知" in line or "UNKNOWN" in line or "沒送到" in line else 0
             put(start + row, line, attr)
-        hint = ("Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  "
-                f"a: {'隱藏雜訊' if expanded else '顯示雜訊'}  End: follow  q: quit")
+        hint = (f"a: {'隱藏雜訊' if noise else '顯示雜訊'}  "
+                "Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  "
+                "End: follow  q: quit")
         if offset:
             hint = f"[scrolled back {offset}]  " + hint
     elif view == "office":
