@@ -1898,6 +1898,44 @@ def _reviewer_native_session_independent(reviewer, executor, codex):
             reviewer != executor and reviewer != codex)
 
 
+def _claude_cli_run_session(developer):
+    if (type(developer) is not dict or
+            developer.get('provider_profile') != 'claude' or
+            developer.get('backend_session_semantics') != 'CLI_REPORTED_SESSION_ID' or
+            developer.get('state') != 'DEVELOPER_RESPONDED'):
+        return None
+    execution = developer.get('execution')
+    if (type(execution) is not dict or execution.get('status') != 'DONE' or
+            type(execution.get('process_exit_code')) is not int or
+            execution.get('process_exit_code') != 0):
+        return None
+    native = execution.get('native_session_id')
+    return native if type(native) is str and native and native != 'UNKNOWN' else None
+
+
+def _claude_review_claim_matches(task, reviewer_task, pr, head, reviewer_native):
+    if type(task) is not dict:
+        return False
+    binding = task.get('task_binding')
+    claims = task.get('review_dispatch_claim')
+    if type(claims) is dict:
+        claims = [claims]
+    if type(claims) is not list or type(binding) is not dict:
+        return False
+    matches = [claim for claim in claims if
+        type(claim) is dict and
+        claim.get('pr') == pr and claim.get('head_sha') == head and
+        claim.get('reviewer_task') == reviewer_task and
+        claim.get('state') == 'COMPLETED' and
+        claim.get('native_session_id') == reviewer_native and
+        type(claim.get('review_result')) is dict and
+        claim['review_result'].get('task_id') == task.get('task_id') and
+        claim['review_result'].get('run_id') == task.get('run_id') and
+        claim['review_result'].get('contract_digest') == binding.get('contract_digest') and
+        claim['review_result'].get('head') == head]
+    return len(matches) == 1
+
+
 def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, context,
                       pm_goal, developer_route='company-gw'):
     packet = {
@@ -5410,6 +5448,12 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                     direct_execution.get('status') == 'DONE' and
                     direct_execution.get('native_session_binding') == 'BOUND'):
                 reviewer_independence_session = direct_execution.get('native_session_id')
+            claude_run_session = _claude_cli_run_session(developer)
+            claude_cli_route = (developer.get('provider_profile') == 'claude' and
+                                developer.get('backend_session_semantics') ==
+                                'CLI_REPORTED_SESSION_ID')
+            if claude_cli_route:
+                reviewer_independence_session = claude_run_session
             github = task_completion.collect_github_evidence(
                 pr_number=args.pr, result_sha=git_evidence['result_head'],
                 task_id=task['task_id'], run_id=task['run_id'],
@@ -5432,6 +5476,25 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                     codex_native = direct_execution.get('native_session_id')
                     if not _reviewer_native_session_independent(
                             reviewer_native, executor_native, codex_native):
+                        github['missing_gates'] = sorted(set(
+                            github['missing_gates'] +
+                            ['REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT']))
+                        github['evidence']['formal_review_state'] = 'UNVERIFIED'
+                except LLMToolError:
+                    # The primary collector already records unavailable D6
+                    # registration as a fail-closed reviewer gate.
+                    pass
+            elif claude_cli_route:
+                try:
+                    reviewer_registration = task_completion.read_d6_registration(
+                        args.reviewer_task, git_evidence['common_dir'])
+                    reviewer_native = reviewer_registration.native_session_id
+                    executor_native = claude_run_session
+                    if (not _reviewer_native_session_independent(
+                            reviewer_native, executor_native, executor_native) or
+                            not _claude_review_claim_matches(
+                                task, args.reviewer_task, args.pr,
+                                git_evidence['result_head'], reviewer_native)):
                         github['missing_gates'] = sorted(set(
                             github['missing_gates'] +
                             ['REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT']))
