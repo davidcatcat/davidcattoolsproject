@@ -3964,7 +3964,8 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(caught.exception.completion_code, 'REVIEW_REPAIR_DIGEST_MISMATCH')
 
 
-    def test_claude_bound_task_cli_end_to_end(self):
+    def _claude_bound_task_context(self, *, skip_remote_test=False,
+                                   skip_completed_claim=False, old_sha_receipt=False):
         from llmtool import remote_test, review_dispatch
         from llmtool.cli import main
 
@@ -3977,6 +3978,7 @@ class TaskCompletionTests(unittest.TestCase):
         self.common = str(root / '.git')
         self.task_id = d6_task
         self._git('init', '-b', 'feat/executor')
+        (Path(self.common) / 'llmtool-worktrees').mkdir(mode=0o700)
         self._git('config', 'user.name', 'Executor')
         self._git('config', 'user.email', 'executor@example.invalid')
         self.source_path = 'tools/llmtool/tests/test_fixture.py'
@@ -3985,7 +3987,7 @@ class TaskCompletionTests(unittest.TestCase):
         (root / 'tools' / 'llmtool' / '.gitignore').write_text(
             '/.d6-bootstrap-report.json\n')
         source.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
-                          '    def test_ok(self): self.assertEqual(1, 1)\n')
+                          '    def test_ok(self): self.assertTrue(True)\n')
         (root / 'README.md').write_text('Repository fixture.\n')
         self._git('add', self.source_path, 'tools/llmtool/.gitignore', 'README.md')
         self._git('commit', '-m', 'source')
@@ -4024,7 +4026,11 @@ class TaskCompletionTests(unittest.TestCase):
 
         def call(argv, stdin=''):
             output = StringIO()
-            with patch('sys.stdin', StringIO(stdin)), redirect_stdout(output), \
+            with patch.dict(os.environ, {
+                    'HOME': str(home), 'PATH': '/usr/bin:/bin',
+                    'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'},
+                    clear=True), \
+                    patch('sys.stdin', StringIO(stdin)), redirect_stdout(output), \
                     patch('llmtool.source_freshness.require_fresh_source',
                           return_value='OK'):
                 rc = main(argv)
@@ -4066,12 +4072,18 @@ class TaskCompletionTests(unittest.TestCase):
                         argv, 0, json.dumps(receipt).encode(), b'')
                 return real_remote_test(*args, transport=ssh, **kwargs)
 
-            with patch.object(remote_test, 'run_remote_test', side_effect=run_with_ssh):
-                rc, remote = call(['task', 'remote-test', task_id,
-                    '--executor-task', d6_task, '--sha', head,
-                    '--ref', 'refs/heads/feat/executor', '--module', 'test_fixture'])
-            self.assertIsNone(rc)
-            self.assertEqual(remote['result'], 'PASS')
+            if not skip_remote_test:
+                remote_sha = base if old_sha_receipt else head
+                if old_sha_receipt:
+                    receipt['source_sha'] = base
+                    receipt['tree'] = self._git('rev-parse', base + '^{tree}')
+                    receipt['fetch_head'] = base
+                with patch.object(remote_test, 'run_remote_test', side_effect=run_with_ssh):
+                    rc, remote = call(['task', 'remote-test', task_id,
+                        '--executor-task', d6_task, '--sha', remote_sha,
+                        '--ref', 'refs/heads/feat/executor', '--module', 'test_fixture'])
+                self.assertIsNone(rc)
+                self.assertEqual(remote['result'], 'PASS')
 
             pr = {'number': 10, 'state': 'open', 'merged': False,
                   'head': {'sha': head}, 'base': {'sha': base, 'repo': {
@@ -4114,13 +4126,15 @@ class TaskCompletionTests(unittest.TestCase):
                     patch.object(review_dispatch, '_create_d6', side_effect=create_d6), \
                     patch.object(review_dispatch, '_bind_d6', side_effect=bind_d6), \
                     patch.object(review_dispatch, '_dispatch_codex', side_effect=codex), \
-                    patch('llmtool.review_dispatch._github_get',
+                    patch('llmtool.task_completion._github_get',
                           side_effect=dispatch_github):
                 rc, dispatched = call(['task', 'review-dispatch', task_id,
                     '--executor-task', d6_task, '--pr', '10',
                     '--reviewer', 'codex-reviewer'])
             self.assertIsNone(rc)
             reviewer_task = dispatched['reviewer_task']
+            if skip_completed_claim:
+                store.update(task_id, review_dispatch_claim=[])
 
             checks = {'total_count': 2, 'check_runs': [
                 {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': head,
@@ -4136,34 +4150,103 @@ class TaskCompletionTests(unittest.TestCase):
                 *self._github_response_sequence(head, pr, [], checks,
                                                 comments=[comment]),
             ]
-            with patch('llmtool.task_completion._github_get',
-                       side_effect=github_responses):
-                rc, completed = call(['task', 'complete', task_id,
+            return {
+                'store': store, 'call': call, 'task_id': task_id, 'head': head,
+                'reviewer_task': reviewer_task,
+                'completion_argv': ['task', 'complete', task_id,
                     '--executor-task', d6_task, '--reviewer-task', reviewer_task,
-                    '--pr', '10'])
-            self.assertEqual(rc, 0)
-            completion = completed['completion']
-            self.assertEqual(completion['state'], 'PM_EVIDENCE_READY')
-            self.assertEqual(completion['missing_gates'], [])
-            self.assertEqual(completion['evidence']['result']['result_head'], head)
-            review_ci = completion['evidence']['review_pr_ci']
-            self.assertEqual(review_ci['formal_review_state'], 'ACCEPTED')
-            self.assertEqual(review_ci['ci_head'], head)
-            self.assertEqual(review_ci['ci_checks'], {
-                'check (macOS 3.13)': 'SUCCESS',
-                'check (Linux 3.14)': 'SUCCESS'})
-            self.assertEqual(completion['pm_dispatch'], 'NOT_STARTED')
-            self.assertIsNone(completed['developer']['artifact'])
-            saved = store.get(task_id)
-            self.assertEqual(saved['remote_test_receipts'][-1]['result'], 'PASS')
-            self.assertEqual(saved['remote_test_receipts'][-1]['source_sha'], head)
-            claims = [claim for claim in saved['review_dispatch_claim']
-                      if claim['state'] == 'COMPLETED']
-            self.assertEqual(len(claims), 1)
-            claim = claims[0]
-            self.assertEqual((claim['pr'], claim['head_sha'], claim['reviewer_task']),
-                             (10, head, reviewer_task))
-            self.assertEqual(claim['review_result']['review_text'], body)
+                    '--pr', '10'],
+                'github_responses': github_responses, 'body': body,
+                'root': root, 'common': self.common, 'base': base,
+            }
+
+    def _complete_claude_bound_context(self, context):
+        with patch('llmtool.task_completion._github_get',
+                   side_effect=context['github_responses']):
+            return context['call'](context['completion_argv'])
+
+    def test_claude_bound_task_cli_end_to_end(self):
+        context = self._claude_bound_task_context()
+        rc, completed = self._complete_claude_bound_context(context)
+        self.assertEqual(rc, 0)
+        completion = completed['completion']
+        self.assertEqual(completion['state'], 'PM_EVIDENCE_READY')
+        self.assertEqual(completion['missing_gates'], [])
+        self.assertEqual(completion['evidence']['result']['result_head'], context['head'])
+        review_ci = completion['evidence']['review_pr_ci']
+        self.assertEqual(review_ci['formal_review_state'], 'ACCEPTED')
+        self.assertEqual(review_ci['ci_head_sha'], context['head'])
+        self.assertEqual(review_ci['required_checks'], [
+            'check (Linux 3.14)', 'check (macOS 3.13)'])
+        self.assertEqual(completion['pm_dispatch'], 'NOT_STARTED')
+        self.assertIsNone(completed['developer']['artifact'])
+        saved = context['store'].get(context['task_id'])
+        self.assertEqual(saved['remote_test_receipts'][-1]['result'], 'PASS')
+        self.assertEqual(saved['remote_test_receipts'][-1]['source_sha'], context['head'])
+        claims = [claim for claim in saved['review_dispatch_claim']
+                  if claim['state'] == 'COMPLETED']
+        self.assertEqual(len(claims), 1)
+        claim = claims[0]
+        self.assertEqual((claim['pr'], claim['head_sha'], claim['reviewer_task']),
+                         (10, context['head'], context['reviewer_task']))
+        self.assertEqual(claim['review_result']['review_text'], context['body'])
+
+    def _assert_cli_completion_waits(self, context, expected_gate):
+        rc, result = self._complete_claude_bound_context(context)
+        self.assertEqual(rc, 1)
+        completion = result['completion']
+        self.assertEqual(completion['missing_gates'], [expected_gate])
+        self.assertIn(completion['state'], ('WAITING_REVIEW', 'WAITING_GATES'))
+        self.assertEqual(completion['pm_dispatch'], 'NOT_STARTED')
+
+    def test_claude_bound_complete_rejects_wrong_claude_result_head(self):
+        context = self._claude_bound_task_context()
+        task = context['store'].get(context['task_id'])
+        developer = dict(task['developer'])
+        claude_result = dict(developer['claude_result'])
+        claude_result['head_sha'] = context['base']
+        developer['claude_result'] = claude_result
+        context['store'].update(context['task_id'], developer=developer)
+        self._assert_cli_completion_waits(context, 'CLAUDE_RESULT_BINDING_INVALID')
+
+    def test_claude_bound_complete_rejects_stale_env2_marker(self):
+        context = self._claude_bound_task_context()
+        registry = Path(context['common']) / 'llmtool-worktrees' / ('4' * 32 + '.json')
+        value = json.loads(registry.read_text(encoding='utf-8'))
+        value['env2_pass_marker']['current_head_sha'] = context['base']
+        registry.write_text(json.dumps(value), encoding='utf-8')
+        registry.chmod(0o600)
+        self._assert_cli_completion_waits(context, 'D6_ENV2_PASS_MARKER_MISMATCH')
+
+    def test_claude_bound_complete_requires_remote_test_receipt(self):
+        context = self._claude_bound_task_context(skip_remote_test=True)
+        self._assert_cli_completion_waits(context, 'REMOTE_TEST_RECEIPT_MISSING')
+
+    def test_claude_bound_complete_rejects_old_sha_remote_receipt(self):
+        context = self._claude_bound_task_context(old_sha_receipt=True)
+        self._assert_cli_completion_waits(context, 'REMOTE_TEST_RECEIPT_MISSING')
+
+    def test_claude_bound_complete_requires_completed_review_dispatch_claim(self):
+        context = self._claude_bound_task_context(skip_completed_claim=True)
+        self._assert_cli_completion_waits(context, 'FORMAL_REVIEW_MISSING')
+
+    def test_non_claude_executor_requires_bound_artifact(self):
+        result_sha, _ = self._make_result()
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+            cwd=self.root, text=True)
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.collect_executor_result(
+                task_id=self.task_id, expected_common_dir=self.common,
+                expected_root=str(self.root), expected_branch='feat/executor',
+                source_sha=self.source_sha,
+                task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                              'contract_digest': '3' * 64},
+                expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+                expected_native_session_id='native-executor',
+                write_paths=[self.source_path], artifact=None, artifact_sha256=None)
+        self.assertEqual(caught.exception.completion_code,
+                         'DEVELOPER_ARTIFACT_BINDING_INVALID')
 
 if __name__ == '__main__':
     unittest.main()
