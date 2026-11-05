@@ -1886,6 +1886,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(row.work, "#965 · PR #977 · task 11111111 · D6 wp-1：Work board view from existing state and …")
         self.assertTrue(row.detail.startswith("Current action"), row.detail)
         self.assertNotIn("Original title", row.detail)
+        self.assertTrue(row.work_bound)
         self.assertIn(row.work, "\n".join(mon.office_lines([row])))
         self.assertNotIn("GOAL-SECRET", row.work + row.detail)
         self.assertNotIn("REPORTED-SECRET", row.work + row.detail)
@@ -1902,6 +1903,16 @@ class OfficeViewTests(unittest.TestCase):
         rows = self.rows(llmtool_tasks=str(tasks))
         self.assertEqual(next(row for row in rows if row.task == "task wp-1").work,
                          "未綁定工作（D6 wp-1）")
+
+    def test_codex_exec_fallback_does_not_bind_one_task_to_two_sessions(self):
+        self._register("wp-1", str(self.task), trusted_agent_id="codex-developer")
+        tasks = Path(self.tmp.name) / "tasks"
+        self._work_record(tasks, "2" * 32, state="DEVELOPER_DISPATCHING", session="")
+        self._codex_for_task("exec-one", self.task, "a" * 32, "codex_exec", 20)
+        self._codex_for_task("exec-two", self.task, "b" * 32, "codex_exec", 15)
+        rows = [row for row in self.rows(llmtool_tasks=str(tasks)) if row.task == "task wp-1"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row.work for row in rows}, {"未綁定工作（D6 wp-1）"})
 
     def test_codex_tui_requires_exact_session_and_unregistered_rows_never_bind(self):
         self._register("wp-1", str(self.task), trusted_agent_id="codex-developer")
@@ -1960,14 +1971,31 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(entries[0].summary, "Safe summary")
         self.assertNotIn("SECRET", entries[0].summary)
 
+    def test_codex_work_oversized_record_reports_unconfirmed_even_when_cached(self):
+        tasks = Path(self.tmp.name) / "oversized-tasks"
+        self._work_record(tasks, "c" * 32)
+        with patch.object(mon, "REMOTE_TEST_READ", 50):
+            first = mon.codex_work_records(str(tasks))
+            second = mon.codex_work_records(str(tasks))
+        self.assertEqual(first[1], mon.REMOTE_TEST_OVER_BUDGET)
+        self.assertEqual(second[1], mon.REMOTE_TEST_OVER_BUDGET)
+
+    def test_codex_work_unreadable_regular_record_reports_unconfirmed(self):
+        tasks = Path(self.tmp.name) / "unreadable-tasks"
+        self._work_record(tasks, "e" * 32)
+        with patch.object(mon, "_remote_test_open", return_value=None):
+            entries, problem = mon.codex_work_records(str(tasks))
+        self.assertEqual(entries, [])
+        self.assertEqual(problem, mon.REMOTE_TEST_OVER_BUDGET)
+
     def test_codex_work_matching_window_exact_id_and_cache(self):
         task_a = mon.CodexWork("1" * 32, "wp-1", "session-a", "DEVELOPER_RUNNING",
                                self.NOW - 10, "965", "summary")
         task_b = mon.CodexWork("2" * 32, "wp-1", "", "DEVELOPER_DISPATCHING",
                                self.NOW - 10, "", "")
-        self.assertIs(mon._codex_work_match([task_a], "wp-1", "session-a", 0, False), task_a)
+        self.assertEqual(mon._codex_work_match([task_a], "wp-1", "session-a", 0, False), (task_a, True))
         self.assertIsNone(mon._codex_work_match([task_a], "other-d6", "session-a", 0, False))
-        self.assertIs(task_b, mon._codex_work_match([task_b], "wp-1", "", self.NOW - 15, True))
+        self.assertEqual(mon._codex_work_match([task_b], "wp-1", "", self.NOW - 15, True), (task_b, False))
         self.assertIsNone(mon._codex_work_match([task_b], "wp-1", "", self.NOW - 20, True))
         self.assertIsNone(mon._codex_work_match([task_b], "wp-1", "", self.NOW - 15, False))
         task_c = mon.CodexWork("3" * 32, "other-d6", "session-c", "DEVELOPER_RUNNING",
@@ -1986,6 +2014,36 @@ class OfficeViewTests(unittest.TestCase):
             first = opened.call_count
             mon.codex_work_records(str(tasks))
         self.assertEqual(opened.call_count, first)
+
+    def test_bound_work_keeps_detail_alert_and_event_identity_unchanged(self):
+        self._register("wp-1", str(self.task), trusted_agent_id="codex-developer")
+        tasks = Path(self.tmp.name) / "tasks"
+        self._work_record(tasks, "d" * 32, session="e" * 32)
+        original = mon.OfficeRow("codex developer", mon.ATTENTION, "Title；failed", 10, 10,
+                                 key="codex:session", role="developer", task="task wp-1",
+                                 exec_result="failed", codex_session="e" * 32,
+                                 codex_title="Title")
+        with patch.object(mon, "codex_work_records", return_value=([], "")):
+            unbound = mon._codex_work_rows([original], self.NOW, self.canonical,
+                                           str(tasks), None)[0]
+        with patch.object(mon, "codex_work_records") as records:
+            records.return_value = ([mon.CodexWork("d" * 32, "wp-1", "e" * 32,
+                                                    "DEVELOPER_RUNNING", self.NOW - 20, "965", "")], "")
+            bound = mon._codex_work_rows([original], self.NOW, self.canonical,
+                                         str(tasks), None)[0]
+        self.assertEqual(bound.detail, unbound.detail)
+        self.assertEqual(mon.office_events({}, [bound])[0], mon.office_events({}, [unbound])[0])
+        bound_alert = [line for line in mon.office_lines([bound], expand=True) if line.startswith("⚠")]
+        unbound_alert = [line for line in mon.office_lines([unbound], expand=True) if line.startswith("⚠")]
+        self.assertEqual(bound_alert, unbound_alert)
+        self.assertTrue(bound.work_bound)
+        self.assertNotIn("Title", mon._row_detail(bound))
+
+    def test_bound_title_only_row_keeps_source_detail_but_hides_title_in_display(self):
+        row = mon.OfficeRow("codex developer", mon.IDLE, "Title", 1, 10,
+                            work="task 12345678 · D6 wp-1", codex_title="Title", work_bound=True)
+        self.assertEqual(row.detail, "Title")
+        self.assertEqual(mon._row_detail(row), row.work)
 
     def test_codex_work_budget_short_and_main_rows_do_not_bind(self):
         tasks = Path(self.tmp.name) / "tasks"

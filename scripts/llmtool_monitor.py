@@ -2420,6 +2420,7 @@ class OfficeRow:
     codex_started: float = 0.0
     codex_exec: bool = False
     codex_title: str = ""
+    work_bound: bool = False
 
 
 @dataclass(frozen=True)
@@ -2438,7 +2439,10 @@ def _shown(row: "OfficeRow") -> str:
 
 
 def _row_detail(row: OfficeRow) -> str:
-    return f"{row.work}；{row.detail}" if row.work and row.detail else row.work or row.detail
+    detail = row.detail
+    if row.work_bound and row.codex_title and detail.startswith(row.codex_title):
+        detail = detail[len(row.codex_title):].lstrip("；")
+    return f"{row.work}；{detail}" if row.work and detail else row.work or detail
 
 
 def _codex_sid(thread_id) -> str:
@@ -5549,16 +5553,22 @@ def codex_work_records(root: str | None = None) -> tuple[list[CodexWork], str]:
             continue
         if stat.S_ISREG(info.st_mode):
             stamped.append((info.st_mtime, path,
-                            (info.st_ino, info.st_mtime_ns, info.st_size)))
+                            (info.st_ino, info.st_mtime_ns, info.st_size), info.st_nlink))
     budget, short, kept, entries = CODEX_WORK_BUDGET, False, {}, []
     parsed = _codex_work_parsed.get(root, {})
-    for _, path, key in sorted(stamped, reverse=True)[:REMOTE_TEST_FILES]:
+    for _, path, key, link_count in sorted(stamped, reverse=True)[:REMOTE_TEST_FILES]:
+        if link_count != 1:
+            continue
+        if key[2] > REMOTE_TEST_READ:
+            short = True
+            continue
         cached = parsed.get(path)
         if cached and cached[0] == key:
             record_entries = cached[1]
         else:
             opened = _remote_test_open(path, budget)
             if opened is None:
+                short = True
                 continue
             key, raw = opened
             if raw is False:
@@ -5578,12 +5588,12 @@ def codex_work_records(root: str | None = None) -> tuple[list[CodexWork], str]:
 
 
 def _codex_work_match(entries: list[CodexWork], d6: str, session: str,
-                      started: float, exec_run: bool) -> CodexWork | None:
+                      started: float, exec_run: bool) -> tuple[CodexWork, bool] | None:
     exact = [entry for entry in entries if entry.d6 == d6 and session
              and entry.session == session]
     exact_tasks = {entry.task: entry for entry in exact}
     if len(exact_tasks) == 1:
-        return next(iter(exact_tasks.values()))
+        return next(iter(exact_tasks.values())), True
     if len(exact_tasks) > 1 or not exec_run:
         return None
     running = [entry for entry in entries if entry.d6 == d6
@@ -5591,7 +5601,7 @@ def _codex_work_match(entries: list[CodexWork], d6: str, session: str,
                and entry.created > 0
                and entry.created - CODEX_WORK_BEFORE <= started <= entry.created + CODEX_WORK_AFTER]
     tasks = {entry.task: entry for entry in running}
-    return next(iter(tasks.values())) if len(tasks) == 1 else None
+    return (next(iter(tasks.values())), False) if len(tasks) == 1 else None
 
 
 def _codex_work_label(entry: CodexWork, pr: int | None) -> str:
@@ -6309,6 +6319,20 @@ def _codex_work_rows(rows: list[OfficeRow], now: float, canonical: str,
         registered = registry_details(canonical)
     except Exception:
         entries, problem, registered = [], REMOTE_TEST_OVER_BUDGET, {}
+    matches = {}
+    fallback_counts = {}
+    for row in targets:
+        task_id = row.task[5:] if row.task.startswith("task ") else ""
+        if task_id not in registered or row.role in ("reviewer", "debug reviewer"):
+            continue
+        match = _codex_work_match(entries, task_id, row.codex_session,
+                                  row.codex_started, row.codex_exec)
+        if match:
+            matches[id(row)] = match
+            entry, exact = match
+            if not exact:
+                key = (task_id, entry.task)
+                fallback_counts[key] = fallback_counts.get(key, 0) + 1
     out = []
     for row in rows:
         if id(row) not in target_ids:
@@ -6326,22 +6350,19 @@ def _codex_work_rows(rows: list[OfficeRow], now: float, canonical: str,
                 work = f"診斷 D6 {name} @{task_id[-7:]}"
                 bound = True
             else:
-                match = _codex_work_match(entries, task_id, row.codex_session,
-                                          row.codex_started, row.codex_exec)
-                if match:
+                match = matches.get(id(row))
+                if match and (match[1] or fallback_counts.get((task_id, match[0].task), 0) == 1):
+                    entry = match[0]
                     branch = registered[task_id][4]
                     pr = prs.get(branch, (None, ""))[0] if prs is not None and branch else None
-                    work = _codex_work_label(match, pr)
+                    work = _codex_work_label(entry, pr)
                     bound = True
                 else:
                     work = (f"工作紀錄未讀完，未確認（D6 {task_id}）" if problem
                             else f"未綁定工作（D6 {task_id}）")
         else:
             work = "未綁定工作"
-        detail = row.detail
-        if bound and row.codex_title and detail.startswith(row.codex_title):
-            detail = detail[len(row.codex_title):].lstrip("；")
-        out.append(replace(row, work=work, detail=detail))
+        out.append(replace(row, work=work, work_bound=bound))
     return out
 
 
