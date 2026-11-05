@@ -69,7 +69,7 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
     registration, _snapshot = _registered_d6(original_task, executor_task)
     args = Namespace(
         task_id=task['task_id'], provider=developer['provider_profile'],
-        mode='direct' if developer['provider_profile'] in ('codex', 'agy') else 'proposal',
+        mode='direct' if developer['provider_profile'] in ('codex', 'agy', 'claude') else 'proposal',
         owner_ref=developer.get('owner_assignment_ref'),
         selection_source='PM',
         executor_task=executor_task, cwd=registration.root,
@@ -91,7 +91,7 @@ def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_
             type(provenance.get('pm_cwd')) is not str):
         _refuse('REPAIR_PM_SESSION_UNAVAILABLE')
     route = developer.get('provider_profile')
-    if route not in ('codex', 'opencode', 'agy'):
+    if route not in ('codex', 'opencode', 'agy', 'claude'):
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     pm_assignment = task.get('pm_assignment')
     if type(pm_assignment) is not dict or type(pm_assignment.get('goal')) is not str:
@@ -298,8 +298,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                       pr_number=pr_number, receipt=remote_test_receipt)
     if _current_d6_head(task, executor_task, current_head) != packet['failed_head']:
         _refuse('REPAIR_HEAD_MOVED')
+    policy_task = executor_task if profile == 'claude' else task_id
     decision = worker_dispatch.evaluate(
-        worker, developer.get('owner_assignment_ref'), task_id)
+        worker, developer.get('owner_assignment_ref'), policy_task)
     if not decision.allowed:
         _refuse(decision.reason_code)
     family = f'pr-{pr_number}' if family is None else family
@@ -389,8 +390,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         _refuse('REPAIR_TASK_RECORD_UNAVAILABLE')
 
     # Re-read the Owner switch immediately before the provider side effect.
+    policy_task = executor_task if profile == 'claude' else task_id
     decision = worker_dispatch.evaluate(
-        worker, developer.get('owner_assignment_ref'), task_id)
+        worker, developer.get('owner_assignment_ref'), policy_task)
     if not decision.allowed:
         _refuse(decision.reason_code)
     adapter = dispatch_adapter
