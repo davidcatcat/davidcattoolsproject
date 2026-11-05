@@ -5899,6 +5899,64 @@ class OfficeViewTests(unittest.TestCase):
         # without a width (--once) nothing is cut
         self.assertIn("x" * 200, "\n".join(mon.office_lines(rows)))
 
+    def test_compact_office_rows_put_state_and_name_first(self):
+        rows = [mon.OfficeRow("codex debug reviewer 931c3f4d", mon.WORKING,
+                              "long detail keeps its words", 0, 10, key="main",
+                              work="task wp one"),
+                mon.OfficeRow("codex subagent", mon.ATTENTION, "subagent detail words", 0, 20,
+                              group="main", kind="subagent")]
+        for width in (40, 60):
+            listed = mon.office_view(rows, width=width, expand=True)
+            main_at = next(i for i, (line, _) in enumerate(listed)
+                           if "codex debug reviewer 931c3f4d" in line)
+            sub_at = next(i for i, (line, _) in enumerate(listed)
+                          if line.startswith(mon.ATTENTION) and "codex subagent" in line)
+            self.assertTrue(listed[main_at][0].startswith(mon.WORKING))
+            self.assertTrue(listed[sub_at][0].startswith(mon.ATTENTION))
+            self.assertTrue(all(mon._width(line) <= width for line, _ in listed))
+            self.assertTrue(any("剛剛" in line for line, _ in listed[main_at:main_at + 5]))
+            self.assertTrue(any("long detail" in line for line, _ in listed[main_at:main_at + 5]))
+            self.assertTrue(any("task wp one" in line for line, _ in listed[main_at:main_at + 5]))
+            main_style = mon._row_style(mon.WORKING)
+            sub_style = mon._row_style(mon.ATTENTION)
+            main_lines = [listed[main_at]]
+            for line, style in listed[main_at + 1:]:
+                if not line.startswith("  ") or style != main_style:
+                    break
+                main_lines.append((line, style))
+            sub_lines = [listed[sub_at]]
+            for line, style in listed[sub_at + 1:]:
+                if not line.startswith("  ") or style != sub_style:
+                    break
+                sub_lines.append((line, style))
+            self.assertTrue(all(style == main_style for _, style in main_lines))
+            self.assertTrue(all(style == sub_style for _, style in sub_lines))
+
+    def test_office_compact_threshold_and_empty_detail(self):
+        row = mon.OfficeRow("plain name", mon.WORKING, "detail words", 0, 1)
+        name_cols = mon._width(mon._shown(row)) + 2
+        threshold = name_cols + 8 + mon.OFFICE_MIN_DETAIL + mon.OFFICE_TIME_COLS
+        below = mon.office_view([row], width=threshold - 1)
+        at = mon.office_view([row], width=threshold)
+        self.assertTrue(next(line for line, _ in below if "plain name" in line).startswith(mon.WORKING))
+        at_line = next(line for line, _ in at if "plain name" in line)
+        self.assertGreater(at_line.index(mon.WORKING), at_line.index("plain name"))
+        no_detail = mon.OfficeRow("plain name", mon.WORKING, "", None, 1)
+        compact = mon.office_view([no_detail], width=10)
+        start = next(i for i, (line, _) in enumerate(compact) if "plain name" in line)
+        self.assertFalse(compact[start + 1][0].startswith("  "))
+        self.assertTrue(all(mon._width(line) <= 10 for line, _ in compact))
+        wide_line = next(line for line, _ in mon.office_view([row]) if "plain name" in line)
+        self.assertGreater(wide_line.index(mon.WORKING), wide_line.index("plain name"))
+
+    def test_compact_office_width_counts_double_width_names(self):
+        row = mon.OfficeRow("中文工作名稱 plain name", mon.WORKING,
+                            "detail words that continue", 0, 1)
+        listed = mon.office_view([row], width=32)
+        self.assertTrue(all(mon._width(line) <= 32 for line, _ in listed))
+        first = next(line for line, _ in listed if line.startswith(mon.WORKING))
+        self.assertIn("中文", first)
+
     def test_office_header_shows_working_and_waiting_counts_or_unknown(self):
         self.assertEqual(mon.office_view([], error="OSError")[0][0],
                          "辦公室 · 工作中 ? · 等你 ?")
@@ -6782,6 +6840,88 @@ class FakeKernel:
     def command(self, pid):
         self.reads.append(pid)
         return self.commands.get(pid)
+
+
+class ProcessTableDisplayTests(unittest.TestCase):
+    def setUp(self):
+        self.process = mon.Process(1, 0, 1, "00:12", "S", "Codex Developer",
+                                   "codex", "owner with a long name")
+
+    def test_full_table_is_unchanged_and_narrow_table_prioritizes_key_fields(self):
+        expected = ["ROLE                      NAME         PID     OWNER                          PGID    STATE ELAPSED",
+                    "Codex Developer           codex        1       owner with a long name         1       S     00:12"]
+        self.assertEqual(mon.table_lines([self.process]), expected)
+        self.assertEqual(mon.table_lines([self.process], 93), expected)
+        long_owner = replace(self.process,
+                             owner="owner with a very long name that does not fit here")
+        narrow = mon.table_lines([long_owner], 80)
+        self.assertTrue(narrow[0].startswith("ROLE                      PID     STATE ELAPSED"))
+        self.assertTrue(narrow[1].startswith("Codex Developer           1       S     00:12"))
+        self.assertTrue(narrow[1].endswith("…"))
+        self.assertEqual(len(narrow[0]), 80)
+        self.assertEqual(len(narrow[1]), 80)
+
+    def test_minimum_narrow_widths_and_missing_owner(self):
+        process = mon.Process(2, 0, 2, "01:02", "S", "Role", "codex", "")
+        at_51 = mon.table_lines([process], 51)
+        self.assertTrue(at_51[0].endswith("ELAPSED    "))
+        self.assertNotIn("OWNER", at_51[0])
+        self.assertTrue(at_51[1].endswith("01:02      "))
+        self.assertIn("-", mon.table_lines([process], 60)[1])
+        self.assertTrue(mon.table_lines([process], 52))
+        self.assertTrue(mon.table_lines([process], 1))
+
+    def test_process_view_supplies_narrow_width(self):
+        class Screen:
+            def getmaxyx(self): return (12, 81)
+            def erase(self): pass
+            def move(self, y, x): pass
+            def refresh(self): pass
+
+        monitor = type("MonitorFixture", (), {
+            "version": "test", "disk_usage": None, "polls": 1, "error": None,
+            "processes": [self.process], "lingering": [], "tasks": [], "stale": False,
+            "github": None})()
+        drawn = []
+        with patch.object(mon, "summary", return_value=""), \
+                patch.object(mon, "running_stages", return_value=0), \
+                patch.object(mon, "behind_line", return_value=""):
+            mon._paint_screen(Screen(), monitor, "table", 0, False, {},
+                              lambda row, text, attr=0: drawn.append((row, text, attr)))
+        self.assertTrue(any("00:12" in line for _, line, _ in drawn))
+
+
+class TasksScreenWrappingTests(unittest.TestCase):
+    def test_wrapped_source_lines_keep_attributes_and_offset_counts_pieces(self):
+        import curses
+
+        class Screen:
+            def getmaxyx(self): return (10, 61)
+            def erase(self): pass
+            def move(self, y, x): pass
+            def refresh(self): pass
+
+        monitor = type("MonitorFixture", (), {
+            "version": "test", "disk_usage": None, "polls": 1, "error": None,
+            "processes": [], "lingering": [], "tasks": [], "stale": False,
+            "github": None, "d6": [], "records": [], "opencode_route": None,
+            "opencode_route_failed": False})()
+        d6_line = "D6 任務 RUNNING phase plain words " + "plain words " * 12 + "who plain name"
+        drawn = []
+        with patch.object(mon, "summary", return_value=""), \
+                patch.object(mon, "running_stages", return_value=0), \
+                patch.object(mon, "behind_line", return_value=""), \
+                patch.object(mon, "d6_lines", return_value=[d6_line] * 4), \
+                patch.object(mon, "record_lines", return_value=[]), \
+                patch.object(mon, "task_lines", return_value=[]):
+            offset = mon._paint_screen(Screen(), monitor, "tasks", 100, False, {"+": 16},
+                                       lambda row, text, attr=0: drawn.append((row, text, attr)))
+        body = [entry for entry in drawn if 3 <= entry[0] < 9 and entry[1]]
+        self.assertGreaterEqual(len(body), 2)
+        self.assertTrue(any("phase" in text for _, text, _ in body))
+        self.assertTrue(any("who" in text for _, text, _ in body))
+        self.assertTrue(all(attr == (curses.A_BOLD | 16) for _, _, attr in body))
+        self.assertGreater(offset, 0)
 
 
 def kproc(pid, ppid, start, comm=b"x", uid=None, pstat=2, pgid=None, **kwargs):

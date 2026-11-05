@@ -832,11 +832,30 @@ def _disk_volume_stats(path: str) -> tuple[int, int, int, int]:
     return usage.f_blocks, usage.f_bfree, usage.f_bavail, usage.f_frsize
 
 
-def table_lines(processes: list[Process]) -> list[str]:
-    # Owner sits next to PID so it stays visible in an 80-column terminal.
-    lines = [f"{'ROLE':<25} {'NAME':<12} {'PID':<7} {'OWNER':<30} {'PGID':<7} {'STATE':<5} ELAPSED"]
-    lines += [f"{_fit(p.role, 25):<25} {_fit(p.name, 12):<12} {p.pid:<7} {_fit(p.owner or '-', 30):<30} "
-              f"{p.pgid:<7} {p.state:<5} {p.elapsed}" for p in processes]
+# Narrow screens keep the fields needed to identify process state on the left.
+TABLE_FULL_WIDTH = 93
+
+
+def table_lines(processes: list[Process], width: int | None = None) -> list[str]:
+    if width is None or width >= TABLE_FULL_WIDTH:
+        # Keep the full --once and wide-screen table byte-for-byte unchanged.
+        lines = [f"{'ROLE':<25} {'NAME':<12} {'PID':<7} {'OWNER':<30} {'PGID':<7} {'STATE':<5} ELAPSED"]
+        lines += [f"{_fit(p.role, 25):<25} {_fit(p.name, 12):<12} {p.pid:<7} {_fit(p.owner or '-', 30):<30} "
+                  f"{p.pgid:<7} {p.state:<5} {p.elapsed}" for p in processes]
+        return lines
+    owner_width = max(0, width - 51)
+    header = f"{'ROLE':<25} {'PID':<7} {'STATE':<5} {'ELAPSED':<11}"
+    if owner_width:
+        header += f"{'OWNER':<{owner_width}}"
+    lines = [header]
+    for process in processes:
+        line = (f"{_fit(process.role, 25):<25} {process.pid:<7} "
+                f"{process.state:<5} {process.elapsed:<11}")
+        if owner_width:
+            owner = process.owner or "-"
+            fitted = _fit(owner, owner_width) if owner_width >= 2 else "…"
+            line += f"{fitted:<{owner_width}}"
+        lines.append(line)
     return lines
 
 
@@ -7244,6 +7263,8 @@ def _review_alerts(rows: list[OfficeRow]) -> list[str]:
 
 DETAIL_COLS = 44   # detail width when the screen width is not known
 DETAIL_MAX = 72    # widest detail column: longer text wraps, the time stays near it
+OFFICE_MIN_DETAIL = 12
+OFFICE_TIME_COLS = 11
 BREAK_AFTER = "；，、 "   # preferred places to continue on the next line
 NO_LINE_START = "）」』】，。、；：！？)]}"
 
@@ -7422,12 +7443,24 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     # what the screen leaves, so the time stays near its text on a wide screen.
     longest = max([_width(_row_detail(row)) for _, row in tree if _row_detail(row)] or [0])
     detail_cols = (DETAIL_COLS if width is None else
-                   max(12, min(longest, DETAIL_MAX, width - name_cols - 8 - 11)))
+                   max(OFFICE_MIN_DETAIL, min(longest, DETAIL_MAX,
+                                              width - name_cols - 8 - OFFICE_TIME_COLS)))
+    compact = (width is not None and
+               width < name_cols + 8 + OFFICE_MIN_DETAIL + OFFICE_TIME_COLS)
     for prefix, row in tree:
         if prefix == "—":
             if row.name == STATUS_SECTION:
                 out.append(("", ""))   # a blank line sets the Worker list apart
             out.append((f"── {row.name} ──", "section"))
+            continue
+        style = _line_style(row, rows)
+        if compact:
+            first = _pad(row.state, 8) + prefix + _shown(row)
+            out += [(piece, style) for piece in _wrap(first, width)]
+            rest = "  ".join(piece for piece in (_short_ago(row.age), _row_detail(row)) if piece)
+            if rest:
+                out += [("  " + piece, style)
+                        for piece in _wrap(rest, max(1, width - 2))]
             continue
         # In the TUI a long detail continues on the next lines under itself.
         detail = _row_detail(row)
@@ -7436,7 +7469,6 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
         line = f"{_pad(prefix + _shown(row), name_cols)}{_pad(row.state, 8)}{pieces[0]}"
         if when:
             line = f"{_pad(line, name_cols + 8 + detail_cols)}  {when}"
-        style = _line_style(row, rows)
         out.append((line.rstrip(), style))
         out += [(" " * (name_cols + 8) + piece, style) for piece in pieces[1:]]
     legend.append("工作中 = 最近有動作，不代表模型正在產生內容")
@@ -7654,16 +7686,19 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
         if offset:
             hint = f"[scrolled back {offset}]  " + hint
     elif view == "tasks":
-        lines = (d6_lines(mon.d6) + [""] + record_lines(mon.records) + [""]
-                 + task_lines(mon.tasks, route=mon.opencode_route,
-                             route_failed=mon.opencode_route_failed))
-        offset = max(0, min(offset, len(lines) - body))
-        for row, line in enumerate(lines[offset:offset + body]):
-            attr = curses.A_BOLD if line.startswith(("任務 ", "llmtool 任務紀錄", "D6 任務")) else 0
-            if "RUNNING" in line:
+        source_lines = (d6_lines(mon.d6) + [""] + record_lines(mon.records) + [""]
+                        + task_lines(mon.tasks, route=mon.opencode_route,
+                                    route_failed=mon.opencode_route_failed))
+        lines = []
+        for source in source_lines:
+            attr = curses.A_BOLD if source.startswith(("任務 ", "llmtool 任務紀錄", "D6 任務")) else 0
+            if "RUNNING" in source:
                 attr |= colors.get("+", 0)
-            elif "UNKNOWN" in line or "TIMEOUT" in line or "BLOCKED" in line or " error" in line:
+            elif "UNKNOWN" in source or "TIMEOUT" in source or "BLOCKED" in source or " error" in source:
                 attr |= colors.get("!", 0)
+            lines.extend((piece, attr) for piece in _wrap(source, max(1, w - 1)))
+        offset = max(0, min(offset, len(lines) - body))
+        for row, (line, attr) in enumerate(lines[offset:offset + body]):
             put(3 + row, line, attr)
         hint = "Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  q: quit"
     elif view == "activity":
@@ -7717,7 +7752,7 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
             put(3 + row, line, styles.get(style, 0))
         hint = "Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  q: quit"
     else:
-        lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
+        lines = table_lines(mon.processes, w - 1) if not mon.error else ["(process table unavailable)"]
         offset = max(0, min(offset, len(lines) - body))
         for row, line in enumerate(lines[offset:offset + body]):
             put(3 + row, line, curses.A_BOLD if offset + row == 0 else 0)
