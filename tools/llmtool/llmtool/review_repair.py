@@ -10,7 +10,7 @@ from argparse import Namespace
 
 from . import review_result, run_budget, task_completion, worker_dispatch
 from .errors import LLMToolError
-from .task_store import new_id
+from .task_store import _json_bytes, new_id
 
 # This same-class repair cap is separate from worker_dispatch's per-dispatch limit of 1.
 MAX_REPAIR_ATTEMPTS = run_budget.MAX_REPAIR_ATTEMPTS
@@ -239,9 +239,7 @@ def _remote_test_failure(task, *, executor_task, pr_number, receipt):
         _refuse('REMOTE_TEST_RECEIPT_INVALID')
     digest_input = dict(receipt)
     claimed = digest_input.pop('receipt_digest', None)
-    digest = hashlib.sha256(json.dumps(
-        digest_input, ensure_ascii=True, sort_keys=True,
-        separators=(',', ':')).encode('utf-8')).hexdigest()
+    digest = hashlib.sha256(_json_bytes(digest_input)).hexdigest()
     excerpt = receipt.get('failure_excerpt')
     try:
         valid_excerpt = (type(excerpt) is str and len(excerpt.encode('utf-8')) <= 4096 and
