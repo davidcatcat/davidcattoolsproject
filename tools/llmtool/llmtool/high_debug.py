@@ -9,10 +9,13 @@ import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 from .errors import LLMToolError
 from . import task_completion, task_store, worker_dispatch
-from .test_output_excerpts import _emitted_sensitive
+from .test_output_excerpts import (
+    _SENSITIVE, _emitted_sensitive, _sensitive_jwt, _sensitive_url,
+)
 
 REPORT_SECTIONS = ('Identity and source', 'Symptom and reproduction', 'Root Cause',
                    'Exactly what to modify', 'Verification', 'Risks and handoff',
@@ -25,6 +28,23 @@ _RECORD_TOKEN = re.compile(r'[A-Za-z0-9._-]{1,64}\Z')
 _REFUSAL_CODES = frozenset((
     'HIGH_DEBUG_RUN_FAILED', 'HIGH_DEBUG_WROTE_FILES',
     'HIGH_DEBUG_REPORT_INVALID'))
+_SCREEN_HIT_LIMIT = 32
+_SCREEN_RULES = (
+    ('private_key', re.compile(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----', re.I)),
+    ('cloud_key', re.compile(r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b', re.I)),
+    ('provider_key', re.compile(r'\bsk-[A-Za-z0-9_-]{12,}', re.I)),
+    ('git_host_key', re.compile(r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}', re.I)),
+    ('chat_key', re.compile(r'\bxox[abprs]-[A-Za-z0-9-]{20,}', re.I)),
+    ('auth_scheme', re.compile(r'\b(?:bearer|basic)\s+\S+', re.I)),
+    ('keyword_assign', re.compile(
+        r'["\']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
+        r'client[_-]?secret|aws_secret_access_key)["\']?\s*[:=]', re.I)),
+)
+_SCREEN_NAME = re.compile(r'[a-z_]+\Z')
+_SCREEN_RECORD_LIMIT = 16384
+_SCREEN_FAMILY = re.compile(r'[a-z0-9._-]{1,64}\Z')
+_SCREEN_TASK_ID = re.compile(r'[a-f0-9]{32}\Z')
+_SCREEN_REF = re.compile(r'https://github\.com/[^/\s]+/[^/\s]+/issues/[0-9]+#issuecomment-[0-9]+\Z')
 
 
 def _record_body(entry, task_id, refusal_code=None):
@@ -259,6 +279,190 @@ def _refuse(code, detail=None):
     raise error from None
 
 
+def _screen_rule(match_text):
+    for name, pattern in _SCREEN_RULES:
+        if pattern.search(match_text):
+            return name
+    return 'unclassified'
+
+
+def _screen_hits(text):
+    """Return bounded, text-free locations from the real output screen."""
+    located = set()
+    ascii_text = text.encode('ascii', 'backslashreplace').decode('ascii')
+    for value in (text, ascii_text):
+        for match in _SENSITIVE.finditer(value):
+            line = value.count('\n', 0, match.start()) + 1
+            located.add((_screen_rule(match.group(0)), line))
+    for line, value in enumerate(text.split('\n'), 1):
+        if _sensitive_jwt(value):
+            located.add(('jwt', line))
+        if _sensitive_url(value):
+            located.add(('url_userinfo', line))
+    return sorted(located)[:_SCREEN_HIT_LIMIT]
+
+
+def _screen_path(task_id, family):
+    return Path(task_store.default_root()).parent / 'high-debug-screen' / (task_id + '-' + family + '.json')
+
+
+def _valid_screen_timestamp(value):
+    if type(value) is not str:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+        return parsed.tzinfo is not None and parsed.utcoffset() == timezone.utc.utcoffset(parsed)
+    except ValueError:
+        return False
+
+
+def _write_screen_record(task_id, family, code, source, hits, byte_count):
+    directory = _screen_path(task_id, family).parent
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory_info = directory.lstat()
+    if not stat.S_ISDIR(directory_info.st_mode) or directory.is_symlink():
+        raise OSError('invalid screen record directory')
+    os.chmod(directory, 0o700)
+    record = {'code': code, 'source': source, 'hits': [list(hit) for hit in hits],
+              'bytes': byte_count, 'recorded_at': datetime.now(timezone.utc).isoformat(),
+              'disposition': None}
+    fd, temporary = tempfile.mkstemp(prefix='.screen-', dir=str(directory))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump(record, stream, sort_keys=True)
+            stream.write('\n')
+        target = _screen_path(task_id, family)
+        os.replace(temporary, target)
+        os.chmod(target, 0o600)
+    except Exception:
+        try: os.close(fd)
+        except OSError: pass
+        try: os.unlink(temporary)
+        except OSError: pass
+        raise
+
+
+def _read_screen_record(task_id, family):
+    path = _screen_path(task_id, family)
+    try:
+        parent_info = path.parent.lstat()
+        if path.parent.is_symlink() or not stat.S_ISDIR(parent_info.st_mode):
+            _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+        info = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_size > _SCREEN_RECORD_LIMIT:
+            _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_size > _SCREEN_RECORD_LIMIT:
+                _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+            raw = os.read(fd, _SCREEN_RECORD_LIMIT + 1)
+        finally:
+            os.close(fd)
+        if len(raw) > _SCREEN_RECORD_LIMIT:
+            _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+        record = json.loads(raw.decode('utf-8'))
+        if (type(record) is not dict or set(record) !=
+                {'code', 'source', 'hits', 'bytes', 'recorded_at', 'disposition'} or
+                record.get('source') not in ('EVIDENCE', 'REPORT') or
+                type(record.get('hits')) is not list or not record['hits'] or
+                len(record['hits']) > _SCREEN_HIT_LIMIT or
+                type(record.get('bytes')) is not int or record['bytes'] < 0 or
+                not _valid_screen_timestamp(record.get('recorded_at'))):
+            _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+        hits = []
+        for hit in record['hits']:
+            if (type(hit) is not list or len(hit) != 2 or type(hit[0]) is not str or
+                    _SCREEN_NAME.fullmatch(hit[0]) is None or type(hit[1]) is not int or hit[1] < 0):
+                _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+            hits.append((hit[0], hit[1]))
+        if hits != sorted(set(hits)):
+            _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+        expected_code = ('HIGH_DEBUG_EVIDENCE_SENSITIVE' if record['source'] == 'EVIDENCE'
+                         else 'HIGH_DEBUG_REPORT_INVALID')
+        disposition = record['disposition']
+        if record['code'] != expected_code or (disposition is not None and
+                (type(disposition) is not dict or set(disposition) !=
+                 {'classification', 'ref', 'recorded_at'} or
+                 disposition.get('classification') not in
+                 ('FALSE_POSITIVE', 'SYNTHETIC_TEST_DATA', 'REAL_VALUE_REMOVED') or
+                 type(disposition.get('ref')) is not str or
+                 _SCREEN_REF.fullmatch(disposition['ref']) is None or
+                 not _valid_screen_timestamp(disposition.get('recorded_at')))):
+            _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+        return record
+    except LLMToolError:
+        raise
+    except Exception:
+        _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+
+
+def _screen_detail(hits, prefix=''):
+    pairs = list(hits)
+    while True:
+        omitted = len(hits) - len(pairs)
+        suffix = (' rules=' + ','.join(hit[0] for hit in pairs) +
+                  ' lines=' + ','.join(str(hit[1]) for hit in pairs))
+        if omitted:
+            suffix += ' more=' + str(omitted)
+        detail = prefix + suffix
+        if len(detail) <= 128:
+            return detail
+        if pairs:
+            pairs.pop()
+            continue
+        return (prefix + ' more=' + str(len(hits)))[:128]
+
+
+def record_screen_disposition(task_id, family, hits, classification, ref):
+    if (type(task_id) is not str or _SCREEN_TASK_ID.fullmatch(task_id) is None or
+            type(family) is not str or _SCREEN_FAMILY.fullmatch(family) is None):
+        _refuse('HIGH_DEBUG_SCREEN_DISPOSITION_INVALID')
+    path = _screen_path(task_id, family)
+    if not path.exists() and not path.is_symlink():
+        _refuse('HIGH_DEBUG_SCREEN_NO_REFUSAL')
+    record = _read_screen_record(task_id, family)
+    if record['disposition'] is not None:
+        _refuse('HIGH_DEBUG_SCREEN_NO_REFUSAL')
+    if type(hits) not in (list, tuple):
+        _refuse('HIGH_DEBUG_SCREEN_DISPOSITION_INVALID')
+    supplied = []
+    for hit in hits:
+        if (type(hit) not in (list, tuple) or len(hit) != 2 or
+                type(hit[0]) is not str or _SCREEN_NAME.fullmatch(hit[0]) is None or
+                type(hit[1]) is not int or hit[1] < 0):
+            _refuse('HIGH_DEBUG_SCREEN_DISPOSITION_INVALID')
+        supplied.append((hit[0], hit[1]))
+    supplied = sorted(set(supplied))
+    if supplied != [tuple(hit) for hit in record['hits']]:
+        _refuse('HIGH_DEBUG_SCREEN_DISPOSITION_MISMATCH')
+    if (classification not in ('FALSE_POSITIVE', 'SYNTHETIC_TEST_DATA', 'REAL_VALUE_REMOVED') or
+            type(ref) is not str or _SCREEN_REF.fullmatch(ref) is None):
+        _refuse('HIGH_DEBUG_SCREEN_DISPOSITION_INVALID')
+    record['disposition'] = {'classification': classification, 'ref': ref,
+                             'recorded_at': datetime.now(timezone.utc).isoformat()}
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parent_info = path.parent.lstat()
+    if path.parent.is_symlink() or not stat.S_ISDIR(parent_info.st_mode):
+        _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+    os.chmod(path.parent, 0o700)
+    fd, temporary = tempfile.mkstemp(prefix='.screen-', dir=str(path.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump(record, stream, sort_keys=True)
+            stream.write('\n')
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    except Exception:
+        try: os.close(fd)
+        except OSError: pass
+        try: os.unlink(temporary)
+        except OSError: pass
+        raise
+
+
 def _create_d6(*, task_id, base_sha, repo_root, executor_task):
     lifecycle = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
     result = subprocess.run([sys.executable, '-B', str(lifecycle), '--task-id', task_id,
@@ -338,13 +542,13 @@ def _failed_entry(*, family, failed_corrections, early_reason, head, d6, code,
             'report': stored_report, 'usage': usage, 'recorded_at': recorded_at}
 
 
-def _report_rejection(code, checks, byte_count, report):
+def _report_rejection(code, checks, byte_count, report, hits=()):
     """Return a bounded diagnostic report, or fixed lines if its head is unsafe."""
     fixed_lines = (code, 'check: ' + checks, 'bytes: ' + str(byte_count),
                    'limit: ' + str(_REPORT_LIMIT))
     fixed = '\n'.join(fixed_lines)
     if 'SENSITIVE' in checks:
-        return fixed
+        return fixed + ''.join(f'\nhit: {rule} line={line}' for rule, line in hits)
     marker = '\nreport truncated\n'
     available = _REPORT_LIMIT - len((fixed + marker).encode('utf-8'))
     if available < 0:
@@ -411,7 +615,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
         _refuse('HIGH_DEBUG_TASK_INVALID')
-    if (type(executor_task) is not str or
+    if (type(task_id) is not str or _SCREEN_TASK_ID.fullmatch(task_id) is None or
+            type(executor_task) is not str or
             re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', executor_task) is None or
             type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
             type(family) is not str or re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None):
@@ -430,6 +635,12 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                          claim.get('family', f"pr-{claim.get('pr')}") == family]
         if len(family_claims) < failed_corrections:
             _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
+    screen_path = _screen_path(task_id, family)
+    if screen_path.exists() or screen_path.is_symlink():
+        screen_record = _read_screen_record(task_id, family)
+        if screen_record['disposition'] is None:
+            _refuse('HIGH_DEBUG_SCREEN_DISPOSITION_REQUIRED',
+                    _screen_detail([tuple(hit) for hit in screen_record['hits']]))
     if evidence is not None:
         try:
             with open(evidence, 'rb') as evidence_stream:
@@ -442,7 +653,15 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                 _refuse('HIGH_DEBUG_EVIDENCE_INVALID',
                         f'bytes={evidence_bytes} limit={_EVIDENCE_LIMIT}')
             evidence_text = raw.decode('utf-8')
-            if _emitted_sensitive(evidence_text): _refuse('HIGH_DEBUG_EVIDENCE_SENSITIVE')
+            if _emitted_sensitive(evidence_text):
+                hits = _screen_hits(evidence_text) or [('unlocated', 0)]
+                try:
+                    _write_screen_record(task_id, family, 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
+                                         'EVIDENCE', hits, len(raw))
+                    detail = _screen_detail(hits)
+                except Exception:
+                    detail = _screen_detail(hits, 'screen_record=UNRECORDED')
+                _refuse('HIGH_DEBUG_EVIDENCE_SENSITIVE', detail)
         except LLMToolError: raise
         except Exception: _refuse('HIGH_DEBUG_EVIDENCE_INVALID')
     else: evidence_text = ''
@@ -477,7 +696,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
     def failed(code, observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN', report=None,
-               detail=None):
+               detail=None, screen_hits=None):
         # A Codex attempt that started but did not finish is recorded: it
         # counts toward the entry limit and keeps its D6 traceable. Recording
         # is best effort: the original refusal code is what the caller sees.
@@ -497,6 +716,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         posted = _post_record(entry, pr_number, repo_root, task_id, code)
         if not posted:
             detail = (detail + ' ' if detail else '') + 'github_record=UNPOSTED'
+        if screen_hits is not None:
+            detail = _screen_detail(screen_hits, detail or '')
         _refuse(code, detail)
 
     create = create_d6 or _create_d6
@@ -542,11 +763,18 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     if oversized or sensitive:
         checks = ','.join(check for check, matched in
                           (('SIZE', oversized), ('SENSITIVE', sensitive)) if matched)
+        hits = (_screen_hits(report) or [('unlocated', 0)]) if sensitive else []
         stored_report = _report_rejection('HIGH_DEBUG_REPORT_INVALID', checks,
-                                          len(report_bytes), report)
+                                          len(report_bytes), report, hits)
         detail = f'check={checks} bytes={len(report_bytes)} limit={_REPORT_LIMIT}'
+        if sensitive:
+            try:
+                _write_screen_record(task_id, family, 'HIGH_DEBUG_REPORT_INVALID',
+                                     'REPORT', hits, len(report_bytes))
+            except Exception:
+                detail += ' screen_record=UNRECORDED'
         failed('HIGH_DEBUG_REPORT_INVALID', observed, effort, usage,
-               report=stored_report, detail=detail)
+               report=stored_report, detail=detail, screen_hits=hits if sensitive else None)
     status=_outcome_status(report)
     if any(not _has_report_section(report, h) for h in REPORT_SECTIONS): status='REPORT_INVALID'
     entry={'family':family, 'failed_corrections':failed_corrections, 'early_reason':early_reason,
@@ -563,3 +791,42 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     print(json.dumps({'state':'RECORDED','status':status,'d6':d6,
         'report_sha256':entry['report_sha256'],'event_id':event_id,
         'github_record':'POSTED' if posted else 'UNPOSTED'},sort_keys=True))
+
+
+def _screen_disposition_main(argv=None):
+    import argparse
+
+    class Parser(argparse.ArgumentParser):
+        def error(self, _message):
+            raise ValueError
+
+    parser = Parser(prog='python -m llmtool.high_debug', add_help=False)
+    parser.add_argument('command', choices=('screen-disposition',))
+    parser.add_argument('--task-id', required=True)
+    parser.add_argument('--family', required=True)
+    parser.add_argument('--hit', action='append', required=True)
+    parser.add_argument('--classification', required=True)
+    parser.add_argument('--ref', required=True)
+    try:
+        args = parser.parse_args(argv)
+        hits = []
+        for value in args.hit:
+            match = re.fullmatch(r'([a-z_]+):([0-9]+)', value)
+            if match is None:
+                _refuse('HIGH_DEBUG_SCREEN_DISPOSITION_INVALID')
+            hits.append((match.group(1), int(match.group(2))))
+        record_screen_disposition(args.task_id, args.family, hits,
+                                  args.classification, args.ref)
+        print(json.dumps({'state': 'RECORDED'}, sort_keys=True))
+        return 0
+    except LLMToolError as error:
+        print(getattr(error, 'high_debug_code', 'HIGH_DEBUG_SCREEN_DISPOSITION_INVALID'),
+              file=sys.stderr)
+        return 1
+    except Exception:
+        print('HIGH_DEBUG_SCREEN_DISPOSITION_INVALID', file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(_screen_disposition_main())

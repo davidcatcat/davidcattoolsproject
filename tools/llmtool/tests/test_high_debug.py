@@ -4,6 +4,7 @@ import unittest
 import subprocess
 import json
 import hashlib
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -659,6 +660,7 @@ class HighDebugTests(unittest.TestCase):
         })
         with tempfile.TemporaryDirectory() as directory:
             evidence = Path(directory) / 'evidence.txt'
+            # synthetic-fixture: screen-tool test
             evidence.write_text('Bear' + 'er ' + 'a' * 40, encoding='utf-8')
             with patch.object(high_debug.worker_dispatch, 'evaluate',
                               return_value=SimpleNamespace(allowed=True)):
@@ -667,6 +669,216 @@ class HighDebugTests(unittest.TestCase):
                         executor_task='executor', pr_number=1, family='family',
                         failed_corrections=2, evidence=str(evidence))
             self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_EVIDENCE_SENSITIVE')
+
+    def test_screen_hits_are_sorted_unique_and_line_aware(self):
+        with patch.object(high_debug, '_SENSITIVE', re.compile(r'FLAG')):
+            self.assertEqual(high_debug._screen_hits('ok\nFLAG\nFLAG'),
+                             [('unclassified', 2), ('unclassified', 3)])
+        with patch.object(high_debug, '_SENSITIVE', re.compile(r'FLAG.*END', re.S)):
+            self.assertEqual(high_debug._screen_hits('FLAG\nEND'),
+                             [('unclassified', 1)])
+
+    def test_screen_rule_first_match_and_unclassified(self):
+        table = tuple((name, re.compile(pattern)) for name, pattern in
+                      (('alpha', 'shared|alpha'), ('beta', 'shared|beta'), ('gamma', 'gamma')))
+        with patch.object(high_debug, '_SCREEN_RULES', table):
+            self.assertEqual(high_debug._screen_rule('shared gamma'), 'alpha')
+            self.assertEqual(high_debug._screen_rule('beta'), 'beta')
+            self.assertEqual(high_debug._screen_rule('gamma'), 'gamma')
+            self.assertEqual(high_debug._screen_rule('plain'), 'unclassified')
+        with patch.object(high_debug, '_SENSITIVE', re.compile(r'eyJplain')):
+            self.assertEqual(high_debug._screen_hits('eyJplain'), [('unclassified', 1)])
+        real_names = [name for name, _pattern in high_debug._SCREEN_RULES]
+        self.assertEqual(len(real_names), len(set(real_names)))
+        self.assertEqual(set(real_names), {'private_key', 'cloud_key', 'provider_key',
+                                           'git_host_key', 'chat_key', 'auth_scheme',
+                                           'keyword_assign'})
+        high_debug._write_screen_record('a' * 32, 'family',
+            'HIGH_DEBUG_EVIDENCE_SENSITIVE', 'EVIDENCE', [('unclassified', 1)], 4)
+        high_debug.record_screen_disposition('a' * 32, 'family', [('unclassified', 1)],
+            'FALSE_POSITIVE', 'https://github.com/org/repo/issues/1#issuecomment-2')
+
+    def test_screen_record_contains_no_refused_text_and_disposition_is_exact(self):
+        task_id, family = 'a' * 32, 'family'
+        high_debug._write_screen_record(task_id, family, 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
+                                        'EVIDENCE', [('keyword_assign', 2)], 91)
+        path = high_debug._screen_path(task_id, family)
+        raw = path.read_text(encoding='utf-8')
+        self.assertNotIn('refused', raw)
+        self.assertNotIn('credential', raw)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        for supplied, expected in (
+                ([('keyword_assign', 1)], 'HIGH_DEBUG_SCREEN_DISPOSITION_MISMATCH'),
+                ([('keyword_assign', 2), ('unknown', 3)], 'HIGH_DEBUG_SCREEN_DISPOSITION_MISMATCH')):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.record_screen_disposition(task_id, family, supplied,
+                    'FALSE_POSITIVE', 'https://github.com/org/repo/issues/1#issuecomment-2')
+            self.assertEqual(caught.exception.high_debug_code, expected)
+        for classification, ref in (("BAD", 'https://github.com/org/repo/issues/1#issuecomment-2'),
+                                    ('FALSE_POSITIVE', 'https://example.com/1')):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.record_screen_disposition(task_id, family, [('keyword_assign', 2)],
+                                                     classification, ref)
+            self.assertEqual(caught.exception.high_debug_code,
+                             'HIGH_DEBUG_SCREEN_DISPOSITION_INVALID')
+        high_debug.record_screen_disposition(task_id, family, [('keyword_assign', 2)],
+            'SYNTHETIC_TEST_DATA', 'https://github.com/org/repo/issues/1#issuecomment-2')
+
+    def test_screen_gate_blocks_before_d6_or_runner_until_disposition(self):
+        task_id, family = 'a' * 32, 'family'
+        high_debug._write_screen_record(task_id, family, 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
+                                        'EVIDENCE', [('unclassified', 1)], 4)
+        store = _Store()
+        create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.run_high_debug(store=store, task_id=task_id,
+                executor_task='executor', pr_number=17, family=family,
+                failed_corrections=2, runner=runner, create_d6=create)
+        self.assertEqual(caught.exception.high_debug_code,
+                         'HIGH_DEBUG_SCREEN_DISPOSITION_REQUIRED')
+        self.assertEqual(caught.exception.high_debug_detail, ' rules=unclassified lines=1')
+        create.assert_not_called()
+        runner.assert_not_called()
+
+    def test_screen_gate_allows_rerun_after_disposition_and_keeps_record(self):
+        task_id, family = 'a' * 32, 'family'
+        high_debug._write_screen_record(task_id, family, 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
+                                        'EVIDENCE', [('unclassified', 1)], 4)
+        high_debug.record_screen_disposition(task_id, family, [('unclassified', 1)],
+            'FALSE_POSITIVE', 'https://github.com/org/repo/issues/1#issuecomment-2')
+        report = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS)
+        report += 'RCA_CONFIRMED'
+        _result, _invoke, store = self._run_case(report)
+        self.assertEqual(store.entries[0]['status'], 'RCA_CONFIRMED')
+        self.assertTrue(high_debug._screen_path(task_id, family).exists())
+
+    def test_screen_disposition_is_scoped_to_task_and_family(self):
+        high_debug._write_screen_record('a' * 32, 'family', 'HIGH_DEBUG_REPORT_INVALID',
+                                        'REPORT', [('jwt', 4)], 10)
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.record_screen_disposition('b' * 32, 'family', [('jwt', 4)],
+                'FALSE_POSITIVE', 'https://github.com/org/repo/issues/1#issuecomment-2')
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_SCREEN_NO_REFUSAL')
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.record_screen_disposition('a' * 32, 'other', [('jwt', 4)],
+                'FALSE_POSITIVE', 'https://github.com/org/repo/issues/1#issuecomment-2')
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_SCREEN_NO_REFUSAL')
+
+    def test_bad_and_symlinked_screen_records_are_rejected(self):
+        task_id, family = 'a' * 32, 'family'
+        path = high_debug._screen_path(task_id, family)
+        path.parent.mkdir(parents=True)
+        path.write_text('{bad', encoding='utf-8')
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.record_screen_disposition(task_id, family, [], 'FALSE_POSITIVE',
+                'https://github.com/org/repo/issues/1#issuecomment-2')
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_SCREEN_RECORD_INVALID')
+        path.unlink()
+        path.write_bytes(b'x' * (high_debug._SCREEN_RECORD_LIMIT + 1))
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.record_screen_disposition(task_id, family, [], 'FALSE_POSITIVE',
+                'https://github.com/org/repo/issues/1#issuecomment-2')
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_SCREEN_RECORD_INVALID')
+        path.unlink()
+        target = Path(self.unposted_root.name) / 'outside.json'
+        target.write_text('{}', encoding='utf-8')
+        path.symlink_to(target)
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.record_screen_disposition(task_id, family, [], 'FALSE_POSITIVE',
+                'https://github.com/org/repo/issues/1#issuecomment-2')
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_SCREEN_RECORD_INVALID')
+
+    def test_screen_write_failure_keeps_refusal_and_marks_detail(self):
+        store = _Store()
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / 'benign.txt'
+            evidence.write_text('plain input', encoding='utf-8')
+            with patch.object(high_debug, '_emitted_sensitive', return_value=True), \
+                 patch.object(high_debug, '_screen_hits', return_value=[('unclassified', 1)]), \
+                 patch.object(high_debug, '_write_screen_record', side_effect=OSError('disk')):
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug(store=store, task_id='a' * 32,
+                        executor_task='executor', pr_number=17, family='family',
+                        failed_corrections=2, evidence=str(evidence))
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_EVIDENCE_SENSITIVE')
+        self.assertEqual(caught.exception.high_debug_detail,
+                         'screen_record=UNRECORDED rules=unclassified lines=1')
+
+    def test_unlocated_screen_match_uses_line_zero(self):
+        evidence = Path(self.unposted_root.name) / 'plain-evidence.txt'
+        evidence.write_text('benign', encoding='utf-8')
+        with patch.object(high_debug, '_emitted_sensitive', return_value=True), \
+             patch.object(high_debug, '_screen_hits', return_value=[]):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(store=_Store(), task_id='a' * 32,
+                    executor_task='executor', pr_number=17, family='family',
+                    failed_corrections=2, evidence=str(evidence))
+        self.assertEqual(caught.exception.high_debug_detail,
+                         ' rules=unlocated lines=0')
+        record = json.loads(high_debug._screen_path('a' * 32, 'family').read_text())
+        self.assertEqual(record['hits'], [['unlocated', 0]])
+
+    def test_size_only_refusal_does_not_write_screen_record(self):
+        store = _Store()
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / 'large.txt'
+            evidence.write_bytes(b'x' * 8193)
+            with self.assertRaises(LLMToolError):
+                high_debug.run_high_debug(store=store, task_id='a' * 32,
+                    executor_task='executor', pr_number=17, family='family',
+                    failed_corrections=2, evidence=str(evidence))
+        self.assertFalse(high_debug._screen_path('a' * 32, 'family').exists())
+
+    def test_screen_disposition_module_entry_reports_one_json_line(self):
+        task_id, family = 'a' * 32, 'family'
+        high_debug._write_screen_record(task_id, family, 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
+                                        'EVIDENCE', [('unclassified', 1)], 4)
+        out, err = StringIO(), StringIO()
+        argv = ['screen-disposition', '--task-id', task_id, '--family', family,
+                '--hit', 'unclassified:1', '--classification', 'FALSE_POSITIVE',
+                '--ref', 'https://github.com/org/repo/issues/1#issuecomment-2']
+        with redirect_stdout(out), redirect_stderr(err):
+            self.assertEqual(high_debug._screen_disposition_main(argv), 0)
+        self.assertEqual(out.getvalue(), '{"state": "RECORDED"}\n')
+        self.assertEqual(err.getvalue(), '')
+
+    def test_screen_disposition_module_entry_refusal_prints_code_only(self):
+        out, err = StringIO(), StringIO()
+        argv = ['screen-disposition', '--task-id', 'a' * 32, '--family', 'family',
+                '--hit', 'unclassified:1', '--classification', 'FALSE_POSITIVE',
+                '--ref', 'https://github.com/org/repo/issues/1#issuecomment-2']
+        with redirect_stdout(out), redirect_stderr(err):
+            self.assertEqual(high_debug._screen_disposition_main(argv), 1)
+        self.assertEqual(out.getvalue(), '')
+        self.assertEqual(err.getvalue(), 'HIGH_DEBUG_SCREEN_NO_REFUSAL\n')
+
+    def test_new_screen_refusal_resets_prior_disposition(self):
+        task_id, family = 'a' * 32, 'family'
+        high_debug._write_screen_record(task_id, family, 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
+                                        'EVIDENCE', [('unclassified', 1)], 4)
+        high_debug.record_screen_disposition(task_id, family, [('unclassified', 1)],
+            'FALSE_POSITIVE', 'https://github.com/org/repo/issues/1#issuecomment-2')
+        high_debug._write_screen_record(task_id, family, 'HIGH_DEBUG_REPORT_INVALID',
+                                        'REPORT', [('jwt', 7)], 8)
+        record = json.loads(high_debug._screen_path(task_id, family).read_text())
+        self.assertIsNone(record['disposition'])
+        self.assertEqual(record['hits'], [['jwt', 7]])
+
+    def test_sensitive_report_rejection_stores_only_screened_text(self):
+        report = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS)
+        report += 'RCA_CONFIRMED\nPRIVATE-REFUSED-TEXT'
+        with patch.object(high_debug, '_emitted_sensitive', return_value=True), \
+             patch.object(high_debug, '_screen_hits', return_value=[('unclassified', 8)]):
+            with self.assertRaises(LLMToolError) as caught:
+                self._run_case(report)
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_REPORT_INVALID')
+        entry = Path(self.unposted_root.name) / 'high-debug-screen' / ('a' * 32 + '-family.json')
+        raw = entry.read_text(encoding='utf-8')
+        self.assertNotIn('PRIVATE-REFUSED-TEXT', raw)
+        self.assertNotIn('PRIVATE-REFUSED-TEXT', caught.exception.high_debug_detail)
+        self.assertNotIn('PRIVATE-REFUSED-TEXT', high_debug._report_rejection(
+            'HIGH_DEBUG_REPORT_INVALID', 'SENSITIVE', 99, report, [('unclassified', 8)]))
 
     def test_usage_comes_from_last_turn_completed_event(self):
         events = (b'{"type":"thread.started","thread_id":"thread-1234567890"}\n'
