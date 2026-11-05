@@ -239,6 +239,13 @@ class MonitorTrustTests(unittest.TestCase):
         self.assertFalse(source.want_main)
         self.assertFalse(any("commits?sha=main" in path for path in seen))
 
+    def test_office_top_is_rendered_before_error_and_wraps(self):
+        top = [("等你決定：2 件", "!"), ("main：尚未讀取", "")]
+        lines = mon.office_view([], error="OSError", width=24, top=top)
+        self.assertEqual(lines[1][1], "!")
+        self.assertTrue(any("辦公室資料讀取失敗" in text for text, _ in lines))
+        self.assertTrue(any(text.startswith("⚠") for text, _ in lines))
+
 
 class MonitorBehindMainTests(unittest.TestCase):
     def test_script_blob_matches_the_file_git_blob_id(self):
@@ -315,14 +322,6 @@ class MonitorBehindMainTests(unittest.TestCase):
             monitor.office_due = 0.0
             monitor.poll()
         self.assertFalse(monitor.behind)
-
-    def test_office_top_is_rendered_before_error_and_wraps(self):
-        top = [("等你決定：2 件", "!"), ("main：尚未讀取", "")]
-        lines = mon.office_view([], error="OSError", width=24, top=top)
-        self.assertEqual(lines[1][1], "!")
-        self.assertTrue(any("辦公室資料讀取失敗" in text for text, _ in lines))
-        self.assertTrue(any(text.startswith("⚠") for text, _ in lines))
-
 
 class QuotaWarningTests(unittest.TestCase):
     NOW = 1_800_000_000.0
@@ -7999,7 +7998,7 @@ class WorkBoardTests(unittest.TestCase):
                 self.assertEqual(count.split("等你 ", 1)[1].split(" ·", 1)[0],
                                  "0（等你決定 0，其他 Owner 請求 0）")
                 self.assertEqual(lines[owner_index + 1][0], "無（只看最近 12 小時留言）")
-            elif case.id == 11:
+            elif case["issue_url"].endswith("/11"):
                 self.assertTrue(source.comments_cut)
                 self.assertIn("等你 1+（等你決定 ?，其他 Owner 請求 1+）", count)
                 self.assertTrue(any(item.reference == "#11" for item in work.owner))
