@@ -84,7 +84,7 @@ class ThemePTYTests(unittest.TestCase):
         terminal.connect_pm()
         notice = "（自動）重新連線：請接續進行中的工作並回報狀態"
         terminal.wait_text(notice, "auto-resume system notice", 20)
-        terminal.wait_for(lambda: terminal.claude_messages() == [notice],
+        terminal.wait_for(lambda _rows: terminal.claude_messages() == [notice],
                           "exactly one auto-resume message", 20)
         self.assertEqual(terminal.claude_messages(), [notice])
 

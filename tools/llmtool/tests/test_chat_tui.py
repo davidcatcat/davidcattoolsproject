@@ -3441,6 +3441,49 @@ class AutoResumeWidgetTests(Base):
         self.assertTrue(ui._auto_resume_pending)
         self.assertTrue(ui._auto_resume_unconfirmed)
 
+    def test_closed_loop_drops_auto_resume_result_without_side_effects(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui._auto_resume_pending = ui._auto_resume_unconfirmed = True
+        loop = asyncio.new_event_loop()
+        loop.close()
+        before = (ui._auto_resume_pending, ui._auto_resume_unconfirmed,
+                  ui._auto_resume_connection, ui.pm_runtime, ui.pm_target,
+                  list(ui.pm_outbox), ui.pm_state, ui.conversation.text)
+        returns = []
+        real_post = ui._post
+        post = Mock(side_effect=lambda *args: returns.append(real_post(*args)) or returns[-1])
+        finish = Mock(wraps=ui.finish_auto_resume_read)
+        errors = Mock()
+        reader = threading.Thread(
+            target=ui._read_auto_resume,
+            args=(ui._auto_resume_connection, ui.pm_runtime, 'session', loop),
+            name='test-closed-loop-resume-reader')
+        with patch.object(chat_tui_status, 'read_background', return_value=[{}]), \
+                patch.object(ui, '_post', post), \
+                patch.object(ui, 'finish_auto_resume_read', finish), \
+                patch.object(threading, 'excepthook', errors):
+            reader.start()
+            reader.join(5)
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(returns, [False])
+        errors.assert_not_called()
+        finish.assert_not_called()
+        ui._pm_start_turn.assert_not_called()
+        self.assertEqual((ui._auto_resume_pending, ui._auto_resume_unconfirmed,
+                          ui._auto_resume_connection, ui.pm_runtime, ui.pm_target,
+                          list(ui.pm_outbox), ui.pm_state, ui.conversation.text), before)
+
+    def test_current_connection_and_runtime_accept_resume_read(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui._auto_resume_pending = ui._auto_resume_unconfirmed = True
+        old_connection = object()
+        ui.finish_auto_resume_read(old_connection, ui.pm_runtime, 'session', [{}])
+        self.assertTrue(ui._auto_resume_pending)
+        self.assertTrue(ui._auto_resume_unconfirmed)
+        ui._pm_start_turn.assert_not_called()
+
     def test_background_end_sends_deferred_resume_once(self):
         ui = self.make_ui()
         self.prepare(ui)
@@ -4097,54 +4140,218 @@ class PMConversationTests(BoundedPMTest):
         finally:
             release.set()
 
-    def test_draft_and_settings_change_cancel_blocked_resume_reader(self):
-        for action in ('draft', 'settings'):
-            entered, release = threading.Event(), threading.Event()
+    def run_blocked_resume_cancellation(self, action):
+        entered, release = threading.Event(), threading.Event()
 
-            def blocked(_session):
-                entered.set()
-                release.wait(5)
-                return [{'role': 'Developer', 'task': 'task-1', 'state': 'RUNNING'}]
+        def blocked(_session):
+            entered.set()
+            release.wait(20)
+            return [{'role': 'Developer', 'task': 'task-1', 'state': 'RUNNING'}]
 
+        with patch.object(chat_tui_status, 'read_background', side_effect=blocked):
             try:
-                with patch.object(chat_tui_status, 'read_background', side_effect=blocked):
-                    async def act(ui):
-                        await self.connected(ui)
-                        await self.until(ui, lambda _ui: entered.is_set(), 'reader started')
-                        if action == 'draft':
-                            ui.submit_pm('owner draft')
-                            await self.until(ui, lambda _ui: len(self.fakes[0].users()) == 1,
-                                             'draft sent')
-                        else:
-                            ui.run_display_command('/settings auto-resume off')
-                            ui.run_display_command('/settings auto-resume on')
-                        release.set()
-                        await asyncio.sleep(0.1)
-                        self.assertEqual(len(self.fakes[0].users()), 1 if action == 'draft' else 0)
-                        self.join_resume_readers()
-                    self.drive([self.connect(), act, self.turn_done])
+                async def act(ui):
+                    await self.connected(ui)
+                    await self.until(ui, lambda _ui: entered.is_set(), 'reader started')
+                    if action == 'draft':
+                        ui.submit_pm('owner draft')
+                        await self.until(ui, lambda _ui: len(self.fakes[0].users()) == 1,
+                                         'draft sent')
+                    else:
+                        ui.run_display_command('/settings auto-resume off')
+                        ui.run_display_command('/settings auto-resume on')
+                    release.set()
+                    await asyncio.sleep(0.1)
+                    self.join_resume_readers()
+                steps = [self.connect(), act]
+                if action == 'draft':
+                    steps.append(self.turn_done)
+                self.drive(steps)
             finally:
                 release.set()
+                self.join_resume_readers()
+        texts = [user['message']['content'][0]['text'] for user in self.fakes[0].users()]
+        self.assertEqual(texts, ['owner draft'] if action == 'draft' else [])
 
-    def test_setting_off_at_adoption_skips_resume_reader(self):
+    def test_draft_cancels_blocked_resume_reader(self):
+        self.run_blocked_resume_cancellation('draft')
+
+    def test_settings_off_then_on_cancels_blocked_resume_reader(self):
+        self.run_blocked_resume_cancellation('settings')
+
+    def test_draft_queued_during_background_turn_suppresses_confirmed_resume(self):
+        self.turns = [[_delta('收到'), _result('收到')]]
+        entered, release = threading.Event(), threading.Event()
+        readers = []
+        items = [{'role': 'Developer', 'task': 'task-1', 'state': 'RUNNING'}]
+
+        def blocked(session):
+            entered.set()
+            release.wait(20)
+            return items
+
+        original_read = chat_tui.ChatTUI._read_auto_resume
+
+        def track_reader(ui, *args):
+            readers.append(threading.current_thread())
+            entered.set()
+            return original_read(ui, *args)
+
+        with patch.object(chat_tui_status, 'read_background', side_effect=blocked), \
+                patch.object(chat_tui.ChatTUI, '_read_auto_resume', track_reader):
+            try:
+                async def flow(ui):
+                    await self.connected(ui)
+                    await self.until(ui, lambda _ui: bool(readers), 'resume reader entered')
+                    turn = dict(runtime=ui.pm_runtime, seq=None, events=[], ended=False)
+                    ui.pm_background_start(turn)
+                    release.set()
+                    await self.until(ui, lambda _ui: not ui._auto_resume_unconfirmed,
+                                     'resume result confirmed')
+                    readers[0].join(5)
+                    self.assertFalse(readers[0].is_alive())
+                    self.assertTrue(ui._auto_resume_pending)
+                    self.assertFalse(ui._auto_resume_unconfirmed)
+                    self.assertEqual(self.fakes[0].users(), [])
+                    ui.submit_pm('owner draft')
+                    self.assertEqual(list(ui.pm_outbox), ['owner draft'])
+                    self.assertFalse(ui._auto_resume_pending)
+                    self.assertEqual(self.fakes[0].users(), [])
+                    ui.pm_background_event(
+                        turn, {'type': 'TURN_END', 'status': 'COMPLETED'})
+                    ui.pm_background_end(turn)
+                    await self.until(ui, lambda _ui: len(self.fakes[0].users()) == 1,
+                                     'queued owner draft sent')
+                    await self.turn_done(ui)
+                    ui._maybe_auto_resume()
+                ui, _ = self.drive([self.connect(), flow])
+            finally:
+                release.set()
+                for reader in readers:
+                    reader.join(5)
+        texts = [user['message']['content'][0]['text'] for user in self.fakes[0].users()]
+        self.assertEqual(texts, ['owner draft'])
+        self.assertEqual(list(ui.pm_outbox), [])
+        self.assertFalse(ui._auto_resume_sent)
+        self.assertNotIn('（自動）重新連線', ui.conversation.text)
+
+    def test_setting_on_connect_uses_isolated_task_store_without_extra_root_read(self):
         from llmtool import task_store
+        entered, readers = threading.Event(), []
         calls = []
-        self.background_read_patch.stop()
+        original_read = chat_tui.ChatTUI._read_auto_resume
+
+        def track_reader(ui, *args):
+            readers.append(threading.current_thread())
+            entered.set()
+            return original_read(ui, *args)
 
         def record_root():
             calls.append(True)
             return self.temp_root / 'isolated-task-store'
 
-        try:
-            with patch.object(task_store, 'default_root', side_effect=record_root):
-                async def off(ui):
+        with patch.object(task_store, 'default_root', side_effect=record_root), \
+                patch.object(chat_tui.ChatTUI, '_read_auto_resume', track_reader):
+            try:
+                async def on(ui):
                     await self.connected(ui)
-                    self.assertFalse(any(t.name == 'llmtool-chat-pm-resume'
-                                         for t in threading.enumerate()))
-                # Set before connect adoption so no TaskStore reader is started.
-                self.drive(['/settings auto-resume off\r', self.connect(), off])
-        finally:
-            self.assertEqual(calls, [])
+                    await self.until(ui, lambda _ui: entered.is_set(), 'resume reader entered')
+                    await self.until(ui, lambda _ui: not ui._auto_resume_unconfirmed,
+                                     'empty resume result confirmed')
+                    readers[0].join(5)
+                    self.assertFalse(readers[0].is_alive())
+                    self.assertEqual(self.fakes[0].users(), [])
+                    self.assertEqual(calls, [])
+                self.drive([self.connect(), on])
+            finally:
+                for reader in readers:
+                    reader.join(5)
+
+    def run_parallel_background_and_resume_reads(self, result):
+        background_entered, background_release = threading.Event(), threading.Event()
+        resume_entered, resume_release = threading.Event(), threading.Event()
+        seen = []
+        items = [{'role': 'Developer', 'task': 'cached-task', 'state': 'RUNNING'}]
+        readers = []
+
+        def controlled_read(session):
+            thread = threading.current_thread()
+            seen.append((thread, session))
+            if thread.name == 'llmtool-chat-pm-background':
+                background_entered.set()
+                background_release.wait(20)
+                return items
+            if thread.name == 'llmtool-chat-pm-resume':
+                resume_entered.set()
+                resume_release.wait(20)
+                return result
+            raise AssertionError('unexpected background reader: ' + thread.name)
+
+        try:
+            with patch.object(chat_tui_status, 'read_background', side_effect=controlled_read):
+                async def start_status(ui):
+                    ui.background_key = self.session_id
+                    ui.background_loaded = time.monotonic()
+                    ui.background = list(items)
+                    ui._loop = asyncio.get_running_loop()
+                    ui.background_reader = threading.Thread(
+                        target=ui._read_background, args=(ui._loop, self.session_id),
+                        name='llmtool-chat-pm-background', daemon=True)
+                    readers.append(ui.background_reader)
+                    ui.background_reader.start()
+                    await self.until(ui, lambda _ui: background_entered.is_set(),
+                                     'status reader entered')
+
+                async def connected(ui):
+                    await self.connected(ui)
+                    await self.until(ui, lambda _ui: resume_entered.is_set(),
+                                     'resume reader entered independently')
+                    self.assertTrue(any(thread.name == 'llmtool-chat-pm-background'
+                                       and session == self.session_id
+                                       for thread, session in seen))
+                    self.assertTrue(any(thread.name == 'llmtool-chat-pm-resume'
+                                       and session == self.session_id
+                                       for thread, session in seen))
+                    self.assertTrue(ui._auto_resume_pending)
+                    self.assertTrue(ui._auto_resume_unconfirmed)
+                    self.assertEqual(self.fakes[0].users(), [])
+                    resume_release.set()
+                    await self.until(ui, lambda _ui: not ui._auto_resume_unconfirmed,
+                                     'resume result confirmed')
+                    self.join_resume_readers()
+                    if result:
+                        await self.until(ui, lambda _ui: len(self.fakes[0].users()) == 1,
+                                         'non-empty snapshot resumes once')
+                        await self.turn_done(ui)
+                    else:
+                        self.assertFalse(ui._auto_resume_pending)
+                        self.assertEqual(self.fakes[0].users(), [])
+
+                try:
+                    ui, _ = self.drive([start_status, self.connect(), connected])
+                    texts = [user['message']['content'][0]['text'] for user in self.fakes[0].users()]
+                    self.assertEqual(texts, ['（自動）重新連線：請接續進行中的工作並回報狀態']
+                                     if result else [])
+                finally:
+                    background_release.set()
+                    resume_release.set()
+                    for reader in readers:
+                        reader.join(5)
+                    self.join_resume_readers()
+        except BaseException:
+            background_release.set()
+            resume_release.set()
+            for reader in readers:
+                reader.join(5)
+            self.join_resume_readers()
+            raise
+
+    def test_parallel_status_reader_and_empty_resume_ignore_cached_items(self):
+        self.run_parallel_background_and_resume_reads([])
+
+    def test_parallel_status_reader_and_nonempty_resume_send_once(self):
+        self.run_parallel_background_and_resume_reads(
+            [{'role': 'Developer', 'task': 'task-1', 'state': 'RUNNING'}])
 
     def test_connect_stream_tools_and_turn_end(self):
         self.turns = [_full_turn(hold=True)]
