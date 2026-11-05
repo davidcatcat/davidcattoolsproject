@@ -241,6 +241,23 @@ class MonitorTrustTests(unittest.TestCase):
 
 
 class MonitorBehindMainTests(unittest.TestCase):
+    def test_script_blob_matches_the_file_git_blob_id(self):
+        script = Path(mon.SCRIPT_PATH).read_bytes()
+        self.assertEqual(mon.script_blob(), mon.git_blob_id(script))
+
+    def test_monitor_loaded_blob_matches_script_blob(self):
+        self.assertEqual(mon.Monitor().loaded_blob, mon.script_blob())
+
+    def test_script_blob_matches_git_hash_object_when_available(self):
+        if not mon.shutil.which("git"):
+            self.skipTest("git is not available")
+        found = subprocess.run(["git", "hash-object", "--no-filters", "--", mon.SCRIPT_PATH],
+                               capture_output=True, text=True, check=True)
+        self.assertEqual(found.stdout.strip(), mon.script_blob())
+
+    def test_github_pages_is_bounded(self):
+        self.assertEqual(mon.GITHUB_PAGES, 10)
+
     def test_git_blob_id_uses_git_blob_hashes(self):
         self.assertEqual(mon.git_blob_id(b""), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
         self.assertEqual(mon.git_blob_id(b"hello\n"), "ce013625030ba8dba906f756967f9e9ca394464a")
@@ -284,6 +301,20 @@ class MonitorBehindMainTests(unittest.TestCase):
         self.assertEqual(mon.behind_line(type("Fake", (), {"behind": True, "stale": True})()), "")
         self.assertEqual(mon.behind_line(type("Fake", (), {"behind": True, "stale": False})()),
                          mon.BEHIND_WARNING)
+
+    def test_unknown_main_blob_clears_behind_warning_on_poll(self):
+        with patch.object(mon, "main_script_blob", return_value=""), \
+             patch.object(mon, "collect", return_value=mon.Snapshot([], {}, [], frozenset())), \
+             patch.object(mon, "scan_tasks", return_value=[]), \
+             patch.object(mon, "llmtool_task_records", return_value=[]), \
+             patch.object(mon, "llmtool_route_outcomes", return_value={"opencode": None}), \
+             patch.object(mon, "quota_warnings", return_value=[]), \
+             patch.object(mon, "office_rows", return_value=[]):
+            monitor = mon.Monitor()
+            monitor.behind = True
+            monitor.office_due = 0.0
+            monitor.poll()
+        self.assertFalse(monitor.behind)
 
     def test_office_top_is_rendered_before_error_and_wraps(self):
         top = [("等你決定：2 件", "!"), ("main：尚未讀取", "")]
@@ -833,17 +864,28 @@ class MonitorTaskBaselineTests(unittest.TestCase):
              patch.object(mon, "quota_warnings", return_value=[]), \
              patch.object(mon, "office_rows", return_value=[]):
             self.monitor.office_due = 0.0
+            main_blob.return_value = mon.script_blob()
+            self.poll([])
+            self.assertFalse(self.monitor.behind)
+            main_blob.return_value = "b" * 40
+            self.monitor.behind_due = 0.0
+            self.monitor.office_due = 0.0
             self.poll([])
             self.assertTrue(self.monitor.behind)
             self.monitor.office_due = 0.0
             self.poll([])
-            main_blob.assert_called_once_with()
+            self.assertEqual(main_blob.call_count, 2)
             self.monitor.behind_due = 0.0
             main_blob.side_effect = RuntimeError("unknown")
             self.monitor.office_due = 0.0
             self.poll([])
             self.assertTrue(self.monitor.behind)
             main_blob.side_effect = None
+            main_blob.return_value = ""
+            self.monitor.behind_due = 0.0
+            self.monitor.office_due = 0.0
+            self.poll([])
+            self.assertFalse(self.monitor.behind)
             main_blob.return_value = self.monitor.loaded_blob
             self.monitor.behind_due = 0.0
             self.monitor.office_due = 0.0
@@ -7927,8 +7969,10 @@ class WorkBoardTests(unittest.TestCase):
         full_page = lambda start: [comment(start + i, NOW - 30, "ordinary")
                                    for i in range(mon.GITHUB_PAGE)]
         marker = "<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->\nNeed a decision"
+        decision_marker = "<!-- activity: type=decision_request actor=PM target=Owner status=WAITING -->\nNeed a decision"
         board = self._board()
-        cases = (None, comment(10, NOW - 30, marker), "uncut")
+        cases = (None, comment(10, NOW - 30, marker),
+                 comment(11, NOW - 30, decision_marker), "uncut")
         for case in cases:
             if case == "uncut":
                 responses = [(0, [comment(20, NOW - 30, "ordinary")]), (0, []), (0, [])]
@@ -7955,9 +7999,13 @@ class WorkBoardTests(unittest.TestCase):
                 self.assertEqual(count.split("等你 ", 1)[1].split(" ·", 1)[0],
                                  "0（等你決定 0，其他 Owner 請求 0）")
                 self.assertEqual(lines[owner_index + 1][0], "無（只看最近 12 小時留言）")
+            elif case.id == 11:
+                self.assertTrue(source.comments_cut)
+                self.assertIn("等你 1+（等你決定 ?，其他 Owner 請求 1+）", count)
+                self.assertTrue(any(item.reference == "#11" for item in work.owner))
             else:
                 self.assertTrue(source.comments_cut)
-                self.assertIn("等你 1+（等你決定 1，其他 Owner 請求 0）", count)
+                self.assertIn("等你 1+（等你決定 1+，其他 Owner 請求 ?）", count)
                 self.assertTrue(any(item.reference == "#10" for item in work.owner))
 
 

@@ -1021,7 +1021,7 @@ class Monitor:
                 self.behind_due = time.monotonic() + 300.0
                 try:
                     self.behind = behind_main(self.loaded_blob, main_script_blob())
-                except Exception:  # local Git evidence is optional; preserve the last result
+                except Exception:  # unexpected errors keep the last result; main_script_blob returns empty for unknown, which clears the warning.
                     pass
             try:
                 office = office_rows(result.processes, finished_runs=finished,
@@ -4183,8 +4183,12 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
     known_running = len(work.running)
     waiting_owner = sum(item.kind == "waiting_owner" for item in work.owner)
     other_owner = len(work.owner) - waiting_owner
+    waiting_count = ("?" if work.owner_cut and not waiting_owner else
+                     f"{waiting_owner}{'+' if work.owner_cut else ''}")
+    other_count = ("?" if work.owner_cut and not other_owner else
+                   f"{other_owner}{'+' if work.owner_cut else ''}")
     owner_count = ("?" if work.github_known and work.owner_cut and not work.owner else
-                   f"{len(work.owner)}{'+' if work.owner_cut else ''}（等你決定 {waiting_owner}，其他 Owner 請求 {other_owner}）"
+                   f"{len(work.owner)}{'+' if work.owner_cut else ''}（等你決定 {waiting_count}，其他 Owner 請求 {other_count}）"
                    if work.github_known else "?")
     counts = (f"今天合併 {today} · 進行中 {known_running if work.github_known else '?'} · "
               f"等 PM {sum(item.next == 'PM' for item in work.running + work.queue + work.blocked) if work.github_known and work.board_known else '?'} · "
