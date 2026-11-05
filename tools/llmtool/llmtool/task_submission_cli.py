@@ -1219,7 +1219,7 @@ def run_task_claude_bind(args, *, store=None, stdout=None):
         'egress_basis': 'Existing Owner-authorized Claude Developer D6 bound to this Task.',
         'input_bytes': max(1, context_bytes), 'max_tokens': None,
         'artifact_format': 'unified_diff', 'artifact': None, 'artifact_sha256': None,
-        'usage': None, 'error_code': None, 'created_at': _now(),
+        'usage': None, 'error_code': None, 'created_at': _timestamp(),
         'owner_assignment_ref': args.owner_ref,
         'executor_task_id': registration.task_id,
     }
