@@ -267,7 +267,7 @@ def usage_status_line(turns, formatter):
         line += '，%s%d 回合沒有紀錄' % (count_prefix, missing)
     if dropped:
         line += '，前 %d 回合已不在紀錄中' % dropped
-    if any(gaps.values()):
+    if any(totals[key] is not None and gaps[key] > 0 for key in _USAGE_KEYS):
         line += '，部分回合缺少部分種類'
     return line + '）'
 
