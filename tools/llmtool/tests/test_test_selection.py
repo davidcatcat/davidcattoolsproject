@@ -64,6 +64,25 @@ class TestSelectionTests(unittest.TestCase):
         ])
         self.assertEqual(plan["fallback_reasons"], [])
 
+    def test_guidance_drift_inputs_map_to_checker_and_docs_tests(self):
+        expected = sorted([
+            "tools/llmtool/tests/test_guidance_drift_check.py",
+            "tools/llmtool/tests/test_docs_check.py",
+        ])
+        for source in (
+            "tools/llmtool/guidance-drift.json",
+            "tools/llmtool/scripts/guidance_drift_check.py",
+        ):
+            with self.subTest(source=source):
+                plan = select_test_plan([source])
+                self.assertEqual([level["level"] for level in plan["levels"]], ["L0", "L1"])
+                self.assertEqual(plan["levels"][1]["tests"], expected)
+                self.assertEqual(plan["fallback_reasons"], [])
+                self.assertEqual(
+                    plan["required_gates"],
+                    ["exact_head_ci", "security", "mac_native"],
+                )
+
     def test_unknown_config_dependency_and_deleted_test_keep_full_fallback(self):
         for path in (
             "tools/llmtool/llmtool/unknown_config.py",
