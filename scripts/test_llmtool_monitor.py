@@ -89,6 +89,193 @@ class ClassifyTests(unittest.TestCase):
         self.assertIsNone(mon._host_job("/x/python -B /tmp/l/invoke_once.py 'red;rm'"))
 
 
+class MonitorTrustTests(unittest.TestCase):
+    NOW = 1_800_000_000.0
+
+    def test_owner_count_requires_a_successful_read_and_counts_only_waiting_owner(self):
+        class Github:
+            successful_read = False
+            read_failed = False
+            pending = []
+        github = Github()
+        self.assertEqual(mon.owner_count_line(None), ("等你決定：未讀 GitHub", ""))
+        self.assertEqual(mon.owner_count_line(github), ("等你決定：尚未讀取", ""))
+        github.successful_read = True
+        github.pending = [mon.OwnerPending(1, "#1", "WAITING", "", "waiting_owner"),
+                          mon.OwnerPending(2, "#2", "WAITING", "", "repair_gate")]
+        self.assertEqual(mon.owner_count_line(github), ("等你決定：1 件", "!"))
+        github.pending = []
+        self.assertEqual(mon.owner_count_line(github), ("等你決定：0 件", ""))
+        github.read_failed = True
+        self.assertIn("GitHub 讀取失敗，可能過時", mon.owner_count_line(github)[0])
+
+    def test_d6_phases_and_unknown_pr_state(self):
+        self.assertEqual(mon.d6_phase("ACTIVE", True, "", False), "執行中")
+        self.assertEqual(mon.d6_phase("ACTIVE", False, "MERGED", False), "已完成，待收尾")
+        self.assertEqual(mon.d6_phase("ACTIVE", False, "CLOSED", False), "已完成，待收尾")
+        self.assertEqual(mon.d6_phase("ACTIVE", False, "OPEN", False), "等審查或 CI")
+        self.assertEqual(mon.d6_phase("REPAIR", False, "", False), "修復中")
+        self.assertEqual(mon.d6_phase("REVIEW_PENDING", False, "", False), "等審查")
+        self.assertEqual(mon.d6_phase("RETIRE_READY", False, "", False), "已驗收，可收尾")
+        self.assertEqual(mon.d6_phase("RETAIN_BLOCKED", False, "", False), "保留待處置")
+        self.assertEqual(mon.d6_phase("ACTIVE", False, "", False), "閒置（查不到 PR）")
+        self.assertEqual(mon.d6_phase("ACTIVE", False, "", True), "審查已結束，待收尾")
+
+    def test_task_route_summary_and_existing_task_output(self):
+        route = (90.0, 3, 2, "已回覆")
+        self.assertIn("Task 紀錄近 7 天 3 次，成功 2 次", mon.task_lines([], route=route)[0])
+        self.assertIn("最近一次", mon.task_lines([], route=route)[0])
+        self.assertEqual(mon.task_lines([]), ["近 7 天 llmtool Task 紀錄沒有 OpenCode 執行"])
+        self.assertNotIn("12 小時", mon.task_lines([])[0])
+        task = mon.Task("/tmp/llmtool-x", "t1", "branch", ())
+        self.assertEqual(mon.task_lines([task], route=route)[0], "任務 t1   分支 branch")
+
+    def test_main_health_line_reports_missing_and_known_runs(self):
+        text, style = mon.main_health_line(None, "offline", self.NOW)
+        self.assertIn("main：尚未讀取（未確認：offline）", text)
+        self.assertEqual(style, "!")
+        health = mon.MainHealth("74f78a4", "題目", self.NOW - 7200,
+                                ("completed", "success", "74f78a4"),
+                                ("completed", "success", self.NOW - 7 * 3600, "74f78a4"))
+        text, style = mon.main_health_line(health, "", self.NOW)
+        self.assertIn("main 74f78a4 題目（2 小時前）· Linux 成功", text)
+        self.assertIn("Mac 全套 成功（7 小時前）", text)
+        self.assertEqual(style, "")
+        self.assertEqual(mon.main_health_line(replace(health, linux=("in_progress", None, "oldsha1")), "", self.NOW)[0].split("· Linux ")[1].split(" ·")[0], "執行中 @oldsha1")
+        self.assertIn("Mac 未確認", mon.main_health_line(replace(health, mac=None), "", self.NOW)[0])
+        self.assertEqual(mon.main_health_line(replace(health, linux=("completed", "failure", "74f78a4")), "", self.NOW)[1], "!")
+
+    def test_main_refresh_ttl_failure_and_opt_in(self):
+        source = mon.GitHubSource("o/r", clock=lambda: self.NOW)
+        base = f"repos/o/r/"
+        paths = {
+            base + "commits?sha=main&per_page=1": [{"sha": "74f78a4deadbeef", "commit": {
+                "message": "Health title", "committer": {"date": iso(self.NOW - 60)}}}],
+            base + "actions/runs?branch=main&event=push&per_page=30": {"workflow_runs": [{
+                "name": "llmtool Linux CI", "status": "completed", "conclusion": "success",
+                "head_sha": "74f78a4deadbeef", "created_at": iso(self.NOW - 30)}]},
+            base + "actions/workflows/llmtool-mac-ci.yml/runs?branch=main&event=workflow_dispatch&per_page=1": {
+                "workflow_runs": [{"name": "llmtool Mac CI", "status": "in_progress",
+                    "conclusion": None, "head_sha": "74f78a4deadbeef", "created_at": iso(self.NOW - 20)}]},
+        }
+        calls = []
+        source._get = lambda path: calls.append(path) or paths[path]
+        source.refresh_main()
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(source.main_health.sha, "74f78a4")
+        self.assertEqual(source.main_health.linux[1], "success")
+        health = source.main_health
+        source._get = lambda path: (_ for _ in ()).throw(RuntimeError("offline"))
+        source.refresh_main()
+        self.assertIs(source.main_health, health)  # TTL suppresses duplicate reads
+        source.main_read_at -= 300
+        source.refresh_main()
+        self.assertIs(source.main_health, health)
+        self.assertEqual(source.main_error, "offline")
+        self.assertFalse(source.read_failed)
+        self.assertEqual(source.status, "GitHub：尚未讀取")
+
+        quiet = mon.GitHubSource("o/r", clock=lambda: self.NOW)
+        seen = []
+        quiet._get = lambda path: seen.append(path) or ([] if "comments?" in path else [])
+        quiet.refresh_ci = lambda: None
+        quiet.refresh(force=True)
+        self.assertFalse(any("commits?sha=main" in path for path in seen))
+
+    def test_github_refresh_does_not_read_main_without_opt_in(self):
+        source = mon.GitHubSource("o/r", clock=lambda: self.NOW)
+        seen = []
+        source._get = lambda path: seen.append(path) or []
+        source.refresh_ci = lambda: None
+        source.refresh(force=True)
+        self.assertFalse(source.want_main)
+        self.assertFalse(any("commits?sha=main" in path for path in seen))
+
+    def test_office_top_is_rendered_before_error_and_wraps(self):
+        top = [("等你決定：2 件", "!"), ("main：尚未讀取", "")]
+        lines = mon.office_view([], error="OSError", width=24, top=top)
+        self.assertEqual(lines[1][1], "!")
+        self.assertTrue(any("辦公室資料讀取失敗" in text for text, _ in lines))
+        self.assertTrue(any(text.startswith("⚠") for text, _ in lines))
+
+
+class QuotaWarningTests(unittest.TestCase):
+    NOW = 1_800_000_000.0
+
+    def _write(self, path, entries, modified=None):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
+        os.utime(path, (modified or self.NOW, modified or self.NOW))
+        mon._tail_cache.pop(str(path), None)
+        return path
+
+    def test_codex_threshold_reset_and_invalid_number(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / time.strftime("%Y/%m/%d", time.localtime(self.NOW))
+            path = folder / "rollout-a.jsonl"
+            def entry(percent, reset):
+                return {"type": "event_msg", "payload": {"rate_limits": {
+                    "primary": {"used_percent": percent, "window_minutes": 300,
+                                "resets_at": reset}}}}
+            self._write(path, [entry(79, self.NOW + 3600)])
+            self.assertEqual(mon.quota_warnings(self.NOW, temp, []), [])
+            self._write(path, [entry(85, self.NOW + 3600)])
+            self.assertIn("Codex 5 小時額度已用 85%", mon.quota_warnings(self.NOW, temp, [])[0])
+            self._write(path, [entry(99, self.NOW - 1)])
+            self.assertEqual(mon.quota_warnings(self.NOW, temp, []), [])
+            self._write(path, [entry("90", self.NOW + 3600)])
+            self.assertEqual(mon.quota_warnings(self.NOW, temp, []), [])
+
+    def test_codex_reset_displays_date_only_when_reset_is_not_today(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / time.strftime("%Y/%m/%d", time.localtime(self.NOW))
+            path = folder / "rollout-a.jsonl"
+
+            def warning(reset):
+                entry = {"type": "event_msg", "payload": {"rate_limits": {
+                    "primary": {"used_percent": 85, "window_minutes": 10080,
+                                "resets_at": reset}}}}
+                self._write(path, [entry])
+                return mon.quota_warnings(self.NOW, temp, [])[0]
+
+            same_day = self.NOW + 3600
+            later_day = self.NOW + 2 * 86400
+            self.assertIn(time.strftime("%H:%M", time.localtime(same_day)) + " 重置",
+                          warning(same_day))
+            self.assertIn(time.strftime("%m-%d %H:%M", time.localtime(later_day)) + " 重置",
+                          warning(later_day))
+
+    def test_codex_rate_limit_reached_is_suppressed_after_all_windows_reset(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / time.strftime("%Y/%m/%d", time.localtime(self.NOW))
+            path = folder / "rollout-a.jsonl"
+            rate = {"type": "event_msg", "payload": {"rate_limits": {
+                "rate_limit_reached_type": "primary",
+                "primary": {"resets_at": self.NOW - 1},
+                "secondary": {"resets_at": self.NOW}}}}
+            self._write(path, [rate])
+            self.assertEqual(mon.quota_warnings(self.NOW, temp, []), [])
+
+    def test_claude_quota_hit_cleared_expired_and_reset_text_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".claude-account" / "projects"
+            path = root / "project" / "session.jsonl"
+            rate = {"type": "assistant", "timestamp": iso(self.NOW - 60),
+                    "error": "rate_limit", "message": {"content": [{"text": "resets 8:30am private text"}]}}
+            self._write(path, [rate])
+            lines = mon.quota_warnings(self.NOW, codex_root=temp + "/missing",
+                                       claude_root=str(root))
+            self.assertEqual(lines, ["Claude（.claude-account）已到用量上限，resets 8:30am"])
+            cleared = dict(rate, timestamp=iso(self.NOW - 30))
+            assistant = {"type": "assistant", "timestamp": iso(self.NOW - 10),
+                         "message": {"content": [{"text": "ordinary reply"}]}}
+            self._write(path, [cleared, assistant])
+            self.assertEqual(mon.quota_warnings(self.NOW, temp + "/missing", str(root)), [])
+            old = dict(rate, timestamp=iso(self.NOW - 6 * 3600))
+            self._write(path, [old])
+            self.assertEqual(mon.quota_warnings(self.NOW, temp + "/missing", str(root)), [])
+
+
 class ProcessGroupTests(unittest.TestCase):
     def test_pgid_reuse_is_not_blamed_on_the_old_group(self):
         first = mon.parse_processes(ps(
@@ -370,6 +557,18 @@ class MonitorTaskBaselineTests(unittest.TestCase):
         with patch.object(mon, "office_rows", return_value=[]):
             self.poll([])
         self.assertIsNone(self.monitor.office_error)
+
+    def test_route_outcome_failure_preserves_previous_opencode_route(self):
+        previous = (30.0, 4, 3, "已回覆")
+        self.monitor.opencode_route = previous
+        with patch.object(mon, "collect", return_value=self.snapshot), \
+             patch.object(mon, "scan_tasks", return_value=[]), \
+             patch.object(mon, "llmtool_task_records", return_value=[]), \
+             patch.object(mon, "llmtool_route_outcomes", side_effect=OSError("offline")), \
+             patch.object(mon, "quota_warnings", return_value=[]), \
+             patch.object(mon, "office_rows", return_value=[]):
+            self.monitor.poll()
+        self.assertEqual(self.monitor.opencode_route, previous)
 
     def test_office_is_rebuilt_at_most_every_office_every_seconds(self):
         with patch.object(mon, "office_rows", return_value=[]) as rows:
@@ -902,12 +1101,14 @@ class GitHubActivityTests(unittest.TestCase):
                 source.runner = FakeRun(*later)
                 source.refresh(force=True)
                 self.assertIn("讀取失敗", source.status)
+                self.assertTrue(source.read_failed)
                 self.assertEqual([e.reference for e in source.events], ["#1"])
             # A comment posted between page reads shifts the next page by one.
             shifted = page[-1:] + [dict(comment(200 + i, NOW - 30, "d"), id=200 + i) for i in range(3)]
             source.runner = FakeRun((0, page), (0, shifted), (0, []))
             source.refresh(force=True)
         self.assertEqual(len(source.events), 103)
+        self.assertFalse(source.read_failed)
 
     def test_requests_addressed_to_the_owner_wait_until_settled(self):
         ask = lambda n, t, status="AUTHORIZATION_REQUESTED", kind="repair_gate": comment(
@@ -930,6 +1131,7 @@ class GitHubActivityTests(unittest.TestCase):
         pending = mon.owner_pending(comments, pulls)
         self.assertEqual([item.reference for item in pending], ["#10", "#13"])
         self.assertEqual(pending[0].status, "AUTHORIZATION_REQUESTED")
+        self.assertEqual(pending[0].kind, "repair_gate")
         self.assertEqual(pending[0].summary, "Need a decision on 10")
         lines = mon.office_lines([], pending=pending[:1])
         self.assertTrue(lines[1].startswith("★ 等你決定：GitHub #10"))
@@ -1131,7 +1333,7 @@ class GitHubActivityTests(unittest.TestCase):
              patch.object(mon.time, "time", return_value=NOW), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
             self.assertEqual(mon.main(["--once", "--github"]), 0)
-        self.assertEqual(len(run.calls), 3)
+        self.assertEqual(len(run.calls), 4)
         self.assertTrue(all(argv[1:4] == ["api", "-X", "GET"] for argv, _ in run.calls))
         self.assertTrue(all(mon.DEFAULT_GITHUB_REPO in argv[4] for argv, _ in run.calls))
         self.assertIn("GitHub #4：新留言 — hello", out.getvalue())
@@ -1646,6 +1848,48 @@ class OfficeViewTests(unittest.TestCase):
         # Without GitHub nothing is flagged.
         self.assertFalse(any("⚠" in line for line in mon.d6_task_lines(self.canonical, [], self.NOW)))
 
+    def test_d6_reviewer_and_high_debug_phases_use_pr_number_and_completion_order(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        names = ("pr941-claude-rv2-0aa754d", "pr961-codex-rv2-f400ef6")
+        for index, task_id in enumerate(names):
+            root = Path(self.tmp.name) / f"review-{index}"
+            root.mkdir()
+            self._register(task_id, str(root), branch=f"review/{task_id}",
+                           last_verified_at=stamp, trusted_agent_id="codex-reviewer")
+
+        # Reviewer branches do not match branch_prs keys. The PR number map still
+        # supplies PR completion, while a matching verdict takes precedence.
+        prs = {"unrelated/branch": (941, "OPEN"),
+               "another/branch": (961, "OPEN")}
+        verdicts = {"941": [(self.NOW - 30, "REVIEW_PASS", ["0aa754d"])],
+                    "961": [(self.NOW - 30, "REVIEW_PASS", ["f400ef6"])]}
+        lines = mon.d6_task_lines(self.canonical, [], self.NOW, prs, verdicts)
+        by_task = {task_id: next(line for line in lines if task_id in line) for task_id in names}
+        self.assertIn("審查已結束，待收尾", by_task[names[0]])
+        self.assertIn("審查已結束，待收尾", by_task[names[1]])
+
+        prs = {"unrelated/branch": (941, "MERGED"),
+               "another/branch": (961, "MERGED")}
+        lines = mon.d6_task_lines(self.canonical, [], self.NOW, prs, {})
+        by_task = {task_id: next(line for line in lines if task_id in line) for task_id in names}
+        self.assertIn("已完成，待收尾", by_task[names[0]])
+        self.assertIn("已完成，待收尾", by_task[names[1]])
+
+        prs = {"unrelated/branch": (941, "OPEN"),
+               "another/branch": (961, "OPEN")}
+        lines = mon.d6_task_lines(self.canonical, [], self.NOW, prs, {})
+        by_task = {task_id: next(line for line in lines if task_id in line) for task_id in names}
+        self.assertIn("審查沒在跑，查不到結論", by_task[names[0]])
+        self.assertIn("審查沒在跑，查不到結論", by_task[names[1]])
+
+        root = Path(self.tmp.name) / "debug"
+        root.mkdir()
+        high_debug = "repair-hd2-abcdef0"
+        self._register(high_debug, str(root), last_verified_at=stamp,
+                       trusted_agent_id=mon.CODEX_HIGH_DEBUG_AGENT)
+        lines = mon.d6_task_lines(self.canonical, [], self.NOW, prs, {})
+        self.assertIn("診斷沒在跑，待收尾", next(line for line in lines if high_debug in line))
+
     def test_d6_task_lines_list_recent_tasks_with_their_live_session(self):
         stamp = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - age))
         other = Path(self.tmp.name) / "wp-2"
@@ -1659,7 +1903,7 @@ class OfficeViewTests(unittest.TestCase):
         lines = mon.d6_task_lines(self.canonical, rows, self.NOW)
         self.assertEqual(len(lines), 2)
         self.assertIn("wp-2  進行中  →  沒有 session 在跑  （未綁定 agent）", lines[0])
-        self.assertIn("wp-1  等審查  →  claude developer（互動） 需注意  （claude-ui-agent）", lines[1])
+        self.assertIn("wp-1  執行中  →  claude developer（互動） 需注意  （claude-ui-agent）", lines[1])
         self.assertNotIn("SECRET", "\n".join(lines))
 
     def test_agent_process_cwd_binds_transcript_free_d6_session(self):
