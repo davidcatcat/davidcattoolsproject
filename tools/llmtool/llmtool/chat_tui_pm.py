@@ -221,6 +221,25 @@ def usage_totals(turns):
     return totals, counted, missing
 
 
+def usage_gaps(turns):
+    """Count counted turns that lack a valid value for each usage key."""
+    valid_counts = {key: 0 for key in _USAGE_KEYS}
+    counted = 0
+    for turn in turns:
+        usage = turn.get('usage') if type(turn) is dict else None
+        valid = set()
+        if type(usage) is dict:
+            for key in _USAGE_KEYS:
+                value = usage.get(key)
+                if type(value) is int and value >= 0:
+                    valid.add(key)
+        if valid:
+            counted += 1
+            for key in valid:
+                valid_counts[key] += 1
+    return {key: counted - valid_counts[key] for key in _USAGE_KEYS}
+
+
 def usage_status_line(turns, formatter):
     """Format PM turn usage, preserving UNKNOWN when no turns recorded usage."""
     if not turns:
@@ -228,14 +247,28 @@ def usage_status_line(turns, formatter):
     totals, counted, missing = usage_totals(turns)
     if not counted:
         return '用量（本 session）：UNKNOWN（%d 回合沒有用量紀錄）' % missing
-    def display(key):
-        return '未回報' if totals[key] is None else formatter(totals[key])
+    dropped = min((turn.get('seq') for turn in turns
+                   if type(turn) is dict and type(turn.get('seq')) is int), default=0) - 1
+    dropped = max(0, dropped)
+    gaps = usage_gaps(turns)
 
-    line = ('用量（本 session）：輸入 %s · 輸出 %s · 快取讀取 %s · 快取建立 %s tokens（%d 回合'
+    def display(key):
+        if totals[key] is None:
+            return '未回報'
+        prefix = '≥' if dropped > 0 or gaps[key] > 0 else ''
+        return prefix + formatter(totals[key])
+
+    count_prefix = '≥' if dropped > 0 else ''
+    line = ('用量（本 session）：輸入 %s · 輸出 %s · 快取讀取 %s · 快取建立 %s tokens（%s%d 回合'
             % (display('input_tokens'), display('output_tokens'),
-               display('cache_read_input_tokens'), display('cache_creation_input_tokens'), counted))
+               display('cache_read_input_tokens'), display('cache_creation_input_tokens'),
+               count_prefix, counted))
     if missing:
-        line += '，%d 回合沒有紀錄' % missing
+        line += '，%s%d 回合沒有紀錄' % (count_prefix, missing)
+    if dropped:
+        line += '，前 %d 回合已不在紀錄中' % dropped
+    if any(gaps.values()):
+        line += '，部分回合缺少部分種類'
     return line + '）'
 
 

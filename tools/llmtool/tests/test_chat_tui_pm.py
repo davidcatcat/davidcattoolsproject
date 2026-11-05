@@ -110,7 +110,47 @@ class PMUsageStatusTests(unittest.TestCase):
                          "用量（本 session）：輸入 22 · 輸出 14 · 快取讀取 0 · 快取建立 未回報 tokens"
                          "（1 回合）")
 
+    def test_usage_gaps_mark_partial_token_totals(self):
+        formatter = chat_tui._short_count
+        turns = [
+            {"usage": {"input_tokens": 1, "output_tokens": 1,
+                       "cache_read_input_tokens": 0}},
+            {"usage": {"input_tokens": 1, "output_tokens": 1}},
+        ]
+        self.assertEqual(chat_tui_pm.usage_gaps(turns), {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_input_tokens": 1, "cache_creation_input_tokens": 2,
+        })
+        self.assertEqual(chat_tui_pm.usage_status_line(turns, formatter),
+                         "用量（本 session）：輸入 2 · 輸出 2 · 快取讀取 ≥0 · 快取建立 未回報 tokens"
+                         "（2 回合，部分回合缺少部分種類）")
+
+    def test_true_and_negative_values_count_as_usage_gaps(self):
+        turns = [
+            {"usage": {"input_tokens": 1, "output_tokens": 2}},
+            {"usage": {"input_tokens": True, "output_tokens": -1,
+                       "cache_read_input_tokens": 0}},
+        ]
+        self.assertEqual(chat_tui_pm.usage_gaps(turns), {
+            "input_tokens": 1, "output_tokens": 1,
+            "cache_read_input_tokens": 1, "cache_creation_input_tokens": 2,
+        })
+
+    def test_truncated_history_marks_totals_as_lower_bounds(self):
+        formatter = chat_tui._short_count
+        turns = [{"seq": seq, "usage": {"input_tokens": 1, "output_tokens": 2,
+                                          "cache_read_input_tokens": 3,
+                                          "cache_creation_input_tokens": 4}}
+                 for seq in range(51, 251)]
+        self.assertEqual(chat_tui_pm.usage_status_line(turns, formatter),
+                         "用量（本 session）：輸入 ≥200 · 輸出 ≥400 · 快取讀取 ≥600 · 快取建立 ≥800 tokens"
+                         "（≥200 回合，前 50 回合已不在紀錄中）")
+
+        turns[0]["seq"] = 1
+        self.assertNotIn("≥", chat_tui_pm.usage_status_line(turns, formatter))
+
     def test_read_all_turns_pages_until_empty_page(self):
+        # This mocked fixture tests the paging loop, not the store's 200-turn capacity.
         turns = [{"seq": index} for index in range(1, 451)]
         calls = []
 
