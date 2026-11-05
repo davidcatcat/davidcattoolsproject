@@ -728,9 +728,9 @@ class WidgetTests(Base):
                                   '/clear', '/history', '/exit', '/quit', '/task submit',
                                   '/task show', '/task mode', '/task list', '/task events',
                                   '/theme', '/links', '/settings', '/pm list', '/pm use',
-                                  '/pm accounts', '/settings auto-resume'])
-        self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:4],
-                         ['/status', '/skill', '/settings', '/settings auto-resume'])
+                                  '/pm accounts'])
+        self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:3],
+                         ['/status', '/skill', '/settings'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/p')][:3],
                          ['/pm connect', '/pm new', '/pm'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/ory')][:2],
@@ -742,14 +742,10 @@ class WidgetTests(Base):
         self.assertEqual(chat_tui.slash_matches('/nope'), [])
         self.assertEqual(chat_tui.slash_matches('/s\nx'), [])
 
-    def test_slash_matches_settings_and_auto_resume(self):
-        self.assertEqual([c[0] for c in chat_tui.slash_matches('/settings')],
-                         ['/settings', '/settings auto-resume'])
-
     def test_picker_completes_draft_without_executing(self):
         def open_menu(ui):
             self.assertEqual([c[0] for c in ui.menu_items],
-                             ['/status', '/skill', '/settings', '/settings auto-resume'])
+                             ['/status', '/skill', '/settings'])
         ui, _ = self.drive(['/s', open_menu, '\x1b[B', '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/skill '),
                             lambda ui: self.assertEqual(ui.menu_items, []),
@@ -771,15 +767,27 @@ class WidgetTests(Base):
         self.assertEqual(ui.menu_items, [])
         self.factory.assert_not_called()
 
-    def test_tab_completes_settings_auto_resume_with_argument_spacing(self):
-        ui, _ = self.drive(['/settings auto', '\t',
-                            lambda ui: self.assertEqual(ui.input.text, '/settings auto-resume ')])
-        self.factory.assert_not_called()
-
     def test_settings_exact_command_still_runs_from_the_draft(self):
         ui, _ = self.drive(['/settings\r',
                             lambda ui: self.assertEqual(ui.input.text, '')])
         self.assertIn('Settings: auto-resume', ui.conversation.text)
+
+    def test_settings_with_trailing_space_runs_from_the_draft(self):
+        ui, _ = self.drive(['/settings ', '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '')])
+        self.assertIn('Settings: auto-resume', ui.conversation.text)
+
+    def test_tab_keeps_settings_command_draft_and_closes_picker(self):
+        ui, _ = self.drive(['/settings', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/settings '),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
+        self.factory.assert_not_called()
+
+    def test_tab_keeps_settings_prefix_draft_and_closes_picker(self):
+        ui, _ = self.drive(['/sett', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/settings '),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
+        self.factory.assert_not_called()
 
     def test_tab_extends_ambiguous_prefix_and_lists_candidates(self):
         def candidates(ui):
@@ -841,7 +849,7 @@ class WidgetTests(Base):
     def test_picker_esc_enter_inserts_newline_instead_of_closing_and_submitting(self):
         def open_menu(ui):
             self.assertEqual([c[0] for c in ui.menu_items],
-                             ['/status', '/skill', '/settings', '/settings auto-resume'])
+                             ['/status', '/skill', '/settings'])
             # The short lone-Esc timeout applies only while the picker is open.
             self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
         ui, _ = self.drive(['/s', open_menu, '\x1b\r',
@@ -964,24 +972,24 @@ class WidgetTests(Base):
 
     def test_picker_scrolls_and_counts_hidden_entries(self):
         def first_page(ui):
-            self.assertEqual(len(ui.menu_items), 26)
+            self.assertEqual(len(ui.menu_items), 25)
             rows = self.menu_rows(ui)
             self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
             self.assertIn('/pm connect', rows[0])
-            self.assertIn('21 more (0 above, 21 below)', rows[-1])
+            self.assertIn('20 more (0 above, 20 below)', rows[-1])
 
         def scrolled(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
             self.assertNotIn('/pm connect', ''.join(rows))
             self.assertIn('/help', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('21 more (2 above, 19 below)', rows[-1])
+            self.assertIn('20 more (2 above, 18 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
-            self.assertEqual(ui.menu_index, 25)
-            self.assertIn('/settings auto-resume', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('(21 above, 0 below)', rows[-1])
+            self.assertEqual(ui.menu_index, 24)
+            self.assertIn('/pm accounts', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('(20 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/help'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
