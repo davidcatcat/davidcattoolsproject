@@ -3772,7 +3772,8 @@ class PMConversationTests(BoundedPMTest):
                 {'role': 'Developer', 'task': 'task-1', 'state': 'DEVELOPER_PENDING'}]):
             ui, _ = self.drive([self.connect(), lambda ui: self.until(
                 ui, lambda ui: ui.pm_runtime is not None and ui.pm_mode), self.turn_done])
-        self.assertEqual(self.fakes[0].users(), ['（自動）重新連線：請接續進行中的工作並回報狀態'])
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['（自動）重新連線：請接續進行中的工作並回報狀態'])
         self.assertEqual(ui.conversation.text.count(
             '（自動）重新連線：請接續進行中的工作並回報狀態'), 2)  # system line and sent turn
 

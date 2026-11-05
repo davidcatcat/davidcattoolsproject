@@ -3693,10 +3693,6 @@ class ChatTUI:
         self.pm_runtime = outcome["runtime"]
         self.pm_binding = outcome.get("binding")
         background = outcome.get("background")
-        if isinstance(background, list):
-            self.background, self.background_error = background, None
-            self.background_key = outcome["session"]
-            self.background_loaded = time.monotonic()
         if callable(getattr(self.pm_runtime, "background_turn", None)):
             threading.Thread(target=self._pm_watch, args=(self.pm_runtime, self._loop),
                              name="llmtool-chat-pm-watch", daemon=True).start()
