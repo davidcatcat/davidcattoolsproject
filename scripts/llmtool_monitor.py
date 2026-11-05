@@ -7315,6 +7315,45 @@ def owner_count_line(github) -> tuple[str, str]:
     return text, "!" if count or others else ""
 
 
+def install_lines(github, pin_file=None) -> list[tuple[str, str]]:
+    """Show Owner approval and pinned-install updates without changing state."""
+    if github is None or not github.successful_read:
+        return []
+
+    out = []
+    approvals = sum(
+        item.kind == "waiting_owner" and "owner-approval" in item.summary.lower()
+        for item in github.pending
+    )
+    if approvals:
+        out.append((f"等你終端核准：{approvals} 件（請在自己的終端執行 "
+                    "llmtool owner-approval grant）", "!"))
+
+    if pin_file is None:
+        pin_file = os.path.join(os.path.expanduser("~"), ".local/state/llmtool/approved-install.json")
+    try:
+        with open(pin_file, "rb") as pin:
+            raw = pin.read(4097)
+        if len(raw) > 4096:
+            raise ValueError("pin too large")
+        data = json.loads(raw)
+        approved_sha = data.get("approved_sha") if isinstance(data, dict) else None
+        if (not isinstance(approved_sha, str) or len(approved_sha) != 40
+                or any(char not in "0123456789abcdef" for char in approved_sha)):
+            raise ValueError("invalid approved SHA")
+    except FileNotFoundError:
+        return out
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        out.append(("安裝釘選檔無法讀取", "!"))
+        return out
+
+    main_health = github.main_health
+    if main_health is not None and approved_sha[:7] != main_health.sha:
+        out.append((f"新版本等你安裝：{approved_sha[:7]} → {main_health.sha}"
+                    "（請在自己的終端執行 llmtool self-update）", "!"))
+    return out
+
+
 def owner_waiting(github) -> int | None:
     if (github is None or not github.successful_read or github.read_failed):
         return None
@@ -7337,8 +7376,10 @@ def stuck_lines(mon, now) -> list[str]:
         return []
 
 
-def office_top(github, quota, now, stuck=None, progress=None) -> list[tuple[str, str]]:
+def office_top(github, quota, now, stuck=None, progress=None, install=None) -> list[tuple[str, str]]:
     out = [owner_count_line(github)]
+    if isinstance(install, list):
+        out.extend(install)
     if github is not None:
         out.append(main_health_line(github.main_health, github.main_error, now))
     if progress is not None:
@@ -7506,7 +7547,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
                                  waiting=owner_waiting(github or mon.github),
                                  top=office_top(github, mon.quota, time.time(),
                                                 stuck=stuck_lines(mon, time.time()),
-                                                progress=pm_progress(mon, time.time())))))
+                                                progress=pm_progress(mon, time.time()),
+                                                install=install_lines(github))))
     print("\n".join(line for line, _ in board_view(
         work_board(github, mon.pm_board, time.time(), ec2=mon.ec2_heads,
                    reviewing=pr_reviewing(mon.office)))))
@@ -7697,7 +7739,8 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
                             waiting=owner_waiting(mon.github),
                             top=office_top(mon.github, mon.quota, time.time(),
                                            stuck=stuck_lines(mon, time.time()),
-                                           progress=pm_progress(mon, time.time())))
+                                           progress=pm_progress(mon, time.time()),
+                                           install=install_lines(mon.github)))
         offset = max(0, min(offset, len(lines) - body))
         styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
                   "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}

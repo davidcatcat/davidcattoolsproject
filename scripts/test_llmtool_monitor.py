@@ -2354,6 +2354,71 @@ class DispatchFileAgreementTests(_GateMixin, unittest.TestCase):
         self.assertLessEqual({key for _, key, _ in mon.WORKER_ROSTER}, mon.DISPATCH_WORKERS)
 
 
+class InstallLinesTests(unittest.TestCase):
+    APPROVAL = ("等你終端核准：1 件（請在自己的終端執行 llmtool owner-approval grant）", "!")
+    UNREADABLE = ("安裝釘選檔無法讀取", "!")
+
+    def _github(self, *, successful_read=True, pending=None, sha="a" * 7):
+        from types import SimpleNamespace
+        health = mon.MainHealth(sha, "main", 0) if sha is not None else None
+        return SimpleNamespace(successful_read=successful_read, pending=pending or [],
+                               main_health=health, main_error="", read_failed=False,
+                               window=43200)
+
+    def _pin(self, directory, value):
+        path = Path(directory) / "approved-install.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return str(path)
+
+    def test_unavailable_github_and_missing_pin_show_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(mon.install_lines(None, directory), [])
+            self.assertEqual(mon.install_lines(self._github(successful_read=False), directory), [])
+            self.assertEqual(mon.install_lines(self._github(), str(Path(directory) / "missing")), [])
+
+    def test_matching_and_behind_pins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            same = self._pin(directory, {"approved_sha": "a" * 40})
+            self.assertEqual(mon.install_lines(self._github(sha="a" * 7), same), [])
+            behind = self._pin(directory, {"approved_sha": "b" * 40})
+            self.assertEqual(mon.install_lines(self._github(sha="a" * 7), behind),
+                             [("新版本等你安裝：bbbbbbb → aaaaaaa（請在自己的終端執行 llmtool self-update）", "!")])
+
+    def test_bad_json_oversize_and_short_sha_are_unreadable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pin"
+            for raw in (b"{", b" " * 4097, json.dumps({"approved_sha": "a" * 39}).encode()):
+                path.write_bytes(raw)
+                self.assertEqual(mon.install_lines(self._github(), str(path)), [self.UNREADABLE])
+
+    def test_counts_only_waiting_owner_approval_summaries(self):
+        pending = [mon.OwnerPending(1, "#1", "open", "Need owner-approval grant", "waiting_owner"),
+                   mon.OwnerPending(2, "#2", "open", "Other owner request", "waiting_owner"),
+                   mon.OwnerPending(3, "#3", "open", "owner-approval", "repair_gate")]
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(mon.install_lines(self._github(pending=pending), directory), [self.APPROVAL])
+
+    def test_office_top_places_install_after_owner_and_before_main(self):
+        github = self._github()
+        install = [("install", "!")]
+        self.assertEqual(mon.office_top(github, ["quota"], 0, install=install),
+                         [mon.owner_count_line(github), *install,
+                          mon.main_health_line(github.main_health, github.main_error, 0),
+                          ("quota", "!")])
+        self.assertEqual(mon.office_top(github, ["quota"], 0),
+                         [mon.owner_count_line(github),
+                          mon.main_health_line(github.main_health, github.main_error, 0),
+                          ("quota", "!")])
+        self.assertEqual(mon.office_top(None, [], 0), [mon.owner_count_line(None)])
+
+    def test_install_lines_runs_no_subprocess(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pin = self._pin(directory, {"approved_sha": "a" * 40})
+            with patch("subprocess.run", side_effect=AssertionError("subprocess.run called")), \
+                    patch("subprocess.Popen", side_effect=AssertionError("subprocess.Popen called")):
+                self.assertEqual(mon.install_lines(self._github(), pin), [])
+
+
 class OfficeViewTests(unittest.TestCase):
     NOW = 1_800_000_000.0
 
