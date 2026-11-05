@@ -167,6 +167,9 @@ class Base(unittest.TestCase):
         self.background_tick = patch.object(chat_tui.ChatTUI, '_background_tick',
                                             lambda ui: None)
         self.background_tick.start()
+        self.background_read_patch = patch.object(chat_tui_status, 'read_background',
+                                                  return_value=[])
+        self.background_read_patch.start()
         # W57: Task mode is behind the developer flag; these tests exercise it, and
         # NonDevTaskTests checks the default without the flag.
         patch.dict(os.environ, {chat_tui.DEV_ENV: '1'}).start()
@@ -3186,6 +3189,8 @@ class AutoResumeWidgetTests(Base):
         ui.pm_runtime = Mock(turn_active=Mock(return_value=False),
                              automatic_sends_blocked=Mock(return_value=False))
         ui.pm_mode, ui.pm_state = True, 'idle'
+        ui.pm_target = ('session', '.')
+        ui._auto_resume_connection = object()
         ui._pm_start_turn = Mock()
 
     def test_no_work_does_not_send(self):
@@ -3193,22 +3198,6 @@ class AutoResumeWidgetTests(Base):
         self.prepare(ui)
         ui._auto_resume_pending = False
         ui._maybe_auto_resume()
-        ui._pm_start_turn.assert_not_called()
-
-    def test_display_waiting_background_turn_is_not_work_evidence(self):
-        ui = self.make_ui()
-        self.prepare(ui)
-        runtime = ui.pm_runtime
-        runtime.background_turn = None
-        ui._pm_unadopted = runtime
-        ui._append_account = Mock()
-        ui._append_history = Mock()
-        ui._pm_background_waiting.append({'runtime': runtime})
-        ui.finish_pm_connect({
-            'runtime': runtime, 'session': 'session', 'cwd': '.', 'binding': None,
-            'history': [], 'history_error': None, 'background': [],
-        })
-        self.assertFalse(ui._auto_resume_pending)
         ui._pm_start_turn.assert_not_called()
 
     def test_busy_pm_defers_resume_until_idle(self):
@@ -3387,14 +3376,80 @@ class AutoResumeWidgetTests(Base):
         self.assertFalse(ui._auto_resume_pending)
         self.assertTrue(ui._auto_resume_sent)
 
+    def test_unconfirmed_candidate_waits_for_reader_confirmation(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui._auto_resume_pending = ui._auto_resume_unconfirmed = True
+        ui._maybe_auto_resume()
+        ui._pm_start_turn.assert_not_called()
+        ui.finish_auto_resume_read(ui._auto_resume_connection, ui.pm_runtime, 'session', [{}])
+        ui.finish_auto_resume_read(ui._auto_resume_connection, ui.pm_runtime, 'session', [{}])
+        ui._maybe_auto_resume()
+        ui._pm_start_turn.assert_called_once()
+
+    def test_finish_pm_turn_cancels_unconfirmed_candidate_with_outbox(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui._auto_resume_pending = ui._auto_resume_unconfirmed = True
+        ui.pm_outbox.append('draft')
+        ui.finish_pm_turn()
+        self.assertFalse(ui._auto_resume_pending)
+        ui.finish_auto_resume_read(ui._auto_resume_connection, ui.pm_runtime, 'session', [{}])
+        ui._pm_start_turn.assert_not_called()
+
+    def test_stale_resume_read_is_ignored_after_reconnect_for_either_session(self):
+        for session in ('session', 'new-session'):
+            with self.subTest(session=session):
+                ui = self.make_ui()
+                self.prepare(ui)
+                old_connection, old_runtime = object(), Mock()
+                ui._auto_resume_connection = object()
+                ui.pm_target = (session, '.')
+                ui.background_key = session
+                ui.background_loaded = time.monotonic()
+                ui.background = [{'role': 'Developer', 'task': 'cached', 'state': 'RUNNING'}]
+                ui._auto_resume_pending = ui._auto_resume_unconfirmed = True
+                ui.finish_auto_resume_read(old_connection, old_runtime, 'session', [{}])
+                self.assertTrue(ui._auto_resume_pending)
+                self.assertTrue(ui._auto_resume_unconfirmed)
+                ui._pm_start_turn.assert_not_called()
+
+    def test_exception_none_and_empty_resume_results_cancel(self):
+        for result in (None, [], RuntimeError('read failed')):
+            with self.subTest(result=result):
+                ui = self.make_ui()
+                self.prepare(ui)
+                ui._auto_resume_pending = ui._auto_resume_unconfirmed = True
+                ui.finish_auto_resume_read(ui._auto_resume_connection, ui.pm_runtime,
+                                           'session', result)
+                self.assertFalse(ui._auto_resume_pending)
+                self.assertFalse(ui._auto_resume_unconfirmed)
+                ui._maybe_auto_resume()
+                ui._pm_start_turn.assert_not_called()
+
+    def test_reader_converts_exception_to_none_and_only_posts_result(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui._auto_resume_pending = ui._auto_resume_unconfirmed = True
+        post = Mock(return_value=True)
+        ui._post = post
+        loop = object()
+        with patch.object(chat_tui_status, 'read_background', side_effect=RuntimeError('private')):
+            ui._read_auto_resume(ui._auto_resume_connection, ui.pm_runtime, 'session', loop)
+        post.assert_called_once_with(loop, ui.finish_auto_resume_read,
+                                     ui._auto_resume_connection, ui.pm_runtime, 'session', None)
+        self.assertTrue(ui._auto_resume_pending)
+        self.assertTrue(ui._auto_resume_unconfirmed)
+
     def test_background_end_sends_deferred_resume_once(self):
         ui = self.make_ui()
         self.prepare(ui)
-        ui._auto_resume_pending = True
+        ui._auto_resume_pending = ui._auto_resume_unconfirmed = True
         turn = dict(runtime=ui.pm_runtime, seq=None,
                     events=[], ended=False)
         ui.pm_background_start(turn)
         self.assertTrue(ui.pm_turn_active)
+        ui.finish_auto_resume_read(ui._auto_resume_connection, ui.pm_runtime, 'session', [{}])
         ui._maybe_auto_resume()
         ui._pm_start_turn.assert_not_called()
         self.assertTrue(ui._auto_resume_pending)
@@ -3949,15 +4004,33 @@ class PMConversationTests(BoundedPMTest):
     def turn_done(self, ui):
         return self.until(ui, lambda ui: not ui.pm_turn_active, 'PM turn end')
 
+    def join_resume_readers(self):
+        readers = [thread for thread in threading.enumerate()
+                   if thread.name == 'llmtool-chat-pm-resume']
+        for reader in readers:
+            reader.join(5)
+        self.assertFalse(any(reader.is_alive() for reader in readers),
+                         'resume reader did not finish before its patch ended')
+
     def connect(self):
         return '/pm connect\r'   # uses the saved dedicated binding
 
     def test_connect_auto_resumes_once_when_taskstore_has_in_flight_work(self):
         self.turns = [_full_turn()]
-        with patch.object(chat_tui_status, 'read_background', return_value=[
-                {'role': 'Developer', 'task': 'task-1', 'state': 'DEVELOPER_PENDING'}]):
-            ui, _ = self.drive([self.connect(), lambda ui: self.until(
-                ui, lambda ui: ui.pm_runtime is not None and ui.pm_mode), self.turn_done])
+        record = {'task_id': 'task-1', 'state': 'PM_RESPONDED',
+                  'developer': {'state': 'DEVELOPER_DISPATCHING'},
+                  'backend_session_semantics': 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL',
+                  'pm_provenance': {'source': 'ACTIVE_PM_RUNTIME', 'provider_invoked': False}}
+        items = chat_tui_status.background_items([record])
+        self.assertEqual(items[0]['state'], 'RUNNING')
+        with patch.object(chat_tui_status, 'read_background', return_value=items):
+            async def resumed(ui):
+                await self.connected(ui)
+                await self.until(ui, lambda _ui: len(self.fakes[0].users()) == 1,
+                                 'resume sent after confirmation')
+                await self.turn_done(ui)
+                self.join_resume_readers()
+            ui, _ = self.drive([self.connect(), resumed])
         self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
                          ['（自動）重新連線：請接續進行中的工作並回報狀態'])
         self.assertEqual(ui.conversation.text.count(
@@ -3965,9 +4038,113 @@ class PMConversationTests(BoundedPMTest):
 
     def test_connect_does_not_auto_resume_when_taskstore_is_empty(self):
         with patch.object(chat_tui_status, 'read_background', return_value=[]):
-            ui, _ = self.drive([self.connect(), self.connected])
+            async def confirmed_empty(ui):
+                await self.connected(ui)
+                await self.until(ui, lambda _ui: not ui._auto_resume_unconfirmed,
+                                 'empty snapshot confirmation')
+                self.join_resume_readers()
+            ui, _ = self.drive([self.connect(), confirmed_empty])
         self.assertEqual(self.fakes[0].users(), [])
         self.assertNotIn('（自動）重新連線', ui.conversation.text)
+
+    def test_resume_reader_waits_until_pm_mode_and_history_are_visible(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def blocked(session):
+            entered.set()
+            release.wait(5)
+            return [{'role': 'Developer', 'task': 'task-1', 'state': 'RUNNING'}]
+
+        try:
+            with patch.object(chat_tui_status, 'read_background', side_effect=blocked):
+                async def ready(ui):
+                    await self.connected(ui)
+                    await self.until(ui, lambda _ui: entered.is_set(), 'resume reader started')
+                    self.assertIn('PM mode:', ui.conversation.text)
+                    self.assertIn('上次對話', ui.conversation.text)
+                    self.assertEqual(self.fakes[0].users(), [])
+                    release.set()
+                    await self.until(ui, lambda _ui: len(self.fakes[0].users()) == 1,
+                                     'confirmed resume')
+                    self.join_resume_readers()
+                ui, _ = self.drive([self.connect(), ready, self.turn_done])
+        finally:
+            release.set()
+        self.assertEqual(len(self.fakes[0].users()), 1)
+
+    def test_waiting_background_turn_does_not_replace_empty_resume_snapshot(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def empty_after_release(_session):
+            entered.set()
+            release.wait(5)
+            return []
+
+        try:
+            with patch.object(chat_tui_status, 'read_background', side_effect=empty_after_release):
+                async def ready(ui):
+                    await self.connected(ui)
+                    await self.until(ui, lambda _ui: entered.is_set(), 'resume reader started')
+                    ui._pm_background_waiting.append({'runtime': ui.pm_runtime})
+                    self.assertTrue(ui._auto_resume_unconfirmed)
+                    release.set()
+                    await self.until(ui, lambda _ui: not ui._auto_resume_unconfirmed,
+                                     'empty snapshot confirmation')
+                    self.join_resume_readers()
+                    self.assertFalse(ui._auto_resume_pending)
+                    self.assertEqual(self.fakes[0].users(), [])
+                self.drive([self.connect(), ready])
+        finally:
+            release.set()
+
+    def test_draft_and_settings_change_cancel_blocked_resume_reader(self):
+        for action in ('draft', 'settings'):
+            entered, release = threading.Event(), threading.Event()
+
+            def blocked(_session):
+                entered.set()
+                release.wait(5)
+                return [{'role': 'Developer', 'task': 'task-1', 'state': 'RUNNING'}]
+
+            try:
+                with patch.object(chat_tui_status, 'read_background', side_effect=blocked):
+                    async def act(ui):
+                        await self.connected(ui)
+                        await self.until(ui, lambda _ui: entered.is_set(), 'reader started')
+                        if action == 'draft':
+                            ui.submit_pm('owner draft')
+                            await self.until(ui, lambda _ui: len(self.fakes[0].users()) == 1,
+                                             'draft sent')
+                        else:
+                            ui.run_display_command('/settings auto-resume off')
+                            ui.run_display_command('/settings auto-resume on')
+                        release.set()
+                        await asyncio.sleep(0.1)
+                        self.assertEqual(len(self.fakes[0].users()), 1 if action == 'draft' else 0)
+                        self.join_resume_readers()
+                    self.drive([self.connect(), act, self.turn_done])
+            finally:
+                release.set()
+
+    def test_setting_off_at_adoption_skips_resume_reader(self):
+        from llmtool import task_store
+        calls = []
+        self.background_read_patch.stop()
+
+        def record_root():
+            calls.append(True)
+            return self.temp_root / 'isolated-task-store'
+
+        try:
+            with patch.object(task_store, 'default_root', side_effect=record_root):
+                async def off(ui):
+                    await self.connected(ui)
+                    self.assertFalse(any(t.name == 'llmtool-chat-pm-resume'
+                                         for t in threading.enumerate()))
+                # Set before connect adoption so no TaskStore reader is started.
+                self.drive(['/settings auto-resume off\r', self.connect(), off])
+        finally:
+            self.assertEqual(calls, [])
 
     def test_connect_stream_tools_and_turn_end(self):
         self.turns = [_full_turn(hold=True)]

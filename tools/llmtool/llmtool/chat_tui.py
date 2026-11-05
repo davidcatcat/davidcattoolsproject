@@ -884,6 +884,8 @@ class ChatTUI:
         self.pm_outbox_paused = None
         self._auto_resume_pending = False
         self._auto_resume_sent = False
+        self._auto_resume_unconfirmed = False
+        self._auto_resume_connection = None
         self.pm_turn_status = None   # TURN_END status of the current turn
         self.pm_turn_error = None    # RUNTIME_ERROR code of the current turn
         self.pm_turn_refused = False # a tool was refused (PERMISSION_DENIED) in this turn
@@ -3654,11 +3656,6 @@ class ChatTUI:
             except LLMToolError:
                 outcome["binding"] = None
             outcome["history"], outcome["history_error"] = self._pm_read_history(session_id, runtime)
-            try:
-                outcome["background"] = chat_tui_status.read_background(session_id)
-            except Exception:
-                # Unknown TaskStore state is never treated as evidence of in-flight work.
-                outcome["background"] = None
         except LLMToolError as exc:
             outcome["error"] = chat_tui_pm.error_code(exc)
         except Exception:
@@ -3695,10 +3692,12 @@ class ChatTUI:
             return
         self.pm_runtime = outcome["runtime"]
         # A new allowance belongs to an adopted connection, never a failed attempt.
-        self._auto_resume_pending = False
+        connection = object()
+        self._auto_resume_connection = connection
         self._auto_resume_sent = False
+        self._auto_resume_pending = self.settings.get("auto_resume", "on") == "on"
+        self._auto_resume_unconfirmed = self._auto_resume_pending
         self.pm_binding = outcome.get("binding")
-        background = outcome.get("background")
         if callable(getattr(self.pm_runtime, "background_turn", None)):
             threading.Thread(target=self._pm_watch, args=(self.pm_runtime, self._loop),
                              name="llmtool-chat-pm-watch", daemon=True).start()
@@ -3715,9 +3714,32 @@ class ChatTUI:
             "open elsewhere. Esc interrupts a turn; /pm disconnect ends the "
             "connection. Chat replies are never the PM.")
         self._append_history(outcome["history"], outcome["history_error"])
-        self._auto_resume_pending = (
-            self.settings.get("auto_resume", "on") == "on"
-            and isinstance(background, list) and bool(background))
+        if self._auto_resume_pending:
+            session = self.pm_target[0]
+            runtime = self.pm_runtime
+            loop = self._loop
+            threading.Thread(
+                target=self._read_auto_resume,
+                args=(connection, runtime, session, loop),
+                name="llmtool-chat-pm-resume", daemon=True).start()
+        self.app.invalidate()
+
+    def _read_auto_resume(self, connection, runtime, session, loop):
+        """Read resume evidence off the UI thread, bound to one adopted connection."""
+        try:
+            result = chat_tui_status.read_background(session)
+        except Exception:
+            result = None
+        self._post(loop, self.finish_auto_resume_read, connection, runtime, session, result)
+
+    def finish_auto_resume_read(self, connection, runtime, session, result):
+        """Accept a background snapshot only for the still-current PM connection."""
+        if (self._auto_resume_connection is not connection or self.pm_runtime is not runtime
+                or not self.pm_target or self.pm_target[0] != session
+                or not self._auto_resume_pending or not self._auto_resume_unconfirmed):
+            return
+        self._auto_resume_unconfirmed = False
+        self._auto_resume_pending = isinstance(result, list) and bool(result)
         self._maybe_auto_resume()
 
     def _maybe_auto_resume(self):
@@ -3729,6 +3751,8 @@ class ChatTUI:
                 or self._received_signal is not None or self.app.is_done or self.quit_pending
                 or self.pm_outbox or self.pm_outbox_paused is not None):
             self._auto_resume_pending = False
+            return
+        if self._auto_resume_unconfirmed:
             return
         if (self.busy or self.pm_pending or self.pm_turn_active or self._pm_background_waiting
                 or self.pm_state != "idle"):
