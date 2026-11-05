@@ -97,6 +97,10 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None,
                reviewer=None):
     if task is None:
         task = store.get(task_id)
+    if (type(task.get('developer')) is dict and
+            task['developer'].get('provider_profile') == 'claude' and
+            task.get('abandonment') is not None):
+        _refuse('CLAUDE_TASK_ABANDONED')
     # Reviewer family/dispatch refusals precede binding, D6, and PR checks;
     # dispatch-policy details are intentionally normalized to REVIEWER_NOT_ALLOWED.
     reviewer_key = _select_reviewer(task, reviewer)
