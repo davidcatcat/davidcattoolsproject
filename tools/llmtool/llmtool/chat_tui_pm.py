@@ -182,6 +182,95 @@ class PMRuntimeAPI:
         from .pm_runtime import read_history
         return read_history(session_id, after=0, limit=200, state_root=self.state_root)
 
+    def read_all_turns(self, session_id):
+        from .pm_runtime import read_history
+        turns = []
+        after = 0
+        while True:
+            page = read_history(session_id, after=after, limit=200, state_root=self.state_root)
+            page_turns = page['turns']
+            if not page_turns:
+                return turns
+            turns.extend(page_turns)
+            after = page['next_after']
+
+
+_USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens',
+               'cache_creation_input_tokens')
+
+
+def usage_totals(turns):
+    """Return recorded token totals and the number of recorded and missing turns."""
+    totals = {key: None for key in _USAGE_KEYS}
+    counted = missing = 0
+    for turn in turns:
+        usage = turn.get('usage') if type(turn) is dict else None
+        recorded = False
+        if type(usage) is dict:
+            for key in _USAGE_KEYS:
+                value = usage.get(key)
+                if type(value) is int and value >= 0:
+                    if totals[key] is None:
+                        totals[key] = 0
+                    totals[key] += value
+                    recorded = True
+        if recorded:
+            counted += 1
+        else:
+            missing += 1
+    return totals, counted, missing
+
+
+def usage_gaps(turns):
+    """Count counted turns that lack a valid value for each usage key."""
+    valid_counts = {key: 0 for key in _USAGE_KEYS}
+    counted = 0
+    for turn in turns:
+        usage = turn.get('usage') if type(turn) is dict else None
+        valid = set()
+        if type(usage) is dict:
+            for key in _USAGE_KEYS:
+                value = usage.get(key)
+                if type(value) is int and value >= 0:
+                    valid.add(key)
+        if valid:
+            counted += 1
+            for key in valid:
+                valid_counts[key] += 1
+    return {key: counted - valid_counts[key] for key in _USAGE_KEYS}
+
+
+def usage_status_line(turns, formatter):
+    """Format PM turn usage, preserving UNKNOWN when no turns recorded usage."""
+    if not turns:
+        return '用量（本 session）：尚無回合'
+    totals, counted, missing = usage_totals(turns)
+    if not counted:
+        return '用量（本 session）：UNKNOWN（%d 回合沒有用量紀錄）' % missing
+    dropped = min((turn.get('seq') for turn in turns
+                   if type(turn) is dict and type(turn.get('seq')) is int), default=0) - 1
+    dropped = max(0, dropped)
+    gaps = usage_gaps(turns)
+
+    def display(key):
+        if totals[key] is None:
+            return '未回報'
+        prefix = '≥' if dropped > 0 or gaps[key] > 0 else ''
+        return prefix + formatter(totals[key])
+
+    count_prefix = '≥' if dropped > 0 else ''
+    line = ('用量（本 session）：輸入 %s · 輸出 %s · 快取讀取 %s · 快取建立 %s tokens（%s%d 回合'
+            % (display('input_tokens'), display('output_tokens'),
+               display('cache_read_input_tokens'), display('cache_creation_input_tokens'),
+               count_prefix, counted))
+    if missing:
+        line += '，%s%d 回合沒有紀錄' % (count_prefix, missing)
+    if dropped:
+        line += '，前 %d 回合已不在紀錄中' % dropped
+    if any(totals[key] is not None and gaps[key] > 0 for key in _USAGE_KEYS):
+        line += '，部分回合缺少部分種類'
+    return line + '）'
+
 
 def binding_text(binding):
     """Dedicated-binding status from pm_runtime.current_binding (a dict or None)."""

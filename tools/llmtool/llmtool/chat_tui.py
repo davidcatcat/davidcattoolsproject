@@ -1615,6 +1615,12 @@ class ChatTUI:
                                    str(self.background_error or "read failed")).replace("\n", " ")
                                + "）" if count == "?" else "%d 件進行中" % count),
                      "佇列（本機設定）：" + queue, theme]
+            try:
+                turns = self.pm_api.read_all_turns(self.pm_target[0])
+                usage = chat_tui_pm.usage_status_line(turns, _short_count)
+            except Exception:
+                usage = "用量（本 session）：UNKNOWN（PM 歷史無法讀取）"
+            lines.extend((usage, "Context 與額度：UNAVAILABLE（llmtool 沒有這項資料）"))
             return "\n  ".join(lines)
         session = self.session
         model = selected_provider(session.config).get("model")
