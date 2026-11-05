@@ -4,13 +4,14 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 
 from .errors import LLMToolError
-from . import task_completion, worker_dispatch
+from . import task_completion, task_store, worker_dispatch
 from .test_output_excerpts import _emitted_sensitive
 
 REPORT_SECTIONS = ('Identity and source', 'Symptom and reproduction', 'Root Cause',
@@ -18,6 +19,120 @@ REPORT_SECTIONS = ('Identity and source', 'Symptom and reproduction', 'Root Caus
                    'Outcome/cost')
 _HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 _SESSION_READ_LIMIT = 2 * 1024 * 1024
+_REPORT_LIMIT = 16384
+_EVIDENCE_LIMIT = 8192
+_RECORD_TOKEN = re.compile(r'[A-Za-z0-9._-]{1,64}\Z')
+_REFUSAL_CODES = frozenset((
+    'HIGH_DEBUG_RUN_FAILED', 'HIGH_DEBUG_WROTE_FILES',
+    'HIGH_DEBUG_REPORT_INVALID'))
+
+
+def _record_body(entry, task_id, refusal_code=None):
+    """Build a monitor-only comment using recorded metadata, never report text."""
+    status = entry.get('status')
+    marker_status = 'WAITING' if status in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED') else 'BLOCKED'
+    observed = entry.get('model_observed')
+    effort = entry.get('effort_observed')
+    observed = observed if type(observed) is str and _RECORD_TOKEN.fullmatch(observed) else 'UNKNOWN'
+    effort = effort if type(effort) is str and _RECORD_TOKEN.fullmatch(effort) else 'UNKNOWN'
+    usage = entry.get('usage')
+    if (type(usage) is dict and
+            all(type(usage.get(key)) is int and usage[key] >= 0
+                for key in ('input', 'cached', 'output', 'reasoning'))):
+        usage_text = ','.join(f'{key}={usage[key]}'
+                              for key in ('input', 'cached', 'output', 'reasoning'))
+    else:
+        usage_text = 'UNKNOWN'
+    lines = [
+        f'<!-- activity: type=developer_progress actor=Codex target=PM status={marker_status} -->',
+        f'Task: {task_id}',
+        f'D6: {entry.get("d6", "UNKNOWN")}',
+        f'Family: {entry.get("family", "UNKNOWN")}',
+        f'Examined SHA: {entry.get("examined_sha", "UNKNOWN")}',
+        f'Requested model: {entry.get("model_requested", "UNKNOWN")}',
+        f'Observed model: {observed}',
+        f'Effort: {effort}',
+        f'Status: {status if type(status) is str else "UNKNOWN"}',
+        f'Report SHA-256: {entry.get("report_sha256", "UNKNOWN")}',
+        f'Usage: {usage_text}',
+    ]
+    if entry.get('status') == 'RUN_FAILED':
+        code = refusal_code if refusal_code in _REFUSAL_CODES else 'HIGH_DEBUG_RUN_FAILED'
+        lines.append(f'Refusal code: {code}')
+    return '\n'.join(lines)
+
+
+def _post_github_record(pr_number, body, repo_root):
+    """Post one screened metadata comment with the trusted gh environment."""
+    gh = shutil.which('gh', path=task_completion._GH_PATH)
+    if gh is None:
+        return False
+    slug = task_completion._trusted_slug()
+    if slug is None:
+        return False
+    env = {'PATH': task_completion._GH_PATH, 'HOME': os.path.expanduser('~'),
+           'LC_ALL': 'C', 'GH_PROMPT_DISABLED': '1',
+           'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1'}
+    if os.environ.get('GH_CONFIG_DIR'):
+        env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
+    result = subprocess.run(
+        [gh, 'pr', 'comment', str(pr_number), '--repo', slug, '--body-file', '-'],
+        cwd=repo_root, env=env, input=body.encode('utf-8'),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False,
+        check=False, timeout=30)
+    return result.returncode == 0
+
+
+def _write_unposted(entry, pr_number, task_id, reason, body=None):
+    """Best-effort private recovery record for the PM."""
+    try:
+        directory = Path(task_store.default_root()).parent / 'high-debug-unposted'
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(directory, 0o700)
+        record = {'task_id': task_id, 'd6': entry.get('d6'),
+                  'pr': pr_number, 'reason': reason}
+        if reason == 'POST_FAILED':
+            record['body'] = body
+        fd, temporary = tempfile.mkstemp(prefix='.unposted-', dir=str(directory))
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                json.dump(record, stream, sort_keys=True)
+                stream.write('\n')
+            os.replace(temporary, directory / (str(entry.get('d6')) + '.json'))
+            os.chmod(directory / (str(entry.get('d6')) + '.json'), 0o600)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+    except Exception:
+        pass
+
+
+def _post_record(entry, pr_number, repo_root, task_id, refusal_code=None):
+    """Return whether a comment was posted; never affect the diagnostic result."""
+    try:
+        body = _record_body(entry, task_id, refusal_code)
+        if _emitted_sensitive(body):
+            _write_unposted(entry, pr_number, task_id, 'SCREEN_REJECTED')
+            return False
+        try:
+            posted = _post_github_record(pr_number, body, repo_root)
+        except Exception:
+            posted = False
+        if posted:
+            return True
+        _write_unposted(entry, pr_number, task_id, 'POST_FAILED', body)
+    except Exception:
+        # Even metadata formatting and local persistence are best effort.
+        return False
+    return False
 
 
 def _thread_id_from_events(events_raw):
@@ -136,9 +251,11 @@ class _AttemptFailed(Exception):
         self.code = code
 
 
-def _refuse(code):
+def _refuse(code, detail=None):
     error = LLMToolError('High-debug diagnosis refused; details omitted')
     error.high_debug_code = code
+    if detail is not None:
+        error.high_debug_detail = detail
     raise error from None
 
 
@@ -209,14 +326,34 @@ _D6_NAME_PROBES = 16
 
 
 def _failed_entry(*, family, failed_corrections, early_reason, head, d6, code,
+                  report=None,
                   observed, effort, usage, recorded_at):
     """The high_debug entry recording one Codex attempt that did not finish."""
+    stored_report = code if report is None else report
     return {'family': family, 'failed_corrections': failed_corrections,
             'early_reason': early_reason, 'examined_sha': head, 'd6': d6,
             'model_requested': 'gpt-6.1-sol', 'model_observed': observed,
             'effort_observed': effort, 'status': 'RUN_FAILED',
-            'report_sha256': hashlib.sha256(code.encode()).hexdigest(),
-            'report': code, 'usage': usage, 'recorded_at': recorded_at}
+            'report_sha256': hashlib.sha256(stored_report.encode('utf-8')).hexdigest(),
+            'report': stored_report, 'usage': usage, 'recorded_at': recorded_at}
+
+
+def _report_rejection(code, checks, byte_count, report):
+    """Return a bounded diagnostic report, or fixed lines if its head is unsafe."""
+    fixed_lines = (code, 'check: ' + checks, 'bytes: ' + str(byte_count),
+                   'limit: ' + str(_REPORT_LIMIT))
+    fixed = '\n'.join(fixed_lines)
+    if 'SENSITIVE' in checks:
+        return fixed
+    marker = '\nreport truncated\n'
+    available = _REPORT_LIMIT - len((fixed + marker).encode('utf-8'))
+    if available < 0:
+        return fixed
+    head = report.encode('utf-8')[:available].decode('utf-8', 'ignore')
+    stored = fixed + marker + head
+    if _emitted_sensitive(stored):
+        return fixed
+    return stored
 
 
 def _d6_name(executor_task, attempt, head):
@@ -296,8 +433,14 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     if evidence is not None:
         try:
             with open(evidence, 'rb') as evidence_stream:
-                raw = evidence_stream.read(8193)
-            if len(raw) > 8192: _refuse('HIGH_DEBUG_EVIDENCE_INVALID')
+                evidence_bytes = os.fstat(evidence_stream.fileno()).st_size
+                if evidence_bytes > _EVIDENCE_LIMIT:
+                    _refuse('HIGH_DEBUG_EVIDENCE_INVALID',
+                            f'bytes={evidence_bytes} limit={_EVIDENCE_LIMIT}')
+                raw = evidence_stream.read(_EVIDENCE_LIMIT + 1)
+            if len(raw) > _EVIDENCE_LIMIT:
+                _refuse('HIGH_DEBUG_EVIDENCE_INVALID',
+                        f'bytes={evidence_bytes} limit={_EVIDENCE_LIMIT}')
             evidence_text = raw.decode('utf-8')
             if _emitted_sensitive(evidence_text): _refuse('HIGH_DEBUG_EVIDENCE_SENSITIVE')
         except LLMToolError: raise
@@ -333,19 +476,28 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     else:
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
-    def failed(code, observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN'):
+    def failed(code, observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN', report=None,
+               detail=None):
         # A Codex attempt that started but did not finish is recorded: it
         # counts toward the entry limit and keeps its D6 traceable. Recording
         # is best effort: the original refusal code is what the caller sees.
         try:
-            store.append_high_debug(task_id, _failed_entry(
+            recorded_at = store._completion_now()
+        except Exception:
+            recorded_at = None
+        entry = _failed_entry(
                 family=family, failed_corrections=failed_corrections,
-                early_reason=early_reason, head=head, d6=d6, code=code,
+                early_reason=early_reason, head=head, d6=d6, code=code, report=report,
                 observed=observed, effort=effort, usage=usage,
-                recorded_at=store._completion_now()))
+                recorded_at=recorded_at)
+        try:
+            store.append_high_debug(task_id, entry)
         except Exception:
             pass
-        _refuse(code)
+        posted = _post_record(entry, pr_number, repo_root, task_id, code)
+        if not posted:
+            detail = (detail + ' ' if detail else '') + 'github_record=UNPOSTED'
+        _refuse(code, detail)
 
     create = create_d6 or _create_d6
     try: diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root, executor_task=executor_task)
@@ -384,8 +536,17 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         try: os.unlink(output_path)
         except Exception: pass
     if failure is not None: failed(failure, observed, effort, usage)
-    if len(report.encode('utf-8')) > 16384 or _emitted_sensitive(report):
-        failed('HIGH_DEBUG_REPORT_INVALID', observed, effort, usage)
+    report_bytes = report.encode('utf-8')
+    oversized = len(report_bytes) > _REPORT_LIMIT
+    sensitive = _emitted_sensitive(report)
+    if oversized or sensitive:
+        checks = ','.join(check for check, matched in
+                          (('SIZE', oversized), ('SENSITIVE', sensitive)) if matched)
+        stored_report = _report_rejection('HIGH_DEBUG_REPORT_INVALID', checks,
+                                          len(report_bytes), report)
+        detail = f'check={checks} bytes={len(report_bytes)} limit={_REPORT_LIMIT}'
+        failed('HIGH_DEBUG_REPORT_INVALID', observed, effort, usage,
+               report=stored_report, detail=detail)
     status=_outcome_status(report)
     if any(not _has_report_section(report, h) for h in REPORT_SECTIONS): status='REPORT_INVALID'
     entry={'family':family, 'failed_corrections':failed_corrections, 'early_reason':early_reason,
@@ -393,9 +554,12 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
        'effort_observed':effort,'status':status,'report_sha256':hashlib.sha256(report.encode()).hexdigest(),
        'report':report,'usage':usage,'recorded_at':store._completion_now()}
     store.append_high_debug(task_id, entry)
+    posted = _post_record(entry, pr_number, repo_root, task_id)
     payload=entry['report_sha256'].encode()
     event_id=hashlib.sha256(('HIGH_DEBUG\0'+task_id+'\0'+head+'\0'+entry['report_sha256']).encode()).hexdigest()[:32]
     result=store.record_completion_event(task_id,event_id=event_id,run_id=task['run_id'],
        session_id='high-debug-'+d6,source='HIGH_DEBUG',source_sha=head,sequence=len(entries),
        payload_sha256=hashlib.sha256(payload).hexdigest())
-    print(json.dumps({'state':'RECORDED','status':status,'d6':d6,'report_sha256':entry['report_sha256'],'event_id':event_id},sort_keys=True))
+    print(json.dumps({'state':'RECORDED','status':status,'d6':d6,
+        'report_sha256':entry['report_sha256'],'event_id':event_id,
+        'github_record':'POSTED' if posted else 'UNPOSTED'},sort_keys=True))
