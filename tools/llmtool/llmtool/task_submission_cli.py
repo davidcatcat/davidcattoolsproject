@@ -3455,6 +3455,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
                 after.head != snapshot.head):
             raise RouteError('CLAUDE_D6_BINDING_CHANGED')
         changed_paths, raw = task_completion._worktree_diff(registration.root, snapshot.head)
+        if not changed_paths or not raw:
+            raise RouteError('CLAUDE_NO_CHANGES')
         if len(raw) > 64 * 1024:
             raise RouteError('CLAUDE_OUTPUT_TOO_LARGE')
         if any(path not in write_paths for path in changed_paths):

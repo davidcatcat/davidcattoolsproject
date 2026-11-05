@@ -283,6 +283,10 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             developer.get('state') not in ('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED')):
         _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
     profile = developer.get('provider_profile')
+    claude_cli = (profile == 'claude' and
+                  developer.get('backend_session_semantics') == 'CLI_REPORTED_SESSION_ID')
+    if profile == 'claude' and not claude_cli:
+        _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     worker = _worker_key(profile)
     if worker is None:
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
@@ -298,7 +302,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                       pr_number=pr_number, receipt=remote_test_receipt)
     if _current_d6_head(task, executor_task, current_head) != packet['failed_head']:
         _refuse('REPAIR_HEAD_MOVED')
-    policy_task = executor_task if profile == 'claude' else task_id
+    policy_task = executor_task if claude_cli else task_id
     decision = worker_dispatch.evaluate(
         worker, developer.get('owner_assignment_ref'), policy_task)
     if not decision.allowed:
@@ -390,7 +394,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         _refuse('REPAIR_TASK_RECORD_UNAVAILABLE')
 
     # Re-read the Owner switch immediately before the provider side effect.
-    policy_task = executor_task if profile == 'claude' else task_id
+    policy_task = executor_task if claude_cli else task_id
     decision = worker_dispatch.evaluate(
         worker, developer.get('owner_assignment_ref'), policy_task)
     if not decision.allowed:

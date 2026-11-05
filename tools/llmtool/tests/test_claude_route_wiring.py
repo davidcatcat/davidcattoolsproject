@@ -1,14 +1,20 @@
 import contextlib
+import hashlib
 import json
+import tempfile
 import unittest
 from argparse import ArgumentParser, Namespace
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from llmtool import task_submission_cli
 from llmtool import review_repair
+from llmtool import task_advance
+from llmtool import worker_dispatch
 from llmtool.developer_routes import RouteError
 from llmtool.errors import LLMToolError
+from llmtool.task_store import TaskStore
 
 
 import review_trust_fixture
@@ -24,7 +30,8 @@ def tearDownModule():
 
 class ClaudeRouteWiringTests(unittest.TestCase):
     def _setup(self, *, trusted_agent='claude-developer', runner_error=None,
-               changed_paths=('src.py',), boundary_digest='f' * 64):
+               changed_paths=('src.py',), raw=b'diff --git a/src.py b/src.py\n',
+               boundary_digest='f' * 64):
         task_id = 'a' * 32
         executor_id = 'executor-d6'
         task = {
@@ -110,7 +117,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             patch.object(task_submission_cli.task_completion, 'read_d6_registration',
                          return_value=registration),
             patch.object(task_submission_cli.task_completion, '_worktree_diff',
-                         return_value=(list(changed_paths), b'diff --git a/src.py b/src.py\n')),
+                         return_value=(list(changed_paths), raw)),
             patch.object(task_submission_cli, '_assignment_paths',
                          return_value=(['src.py'], ['src.py'])),
             patch.object(task_submission_cli, '_direct_result_callback', return_value=callback),
@@ -306,6 +313,25 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         self.assertEqual(developer['error_code'], 'CLAUDE_WRITE_SCOPE_VIOLATION')
         self.assertIsNone(developer['artifact'])
 
+    def test_empty_claude_diff_is_blocked_without_direct_result_event(self):
+        for changed_paths, raw in (((), b'diff --git a/src.py b/src.py\n'),
+                                   (('src.py',), b'')):
+            with self.subTest(changed_paths=changed_paths, raw=raw):
+                cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = self._setup(
+                    changed_paths=changed_paths, raw=raw)
+                direct_event = next(item for item in patches
+                    if item.attribute == 'run_task_direct_result_event')
+                with contextlib.ExitStack() as stack:
+                    for item in patches:
+                        stack.enter_context(item)
+                    status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+                developer = store.task['developer']
+                self.assertEqual(status, 1)
+                self.assertEqual(developer['state'], 'BLOCKED')
+                self.assertEqual(developer['error_code'], 'CLAUDE_NO_CHANGES')
+                self.assertIsNone(developer['artifact'])
+                direct_event.mock.assert_not_called()
+
     def test_repair_packet_is_embedded_as_untrusted_reference(self):
         cli, store, args, _registration, _evaluations, prompts, _requests, patches, runner = self._setup()
         args.repair_packet = {'opaque': 'repair reference'}
@@ -360,7 +386,9 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                     'task_id': 'original-task',
                     'developer': {'provider_profile': profile,
                         'state': 'DEVELOPER_RESPONDED',
-                        'owner_assignment_ref': 'owner-ref', 'model': 'model'},
+                        'owner_assignment_ref': 'owner-ref', 'model': 'model',
+                        **({'backend_session_semantics': 'CLI_REPORTED_SESSION_ID'}
+                           if profile == 'claude' else {})},
                     'completion': {'executor_task_id': 'd6-owner-task'},
                     'review_repair_claims': [], 'record_sha256': 'b' * 64,
                 }
@@ -395,6 +423,214 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                                  (expected_worker, 'owner-ref', expected_task))
                 self.assertEqual(evaluate.call_args_list[1].args,
                                  (expected_worker, 'owner-ref', expected_task))
+
+    def test_record_only_and_unknown_claude_semantics_refuse_repair_before_claim(self):
+        for semantics in ('NO_NATIVE_SESSION_ID_EXPOSED', None):
+            with self.subTest(semantics=semantics):
+                developer = {'provider_profile': 'claude', 'state': 'DEVELOPER_RESPONDED',
+                    'owner_assignment_ref': 'owner-ref', 'model': 'model'}
+                if semantics is not None:
+                    developer['backend_session_semantics'] = semantics
+                record = {'task_id': 'original-task', 'developer': developer,
+                    'completion': {'executor_task_id': 'd6-owner-task'},
+                    'review_repair_claims': [], 'record_sha256': 'b' * 64}
+
+                class Store:
+                    def __init__(self):
+                        self.value = dict(record)
+                        self.claim_writes = 0
+
+                    def get(self, _task_id):
+                        return dict(self.value)
+
+                    def compare_and_update(self, _task_id, *, expected, **updates):
+                        self.claim_writes += 1
+                        self.value.update(updates)
+                        return dict(self.value)
+
+                store = Store()
+                recorder = Mock()
+                delegate = Mock()
+                with patch.object(review_repair.shutil, 'which',
+                                  side_effect=AssertionError('runtime lookup must not run')), \
+                     patch.object(review_repair, '_remote_test_failure',
+                                  side_effect=AssertionError('event collection must not run')), \
+                     patch.object(review_repair.worker_dispatch, 'evaluate',
+                                  side_effect=AssertionError('policy must not run')):
+                    with self.assertRaises(LLMToolError) as caught:
+                        review_repair.repair_review(store=store, task_id='original-task',
+                            executor_task='d6-owner-task', pr_number=12,
+                            repair_task_recorder=recorder, delegate_callable=delegate)
+                self.assertEqual(caught.exception.review_repair_code,
+                                 'REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
+                self.assertEqual(store.claim_writes, 0)
+                self.assertEqual(store.value['review_repair_claims'], [])
+                recorder.assert_not_called()
+                delegate.assert_not_called()
+
+    def test_task_advance_uses_real_repair_guard_for_record_only_claude(self):
+        task_id = '1' * 32
+        run_id = '2' * 32
+        receipt = {'task_id': task_id, 'run_id': run_id,
+            'executor_task': 'executor-1', 'source_sha': 'a' * 40,
+            'result': 'FAIL', 'modules': ['test_claude_route_wiring']}
+        receipt['receipt_digest'] = hashlib.sha256(json.dumps(receipt,
+            ensure_ascii=True, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        record = {
+            'task_id': task_id, 'run_id': run_id,
+            'developer': {'provider_profile': 'claude',
+                'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
+                'state': 'DEVELOPER_RESPONDED'},
+            'completion': {'executor_task_id': 'executor-1', 'state': 'WAITING_REVIEW',
+                'evidence': {'result': {'result_head': 'a' * 40}}},
+            'review_dispatch_claim': [{'pr': 17, 'head_sha': 'a' * 40,
+                'version': 1, 'state': 'DISPATCHED'}],
+            'review_repair_claims': [],
+            'completion_events': [{'source': 'REVIEWER', 'source_sha': 'a' * 40,
+                'version': 1, 'outcome': 'REVIEW_FAIL'}],
+            'remote_test_receipts': [receipt],
+        }
+
+        class Store:
+            def get(self, requested_id):
+                self.asserted_id = requested_id
+                return dict(record)
+
+        store = Store()
+        with patch.object(task_advance, '_d6_snapshot', return_value={
+                'root': '/repo/task', 'result_head': 'a' * 40,
+                'recorded_result_head': 'a' * 40, 'registered_result_head': 'a' * 40,
+                'dirty': False}), \
+             patch.object(task_advance, '_pr_snapshot', return_value={
+                'number': 17, 'head': {'sha': 'a' * 40}, 'merged': False}), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(task_advance.shutil, 'which', return_value='/usr/bin/claude'):
+            result = task_advance.advance(task_id=task_id, store=store,
+                pr_number=17, github_get=lambda _path: [])
+        self.assertEqual(result['step'], 'REPAIR_REVIEW')
+        self.assertIn('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED', result['codes'])
+
+    def test_real_taskstore_owner_gate_binds_claude_cli_to_d6_id(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        policy_path = root / 'worker-dispatch.json'
+        owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
+                     'issues/289#issuecomment-1234567890')
+        d6_id, other_d6_id = 'c' * 32, 'd' * 32
+        task_id, second_task_id = 'a' * 32, 'b' * 32
+        policy_workers = {
+            worker: {'dispatch': 'ALLOWED', 'decided_by': 'Owner',
+                'decided_at': '2026-11-05', 'reason': 'test policy state',
+                'evidence': 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'}
+            for worker in worker_dispatch.WORKERS
+        }
+        policy_workers['claude-developer'] = {
+            'dispatch': 'OWNER_ASSIGNMENT_ONLY', 'decided_by': 'Owner',
+            'decided_at': '2026-11-05', 'reason': 'test D6-bound assignment',
+            'evidence': 'https://github.com/davidcatcat/davidcattoolsproject/issues/289',
+            'owner_assignments': [{'task_id': d6_id, 'owner_assignment_ref': owner_ref}],
+        }
+        policy_path.write_text(json.dumps({'schema_version': 1, 'workers': policy_workers}),
+                               encoding='utf-8')
+        policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', policy_path)
+        with policy_patch:
+            store = TaskStore(root / 'tasks')
+
+            def record_for(llm_task_id, executor_id, *, developer=None):
+                request = 'Bounded Claude Task.'
+                run_id = hashlib.sha256((llm_task_id + 'run').encode()).hexdigest()[:32]
+                request_sha = hashlib.sha256(request.encode()).hexdigest()
+                task = task_submission_cli._record(llm_task_id, run_id, 'pm-' + 'e' * 32,
+                    'pm-profile', request, state='PM_RESPONDED',
+                    provider_type='openai-compatible', model='pm-model',
+                    backend='NO_NATIVE_SESSION_ID_EXPOSED', request_sha=request_sha)
+                task.update(pm_route_binding={'type': 'openai-compatible',
+                    'model': 'pm-model', 'base_url': None},
+                    response='PM accepted a bounded Claude assignment.', error_code=None,
+                    pm_assignment={'schema_version': 1, 'route': 'claude', 'risk': 'LOW',
+                        'goal': 'Complete the bounded change.',
+                        'acceptance': ['the requested changes are complete']})
+                if developer is not None:
+                    task['developer'] = developer
+                return task
+
+            def developer_for(executor_id, llm_task_id=task_id):
+                assignment_id = hashlib.sha256((executor_id + 'assignment').encode()).hexdigest()[:32]
+                session_id = 'dev-' + hashlib.sha256((executor_id + 'session').encode()).hexdigest()[:32]
+                task_stub = record_for(llm_task_id, executor_id)
+                registration = SimpleNamespace(task_id=executor_id,
+                    trusted_agent_id='claude-developer', session_ref='session-ref',
+                    native_session_id=None, root='/registered/d6', common_dir='/repo/.git',
+                    branch='task-branch')
+                callback = task_submission_cli._direct_result_callback(
+                    task_stub, registration, 'f' * 40, test_policy='LOCAL')
+                return {
+                    'assignment_id': assignment_id, 'selection_source': 'PM',
+                    'state': 'DEVELOPER_PENDING', 'provider_profile': 'claude',
+                    'provider_type': None, 'model': None,
+                    'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+                    'session_id': session_id, 'source_sha': 'f' * 40,
+                    'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+                    'read_paths': ['src.py'], 'write_paths': ['src.py'],
+                    'acceptance': ['the requested changes are complete'],
+                    'context_sha256': '1' * 64,
+                    'egress_basis': 'Approved non-sensitive Task context.',
+                    'input_bytes': 10, 'max_tokens': None,
+                    'artifact_format': 'unified_diff', 'artifact': None,
+                    'artifact_sha256': None, 'usage': None, 'error_code': None,
+                    'created_at': task_submission_cli._timestamp(),
+                    'owner_assignment_ref': owner_ref, 'executor_task_id': executor_id,
+                    'direct_result_callback': callback,
+                }
+
+            first = record_for(task_id, d6_id)
+            store.create(first)
+            pending = developer_for(d6_id)
+            current = store.get(task_id)
+            self.assertIsNone(worker_dispatch.authorize_task_store_change(
+                current, {'developer': pending}, expected={'developer': None}))
+            stored = store.compare_and_update(task_id, expected={'developer': None},
+                                               developer=pending)
+            self.assertEqual(stored['developer']['state'], 'DEVELOPER_PENDING')
+            dispatching = dict(pending, state='DEVELOPER_DISPATCHING',
+                               provider_type='claude-cli', model='claude-test')
+            current = store.get(task_id)
+            self.assertIsNone(worker_dispatch.authorize_task_store_change(
+                current, {'developer': dispatching}, expected={'developer': pending}))
+            stored = store.compare_and_update(task_id, expected={'developer': pending},
+                                               developer=dispatching)
+            self.assertEqual(stored['developer']['state'], 'DEVELOPER_DISPATCHING')
+
+            second = record_for(second_task_id, d6_id)
+            store.create(second)
+            second_pending = developer_for(d6_id, second_task_id)
+            self.assertIsNone(worker_dispatch.authorize_task_store_change(
+                store.get(second_task_id), {'developer': second_pending},
+                expected={'developer': None}))
+            second_saved = store.compare_and_update(second_task_id,
+                expected={'developer': None}, developer=second_pending)
+            self.assertEqual(second_saved['developer']['executor_task_id'], d6_id)
+
+            denied_task_id = '9' * 32
+            denied_record = record_for(denied_task_id, other_d6_id,
+                developer=developer_for(other_d6_id, denied_task_id))
+            with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as denied:
+                store.create(denied_record)
+            self.assertEqual(denied.exception.dispatch_code, 'OWNER_ASSIGNMENT_REQUIRED')
+            self.assertIsNone(store.get(denied_task_id)['developer'])
+
+            policy_workers['claude-developer']['owner_assignments'] = [{
+                'task_id': task_id, 'owner_assignment_ref': owner_ref}]
+            policy_path.write_text(json.dumps({'schema_version': 1,
+                'workers': policy_workers}), encoding='utf-8')
+            llm_keyed_id = '8' * 32
+            llm_keyed = record_for(llm_keyed_id, d6_id,
+                developer=developer_for(d6_id, llm_keyed_id))
+            with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as denied:
+                store.create(llm_keyed)
+            self.assertEqual(denied.exception.dispatch_code, 'OWNER_ASSIGNMENT_REQUIRED')
+            self.assertIsNone(store.get(llm_keyed_id)['developer'])
 
     def test_task_complete_accepts_cli_claude_binding_and_rejects_record_only_without_result(self):
         task_id = 'a' * 32
