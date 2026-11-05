@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 from llmtool.opencode_direct_developer import (
     AGENT, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, MAX_SOURCE_FILE_BYTES, MODEL,
-    DirectOpenCodeError, configuration,
-    parse_json_events, run,
+    DirectOpenCodeError, _classify_provider_error, _classify_provider_events,
+    _recovered_transport_indices, configuration, parse_json_events, run,
 )
 from llmtool.providers.cli_lifecycle import CLIHostTermination
 from llmtool import worker_dispatch
@@ -291,6 +291,206 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertNotIn(marker, str(error))
         self.assertNotIn(marker, repr(error.args))
         self.assertNotIn(marker, repr(vars(error)))
+
+    def test_provider_transport_error_is_recovered_by_later_structured_completion(self):
+        transport = self.event('error', error={
+            'type': 'provider.transport', 'message': 'UNTRUSTED TRANSPORT PROSE',
+        })
+        completion = self.event('step_finish', part={})
+        raw = (transport + '\n' + completion + '\n').encode()
+        self.assertIsNone(_classify_provider_error(raw))
+        sid, text, _ = parse_json_events(raw)
+        self.assertEqual((sid, text), ('ses_Abc123', None))
+
+    def test_exit_zero_transport_recovery_requires_ordered_completion(self):
+        transport = {'type': 'provider.transport'}
+        unavailable = {'type': 'provider.unavailable'}
+        cases = (
+            ('finish before transport', (
+                {'type': 'step_finish', 'sessionID': 'ses_Abc123'},
+                {'type': 'error', 'sessionID': 'ses_Abc123', 'error': transport},
+            ), set()),
+            ('only earlier transport recovered', (
+                {'type': 'error', 'sessionID': 'ses_Abc123', 'error': transport},
+                {'type': 'step_finish', 'sessionID': 'ses_Abc123'},
+                {'type': 'error', 'sessionID': 'ses_Abc123', 'error': transport},
+            ), {0}),
+            ('text and finish before transport', (
+                {'type': 'text', 'sessionID': 'ses_Abc123', 'part': {'text': 'done'}},
+                {'type': 'step_finish', 'sessionID': 'ses_Abc123'},
+                {'type': 'error', 'sessionID': 'ses_Abc123', 'error': transport},
+            ), set()),
+            ('later provider error remains fatal', (
+                {'type': 'error', 'sessionID': 'ses_Abc123', 'error': transport},
+                {'type': 'step_finish', 'sessionID': 'ses_Abc123'},
+                {'type': 'error', 'sessionID': 'ses_Abc123', 'error': unavailable},
+            ), {0}),
+        )
+        for name, events, recovered_indices in cases:
+            with self.subTest(name=name):
+                self.assertEqual(_recovered_transport_indices(events),
+                                 recovered_indices)
+                raw = ('\n'.join(json.dumps(event) for event in events) + '\n').encode()
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    self.run_with_valid_binding(
+                        root=self.root, read_paths=['source.py'],
+                        write_paths=['source.py'], prompt='bounded task prompt',
+                        timeout_seconds=5, executable=self.fake_cli(raw.decode(),
+                                                                    exit_code=0))
+                self.assertEqual(caught.exception.direct_opencode_code,
+                                 'OPENCODE_PROVIDER_FAILED')
+
+    def test_transport_error_text_only_or_different_session_is_not_recovery(self):
+        transport = self.event('error', error={'type': 'provider.transport'})
+        text_only = self.event('text', part={'text': 'completed'})
+        other_session_finish = json.dumps({
+            'type': 'step_finish', 'sessionID': 'ses_Other', 'part': {},
+        })
+        for completion in (text_only, other_session_finish):
+            with self.subTest(completion=completion):
+                raw = (transport + '\n' + completion + '\n').encode()
+                self.assertEqual(_classify_provider_error(raw),
+                                 'OPENCODE_PROVIDER_FAILED')
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    parse_json_events(raw)
+                self.assertEqual(caught.exception.direct_opencode_code,
+                                 'OPENCODE_PROVIDER_FAILED')
+
+        missing_session = {'type': 'error', 'error': {'type': 'provider.transport'}}
+        malformed_session = {
+            'type': 'error', 'sessionID': 'not-a-session',
+            'error': {'type': 'provider.transport'},
+        }
+        for transport_event in (missing_session, malformed_session):
+            raw = (json.dumps(transport_event) + '\n' +
+                   self.event('step_finish', part={}) + '\n').encode()
+            self.assertEqual(_classify_provider_error(raw),
+                             'OPENCODE_PROVIDER_FAILED')
+            with self.assertRaises(DirectOpenCodeError) as caught:
+                parse_json_events(raw)
+            self.assertEqual(caught.exception.direct_opencode_code,
+                             'OPENCODE_PROVIDER_FAILED')
+
+    def test_transport_recovery_scans_large_event_stream(self):
+        class CountingList(list):
+            def __init__(self, values):
+                super().__init__(values)
+                self.element_reads = 0
+
+            def __getitem__(self, index):
+                value = super().__getitem__(index)
+                self.element_reads += len(value) if isinstance(index, slice) else 1
+                return value
+
+            def __iter__(self):
+                for value in super().__iter__():
+                    self.element_reads += 1
+                    yield value
+
+        count = 20_000
+        transport = {'type': 'error', 'sessionID': 'ses_Abc123',
+                     'error': {'type': 'provider.transport'}}
+        events = CountingList(transport.copy() for _ in range(count))
+        events.append({'type': 'step_finish', 'sessionID': 'ses_Abc123'})
+        recovered = _recovered_transport_indices(events)
+        self.assertEqual(len(recovered), count)
+        self.assertEqual(min(recovered), 0)
+        self.assertEqual(max(recovered), count - 1)
+        self.assertLessEqual(events.element_reads, 2 * len(events))
+
+    def test_non_dict_json_line_keeps_later_error_classification(self):
+        failed = (b'[]\n' + self.event(
+            'error', error={'type': 'provider.unavailable'}).encode() + b'\n')
+        self.assertEqual(_classify_provider_error(failed),
+                         'OPENCODE_PROVIDER_FAILED')
+
+        invalid = (b'[]\n' + self.event('step_start').encode() + b'\n')
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            parse_json_events(invalid)
+        self.assertEqual(caught.exception.direct_opencode_code,
+                         'OPENCODE_OUTPUT_INVALID')
+
+    def test_output_truncation_classification_does_not_serialize_events(self):
+        nested = {}
+        for _ in range(1_100):
+            nested = {'nested': nested}
+        event = {'type': 'text', 'sessionID': 'ses_Abc123', 'deep': nested}
+        self.assertIsNone(_classify_provider_events([event]))
+
+    def test_provider_transport_error_without_later_completion_stays_failed(self):
+        transport = self.event('error', error={
+            'type': 'provider.transport', 'message': 'UNTRUSTED TRANSPORT PROSE',
+        })
+        for events in ((transport,),
+                       (self.event('step_start'), transport)):
+            with self.subTest(events=events):
+                raw = ('\n'.join(events) + '\n').encode()
+                self.assertEqual(_classify_provider_error(raw),
+                                 'OPENCODE_PROVIDER_FAILED')
+
+    def test_run_accepts_recovered_transport_and_rejects_failure_variants(self):
+        transport = self.event('error', error={'type': 'provider.transport'})
+        finish = self.event('step_finish', part={'tokens': {'input': 2, 'output': 3}})
+        text = self.event('text', part={'text': 'completed'})
+        success = self.run_with_valid_binding(
+            root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+            prompt='bounded task prompt', timeout_seconds=5,
+            executable=self.fake_cli('\n'.join((transport, finish, text)) + '\n'))
+        self.assertEqual(success.exit_code, 0)
+        self.assertEqual((success.session_id, success.text), ('ses_Abc123', 'completed'))
+
+        other_error = self.event('error', error={'type': 'provider.unavailable'})
+        cases = (
+            ('nonzero after recovery', '\n'.join((transport, finish, text)) + '\n', 7),
+            ('later provider error', '\n'.join((transport, other_error, finish, text)) + '\n', 0),
+            ('unrecovered transport', transport + '\n', 0),
+            ('other error before finish', '\n'.join((other_error, finish, text)) + '\n', 0),
+            ('unknown error before finish', '\n'.join((
+                self.event('error', error={'type': 'provider.unknown'}),
+                finish, text)) + '\n', 0),
+        )
+        for label, body, exit_code in cases:
+            with self.subTest(label=label), self.assertRaises(DirectOpenCodeError) as caught:
+                self.run_with_valid_binding(
+                    root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+                    prompt='bounded task prompt', timeout_seconds=5,
+                    executable=self.fake_cli(body, exit_code=exit_code))
+            self.assertEqual(caught.exception.direct_opencode_code,
+                             'OPENCODE_PROVIDER_FAILED')
+
+    def test_error_classification_survives_a_later_malformed_line(self):
+        limit = self.event('error', error={
+            'type': 'provider.free-limit', 'message': 'PRIVATE FREE MESSAGE',
+        })
+        raw = (limit + '\n' + '{truncated json\n').encode()
+        self.assertEqual(_classify_provider_error(raw), 'OPENCODE_FREE_LIMIT')
+        cli = self.fake_cli(raw.decode(), exit_code=7)
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            self.run_with_valid_binding(
+                root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+                prompt='bounded task prompt', timeout_seconds=5, executable=cli)
+        self.assertEqual(caught.exception.direct_opencode_code, 'OPENCODE_FREE_LIMIT')
+
+    def test_other_provider_errors_keep_classification_after_completion(self):
+        cases = (
+            (self.event('error', error={'type': 'provider.auth'}),
+             'OPENCODE_AUTH_REQUIRED'),
+            (self.event('error', error={'type': 'provider.free-limit'}),
+             'OPENCODE_FREE_LIMIT'),
+            (self.event('error', error={'type': 'provider.quota'}),
+             'OPENCODE_FREE_LIMIT'),
+            (self.event('error', error={'type': 'provider.rate-limit'}),
+             'OPENCODE_RATE_LIMITED'),
+            (self.event('tool_use', part={'state': {'status': 'denied'}}),
+             'TOOL_DENIED'),
+            (self.event('error', error={'type': 'output-limit'}),
+             'OPENCODE_OUTPUT_TRUNCATED'),
+        )
+        completion = self.event('text', part={'text': 'completed'})
+        for failure, expected in cases:
+            with self.subTest(expected=expected):
+                raw = (failure + '\n' + completion + '\n').encode()
+                self.assertEqual(_classify_provider_error(raw), expected)
 
     def test_error_event_without_dict_payload_stays_provider_failed(self):
         event = self.event('error', error='malformed provider payload')

@@ -304,7 +304,7 @@ def _pm_assignment(response):
             return None
         if (type(assignment) is not dict or
                 set(assignment) != {'route', 'risk', 'goal', 'acceptance'} or
-                assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'none') or
+                assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                 assignment['risk'] not in ('LOW', 'OTHER') or
                 type(assignment['goal']) is not str or
                 type(assignment['acceptance']) is not list or
@@ -327,7 +327,7 @@ def _pm_assignment_limit_error(response):
                 type(value.get('schema_version')) is not int or
                 type(assignment) is not dict or
                 set(assignment) != {'route', 'risk', 'goal', 'acceptance'} or
-                assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'none') or
+                assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                 assignment['risk'] not in ('LOW', 'OTHER') or
                 type(assignment['goal']) is not str or
                 type(assignment['acceptance']) is not list):
@@ -412,7 +412,7 @@ def _read_pm_record_input(stream=None):
     except (ValueError, TypeError):
         raise LLMToolError('PM response must be one strict JSON object') from None
     assignment = _pm_assignment(response)
-    if (assignment is None or assignment['route'] not in ('company-gw', 'gw-agent', 'opencode', 'codex', 'agy') or
+    if (assignment is None or assignment['route'] not in ('company-gw', 'gw-agent', 'opencode', 'codex', 'agy', 'claude') or
             assignment['risk'] != 'LOW'):
         limit_error = _pm_assignment_limit_error(response)
         if limit_error is not None:
@@ -739,6 +739,19 @@ def add_task_submission_parsers(actions):
                         help='Owner assignment comment URL for OWNER_ASSIGNMENT_ONLY workers')
     assign.add_argument('--expires-in', type=int, default=600,
                         help='seconds until an unclaimed assignment expires (1-900, default 600)')
+    claude_bind = actions.add_parser(
+        'claude-bind', help='Bind an existing authorized Claude Developer D6 without launching a provider')
+    claude_bind.add_argument('task_id', help='existing durable Task ID')
+    claude_bind.add_argument('--executor-task', required=True,
+                             help='registered ACTIVE Claude Developer D6 task id')
+    claude_bind.add_argument('--owner-ref', required=True,
+                             help='Owner assignment comment URL matching worker-dispatch.json')
+    claude_bind.add_argument('--read-path', action='append', required=True,
+                             help='authorized relative context path; repeat as needed')
+    claude_bind.add_argument('--write-path', action='append', required=True,
+                             help='authorized relative target path; repeat as needed')
+    claude_bind.add_argument('--common-dir',
+                             help='Git common dir holding the D6 registry (default: from cwd)')
     assignments = actions.add_parser(
         'assignments', help='List live Developer assignment ids for one worker')
     assignments.add_argument('--worker', required=True, help='worker-dispatch key')
@@ -970,7 +983,7 @@ def run_task_review_prompt(args, *, store=None):
             type(pm_assignment.get('schema_version')) is not int or
             pm_assignment['schema_version'] != 1 or
             pm_assignment.get('route') not in ('company-gw', 'gw-agent', 'codex',
-                                                'opencode', 'agy', 'none') or
+                                                'opencode', 'agy', 'claude', 'none') or
             pm_assignment.get('risk') not in ('LOW', 'OTHER') or
             type(pm_assignment.get('goal')) is not str or
             type(pm_assignment.get('acceptance')) is not list or
@@ -1154,6 +1167,98 @@ def run_task_claude_result(args, *, store=None, stdout=None):
         args.task_id, pm_session_id=pm_session_id,
         executor_task_id=args.executor_task, head_sha=args.head)
     _print(_task_view(result), stdout=stdout)
+    return 0
+
+
+def run_task_claude_bind(args, *, store=None, stdout=None):
+    """Bind an existing, registered Claude D6 to an eligible Task without a provider call."""
+    store = TaskStore() if store is None else store
+    task = store.get(args.task_id)
+    if task.get('abandonment') is not None:
+        raise LLMToolError('CLAUDE_TASK_ABANDONED')
+    assignment = task.get('pm_assignment')
+    if (type(assignment) is not dict or assignment.get('route') != 'claude' or
+            assignment.get('risk') != 'LOW' or task.get('state') != 'PM_RESPONDED' or
+            type(task.get('pm_provenance')) is not dict or
+            task['pm_provenance'].get('source') != 'ACTIVE_PM_RUNTIME' or
+            task['pm_provenance'].get('provider_invoked') is not False):
+        raise LLMToolError('Claude binding requires a low-risk active-PM Claude Task')
+    common_dir = getattr(args, 'common_dir', None)
+    if common_dir is None:
+        common_dir = task_completion.collect_git_snapshot(os.getcwd()).common_dir
+    registration = task_completion.read_d6_registration(
+        args.executor_task, common_dir, allowed_states=('ACTIVE',))
+    if (registration.trusted_agent_id != 'claude-developer' or
+            registration.native_session_id in (None, 'UNKNOWN')):
+        raise LLMToolError('Claude binding requires an independent native Claude Developer session')
+    snapshot = task_completion.collect_git_snapshot(registration.root)
+    if (snapshot.root != registration.root or snapshot.common_dir != registration.common_dir or
+            snapshot.branch != registration.branch or snapshot.head != registration.result_sha or
+            not snapshot.clean):
+        raise LLMToolError('Claude D6 binding requires a clean registered D6 HEAD')
+    changed_raw = task_completion._git(registration.root, (
+        'diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv', '--no-renames',
+        registration.source_sha, registration.result_sha, '--'), limit=1024 * 1024)
+    changed_paths = sorted(set(path for path in
+        changed_raw.decode('utf-8', 'strict').split('\x00') if path))
+    if not changed_paths or len(changed_paths) > 32:
+        raise LLMToolError('Claude D6 binding requires a bounded committed result diff')
+    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    if not set(changed_paths).issubset(write_paths):
+        raise LLMToolError('RESULT_SCOPE_MISMATCH')
+    if not _remote_task_test_paths(task, read_paths=read_paths):
+        raise LLMToolError('CLAUDE_REMOTE_TEST_PATHS_MISSING')
+    decision = worker_dispatch.evaluate('claude-developer', args.owner_ref,
+                                         registration.task_id)
+    if not decision.allowed:
+        raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
+    current = task.get('developer')
+    if current is not None:
+        raise LLMToolError('Task already has a Developer binding')
+    request = task.get('request') or ''
+    context = '\n'.join((request, assignment['goal'], *assignment['acceptance']))
+    context_bytes = len(context.encode('utf-8'))
+    if context_bytes > 64 * 1024:
+        raise LLMToolError('Claude binding context exceeds the supported Task limit')
+    developer = {
+        'assignment_id': new_id(), 'selection_source': 'PM',
+        'state': 'DEVELOPER_PENDING', 'provider_profile': 'claude',
+        'provider_type': None, 'model': None,
+        'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
+        'session_id': 'dev-' + new_id(), 'source_sha': registration.source_sha,
+        'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+        'read_paths': read_paths, 'write_paths': write_paths,
+        'acceptance': list(assignment['acceptance']),
+        'context_sha256': hashlib.sha256(context.encode('utf-8')).hexdigest(),
+        'egress_basis': 'Existing Owner-authorized Claude Developer D6 bound to this Task.',
+        'input_bytes': max(1, context_bytes), 'max_tokens': None,
+        'artifact_format': 'unified_diff', 'artifact': None, 'artifact_sha256': None,
+        'usage': None, 'error_code': None, 'created_at': _timestamp(),
+        'owner_assignment_ref': args.owner_ref,
+        'executor_task_id': registration.task_id,
+    }
+    completion = {
+        'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
+        'reviewer_task_id': None,
+        'evidence': {
+            'task_id': task['task_id'], 'run_id': task['run_id'],
+            'contract_digest': task['task_binding']['contract_digest'],
+            'execution_mode': 'DIRECT_D6', 'root': registration.root,
+            'common_dir': registration.common_dir, 'branch': registration.branch,
+            'source_sha': registration.source_sha,
+            'executor_identity': registration.trusted_agent_id,
+            'executor_session_ref': registration.session_ref,
+            'executor_native_session_id': registration.native_session_id,
+            'executor_native_session': 'VERIFIED',
+        },
+        'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+        'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+    }
+    saved = store.claude_bind_compare_and_update(
+        args.task_id, executor_task_id=registration.task_id,
+        expected={'developer': None, 'completion': None},
+        developer=developer, completion=completion)
+    _print(_task_view(saved), stdout=stdout)
     return 0
 
 
@@ -2539,6 +2644,8 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             raise LLMToolError('acceptance differs from the selected PM assignment')
     registration, snapshot = (d6_binding if d6_binding is not None else
                               _delegate_d6_binding(args))
+    if previous_developer is None:
+        _reject_claude_reserved_d6(registration)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
@@ -2950,6 +3057,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 assignment.get('risk') != 'LOW' or args.acceptance != assignment.get('acceptance')):
             raise LLMToolError('no matching low-risk AGY recommendation from the selected PM route')
     registration, snapshot = _delegate_d6_binding(args)
+    if previous_developer is None:
+        _reject_claude_reserved_d6(registration)
     # A fresh Owner decision is required before creating the durable assignment.
     decision = worker_dispatch.evaluate('agy', owner_ref, task['task_id'])
     if not decision.allowed:
@@ -3171,6 +3280,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             assignment.get('risk') != 'LOW' or args.acceptance != assignment.get('acceptance')):
         raise LLMToolError('no matching low-risk gw-agent recommendation from the selected PM route')
     registration, snapshot = _delegate_d6_binding(args)
+    _reject_claude_reserved_d6(registration)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
@@ -3600,6 +3710,11 @@ def _delegate_d6_binding(args):
     return registration, snapshot
 
 
+def _reject_claude_reserved_d6(registration):
+    if getattr(registration, 'trusted_agent_id', None) == 'claude-developer':
+        raise LLMToolError('D6_CLAUDE_RESERVED')
+
+
 def run_task_codex_delegate(args, *, store, d6_binding=None):
     """Run Codex's own agent loop inside the assigned D6 workspace."""
     task = store.get(args.task_id)
@@ -3663,6 +3778,8 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
                 exc, prefix='') + '): run it with the current directory at the registered '
             'D6 root of --executor-task, on its registered branch and HEAD, with a clean '
             'tree') from None
+    if previous_developer is None:
+        _reject_claude_reserved_d6(registration)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
@@ -4218,6 +4335,8 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
         if registration.task_id != getattr(args, 'executor_task', None):
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH')
+        if previous is None:
+            _reject_claude_reserved_d6(registration)
         _check_delegate_repair_cap(args, store, (registration, _snapshot))
         return _run_background_delegate(
             args, provider=provider, store=store,
@@ -4270,6 +4389,8 @@ def run_task_delegate(args, *, store=None):
         if args.acceptance != pm_assignment['acceptance']:
             raise LLMToolError('acceptance differs from the selected PM assignment')
     registration, snapshot = _delegate_d6_binding(args)
+    if task.get('developer') is None:
+        _reject_claude_reserved_d6(registration)
     _check_delegate_repair_cap(args, store, (registration, snapshot))
     source_sha = snapshot.head
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
@@ -4773,6 +4894,60 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
     return artifacts
 
 
+def _main_pin_error():
+    error = LLMToolError('authenticated trusted main ref is unavailable or invalid')
+    error.completion_code = 'MAIN_REF_PIN_INVALID'
+    raise error
+
+
+def _validate_trusted_main_pin(pin, task, source_sha):
+    required = {'repository', 'ref', 'sha', 'provenance', 'task_id', 'run_id',
+                'contract_digest', 'source_sha', 'verified_result_heads'}
+    try:
+        repository = task_completion._trusted_slug()
+    except Exception:
+        _main_pin_error()
+    if (type(pin) is not dict or set(pin) != required or
+            pin.get('repository') != repository or
+            pin.get('ref') != 'refs/heads/main' or
+            type(pin.get('sha')) is not str or
+            re.fullmatch(r'[0-9a-f]{40}', pin['sha']) is None or
+            pin.get('provenance') != 'AUTHENTICATED_TRUSTED_SLUG_GITHUB_REF' or
+            pin.get('task_id') != task.get('task_id') or
+            pin.get('run_id') != task.get('run_id') or
+            pin.get('contract_digest') != task.get('task_binding', {}).get('contract_digest') or
+            pin.get('source_sha') != source_sha or
+            type(pin.get('verified_result_heads')) is not list or
+            any(type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None
+                for head in pin.get('verified_result_heads', [])) or
+            len(pin['verified_result_heads']) != len(set(pin['verified_result_heads']))):
+        _main_pin_error()
+    return pin
+
+
+def _capture_trusted_main_pin(task, source_sha):
+    response = task_completion._github_get('git/ref/heads/main')
+    if (type(response) is not dict or response.get('ref') != 'refs/heads/main' or
+            type(response.get('object')) is not dict or
+            response['object'].get('type') != 'commit' or
+            type(response['object'].get('sha')) is not str or
+            re.fullmatch(r'[0-9a-f]{40}', response['object']['sha']) is None):
+        _main_pin_error()
+    try:
+        repository = task_completion._trusted_slug()
+    except Exception:
+        _main_pin_error()
+    pin = {
+        'repository': repository,
+        'ref': 'refs/heads/main', 'sha': response['object']['sha'],
+        'provenance': 'AUTHENTICATED_TRUSTED_SLUG_GITHUB_REF',
+        'task_id': task['task_id'], 'run_id': task['run_id'],
+        'contract_digest': task['task_binding']['contract_digest'],
+        'source_sha': source_sha, 'verified_result_heads': [],
+    }
+    return _validate_trusted_main_pin(pin, task, source_sha)
+
+
 def run_task_complete(args, *, store=None, reviewer_adapter=None):
     """Verify an Executor result and make one non-replayable original-profile PM call.
 
@@ -4782,6 +4957,10 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
     """
     store = TaskStore() if store is None else store
     task = store.get(args.task_id)
+    if (type(task.get('developer')) is dict and
+            task['developer'].get('provider_profile') == 'claude' and
+            task.get('abandonment') is not None):
+        raise LLMToolError('CLAUDE_TASK_ABANDONED')
     completion = task.get('completion')
     executor_result_only = args.reviewer_task is None and args.pr is None
     if (args.reviewer_task is None) != (args.pr is None):
@@ -4814,6 +4993,15 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
     if completion['pm_dispatch'] in ('CLAIMED', 'UNKNOWN', 'RETURNED'):
         raise LLMToolError('original PM request already claimed or completed; replay refused')
     developer = task['developer']
+    claude_route = developer.get('provider_profile') == 'claude'
+    claude_result = developer.get('claude_result')
+    if claude_route and not (
+            developer.get('state') == 'DEVELOPER_RESPONDED' and
+            type(claude_result) is dict and
+            developer.get('executor_task_id') == args.executor_task and
+            claude_result.get('executor_task_id') == args.executor_task and
+            completion.get('executor_task_id') == args.executor_task):
+        raise LLMToolError('CLAUDE_RESULT_BINDING_INVALID')
     initial = completion['evidence'] or {}
     try:
         task_completion.validate_task_binding(
@@ -4833,7 +5021,7 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
     admission_fields = ('executor_identity', 'executor_session_ref',
         'executor_native_session_id', 'executor_native_session', 'root',
         'common_dir', 'branch', 'source_sha', 'execution_mode',
-        'host_worker_receipt')
+        'host_worker_receipt', 'trusted_main_pin')
     evidence = {key: initial[key] for key in admission_fields if key in initial}
     evidence.update({'task_id': task['task_id'], 'run_id': task['run_id'],
                 'contract_digest': task['task_binding']['contract_digest'],
@@ -4852,26 +5040,50 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             error = LLMToolError('Executor admission source does not match Developer source')
             error.completion_code = 'D6_ADMISSION_SOURCE_MISMATCH'
             raise error
+        main_pin = evidence.get('trusted_main_pin')
+        if main_pin is None:
+            main_pin = _capture_trusted_main_pin(task, developer['source_sha'])
+        else:
+            _validate_trusted_main_pin(main_pin, task, developer['source_sha'])
+        evidence['trusted_main_pin'] = main_pin
         artifact_segments = _completion_repair_artifact_segments(
             task, store, executor_task=args.executor_task,
             common_dir=initial.get('common_dir'), root=initial.get('root'),
             branch=initial.get('branch'), source_sha=developer['source_sha'])
-        git_evidence = task_completion.collect_executor_result(
-            task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),
-            expected_root=initial.get('root'), expected_branch=initial.get('branch'),
-            source_sha=developer['source_sha'], task_binding=task['task_binding'],
-            expected_agent=initial.get('executor_identity'),
-            expected_session_ref=initial.get('executor_session_ref'),
-            expected_native_session_id=initial.get('executor_native_session_id'),
-            write_paths=developer['write_paths'], artifact=developer['artifact'],
-            artifact_sha256=developer['artifact_sha256'],
-            **({'artifact_segments': artifact_segments}
-               if artifact_segments is not None else {}))
+        if claude_route:
+            git_evidence = task_completion.collect_claude_result(
+                task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),
+                expected_root=initial.get('root'), expected_branch=initial.get('branch'),
+                source_sha=developer['source_sha'], task_binding=task['task_binding'],
+                expected_agent=initial.get('executor_identity'),
+                expected_session_ref=initial.get('executor_session_ref'),
+                expected_native_session_id=initial.get('executor_native_session_id'),
+                write_paths=developer['write_paths'], claude_result=claude_result,
+                trusted_base_sha=main_pin['sha'])
+        else:
+            git_evidence = task_completion.collect_executor_result(
+                task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),
+                expected_root=initial.get('root'), expected_branch=initial.get('branch'),
+                source_sha=developer['source_sha'], task_binding=task['task_binding'],
+                expected_agent=initial.get('executor_identity'),
+                expected_session_ref=initial.get('executor_session_ref'),
+                expected_native_session_id=initial.get('executor_native_session_id'),
+                write_paths=developer['write_paths'], artifact=developer['artifact'],
+                artifact_sha256=developer['artifact_sha256'],
+                trusted_base_sha=main_pin['sha'],
+                **({'artifact_segments': artifact_segments}
+                   if artifact_segments is not None else {}))
+        main_pin = dict(main_pin)
+        result_heads = list(main_pin['verified_result_heads'])
+        if git_evidence['result_head'] not in result_heads:
+            result_heads.append(git_evidence['result_head'])
+        main_pin['verified_result_heads'] = result_heads
+        evidence['trusted_main_pin'] = main_pin
         direct_callback = developer.get('direct_result_callback')
         callback_evidence = (direct_callback.get('evidence')
                              if type(direct_callback) is dict else None)
-        if (type(callback_evidence) is dict and
-                callback_evidence.get('test_policy') == 'REMOTE_RECEIPT'):
+        if (claude_route or (type(callback_evidence) is dict and
+                callback_evidence.get('test_policy') == 'REMOTE_RECEIPT')):
             paths = _remote_task_test_paths(task, read_paths=developer['read_paths'])
             receipt, receipt_gate = _matching_remote_test_receipt(
                 task, executor_task=args.executor_task,
@@ -4984,8 +5196,21 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                  'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
                  'pm_recommendation': None, 'pm_usage': None,
                  'pm_error_code': None}
-        store.compare_and_update(task['task_id'],
-            expected={'completion': completion}, completion=ready)
+        expected = {'completion': completion}
+        claude_route = developer.get('provider_profile') == 'claude'
+        if claude_route:
+            fresh = store.get(task['task_id'])
+            if fresh.get('abandonment') is not None:
+                raise LLMToolError('CLAUDE_TASK_ABANDONED')
+            expected['record_sha256'] = fresh['record_sha256']
+        try:
+            store.compare_and_update(task['task_id'], expected=expected,
+                                     completion=ready)
+        except TaskStoreConflict:
+            if (claude_route and
+                    store.get(task['task_id']).get('abandonment') is not None):
+                raise LLMToolError('CLAUDE_TASK_ABANDONED') from None
+            raise
         _record_ready_event(store, task['task_id'])
         _print(_task_view(store.get(task['task_id'])))
         return 0

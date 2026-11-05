@@ -54,6 +54,7 @@ class _DisabledTaskIndex(TaskStatusIndex):
 class ActivePMInboxTests(unittest.TestCase):
     setUp_fixture = completion_fixture.TaskCompletionTests.setUp
     _git = completion_fixture.TaskCompletionTests._git
+    _trusted_main_ref = completion_fixture.TaskCompletionTests._trusted_main_ref
     _write_registration = completion_fixture.TaskCompletionTests._write_registration
     _write_env2_marker = completion_fixture.TaskCompletionTests._write_env2_marker
     _task = completion_fixture.TaskCompletionTests._task

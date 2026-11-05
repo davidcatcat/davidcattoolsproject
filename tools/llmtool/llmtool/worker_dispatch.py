@@ -578,7 +578,16 @@ def authorize_task_store_change(current, changes, expected=None):
     entries = []
     decisions = []
     for worker_key, action in attempts:
-        decision = evaluate(worker_key, owner_assignment_ref, current.get('task_id'))
+        policy_task_id = current.get('task_id')
+        # A bound Claude D6 assignment is authorized against the registered D6
+        # identifier named by the Owner policy row. The llmtool Task has its own
+        # random identifier and is deliberately not the dispatch authority key.
+        if (worker_key == 'claude-developer' and
+                type(new_developer) is dict and
+                new_developer.get('provider_profile') == 'claude' and
+                type(new_developer.get('executor_task_id')) is str):
+            policy_task_id = new_developer['executor_task_id']
+        decision = evaluate(worker_key, owner_assignment_ref, policy_task_id)
         if action == 'TIMEOUT_CONTINUATION':
             old_execution = (old_developer.get('execution')
                              if type(old_developer) is dict else None)

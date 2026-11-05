@@ -91,6 +91,41 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             task_submission_cli.run_task_gw_agent_delegate(args, store=UnreadStore())
 
+    def test_gw_agent_refuses_claude_reserved_d6_before_route_runner(self):
+        task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'bounded task',
+            'task_binding': {'contract_digest': 'c' * 64},
+            'pm_assignment': {'route': 'gw-agent', 'risk': 'LOW', 'goal': 'goal',
+                              'acceptance': ['record result']},
+            'developer': None, 'completion': None}
+
+        class Store:
+            def __init__(self):
+                self.value = copy.deepcopy(task)
+
+            def get(self, _task_id):
+                return copy.deepcopy(self.value)
+
+        registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
+            common_dir='/repo/.git', branch='task-branch',
+            trusted_agent_id='claude-developer', session_ref='session-ref',
+            native_session_id=None)
+        snapshot = SimpleNamespace(head='d' * 40)
+        args = Namespace(task_id=task['task_id'], mode='direct', context_stdin=False,
+            data_class='SYNTHETIC', egress_basis='Synthetic test context.',
+            acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
+            read_path=['src.py'], write_path=['src.py'])
+        store = Store()
+        with patch.object(task_completion, 'validate_task_binding'), \
+             patch.object(task_submission_cli, '_delegate_d6_binding',
+                          return_value=(registration, snapshot)), \
+             patch.object(task_submission_cli, 'run_route') as runner:
+            with self.assertRaisesRegex(LLMToolError, 'D6_CLAUDE_RESERVED'):
+                task_submission_cli.run_task_gw_agent_delegate(
+                    args, store=store, route_runner=runner)
+        self.assertIsNone(store.value['developer'])
+        runner.assert_not_called()
+
     def test_route_config_and_data_class_are_validated(self):
         config = load_route_config()['routes']['gw-agent']
         self.assertEqual(config['package_path'], '~/.local/lib/api-agent-gateway')
