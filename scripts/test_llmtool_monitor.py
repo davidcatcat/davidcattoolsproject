@@ -239,6 +239,52 @@ class MonitorTrustTests(unittest.TestCase):
         self.assertFalse(source.want_main)
         self.assertFalse(any("commits?sha=main" in path for path in seen))
 
+
+class MonitorBehindMainTests(unittest.TestCase):
+    def test_git_blob_id_uses_git_blob_hashes(self):
+        self.assertEqual(mon.git_blob_id(b""), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
+        self.assertEqual(mon.git_blob_id(b"hello\n"), "ce013625030ba8dba906f756967f9e9ca394464a")
+
+    def test_behind_main_requires_two_known_different_blobs(self):
+        for loaded, main, expected in (("a", "a", False), ("a", "b", True),
+                                       ("", "b", False), ("a", "", False),
+                                       ("", "", False)):
+            with self.subTest(loaded=loaded, main=main):
+                self.assertEqual(mon.behind_main(loaded, main), expected)
+
+    def test_main_script_blob_validates_local_rev_parse_output(self):
+        responses = [
+            __import__("types").SimpleNamespace(returncode=0, stdout="a" * 40 + "\n"),
+            __import__("types").SimpleNamespace(returncode=1, stdout="a" * 40),
+            __import__("types").SimpleNamespace(returncode=0, stdout="abc\n"),
+            OSError("offline"), subprocess.TimeoutExpired("git", 2),
+        ]
+        argv_seen = []
+        def fake(argv, **kwargs):
+            argv_seen.append((argv, kwargs))
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+        with patch.object(mon, "_GIT_RUN", side_effect=fake):
+            self.assertEqual(mon.main_script_blob(), "a" * 40)
+            self.assertEqual(mon.main_script_blob(), "")
+            self.assertEqual(mon.main_script_blob(), "")
+            self.assertEqual(mon.main_script_blob(), "")
+            self.assertEqual(mon.main_script_blob(), "")
+        argv, kwargs = argv_seen[0]
+        self.assertEqual(argv[-1], "origin/main:scripts/llmtool_monitor.py")
+        self.assertEqual(argv, ["git", "-C", mon.SCRIPT_ROOT, "rev-parse", "--verify", "-q",
+                                "origin/main:scripts/llmtool_monitor.py"])
+        self.assertEqual(kwargs["timeout"], 2)
+        self.assertEqual(kwargs["env"]["GIT_OPTIONAL_LOCKS"], "0")
+
+    def test_behind_line_stale_wins_and_missing_attributes_are_quiet(self):
+        self.assertEqual(mon.behind_line(type("Fake", (), {})()), "")
+        self.assertEqual(mon.behind_line(type("Fake", (), {"behind": True, "stale": True})()), "")
+        self.assertEqual(mon.behind_line(type("Fake", (), {"behind": True, "stale": False})()),
+                         mon.BEHIND_WARNING)
+
     def test_office_top_is_rendered_before_error_and_wraps(self):
         top = [("等你決定：2 件", "!"), ("main：尚未讀取", "")]
         lines = mon.office_view([], error="OSError", width=24, top=top)
@@ -777,6 +823,32 @@ class MonitorTaskBaselineTests(unittest.TestCase):
         self.assertEqual([(kind, text) for _, kind, text in self.poll(added)],
                          [("▶", "d: stage fix started (deepseek)")])
         self.assertEqual(self.poll(added), [])
+
+    def test_behind_main_poll_is_throttled_and_preserves_old_value_on_error(self):
+        with patch.object(mon, "main_script_blob", return_value="b" * 40) as main_blob, \
+             patch.object(mon, "collect", return_value=self.snapshot), \
+             patch.object(mon, "scan_tasks", return_value=[]), \
+             patch.object(mon, "llmtool_task_records", return_value=[]), \
+             patch.object(mon, "llmtool_route_outcomes", return_value={"opencode": None}), \
+             patch.object(mon, "quota_warnings", return_value=[]), \
+             patch.object(mon, "office_rows", return_value=[]):
+            self.monitor.office_due = 0.0
+            self.poll([])
+            self.assertTrue(self.monitor.behind)
+            self.monitor.office_due = 0.0
+            self.poll([])
+            main_blob.assert_called_once_with()
+            self.monitor.behind_due = 0.0
+            main_blob.side_effect = RuntimeError("unknown")
+            self.monitor.office_due = 0.0
+            self.poll([])
+            self.assertTrue(self.monitor.behind)
+            main_blob.side_effect = None
+            main_blob.return_value = self.monitor.loaded_blob
+            self.monitor.behind_due = 0.0
+            self.monitor.office_due = 0.0
+            self.poll([])
+            self.assertFalse(self.monitor.behind)
 
 
 class ActivityViewTests(unittest.TestCase):
@@ -1546,37 +1618,39 @@ class GitHubActivityTests(unittest.TestCase):
             source = mon.GitHubSource("o/r", runner=full, clock=lambda: NOW)
             source.refresh()
         self.assertEqual(len(full.calls), mon.GITHUB_PAGES + 3)
-        self.assertIn("per_page=1&page=501", full.calls[mon.GITHUB_PAGES][0][4])
-        self.assertIn("只讀了最新 500 則", source.status)
+        self.assertIn(f"per_page=1&page={mon.GITHUB_PAGE * mon.GITHUB_PAGES + 1}",
+                      full.calls[mon.GITHUB_PAGES][0][4])
+        self.assertIn(f"只讀了最新 {mon.GITHUB_PAGE * mon.GITHUB_PAGES} 則", source.status)
         self.assertTrue(source.comments_cut)
-        self.assertEqual(len(source.events), 500)   # the probe's item (#900) never lands
+        self.assertEqual(len(source.events), mon.GITHUB_PAGE * mon.GITHUB_PAGES)   # probe never lands
         self.assertNotIn("#900", [e.reference for e in source.events])
         self.assertIsNone(mon.owner_waiting(source))
         self.assertEqual(mon.owner_count_line(source)[0],
-                         "等你決定：未確認（留言太多，只讀了最新 500 則）")
+                         f"等你決定：未確認（留言太多，只讀了最新 {mon.GITHUB_PAGE * mon.GITHUB_PAGES} 則）")
         self.assertEqual(mon.office_view([], waiting=mon.owner_waiting(source))[0][0],
                          "辦公室 · 工作中 0 · 等你 ?")
         failed = FakeRun(*([(0, page(1, 100))] * mon.GITHUB_PAGES), (1, b""), (0, []))
         with patch.object(mon.shutil, "which", return_value="/opt/gh"):
             source = mon.GitHubSource("o/r", runner=failed, clock=lambda: NOW)
             source.refresh()
-        self.assertIn("只讀了最新 500 則", source.status)   # unknown: stay conservative
+        self.assertIn(f"只讀了最新 {mon.GITHUB_PAGE * mon.GITHUB_PAGES} 則", source.status)   # unknown: stay conservative
         self.assertTrue(source.comments_cut)
         self.assertNotIn("讀取失敗", source.status)
-        self.assertEqual(len(source.events), 500)
+        self.assertEqual(len(source.events), mon.GITHUB_PAGE * mon.GITHUB_PAGES)
         self.assertIsNone(mon.owner_waiting(source))
         self.assertEqual(mon.owner_count_line(source)[0],
-                         "等你決定：未確認（留言太多，只讀了最新 500 則）")
+                         f"等你決定：未確認（留言太多，只讀了最新 {mon.GITHUB_PAGE * mon.GITHUB_PAGES} 則）")
         self.assertEqual(mon.office_view([], waiting=mon.owner_waiting(source))[0][0],
                          "辦公室 · 工作中 0 · 等你 ?")
         exact = FakeRun(*([(0, page(1, 100))] * mon.GITHUB_PAGES), (0, []), (0, []))
         with patch.object(mon.shutil, "which", return_value="/opt/gh"):
             source = mon.GitHubSource("o/r", runner=exact, clock=lambda: NOW)
             source.refresh()
-        self.assertNotIn("留言太多", source.status)   # exactly 500: nothing was cut
+        self.assertNotIn("留言太多", source.status)   # exactly the limit: nothing was cut
         self.assertFalse(source.comments_cut)
         self.assertEqual(len(exact.calls), mon.GITHUB_PAGES + 3)
-        self.assertIn("per_page=1&page=501", exact.calls[mon.GITHUB_PAGES][0][4])
+        self.assertIn(f"per_page=1&page={mon.GITHUB_PAGE * mon.GITHUB_PAGES + 1}",
+                      exact.calls[mon.GITHUB_PAGES][0][4])
         self.assertEqual(mon.owner_waiting(source), 0)
         self.assertEqual(mon.owner_count_line(source)[0], "等你決定：0 件（只看最近 12 小時留言）")
 
@@ -1591,7 +1665,7 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertTrue(source.comments_cut)
         self.assertEqual(mon.owner_waiting(source), 1)
         self.assertEqual(mon.owner_count_line(source)[0],
-                         "等你決定：1 件以上（留言太多，只讀了最新 500 則）")
+                         f"等你決定：1 件以上（留言太多，只讀了最新 {mon.GITHUB_PAGE * mon.GITHUB_PAGES} 則）")
 
         cleared = FakeRun(*([(0, batch) for batch in pages]), (0, []), (0, []))
         with patch.object(mon.shutil, "which", return_value="/opt/gh"):
@@ -7849,6 +7923,44 @@ class WorkBoardTests(unittest.TestCase):
         self.assertTrue(all(mon._width(line) <= 14 for line, _ in view))
 
 
+    def test_cut_comment_read_marks_owner_board_as_uncertain(self):
+        full_page = lambda start: [comment(start + i, NOW - 30, "ordinary")
+                                   for i in range(mon.GITHUB_PAGE)]
+        marker = "<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->\nNeed a decision"
+        board = self._board()
+        cases = (None, comment(10, NOW - 30, marker), "uncut")
+        for case in cases:
+            if case == "uncut":
+                responses = [(0, [comment(20, NOW - 30, "ordinary")]), (0, []), (0, [])]
+            else:
+                pages = [full_page(100 * page + 1) for page in range(mon.GITHUB_PAGES)]
+                if case is not None:
+                    pages[0][0] = case
+                responses = [(0, batch) for batch in pages]
+                responses += [(0, [comment(900, NOW - 30, "probe")]), (0, []), (0, [])]
+            source = mon.GitHubSource("o/r", runner=FakeRun(*responses), clock=lambda: NOW)
+            with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+                source.refresh()
+            work = mon.work_board(source, board, NOW)
+            lines = mon.board_view(work)
+            count = next(line for line, _ in lines if "等你 " in line)
+            owner_index = next(i for i, (line, _) in enumerate(lines) if line == "── 等你 ──")
+            if case is None:
+                self.assertTrue(source.comments_cut)
+                self.assertIn("等你 ?", count)
+                self.assertEqual(lines[owner_index + 1][0],
+                                 f"未確認（留言太多，只讀了最新 {mon.GITHUB_PAGE * mon.GITHUB_PAGES} 則）")
+            elif case == "uncut":
+                self.assertFalse(source.comments_cut)
+                self.assertEqual(count.split("等你 ", 1)[1].split(" ·", 1)[0],
+                                 "0（等你決定 0，其他 Owner 請求 0）")
+                self.assertEqual(lines[owner_index + 1][0], "無（只看最近 12 小時留言）")
+            else:
+                self.assertTrue(source.comments_cut)
+                self.assertIn("等你 1+（等你決定 1，其他 Owner 請求 0）", count)
+                self.assertTrue(any(item.reference == "#10" for item in work.owner))
+
+
 class PrBoardTests(unittest.TestCase):
     SHA = "abcdef0" + "1" * 33
 
@@ -8353,6 +8465,7 @@ class StuckAlertTests(unittest.TestCase):
                     mon.StuckRecord("b" * 8, "wp-1", True, 0)], "")
                 self.github, self.polls = github, 0
                 self.stale = False
+                self.behind = True
             def poll(self): pass
 
         class Screen:
@@ -8380,9 +8493,16 @@ class StuckAlertTests(unittest.TestCase):
         self.assertIn("修復已到上限：D6 wp-1（至少 2 輪）", rendered)
         self.assertIn("PM 進度：上次派工 12 分鐘前 · 排隊 0", rendered)
         self.assertIn("辦公室 · 工作中 0 · 等你 1", rendered)
+        self.assertIn(mon.BEHIND_WARNING, rendered)
         self.assertTrue(any("macOS 超過 45 分鐘" in line for line in drawn.values()))
         self.assertTrue(any("修復已到上限：D6 wp-1（至少 2 輪）" in line for line in drawn.values()))
         self.assertTrue(any("PM 進度：上次派工 12 分鐘前 · 排隊 0" in line
                             for line in drawn.values()))
         self.assertTrue(any("辦公室 · 工作中 0 · 等你 1" in line
                             for line in drawn.values()))
+        self.assertIn(mon.BEHIND_WARNING, drawn[2])
+        monitor.behind = False
+        drawn.clear()
+        mon._paint_screen(Screen(), monitor, "office", 0, False, {},
+                          lambda row, text, attr=0: drawn.__setitem__(row, text))
+        self.assertNotIn(mon.BEHIND_WARNING, "\n".join(drawn.values()))
