@@ -582,6 +582,49 @@ def read_background(pm_session, store=None):
     return background_items(records)
 
 
+def attention_items(records, ready_task_ids=()):
+    """Tasks needing PM attention, plus current evidence ready for PM handling."""
+    from .task_status import derive_state
+
+    ready_task_ids = set(ready_task_ids)
+    labels = {"BLOCKED": "卡住", "UNAVAILABLE": "供應商不可用", "FAILED": "失敗"}
+    items = []
+    for record in records:
+        state = derive_state(record)
+        if state in labels:
+            items.append({"label": labels[state], "task": str(value(record, "task_id")),
+                          "reason": blocked_reason(record) or ""})
+        elif state == "RUNNING" and record.get("task_id") in ready_task_ids:
+            items.append({"label": "證據已就緒，等 PM 處理",
+                          "task": str(value(record, "task_id")), "reason": ""})
+    return items
+
+
+def read_attention(pm_session, store=None):
+    """Read attention facts and unread completion events without reconciling or acking."""
+    from .active_pm_inbox import _session_records, peek_inbox, pm_session_key
+    from .task_store import TaskStore
+
+    store = TaskStore() if store is None else store
+    session_key = pm_session_key(pm_session)
+    records, unreadable = _session_records(store, session_key)
+    inbox = peek_inbox(store, session_key)
+    events = inbox.get("events", [])
+    pending = inbox.get("pending", [])
+    ready_task_ids = {
+        entry.get("task_id") for entry in pending
+        if type(entry) is dict and entry.get("state") == "NOT_YET_RECORDED"
+    }
+    ready_task_ids.update(
+        event.get("task_id") for event in events
+        if type(event) is dict and event.get("current") is True and event.get("state") != "ACKED"
+    )
+    return {"items": attention_items(records, ready_task_ids),
+            "unread": len(events) + len(pending),
+            "task_unreadable_count": unreadable,
+            "inbox_unreadable_count": inbox.get("unreadable_task_count", 0)}
+
+
 def age_text(timestamp, now=None):
     """Compact age of a Core timestamp ("45s", "12m", "3h", "2d"); "?" when unreadable."""
     try:
