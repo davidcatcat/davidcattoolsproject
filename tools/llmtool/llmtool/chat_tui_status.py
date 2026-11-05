@@ -445,9 +445,16 @@ def background_items(records):
             continue
         numbers = sorted({number for number, _label in _pr_sources(record)})
         developer = _dict(record.get("developer")) or {}
-        started_at = developer.get("created_at")
-        if type(started_at) is not str:
-            started_at = record.get("created_at")
+        if derived == "REPAIRING":
+            claim = _latest(record.get("review_repair_claims"))
+            started_at = claim.get("claimed_at") if claim is not None else None
+        elif derived == "WAITING_REVIEW":
+            claim = _latest(record.get("review_dispatch_claim"))
+            started_at = claim.get("claimed_at") if claim is not None else None
+        else:
+            started_at = developer.get("created_at")
+            if type(started_at) is not str:
+                started_at = record.get("created_at")
         if type(started_at) is not str:
             started_at = None
         items.append({"role": role, "task": str(value(record, "task_id")),

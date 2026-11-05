@@ -274,7 +274,6 @@ PM_ACCOUNTS_GUIDANCE = (
     "The built-in default Claude account is used meanwhile.")
 # Busy-line and running-tool refresh cadence; this is the existing PM timer.
 PM_BUSY_SECONDS = 0.5
-PM_WAIT_SECONDS = 1.0
 PM_BUSY_GLYPHS = ('✽', '✻', '✶', '✢')
 # P0-3: how long the background watcher waits per pm_runtime.background_turn call; it
 # re-checks that the runtime is still alive between waits.
@@ -912,7 +911,6 @@ class ChatTUI:
         # W58b-4: the fixed busy line above the input, animated by the existing PM tick.
         self._pm_busy_frame = 0
         self._pm_busy_handle = None
-        self._pm_busy_delay = None
         # W52 F3: a moving drag copies its selection shortly after it changes, so the
         # clipboard is right even when the terminal never reports the release (Warp).
         self._drag_copy_handle = None
@@ -1735,7 +1733,8 @@ class ChatTUI:
     def _pm_waiting_wanted(self):
         count = self.background_count()
         return (self.pm_mode and self.pm_runtime is not None and not self.pm_turn_active
-                and type(count) is int and count > 0)
+                and not self.menu_items and not self.searching and not self.background_open()
+                and self.pm_state != "closing" and type(count) is int and count > 0)
 
     def _pm_waiting_line(self):
         items = self.background_all()
@@ -3005,7 +3004,6 @@ class ChatTUI:
         self.background_loaded = time.monotonic()
         # W59: a refresh changes the data, never whether the Owner's panel is open.
         self.app.invalidate()
-        self._pm_busy_show()
 
     def background_loading(self):
         """W60: the connected PM's first background read has not finished yet."""
@@ -4223,28 +4221,21 @@ class ChatTUI:
         self.pm_tail = []   # the notices stay where they are, below the finished block
 
     def _pm_busy_show(self):
-        """Keep one timer for the busy line, waiting work and running-tool durations."""
-        busy = self._pm_busy_wanted()
-        waiting = self._pm_waiting_wanted()
-        if not busy and not waiting:
+        """Keep one timer for the busy line and running-tool durations."""
+        if not self._pm_busy_wanted():
             self._pm_busy_cancel()
             return
-        delay = PM_BUSY_SECONDS if busy else PM_WAIT_SECONDS
-        if self._pm_busy_handle is not None and self._pm_busy_delay != delay:
-            self._pm_busy_cancel()
         if self._pm_busy_handle is None:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 self.app.invalidate()
                 return   # No loop (unit tests): the line is rendered on demand.
-            self._pm_busy_handle = loop.call_later(delay, self._pm_busy_tick)
-            self._pm_busy_delay = delay
+            self._pm_busy_handle = loop.call_later(PM_BUSY_SECONDS, self._pm_busy_tick)
         self.app.invalidate()
 
     def _pm_busy_tick(self):
         self._pm_busy_handle = None
-        self._pm_busy_delay = None
         if self.pm_turn_active:
             self._pm_tool_tick()
             self._pm_busy_frame = (self._pm_busy_frame + 1) % len(PM_BUSY_GLYPHS)
@@ -4254,7 +4245,6 @@ class ChatTUI:
         if self._pm_busy_handle is not None:
             self._pm_busy_handle.cancel()
             self._pm_busy_handle = None
-        self._pm_busy_delay = None
 
     def _pm_busy_stop(self):
         """Cancel the busy-line timer, turn or no turn."""
@@ -4371,7 +4361,6 @@ class ChatTUI:
         self._pm_finalize()   # Nothing queued survives the turn (interrupt without TURN_END).
         self.pm_turn_active, self.pm_turn_started = False, None
         self._pm_busy_stop()
-        self._pm_busy_show()
         if self.pm_state in ("working", "thinking", "interrupting"):
             self.pm_state = "idle"
         if self.pm_outbox and not self.pm_outbox_paused:
@@ -4440,7 +4429,6 @@ class ChatTUI:
             if handle is not None:
                 handle.cancel()
         self._pm_tick_handle = self._pm_busy_handle = self._drag_copy_handle = None
-        self._pm_busy_delay = None
         self._autoscroll_handle = None
         for runtime in runtimes:
             if runtime is not None:

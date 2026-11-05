@@ -358,6 +358,35 @@ class BackgroundItemTests(unittest.TestCase):
             "no-time": None,
         })
 
+    def test_background_items_use_current_review_stage_claim_time(self):
+        repairing = _record("repair", developer_state="DEVELOPER_RESPONDED",
+                            review_repair_claims=[{"state": "CLAIMED", "version": 1,
+                                                   "claimed_at": "2026-11-04T00:00:00Z"}])
+        reviewing = _record("review", developer_state="DEVELOPER_RESPONDED",
+                            review_dispatch_claim=[{"version": 1,
+                                                    "claimed_at": "2026-11-04T00:00:00Z"},
+                                                   {"version": 2,
+                                                    "claimed_at": "2026-11-05T00:00:00Z"}])
+        reviewing["developer"]["direct_result_callback"] = {
+            "review_handoff": {"dispatch_state": "PENDING"}}
+        no_repair_time = _record("repairmissing", developer_state="DEVELOPER_RESPONDED",
+                                 review_repair_claims=[{"state": "CLAIMED", "version": 1}])
+        no_review_time = _record("reviewmissing", developer_state="DEVELOPER_RESPONDED",
+                                 review_dispatch_claim={"version": 1})
+        no_review_time["developer"]["direct_result_callback"] = {
+            "review_handoff": {"dispatch_state": "PENDING"}}
+        items = chat_tui_status.background_items(
+            [repairing, reviewing, no_repair_time, no_review_time])
+        self.assertEqual({item["task"]: item["started_at"] for item in items}, {
+            "repair": "2026-11-04T00:00:00Z",
+            "review": "2026-11-05T00:00:00Z",
+            "repairmissing": None,
+            "reviewmissing": None,
+        })
+        for item in items:
+            if item["task"] in ("repairmissing", "reviewmissing"):
+                self.assertEqual(len(chat_tui_status.background_summary(item).split(" · ")), 2)
+
     def test_items_roles_prs_and_age(self):
         records = [
             _record("t-run", updated="2026-10-30T01:00:00Z"),

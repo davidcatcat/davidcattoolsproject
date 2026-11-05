@@ -444,6 +444,51 @@ class PMLayoutTests(Base):
         ui.pm_turn_active = True
         self.assertEqual(ui.busy_rows(), 0)
 
+    def test_waiting_row_yields_to_picker_panel_and_closing(self):
+        ui = self.ui
+        ui.pm_runtime = object()
+        ui.pm_state = "idle"
+        ui.background_key = ui.pm_target[0]
+        ui.background = [{"role": "Developer", "task": "task1234", "pr": "#654",
+                          "state": "RUNNING"}]
+        ui.app.output.get_size = lambda: Size(rows=12, columns=40)
+        self.assertTrue(ui._pm_waiting_wanted())
+        self.assertEqual(ui.busy_rows(), 1)
+
+        ui.menu_items = [("/help", "help", "plain words")]
+        self.assertFalse(ui._pm_waiting_wanted())
+        self.assertEqual(ui.busy_rows(), 0)
+        ui.menu_items = []
+        ui.searching = True
+        self.assertFalse(ui._pm_waiting_wanted())
+        self.assertEqual(ui.busy_rows(), 0)
+        ui.searching = False
+
+        ui.show_background = True
+        self.assertFalse(ui._pm_waiting_wanted())
+        self.assertEqual(ui.busy_rows(), 0)
+        ui.show_background = False
+
+        ui.pm_state = "closing"
+        self.assertFalse(ui._pm_waiting_wanted())
+        self.assertEqual(ui.busy_rows(), 0)
+
+    def test_waiting_only_does_not_schedule_busy_handle(self):
+        class Loop:
+            def call_later(self, delay, callback):
+                raise AssertionError("waiting work must not schedule a timer")
+
+        ui = self.ui
+        ui.pm_runtime = object()
+        ui.pm_target = ("abcdef0123456789", "/tmp")
+        ui.background_key = ui.pm_target[0]
+        ui.background = [{"role": "Developer", "task": "task1234", "pr": "#654",
+                          "state": "RUNNING"}]
+        with patch("llmtool.chat_tui.asyncio.get_running_loop", return_value=Loop()):
+            ui._pm_busy_show()
+        self.assertTrue(ui._pm_waiting_wanted())
+        self.assertIsNone(ui._pm_busy_handle)
+
     def test_busy_fragments_stay_on_one_row_at_40_columns(self):
         ui = self.ui
         ui.pm_runtime = object()
@@ -491,15 +536,6 @@ class PMLayoutTests(Base):
             self.assertEqual(len(loop.handles), 6)
             self.assertEqual(loop.pending()[0].delay, chat_tui.PM_BUSY_SECONDS)
             ui._pm_busy_cancel()
-            ui.pm_turn_active = False
-            ui.pm_target = ("abcdef0123456789", "/tmp")
-            ui.background_key = ui.pm_target[0]
-            ui.background = [{"role": "Developer", "task": "task1234", "pr": "#654",
-                              "state": "RUNNING"}]
-            ui._pm_busy_show()
-            self.assertEqual(loop.pending()[0].delay, chat_tui.PM_WAIT_SECONDS)
-            ui.finish_background(ui.pm_target[0], ([], None))
-            self.assertEqual(loop.pending(), [])
 
     def test_account_text_is_a_system_notice(self):
         ui = self.ui
