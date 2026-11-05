@@ -3989,7 +3989,7 @@ def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending) -> list[Pr
                         if isinstance(item, BoardPull) and item.state == "OPEN"),
                        key=lambda item: item.number):
         number, head = str(pull.number), pull.head.lower()
-        review = "未審"
+        review = "未審" if head else "?"
         if head and (number, head) in (reviewing or set()):
             review = "審查中"
         else:
@@ -3999,9 +3999,9 @@ def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending) -> list[Pr
             if matches:
                 verdict = max(matches, key=lambda entry: entry[0])[1]
                 review = {"PASS": "通過", "FAIL": "要修"}.get(verdict, "未確認")
-        ec2_word = "?" if ec2 is None else (
+        ec2_word = "?" if not head or ec2 is None else (
             ec2[0].get(head, "?") if head in ec2[0] else "?" if ec2[1] else "—")
-        ci = (ci_heads or {}).get(head, {})
+        ci = (ci_heads or {}).get(head, {}) if head else {}
         linux = _ci_word(ci.get("linux"), ci_heads is not None)
         mac = _ci_word(ci.get("mac"), ci_heads is not None)
         waiting_owner = any(type(item) is OwnerPending and item.kind == "waiting_owner"
@@ -4017,14 +4017,19 @@ def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending) -> list[Pr
             next_step, owner = "修復", "Developer"
         elif any(word in (linux, mac) for word in ("失敗", "逾時", "取消")):
             next_step, owner = "修 CI", "PM"
-        elif review == "通過" and mac == "成功":
-            next_step, owner = "可合併", "PM"
-        elif review == "通過" and mac in ("執行中", "排隊"):
-            next_step, owner = "等 macOS", "CI"
-        elif review == "通過" and mac == "?":
-            next_step, owner = "未確認 CI", "PM"
+        elif ec2_word in ("FAIL", "SHA_MISMATCH", "TIMEOUT"):
+            next_step, owner = "修 EC2 失敗", "PM"
         elif review == "通過":
-            next_step, owner = "加 mac-ci", "PM"
+            if linux in ("略過", "結果不明") or mac in ("?", "結果不明"):
+                next_step, owner = "未確認 CI", "PM"
+            elif linux in ("執行中", "排隊"):
+                next_step, owner = "等 CI", "CI"
+            elif mac == "成功" and linux in ("成功", "?"):
+                next_step, owner = "可合併", "PM"
+            elif mac in ("執行中", "排隊"):
+                next_step, owner = "等 macOS", "CI"
+            else:
+                next_step, owner = "加 mac-ci", "PM"
         elif review == "未審":
             next_step, owner = "派審查", "PM"
         rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, next_step, owner))
@@ -5790,6 +5795,10 @@ def ec2_head_results(root: str | None = None) -> tuple[dict, str]:
     root = LLMTOOL_TASKS if root is None else root
     entries, problem = _bounded_task_entries(root, _ec2_parsed,
                                              EC2_HEAD_BUDGET, _ec2_head_entry)
+    if not problem:
+        paths, _ = _remote_test_paths(root)
+        if len(paths) >= REMOTE_TEST_FILES:
+            problem = "task 僅讀最近 32 筆，未見結果未確認"
     latest = {}
     for sha, when, word in entries:
         if when > latest.get(sha, (0, ""))[0]:

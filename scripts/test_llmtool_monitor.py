@@ -7572,30 +7572,52 @@ class PrBoardTests(unittest.TestCase):
             ("", True, "", "", "草稿", "Developer"),
             ("", False, "審查中", "", "等審查", "Reviewer"),
             ("", False, "要修", "", "修復", "Developer"),
-            ("", False, "通過", "失敗", "修 CI", "PM"),
-            ("", False, "通過", "成功", "可合併", "PM"),
-            ("", False, "通過", "執行中", "等 macOS", "CI"),
-            ("", False, "通過", "?", "未確認 CI", "PM"),
-            ("", False, "通過", "略過", "加 mac-ci", "PM"),
+            ("", False, "通過", "失敗", "成功", "修 CI", "PM"),
+            ("", False, "通過", "", "成功", "可合併", "PM"),
+            ("", False, "通過", "執行中", "成功", "等 CI", "CI"),
+            ("", False, "通過", "排隊", "成功", "等 CI", "CI"),
+            ("", False, "通過", "略過", "成功", "未確認 CI", "PM"),
+            ("", False, "通過", "結果不明", "成功", "未確認 CI", "PM"),
+            ("", False, "通過", "成功", "結果不明", "未確認 CI", "PM"),
+            ("", False, "通過", "執行中", "?", "未確認 CI", "PM"),
+            ("", False, "通過", "成功", "執行中", "等 macOS", "CI"),
+            ("", False, "通過", "略過", "成功", "加 mac-ci", "PM"),
             ("", False, "未審", "", "派審查", "PM"),
             ("", False, "未確認", "", "未確認", "PM"),
         ]
-        for index, (kind, draft, verdict, mac, expected_next, expected_owner) in enumerate(cases, 1):
+        for index, case in enumerate(cases, 1):
+            if len(case) == 6:
+                kind, draft, verdict, mac, expected_next, expected_owner = case
+                linux = ""
+            else:
+                kind, draft, verdict, linux, mac, expected_next, expected_owner = case
             review = {"通過": "PASS", "要修": "FAIL", "未確認": "MAYBE"}.get(verdict)
             verdicts = self._verdict(review, number=str(index)) if review else {}
             reviewing = {(str(index), "abcdef0")} if verdict == "審查中" else set()
             pending = [mon.OwnerPending(1, f"#{index}", "open", "", kind)] if kind else []
-            linux = ("completed", "failure") if verdict == "通過" and index == 5 else None
+            linux_entry = {"成功": ("completed", "success"), "失敗": ("completed", "failure"),
+                           "略過": ("completed", "skipped"), "執行中": ("in_progress", ""),
+                           "排隊": ("queued", ""), "結果不明": ("completed", "made_up")}.get(linux)
             mac_entry = {"成功": ("completed", "success"), "略過": ("completed", "skipped"),
-                         "失敗": ("completed", "failure"), "執行中": ("in_progress", "")}.get(mac)
+                         "失敗": ("completed", "failure"), "執行中": ("in_progress", ""),
+                         "結果不明": ("completed", "made_up")}.get(mac)
             ci = {"abcdef0": {}}
-            if linux:
-                ci["abcdef0"]["linux"] = linux
+            if linux_entry:
+                ci["abcdef0"]["linux"] = linux_entry
             if mac_entry:
                 ci["abcdef0"]["mac"] = mac_entry
             row = mon.pr_board_rows([self._pull(index, draft=draft)], verdicts, ci,
                                     ({}, ""), reviewing, pending)[0]
             self.assertEqual((row.next, row.owner), (expected_next, expected_owner))
+
+        for index, linux in enumerate(("略過", "結果不明"), 30):
+            verdicts = self._verdict("PASS", number=str(index))
+            linux_entry = ("completed", "skipped" if linux == "略過" else "made_up")
+            row = mon.pr_board_rows([self._pull(index)], verdicts,
+                                    {"abcdef0": {"linux": linux_entry,
+                                                  "mac": ("completed", "success")}},
+                                    ({}, ""), set(), [])[0]
+            self.assertEqual((row.next, row.owner), ("未確認 CI", "PM"))
 
     def test_pr_verdict_head_binding_open_filter_and_priority_pairs(self):
         rows = mon.pr_board_rows(
@@ -7605,7 +7627,14 @@ class PrBoardTests(unittest.TestCase):
                    (3, "PASS", frozenset({"abcdef0"}))]}, None, ({}, ""), set(), [])
         self.assertEqual([(row.number, row.review) for row in rows], [(1, "通過")])
         self.assertEqual(mon.pr_board_rows([self._pull(1, head="")], {}, None,
-                                           ({}, ""), {("1", "abcdef0")}, [])[0].review, "未審")
+                                           ({}, ""), {("1", "abcdef0")}, [])[0].review, "?")
+        empty_head = mon.pr_board_rows([self._pull(1, head="")], {}, None,
+                                       ({}, ""), set(), [])[0]
+        self.assertEqual((empty_head.review, empty_head.ec2, empty_head.next, empty_head.owner),
+                         ("?", "?", "未確認", "PM"))
+        empty_draft = mon.pr_board_rows([self._pull(1, head="", draft=True)], {}, None,
+                                        ({}, ""), set(), [])[0]
+        self.assertEqual((empty_draft.next, empty_draft.owner), ("草稿", "Developer"))
         self.assertEqual(mon.pr_board_rows([self._pull(1)], {"1": [(1, "PASS", {"abcdef0"})]},
                                            None, ({}, ""), {("1", "abcdef0")}, [])[0].review,
                          "審查中")
@@ -7620,21 +7649,41 @@ class PrBoardTests(unittest.TestCase):
         passed = {"1": [(1, "PASS", frozenset({"abcdef0"}))]}
         ci = {"abcdef0": {"linux": ("completed", "failure"),
                            "mac": ("completed", "success")}}
-        def next_for(*, selected=pull, verdicts=passed, statuses=ci,
+        def next_for(*, selected=pull, verdicts=passed, statuses=ci, ec2=({}, ""),
                      reviewing=set(), pending=()):
-            row = mon.pr_board_rows([selected], verdicts, statuses, ({}, ""),
+            row = mon.pr_board_rows([selected], verdicts, statuses, ec2,
                                     reviewing, pending)[0]
             return row.next, row.owner
-        self.assertEqual(next_for(pending=[mon.OwnerPending(1, "#1", "open", "", "waiting_owner")]),
+        ec2_failure = ({"abcdef0": "FAIL"}, "")
+        self.assertEqual(next_for(ec2=ec2_failure,
+                                  pending=[mon.OwnerPending(1, "#1", "open", "", "waiting_owner")]),
                          ("等你決定", "Owner"))
-        self.assertEqual(next_for(reviewing={("1", "abcdef0")}), ("草稿", "Developer"))
+        self.assertEqual(next_for(ec2=ec2_failure, reviewing={("1", "abcdef0")}),
+                         ("草稿", "Developer"))
         self.assertEqual(next_for(selected=self._pull(1, draft=False),
                                   verdicts={"1": [(1, "FAIL", {"abcdef0"})]},
-                                  reviewing={("1", "abcdef0")}), ("等審查", "Reviewer"))
+                                  ec2=ec2_failure, reviewing={("1", "abcdef0")}),
+                         ("等審查", "Reviewer"))
         self.assertEqual(next_for(selected=self._pull(1, draft=False),
-                                  verdicts={"1": [(1, "FAIL", {"abcdef0"})]}),
+                                  verdicts={"1": [(1, "FAIL", {"abcdef0"})]},
+                                  ec2=ec2_failure),
                          ("修復", "Developer"))
-        self.assertEqual(next_for(selected=self._pull(1, draft=False)), ("修 CI", "PM"))
+        self.assertEqual(next_for(selected=self._pull(1, draft=False), ec2=ec2_failure),
+                         ("修 CI", "PM"))
+        for failure in ("FAIL", "SHA_MISMATCH", "TIMEOUT"):
+            self.assertEqual(next_for(selected=self._pull(1, draft=False), verdicts={},
+                                      statuses={"abcdef0": {"mac": ("completed", "success")}},
+                                      ec2=({"abcdef0": failure}, "")),
+                             ("修 EC2 失敗", "PM"))
+            self.assertEqual(next_for(selected=self._pull(1, draft=False),
+                                      statuses={"abcdef0": {"mac": ("completed", "success")}},
+                                      ec2=({"abcdef0": failure}, "")),
+                             ("修 EC2 失敗", "PM"))
+        for non_failure in ("ADMISSION_DENIED", "UNAVAILABLE", "UNKNOWN", "?", "—"):
+            self.assertEqual(next_for(selected=self._pull(1, draft=False),
+                                      statuses={"abcdef0": {"mac": ("completed", "success")}},
+                                      ec2=({"abcdef0": non_failure}, "")),
+                             ("可合併", "PM"))
         unmatched = [mon.OwnerPending(1, "#2", "open", "", "waiting_owner"),
                      mon.OwnerPending(1, "#1", "open", "", "repair_gate")]
         self.assertEqual(next_for(pending=unmatched), ("草稿", "Developer"))
@@ -7704,6 +7753,84 @@ class PrBoardTests(unittest.TestCase):
             results, problem = mon.ec2_head_results(tasks)
         self.assertEqual(results, {"abcdef0": "PASS", "1234567": "FAIL"})
         self.assertEqual(problem, "")
+
+    def test_ec2_head_results_marks_file_window_incomplete(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            root = Path(tasks)
+            for index in range(31):
+                path = root / f"task-{index:02}.json"
+                contents = ({"remote_test_receipts": [
+                    {"source_sha": "1234567" + "2" * 33,
+                     "ended_at": "2026-11-05T00:00:00Z", "result": "FAIL"}]}
+                    if index == 0 else {})
+                path.write_text(json.dumps(contents), encoding="utf-8")
+                path.chmod(0o600)
+                os.utime(path, (NOW + index, NOW + index))
+            results, problem = mon.ec2_head_results(tasks)
+            self.assertEqual((results, problem), ({"1234567": "FAIL"}, ""))
+            absent = mon.pr_board_rows([self._pull(1)], {}, {}, (results, problem), set(), [])[0]
+            self.assertEqual(absent.ec2, "—")
+            path = root / "task-31.json"
+            path.write_text("{}", encoding="utf-8")
+            path.chmod(0o600)
+            os.utime(path, (NOW + 31, NOW + 31))
+            results, problem = mon.ec2_head_results(tasks)
+            expected = "task 僅讀最近 32 筆，未見結果未確認"
+            self.assertEqual((results, problem), ({"1234567": "FAIL"}, expected))
+            absent = mon.pr_board_rows([self._pull(1)], {}, {}, (results, problem), set(), [])[0]
+            self.assertEqual(absent.ec2, "?")
+            path = root / "task-32.json"
+            path.write_text(json.dumps({"remote_test_receipts": [
+                {"source_sha": self.SHA, "ended_at": "2026-11-05T00:00:00Z",
+                 "result": "PASS"}]}), encoding="utf-8")
+            path.chmod(0o600)
+            os.utime(path, (NOW + 32, NOW + 32))
+            results, problem = mon.ec2_head_results(tasks)
+            self.assertEqual((results, problem), ({"abcdef0": "PASS"}, expected))
+            absent = mon.pr_board_rows([self._pull(1)], {}, {}, (results, problem), set(), [])[0]
+            self.assertEqual(absent.ec2, "?")
+            results_again, problem_again = mon.ec2_head_results(tasks)
+            self.assertEqual((results_again, problem_again), (results, problem))
+
+        with patch.object(mon, "_bounded_task_entries", return_value=([], mon.REMOTE_TEST_OVER_BUDGET)), \
+                patch.object(mon, "_remote_test_paths", return_value=([], False)):
+            self.assertEqual(mon.ec2_head_results("unused"), ({}, mon.REMOTE_TEST_OVER_BUDGET))
+
+    def test_ec2_failure_is_bound_to_head_and_latest_result(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            root = Path(tasks)
+            records = [
+                ("other", {"remote_test_receipts": [
+                    {"source_sha": "1234567" + "2" * 33, "ended_at": "2026-11-05T00:01:00Z",
+                     "result": "FAIL"}]}),
+                ("old", {"remote_test_receipts": [
+                    {"source_sha": self.SHA, "ended_at": "2026-11-05T00:02:00Z",
+                     "result": "FAIL"}]}),
+                ("new", {"remote_test_receipts": [
+                    {"source_sha": self.SHA, "ended_at": "2026-11-05T00:03:00Z",
+                     "result": "PASS"}]})]
+            for index, (name, record) in enumerate(records):
+                path = root / f"{name}.json"
+                path.write_text(json.dumps(record), encoding="utf-8")
+                path.chmod(0o600)
+                os.utime(path, (NOW + index, NOW + index))
+            results, problem = mon.ec2_head_results(tasks)
+            self.assertEqual((results, problem), ({"abcdef0": "PASS", "1234567": "FAIL"}, ""))
+            timeout = root / "timeout.json"
+            timeout.write_text(json.dumps({"remote_test_outcomes": [
+                {"sha": self.SHA, "at": "2026-11-05T00:04:00Z", "result": "TIMEOUT"}]}),
+                encoding="utf-8")
+            timeout.chmod(0o600)
+            os.utime(timeout, (NOW + 4, NOW + 4))
+            results, problem = mon.ec2_head_results(tasks)
+            self.assertEqual((results, problem), ({"abcdef0": "TIMEOUT", "1234567": "FAIL"}, ""))
+            mac = {"abcdef0": {"mac": ("completed", "success")}}
+            rows = mon.pr_board_rows([self._pull(1)], self._verdict("PASS"), mac,
+                                     ({"1234567": "FAIL"}, ""), set(), [])
+            self.assertEqual((rows[0].next, rows[0].owner), ("可合併", "PM"))
+            rows = mon.pr_board_rows([self._pull(1)], self._verdict("PASS"), mac,
+                                     (results, problem), set(), [])
+            self.assertEqual((rows[0].next, rows[0].owner), ("修 EC2 失敗", "PM"))
 
     def test_pr_section_unknown_empty_and_narrow_row(self):
         unknown = mon.work_board(None, mon.PmBoard("missing", None, [], [], []), NOW)
