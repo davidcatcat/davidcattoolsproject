@@ -819,6 +819,15 @@ def add_task_submission_parsers(actions):
                        help='merged integration PR containing the reviewed head')
     drive.add_argument('--reviewer-session-done', action='store_true',
                        help='record REVIEW_BLOCKED when the dispatched Reviewer has ended without a verdict')
+    claude_bind = actions.add_parser(
+        'claude-bind', help='Bind an existing Owner-assigned Claude Developer D6')
+    claude_bind.add_argument('task_id', help='existing durable Task ID')
+    claude_bind.add_argument('--executor-task', required=True,
+                             help='registered D6 Executor task id')
+    claude_bind.add_argument('--owner-ref', required=True,
+                             help='Owner assignment reference for this Claude Developer')
+    claude_bind.add_argument('--common-dir',
+                             help='registered repository common Git directory')
     claude_result = actions.add_parser(
         'claude-result', help='Record the original PM-bound Claude Developer result')
     claude_result.add_argument('task_id', help='existing durable Task ID')
@@ -1182,6 +1191,9 @@ def run_task_claude_bind(args, *, store=None, stdout=None):
         common_dir = task_completion.collect_git_snapshot(os.getcwd()).common_dir
     registration = task_completion.read_d6_registration(
         args.executor_task, common_dir, allowed_states=('ACTIVE',))
+    if (registration.trusted_agent_id != 'claude-developer' or
+            registration.native_session_id in (None, 'UNKNOWN')):
+        raise LLMToolError('Claude binding requires an independent native Claude Developer session')
     snapshot = task_completion.collect_git_snapshot(registration.root)
     if (snapshot.root != registration.root or snapshot.common_dir != registration.common_dir or
             snapshot.branch != registration.branch or snapshot.head != registration.result_sha or
@@ -1240,8 +1252,10 @@ def run_task_claude_bind(args, *, store=None, stdout=None):
         'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
-    saved = store.compare_and_update(
-        args.task_id, expected={'developer': None, 'completion': None},
+    saved = store.claude_bind_compare_and_update(
+        args.task_id, executor_task_id=registration.task_id,
+        common_dir=registration.common_dir,
+        expected={'developer': None, 'completion': None},
         developer=developer, completion=completion)
     _print(_task_view(saved), stdout=stdout)
     return 0
@@ -4958,6 +4972,15 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
     if completion['pm_dispatch'] in ('CLAIMED', 'UNKNOWN', 'RETURNED'):
         raise LLMToolError('original PM request already claimed or completed; replay refused')
     developer = task['developer']
+    claude_route = developer.get('provider_profile') == 'claude'
+    claude_result = developer.get('claude_result')
+    if claude_route and not (
+            developer.get('state') == 'DEVELOPER_RESPONDED' and
+            type(claude_result) is dict and
+            developer.get('executor_task_id') == args.executor_task and
+            claude_result.get('executor_task_id') == args.executor_task and
+            completion.get('executor_task_id') == args.executor_task):
+        raise LLMToolError('CLAUDE_RESULT_BINDING_INVALID')
     initial = completion['evidence'] or {}
     try:
         task_completion.validate_task_binding(
@@ -5006,18 +5029,29 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             task, store, executor_task=args.executor_task,
             common_dir=initial.get('common_dir'), root=initial.get('root'),
             branch=initial.get('branch'), source_sha=developer['source_sha'])
-        git_evidence = task_completion.collect_executor_result(
-            task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),
-            expected_root=initial.get('root'), expected_branch=initial.get('branch'),
-            source_sha=developer['source_sha'], task_binding=task['task_binding'],
-            expected_agent=initial.get('executor_identity'),
-            expected_session_ref=initial.get('executor_session_ref'),
-            expected_native_session_id=initial.get('executor_native_session_id'),
-            write_paths=developer['write_paths'], artifact=developer['artifact'],
-            artifact_sha256=developer['artifact_sha256'],
-            trusted_base_sha=main_pin['sha'],
-            **({'artifact_segments': artifact_segments}
-               if artifact_segments is not None else {}))
+        if claude_route:
+            git_evidence = task_completion.collect_claude_result(
+                task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),
+                expected_root=initial.get('root'), expected_branch=initial.get('branch'),
+                source_sha=developer['source_sha'], task_binding=task['task_binding'],
+                expected_agent=initial.get('executor_identity'),
+                expected_session_ref=initial.get('executor_session_ref'),
+                expected_native_session_id=initial.get('executor_native_session_id'),
+                write_paths=developer['write_paths'], claude_result=claude_result,
+                trusted_base_sha=main_pin['sha'])
+        else:
+            git_evidence = task_completion.collect_executor_result(
+                task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),
+                expected_root=initial.get('root'), expected_branch=initial.get('branch'),
+                source_sha=developer['source_sha'], task_binding=task['task_binding'],
+                expected_agent=initial.get('executor_identity'),
+                expected_session_ref=initial.get('executor_session_ref'),
+                expected_native_session_id=initial.get('executor_native_session_id'),
+                write_paths=developer['write_paths'], artifact=developer['artifact'],
+                artifact_sha256=developer['artifact_sha256'],
+                trusted_base_sha=main_pin['sha'],
+                **({'artifact_segments': artifact_segments}
+                   if artifact_segments is not None else {}))
         main_pin = dict(main_pin)
         result_heads = list(main_pin['verified_result_heads'])
         if git_evidence['result_head'] not in result_heads:
@@ -5027,8 +5061,8 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
         direct_callback = developer.get('direct_result_callback')
         callback_evidence = (direct_callback.get('evidence')
                              if type(direct_callback) is dict else None)
-        if (type(callback_evidence) is dict and
-                callback_evidence.get('test_policy') == 'REMOTE_RECEIPT'):
+        if (claude_route or (type(callback_evidence) is dict and
+                callback_evidence.get('test_policy') == 'REMOTE_RECEIPT')):
             paths = _remote_task_test_paths(task, read_paths=developer['read_paths'])
             receipt, receipt_gate = _matching_remote_test_receipt(
                 task, executor_task=args.executor_task,

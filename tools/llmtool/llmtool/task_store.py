@@ -2361,6 +2361,48 @@ class TaskStore:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
 
+    def claude_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                       common_dir, expected, **changes):
+        """Atomically ensure a D6 is not already held by another live Task."""
+        if (type(executor_task_id) is not str or not executor_task_id or
+                type(common_dir) is not str or not os.path.isabs(common_dir) or
+                type(expected) is not dict or not expected):
+            _fail('TASK_D6_BINDING_SCAN_FAILED')
+        directory = self._dirfd()
+        lock_fd = None
+        try:
+            lock_fd = self._lock_sidecar(directory, '.claude-d6-binding.lock',
+                                         exclusive=True, code='TASK_D6_BINDING')
+            try:
+                ids = self.task_ids()
+                for other_id in ids:
+                    if other_id == task_id:
+                        continue
+                    try:
+                        other = self.get(other_id)
+                    except Exception:
+                        _fail('TASK_D6_BINDING_SCAN_FAILED')
+                    if other.get('abandonment') is not None:
+                        continue
+                    dev = other.get('developer')
+                    completion = other.get('completion')
+                    evidence = completion.get('evidence') if type(completion) is dict else None
+                    if (type(evidence) is dict and
+                            evidence.get('common_dir') == common_dir and
+                            ((type(dev) is dict and
+                              dev.get('executor_task_id') == executor_task_id) or
+                             (type(completion) is dict and
+                              completion.get('executor_task_id') == executor_task_id))):
+                        _fail('TASK_D6_ALREADY_BOUND')
+                return self.compare_and_update(task_id, expected=expected, **changes)
+            except LLMToolError:
+                raise
+            except Exception:
+                _fail('TASK_D6_BINDING_SCAN_FAILED')
+        finally:
+            self._unlock_sidecar(lock_fd)
+            os.close(directory)
+
     def record_published_pr(self, task_id, pr, head_sha):
         """Record or replace the PR linked to this Task's published HEAD."""
         if (type(pr) is not int or not 1 <= pr <= 9999999 or

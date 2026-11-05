@@ -1186,12 +1186,12 @@ def _is_ancestor(root, ancestor, descendant):
     return result.returncode == 0
 
 
-def collect_executor_result(*, task_id, expected_common_dir, expected_root,
-                           expected_branch, source_sha, task_binding,
-                           expected_agent, expected_session_ref,
-                           expected_native_session_id, write_paths, artifact, artifact_sha256,
-                           artifact_segments=None, trusted_base_sha=None):
-    """Compare the current registered Executor HEAD and actual source-to-result diff."""
+def _collect_registered_result_diff(*, task_id, expected_common_dir, expected_root,
+                                     expected_branch, source_sha, task_binding,
+                                     expected_agent, expected_session_ref,
+                                     expected_native_session_id, write_paths,
+                                     artifact_segments=None, trusted_base_sha=None):
+    """Share D6, ENV2, HEAD, ancestry, scope and diff-hash checks across routes."""
     registration = read_d6_registration(task_id, expected_common_dir,
                                         allowed_states=_D6_EVIDENCE_STATES)
     if (registration.root != expected_root or registration.branch != expected_branch or
@@ -1238,6 +1238,23 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
               else 'RESULT_SCOPE_MISMATCH')
     patch = _git(registration.root, ('diff', '--binary', '--no-ext-diff', '--no-textconv',
                 '--no-renames', source_sha, snapshot.head, '--'), limit=_GIT_LIMIT)
+    return registration, snapshot, paths, developer_paths, patch
+
+
+def collect_executor_result(*, task_id, expected_common_dir, expected_root,
+                           expected_branch, source_sha, task_binding,
+                           expected_agent, expected_session_ref,
+                           expected_native_session_id, write_paths, artifact, artifact_sha256,
+                           artifact_segments=None, trusted_base_sha=None):
+    """Compare the current registered Executor HEAD and actual source-to-result diff."""
+    registration, snapshot, paths, developer_paths, patch = _collect_registered_result_diff(
+        task_id=task_id, expected_common_dir=expected_common_dir,
+        expected_root=expected_root, expected_branch=expected_branch,
+        source_sha=source_sha, task_binding=task_binding,
+        expected_agent=expected_agent, expected_session_ref=expected_session_ref,
+        expected_native_session_id=expected_native_session_id,
+        write_paths=write_paths, artifact_segments=artifact_segments,
+        trusted_base_sha=trusted_base_sha)
     if artifact_segments is None:
         verify_artifact_applied(registration.root, artifact, artifact_sha256,
                                 source_sha, snapshot.head, paths, write_paths,
@@ -1291,6 +1308,43 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
         'branch': registration.branch,
         'source_sha': source_sha, 'result_head': snapshot.head,
         'changed_paths': list(paths),
+        'developer_changed_paths': list(developer_paths),
+        'diff_sha256': hashlib.sha256(patch).hexdigest(),
+    }
+
+
+def collect_claude_result(*, task_id, expected_common_dir, expected_root,
+                          expected_branch, source_sha, task_binding,
+                          expected_agent, expected_session_ref,
+                          expected_native_session_id, write_paths, claude_result,
+                          trusted_base_sha=None):
+    """Verify a bound Claude result using D6 evidence, without an artifact claim."""
+    registration = read_d6_registration(task_id, expected_common_dir,
+                                        allowed_states=_D6_EVIDENCE_STATES)
+    if (type(claude_result) is not dict or
+            claude_result.get('executor_task_id') != registration.task_id or
+            claude_result.get('head_sha') != registration.result_sha):
+        _stop('CLAUDE_RESULT_BINDING_INVALID')
+    registration, snapshot, paths, developer_paths, patch = _collect_registered_result_diff(
+        task_id=task_id, expected_common_dir=expected_common_dir,
+        expected_root=expected_root, expected_branch=expected_branch,
+        source_sha=source_sha, task_binding=task_binding,
+        expected_agent=expected_agent, expected_session_ref=expected_session_ref,
+        expected_native_session_id=expected_native_session_id,
+        write_paths=write_paths, trusted_base_sha=trusted_base_sha)
+    if claude_result.get('head_sha') != snapshot.head:
+        _stop('RESULT_HEAD_MISMATCH')
+    _reject_legacy_grafts(registration.root, registration.common_dir)
+    return {
+        'task_id': task_binding.get('task_id'), 'run_id': task_binding.get('run_id'),
+        'executor_task_id': registration.task_id,
+        'executor_identity': registration.trusted_agent_id,
+        'executor_session_ref': registration.session_ref,
+        'executor_native_session_id': registration.native_session_id,
+        'executor_native_session': ('VERIFIED' if registration.native_session_id else 'UNKNOWN'),
+        'root': registration.root, 'common_dir': registration.common_dir,
+        'branch': registration.branch, 'source_sha': source_sha,
+        'result_head': snapshot.head, 'changed_paths': list(paths),
         'developer_changed_paths': list(developer_paths),
         'diff_sha256': hashlib.sha256(patch).hexdigest(),
     }

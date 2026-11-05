@@ -948,9 +948,34 @@ class TaskSubmissionCLITests(unittest.TestCase):
             ['/usr/bin/git', 'rev-parse', 'HEAD'], cwd=self.executor_root,
             text=True).strip()
         registered_d6 = dict(self.executor_registry)
-        registered_d6.update(task_id=d6_task_id, head_sha=result_head)
+        registered_d6.update(task_id=d6_task_id, head_sha=result_head,
+                              trusted_agent_id='claude-developer',
+                              native_session_id='claude-native-session')
         registration_path = (Path(self.executor_common_dir) / 'llmtool-worktrees' /
                              (d6_task_id + '.json'))
+        registered_d6['trusted_agent_id'] = 'codex-developer'
+        registration_path.write_text(json.dumps(registered_d6), encoding='utf-8')
+        registration_path.chmod(0o600)
+        with self.assertRaises(LLMToolError):
+            submission_cli.run_task_claude_bind(Namespace(
+                task_id=task['task_id'], executor_task=d6_task_id,
+                owner_ref=owner_ref, common_dir=self.executor_common_dir), store=store)
+        registered_d6['trusted_agent_id'] = 'claude-developer'
+        registered_d6['native_session_id'] = None
+        registration_path.write_text(json.dumps(registered_d6), encoding='utf-8')
+        registration_path.chmod(0o600)
+        with self.assertRaises(LLMToolError):
+            submission_cli.run_task_claude_bind(Namespace(
+                task_id=task['task_id'], executor_task=d6_task_id,
+                owner_ref=owner_ref, common_dir=self.executor_common_dir), store=store)
+        registered_d6['native_session_id'] = 'UNKNOWN'
+        registration_path.write_text(json.dumps(registered_d6), encoding='utf-8')
+        registration_path.chmod(0o600)
+        with self.assertRaises(LLMToolError):
+            submission_cli.run_task_claude_bind(Namespace(
+                task_id=task['task_id'], executor_task=d6_task_id,
+                owner_ref=owner_ref, common_dir=self.executor_common_dir), store=store)
+        registered_d6['native_session_id'] = 'claude-native-session'
         registration_path.write_text(json.dumps(registered_d6), encoding='utf-8')
         registration_path.chmod(0o600)
         output = io.StringIO()
@@ -971,6 +996,15 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(bound['completion']['evidence']['source_sha'],
                          self.executor_head)
         self.assertEqual(_select_reviewer(bound), 'codex-reviewer')
+        second_task = run_task_record_pm(
+            Namespace(stdin_json=True), store=store,
+            input_stream=io.StringIO(envelope), return_record=True)
+        with self.assertRaises(LLMToolError) as collision:
+            submission_cli.run_task_claude_bind(Namespace(
+                task_id=second_task['task_id'], executor_task=d6_task_id,
+                owner_ref=owner_ref, common_dir=self.executor_common_dir), store=store)
+        self.assertEqual(collision.exception.task_store_error_code,
+                         'TASK_D6_ALREADY_BOUND')
         with self.assertRaises(LLMToolError):
             submission_cli.run_task_claude_bind(Namespace(
                 task_id=task['task_id'], executor_task=d6_task_id,
@@ -1070,6 +1104,37 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(same_family.exception.review_dispatch_code,
                          'REVIEWER_SAME_FAMILY')
 
+        store.abandon(task['task_id'], pm_session_id=task['pm_session_id'],
+                      reason='fixture releases the D6 for concurrent bind test')
+        third_task = run_task_record_pm(
+            Namespace(stdin_json=True), store=store,
+            input_stream=io.StringIO(envelope), return_record=True)
+        barrier = threading.Barrier(2)
+        outcomes = []
+        outcome_lock = threading.Lock()
+
+        def bind_candidate(candidate):
+            barrier.wait(timeout=5)
+            try:
+                result = submission_cli.run_task_claude_bind(Namespace(
+                    task_id=candidate['task_id'], executor_task=d6_task_id,
+                    owner_ref=owner_ref, common_dir=self.executor_common_dir),
+                    store=store, stdout=io.StringIO())
+                outcome = result
+            except LLMToolError as exc:
+                outcome = getattr(exc, 'task_store_error_code', None)
+            with outcome_lock:
+                outcomes.append(outcome)
+
+        threads = [threading.Thread(target=bind_candidate, args=(candidate,))
+                   for candidate in (second_task, third_task)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertCountEqual(outcomes, [0, 'TASK_D6_ALREADY_BOUND'])
+
     def test_claude_binding_refuses_wrong_d6_missing_ref_and_paused_worker(self):
         from types import SimpleNamespace
 
@@ -1094,7 +1159,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
             registration = SimpleNamespace(task_id=d6_id,
                 common_dir=self.executor_common_dir, root=str(self.executor_root),
                 branch='feat/test-executor', source_sha=self.executor_head,
-                result_sha=self.executor_head)
+                result_sha=self.executor_head, trusted_agent_id='claude-developer',
+                native_session_id='claude-native-session')
             updated_policy = json.loads(self.policy_path.read_text(encoding='utf-8'))
             updated_policy['workers']['claude-developer']['dispatch'] = worker_state
             self.policy_path.write_text(json.dumps(updated_policy), encoding='utf-8')

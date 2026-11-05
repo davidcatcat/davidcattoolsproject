@@ -114,6 +114,7 @@ class CLITests(unittest.TestCase):
 
         expected_freshness = {
             'delegate', 'review-dispatch', 'high-debug', 'repair', 'remote-test', 'drive',
+            'claude-bind',
         }
         self.assertEqual(
             {action for action, (_function_name, fresh) in TASK_ACTIONS.items() if fresh},
@@ -131,6 +132,19 @@ class CLITests(unittest.TestCase):
             'inspect', 'review', 'review-request', 'review-wait', 'review-bundle',
         }
         self.assertEqual(parsed_actions - set(TASK_ACTIONS), unchanged_actions)
+
+    def test_claude_bind_cli_dispatches_to_handler(self):
+        from llmtool.cli import main
+        from unittest.mock import patch
+        called = []
+        with patch('llmtool.source_freshness.require_fresh_source'), \
+                patch.object(task_submission_cli, 'run_task_claude_bind',
+                             side_effect=lambda args: called.append(args) or 0):
+            rc = main(['task', 'claude-bind', 'a' * 32, '--executor-task', 'd6-task',
+                       '--owner-ref', 'https://github.com/example/repo/issues/1'])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(called), 1)
+        self.assertEqual(called[0].action, 'claude-bind')
 
     def test_review_bundle_is_local_early_dispatch_and_sanitized_json(self):
         result = self.run_cli('task','review-bundle','--help')

@@ -267,6 +267,35 @@ class TaskCompletionTests(unittest.TestCase):
         return self._collect_result(result_sha, artifact,
                                     trusted_base_sha=trusted_base_sha)
 
+    def test_claude_result_collector_binds_head_and_env2(self):
+        result_sha, _ = self._make_result()
+        kwargs = {
+            'task_id': self.task_id, 'expected_common_dir': self.common,
+            'expected_root': str(self.root), 'expected_branch': 'feat/executor',
+            'source_sha': self.source_sha,
+            'task_binding': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                             'contract_digest': '3' * 64},
+            'expected_agent': 'executor-agent',
+            'expected_session_ref': 'Executor D6 session',
+            'expected_native_session_id': 'native-executor',
+            'write_paths': [self.source_path],
+            'claude_result': {'executor_task_id': self.task_id, 'head_sha': result_sha},
+            'trusted_base_sha': self.source_sha,
+        }
+        evidence = task_completion.collect_claude_result(**kwargs)
+        self.assertEqual(evidence['result_head'], result_sha)
+        self.assertEqual(evidence['executor_identity'], 'executor-agent')
+        wrong_head = dict(kwargs, claude_result={
+            'executor_task_id': self.task_id, 'head_sha': '0' * 40})
+        with self.assertRaises(LLMToolError):
+            task_completion.collect_claude_result(**wrong_head)
+
+        stale_sha, _ = self._make_result(refresh_env2_marker=False)
+        stale = dict(kwargs, claude_result={
+            'executor_task_id': self.task_id, 'head_sha': stale_sha})
+        with self.assertRaises(LLMToolError):
+            task_completion.collect_claude_result(**stale)
+
     def test_main_merge_changes_are_excluded_from_developer_scope(self):
         self._git('branch', 'main', self.source_sha)
         self._git('checkout', 'main')
