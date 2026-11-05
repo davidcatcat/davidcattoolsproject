@@ -5730,9 +5730,10 @@ def stuck_alerts(now, ci, reviews, records, open_d6) -> list[str]:
         for record in records:
             if isinstance(record, StuckRecord) and record.repair and record.d6 in allowed:
                 repairs[record.d6] = repairs.get(record.d6, 0) + 1
+    # Only the newest Task files are read, so this count is a lower bound.
     limited = sorted((d6, count) for d6, count in repairs.items()
                      if count >= STUCK_REPAIR_CAP)
-    alerts.extend(f"修復已到上限：D6 {d6}（{count} 輪）" for d6, count in limited[:5])
+    alerts.extend(f"修復已到上限：D6 {d6}（至少 {count} 輪）" for d6, count in limited[:5])
     if len(limited) > 5:
         alerts.append(f"另有 {len(limited) - 5} 件到達修復上限")
     return alerts

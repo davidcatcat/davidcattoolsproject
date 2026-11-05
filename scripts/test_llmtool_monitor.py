@@ -644,6 +644,16 @@ class MonitorTaskBaselineTests(unittest.TestCase):
             self.poll([])
         self.assertIs(self.monitor.stuck_records, previous)
 
+    def test_stuck_record_refresh_stores_a_good_read(self):
+        expected = ([mon.StuckRecord("b" * 8, "wp-2", True, 0.0)], "")
+        with patch.object(mon, "llmtool_task_records", return_value=[]), \
+                patch.object(mon, "llmtool_route_outcomes", return_value={"opencode": None}), \
+                patch.object(mon, "quota_warnings", return_value=[]), \
+                patch.object(mon, "office_rows", return_value=[]), \
+                patch.object(mon, "stuck_records", return_value=expected):
+            self.poll([])
+        self.assertEqual(self.monitor.stuck_records, expected)
+
     def task_kinds(self, new):
         return [kind for _, kind, _ in new if kind in self.TASK_KINDS]
 
@@ -7926,6 +7936,19 @@ class StuckAlertTests(unittest.TestCase):
             self.assertEqual(opened, [str(path)])
             self.assertEqual(path.stat().st_nlink, 1)
 
+    def test_stuck_records_default_root_is_the_task_store(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / f"{self.TASK}.json"
+            payload = {"task_id": self.TASK, "request": "Repair round: fix",
+                       "developer": {"state": "DEVELOPER_RESPONDED", "executor_task_id": "wp-1"}}
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            os.chmod(path, 0o600)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            with patch.object(mon, "LLMTOOL_TASKS", root):
+                records, problem = mon.stuck_records()
+            self.assertEqual(records, [mon.StuckRecord("a" * 8, "wp-1", True, 0.0)])
+            self.assertEqual(problem, "")
+
     def test_stuck_reviews_and_open_d6_use_live_rows_and_open_branches(self):
         task = "pr5-claude-rv1-abcdef0"
         details = {task: ("ACTIVE", "agent", self.NOW - 100, self.NOW, "feature")}
@@ -7983,7 +8006,7 @@ class StuckAlertTests(unittest.TestCase):
             mon.StuckRecord("a" * 8, "wp-1", True, 0)], {"wp-1"}))
         self.assertFalse(mon.stuck_alerts(self.NOW, None, [], repair[:2], set()))
         self.assertEqual(mon.stuck_alerts(self.NOW, None, [], repair[:2], {"wp-1"}),
-                         ["修復已到上限：D6 wp-1（2 輪）"])
+                         ["修復已到上限：D6 wp-1（至少 2 輪）"])
         self.assertEqual(mon.stuck_alerts(self.NOW, None, [], [repair[0]], {"wp-1"}), [])
         self.assertEqual(mon.stuck_alerts(self.NOW, None, [], None, set()), [])
 
@@ -8050,6 +8073,6 @@ class StuckAlertTests(unittest.TestCase):
             mon._paint_screen(Screen(), monitor, "office", 0, False, {},
                               lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertIn("macOS 超過 45 分鐘", rendered)
-        self.assertIn("修復已到上限：D6 wp-1（2 輪）", rendered)
+        self.assertIn("修復已到上限：D6 wp-1（至少 2 輪）", rendered)
         self.assertTrue(any("macOS 超過 45 分鐘" in line for line in drawn.values()))
-        self.assertTrue(any("修復已到上限：D6 wp-1（2 輪）" in line for line in drawn.values()))
+        self.assertTrue(any("修復已到上限：D6 wp-1（至少 2 輪）" in line for line in drawn.values()))
