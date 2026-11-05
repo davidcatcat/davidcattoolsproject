@@ -62,8 +62,10 @@ import urllib.parse
 import functools
 import hashlib
 import http.client
+import importlib.util
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import typing
@@ -82,6 +84,73 @@ NO_EXPAND = frozenset({"Claude Desktop", "Antigravity App (AGY)"})
 DISK_REFRESH_SECONDS = 60.0
 DISK_WARNING_PERCENT = 90
 DISK_ATTENTION_PERCENT = 95
+RULE_ALERT_FILE = os.path.join(os.path.expanduser("~"), ".local/state/llmtool/rule-file-alerts.json")
+
+
+def _load_rule_alerts(path):
+    """Load the small local rule-alert record; return None when it is absent."""
+    try:
+        with open(path, "rb") as stream:
+            raw = stream.read()
+    except FileNotFoundError:
+        return None
+    value = json.loads(raw.decode("utf-8"))
+    if (type(value) is not dict or set(value) != {"schema_version", "baseline", "checked", "alerts"}
+            or type(value["schema_version"]) is not int or value["schema_version"] != 1
+            or type(value["baseline"]) is not int or type(value["checked"]) is not list
+            or type(value["alerts"]) is not list):
+        raise ValueError("invalid rule-alert record")
+    if any(type(number) is not int for number in value["checked"]):
+        raise ValueError("invalid checked PR")
+    alerts = value["alerts"]
+    for alert in alerts:
+        if (type(alert) is not dict or set(alert) != {"pr", "title", "paths"}
+                or type(alert["pr"]) is not int or type(alert["title"]) is not str
+                or type(alert["paths"]) is not list
+                or any(type(path) is not str for path in alert["paths"])):
+            raise ValueError("invalid rule alert")
+    return {"schema_version": 1, "baseline": value["baseline"],
+            "checked": value["checked"][-500:], "alerts": alerts}
+
+
+def _save_rule_alerts(path, state):
+    """Atomically write the rule-alert record with private file and directory modes."""
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    os.chmod(parent, 0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".rule-file-alerts-", dir=parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = -1
+            json.dump(state, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def rule_alert_lines(path=None) -> list[tuple[str, str]]:
+    if path is None:
+        path = RULE_ALERT_FILE
+    try:
+        state = _load_rule_alerts(path)
+    except Exception:
+        return [("規則檔告警紀錄無法讀取", "!")]
+    if state is None or not state["alerts"]:
+        return []
+    alerts = list(reversed(state["alerts"]))
+    lines = [(f"規則檔已變更：PR #{alert['pr']}，{len(alert['paths'])} 個檔（看過後請 PM 清除）", "!")
+             for alert in alerts[:5]]
+    if len(alerts) > 5:
+        lines.append((f"另有 {len(alerts) - 5} 件規則檔告警", "!"))
+    return lines
 
 
 @dataclass(frozen=True)
@@ -1914,6 +1983,75 @@ class GitHubSource:
         self.settled = None   # monotonic time the last attempt ended
         self.wait = GITHUB_REFRESH   # seconds between attempts; grows while gh keeps failing
 
+    def refresh_rule_alerts(self, pulls, path=None) -> None:
+        """Check at most five newly merged main PRs against the canonical path list."""
+        if path is None:
+            path = RULE_ALERT_FILE
+        try:
+            state = _load_rule_alerts(path)
+            if state is None:
+                _save_rule_alerts(path, {"schema_version": 1, "baseline": int(self.clock()),
+                                         "checked": [], "alerts": []})
+                return
+            checked = set(state["checked"])
+            candidates = []
+            for pull in pulls:
+                if type(pull) is not dict or type(pull.get("number")) is not int:
+                    continue
+                number = pull["number"]
+                base = pull.get("base")
+                if (number in checked or type(base) is not dict
+                        or base.get("ref") != "main"):
+                    continue
+                merged_at = _github_time(pull.get("merged_at"))
+                if not merged_at or merged_at < state["baseline"]:
+                    continue
+                candidates.append((merged_at, number, pull))
+            candidates.sort(key=lambda item: (item[0], item[1]))
+            matcher = None
+            matcher_path = os.path.join(canonical_root(), "tools", "llmtool", "llmtool",
+                                        "sensitive_paths.py")
+            try:
+                spec = importlib.util.spec_from_file_location("llmtool_monitor_sensitive_paths",
+                                                              matcher_path)
+                if spec is None or spec.loader is None:
+                    raise ImportError("sensitive matcher unavailable")
+                matcher = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(matcher)
+                if not callable(getattr(matcher, "sensitive_matches", None)):
+                    raise ImportError("sensitive matcher unavailable")
+            except Exception:
+                matcher = None
+
+            for _, number, pull in candidates[:5]:
+                try:
+                    files = self._get(f"repos/{self.repo}/pulls/{number}/files?per_page=100")
+                except Exception:
+                    break
+                if type(files) is not list:
+                    break
+                if len(files) >= 100:
+                    paths = ["<too-many-files>"]
+                elif matcher is None:
+                    paths = ["<sensitive-list-unreadable>"]
+                else:
+                    try:
+                        paths = list(matcher.sensitive_matches(files))
+                    except Exception:
+                        paths = ["<sensitive-list-unreadable>"]
+                if paths:
+                    title = pull.get("title")
+                    state["alerts"].append({"pr": number,
+                                             "title": title if type(title) is str else "",
+                                             "paths": paths})
+                state["checked"].append(number)
+                state["checked"] = state["checked"][-500:]
+                checked.add(number)
+            _save_rule_alerts(path, state)
+        except Exception:
+            # This auxiliary local alert must never affect GitHub refresh health.
+            return
+
     def _get(self, path: str):
         if self.direct and time.monotonic() >= self._direct_paused:
             try:
@@ -2050,6 +2188,7 @@ class GitHubSource:
                               "&direction=desc&per_page=100")
             if type(pulls) is not list:
                 raise ValueError("pulls page")
+            self.refresh_rule_alerts(pulls)
             board_page_count = len(pulls)
             updated_times = []
             for pull in pulls:
@@ -7563,7 +7702,7 @@ def run_once(github: "GitHubSource | None" = None) -> int:
                                  top=office_top(github, mon.quota, time.time(),
                                                 stuck=stuck_lines(mon, time.time()),
                                                 progress=pm_progress(mon, time.time()),
-                                                install=install_lines(github)))))
+                                                install=rule_alert_lines() + install_lines(github)))))
     print("\n".join(line for line, _ in board_view(
         work_board(github, mon.pm_board, time.time(), ec2=mon.ec2_heads,
                    reviewing=pr_reviewing(mon.office)))))
@@ -7755,7 +7894,7 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
                             top=office_top(mon.github, mon.quota, time.time(),
                                            stuck=stuck_lines(mon, time.time()),
                                            progress=pm_progress(mon, time.time()),
-                                           install=install_lines(mon.github)))
+                                           install=rule_alert_lines() + install_lines(mon.github)))
         offset = max(0, min(offset, len(lines) - body))
         styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
                   "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
@@ -7811,7 +7950,29 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"turn off the read-only gh api Activity on {DEFAULT_GITHUB_REPO} (no network)")
     parser.add_argument("--gh-cli", action="store_true",
                         help="read GitHub only through `gh api` processes (never holds gh's token; more CPU)")
+    parser.add_argument("--clear-rule-alert", type=int, metavar="PR",
+                        help="clear one local sensitive-path alert by PR number")
     args = parser.parse_args(argv)
+    if args.clear_rule_alert is not None:
+        try:
+            state = _load_rule_alerts(RULE_ALERT_FILE)
+        except Exception:
+            print("RULE_ALERT_RECORD_BAD")
+            return 1
+        number = args.clear_rule_alert
+        if state is None or not any(alert["pr"] == number for alert in state["alerts"]):
+            print(f"RULE_ALERT_NOT_FOUND pr={number}")
+            return 1
+        state["alerts"] = [alert for alert in state["alerts"] if alert["pr"] != number]
+        if number not in state["checked"]:
+            state["checked"] = (state["checked"] + [number])[-500:]
+        try:
+            _save_rule_alerts(RULE_ALERT_FILE, state)
+        except Exception:
+            print("RULE_ALERT_RECORD_BAD")
+            return 1
+        print(f"RULE_ALERT_CLEARED pr={number}")
+        return 0
     if not 0.5 <= args.interval <= 60:
         parser.error("--interval must be between 0.5 and 60 seconds")
     github = None if args.no_github else GitHubSource(DEFAULT_GITHUB_REPO,

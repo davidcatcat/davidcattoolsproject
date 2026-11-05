@@ -18,7 +18,9 @@ This is the operational decision boundary for the Integrator/PM. [AGENTS.md](../
 | --- | --- |
 | Incorrect or changed product requirement; material feature, architecture, scope, priority or hosting change; major unresolved release trade-off | Provide a short evidence-based decision brief and ask a concrete question. |
 | New spend, billing/provider tier, paid fallback, export/egress beyond existing permission, credentials or dangerous permission, accepted material security risk | STOP **only the dependent action**; no response is not consent. |
-| Root/sudo or macOS core/system changes | Ask for explicit approval before execution, even if a technical fix would be convenient. |
+| `sudo`, `su` or root | AI never uses these, including on EC2. Stop and report if a task needs them. |
+| Accounts, passwords, credentials or keys | Ask for explicit Owner authorization before any change or use. |
+| macOS core/system changes | Ask for explicit approval before execution, even if a technical fix would be convenient. |
 | Formal GO / LIMITED GO / NO-GO and major deployment or release decision | Owner decides based on evidence; technical PASS alone is not release approval. |
 | No qualified and authorized cross-family formal Reviewer is available | Ask the Owner to authorize an eligible pairing; keep the affected review WAITING until one is available. Under [Owner D6 (#846)](https://github.com/davidcatcat/davidcattoolsproject/issues/846), the PM selects among already-authorized qualified Reviewers from a different model family without seeking separate Owner authorization for each pairing. No same-family or self-review. |
 | Assignment of `OWNER_ASSIGNMENT_ONLY` Workers | Require the specific Owner Task assignment and exact policy binding before dispatch; a chat suggestion or healthy provider alone does not authorize work. AGY is currently `ALLOWED` for PM-selected dispatch under its worker-dispatch entry. |

@@ -7,6 +7,8 @@
 > **作者角色：** Claude（claude.ai 對話），依 Owner 2026-11-05 至 11-06 逐段口述的流程整理，並對照當日 main 核實現況
 > **Owner 決策紀錄：** 第 9 節的決定由 Owner 在對話中確認；依 [CLAUDE.md](../../CLAUDE.md) 的 Owner channel 規則，PM 需另行在 Task/Issue 上轉記（`actor=PM`）後才算正式紀錄
 > **與其他報告的關係：** 參考 [資源感知報告](llmtool-resource-efficient-ai-delivery-research-and-rollout-20261103.md)（PR #877）後，Owner 決定**不採用**其 Scheduler、Evidence Graph 等提案
+>
+> **2026-11-06 更新（[規則檔與權限](https://github.com/davidcatcat/davidcattoolsproject/issues/1019#issuecomment-6668770028)、[自動安裝](https://github.com/davidcatcat/davidcattoolsproject/issues/1019#issuecomment-6669350210)，#1019）：** Owner 後來改了兩項決定。規則檔（敏感檔案清單所列）的 PR 不再逐件核准，merge 後在監控上方告警，Owner 看過後請 PM 清除。 llmtool 新版維持自動安裝（本機 repo 快轉到 main），沒有 Owner 按鍵，也沒有 self-update 工具。AI 不使用 sudo、su、root；帳號、密碼、憑證、金鑰需 Owner 明確授權。以下相關文字已依此更新。
 
 ---
 
@@ -20,8 +22,8 @@ llmtool 是所有角色之間唯一的中樞，也是 GitHub 唯一的讀寫出�
 - 角色不碰 GitHub：讀寫程式碼都在 llmtool 準備的 worktree 裡，GitHub 權杖只放在 llmtool。
 - 機械式、不能被說服的檢查放 llmtool；需要判斷的交給 PM。
 - merge 進 main 的每一行程式碼都被跨模型 Reviewer 審過。
-- AI 可以修改 llmtool，但不能自己讓改動生效：新版需要 Owner 按下更新才安裝。
-- 結案不通知 Owner；只有失敗到底、敏感變更、超時或系統異常才通知。
+- AI 可以修改 llmtool；新版 merge 後自動安裝（本機 repo 快轉到 main）。
+- 結案不通知 Owner；只有失敗到底、規則檔變更、超時或系統異常才通知。
 
 不經過 llmtool 的只有：各 AI 呼叫自己的模型（llmtool 只負責啟動、給 worktree、收結果）、GitHub 依 push／PR 觸發的 CI（結果仍由 llmtool 取回判斷）、外部監控（必須在 llmtool 之外）、ChatGPT 顧問（在系統之外，只與 Owner 討論）。
 
@@ -100,12 +102,12 @@ gateway 只靠 CLI／JSON 跟 llmtool 溝通；llmtool 每次執行前寫一份 
 | llmtool | 中樞與工作區 | 訊息轉送、建立與交接 worktree、寫入權租期 |
 | llmtool | GitHub 閘門 | 推分支、開 PR、發審查、merge、回退 |
 | llmtool | 測試關卡 | 取回 EC2 與 CI 結果、同步 main、失敗計次、merge 排隊 |
-| llmtool | 保護與監控 | 敏感檔案擋 merge、心跳與總時限、PM 備援切換 |
+| llmtool | 保護與監控 | 規則檔 merge 後告警、心跳與總時限、PM 備援切換 |
 | PM | 需要判斷的事 | 拆解需求、選 developer、卡住時重試／換人／隔離、判斷程式或環境問題、找 AI Debug、通知 Owner |
-| Owner | 保留的決定 | 核准敏感變更、安裝 llmtool 新版 |
+| Owner | 保留的決定 | 帳號、密碼、憑證、金鑰的授權；看過規則檔告警後請 PM 清除 |
 | 外部監控 | llmtool 之外 | EC2 上的排程檢查，llmtool 掛了直接通知 Owner |
 
-保護與監控發現卡住時通知 PM 判斷；敏感變更與超時繞過 PM 直接通知 Owner，因為它們本來就是在防 AI 出錯。
+保護與監控發現卡住時通知 PM 判斷；規則檔告警與超時繞過 PM 直接讓 Owner 看到，因為它們本來就是在防 AI 出錯。
 
 ## 6. 工作流程
 
@@ -124,7 +126,7 @@ flowchart TD
     I -- 是 --> J{"Mac CI（Mac ×2）過？"}
     J -- 否 --> D
     J -- 是 --> K{"同步 main（排隊）：HEAD 有變？"}
-    K -- 否 --> S["敏感檔案：等 Owner 核准"]
+    K -- 否 --> S["規則檔：不逐件核准，merge 後告警"]
     K -- 是 --> R{"新 HEAD：CI 重跑，Reviewer 審同步差異，皆過？"}
     R -- 否 --> D
     R -- 是 --> S
@@ -142,7 +144,7 @@ flowchart TD
 - 測試或同步失敗都退回 developer，不計審查次數。只有 runner、網路、環境異常或疑似不穩定的測試，才在同一 commit 重跑一次；確定是程式錯誤的直接退回，不重跑。
 - 同步 main 若改變了 HEAD（包含解衝突），舊 commit 的審查與 CI 結果都不能沿用：新 HEAD 必須重跑必要 CI，並由 Reviewer 對新 HEAD 給出正式結果（可以只看同步帶進來的差異，但 PASS 必須綁定新的完整 HEAD）。
 - 任何 developer 修改後都從 EC2 重新走一遍；審查與 CI 一律對最新 commit（exact-head）。
-- 沒碰敏感檔案時，「等 Owner 核准」一步直接通過。
+- 沒碰規則檔時，merge 後沒有告警。
 
 ## 7. 失敗、迴圈與卡住
 
@@ -168,7 +170,7 @@ flowchart TD
 | Runner 或 EC2 連不上 | 等一段時間重試，持續不通就通知 Owner |
 | worktree 交接時舊的不放手 | 寫入權有租期，到期自動收回 |
 | Claude 不可用、審查卡死 | 見第 3 節 PM 備援規則 |
-| 等 Owner 核准敏感變更 | 一段時間後提醒，絕不自動放行 |
+| 規則檔告警 | 留在監控上方，直到 Owner 請 PM 清除 |
 | llmtool 本身掛掉 | 任務狀態存在硬碟，重啟後從斷點繼續；外部監控通知 Owner |
 | 任何任務太久沒結案 | 超過總時限直接通知 Owner，不經過 PM |
 
@@ -214,13 +216,13 @@ GitHub 付費託管 runner 已停用，Actions 只負責把 job 派給自架 run
 | 公司 LLM | 開放真實任務，經 API Agent Gateway，用法同 Codex、Claude |
 | 舊提案模式 | gateway 功能完成後移除 |
 | 平行任務 | 依 Git 規則與精神：一任務一分支、PR 盡量小、後 merge 的解衝突 |
-| llmtool 自我更新 | 新版 merge 後通知 Owner，Owner 按了才自動安裝 |
+| llmtool 自我更新 | 新版 merge 後自動安裝（本機 repo 快轉到 main），沒有 Owner 按鍵 |
 | 選 developer | 由 PM 選 |
 | PM 備援 | Claude 為主，Codex 在 Claude 不可用時暫代；暫代 PM 不寫程式，找不到合格 Reviewer 的任務標記等待 |
 | EC2 測試時機 | 推臨時分支、不開 PR 先測，通過才開 PR（取代原先「推上 GitHub 前測試」的 A 方案，見第 8 節） |
 | #877 | 不採用 Scheduler、Evidence Graph 等提案 |
 
-**敏感檔案清單（Owner 授權先由 AI 團隊決定，有疑問再問）：** llmtool 閘門與權限檢查程式、權限設定檔（例如 `worker-dispatch.json`）、權杖與帳號相關程式、CI 設定與 runner 安裝腳本、敏感檔案清單本身。改到這些檔案的 PR，merge 前要 Owner 核准。
+**規則檔清單（Owner 授權先由 AI 團隊決定，有疑問再問）：** llmtool 閘門與權限檢查程式、權限設定檔（例如 `worker-dispatch.json`）、權杖與帳號相關程式、CI 設定與 runner 安裝腳本、規則檔清單本身。改到這些檔案的 PR 不需逐件核准，merge 後在監控上方告警。
 
 ## 10. 遷移建議
 
@@ -231,7 +233,7 @@ GitHub 付費託管 runner 已停用，Actions 只負責把 job 派給自架 run
 | 順序 | 內容 | 說明 |
 | --- | --- | --- |
 | 0 | 盤點缺口（唯讀） | PM 逐條對照本文件與 main，列出已有／要改／要新做，並對到現有 Issue 去重 |
-| 1 | 先上保護 | 敏感檔案清單、merge 前等 Owner 核准、llmtool 新版要 Owner 按了才安裝。必須最先做：後面每一步都是 AI 在改 llmtool 的閘門 |
+| 1 | 先上保護 | 規則檔清單與 merge 後監控告警。必須最先做：後面每一步都是 AI 在改 llmtool 的閘門 |
 | 2 | 只改設定 | Claude developer 改成一般路線；決定紀錄寫進 `CLAUDE.md`、`AGENTS.md` |
 | 3 | GitHub 只走 llmtool | 配合 #926 上線 AI 帳號，收回各角色直接寫 GitHub 的路徑；分多個 PR；完成條件見下方負面測試 |
 | 4 | 流程調整 | EC2 改在開 PR 前、審查結果由 llmtool 判斷、失敗次數跟著任務算、不穩定測試先重跑、merge 排隊與回退 |
@@ -249,8 +251,8 @@ GitHub 付費託管 runner 已停用，Actions 只負責把 job 派給自架 run
 
 - [ ] PM 轉記第 9 節 Owner 決策
 - [ ] 第 0 步缺口盤點
-- [ ] 敏感檔案清單寫成 llmtool 規則，merge 前擋下並等 Owner 核准
-- [ ] llmtool 新版 merge 後通知 Owner，按下才安裝
+- [ ] 規則檔清單寫成 llmtool 規則，merge 後在監控上方告警
+- [ ] llmtool 新版 merge 後自動安裝
 - [ ] EC2 測試改成「推臨時分支、不開 PR」後再測
 - [ ] PM 備援：偵測 Claude 不可用、切換 Codex、單一 PM 鎖、切回規則
 - [ ] 失敗次數跟著任務累計；決定測試失敗總數上限
