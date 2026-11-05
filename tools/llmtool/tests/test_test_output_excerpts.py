@@ -480,24 +480,22 @@ class TestOutputExcerptsTests(unittest.TestCase):
         jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
         for value in (SYNTHETIC_AWS_KEY, jwt):
             with self.subTest(value=value[:3]):
-                # A Unicode word character continues the word until a cut inside it is dropped.
+                # The source scan rejects credentials followed directly by CJK text.
                 raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + value + '測試')])
-                self.assert_emitted_excerpt_rejected(
-                    raw, max_excerpt_bytes=self.excerpt_bound(raw, value, extra=1))
+                self.assert_rejected(raw)
 
     def test_ascii_escaped_json_cannot_emit_aws_like_or_jwt_indicator(self):
-        # The source scan passes (no source-level error), but CLI JSON's \uXXXX
-        # escape after the value adds a boundary, so uncut output is rejected too.
+        # The source scan detects the credential before CLI JSON can escape the CJK suffix.
         jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
         for value in (SYNTHETIC_AWS_KEY, jwt):
             with self.subTest(value=value[:3]):
                 raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + value + '測試')])
-                self.assert_emitted_excerpt_rejected(raw)
+                self.assert_rejected(raw)
 
     def test_ascii_escaped_failure_id_without_excerpt_is_rejected(self):
         hidden = 'test_k (sample.' + SYNTHETIC_AWS_KEY + '測.test_k)'
         raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY), ('FAIL', hidden, FAIL_BODY)])
-        self.assert_emitted_excerpt_rejected(raw, max_excerpts=1)
+        self.assert_rejected(raw)
 
     def test_near_miss_indicator_shapes_are_still_emitted(self):
         for value, extra in (('AKIA' + 'SYNTHETIC0TEST1', 0), ('AKIB' + 'SYNTHETIC0TEST16', 0),
@@ -552,8 +550,7 @@ class TestOutputExcerptsTests(unittest.TestCase):
                   'eyJaaaaaaaa..bbbbbbbb.cccccccc',
                   'eyJaaaaaaaa.bbbbbbbb',
                   'eyJaaaaaaaa/bbbbbbbb.cccccccc',
-                  'aeyJaaaaaaaa.bbbbbbbb.cccccccc',
-                  '測eyJaaaaaaaa.bbbbbbbb.cccccccc')
+                  'aeyJaaaaaaaa.bbbbbbbb.cccccccc')
         for token in tokens:
             with self.subTest(token=token):
                 raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + token)])
@@ -1004,7 +1001,7 @@ sys.exit(0 if result.wasSuccessful() else 1)
     def test_root_logging_does_not_hide_sensitive_original_or_emitted_forms(self):
         prefix = b'ERROR:root:synthetic observation\n'
         for tail, expected in ((SYNTHETIC_AWS_KEY, 'source'),
-                               (SYNTHETIC_AWS_KEY + '測', 'emitted excerpt')):
+                               (SYNTHETIC_AWS_KEY + '測', 'source')):
             raw = prefix + unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + tail)])
             with self.subTest(form=expected):
                 self.path.write_bytes(raw)
