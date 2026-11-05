@@ -218,6 +218,7 @@ SLASH_COMMANDS = (
     ("/pm list", "/pm list", "List dedicated PM sessions"),
     ("/pm use", "/pm use ", "Select a dedicated PM session without connecting"),
     ("/pm accounts", "/pm accounts", "List configured PM accounts and folder status"),
+    ("/settings auto-resume", "/settings auto-resume ", "PM 重連後自動接續：on 開啟，off 關閉"),
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 BACKGROUND_LIMIT = 6  # Most rows of the ↓ background panel shown below its header.
@@ -3266,6 +3267,10 @@ class ChatTUI:
             "/pm accounts ": "[--check]",
             "/pm use ": "N|SESSION",
             "/pm connect ": "[SESSION [CWD]]",
+            "/settings": " auto-resume on|off",
+            "/settings ": "auto-resume on|off",
+            "/settings auto-resume": " on|off",
+            "/settings auto-resume ": "on|off",
         }
         hint = hints.get(text, "")
         if width is not None and get_cwidth is not None:

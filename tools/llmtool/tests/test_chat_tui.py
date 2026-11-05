@@ -378,6 +378,32 @@ class WidgetTests(Base):
         self.assertEqual(seen['argument_draft'], '/pm new --runtime')
         self.assertEqual(ui.input.text, '/pm new --runtime')
 
+    def test_settings_ghost_hints_render_without_editing_input(self):
+        seen = {}
+
+        def capture(ui, key):
+            screen = ui.app.renderer.last_rendered_screen
+            size = ui.app.output.get_size()
+            seen[key] = "".join(screen.data_buffer[y][x].char
+                                for y in range(size.rows) for x in range(size.columns))
+            seen[key + "_draft"] = ui.input.text
+
+        ui, _ = self.drive(['/settings', lambda ui: capture(ui, 'command'),
+                            ' ', lambda ui: capture(ui, 'command_space'),
+                            'auto-resume', lambda ui: capture(ui, 'setting'),
+                            ' ', lambda ui: capture(ui, 'setting_space'),
+                            'on', lambda ui: capture(ui, 'value')])
+        self.assertIn('auto-resume on|off', seen['command'])
+        self.assertIn('auto-resume on|off', seen['command_space'])
+        self.assertIn('on|off', seen['setting'])
+        self.assertIn('on|off', seen['setting_space'])
+        self.assertNotIn('on|off', seen['value'])
+        self.assertEqual(seen['command_draft'], '/settings')
+        self.assertEqual(seen['command_space_draft'], '/settings ')
+        self.assertEqual(seen['setting_draft'], '/settings auto-resume')
+        self.assertEqual(seen['setting_space_draft'], '/settings auto-resume ')
+        self.assertEqual(seen['value_draft'], '/settings auto-resume on')
+
     def test_saved_history_is_identified_in_opening_text(self):
         history_path = self.temp_root / '.local/state/llmtool/chat/history.json'
         self.session = ChatSession(self.session.config, history_path=history_path)
@@ -702,7 +728,7 @@ class WidgetTests(Base):
                                   '/clear', '/history', '/exit', '/quit', '/task submit',
                                   '/task show', '/task mode', '/task list', '/task events',
                                   '/theme', '/links', '/settings', '/pm list', '/pm use',
-                                  '/pm accounts'])
+                                  '/pm accounts', '/settings auto-resume'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:3],
                          ['/status', '/skill', '/settings'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/p')][:3],
@@ -715,6 +741,10 @@ class WidgetTests(Base):
         self.assertEqual(chat_tui.slash_matches('hello'), [])
         self.assertEqual(chat_tui.slash_matches('/nope'), [])
         self.assertEqual(chat_tui.slash_matches('/s\nx'), [])
+
+    def test_slash_matches_settings_and_auto_resume(self):
+        self.assertEqual([c[0] for c in chat_tui.slash_matches('/settings')],
+                         ['/settings', '/settings auto-resume'])
 
     def test_picker_completes_draft_without_executing(self):
         def open_menu(ui):
@@ -739,6 +769,16 @@ class WidgetTests(Base):
                             lambda ui: self.assertEqual(ui.input.text, '/provider ')])
         self.assertEqual(ui.menu_items, [])
         self.factory.assert_not_called()
+
+    def test_tab_completes_settings_auto_resume_with_argument_spacing(self):
+        ui, _ = self.drive(['/settings auto', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/settings auto-resume ')])
+        self.factory.assert_not_called()
+
+    def test_settings_exact_command_still_runs_from_the_draft(self):
+        ui, _ = self.drive(['/settings\r',
+                            lambda ui: self.assertEqual(ui.input.text, '')])
+        self.assertIn('Settings: auto-resume', ui.conversation.text)
 
     def test_tab_extends_ambiguous_prefix_and_lists_candidates(self):
         def candidates(ui):
