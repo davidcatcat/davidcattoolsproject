@@ -45,6 +45,7 @@ class AiGithubExecTests(unittest.TestCase):
         self.assertEqual(stderr, "AI_GH_CONFIG_MISSING\n")
 
     def test_auth_mutation_and_credential_commands_are_refused(self):
+        # auth status is an exact match, so any extra argument is refused.
         for argv in (
             ["--", "gh", "auth", "login"],
             ["--", "gh", "auth", "token"],
@@ -52,7 +53,7 @@ class AiGithubExecTests(unittest.TestCase):
             ["--", "gh", "auth", "status", "-t"],
             ["--", "gh", "auth", "status", "-at"],
             ["--", "gh", "auth", "status", "--show-token"],
-            ["--", "gh", "auth", "status", "--show-token=true"],
+            ["--", "gh", "auth", "status", "--active"],
             ["--", "gh", "auth", "status", "--hostname", "github.com"],
             ["--", "/usr/bin/gh", "auth", "switch", "--user", "owner"],
             ["--", "GH", "auth", "login"],
