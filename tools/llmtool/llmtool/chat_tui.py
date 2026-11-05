@@ -87,6 +87,8 @@ Talk to the PM: the dedicated PM (/pm …) is the product entry
                         Create a dedicated PM session (CWD defaults to the current directory)
   /pm accounts [--check]  Show configured account names and folder status; --check prints
                         only login yes/no results, never provider output
+PM setup
+  設定 PM（帳號、Codex、工作目錄、預設）：docs/guides/llmtool-pm-setup-zh-tw.md
   /pm connect [SESSION [CWD]]  Connect to the dedicated PM session: the saved binding when
                         no SESSION is given; "pm>" prompt, Enter sends
   /pm disconnect        End the connection and return to chat mode
@@ -1565,6 +1567,8 @@ class ChatTUI:
             "  /pm history             Show recent PM turns",
             "  /pm queue               List, clear, or resume queued messages",
             "  /pm disconnect         Leave the PM session",
+            "PM setup",
+            "  設定 PM（帳號、Codex、工作目錄、預設）：docs/guides/llmtool-pm-setup-zh-tw.md",
             "Chat",
             "  /status                 Show the current chat or PM status",
             "  /provider [PROFILE]     List or switch chat profiles",

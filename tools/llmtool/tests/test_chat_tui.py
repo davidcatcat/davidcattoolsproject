@@ -842,6 +842,17 @@ class WidgetTests(Base):
         self.assertNotIn('Ctrl-J', shown)
         self.factory.assert_not_called()
 
+    def test_help_points_to_pm_setup_guide_before_chat_heading(self):
+        ui, _ = self.drive(['/help\r'])
+        shown = ui.conversation.text.split('> /help', 1)[1]
+        guide = 'docs/guides/llmtool-pm-setup-zh-tw.md'
+        self.assertIn(guide, shown)
+        self.assertLess(shown.index(guide), shown.index('Chat'))
+
+    def test_key_help_points_to_pm_setup_guide(self):
+        help_text = chat_tui.key_help(False)
+        self.assertIn('docs/guides/llmtool-pm-setup-zh-tw.md', help_text)
+
     def test_picker_enter_on_exact_typed_command_submits_like_no_picker(self):
         # Rule: Enter only completes a draft that differs from the chosen suggestion and
         # never runs it; a draft the user already typed in full runs as with no picker.
