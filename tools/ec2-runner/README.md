@@ -101,9 +101,10 @@ killed service left an orphan listener holding the runner's GitHub session.
 
 `/opt/llmtool-ci/` (root-owned, `0755`) holds [job-started.sh](job-started.sh),
 which the runner requires to end in `.sh`, and [job-started.py](job-started.py),
-the checks. Every job must be `llmtool-linux-ci.yml` from the Owner on this
-repository, on the runner's own account, pushed or started by hand on `main`,
-or an Owner PR into `main`. Anything else fails before checkout.
+the checks. Every job must be `llmtool-linux-ci.yml`
+from `davidcatcat` or `ddavidccatssun` on this repository, on the runner's own
+account, pushed or started by hand on `main`,
+or a PR by either account into `main`. Anything else fails before checkout.
 `python3 -B -m unittest discover -s tools/ec2-runner` tests it offline.
 
 To update the hook, copy both files to `/opt/llmtool-ci/` as root, keeping
