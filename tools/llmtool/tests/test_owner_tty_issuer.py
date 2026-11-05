@@ -17,11 +17,28 @@ from unittest.mock import patch
 
 from llmtool import cli, owner_tty_issuer as owner
 from llmtool.authorization_ledger import LedgerCode, LedgerError, ReceiptLedger
+import review_trust_fixture
 
 
 SHA = 'a' * 40
 OTHER_SHA = 'b' * 40
 REPOSITORY = 'davidcatcat/davidcattoolsproject'
+
+
+def setUpModule():
+    global _module_home, _module_home_patch
+    _module_home = tempfile.TemporaryDirectory()
+    _module_home_patch = patch.dict(os.environ, {'HOME': _module_home.name})
+    _module_home_patch.start()
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    try:
+        review_trust_fixture.stop_module()
+    finally:
+        _module_home_patch.stop()
+        _module_home.cleanup()
 
 
 def binding(pr=7, head=SHA, base='main', repository=REPOSITORY):
@@ -134,16 +151,38 @@ class OwnerApprovalLedgerTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 owner.install_binding(value, OTHER_SHA)
 
-    def test_binding_from_pr_round_trips_and_retarget_changes_binding(self):
+    def test_retarget_to_another_base_is_not_approved(self):
+        with patch.object(owner, '_repository_slug', return_value=REPOSITORY):
+            main_binding = owner.merge_binding_from_pr(pull())
+            with self.assertRaises(ValueError):
+                owner.merge_binding_from_pr(pull(base='stack-x'))
+
+            # Synthetic binding: model the retargeted JSON while changing only base_ref.
+            synthetic_value = json.loads(main_binding)
+            synthetic_value['base_ref'] = 'stack-x'
+            synthetic_retargeted = json.dumps(synthetic_value, sort_keys=True,
+                                              separators=(',', ':'))
+            ledger = self.create()
+            try:
+                ledger.issue_owner_approval(main_binding, ttl_seconds=30)
+                self.assertFalse(ledger.owner_approval_live(synthetic_retargeted))
+                self.assertFalse(ledger.consume_owner_approval(synthetic_retargeted))
+                self.assertTrue(ledger.owner_approval_live(main_binding))
+                self.assertTrue(ledger.consume_owner_approval(main_binding))
+                self.assertFalse(ledger.consume_owner_approval(main_binding))
+            finally:
+                ledger.close()
+
+    def test_head_change_is_a_different_binding(self):
         with patch.object(owner, '_repository_slug', return_value=REPOSITORY):
             original = owner.merge_binding_from_pr(pull())
-            retargeted = owner.merge_binding_from_pr(pull(head=OTHER_SHA))
-            self.assertNotEqual(original, retargeted)
+            changed_head = owner.merge_binding_from_pr(pull(head=OTHER_SHA))
+            self.assertNotEqual(original, changed_head)
             ledger = self.create()
             try:
                 ledger.issue_owner_approval(original, ttl_seconds=30)
                 self.assertTrue(ledger.owner_approval_live(original))
-                self.assertFalse(ledger.owner_approval_live(retargeted))
+                self.assertFalse(ledger.owner_approval_live(changed_head))
             finally:
                 ledger.close()
 
@@ -311,11 +350,16 @@ class OwnerApprovalCliTests(unittest.TestCase):
     def test_terminal_display_sanitizes_title_and_paths_and_parser_is_narrow(self):
         hostile = pull(title='title\x1b[31m\u202e')
         files = [{'filename': 'bad\x1b[2J\u202e.py', 'status': 'modified'}]
-        with patch.object(owner, 'grant', return_value=123) as granted:
+        expected_binding = binding()
+        with patch.object(owner, 'grant', return_value=123) as granted, \
+                patch.object(owner, 'is_approved', return_value=False) as approved:
             with patch.object(owner, '_read_pr', return_value=(hostile, files)), \
                     patch.object(owner, '_repository_slug', return_value=REPOSITORY), \
                     patch('sys.stdout'):
                 self.assertEqual(owner.run_owner_approval(SimpleNamespace(pr=7, head=SHA)), 0)
+            granted.assert_called_once()
+            self.assertEqual(granted.call_args.args[0], expected_binding)
+            approved.assert_called_once_with(expected_binding)
             lines = granted.call_args.args[1]
         self.assertTrue(lines)
         self.assertTrue(lines[0].startswith('Action: merge PR #7 into main'))
