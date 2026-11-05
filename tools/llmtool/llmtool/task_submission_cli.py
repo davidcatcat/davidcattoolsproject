@@ -5487,7 +5487,8 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             elif claude_cli_route:
                 try:
                     reviewer_registration = task_completion.read_d6_registration(
-                        args.reviewer_task, git_evidence['common_dir'])
+                        args.reviewer_task, git_evidence['common_dir'],
+                        allowed_states=task_completion._D6_EVIDENCE_STATES)
                     reviewer_native = reviewer_registration.native_session_id
                     executor_native = claude_run_session
                     if (not _reviewer_native_session_independent(
@@ -5500,9 +5501,10 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                             ['REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT']))
                         github['evidence']['formal_review_state'] = 'UNVERIFIED'
                 except LLMToolError:
-                    # The primary collector already records unavailable D6
-                    # registration as a fail-closed reviewer gate.
-                    pass
+                    github['missing_gates'] = sorted(set(
+                        github['missing_gates'] +
+                        ['REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT']))
+                    github['evidence']['formal_review_state'] = 'UNVERIFIED'
             evidence['review_pr_ci'] = github['evidence']
             missing.extend(github['missing_gates'])
     except LLMToolError as exc:

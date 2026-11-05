@@ -768,7 +768,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             return claim
 
         def complete(developer_overrides=None, *, reviewer_native=reviewer_session,
-                     claims=None):
+                     claims=None, reviewer_state='ACTIVE', reviewer_read_error=False):
             developer = {'provider_profile': 'claude',
                 'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
                 'state': 'DEVELOPER_RESPONDED', 'model': 'claude-test',
@@ -807,7 +807,16 @@ class ClaudeRouteWiringTests(unittest.TestCase):
 
             github = {'evidence': {'formal_review_state': 'PASS'},
                       'missing_gates': ['CI_NOT_READY']}
-            d6 = SimpleNamespace(native_session_id=reviewer_native)
+            d6 = SimpleNamespace(native_session_id=reviewer_native,
+                                 state=reviewer_state)
+            registration_reads = []
+
+            def read_registration(task, common_dir, *, allowed_states=None):
+                registration_reads.append((task, common_dir, allowed_states))
+                if reviewer_read_error or d6.state not in allowed_states:
+                    raise LLMToolError('reviewer D6 registration unavailable')
+                return d6
+
             with patch.object(task_submission_cli.task_completion, 'validate_task_binding'), \
                  patch.object(task_submission_cli, '_validate_trusted_main_pin'), \
                  patch.object(task_submission_cli, '_completion_repair_artifact_segments',
@@ -822,13 +831,16 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                  patch.object(task_submission_cli.task_completion, 'collect_github_evidence',
                               return_value=github) as collect_github, \
                  patch.object(task_submission_cli.task_completion, 'read_d6_registration',
-                              return_value=d6), \
+                              side_effect=read_registration), \
                  patch.object(task_submission_cli, '_task_view', return_value={}), \
                  patch.object(task_submission_cli, '_print'):
                 result = task_submission_cli.run_task_complete(
                     Namespace(task_id=task_id, executor_task='executor-d6',
                               reviewer_task=reviewer_task, pr=17), store=Store())
             self.assertEqual(result, 1)
+            self.assertTrue(registration_reads)
+            self.assertEqual(registration_reads[-1][2],
+                             task_submission_cli.task_completion._D6_EVIDENCE_STATES)
             self.assertEqual(collect_github.call_args.kwargs['executor_native_session_id'],
                              task_submission_cli._claude_cli_run_session(developer))
             return task['completion']['missing_gates'], task['completion']['evidence']
@@ -837,6 +849,22 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         missing, evidence = complete(claims=[valid])
         self.assertEqual(missing, ['CI_NOT_READY'])
         self.assertEqual(evidence['review_pr_ci']['formal_review_state'], 'PASS')
+
+        for reviewer_state in ('REVIEW_PENDING', 'REPAIR'):
+            with self.subTest(reviewer_state=reviewer_state, claim='matching'):
+                missing, evidence = complete(claims=[valid], reviewer_state=reviewer_state)
+                self.assertEqual(missing, ['CI_NOT_READY'])
+                self.assertEqual(evidence['review_pr_ci']['formal_review_state'], 'PASS')
+            with self.subTest(reviewer_state=reviewer_state, claim='different session'):
+                missing, evidence = complete(
+                    claims=[matching_claim(native_session_id='different')],
+                    reviewer_state=reviewer_state)
+                self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT', missing)
+                self.assertEqual(evidence['review_pr_ci']['formal_review_state'], 'UNVERIFIED')
+
+        missing, evidence = complete(claims=[valid], reviewer_read_error=True)
+        self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT', missing)
+        self.assertEqual(evidence['review_pr_ci']['formal_review_state'], 'UNVERIFIED')
 
         refused = [
             ('same reviewer and executor session', {}, executor_session, [valid]),
