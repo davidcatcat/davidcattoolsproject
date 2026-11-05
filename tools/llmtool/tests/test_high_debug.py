@@ -11,12 +11,14 @@ from unittest.mock import patch
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from io import StringIO
 
+import review_trust_fixture
+import test_task_store as task_store_fixtures
+
 from llmtool import high_debug
 from llmtool import cli
 from llmtool import test_output_excerpts
 from llmtool.errors import LLMToolError
-from llmtool.task_store import TaskStore, new_id
-from llmtool.task_verification import AcceptanceCriterion, CriterionKind, TaskContract
+from llmtool.task_store import TaskStore
 
 _REAL_POST_GITHUB_RECORD = high_debug._post_github_record
 
@@ -700,33 +702,9 @@ class HighDebugTests(unittest.TestCase):
         self.assertTrue(all(pattern.flags & re.IGNORECASE
                             for _name, pattern in high_debug._SCREEN_RULES))
 
-    @staticmethod
-    def _real_task_store_task():
-        request = 'Bounded non-sensitive TaskStore test record.'
-        task_id, run_id = new_id(), new_id()
-        request_sha = hashlib.sha256(request.encode()).hexdigest()
-        contract = TaskContract(
-            schema_version=1, task_id=task_id, contract_version=1,
-            previous_digest=None, goal='PM intake request sha256:' + request_sha,
-            authorized_scope=('pm-planning',), forbidden_scope=(),
-            criteria=(AcceptanceCriterion(
-                'pm_response', CriterionKind.ARTIFACT,
-                'Record the PM reply or unavailable status.'),),
-        )
-        return {
-            'schema_version': 1, 'task_id': task_id, 'run_id': run_id,
-            'pm_session_id': 'pm-' + new_id(), 'pm_provider_profile': 'pm',
-            'pm_provider_type': 'codex-cli',
-            'backend_session_semantics': 'EPHEMERAL_SINGLE_CALL',
-            'native_session_id': None, 'state': 'PM_PENDING',
-            'created_at': '2026-10-21T00:00:00Z',
-            'updated_at': '2026-10-21T00:00:00Z',
-            'task_contract': contract.to_dict(),
-            'task_binding': contract.binding(run_id).to_dict(),
-            'request': request, 'request_sha256': request_sha,
-            'response': None, 'usage': None, 'error_code': None,
-            'record_sha256': None,
-        }
+    def _real_task_store_task(self):
+        review_trust_fixture.install_for_case(self)
+        return task_store_fixtures.TaskStoreTests._codex_dispatch_task(self)
 
     def test_sensitive_rejection_report_is_bounded_and_real_store_validates(self):
         with tempfile.TemporaryDirectory() as directory:
