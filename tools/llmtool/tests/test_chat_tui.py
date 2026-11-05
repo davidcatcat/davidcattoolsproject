@@ -3183,7 +3183,8 @@ class AutoResumeWidgetTests(Base):
         return chat_tui.ChatTUI(self.session, input=self.pipe, output=DummyOutput())
 
     def prepare(self, ui):
-        ui.pm_runtime = Mock(turn_active=Mock(return_value=False))
+        ui.pm_runtime = Mock(turn_active=Mock(return_value=False),
+                             automatic_sends_blocked=Mock(return_value=False))
         ui.pm_mode, ui.pm_state = True, 'idle'
         ui._pm_start_turn = Mock()
 
@@ -3192,6 +3193,22 @@ class AutoResumeWidgetTests(Base):
         self.prepare(ui)
         ui._auto_resume_pending = False
         ui._maybe_auto_resume()
+        ui._pm_start_turn.assert_not_called()
+
+    def test_display_waiting_background_turn_is_not_work_evidence(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        runtime = ui.pm_runtime
+        runtime.background_turn = None
+        ui._pm_unadopted = runtime
+        ui._append_account = Mock()
+        ui._append_history = Mock()
+        ui._pm_background_waiting.append({'runtime': runtime})
+        ui.finish_pm_connect({
+            'runtime': runtime, 'session': 'session', 'cwd': '.', 'binding': None,
+            'history': [], 'history_error': None, 'background': [],
+        })
+        self.assertFalse(ui._auto_resume_pending)
         ui._pm_start_turn.assert_not_called()
 
     def test_busy_pm_defers_resume_until_idle(self):
@@ -3210,10 +3227,113 @@ class AutoResumeWidgetTests(Base):
         ui._maybe_auto_resume()
         ui._pm_start_turn.assert_called_once()
 
+    def test_busy_chat_request_defers_then_non_pm_finish_rechecks(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui.busy = True
+        ui._auto_resume_pending = True
+        ui._maybe_auto_resume()
+        ui._pm_start_turn.assert_not_called()
+        self.assertTrue(ui._auto_resume_pending)
+        ui._finish(lambda: None)
+        ui._pm_start_turn.assert_called_once()
+
+    def test_held_drafts_cancel_candidate_and_turning_setting_back_on_does_not_revive(self):
+        for paused in (False, True):
+            with self.subTest(paused=paused):
+                ui = self.make_ui()
+                self.prepare(ui)
+                ui._auto_resume_pending = True
+                if paused:
+                    ui.pm_outbox_paused = 'Esc 中斷'
+                else:
+                    ui.pm_outbox.append('held draft')
+                ui._maybe_auto_resume()
+                self.assertFalse(ui._auto_resume_pending)
+                ui.pm_outbox.clear()
+                ui.pm_outbox_paused = None
+                ui._maybe_auto_resume()
+                ui._pm_start_turn.assert_not_called()
+
+    def test_settings_off_cancels_candidate_permanently(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui._auto_resume_pending = True
+        ui.run_display_command('/settings auto-resume off')
+        self.assertFalse(ui._auto_resume_pending)
+        ui.run_display_command('/settings auto-resume on')
+        ui._maybe_auto_resume()
+        ui._pm_start_turn.assert_not_called()
+
+    def test_disconnect_and_close_cancel_candidate(self):
+        disconnected = self.make_ui()
+        self.prepare(disconnected)
+        disconnected._auto_resume_pending = True
+        disconnected.finish_pm_disconnect()
+        self.assertFalse(disconnected._auto_resume_pending)
+
+        closing = self.make_ui()
+        self.prepare(closing)
+        closing._auto_resume_pending = True
+        closing.close_pm()
+        self.assertFalse(closing._auto_resume_pending)
+
+    def test_unreadable_or_blocked_runtime_safety_latch_cancels(self):
+        for blocked in (True, None, RuntimeError('unreadable')):
+            with self.subTest(blocked=blocked):
+                ui = self.make_ui()
+                self.prepare(ui)
+                ui.pm_runtime.automatic_sends_blocked = Mock(
+                    side_effect=blocked if isinstance(blocked, Exception) else None,
+                    return_value=blocked)
+                ui._auto_resume_pending = True
+                ui._maybe_auto_resume()
+                ui._pm_start_turn.assert_not_called()
+                self.assertFalse(ui._auto_resume_pending)
+
+    def test_unknown_turn_guard_cancels_without_sending(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        del ui.pm_runtime.turn_active
+        ui._auto_resume_pending = True
+        ui._maybe_auto_resume()
+        ui._pm_start_turn.assert_not_called()
+        self.assertFalse(ui._auto_resume_pending)
+
+    def test_interrupt_and_unsafe_turn_outcomes_cancel_before_background_drain(self):
+        cases = (("esc", None, False, "COMPLETED"),
+                 ("ctrl-c", None, False, "COMPLETED"),
+                 (None, "E_RUNTIME", False, "COMPLETED"),
+                 (None, None, True, "COMPLETED"),
+                 (None, None, False, "FAILED"))
+        for interrupt, error, refused, status in cases:
+            with self.subTest(interrupt=interrupt, error=error, refused=refused, status=status):
+                ui = self.make_ui()
+                self.prepare(ui)
+                ui._auto_resume_pending = True
+                ui.pm_turn_active = True
+                ui.pm_turn_status, ui.pm_turn_error = status, error
+                ui.pm_turn_refused, ui.pm_interrupt_by = refused, interrupt
+                ui._pm_background_waiting.append({'runtime': ui.pm_runtime})
+                ui._pm_background_show = Mock(side_effect=lambda _turn: ui._pm_begin('bg', 'background'))
+                ui.finish_pm_turn()
+                self.assertFalse(ui._auto_resume_pending)
+                ui._pm_start_turn.assert_not_called()
+
+    def test_interrupt_cancels_before_runtime_interrupt(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui.pm_turn_active = True
+        ui._auto_resume_pending = True
+        ui.pm_runtime.interrupt = Mock(side_effect=lambda: self.assertFalse(ui._auto_resume_pending))
+        ui.interrupt_pm('esc')
+        ui.pm_runtime.interrupt.assert_called_once()
+
     def test_resume_sends_once_per_connect_and_shows_system_line(self):
         ui = self.make_ui()
         self.prepare(ui)
         ui._auto_resume_pending = True
+        ui._pm_start_turn.side_effect = lambda *_args: self.assertTrue(ui._auto_resume_sent)
         ui._maybe_auto_resume()
         ui._maybe_auto_resume()
         ui._pm_start_turn.assert_called_once_with(

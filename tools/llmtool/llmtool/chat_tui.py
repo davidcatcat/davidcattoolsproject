@@ -1643,6 +1643,8 @@ class ChatTUI:
                 self.append("usage: /settings [auto-resume on|off]")
                 return
             self.settings["auto_resume"] = parts[2]
+            if parts[2] == "off":
+                self._auto_resume_pending = False
             self.append("Settings: auto-resume " + parts[2] + self._save_settings())
             return
         if parts[0] == "/theme":
@@ -2844,6 +2846,8 @@ class ChatTUI:
         self.app.invalidate()
         if self.quit_pending:
             self.app.exit(result=0)
+            return
+        self._maybe_auto_resume()
 
     # -- real-time PM (pm_runtime only; never ChatSession) ---------------------------
     def pm_status_fields(self, compact):
@@ -3427,8 +3431,6 @@ class ChatTUI:
                                 + "; /pm disconnect first")
                 return
             self.pm_state = "connecting"
-            self._auto_resume_pending = False
-            self._auto_resume_sent = False
             self._pm_worker(self._pm_connect, session_id, parts[3] if len(parts) == 4 else None)
             return
         if parts[1:2] == ["new"]:
@@ -3471,6 +3473,7 @@ class ChatTUI:
             if self.pm_runtime is None:
                 self.append("PM: not connected")
                 return
+            self._auto_resume_pending = False
             self.pm_state = "closing"
             self._pm_working_stop()   # never redrawn once disconnecting (see _pm_working_wanted)
             self._pm_worker(self._pm_disconnect, self.pm_runtime)
@@ -3691,6 +3694,9 @@ class ChatTUI:
             self._close_runtime(outcome["runtime"])   # Closing twice is a no-op in pm_runtime.
             return
         self.pm_runtime = outcome["runtime"]
+        # A new allowance belongs to an adopted connection, never a failed attempt.
+        self._auto_resume_pending = False
+        self._auto_resume_sent = False
         self.pm_binding = outcome.get("binding")
         background = outcome.get("background")
         if callable(getattr(self.pm_runtime, "background_turn", None)):
@@ -3711,27 +3717,39 @@ class ChatTUI:
         self._append_history(outcome["history"], outcome["history_error"])
         self._auto_resume_pending = (
             self.settings.get("auto_resume", "on") == "on"
-            and ((isinstance(background, list) and bool(background))
-                 or bool(self._pm_background_waiting)))
+            and isinstance(background, list) and bool(background))
         self._maybe_auto_resume()
 
     def _maybe_auto_resume(self):
         """Send one resume turn for this connection, only after work is confirmed and idle."""
-        if (not self._auto_resume_pending or self._auto_resume_sent
-                or self.settings.get("auto_resume", "on") != "on"):
+        if not self._auto_resume_pending or self._auto_resume_sent:
             return
-        if (self.pm_runtime is None or not self.pm_mode or self.pm_pending
-                or self.pm_turn_active or self._pm_background_waiting
-                or self.pm_state in ("closing", "working", "thinking", "interrupting")):
+        if (self.settings.get("auto_resume", "on") != "on" or self.pm_runtime is None
+                or not self.pm_mode or self.pm_state in ("closing", "exiting")
+                or self._received_signal is not None or self.app.is_done or self.quit_pending
+                or self.pm_outbox or self.pm_outbox_paused is not None):
+            self._auto_resume_pending = False
             return
-        busy = getattr(self.pm_runtime, "turn_active", None)
-        if callable(busy):
-            try:
-                if busy():
-                    return
-            except Exception:
+        if (self.busy or self.pm_pending or self.pm_turn_active or self._pm_background_waiting
+                or self.pm_state != "idle"):
+            return
+        try:
+            busy = getattr(self.pm_runtime, "turn_active")()
+        except Exception:
+            self._auto_resume_pending = False
+            return
+        if busy is not False:
+            if busy is True:
                 return
-        elif busy:
+            self._auto_resume_pending = False
+            return
+        try:
+            blocked = getattr(self.pm_runtime, "automatic_sends_blocked")()
+        except Exception:
+            self._auto_resume_pending = False
+            return
+        if blocked is not False:
+            self._auto_resume_pending = False
             return
         self._auto_resume_pending = False  # claim before starting; at most once per connect
         self._auto_resume_sent = True
@@ -3752,6 +3770,7 @@ class ChatTUI:
 
     def finish_pm_disconnect(self):
         self.pm_pending = False
+        self._auto_resume_pending = False
         if self.pm_turn_active:
             self._pm_drop_turn()   # the worker's end may come later or never; it is stale now
         self._pm_background_waiting.clear()
@@ -3769,6 +3788,7 @@ class ChatTUI:
     def finish_pm_history(self, history, code):
         self.pm_pending = False
         self._append_history(history, code)
+        self._maybe_auto_resume()
 
     def _append_history(self, history, code):
         if code:
@@ -4258,6 +4278,10 @@ class ChatTUI:
     def finish_pm_turn(self, seq=None):
         if self._pm_stale(seq):
             return
+        status, error = self.pm_turn_status, self.pm_turn_error
+        if (self.pm_interrupt_by in ("esc", "ctrl-c") or error is not None
+                or self.pm_turn_refused or status not in ("COMPLETED", "ABSORBED")):
+            self._auto_resume_pending = False
         for kind in ("turn", "sub"):   # the background turn of this turn (if any) is over
             self._pm_background_live.pop((kind, self._pm_turn_seq), None)
         self._pm_finalize()   # Nothing queued survives the turn (interrupt without TURN_END).
@@ -4265,7 +4289,6 @@ class ChatTUI:
         self._pm_working_stop()
         if self.pm_state in ("working", "thinking", "interrupting"):
             self.pm_state = "idle"
-        status, error = self.pm_turn_status, self.pm_turn_error
         if self.pm_outbox and not self.pm_outbox_paused:
             if self.pm_runtime is None or self.pm_state == "closing":
                 self._pm_pause("PM 已斷線")
@@ -4300,6 +4323,7 @@ class ChatTUI:
     def interrupt_pm(self, by="esc"):
         if not self.pm_turn_active or self.pm_interrupted or self.pm_runtime is None:
             return
+        self._auto_resume_pending = False
         self.pm_interrupted, self.pm_state = True, "interrupting"
         self.pm_interrupt_by = by
         # W55: visible at once, below a streaming reply, before the turn actually ends.
@@ -4318,6 +4342,7 @@ class ChatTUI:
         not handed over yet; a connect still inside open() closes its own (see _pm_connect)."""
         with self._pm_lock:
             self._pm_exiting = True
+            self._auto_resume_pending = False
             runtimes = [self.pm_runtime, self._pm_unadopted]
             self.pm_runtime, self._pm_unadopted = None, None
         # Exit: the turn's late worker callbacks are stale; nothing is rendered any more.
