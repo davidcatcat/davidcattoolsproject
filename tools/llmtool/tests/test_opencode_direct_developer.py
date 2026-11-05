@@ -296,12 +296,27 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         transport = self.event('error', error={
             'type': 'provider.transport', 'message': 'UNTRUSTED TRANSPORT PROSE',
         })
-        for completion in (
-                self.event('step_finish', part={}),
-                self.event('text', part={'text': 'completed'})):
+        completion = self.event('step_finish', part={})
+        raw = (transport + '\n' + completion + '\n').encode()
+        self.assertIsNone(_classify_provider_error(raw))
+        sid, text, _ = parse_json_events(raw)
+        self.assertEqual((sid, text), ('ses_Abc123', None))
+
+    def test_transport_error_text_only_or_different_session_is_not_recovery(self):
+        transport = self.event('error', error={'type': 'provider.transport'})
+        text_only = self.event('text', part={'text': 'completed'})
+        other_session_finish = json.dumps({
+            'type': 'step_finish', 'sessionID': 'ses_Other', 'part': {},
+        })
+        for completion in (text_only, other_session_finish):
             with self.subTest(completion=completion):
                 raw = (transport + '\n' + completion + '\n').encode()
-                self.assertIsNone(_classify_provider_error(raw))
+                self.assertEqual(_classify_provider_error(raw),
+                                 'OPENCODE_PROVIDER_FAILED')
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    parse_json_events(raw)
+                self.assertEqual(caught.exception.direct_opencode_code,
+                                 'OPENCODE_PROVIDER_FAILED')
 
     def test_provider_transport_error_without_later_completion_stays_failed(self):
         transport = self.event('error', error={
@@ -313,6 +328,45 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                 raw = ('\n'.join(events) + '\n').encode()
                 self.assertEqual(_classify_provider_error(raw),
                                  'OPENCODE_PROVIDER_FAILED')
+
+    def test_run_accepts_recovered_transport_and_rejects_failure_variants(self):
+        transport = self.event('error', error={'type': 'provider.transport'})
+        finish = self.event('step_finish', part={'tokens': {'input': 2, 'output': 3}})
+        text = self.event('text', part={'text': 'completed'})
+        success = self.run_with_valid_binding(
+            root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+            prompt='bounded task prompt', timeout_seconds=5,
+            executable=self.fake_cli('\n'.join((transport, finish, text)) + '\n'))
+        self.assertEqual(success.exit_code, 0)
+        self.assertEqual((success.session_id, success.text), ('ses_Abc123', 'completed'))
+
+        other_error = self.event('error', error={'type': 'provider.unavailable'})
+        cases = (
+            ('nonzero after recovery', '\n'.join((transport, finish, text)) + '\n', 7),
+            ('later provider error', '\n'.join((transport, other_error, finish, text)) + '\n', 7),
+            ('unrecovered transport', transport + '\n', 7),
+        )
+        for label, body, exit_code in cases:
+            with self.subTest(label=label), self.assertRaises(DirectOpenCodeError) as caught:
+                self.run_with_valid_binding(
+                    root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+                    prompt='bounded task prompt', timeout_seconds=5,
+                    executable=self.fake_cli(body, exit_code=exit_code))
+            self.assertEqual(caught.exception.direct_opencode_code,
+                             'OPENCODE_PROVIDER_FAILED')
+
+    def test_error_classification_survives_a_later_malformed_line(self):
+        limit = self.event('error', error={
+            'type': 'provider.free-limit', 'message': 'PRIVATE FREE MESSAGE',
+        })
+        raw = (limit + '\n' + '{truncated json\n').encode()
+        self.assertEqual(_classify_provider_error(raw), 'OPENCODE_FREE_LIMIT')
+        cli = self.fake_cli(raw.decode(), exit_code=7)
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            self.run_with_valid_binding(
+                root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+                prompt='bounded task prompt', timeout_seconds=5, executable=cli)
+        self.assertEqual(caught.exception.direct_opencode_code, 'OPENCODE_FREE_LIMIT')
 
     def test_other_provider_errors_keep_classification_after_completion(self):
         cases = (

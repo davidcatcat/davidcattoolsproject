@@ -192,60 +192,97 @@ def _has_output_truncation(raw, *, stderr=False):
     return False
 
 
-def _classify_provider_error(raw, *, stderr=b''):
+def _json_event_prefix(raw):
+    """Decode valid JSON events up to the first malformed line."""
+    events = []
+    for raw_line in raw.splitlines():
+        try:
+            line = raw_line.decode('utf-8')
+        except UnicodeError:
+            return events, False
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            return events, False
+        if type(event) is not dict:
+            return events, False
+        events.append(event)
+    return events, True
+
+
+def _recovered_transport_indices(events):
+    """Return transport errors recovered by a same-session step finish.
+
+    The original OpenCode stream was not retained, so this recovery rule is
+    inferred from the strongest available structured completion evidence.
+    """
+    recovered = set()
+    for index, event in enumerate(events):
+        error = event.get('error')
+        session_id = event.get('sessionID')
+        if (event.get('type') != 'error' or type(error) is not dict or
+                error.get('type') != 'provider.transport' or
+                type(session_id) is not str or _SESSION.fullmatch(session_id) is None):
+            continue
+        if any(later.get('type') == 'step_finish' and
+               later.get('sessionID') == session_id
+               for later in events[index + 1:]):
+            recovered.add(index)
+    return recovered
+
+
+def _classify_provider_events(events, *, stderr=b''):
     """Classify structured OpenCode errors without retaining provider text."""
-    if _has_structured_tool_denial(raw):
+    if any(_tool_denied(event) for event in events):
         return 'TOOL_DENIED'
-    if _has_provider_auth_error(raw):
+    if any(event.get('type') == 'error' and
+           type(event.get('error')) is dict and
+           event['error'].get('type') == 'provider.auth'
+           for event in events):
         return 'OPENCODE_AUTH_REQUIRED'
     has_error = False
     has_free_limit = False
     has_rate_limit = False
-    events = []
-    try:
-        for line in raw.decode('utf-8').splitlines():
-            if not line:
-                continue
-            event = json.loads(line)
-            if type(event) is not dict:
-                continue
-            events.append(event)
-        for index, event in enumerate(events):
-            if event.get('type') != 'error':
-                continue
-            error = event.get('error')
-            error_type = error.get('type') if type(error) is dict else None
-            # OpenCode may emit a transient transport error and then continue
-            # the same run. Only a later structured completion event recovers
-            # that error; provider prose is never used as evidence.
-            recovered_transport = (
-                error_type == 'provider.transport' and
-                any(later.get('type') in ('step_finish', 'text')
-                    for later in events[index + 1:])
-            )
-            if not recovered_transport:
-                has_error = True
-            if type(error) is not dict:
-                continue
-            if error_type in ('provider.free-limit', 'provider.quota'):
-                has_free_limit = True
-            if error_type == 'provider.rate-limit':
-                has_rate_limit = True
-            status = error.get('status', error.get('statusCode',
-                                error.get('status_code')))
-            code = error.get('code')
-            if status == 429 or code == 429 or code == '429':
-                has_rate_limit = True
-    except (UnicodeError, ValueError, RecursionError):
-        pass
+    recovered = _recovered_transport_indices(events)
+    for index, event in enumerate(events):
+        if event.get('type') != 'error':
+            continue
+        error = event.get('error')
+        error_type = error.get('type') if type(error) is dict else None
+        if index not in recovered:
+            has_error = True
+        if type(error) is not dict:
+            continue
+        if error_type in ('provider.free-limit', 'provider.quota'):
+            has_free_limit = True
+        if error_type == 'provider.rate-limit':
+            has_rate_limit = True
+        status = error.get('status', error.get('statusCode',
+                            error.get('status_code')))
+        code = error.get('code')
+        if status == 429 or code == 429 or code == '429':
+            has_rate_limit = True
     if has_free_limit:
         return 'OPENCODE_FREE_LIMIT'
     if has_rate_limit:
         return 'OPENCODE_RATE_LIMITED'
-    if (_has_output_truncation(raw) or
+    if (_has_output_truncation(_events_raw(events)) or
             _has_output_truncation(stderr, stderr=True)):
         return 'OPENCODE_OUTPUT_TRUNCATED'
     return 'OPENCODE_PROVIDER_FAILED' if has_error else None
+
+
+def _events_raw(events):
+    """Serialize parsed events for the structured output-limit classifier."""
+    return ('\n'.join(json.dumps(event) for event in events)).encode('utf-8')
+
+
+def _classify_provider_error(raw, *, stderr=b''):
+    """Classify structured OpenCode errors, preserving valid events pre-truncation."""
+    events, _ = _json_event_prefix(raw)
+    return _classify_provider_events(events, stderr=stderr)
 
 
 def _observed_native_session(raw):
@@ -500,32 +537,26 @@ def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
         _reject('OPENCODE_OUTPUT_INVALID')
     if len(raw) > MAX_OUTPUT_BYTES:
         _reject('OPENCODE_OUTPUT_TOO_LARGE')
-    classified = _classify_provider_error(raw)
+    events, complete = _json_event_prefix(raw)
+    classified = _classify_provider_events(events)
     if classified is not None:
         _reject(classified)
-    try:
-        lines = raw.decode('utf-8').splitlines()
-    except UnicodeError:
+    if not complete:
         _reject('OPENCODE_OUTPUT_INVALID')
     sid = None
     text = []
     input_tokens = output_tokens = 0
     usage_known = True
     step_finishes = 0
-    for line in lines:
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except Exception:
-            _reject('OPENCODE_OUTPUT_INVALID')
-        if type(event) is not dict:
-            _reject('OPENCODE_OUTPUT_INVALID')
+    recovered = _recovered_transport_indices(events)
+    for index, event in enumerate(events):
         if _tool_denied(event):
             _reject('TOOL_DENIED')
         event_type = event.get('type')
         event_sid = event.get('sessionID')
-        if (event_type not in ('step_start', 'step_finish', 'text', 'tool_use') or
+        allowed_type = (event_type in ('step_start', 'step_finish', 'text', 'tool_use') or
+                        (event_type == 'error' and index in recovered))
+        if (not allowed_type or
                 type(event_sid) is not str or _SESSION.fullmatch(event_sid) is None or
                 (sid is not None and sid != event_sid)):
             _reject('OPENCODE_OUTPUT_INVALID')
