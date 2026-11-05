@@ -29,6 +29,10 @@ SECRETS = ("PROMPT-SECRET", "REASONING-SECRET", "TOOL-OUTPUT-SECRET", "MODEL-OUT
 
 
 _ISOLATED = tempfile.TemporaryDirectory()
+_RULE_ALERT_ISOLATED = tempfile.TemporaryDirectory()
+_RULE_ALERT_PATCH = patch.object(
+    mon, "RULE_ALERT_FILE",
+    os.path.join(_RULE_ALERT_ISOLATED.name, "rule-file-alerts.json"))
 
 
 def setUpModule():
@@ -36,9 +40,12 @@ def setUpModule():
     # changing state mid-test would add office events to unrelated assertions.
     for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
+    _RULE_ALERT_PATCH.start()
 
 
 def tearDownModule():
+    _RULE_ALERT_PATCH.stop()
+    _RULE_ALERT_ISOLATED.cleanup()
     _ISOLATED.cleanup()
 
 
@@ -1412,6 +1419,15 @@ def comment(number, seconds, body, kind="issues", association="OWNER"):
 
 
 class GitHubActivityTests(unittest.TestCase):
+    def test_refresh_does_not_create_default_rule_alert_path_under_home(self):
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
+            default_path = os.path.join(os.path.expanduser("~"),
+                                        ".local/state/llmtool/rule-file-alerts.json")
+            source = mon.GitHubSource("o/r", clock=lambda: NOW)
+            source._get = lambda path: []
+            source.refresh(force=True)
+            self.assertFalse(os.path.exists(default_path))
+
     def test_progress_summary_shows_only_valid_d6_and_family_labels(self):
         marker = "<!-- activity: type=developer_progress actor=Codex target=PM status=WAITING -->\n"
         task = "Task: " + "a" * 32
@@ -2482,6 +2498,7 @@ class RuleAlertTests(unittest.TestCase):
         self.assertEqual(output.call_args.args, ("RULE_ALERT_NOT_FOUND pr=13",))
 
     def test_clear_malformed_record_is_unchanged_and_save_uses_private_modes(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
         Path(self.path).write_bytes(b"{bad")
         original = Path(self.path).read_bytes()
         with patch("builtins.print") as output:
