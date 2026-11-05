@@ -2559,13 +2559,18 @@ class OfficeViewTests(unittest.TestCase):
             mon.OfficeRow("claude developer", mon.ATTENTION, "at prompt", 10, 10,
                           key="claude:attention.jsonl", task="task claude-attention"),
         ]
-        prs = {branch: (941, "MERGED") for branch in cases.values()}
-        prs[cases["pr941-claude-rv2-0aa754d"]] = (941, "OPEN")
+        prs = {
+            cases["pr941-claude-rv2-0aa754d"]: (941, "OPEN"),
+            cases["failed-codex"]: (942, "MERGED"),
+            cases["subagent-live"]: (943, "MERGED"),
+            cases["repair-hd2-abcdef0"]: (944, "MERGED"),
+            cases["claude-attention"]: (945, "MERGED"),
+        }
         lines = mon.d6_task_lines(self.canonical, rows, self.NOW, prs, {})
         by_task = {task_id: next(line for line in lines if task_id in line) for task_id in cases}
         self.assertIn("執行中", by_task["subagent-live"])
         self.assertIn("已完成，待收尾", by_task["failed-codex"])
-        self.assertIn("⚠ PR #941 已合併", by_task["failed-codex"])
+        self.assertIn("⚠ PR #942 已合併", by_task["failed-codex"])
         self.assertIn("審查沒在跑，查不到結論", by_task["pr941-claude-rv2-0aa754d"])
         self.assertIn("診斷沒在跑，待收尾", by_task["repair-hd2-abcdef0"])
         self.assertIn("執行中", by_task["claude-attention"])
@@ -2591,11 +2596,16 @@ class OfficeViewTests(unittest.TestCase):
                f"branch/{tasks[1]}": (943, "OPEN"),
                f"branch/{tasks[2]}": (944, "OPEN")}
         lines = mon.d6_task_lines(self.canonical, rows, self.NOW, prs, {})
-        by_task = {task_id: next(line for line in lines if task_id in line) for task_id in tasks}
+        by_task = {task_id: next(line for line in lines if task_id in line)
+                   for task_id in tasks[:3]}
         self.assertIn("執行中", by_task[tasks[0]])
         self.assertIn("審查沒在跑，查不到結論", by_task[tasks[1]])
         self.assertIn("執行中", by_task[tasks[2]])
-        self.assertIn("進行中", by_task[tasks[3]])
+        done_row = mon.OfficeRow("claude reviewer", mon.DONE, "review finished", 10, 10,
+                                 key="claude:done.jsonl", task=f"task {tasks[3]}")
+        done_lines = mon.d6_task_lines(self.canonical, [done_row], self.NOW, {})
+        done_task_line = next(line for line in done_lines if tasks[3] in line)
+        self.assertIn("進行中", done_task_line)
 
     def test_agent_process_cwd_binds_transcript_free_d6_session(self):
         stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 600))
@@ -2637,14 +2647,17 @@ class OfficeViewTests(unittest.TestCase):
                          [(mon.IDLE, "claude 紀錄")])
 
     def test_done_claude_one_shot_does_not_cover_live_d6_process(self):
-        self._register("wp-1", str(self.task), branch="feature/one-shot")
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        self._register("wp-1", str(self.task), branch="feature/one-shot",
+                       last_verified_at=stamp)
         self._write(self.claude / "proj" / "one-shot.jsonl", [
             {"type": "user", "cwd": str(self.task), "entrypoint": "sdk-cli"}], age=300)
         proc = mon.Process(81, 1, 81, "00:05", "S", "Claude Code CLI",
                            "sdk-cli claude -p transcript", "")
         for pr_state in ("OPEN", "MERGED"):
             with self.subTest(pr_state=pr_state):
-                rows = self.rows([proc], prs={"feature/one-shot": (965, pr_state)})
+                rows = self.rows([proc], prs={"feature/one-shot": (965, pr_state)},
+                                 cwd_of=lambda pid: str(self.task))
                 lines = mon.d6_task_lines(self.canonical, rows, self.NOW,
                                           {"feature/one-shot": (965, pr_state)})
                 self.assertIn("執行中", next(line for line in lines if "wp-1" in line))
