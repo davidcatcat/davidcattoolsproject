@@ -2178,8 +2178,8 @@ def _activity_screen_lines(lines: list[str], width: int) -> list[str]:
 # model text, reasoning, commands and tool output are never shown; private paths
 # are never shown. A role is named only when a record binds it (a D6 registry
 # root or session_ref, a PM call naming a PR and head, or a Claude session its
-# launcher named claude-pm / claude-reviewer / claude-developer[-…] / claude-ui); otherwise no role is
-# claimed and the row says only who it is.
+# launcher named claude-pm / claude-reviewer / claude-developer[-…]); otherwise
+# no role is claimed and the row says only who it is.
 import unicodedata
 
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
@@ -2411,10 +2411,9 @@ def registry_details(canonical: str) -> dict:
     return cached[2] if cached else {}
 
 
-# A role word anywhere in a bound agent id: codex-reviewer, claude-reviewer-agent,
-# codex-developer-gpt-6-luna (the first word wins). `developer-ui` is the UI
-# Agent, as in SESSION_ROLE (Owner 2026-10-26).
-D6_ROLE = re.compile(r"(?:^|[-_])(?:developer-(ui)|(developer|reviewer|pm|ui))(?=$|[-_])")
+# A role word anywhere in a bound agent id: codex-reviewer,
+# claude-reviewer-agent, codex-developer-gpt-6-luna (the first word wins).
+D6_ROLE = re.compile(r"(?:^|[-_])(developer|reviewer|pm)(?=$|[-_])")
 # A Codex review worktree is named <task>-crv<N>-<head> (review-change).
 CODEX_REVIEW_TASK = re.compile(r"-crv\d+-")
 
@@ -2435,10 +2434,24 @@ def _d6_role(canonical: str, task_id: str, default: str = "") -> str:
     agent = details.get(task_id, ("", "", 0, 0, ""))[1]
     found = D6_ROLE.search(agent)
     if found:
-        return found.group(1) or found.group(2)
+        return found.group(1)
     if not agent and CODEX_REVIEW_TASK.search(task_id):
         return "reviewer"
     return default
+
+
+CODEX_HIGH_DEBUG_TASK = re.compile(r"-hd[0-9]+-[0-9a-fA-F]{7}$")
+CODEX_HIGH_DEBUG_AGENT = "codex-high-debug-gpt-6.1-sol"
+
+
+def _codex_d6_role(canonical: str, task_id: str, default: str = "") -> str:
+    """Return the role Codex should display for a registered D6 task."""
+    cached = _registry_cache.get(os.path.join(canonical, ".git", "llmtool-worktrees"))
+    details = cached[2] if cached is not None else registry_details(canonical)
+    agent = details.get(task_id, ("", "", 0, 0, ""))[1]
+    if agent == CODEX_HIGH_DEBUG_AGENT and CODEX_HIGH_DEBUG_TASK.search(task_id):
+        return "debug reviewer"
+    return _d6_role(canonical, task_id, default)
 
 
 D6_STATES = {   # D6 record state -> plain words
@@ -3108,7 +3121,7 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
         task = next((task_id for task_id, (_, ref) in registered_tasks(canonical).items()
                      if stem and re.search(rf"(?<![\w-])/root/{re.escape(stem)}(?![\w-])", ref)),
                     "")
-        role = _d6_role(canonical, task, "developer") if task else ""
+        role = _codex_d6_role(canonical, task, "developer") if task else ""
         detail = (_humanize(stem) if stem else "（未命名工作）")
         if task:
             detail += f"（task {task}）"
@@ -3144,7 +3157,7 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
     if place[0] == "task":
         # A registered D6 root belongs to the one agent its record binds: the
         # Codex Reviewer in a -crv- review worktree, else the Codex Developer.
-        role = _d6_role(canonical, place[1], "developer")
+        role = _codex_d6_role(canonical, place[1], "developer")
         result = ""
         if payload.get("originator") == "codex_exec":
             result = ("failed" if failed else "completed" if completed or
@@ -3713,13 +3726,9 @@ def _claude_row(entry: dict, state: str, detail: str, age, place, task: str, key
     # launcher's name is the record outside D6, or when the D6 record names
     # none. Nothing else claims a role (Owner 2026-10-23, #565).
     named = SESSION_ROLE.fullmatch(name)
-    launcher = (named.group(1) or named.group(2)) if named else ""
+    launcher = named.group(1) if named else ""
     bound_role = _d6_role(canonical, place[1]) if place[0] == "task" else ""
     role = bound_role or launcher
-    # A D6 Developer binding can cover the UI Agent session as well. Keep
-    # that distinction only when the validated launcher name explicitly says UI.
-    if bound_role == "developer" and named and named.group(1):
-        role = "ui"
     # Only a running CLI says whether it has a terminal; a session moved to
     # the background keeps running without one.
     mode = ("背景" if entry.get("kind") == "bg" else "互動") if running else ""
@@ -3732,9 +3741,9 @@ def _claude_row(entry: dict, state: str, detail: str, age, place, task: str, key
 
 SESSION_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 # The role a launcher assigns in the session name (`claude --name claude-reviewer`).
-# `claude-ui` and `claude-developer-ui` are the UI Agent (Owner 2026-10-26).
-# A suffix never ends in "-", for every role alike.
-SESSION_ROLE = re.compile(r"claude-(?:(?:developer-)?(ui)|(pm|reviewer|developer))(?:-[A-Za-z0-9._-]*[A-Za-z0-9._])?")
+# A suffix never ends in "-", for every role alike. Names that are not one
+# of the listed roles keep the ordinary unnamed-session handling.
+SESSION_ROLE = re.compile(r"claude-(pm|reviewer|developer)(?:-[A-Za-z0-9._-]*[A-Za-z0-9._])?")
 
 
 def claude_roots(root=None) -> list[str]:
@@ -5519,7 +5528,8 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
         seen.add(place[1])
         # A Codex CLI in a registered D6 is its Developer unless the record
         # binds a Reviewer; other families claim no role the record does not name.
-        role = _d6_role(canonical, place[1], "developer" if family == "codex" else "")
+        role = (_codex_d6_role(canonical, place[1], "developer")
+                if family == "codex" else _d6_role(canonical, place[1]))
         age = _elapsed_seconds(proc.elapsed)
         out.append(OfficeRow(f"{family} {role}".rstrip(), WORKING, f"task {place[1]}（程序 cwd）",
                              age if age is not None else 0.0, 10,
