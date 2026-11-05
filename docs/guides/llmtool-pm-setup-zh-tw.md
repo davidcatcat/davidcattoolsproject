@@ -55,7 +55,7 @@ Claude PM 在 Claude Code 的 auto permission mode 執行。Codex PM（Owner Q1 
 
 Owner Q2 C：程式碼沒有設定 Codex PM 費用上限；PM 會回報它觀察到的用量。
 
-TUI 在切換 PM 時不提供 `llmtool task adopt`：未實作或未驗證。CLI 指令 `llmtool task adopt --from-pm-session X --to-pm-session Y` 存在。`/help` 不包含本指南。Owner 個人的 Codex TUI 不由 llmtool 驅動，且不在本指南範圍內。
+TUI 在切換 PM 時不提供 `llmtool task adopt`：未實作或未驗證。CLI 指令 `llmtool task adopt --from-pm-session X --to-pm-session Y` 存在。Owner 個人的 Codex TUI 不由 llmtool 驅動，且不在本指南範圍內。
 
 ## 常見錯誤
 

@@ -851,7 +851,9 @@ class WidgetTests(Base):
 
     def test_key_help_points_to_pm_setup_guide(self):
         help_text = chat_tui.key_help(False)
-        self.assertIn('docs/guides/llmtool-pm-setup-zh-tw.md', help_text)
+        guide = 'docs/guides/llmtool-pm-setup-zh-tw.md'
+        self.assertIn(guide, help_text)
+        self.assertGreater(help_text.index(guide), help_text.index('/pm queue'))
 
     def test_picker_enter_on_exact_typed_command_submits_like_no_picker(self):
         # Rule: Enter only completes a draft that differs from the chosen suggestion and

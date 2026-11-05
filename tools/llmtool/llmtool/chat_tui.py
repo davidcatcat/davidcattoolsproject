@@ -87,8 +87,6 @@ Talk to the PM: the dedicated PM (/pm …) is the product entry
                         Create a dedicated PM session (CWD defaults to the current directory)
   /pm accounts [--check]  Show configured account names and folder status; --check prints
                         only login yes/no results, never provider output
-PM setup
-  設定 PM（帳號、Codex、工作目錄、預設）：docs/guides/llmtool-pm-setup-zh-tw.md
   /pm connect [SESSION [CWD]]  Connect to the dedicated PM session: the saved binding when
                         no SESSION is given; "pm>" prompt, Enter sends
   /pm disconnect        End the connection and return to chat mode
@@ -103,6 +101,8 @@ PM setup
                         and pause the queue: nothing more is sent. Enter on an empty draft
                         sends the next queued message, /pm queue send resumes them all.
                         Ctrl-C interrupts and pauses the queue; a second Ctrl-C exits
+PM setup
+  設定 PM（帳號、Codex、工作目錄、預設）：docs/guides/llmtool-pm-setup-zh-tw.md
 A PM turn and a chat request never run together: in chat mode, Enter during a PM turn
 keeps the draft and sends nothing until the turn ends.
 A CWD with spaces: /pm new "/path/with space" or /pm new /path/with\\ space.
