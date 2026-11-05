@@ -32,6 +32,11 @@ list each poll and from `ps -A` every 15 seconds (it prints the same rows but
 costs ~0.1 s CPU a call): only the R/S letter in STAT, and a new root or system
 daemon process, may lag by that. The EC2 remote-test worker gets one row: the Task, SHA and modules of a
 running `llmtool task remote-test`, else its newest local receipt or outcome.
+The work board PR section uses the already-read pulls and workflow-runs pages,
+verdict comments, live D6 review tasks and bounded local Task receipts/outcomes.
+Stuck alerts use only local Task id, request, developer executor task id/state,
+remote-test receipts/outcomes, live office rows, registry details, and already-read
+CI runs and branch PRs.
 
 Also lists the other members of every observed agent process group, plus their
 descendants, including zombies (state Z). A lingering member after its leader
@@ -43,7 +48,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 import math
 import os
@@ -877,6 +882,8 @@ class Monitor:
         self.quota: list[str] = []
         self.quota_due = 0.0
         self.d6: list = []   # D6 task lines, refreshed with the office view
+        self.ec2_heads = None
+        self.stuck_records = None
         self.version = monitor_version()   # the code this process loaded
         self.digest = script_digest()
         self.stale = False   # the file on disk changed since start: a restart is needed
@@ -1038,6 +1045,14 @@ class Monitor:
                                             self.github.verdicts if self.github else None)
                 except Exception:  # optional, like task evidence; never show a stale list
                     self.d6 = []
+                try:
+                    self.ec2_heads = ec2_head_results()
+                except Exception:  # optional local evidence; preserve the last good snapshot
+                    pass
+                try:
+                    self.stuck_records = stuck_records()
+                except Exception:  # optional local evidence; preserve the last good snapshot
+                    pass
         if self.short_lived and now - self.last_summary >= self.summary_every:
             new += self._flush_short_lived(stamp)
             self.last_summary = now
@@ -1872,6 +1887,7 @@ class GitHubSource:
         self.board_page_count: int | None = None
         self.board_oldest_updated: float | None = None
         self.ci_runs: list | None = None    # ci_runs(); None until GitHub was read
+        self.ci_heads: dict | None = None   # latest Linux/Mac run per head from same page
         self.want_ci = False   # set while a self-hosted runner is on this Mac
         self.want_main = False
         self.main_health: MainHealth | None = None
@@ -2164,6 +2180,7 @@ class GitHubSource:
                 return found
             try:
                 payload = self._get(f"repos/{self.repo}/actions/runs?per_page=30")
+                self.ci_heads = ci_head_runs(payload)
                 stamps = {run.get("id"): str(run.get("updated_at") or "")
                           for run in (payload.get("workflow_runs") if type(payload) is dict else None) or []
                           if type(run) is dict and type(run.get("id")) is int and run.get("status") in CI_ACTIVE}
@@ -2177,6 +2194,7 @@ class GitHubSource:
                     self._finished[run] = ci_finished_jobs(jobs_of(run), text)
             except errors:
                 self.ci_runs = None
+                self.ci_heads = None
                 queued = []
             last: dict = {}
             for jobs in self._finished.values():
@@ -2337,7 +2355,11 @@ def _activity_screen_lines(lines: list[str], width: int) -> list[str]:
 #   - one-shot reviews: the PR number and head named in the PM's call, and the
 #     verdict word on its own line in the call's result;
 #   - OpenCode/Kilo session titles and timestamps, typed error codes;
-#   - worker-dispatch.json switches, the D6 registry, llmtool task state codes.
+#   - worker-dispatch.json switches, the D6 registry, llmtool task state codes;
+#     the PR board keeps only pulls/runs already fetched, verdict words, active
+#     review PR/head pairs and valid local Task receipt/outcome SHA/result words.
+#   - stuck alerts: Task task_id, request, developer.executor_task_id/state,
+#     remote_test_receipts and remote_test_outcomes.
 # Titles and descriptions are model- or prompt-derived text: they are passed
 # through the same redaction as Activity headlines and shortened. Prompts, other
 # model text, reasoning, commands and tool output are never shown; private paths
@@ -2349,7 +2371,8 @@ import unicodedata
 
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
 # The office reads only task_id, developer.provider_type/state/created_at/
-# executor_task_id/execution.native_session_id, request, and response JSON summary
+# executor_task_id/execution.native_session_id, request, remote_test_receipts,
+# remote_test_outcomes, and response JSON summary
 # when binding a Codex session to local Task work.
 CODEX_HISTORY = os.path.expanduser("~/.codex/thread_history_1.sqlite")
 CODEX_STATE = os.path.expanduser("~/.codex/state_5.sqlite")
@@ -2689,6 +2712,7 @@ def d6_task_lines(canonical: str, office: list, now: float,
     for row in office:
         if row.task.startswith("task ") and row.state != CLOSED:
             live.setdefault(row.task[5:], []).append(f"{row.name} {row.state}")
+    running = _d6_running_tasks(office)
     # A recorded time in the future would pin a task on top: use the write time.
     stamped = ((task_id, state, agent, verified if verified <= now + 300 else written, branch)
                for task_id, (state, agent, verified, written, branch) in details.items())
@@ -2703,12 +2727,12 @@ def d6_task_lines(canonical: str, office: list, now: float,
         pr_state = prs.get(branch, (None, ""))[1] if branch and prs else ""
         reviewer_done = False
         match = _review_task(task_id)
-        if match and not live.get(task_id):
+        if match and task_id not in running:
             reviewer_done = any(match[1].lower() in ids
                                 for _, _, ids in (verdicts or {}).get(match[0], []))
-        if not live.get(task_id) and not prs:
+        if task_id not in running and not prs:
             phase = D6_STATES.get(state, state)
-        elif match and not live.get(task_id):
+        elif match and task_id not in running:
             reviewer_pr = pr_numbers.get(int(match[0]), "")
             if reviewer_done:
                 phase = "審查已結束，待收尾"
@@ -2716,10 +2740,10 @@ def d6_task_lines(canonical: str, office: list, now: float,
                 phase = "已完成，待收尾"
             else:
                 phase = "審查沒在跑，查不到結論"
-        elif not live.get(task_id) and CODEX_HIGH_DEBUG_TASK.search(task_id):
+        elif task_id not in running and CODEX_HIGH_DEBUG_TASK.search(task_id):
             phase = "診斷沒在跑，待收尾"
         else:
-            phase = d6_phase(state, bool(live.get(task_id)), pr_state, reviewer_done)
+            phase = d6_phase(state, task_id in running, pr_state, reviewer_done)
         note = f"  ⚠ PR #{done[0]} {PR_DONE_WORDS[done[1]]}，登記還是{D6_STATES.get(state, state)}" if done else ""
         lines.append(f"{time.strftime('%m-%d %H:%M', time.localtime(when))}  {task_id:<{width}}  "
                      f"{phase}  →  {who}  （{agent or '未綁定 agent'}）{note}")
@@ -2729,6 +2753,22 @@ def d6_task_lines(canonical: str, office: list, now: float,
         lines.append(D6_STALE_HEAD + f"{len(older)} 筆較舊的 D6 登記還是進行中，但 PR 已合併或關閉："
                      + "、".join(older[:6]) + ("…" if len(older) > 6 else ""))
     return lines
+
+
+def _d6_running_tasks(office: list) -> set[str]:
+    """Return D6 tasks with live work, based on row family and state."""
+    running = {row.task[5:] for row in office
+               if row.task.startswith("task ")
+               and (row.state in (WORKING, STALLED)
+                    or row.state == ATTENTION and not row.key.startswith("codex:"))}
+    # Claude subagent rows carry no task; their parent session supplies it.
+    running_keys = {row.group for row in office
+                    if row.kind == "subagent" and row.group
+                    and row.state in (WORKING, STALLED)}
+    running.update(row.task[5:] for row in office
+                   if row.task.startswith("task ") and row.state != CLOSED
+                   and row.key in running_keys)
+    return running
 
 
 def _review_task(task_id: str) -> tuple[str, str] | None:
@@ -3587,6 +3627,30 @@ COMMIT_ID = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
 CI_ACTIVE = ("in_progress", "queued", "waiting", "pending", "requested")
 
 
+def ci_head_runs(payload) -> dict:
+    """Newest recognized Linux/Mac workflow run for each seven-character head."""
+    found = {}
+    runs = payload.get("workflow_runs") if type(payload) is dict else None
+    for run in runs if type(runs) is list else []:
+        if type(run) is not dict:
+            continue
+        name, sha, run_id = run.get("name"), run.get("head_sha"), run.get("id")
+        status, conclusion = run.get("status"), run.get("conclusion")
+        if (name not in ("llmtool Linux CI", "llmtool Mac CI")
+                or type(sha) is not str or not HEX_SHA.fullmatch(sha)
+                or type(run_id) is not int or type(status) is not str
+                or (conclusion is not None and type(conclusion) is not str)):
+            continue
+        sha7 = sha[:7].lower()
+        workflow = "linux" if name == "llmtool Linux CI" else "mac"
+        per_head = found.setdefault(sha7, {})
+        previous = per_head.get(workflow)
+        if previous is None or run_id > previous[0]:
+            per_head[workflow] = (run_id, (status, conclusion or ""))
+    return {sha: {workflow: result for workflow, (_, result) in workflows.items()}
+            for sha, workflows in found.items()}
+
+
 def ci_runs(payload) -> list:
     """Workflow runs not finished yet, oldest first: (status, text, started,
     runner, run id); runner is None until ci_runner_names() fills it in.
@@ -3789,6 +3853,7 @@ class WorkBoard:
     skipped: int
     note: str = ""
     window_hours: int = 12
+    prs: list = field(default_factory=list)
 
 
 # File format: a JSON object with schema_version 1, UTC updated_at, string
@@ -3895,12 +3960,99 @@ def board_pulls(pulls, repo: str) -> list[BoardPull]:
     return out
 
 
+@dataclass(frozen=True)
+class PrRow:
+    number: int
+    head: str
+    review: str
+    ec2: str
+    linux: str
+    mac: str
+    next: str
+    owner: str
+
+
+def pr_reviewing(office) -> set[tuple[str, str]]:
+    """PR/head pairs with a live D6 review task."""
+    result = set()
+    for task_id in _d6_running_tasks(office if type(office) is list else []):
+        match = _review_task(task_id)
+        if match:
+            result.add((str(match[0]), match[1].lower()))
+    return result
+
+
+def _ci_word(entry, known: bool) -> str:
+    if not known or entry is None:
+        return "?"
+    status, conclusion = entry
+    if status in CI_ACTIVE:
+        return "排隊" if status in ("queued", "waiting", "pending", "requested") else "執行中"
+    if status == "completed":
+        return CI_CONCLUSIONS.get(conclusion, "結果不明")
+    return "?"
+
+
+def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending) -> list[PrRow]:
+    """Build the read-only PR status table from already-read local/GitHub data."""
+    rows = []
+    for pull in sorted((item for item in pulls or []
+                        if isinstance(item, BoardPull) and item.state == "OPEN"),
+                       key=lambda item: item.number):
+        number, head = str(pull.number), pull.head.lower()
+        review = "未審" if head else "?"
+        if head and (number, head) in (reviewing or set()):
+            review = "審查中"
+        else:
+            matches = [entry for entry in (verdicts or {}).get(number, [])
+                       if type(entry) in (tuple, list) and len(entry) >= 3
+                       and head and head in entry[2]]
+            if matches:
+                verdict = max(matches, key=lambda entry: entry[0])[1]
+                review = {"PASS": "通過", "FAIL": "要修"}.get(verdict, "未確認")
+        ec2_word = "?" if not head or ec2 is None else (
+            ec2[0].get(head, "?") if head in ec2[0] else "?" if ec2[1] else "—")
+        ci = (ci_heads or {}).get(head, {}) if head else {}
+        linux = _ci_word(ci.get("linux"), ci_heads is not None)
+        mac = _ci_word(ci.get("mac"), ci_heads is not None)
+        waiting_owner = any(type(item) is OwnerPending and item.kind == "waiting_owner"
+                            and item.reference == f"#{number}" for item in pending or [])
+        next_step, owner = "未確認", "PM"
+        if waiting_owner:
+            next_step, owner = "等你決定", "Owner"
+        elif pull.draft:
+            next_step, owner = "草稿", "Developer"
+        elif review == "審查中":
+            next_step, owner = "等審查", "Reviewer"
+        elif review == "要修":
+            next_step, owner = "修復", "Developer"
+        elif any(word in (linux, mac) for word in ("失敗", "逾時", "取消")):
+            next_step, owner = "修 CI", "PM"
+        elif ec2_word in ("FAIL", "SHA_MISMATCH", "TIMEOUT"):
+            next_step, owner = "修 EC2 失敗", "PM"
+        elif review == "通過":
+            if linux in ("略過", "結果不明") or mac in ("?", "結果不明"):
+                next_step, owner = "未確認 CI", "PM"
+            elif linux in ("執行中", "排隊"):
+                next_step, owner = "等 CI", "CI"
+            elif mac == "成功" and linux in ("成功", "?"):
+                next_step, owner = "可合併", "PM"
+            elif mac in ("執行中", "排隊"):
+                next_step, owner = "等 macOS", "CI"
+            else:
+                next_step, owner = "加 mac-ci", "PM"
+        elif review == "未審":
+            next_step, owner = "派審查", "PM"
+        rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, next_step, owner))
+    return rows
+
+
 def _board_ref_number(ref):
     match = re.fullmatch(r"(?:PR )?#([0-9]{1,7})", ref or "")
     return int(match.group(1)) if match else None
 
 
-def work_board(github, board: PmBoard, now) -> WorkBoard:
+def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None) -> WorkBoard:
     pulls = github.board_pulls if github is not None else None
     github_known = bool(github is not None and github.successful_read)
     board_known = board.status in ("ok", "stale")
@@ -3955,9 +4107,11 @@ def work_board(github, board: PmBoard, now) -> WorkBoard:
     github_status = ("未讀 GitHub" if github is None else
                      "GitHub 讀取失敗，以下可能過時" if github.read_failed else
                      "GitHub 尚未讀取" if not github_known else "")
+    prs = (pr_board_rows(pulls, github.verdicts, getattr(github, "ci_heads", None),
+                         ec2, reviewing, github.pending) if github_known else [])
     return WorkBoard(owner, running, queue, blocked, done, github_known, board_known,
                      github_status, board.status, board.age, board.skipped, note,
-                     int(github.window // 3600) if github is not None else 12)
+                     int(github.window // 3600) if github is not None else 12, prs)
 
 
 def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
@@ -3997,7 +4151,8 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
         append_header(work.note, "!")
     sections = (("等你", work.owner, work.github_known), ("進行中", work.running, work.github_known),
                 ("排隊", work.queue, work.board_known), ("卡住", work.blocked, work.board_known),
-                (f"今天完成（累計 {today}）", work.done, work.github_known))
+                (f"今天完成（累計 {today}）", work.done, work.github_known),
+                ("PR 看板", work.prs, work.github_known))
     for title, items, known in sections:
         append_header(f"── {title} ──", "section")
         if not items:
@@ -4009,6 +4164,10 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
             if isinstance(item, BoardPull):
                 ref = f"PR #{item.number}"
                 rest = f"{item.title}  → {datetime.fromtimestamp(item.merged_at).astimezone():%H:%M}"
+            elif isinstance(item, PrRow):
+                ref = f"PR #{item.number}"
+                rest = (f"審查 {item.review} · EC2 {item.ec2} · Linux {item.linux} · "
+                        f"macOS {item.mac}  → {item.next}（{item.owner}）")
             elif isinstance(item, OwnerPending):
                 ref = item.reference
                 rest = f"{item.summary or item.status}  → 你"
@@ -5442,10 +5601,142 @@ REMOTE_TEST_SKEW = 300.0      # receipts carry the EC2 clock; file times the loc
 REMOTE_TEST_RELIST = 60.0     # seconds a task-file listing is reused while the folder is unchanged
 REMOTE_TEST_SCAN = 4096       # folder entries looked at per listing, at most
 REMOTE_TEST_BUDGET = 4 << 20  # bytes of task files read per office rebuild, in total
+EC2_HEAD_BUDGET = 4 << 20
 REMOTE_TEST_CAPPED = "task 目錄超過上限，結果可能不是最新"
 REMOTE_TEST_OVER_BUDGET = "task 紀錄超過讀取上限，結果可能不是最新"
 _remote_test_listing: dict = {}   # root -> (folder mtime_ns, listed at, newest paths, capped)
 _remote_test_parsed: dict = {}    # root -> {path: ((st_ino, st_mtime_ns, st_size), entries)}
+_ec2_parsed: dict = {}
+STUCK_REVIEW = 3600
+STUCK_MAC = 2700
+STUCK_BUSY_WINDOW = 1800
+STUCK_REPAIR_CAP = 2
+STUCK_BUDGET = 4 << 20
+_stuck_parsed: dict = {}
+
+
+@dataclass(frozen=True)
+class StuckRecord:
+    task: str
+    d6: str
+    repair: bool
+    busy_at: float
+
+
+def _stuck_entry(record) -> StuckRecord | None:
+    """Extract only the bounded, non-free-text fields needed by stuck alerts."""
+    if type(record) is not dict:
+        return None
+    task = record.get("task_id")
+    if type(task) is not str or re.fullmatch(r"[0-9a-f]{32}", task) is None:
+        return None
+    request = record.get("request")
+    developer = record.get("developer")
+    if type(developer) is not dict:
+        developer = {}
+    state = developer.get("state")
+    d6 = developer.get("executor_task_id")
+    d6 = d6 if type(d6) is str else ""
+    repair = (type(request) is str and request.startswith("Repair round")
+              and type(state) is str and state in DISPATCH_ACCEPTED)
+    events = []
+    receipts = record.get("remote_test_receipts")
+    outcomes = record.get("remote_test_outcomes")
+    for item in receipts if type(receipts) is list else []:
+        if type(item) is dict:
+            when = _remote_test_time(item.get("ended_at"))
+            if when > 0:
+                events.append((when, False))
+    for item in outcomes if type(outcomes) is list else []:
+        if type(item) is dict:
+            when = _remote_test_time(item.get("at"))
+            if when > 0:
+                events.append((when, item.get("code") == "REMOTE_BUSY"))
+    latest = max(events, default=(0.0, False))
+    busy_at = latest[0] if latest[1] else 0.0
+    if not d6 and not busy_at:
+        return None
+    return StuckRecord(task[:8], d6, repair, busy_at)
+
+
+def stuck_records(root: str | None = None) -> tuple[list[StuckRecord], str]:
+    """Read bounded cached Task fields used by stuck alerts."""
+    root = LLMTOOL_TASKS if root is None else root
+    return _bounded_task_entries(root, _stuck_parsed, STUCK_BUDGET, _stuck_entry)
+
+
+def stuck_reviews(office, details) -> list[tuple[str, str, float]]:
+    found = []
+    running = _d6_running_tasks(office if type(office) is list else [])
+    for task_id in running:
+        match = _review_task(task_id)
+        if match and task_id in details:
+            found.append((match[0], match[1], details[task_id][2]))
+    return sorted(found)
+
+
+def stuck_open_d6(details, prs) -> set[str]:
+    return {task_id for task_id, value in details.items()
+            if value[4] and prs.get(value[4], (None, ""))[1] == "OPEN"}
+
+
+def stuck_alerts(now, ci, reviews, records, open_d6) -> list[str]:
+    alerts = []
+    for pr, head, since in sorted(reviews or []):
+        if type(since) not in (int, float) or since <= 0:
+            continue
+        age = now - since
+        if age > STUCK_REVIEW:
+            alerts.append(f"審查超過 1 小時：PR #{pr} @{head}（已 {int(age // 60)} 分鐘）")
+    runs = {}
+    if ci is not None:
+        for index, entry in enumerate(ci):
+            if type(entry) not in (tuple, list) or len(entry) != 5:
+                continue
+            status, text, started, runner, run_id = entry
+            if (type(text) is not str or not text.startswith("llmtool Mac CI")
+                    or type(started) not in (int, float) or not math.isfinite(started)
+                    or started <= 0):
+                continue
+            key = ("id", run_id) if type(run_id) is int else ("entry", index)
+            previous = runs.get(key)
+            if previous is None:
+                runs[key] = [started, status == "in_progress", text]
+            else:
+                oldest = previous[0]
+                previous[0] = min(previous[0], started)
+                previous[1] = previous[1] or status == "in_progress"
+                if started < oldest:
+                    previous[2] = text
+        mac = []
+        for started, active, text in runs.values():
+            age = now - started
+            if age > STUCK_MAC:
+                mac.append((started, f"macOS 超過 45 分鐘：{text}（{'執行中' if active else '排隊'}，已 {int(age // 60)} 分鐘）"))
+        alerts.extend(line for _, line in sorted(mac))
+    busy = []
+    if records is not None:
+        for record in records:
+            if not isinstance(record, StuckRecord) or record.busy_at <= 0:
+                continue
+            age = now - record.busy_at
+            if 0 <= age <= STUCK_BUSY_WINDOW:
+                busy.append((record.busy_at, record.task,
+                             f"EC2 忙碌：task {record.task}（REMOTE_BUSY，{int(age // 60)} 分鐘前）"))
+        alerts.extend(item[2] for item in sorted(busy, key=lambda item: (-item[0], item[1]))[:3])
+    repairs = {}
+    if records is not None:
+        allowed = open_d6 or set()
+        for record in records:
+            if isinstance(record, StuckRecord) and record.repair and record.d6 in allowed:
+                repairs[record.d6] = repairs.get(record.d6, 0) + 1
+    # Only the newest Task files are read, so this count is a lower bound.
+    limited = sorted((d6, count) for d6, count in repairs.items()
+                     if count >= STUCK_REPAIR_CAP)
+    alerts.extend(f"修復已到上限：D6 {d6}（至少 {count} 輪）" for d6, count in limited[:5])
+    if len(limited) > 5:
+        alerts.append(f"另有 {len(limited) - 5} 件到達修復上限")
+    return alerts
 
 
 def _remote_test_paths(root: str) -> tuple[list, bool]:
@@ -5605,7 +5896,8 @@ def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
             budget -= len(raw or b"")
             record = _remote_test_json(raw) if raw else None
             entry = extract(record)
-            record_entries = (entry,) if entry is not None else ()
+            record_entries = (tuple(entry) if type(entry) in (tuple, list)
+                              else (entry,) if entry is not None else ())
         kept[path] = (key, record_entries)
         entries.extend(record_entries)
     if root not in cache and len(cache) >= 8:
@@ -5613,6 +5905,46 @@ def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
     cache[root] = kept
     problem = REMOTE_TEST_CAPPED if capped else REMOTE_TEST_OVER_BUDGET if short else ""
     return entries, problem
+
+
+def _ec2_head_entry(record) -> tuple:
+    """Extract valid SHA-bound remote-test results from one Task."""
+    if type(record) is not dict:
+        return ()
+    found = []
+    receipts = record.get("remote_test_receipts")
+    outcomes = record.get("remote_test_outcomes")
+    for item in receipts if type(receipts) is list else []:
+        result = item.get("result") if type(item) is dict else None
+        sha = item.get("source_sha") if type(item) is dict else None
+        when = _remote_test_time(item.get("ended_at")) if type(item) is dict else 0
+        if (type(result) is str and result in REMOTE_TEST_RESULTS
+                and type(sha) is str and HEX_SHA.fullmatch(sha) and when > 0):
+            found.append((sha[:7].lower(), when, result))
+    for item in outcomes if type(outcomes) is list else []:
+        result = item.get("result") if type(item) is dict else None
+        sha = item.get("sha") if type(item) is dict else None
+        when = _remote_test_time(item.get("at")) if type(item) is dict else 0
+        if (type(result) is str and result in REMOTE_TEST_OUTCOMES
+                and type(sha) is str and HEX_SHA.fullmatch(sha) and when > 0):
+            found.append((sha[:7].lower(), when, result))
+    return tuple(found)
+
+
+def ec2_head_results(root: str | None = None) -> tuple[dict, str]:
+    """Newest local remote-test result per head SHA, read with bounded caching."""
+    root = LLMTOOL_TASKS if root is None else root
+    entries, problem = _bounded_task_entries(root, _ec2_parsed,
+                                             EC2_HEAD_BUDGET, _ec2_head_entry)
+    if not problem:
+        paths, _ = _remote_test_paths(root)
+        if len(paths) >= REMOTE_TEST_FILES:
+            problem = "task 僅讀最近 32 筆，未見結果未確認"
+    latest = {}
+    for sha, when, word in entries:
+        if when > latest.get(sha, (0, ""))[0]:
+            latest[sha] = (when, word)
+    return ({sha: word for sha, (_, word) in latest.items()}, problem)
 
 
 def pm_last_dispatch(now: float, root: str | None = None) -> tuple[DispatchRecord | None, str]:
@@ -6367,9 +6699,11 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
                     cwd_of=process_cwd, now: float | None = None) -> list[OfficeRow]:
     """Show a live agent CLI in its registered D6 task even without a transcript."""
     now = time.time() if now is None else now
-    covered = {row.task[5:] for row in rows
-               if row.task.startswith("task ") and row.state != CLOSED}
-    seen = set(covered)
+    covered = {}
+    for row in rows:
+        if row.task.startswith("task ") and row.state != CLOSED:
+            covered.setdefault(row.task[5:], []).append(row)
+    seen = set()
     out = []
     for proc in sorted(processes, key=lambda item: item.pid):
         base_role = proc.role.removesuffix(" (node launcher)")
@@ -6384,6 +6718,10 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
         cwd = cwd_of(proc.pid)
         place = _place(cwd, canonical)
         if not place or place[0] != "task" or place[1] in seen:
+            continue
+        if any(not (family == "claude" and row.state == DONE and row.key.startswith("claude:"))
+               for row in covered.get(place[1], ())):
+            # At this revision a DONE claude: session row is a one-shot, and only a Claude process can outlive its inactivity-based DONE state.
             continue
         registered = registered_tasks(canonical).get(place[1])
         if not registered or os.path.realpath(cwd) != registered[0]:
@@ -6845,11 +7183,25 @@ def owner_count_line(github) -> tuple[str, str]:
     return text, "!" if count or others else ""
 
 
-def office_top(github, quota, now) -> list[tuple[str, str]]:
+def stuck_lines(mon, now) -> list[str]:
+    try:
+        github = mon.github
+        prs = github.branch_prs if github is not None else {}
+        details = registry_details(canonical_root())
+        records = mon.stuck_records[0] if mon.stuck_records is not None else None
+        return stuck_alerts(now, github.ci_runs if github is not None else None,
+                            stuck_reviews(mon.office, details), records,
+                            stuck_open_d6(details, prs))
+    except Exception:
+        return []
+
+
+def office_top(github, quota, now, stuck=None) -> list[tuple[str, str]]:
     out = [owner_count_line(github)]
     if github is not None:
         out.append(main_health_line(github.main_health, github.main_error, now))
     out.extend((line, "!") for line in (quota or []))
+    out.extend((line, "!") for line in (stuck or []))
     return out
 
 
@@ -7002,9 +7354,11 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     print("\n".join(office_lines(mon.office, mon.office_error, expand=True,
                                  pending=github.pending if github is not None else None,
                                  scope=github.scope if github is not None else "",
-                                 top=office_top(github, mon.quota, time.time()))))
+                                 top=office_top(github, mon.quota, time.time(),
+                                                stuck=stuck_lines(mon, time.time())))))
     print("\n".join(line for line, _ in board_view(
-        work_board(github, mon.pm_board, time.time()))))
+        work_board(github, mon.pm_board, time.time(), ec2=mon.ec2_heads,
+                   reviewing=pr_reviewing(mon.office)))))
     print()
     print("\n".join(table_lines(mon.processes)))
     print("\n".join(["", *d6_lines(mon.d6), "", *record_lines(mon.records), "",
@@ -7188,7 +7542,8 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
         lines = office_view(mon.office, mon.office_error, w - 1, expanded,
                             pending=mon.github.pending if mon.github is not None else None,
                             scope=mon.github.scope if mon.github is not None else "",
-                            top=office_top(mon.github, mon.quota, time.time()))
+                            top=office_top(mon.github, mon.quota, time.time(),
+                                           stuck=stuck_lines(mon, time.time())))
         offset = max(0, min(offset, len(lines) - body))
         styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
                   "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
@@ -7197,7 +7552,9 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
         hint = ("Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  "
                 f"a: {'摺疊' if expanded else '展開'}灰色  q: quit")
     elif view == "board":
-        lines = board_view(work_board(mon.github, mon.pm_board, time.time()), w - 1)
+        lines = board_view(work_board(mon.github, mon.pm_board, time.time(),
+                                      ec2=mon.ec2_heads,
+                                      reviewing=pr_reviewing(mon.office)), w - 1)
         offset = max(0, min(offset, len(lines) - body))
         styles = {"title": colors.get("title", 0) | curses.A_BOLD,
                   "!": colors.get("!", 0) | curses.A_BOLD,

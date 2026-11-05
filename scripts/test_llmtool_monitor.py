@@ -633,6 +633,27 @@ class MonitorTaskBaselineTests(unittest.TestCase):
             self.poll([])
             self.assertEqual(rows.call_count, 2)
 
+    def test_stuck_record_refresh_failure_preserves_previous_value(self):
+        previous = ([mon.StuckRecord("a" * 8, "wp-1", True, 0.0)], "")
+        self.monitor.stuck_records = previous
+        with patch.object(mon, "llmtool_task_records", return_value=[]), \
+                patch.object(mon, "llmtool_route_outcomes", return_value={"opencode": None}), \
+                patch.object(mon, "quota_warnings", return_value=[]), \
+                patch.object(mon, "office_rows", return_value=[]), \
+                patch.object(mon, "stuck_records", side_effect=OSError("offline")):
+            self.poll([])
+        self.assertIs(self.monitor.stuck_records, previous)
+
+    def test_stuck_record_refresh_stores_a_good_read(self):
+        expected = ([mon.StuckRecord("b" * 8, "wp-2", True, 0.0)], "")
+        with patch.object(mon, "llmtool_task_records", return_value=[]), \
+                patch.object(mon, "llmtool_route_outcomes", return_value={"opencode": None}), \
+                patch.object(mon, "quota_warnings", return_value=[]), \
+                patch.object(mon, "office_rows", return_value=[]), \
+                patch.object(mon, "stuck_records", return_value=expected):
+            self.poll([])
+        self.assertEqual(self.monitor.stuck_records, expected)
+
     def task_kinds(self, new):
         return [kind for _, kind, _ in new if kind in self.TASK_KINDS]
 
@@ -2484,6 +2505,129 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("wp-1  執行中  →  claude developer（互動） 需注意  （claude-ui-agent）", lines[1])
         self.assertNotIn("SECRET", "\n".join(lines))
 
+    def test_d6_phase_uses_running_rows_but_keeps_finished_rows_named(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        tasks = {
+            "working-open": ("ACTIVE", "branch-working-open", mon.WORKING),
+            "working-merged": ("ACTIVE", "branch-working-merged", mon.WORKING),
+            "stalled-open": ("ACTIVE", "branch-stalled-open", mon.STALLED),
+            "attention-open": ("ACTIVE", "branch-attention-open", mon.ATTENTION),
+            "done-merged": ("ACTIVE", "branch-done-merged", mon.DONE),
+            "idle-merged": ("ACTIVE", "branch-idle-merged", mon.IDLE),
+            "pr941-claude-rv2-0aa754d": ("ACTIVE", "review/941", mon.IDLE),
+            "done-open": ("ACTIVE", "branch-done-open", mon.DONE),
+            "repair-hd2-abcdef0": ("ACTIVE", "branch-debug", mon.DONE),
+            "idle-unknown": ("REPAIR", "branch-unknown", mon.IDLE),
+        }
+        rows = []
+        prs = {}
+        for task_id, (record_state, branch, row_state) in tasks.items():
+            self._register(task_id, str(self.task), state=record_state, branch=branch,
+                           last_verified_at=stamp,
+                           trusted_agent_id=mon.CODEX_HIGH_DEBUG_AGENT if "-hd" in task_id else "claude-ui-agent")
+            rows.append(mon.OfficeRow(f"session {task_id}", row_state, "fixture", 1.0, 1,
+                                      task=f"task {task_id}"))
+            if task_id == "working-merged" or task_id in ("done-merged", "idle-merged"):
+                prs[branch] = (901, "MERGED")
+            elif task_id.startswith("pr941-"):
+                prs[branch] = (941, "OPEN")
+            elif task_id != "idle-unknown":
+                prs[branch] = (902, "OPEN")
+
+        verdicts = {"941": [(self.NOW - 30, "REVIEW_PASS", ["0aa754d"])]}
+        lines = mon.d6_task_lines(self.canonical, rows, self.NOW, prs, verdicts)
+        by_task = {task_id: next(line for line in lines if task_id in line) for task_id in tasks}
+        for task_id in ("working-open", "working-merged", "stalled-open", "attention-open"):
+            self.assertIn("執行中", by_task[task_id])
+        self.assertIn("已完成，待收尾", by_task["done-merged"])
+        self.assertIn("已完成，待收尾", by_task["idle-merged"])
+        self.assertIn("session done-merged 完成", by_task["done-merged"])
+        self.assertIn("session idle-merged 待命", by_task["idle-merged"])
+        self.assertIn("審查已結束，待收尾", by_task["pr941-claude-rv2-0aa754d"])
+        self.assertIn("等審查或 CI", by_task["done-open"])
+        self.assertIn("診斷沒在跑，待收尾", by_task["repair-hd2-abcdef0"])
+
+        no_github_lines = mon.d6_task_lines(self.canonical, rows, self.NOW)
+        unknown = next(line for line in no_github_lines if "idle-unknown" in line)
+        self.assertIn("修復中", unknown)
+
+    def test_d6_running_phase_uses_live_main_subagent_and_codex_family(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        cases = {
+            "subagent-live": "subagent-live-branch",
+            "failed-codex": "failed-codex-branch",
+            "pr941-claude-rv2-0aa754d": "review-live-branch",
+            "repair-hd2-abcdef0": "debug-live-branch",
+            "claude-attention": "claude-attention-branch",
+        }
+        for task_id, branch in cases.items():
+            self._register(task_id, str(self.task), state="ACTIVE", branch=branch,
+                           last_verified_at=stamp)
+        rows = [
+            mon.OfficeRow("claude developer", mon.IDLE, "prompt", 10, 10,
+                          key="claude:main.jsonl", task="task subagent-live"),
+            mon.OfficeRow("claude subagent", mon.WORKING, "working", 10, 20,
+                          group="claude:main.jsonl", kind="subagent"),
+            mon.OfficeRow("codex developer", mon.ATTENTION, "failed", 10, 10,
+                          key="codex:failed", task="task failed-codex", exec_result="failed",
+                          alert="Codex turn failed"),
+            mon.OfficeRow("codex reviewer", mon.ATTENTION, "failed", 10, 10,
+                          key="codex:review", task="task pr941-claude-rv2-0aa754d",
+                          exec_result="failed"),
+            mon.OfficeRow("codex debug reviewer", mon.ATTENTION, "failed", 10, 10,
+                          key="codex:debug", task="task repair-hd2-abcdef0",
+                          exec_result="failed"),
+            mon.OfficeRow("claude developer", mon.ATTENTION, "at prompt", 10, 10,
+                          key="claude:attention.jsonl", task="task claude-attention"),
+        ]
+        prs = {
+            cases["pr941-claude-rv2-0aa754d"]: (941, "OPEN"),
+            cases["failed-codex"]: (942, "MERGED"),
+            cases["subagent-live"]: (943, "MERGED"),
+            cases["repair-hd2-abcdef0"]: (944, "MERGED"),
+            cases["claude-attention"]: (945, "MERGED"),
+        }
+        lines = mon.d6_task_lines(self.canonical, rows, self.NOW, prs, {})
+        by_task = {task_id: next(line for line in lines if task_id in line) for task_id in cases}
+        self.assertIn("執行中", by_task["subagent-live"])
+        self.assertIn("已完成，待收尾", by_task["failed-codex"])
+        self.assertIn("⚠ PR #942 已合併", by_task["failed-codex"])
+        self.assertIn("審查沒在跑，查不到結論", by_task["pr941-claude-rv2-0aa754d"])
+        self.assertIn("診斷沒在跑，待收尾", by_task["repair-hd2-abcdef0"])
+        self.assertIn("執行中", by_task["claude-attention"])
+        self.assertTrue(any("⚠" in line and "Codex turn failed" in line
+                            for line in mon.office_lines(rows, expand=True)))
+
+    def test_d6_live_reviewer_and_debug_rows_and_done_row_phases(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        tasks = ("pr942-claude-rv1-1234567", "pr943-claude-rv1-7654321",
+                 "inspect-hd1-abcdef0", "active-empty-prs")
+        for task_id in tasks:
+            self._register(task_id, str(self.task), state="ACTIVE", branch=f"branch/{task_id}",
+                           last_verified_at=stamp)
+        rows = [
+            mon.OfficeRow("claude reviewer", mon.WORKING, "review", 10, 10,
+                          key="claude:review.jsonl", task=f"task {tasks[0]}"),
+            mon.OfficeRow("claude reviewer", mon.DONE, "review finished", 10, 10,
+                          key="claude:done.jsonl", task=f"task {tasks[1]}"),
+            mon.OfficeRow("codex debug reviewer", mon.WORKING, "debug", 10, 10,
+                          key="codex:debug", task=f"task {tasks[2]}"),
+        ]
+        prs = {f"branch/{tasks[0]}": (942, "OPEN"),
+               f"branch/{tasks[1]}": (943, "OPEN"),
+               f"branch/{tasks[2]}": (944, "OPEN")}
+        lines = mon.d6_task_lines(self.canonical, rows, self.NOW, prs, {})
+        by_task = {task_id: next(line for line in lines if task_id in line)
+                   for task_id in tasks[:3]}
+        self.assertIn("執行中", by_task[tasks[0]])
+        self.assertIn("審查沒在跑，查不到結論", by_task[tasks[1]])
+        self.assertIn("執行中", by_task[tasks[2]])
+        done_row = mon.OfficeRow("claude reviewer", mon.DONE, "review finished", 10, 10,
+                                 key="claude:done.jsonl", task=f"task {tasks[3]}")
+        done_lines = mon.d6_task_lines(self.canonical, [done_row], self.NOW, {})
+        done_task_line = next(line for line in done_lines if tasks[3] in line)
+        self.assertIn("進行中", done_task_line)
+
     def test_agent_process_cwd_binds_transcript_free_d6_session(self):
         stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 600))
         self._register("wp-1", str(self.task), last_verified_at=stamp,
@@ -2523,6 +2667,26 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual([(row.state, row.evidence) for row in task_rows],
                          [(mon.IDLE, "claude 紀錄")])
 
+    def test_done_claude_one_shot_does_not_cover_live_d6_process(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        self._register("wp-1", str(self.task), branch="feature/one-shot",
+                       last_verified_at=stamp)
+        self._write(self.claude / "proj" / "one-shot.jsonl", [
+            {"type": "user", "cwd": str(self.task), "entrypoint": "sdk-cli"}], age=300)
+        proc = mon.Process(81, 1, 81, "00:05", "S", "Claude Code CLI",
+                           "sdk-cli claude -p transcript", "")
+        for pr_state in ("OPEN", "MERGED"):
+            with self.subTest(pr_state=pr_state):
+                rows = self.rows([proc], prs={"feature/one-shot": (965, pr_state)},
+                                 cwd_of=lambda pid: str(self.task))
+                lines = mon.d6_task_lines(self.canonical, rows, self.NOW,
+                                          {"feature/one-shot": (965, pr_state)})
+                self.assertIn("執行中", next(line for line in lines if "wp-1" in line))
+        no_process = self.rows(prs={"feature/one-shot": (965, "MERGED")})
+        lines = mon.d6_task_lines(self.canonical, no_process, self.NOW,
+                                  {"feature/one-shot": (965, "MERGED")})
+        self.assertIn("已完成，待收尾", next(line for line in lines if "wp-1" in line))
+
     def test_idle_codex_session_row_covers_its_d6_process(self):
         self._codex("completed", {"id": "T9", "cwd": str(self.task),
                                   "thread_source": "user", "originator": "codex-tui"},
@@ -2545,6 +2709,64 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(len(task_rows), 1)
         self.assertEqual((task_rows[0].state, task_rows[0].evidence),
                          (mon.WORKING, "程序"))
+
+    def test_closed_parent_does_not_promote_unfinished_subagent(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        self._register("wp-1", str(self.task), branch="feature/closed-parent",
+                       last_verified_at=stamp)
+        prs = {"feature/closed-parent": (966, "MERGED")}
+        for child_state in (mon.WORKING, mon.STALLED):
+            for parent_state, expected_running, expected_phase, expected_session in (
+                    (mon.IDLE, {"wp-1"}, "執行中", None),
+                    (mon.CLOSED, set(), "已完成，待收尾", "沒有 session 在跑")):
+                with self.subTest(parent=parent_state, child=child_state):
+                    parent = mon.OfficeRow("claude developer", parent_state, "parent", 1.0, 10,
+                                           key="claude:parent", task="task wp-1")
+                    child = mon.OfficeRow("claude subagent", child_state, "child", 1.0, 10,
+                                          group="claude:parent", kind="subagent")
+                    rows = [parent, child]
+                    self.assertEqual(mon._d6_running_tasks(rows), expected_running)
+                    line = next(line for line in mon.d6_task_lines(
+                        self.canonical, rows, self.NOW, prs) if "wp-1" in line)
+                    self.assertIn(expected_phase, line)
+                    if expected_session:
+                        self.assertIn(expected_session, line)
+
+    def test_done_rows_only_cover_matching_live_claude_one_shot(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        self._register("wp-1", str(self.task), branch="feature/done-coverage",
+                       last_verified_at=stamp)
+        prs = {"feature/done-coverage": (967, "MERGED")}
+
+        def check(rows, processes, process_expected, phase):
+            added = mon._d6_process_rows(processes, rows, self.canonical,
+                                         lambda pid: str(self.task), self.NOW)
+            task_rows = [row for row in added if row.evidence == "程序"]
+            self.assertEqual(len(task_rows), int(process_expected))
+            line = next(line for line in mon.d6_task_lines(
+                self.canonical, rows + task_rows, self.NOW, prs) if "wp-1" in line)
+            self.assertIn(phase, line)
+            for row in rows:
+                self.assertIn(f"{row.name} {row.state}", line)
+            return task_rows
+
+        codex_done = mon.OfficeRow("codex developer", mon.DONE, "finished", 1.0, 10,
+                                   key="codex:done", task="task wp-1")
+        claude_done = mon.OfficeRow("claude developer", mon.DONE, "finished", 1.0, 10,
+                                    key="claude:one-shot", task="task wp-1")
+        codex = mon.Process(80, 1, 80, "00:12", "S", "Codex CLI", "codex", "")
+        claude = mon.Process(81, 1, 81, "00:12", "S", "Claude Code CLI", "claude", "")
+
+        check([codex_done], [claude], False, "已完成，待收尾")
+        check([claude_done], [codex], False, "已完成，待收尾")
+        check([codex_done], [codex], False, "已完成，待收尾")
+        check([claude_done], [claude], True, "執行中")
+
+        check([codex_done, claude_done], [codex, claude], False, "已完成，待收尾")
+
+        # The covered Codex candidate must not mark the task seen before Claude is considered.
+        task_rows = check([claude_done], [codex, claude], True, "執行中")
+        self.assertEqual(task_rows[0].name, "claude")
 
     def test_d6_process_role_comes_from_registered_agent_id(self):
         self._register("wp-1", str(self.task), trusted_agent_id="claude-reviewer-agent")
@@ -7314,7 +7536,9 @@ class WorkBoardTests(unittest.TestCase):
         work = mon.work_board(self._github([self._pull(976, title="很長的中文標題用來測試窄螢幕換行")]),
                               mon.PmBoard("stale", 3600, [], [], []), NOW)
         view = mon.board_view(work, width=14)
-        rows = [line for line, _ in view
+        pr_start = next(index for index, (line, _) in enumerate(view)
+                        if line == "── PR 看板 ──")
+        rows = [line for line, _ in view[:pr_start]
                 if line.startswith("PR #") or line.startswith("  ")]
         self.assertTrue(rows)
         self.assertEqual(rows[0], "PR #976")
@@ -7322,3 +7546,533 @@ class WorkBoardTests(unittest.TestCase):
         self.assertTrue(all(line.startswith("  ") for line in rows[1:]))
         self.assertTrue(any(style == "!" for _, style in view))
         self.assertTrue(all(mon._width(line) <= 14 for line, _ in view))
+
+
+class PrBoardTests(unittest.TestCase):
+    SHA = "abcdef0" + "1" * 33
+
+    @staticmethod
+    def _pull(number, *, head="abcdef0", draft=False, state="OPEN"):
+        return mon.BoardPull(number, f"Work {number}", state, 0, 0, head, draft)
+
+    @staticmethod
+    def _verdict(word, when=1, head="abcdef0", number="1"):
+        return {number: [(when, word, frozenset({head}))]}
+
+    def test_ci_head_runs_choose_highest_id_and_skip_malformed_items(self):
+        def run(run_id, conclusion, name="llmtool Linux CI", sha=None, status="completed"):
+            return {"id": run_id, "name": name, "head_sha": sha or self.SHA,
+                    "status": status, "conclusion": conclusion}
+        for values in ((run(1, "skipped"), run(2, "success")),
+                       (run(2, "success"), run(1, "skipped"))):
+            result = mon.ci_head_runs({"workflow_runs": list(values) + [
+                run(3, "success", name="Other", sha=self.SHA), None,
+                run(True, "success"), run(4, "success", sha="short"),
+                run(5, "success", status=4)]})
+            self.assertEqual(result, {"abcdef0": {"linux": ("completed", "success")}})
+        self.assertEqual(mon.ci_head_runs([]), {})
+        self.assertEqual(mon.ci_head_runs({"workflow_runs": [run(1, "", "llmtool Mac CI")]})
+                         ["abcdef0"]["mac"], ("completed", ""))
+
+    def test_ci_words_and_pr_rules_in_priority_order(self):
+        self.assertEqual(mon._ci_word(None, False), "?")
+        self.assertEqual(mon._ci_word(None, True), "?")
+        self.assertEqual(mon._ci_word(("queued", ""), True), "排隊")
+        self.assertEqual(mon._ci_word(("in_progress", ""), True), "執行中")
+        self.assertEqual(mon._ci_word(("completed", "success"), True), "成功")
+        self.assertEqual(mon._ci_word(("completed", "failure"), True), "失敗")
+        self.assertEqual(mon._ci_word(("completed", "timed_out"), True), "逾時")
+        self.assertEqual(mon._ci_word(("completed", "cancelled"), True), "取消")
+        self.assertEqual(mon._ci_word(("completed", "skipped"), True), "略過")
+        self.assertEqual(mon._ci_word(("waiting", ""), True), "排隊")
+        self.assertEqual(mon._ci_word(("pending", ""), True), "排隊")
+        self.assertEqual(mon._ci_word(("requested", ""), True), "排隊")
+        self.assertEqual(mon._ci_word(("completed", "made_up"), True), "結果不明")
+        cases = [
+            ("waiting_owner", False, "", "", "等你決定", "Owner"),
+            ("", True, "", "", "草稿", "Developer"),
+            ("", False, "審查中", "", "等審查", "Reviewer"),
+            ("", False, "要修", "", "修復", "Developer"),
+            ("", False, "通過", "失敗", "成功", "修 CI", "PM"),
+            ("", False, "通過", "", "成功", "可合併", "PM"),
+            ("", False, "通過", "執行中", "成功", "等 CI", "CI"),
+            ("", False, "通過", "排隊", "成功", "等 CI", "CI"),
+            ("", False, "通過", "略過", "成功", "未確認 CI", "PM"),
+            ("", False, "通過", "結果不明", "成功", "未確認 CI", "PM"),
+            ("", False, "通過", "成功", "結果不明", "未確認 CI", "PM"),
+            ("", False, "通過", "執行中", "?", "未確認 CI", "PM"),
+            ("", False, "通過", "成功", "執行中", "等 macOS", "CI"),
+            ("", False, "通過", "成功", "略過", "加 mac-ci", "PM"),
+            ("", False, "未審", "", "派審查", "PM"),
+            ("", False, "未確認", "", "未確認", "PM"),
+        ]
+        for index, case in enumerate(cases, 1):
+            if len(case) == 6:
+                kind, draft, verdict, mac, expected_next, expected_owner = case
+                linux = ""
+            else:
+                kind, draft, verdict, linux, mac, expected_next, expected_owner = case
+            review = {"通過": "PASS", "要修": "FAIL", "未確認": "MAYBE"}.get(verdict)
+            verdicts = self._verdict(review, number=str(index)) if review else {}
+            reviewing = {(str(index), "abcdef0")} if verdict == "審查中" else set()
+            pending = [mon.OwnerPending(1, f"#{index}", "open", "", kind)] if kind else []
+            linux_entry = {"成功": ("completed", "success"), "失敗": ("completed", "failure"),
+                           "略過": ("completed", "skipped"), "執行中": ("in_progress", ""),
+                           "排隊": ("queued", ""), "結果不明": ("completed", "made_up")}.get(linux)
+            mac_entry = {"成功": ("completed", "success"), "略過": ("completed", "skipped"),
+                         "失敗": ("completed", "failure"), "執行中": ("in_progress", ""),
+                         "結果不明": ("completed", "made_up")}.get(mac)
+            ci = {"abcdef0": {}}
+            if linux_entry:
+                ci["abcdef0"]["linux"] = linux_entry
+            if mac_entry:
+                ci["abcdef0"]["mac"] = mac_entry
+            row = mon.pr_board_rows([self._pull(index, draft=draft)], verdicts, ci,
+                                    ({}, ""), reviewing, pending)[0]
+            self.assertEqual((row.next, row.owner), (expected_next, expected_owner))
+
+        for index, linux in enumerate(("略過", "結果不明"), 30):
+            verdicts = self._verdict("PASS", number=str(index))
+            linux_entry = ("completed", "skipped" if linux == "略過" else "made_up")
+            row = mon.pr_board_rows([self._pull(index)], verdicts,
+                                    {"abcdef0": {"linux": linux_entry,
+                                                  "mac": ("completed", "success")}},
+                                    ({}, ""), set(), [])[0]
+            self.assertEqual((row.next, row.owner), ("未確認 CI", "PM"))
+
+    def test_pr_verdict_head_binding_open_filter_and_priority_pairs(self):
+        rows = mon.pr_board_rows(
+            [self._pull(1), self._pull(2, state="CLOSED"), self._pull(3, state="MERGED")],
+            {"1": [(1, "PASS", frozenset({"oldhead"})),
+                   (2, "FAIL", frozenset({"abcdef0"})),
+                   (3, "PASS", frozenset({"abcdef0"}))]}, None, ({}, ""), set(), [])
+        self.assertEqual([(row.number, row.review) for row in rows], [(1, "通過")])
+        self.assertEqual(mon.pr_board_rows([self._pull(1, head="")], {}, None,
+                                           ({}, ""), {("1", "abcdef0")}, [])[0].review, "?")
+        empty_head = mon.pr_board_rows([self._pull(1, head="")], {}, None,
+                                       ({}, ""), set(), [])[0]
+        self.assertEqual((empty_head.review, empty_head.ec2, empty_head.next, empty_head.owner),
+                         ("?", "?", "未確認", "PM"))
+        empty_draft = mon.pr_board_rows([self._pull(1, head="", draft=True)], {}, None,
+                                        ({}, ""), set(), [])[0]
+        self.assertEqual((empty_draft.next, empty_draft.owner), ("草稿", "Developer"))
+        self.assertEqual(mon.pr_board_rows([self._pull(1)], {"1": [(1, "PASS", {"abcdef0"})]},
+                                           None, ({}, ""), {("1", "abcdef0")}, [])[0].review,
+                         "審查中")
+        self.assertEqual(mon.pr_board_rows([self._pull(1)], {"1": [(1, "FAIL", {"abcdef0"})]},
+                                           {"abcdef0": {"mac": ("completed", "success"),
+                                                         "linux": ("completed", "failure")}},
+                                           ({}, ""), set(), [mon.OwnerPending(1, "#2", "open", "", "waiting_owner")])[0].next,
+                         "修復")
+
+    def test_next_step_priority_pairs_and_pending_exact_match(self):
+        pull = self._pull(1, draft=True)
+        passed = {"1": [(1, "PASS", frozenset({"abcdef0"}))]}
+        ci = {"abcdef0": {"linux": ("completed", "failure"),
+                           "mac": ("completed", "success")}}
+        def next_for(*, selected=pull, verdicts=passed, statuses=ci, ec2=({}, ""),
+                     reviewing=set(), pending=()):
+            row = mon.pr_board_rows([selected], verdicts, statuses, ec2,
+                                    reviewing, pending)[0]
+            return row.next, row.owner
+        ec2_failure = ({"abcdef0": "FAIL"}, "")
+        self.assertEqual(next_for(ec2=ec2_failure,
+                                  pending=[mon.OwnerPending(1, "#1", "open", "", "waiting_owner")]),
+                         ("等你決定", "Owner"))
+        self.assertEqual(next_for(ec2=ec2_failure, reviewing={("1", "abcdef0")}),
+                         ("草稿", "Developer"))
+        self.assertEqual(next_for(selected=self._pull(1, draft=False),
+                                  verdicts={"1": [(1, "FAIL", {"abcdef0"})]},
+                                  ec2=ec2_failure, reviewing={("1", "abcdef0")}),
+                         ("等審查", "Reviewer"))
+        self.assertEqual(next_for(selected=self._pull(1, draft=False),
+                                  verdicts={"1": [(1, "FAIL", {"abcdef0"})]},
+                                  ec2=ec2_failure),
+                         ("修復", "Developer"))
+        self.assertEqual(next_for(selected=self._pull(1, draft=False), ec2=ec2_failure),
+                         ("修 CI", "PM"))
+        for failure in ("FAIL", "SHA_MISMATCH", "TIMEOUT"):
+            self.assertEqual(next_for(selected=self._pull(1, draft=False), verdicts={},
+                                      statuses={"abcdef0": {"mac": ("completed", "success")}},
+                                      ec2=({"abcdef0": failure}, "")),
+                             ("修 EC2 失敗", "PM"))
+            self.assertEqual(next_for(selected=self._pull(1, draft=False),
+                                      statuses={"abcdef0": {"mac": ("completed", "success")}},
+                                      ec2=({"abcdef0": failure}, "")),
+                             ("修 EC2 失敗", "PM"))
+        for non_failure in ("ADMISSION_DENIED", "UNAVAILABLE", "UNKNOWN", "?", "—"):
+            self.assertEqual(next_for(selected=self._pull(1, draft=False),
+                                      statuses={"abcdef0": {"mac": ("completed", "success")}},
+                                      ec2=({"abcdef0": non_failure}, "")),
+                             ("可合併", "PM"))
+        unmatched = [mon.OwnerPending(1, "#2", "open", "", "waiting_owner"),
+                     mon.OwnerPending(1, "#1", "open", "", "repair_gate")]
+        self.assertEqual(next_for(pending=unmatched), ("草稿", "Developer"))
+
+    def test_reviewing_requires_live_task_and_bound_pr_head(self):
+        def row(task, state):
+            return mon.OfficeRow("review", state, "", 0, 0, task="task " + task)
+        self.assertEqual(mon.pr_reviewing([row("pr5-claude-rv1-abcdef0", mon.WORKING)]),
+                         {("5", "abcdef0")})
+        self.assertEqual(mon.pr_reviewing([row("pr5-claude-rv1-abcdef0", mon.DONE)]), set())
+        self.assertEqual(mon.pr_reviewing([row("pr5-claude-rv1-abcdef0", mon.IDLE)]), set())
+        self.assertEqual(mon.pr_reviewing([row("not-review", mon.WORKING)]), set())
+
+    def test_github_ci_heads_reuse_the_runs_page_and_clear_after_failed_read(self):
+        source = mon.GitHubSource("o/r")
+        payload = {"workflow_runs": [{"id": 1, "name": "llmtool Linux CI",
+                                      "head_sha": self.SHA, "status": "completed",
+                                      "conclusion": "success"}]}
+        reads = []
+        def get(path):
+            reads.append(path)
+            if path.endswith("actions/runners?per_page=100"):
+                return {"runners": []}
+            if path.endswith("actions/runs?per_page=30"):
+                return payload
+            if path.endswith("/actions/runs/1/jobs"):
+                return {"jobs": []}
+            raise AssertionError(path)
+        source._get = get
+        source.want_ci = True
+        source.refresh_ci()
+        self.assertEqual(source.ci_heads, {"abcdef0": {"linux": ("completed", "success")}})
+        self.assertEqual(reads.count("repos/o/r/actions/runs?per_page=30"), 1)
+        source._get = lambda path: (_ for _ in ()).throw(RuntimeError("failed")) \
+            if path.endswith("actions/runs?per_page=30") else {"runners": []}
+        source.refresh_ci()
+        self.assertIsNone(source.ci_heads)
+
+    def test_ec2_head_entry_uses_only_valid_bound_receipt_fields(self):
+        stamp = "2026-11-05T00:00:00Z"
+        later = "2026-11-05T00:01:00Z"
+        latest = "2026-11-05T00:02:00Z"
+        record = {"task_id": "1" * 32, "request": "secret request", "response": "secret",
+                  "goal": "secret", "reported": "secret",
+                  "remote_test_receipts": [
+                      {"source_sha": self.SHA, "ended_at": stamp, "result": "FAIL"},
+                      {"source_sha": self.SHA.upper(), "ended_at": later, "result": "PASS"},
+                      {"source_sha": "short", "ended_at": later, "result": "PASS"},
+                      {"source_sha": self.SHA, "ended_at": later, "result": "UNKNOWN"}],
+                  "remote_test_outcomes": [
+                      {"sha": self.SHA, "at": latest, "result": "TIMEOUT"}]}
+        self.assertEqual(mon._ec2_head_entry(record),
+                         (("abcdef0", mon._remote_test_time(stamp), "FAIL"),
+                          ("abcdef0", mon._remote_test_time(latest), "TIMEOUT")))
+        self.assertEqual(mon._ec2_head_entry(None), ())
+
+    def test_ec2_head_entry_keeps_receipts_for_multiple_heads(self):
+        record = {"remote_test_receipts": [
+            {"source_sha": self.SHA, "ended_at": "2026-11-05T00:00:00Z", "result": "PASS"},
+            {"source_sha": "1234567" + "2" * 33,
+             "ended_at": "2026-11-05T00:01:00Z", "result": "FAIL"}]}
+        self.assertEqual(mon._ec2_head_entry(record),
+                         (("abcdef0", mon._remote_test_time("2026-11-05T00:00:00Z"), "PASS"),
+                          ("1234567", mon._remote_test_time("2026-11-05T00:01:00Z"), "FAIL")))
+        with tempfile.TemporaryDirectory() as tasks:
+            (Path(tasks) / "task.json").write_text(json.dumps(record), encoding="utf-8")
+            results, problem = mon.ec2_head_results(tasks)
+        self.assertEqual(results, {"abcdef0": "PASS", "1234567": "FAIL"})
+        self.assertEqual(problem, "")
+
+    def test_ec2_head_results_marks_file_window_incomplete(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            root = Path(tasks)
+            for index in range(31):
+                path = root / f"task-{index:02}.json"
+                contents = ({"remote_test_receipts": [
+                    {"source_sha": "1234567" + "2" * 33,
+                     "ended_at": "2026-11-05T00:00:00Z", "result": "FAIL"}]}
+                    if index == 0 else {})
+                path.write_text(json.dumps(contents), encoding="utf-8")
+                path.chmod(0o600)
+                os.utime(path, (NOW + index, NOW + index))
+            results, problem = mon.ec2_head_results(tasks)
+            self.assertEqual((results, problem), ({"1234567": "FAIL"}, ""))
+            absent = mon.pr_board_rows([self._pull(1)], {}, {}, (results, problem), set(), [])[0]
+            self.assertEqual(absent.ec2, "—")
+            path = root / "task-31.json"
+            path.write_text("{}", encoding="utf-8")
+            path.chmod(0o600)
+            os.utime(path, (NOW + 31, NOW + 31))
+            results, problem = mon.ec2_head_results(tasks)
+            expected = "task 僅讀最近 32 筆，未見結果未確認"
+            self.assertEqual((results, problem), ({"1234567": "FAIL"}, expected))
+            absent = mon.pr_board_rows([self._pull(1)], {}, {}, (results, problem), set(), [])[0]
+            self.assertEqual(absent.ec2, "?")
+            path = root / "task-32.json"
+            path.write_text(json.dumps({"remote_test_receipts": [
+                {"source_sha": self.SHA, "ended_at": "2026-11-05T00:00:00Z",
+                 "result": "PASS"}]}), encoding="utf-8")
+            path.chmod(0o600)
+            os.utime(path, (NOW + 32, NOW + 32))
+            results, problem = mon.ec2_head_results(tasks)
+            self.assertEqual((results, problem), ({"abcdef0": "PASS"}, expected))
+            known = mon.pr_board_rows([self._pull(1)], {}, {}, (results, problem), set(), [])[0]
+            self.assertEqual(known.ec2, "PASS")
+            absent = mon.pr_board_rows([self._pull(1, head="fedcba9")], {}, {},
+                                       (results, problem), set(), [])[0]
+            self.assertEqual(absent.ec2, "?")
+            results_again, problem_again = mon.ec2_head_results(tasks)
+            self.assertEqual((results_again, problem_again), (results, problem))
+
+        with patch.object(mon, "_bounded_task_entries", return_value=([], mon.REMOTE_TEST_OVER_BUDGET)), \
+                patch.object(mon, "_remote_test_paths", return_value=([], False)):
+            self.assertEqual(mon.ec2_head_results("unused"), ({}, mon.REMOTE_TEST_OVER_BUDGET))
+
+    def test_ec2_failure_is_bound_to_head_and_latest_result(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            root = Path(tasks)
+            records = [
+                ("other", {"remote_test_receipts": [
+                    {"source_sha": "1234567" + "2" * 33, "ended_at": "2026-11-05T00:01:00Z",
+                     "result": "FAIL"}]}),
+                ("old", {"remote_test_receipts": [
+                    {"source_sha": self.SHA, "ended_at": "2026-11-05T00:02:00Z",
+                     "result": "FAIL"}]}),
+                ("new", {"remote_test_receipts": [
+                    {"source_sha": self.SHA, "ended_at": "2026-11-05T00:03:00Z",
+                     "result": "PASS"}]})]
+            for index, (name, record) in enumerate(records):
+                path = root / f"{name}.json"
+                path.write_text(json.dumps(record), encoding="utf-8")
+                path.chmod(0o600)
+                os.utime(path, (NOW + index, NOW + index))
+            results, problem = mon.ec2_head_results(tasks)
+            self.assertEqual((results, problem), ({"abcdef0": "PASS", "1234567": "FAIL"}, ""))
+            timeout = root / "timeout.json"
+            timeout.write_text(json.dumps({"remote_test_outcomes": [
+                {"sha": self.SHA, "at": "2026-11-05T00:04:00Z", "result": "TIMEOUT"}]}),
+                encoding="utf-8")
+            timeout.chmod(0o600)
+            os.utime(timeout, (NOW + 4, NOW + 4))
+            results, problem = mon.ec2_head_results(tasks)
+            self.assertEqual((results, problem), ({"abcdef0": "TIMEOUT", "1234567": "FAIL"}, ""))
+            mac = {"abcdef0": {"mac": ("completed", "success")}}
+            rows = mon.pr_board_rows([self._pull(1)], self._verdict("PASS"), mac,
+                                     ({"1234567": "FAIL"}, ""), set(), [])
+            self.assertEqual((rows[0].next, rows[0].owner), ("可合併", "PM"))
+            rows = mon.pr_board_rows([self._pull(1)], self._verdict("PASS"), mac,
+                                     (results, problem), set(), [])
+            self.assertEqual((rows[0].next, rows[0].owner), ("修 EC2 失敗", "PM"))
+
+    def test_pr_section_unknown_empty_and_narrow_row(self):
+        unknown = mon.work_board(None, mon.PmBoard("missing", None, [], [], []), NOW)
+        lines = [line for line, _ in mon.board_view(unknown)]
+        self.assertIn("── PR 看板 ──", lines)
+        self.assertEqual(lines[lines.index("── PR 看板 ──") + 1], "未知")
+        known_empty = mon.work_board(
+            type("GitHub", (), {"successful_read": True, "board_pulls": [], "verdicts": {},
+                                "ci_heads": {}, "pending": [], "window": 43200,
+                                "read_failed": False, "board_page_count": 0,
+                                "board_oldest_updated": None})(),
+            mon.PmBoard("ok", 0, [], [], []), NOW)
+        empty_lines = [line for line, _ in mon.board_view(known_empty)]
+        self.assertEqual(empty_lines[empty_lines.index("── PR 看板 ──") + 1], "無")
+        github = type("GitHub", (), {"successful_read": True, "board_pulls": [
+            mon.BoardPull(978, "title", "OPEN", 0, 0, "abcdef0", False)],
+            "verdicts": {"978": [(1, "PASS", frozenset({"abcdef0"}))]},
+            "ci_heads": {"abcdef0": {"mac": ("completed", "success")}},
+            "pending": [], "window": 43200, "read_failed": False,
+            "board_page_count": 1, "board_oldest_updated": 0})()
+        work = mon.work_board(github, mon.PmBoard("ok", 0, [], [], []), NOW,
+                              ec2=({}, ""), reviewing=set())
+        view = mon.board_view(work, 40)
+        lines = [line for line, _ in view]
+        rows = [line for line in lines if line.startswith("PR #") or line.startswith("  ")]
+        self.assertTrue(rows[0].startswith("PR #978"))
+        self.assertIn("審查 通過", " ".join(rows))
+        self.assertIn("macOS 成功", " ".join(rows))
+        self.assertTrue(all(mon._width(line) <= 40 for line in lines))
+
+
+class StuckAlertTests(unittest.TestCase):
+    NOW = 1_800_000_000.0
+    TASK = "a" * 32
+
+    def stamp(self, age):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.NOW - age))
+
+    def test_stuck_entry_accepts_only_bound_fields_and_newest_busy_event(self):
+        base = {"task_id": self.TASK, "request": "Repair round: fix",
+                "developer": {"state": "DEVELOPER_RESPONDED", "executor_task_id": "wp-1"}}
+        self.assertEqual(mon._stuck_entry(base), mon.StuckRecord("a" * 8, "wp-1", True, 0.0))
+        for request, state, expected in (("Repair round: fix", "DEVELOPER_UNAVAILABLE", False),
+                                         ("words Repair round: fix", "DEVELOPER_RESPONDED", False),
+                                         ("Repair round: fix", None, False)):
+            case = {**base, "request": request,
+                    "developer": {"state": state, "executor_task_id": "wp-1"}}
+            self.assertEqual(mon._stuck_entry(case).repair, expected)
+        busy_item = {"code": "REMOTE_BUSY", "at": self.stamp(30)}
+        case = {"task_id": self.TASK, "developer": {"executor_task_id": "wp-1"},
+                "remote_test_outcomes": [busy_item]}
+        self.assertEqual(mon._stuck_entry(case).busy_at, mon._remote_test_time(self.stamp(30)))
+        for later in ({"remote_test_receipts": [{"ended_at": self.stamp(20)}]},
+                      {"remote_test_outcomes": [busy_item, {"code": "OTHER", "at": self.stamp(20)}]}):
+            value = {"task_id": self.TASK, **case, **later}
+            self.assertEqual(mon._stuck_entry(value).busy_at, 0.0)
+        self.assertIsNone(mon._stuck_entry({"task_id": "A" * 32, "developer": {"executor_task_id": "wp"}}))
+        self.assertIsNone(mon._stuck_entry({"task_id": self.TASK, "request": "Repair round",
+                                            "developer": {"state": "DEVELOPER_RESPONDED"}}))
+        self.assertEqual(tuple(field.name for field in __import__("dataclasses").fields(mon.StuckRecord)),
+                         ("task", "d6", "repair", "busy_at"))
+
+    def test_stuck_records_use_the_bounded_task_cache(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / f"{self.TASK}.json"
+            payload = {"task_id": self.TASK, "request": "Repair round: fix",
+                       "developer": {"state": "DEVELOPER_RESPONDED", "executor_task_id": "wp-1"}}
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            os.chmod(path, 0o600)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            opened = []
+            with patch.object(mon, "_remote_test_open", wraps=mon._remote_test_open) as read:
+                first, problem = mon.stuck_records(root)
+                second, same_problem = mon.stuck_records(root)
+                opened = [call.args[0] for call in read.call_args_list]
+            self.assertEqual(first, [mon.StuckRecord("a" * 8, "wp-1", True, 0.0)])
+            self.assertEqual(second, first)
+            self.assertEqual((problem, same_problem), ("", ""))
+            self.assertEqual(opened, [str(path)])
+            self.assertEqual(path.stat().st_nlink, 1)
+
+    def test_stuck_records_default_root_is_the_task_store(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / f"{self.TASK}.json"
+            payload = {"task_id": self.TASK, "request": "Repair round: fix",
+                       "developer": {"state": "DEVELOPER_RESPONDED", "executor_task_id": "wp-1"}}
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            os.chmod(path, 0o600)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            with patch.object(mon, "LLMTOOL_TASKS", root):
+                records, problem = mon.stuck_records()
+            self.assertEqual(records, [mon.StuckRecord("a" * 8, "wp-1", True, 0.0)])
+            self.assertEqual(problem, "")
+
+    def test_stuck_reviews_and_open_d6_use_live_rows_and_open_branches(self):
+        task = "pr5-claude-rv1-abcdef0"
+        details = {task: ("ACTIVE", "agent", self.NOW - 100, self.NOW, "feature")}
+        row = mon.OfficeRow("Reviewer", mon.WORKING, "", 0, 0, task="task " + task)
+        self.assertEqual(mon.stuck_reviews([row], details), [("5", "abcdef0", self.NOW - 100)])
+        for state in ("DONE", "IDLE"):
+            self.assertEqual(mon.stuck_reviews([replace(row, state=state)], details), [])
+        self.assertEqual(mon.stuck_reviews([replace(row, task="task other")], details), [])
+        self.assertEqual(mon.stuck_reviews([row], {}), [])
+        self.assertEqual(mon.stuck_open_d6(details, {"feature": (5, "OPEN")}), {task})
+        self.assertEqual(mon.stuck_open_d6(details, {}), set())
+        for branch, state in (("feature", "MERGED"), ("feature", "CLOSED"), ("", "OPEN")):
+            value = {task: ("ACTIVE", "agent", self.NOW, self.NOW, branch)}
+            self.assertEqual(mon.stuck_open_d6(value, {branch: (5, state)}), set())
+
+    def test_stuck_alert_thresholds_grouping_order_and_caps(self):
+        review = [("5", "abcdef0", self.NOW - mon.STUCK_REVIEW - 1)]
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [("5", "abcdef0", self.NOW - 3599)], None, set()), [])
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [("5", "abcdef0", self.NOW - 3600)], None, set()), [])
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [("5", "abcdef0", 0)], None, set()), [])
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, review, None, set()),
+                         ["審查超過 1 小時：PR #5 @abcdef0（已 60 分鐘）"])
+        for age in (2699, 2700):
+            self.assertEqual(mon.stuck_alerts(self.NOW, [("queued", "llmtool Mac CI", self.NOW - age,
+                                                          None, 1)], [], None, set()), [])
+        mac_ci = [("queued", "llmtool Mac CI job", self.NOW - 2701, None, 7),
+                  ("in_progress", "llmtool Mac CI job 2", self.NOW - 2800, "runner", 7),
+                  ("queued", "llmtool Mac CI queued", self.NOW - 2701, None, 8),
+                  ("in_progress", "llmtool Linux CI", self.NOW - 5000, None, 9),
+                  ("queued", "bad", None, None, 10), ("queued", "bad", "1", None, 11),
+                  ("queued", "bad", self.NOW - 5000, None), None]
+        alerts = mon.stuck_alerts(self.NOW, mac_ci, [], None, set())
+        self.assertEqual(alerts, ["macOS 超過 45 分鐘：llmtool Mac CI job 2（執行中，已 46 分鐘）",
+                                  "macOS 超過 45 分鐘：llmtool Mac CI queued（排隊，已 45 分鐘）"])
+        per_entry = mon.stuck_alerts(self.NOW, [
+            ("queued", "llmtool Mac CI odd one", self.NOW - 2800, None, "one"),
+            ("queued", "llmtool Mac CI odd two", self.NOW - 2701, None, "two")], [], None, set())
+        self.assertEqual(len(per_entry), 2)
+        busy = [mon.StuckRecord(f"{i:08x}", "", False, self.NOW - age)
+                for i, age in enumerate((1800, 60, 30, 20, 1801, -1), 1)]
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [], [busy[0]], set()),
+                         ["EC2 忙碌：task 00000001（REMOTE_BUSY，30 分鐘前）"])
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [], [busy[4], busy[5]], set()), [])
+        repair = [mon.StuckRecord(f"{i:08x}{j:024x}", f"wp-{i}", True, 0)
+                  for i in range(1, 7) for j in range(2)]
+        ordered = mon.stuck_alerts(self.NOW, None, review, busy + repair,
+                                   {f"wp-{i}" for i in range(1, 7)})
+        self.assertEqual(ordered[0], "審查超過 1 小時：PR #5 @abcdef0（已 60 分鐘）")
+        self.assertTrue(ordered[1].startswith("EC2 忙碌：task 00000004"))
+        self.assertEqual(sum(line.startswith("EC2 忙碌：") for line in ordered), 3)
+        self.assertTrue(any(line.startswith("修復已到上限：D6 wp-1") for line in ordered))
+        self.assertEqual(sum(line.startswith("修復已到上限：") for line in ordered), 5)
+        self.assertIn("另有 1 件到達修復上限", ordered)
+        self.assertFalse(mon.stuck_alerts(self.NOW, None, [], [
+            mon.StuckRecord("a" * 8, "wp-1", True, 0)], {"wp-1"}))
+        self.assertFalse(mon.stuck_alerts(self.NOW, None, [], repair[:2], set()))
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [], repair[:2], {"wp-1"}),
+                         ["修復已到上限：D6 wp-1（至少 2 輪）"])
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [], [repair[0]], {"wp-1"}), [])
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [], None, set()), [])
+
+    def test_stuck_top_and_missing_github(self):
+        top = mon.office_top(None, [], self.NOW, stuck=["macOS 超過 45 分鐘", "修復已到上限"])
+        self.assertEqual(top[-2:], [("macOS 超過 45 分鐘", "!"), ("修復已到上限", "!")])
+        self.assertEqual(mon.office_top(None, [], self.NOW), [("等你決定：未讀 GitHub", "")])
+
+    def test_stuck_lines_without_github_keep_local_review_and_busy_only(self):
+        task_id = "task pr5-claude-rv1-abcdef0"
+        office = [mon.OfficeRow("Reviewer", mon.WORKING, "", 0, 0, task=task_id)]
+        details = {task_id[5:]: ("ACTIVE", "agent", self.NOW - 3700, self.NOW, "feature")}
+        monitor = type("MonitorFixture", (), {"github": None, "office": office,
+                    "stuck_records": ([mon.StuckRecord("a" * 8, "", False,
+                                                        self.NOW - 60)], "")})()
+        with patch.object(mon, "canonical_root", return_value="root"), \
+                patch.object(mon, "registry_details", return_value=details):
+            lines = mon.stuck_lines(monitor, self.NOW)
+        self.assertEqual(lines, ["審查超過 1 小時：PR #5 @abcdef0（已 61 分鐘）",
+                                 "EC2 忙碌：task aaaaaaaa（REMOTE_BUSY，1 分鐘前）"])
+
+    def test_once_and_office_paint_render_stuck_lines(self):
+        github = mon.GitHubSource("o/r", runner=FakeRun(), clock=lambda: self.NOW)
+        github.ci_runs = [("queued", "llmtool Mac CI", self.NOW - 2701, None, 7)]
+        github.branch_prs = {"feature": (5, "OPEN")}
+        github.verdicts, github.pending, github.scope = {}, [], ""
+        github.board_pulls, github.ci_heads = [], {}
+        github.successful_read, github.read_failed = True, False
+        github.board_page_count, github.board_oldest_updated = 0, None
+        github.want_ci, github.main_error, github.main_health = False, "", None
+        github.ci_view, github.events = None, []
+        github.refresh = lambda: None
+
+        class FakeMonitor:
+            def __init__(self):
+                self.version, self.processes, self.lingering = "test", [], []
+                self.disk_usage, self.error, self.office, self.office_error = None, None, [], None
+                self.quota, self.pm_board, self.ec2_heads = [], mon.PmBoard("ok", 0, [], [], []), None
+                self.records, self.opencode_route, self.opencode_route_failed = [], None, False
+                self.tasks, self.d6, self.stuck_records = [], [], ([
+                    mon.StuckRecord("a" * 8, "wp-1", True, 0),
+                    mon.StuckRecord("b" * 8, "wp-1", True, 0)], "")
+                self.github, self.polls = github, 0
+                self.stale = False
+            def poll(self): pass
+
+        class Screen:
+            def getmaxyx(self): return (40, 120)
+            def erase(self): pass
+            def move(self, y, x): pass
+            def refresh(self): pass
+
+        details = {"wp-1": ("ACTIVE", "agent", self.NOW, self.NOW, "feature")}
+        with patch.object(mon, "Monitor", FakeMonitor), \
+                patch.object(mon, "ClaudeAgents"), \
+                patch.object(mon, "canonical_root", return_value="root"), \
+                patch.object(mon, "registry_details", return_value=details), \
+                patch.object(mon.time, "time", return_value=self.NOW), \
+                patch("sys.stdout", __import__("io").StringIO()) as output:
+            self.assertEqual(mon.run_once(github), 0)
+            rendered = output.getvalue()
+            drawn = {}
+            monitor = FakeMonitor()
+            mon._paint_screen(Screen(), monitor, "office", 0, False, {},
+                              lambda row, text, attr=0: drawn.__setitem__(row, text))
+        self.assertIn("macOS 超過 45 分鐘", rendered)
+        self.assertIn("修復已到上限：D6 wp-1（至少 2 輪）", rendered)
+        self.assertTrue(any("macOS 超過 45 分鐘" in line for line in drawn.values()))
+        self.assertTrue(any("修復已到上限：D6 wp-1（至少 2 輪）" in line for line in drawn.values()))
