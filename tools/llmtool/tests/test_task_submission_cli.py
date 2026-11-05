@@ -916,7 +916,6 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     self.assertFalse(store.root.exists())
 
     def test_claude_task_binding_and_result_use_registered_d6_authority(self):
-        from types import SimpleNamespace
         from llmtool.review_dispatch import _preflight, _select_reviewer
 
         owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
@@ -946,57 +945,59 @@ class TaskSubmissionCLITests(unittest.TestCase):
         result_head = subprocess.check_output(
             ['/usr/bin/git', 'rev-parse', 'HEAD'], cwd=self.executor_root,
             text=True).strip()
-        registration = SimpleNamespace(
-            task_id=d6_task_id, common_dir=self.executor_common_dir,
-            root=str(self.executor_root), branch='feat/test-executor',
-            source_sha=self.executor_head, result_sha=result_head)
-        with patch.object(submission_cli.task_completion, 'read_d6_registration',
-                          return_value=registration):
-            output = io.StringIO()
-            with redirect_stdout(output):
-                self.assertEqual(submission_cli.run_task_claude_bind(Namespace(
-                    task_id=task['task_id'], executor_task=d6_task_id,
-                    owner_ref=owner_ref, common_dir=self.executor_common_dir),
-                    store=store), 0)
-            bound = store.get(task['task_id'])
-            self.assertEqual(bound['developer']['provider_profile'], 'claude')
-            self.assertEqual(bound['developer']['executor_task_id'], d6_task_id)
-            self.assertEqual(bound['developer']['source_sha'], self.executor_head)
-            self.assertEqual(bound['developer']['write_paths'], ['changed.py'])
-            self.assertEqual(bound['dispatch_audit'][-1]['worker_key'], 'claude-developer')
-            self.assertEqual(bound['dispatch_audit'][-1]['reason_code'],
-                             'OWNER_ASSIGNMENT_MATCHED')
-            self.assertEqual(bound['completion']['executor_task_id'], d6_task_id)
-            self.assertEqual(bound['completion']['evidence']['source_sha'],
-                             self.executor_head)
-            self.assertEqual(_select_reviewer(bound), 'codex-reviewer')
-            with self.assertRaises(LLMToolError):
-                submission_cli.run_task_claude_bind(Namespace(
-                    task_id=task['task_id'], executor_task=d6_task_id,
-                    owner_ref=owner_ref, common_dir=self.executor_common_dir), store=store)
+        registered_d6 = dict(self.executor_registry)
+        registered_d6.update(task_id=d6_task_id, head_sha=result_head)
+        registration_path = (Path(self.executor_common_dir) / 'llmtool-worktrees' /
+                             (d6_task_id + '.json'))
+        registration_path.write_text(json.dumps(registered_d6), encoding='utf-8')
+        registration_path.chmod(0o600)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(submission_cli.run_task_claude_bind(Namespace(
+                task_id=task['task_id'], executor_task=d6_task_id,
+                owner_ref=owner_ref, common_dir=self.executor_common_dir),
+                store=store), 0)
+        bound = store.get(task['task_id'])
+        self.assertEqual(bound['developer']['provider_profile'], 'claude')
+        self.assertEqual(bound['developer']['executor_task_id'], d6_task_id)
+        self.assertEqual(bound['developer']['source_sha'], self.executor_head)
+        self.assertEqual(bound['developer']['write_paths'], ['changed.py'])
+        self.assertEqual(bound['dispatch_audit'][-1]['worker_key'], 'claude-developer')
+        self.assertEqual(bound['dispatch_audit'][-1]['reason_code'],
+                         'OWNER_ASSIGNMENT_MATCHED')
+        self.assertEqual(bound['completion']['executor_task_id'], d6_task_id)
+        self.assertEqual(bound['completion']['evidence']['source_sha'],
+                         self.executor_head)
+        self.assertEqual(_select_reviewer(bound), 'codex-reviewer')
+        with self.assertRaises(LLMToolError):
+            submission_cli.run_task_claude_bind(Namespace(
+                task_id=task['task_id'], executor_task=d6_task_id,
+                owner_ref=owner_ref, common_dir=self.executor_common_dir), store=store)
 
-            with self.assertRaises(LLMToolError):
-                submission_cli.run_task_claude_result(Namespace(
-                    task_id=task['task_id'], executor_task='a' * 32,
-                    head=result_head, pm_session=task['pm_session_id']), store=store)
-            with redirect_stdout(io.StringIO()):
-                submission_cli.run_task_claude_result(Namespace(
-                    task_id=task['task_id'], executor_task=d6_task_id,
-                    head=result_head, pm_session=task['pm_session_id']), store=store)
-            completed = store.get(task['task_id'])
-            self.assertEqual(completed['developer']['state'], 'DEVELOPER_RESPONDED')
-            self.assertEqual(completed['developer']['claude_result']['executor_task_id'],
-                             d6_task_id)
+        with self.assertRaises(LLMToolError):
+            submission_cli.run_task_claude_result(Namespace(
+                task_id=task['task_id'], executor_task='a' * 32,
+                head=result_head, pm_session=task['pm_session_id']), store=store)
+        with redirect_stdout(io.StringIO()):
+            submission_cli.run_task_claude_result(Namespace(
+                task_id=task['task_id'], executor_task=d6_task_id,
+                head=result_head, pm_session=task['pm_session_id']), store=store)
+        completed = store.get(task['task_id'])
+        self.assertEqual(completed['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(completed['developer']['claude_result']['executor_task_id'],
+                         d6_task_id)
 
-            with self.assertRaises(LLMToolError):
-                submission_cli.run_task_remote_test(Namespace(
-                    task_id=task['task_id'], executor_task=d6_task_id,
-                    sha=result_head, ref=None, module=[], pr=None), store=store)
-            with self.assertRaises(LLMToolError) as same_family:
-                _preflight(store, task['task_id'], d6_task_id, 1, 1,
-                           reviewer='claude-reviewer')
-            self.assertEqual(same_family.exception.review_dispatch_code,
-                             'REVIEWER_SAME_FAMILY')
+        remote_result = submission_cli.run_task_remote_test(Namespace(
+            task_id=task['task_id'], executor_task=d6_task_id,
+            sha=result_head, ref='refs/heads/feat/test-executor',
+            module=['test_task_store'], pr=None), store=store)
+        self.assertEqual(remote_result['result'], 'ADMISSION_DENIED')
+        self.assertEqual(remote_result['code'], 'MODULE_NOT_ADMITTED')
+        with self.assertRaises(LLMToolError) as same_family:
+            _preflight(store, task['task_id'], d6_task_id, 1, 1,
+                       reviewer='claude-reviewer')
+        self.assertEqual(same_family.exception.review_dispatch_code,
+                         'REVIEWER_SAME_FAMILY')
 
     def test_claude_binding_refuses_wrong_d6_missing_ref_and_paused_worker(self):
         from types import SimpleNamespace
