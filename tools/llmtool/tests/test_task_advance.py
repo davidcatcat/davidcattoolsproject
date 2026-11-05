@@ -35,7 +35,7 @@ def base_record(**changes):
 
 
 def d6(clean=True, recorded=HEAD):
-    return {'root': '/repo/task', 'result_head': HEAD,
+    return {'root': '/repo/task', 'task_id': 'executor-1', 'result_head': HEAD,
             'recorded_result_head': recorded, 'registered_result_head': recorded,
             'dirty': not clean}
 
@@ -46,11 +46,24 @@ def remote_receipt(record, *, source_sha=HEAD, result='PASS', excerpt=None,
         'task_id': record['task_id'], 'run_id': record['run_id'],
         'executor_task': executor_task, 'source_sha': source_sha,
         'result': result, 'modules': ['test_task_advance'],
+        'ran_total': 1, 'elapsed_s': 0.01,
     }
     if excerpt is not None:
         receipt['failure_excerpt'] = excerpt
     receipt['receipt_digest'] = hashlib.sha256(_json_bytes(receipt)).hexdigest()
     return receipt
+
+
+def green_linux_ci(path, pr=PR):
+    if path.startswith('commits/') and path.endswith('/check-runs?per_page=100'):
+        head = path[len('commits/'):].split('/', 1)[0]
+        return {'total_count': 1, 'check_runs': [{'id': 1, 'name': 'check (Linux 3.14)',
+            'head_sha': head, 'status': 'completed', 'conclusion': 'success'}]}
+    if path.startswith('pulls/') and path.endswith('/files?per_page=100'):
+        return [{'filename': 'src/module.py'}]
+    if path.startswith('pulls/'):
+        return pr
+    return []
 
 
 class TaskAdvanceTests(unittest.TestCase):
@@ -162,7 +175,7 @@ class TaskAdvanceTests(unittest.TestCase):
         with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
              patch.object(task_advance, '_review_outcomes', return_value=[]):
             result = task_advance.advance(task_id=record['task_id'], store=store,
-                pr_number=17, github_get=lambda _path: pr,
+                pr_number=17, github_get=lambda path: green_linux_ci(path, pr),
                 dispatch_review_call=lambda **kwargs: dispatched.append(kwargs) or {})
         return result, dispatched
 
@@ -261,12 +274,18 @@ class TaskAdvanceTests(unittest.TestCase):
              patch.object(task_advance, '_pr_snapshot', return_value=PR), \
              patch.object(task_submission_cli, 'run_task_remote_test', side_effect=remote_test):
             first = task_advance.advance(task_id=store.record['task_id'], store=store,
-                pr_number=17, dispatch_review_call=lambda **kwargs: dispatched.append(kwargs))
+                pr_number=17, dispatch_review_call=lambda **kwargs: dispatched.append(kwargs),
+                publish_gh_runner=lambda *_args: type('R', (), {'returncode': 0})())
             second = task_advance.advance(task_id=store.record['task_id'], store=store,
-                pr_number=17, dispatch_review_call=lambda **kwargs: dispatched.append(kwargs))
+                pr_number=17, github_get=green_linux_ci,
+                dispatch_review_call=lambda **kwargs: dispatched.append(kwargs))
         self.assertEqual(first['step'], 'RUN_REMOTE_TEST')
         self.assertEqual(first['result'], {'task_id': store.record['task_id'],
-            'executor_task': 'executor-1', 'head': HEAD})
+            'executor_task': 'executor-1', 'head': HEAD,
+            'remote_test': {'result': 'PASS', 'modules': ['test_task_advance'],
+                            'ran_total': 1, 'elapsed_s': 0.01,
+                            'receipt_digest': store.record['remote_test_receipts'][0]
+                                ['receipt_digest'][:8]}})
         self.assertEqual(second['step'], 'DISPATCH_REVIEW')
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls, [(HEAD, 'executor-1', 'refs/pull/17/head')])
@@ -318,9 +337,10 @@ class TaskAdvanceTests(unittest.TestCase):
             published_result = task_advance.advance(task_id=record['task_id'], store=store,
                 pr_number=17, github_get=lambda _path: [])
             tested = task_advance.advance(task_id=record['task_id'], store=store,
-                pr_number=17, github_get=lambda _path: [])
+                pr_number=17, github_get=lambda _path: [],
+                publish_gh_runner=lambda *_args: type('R', (), {'returncode': 0})())
             reviewed = task_advance.advance(task_id=record['task_id'], store=store,
-                pr_number=17, github_get=lambda _path: [], dispatch_review_call=dispatch)
+                pr_number=17, github_get=green_linux_ci, dispatch_review_call=dispatch)
 
         self.assertEqual(repaired['step'], 'REPAIR_REVIEW')
         self.assertEqual(published_result, {'task_id': record['task_id'], 'codes': [],
@@ -565,7 +585,7 @@ class TaskAdvanceTests(unittest.TestCase):
         with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
              patch.object(task_advance, '_pr_snapshot', return_value=PR):
             first = task_advance.advance(task_id=store.record['task_id'], store=store,
-                pr_number=17, dispatch_review_call=dispatch, github_get=lambda _url: [])
+                pr_number=17, dispatch_review_call=dispatch, github_get=green_linux_ci)
             second = task_advance.advance(task_id=store.record['task_id'], store=store,
                 pr_number=17, record_review_result_call=review_result, github_get=lambda _url: [])
         self.assertEqual(first['step'], 'DISPATCH_REVIEW')
@@ -971,10 +991,10 @@ class TaskAdvanceTests(unittest.TestCase):
              patch.object(task_advance.active_pm_inbox, 'ack', side_effect=ack):
             first = task_advance.advance(task_id=record['task_id'], store=store,
                 pr_number=17, dispatch_review_call=lambda **_kwargs: {'state': 'DISPATCHED'},
-                github_get=lambda _url: [])
+                github_get=green_linux_ci)
             second = task_advance.advance(task_id=record['task_id'], store=store,
                 pr_number=17, dispatch_review_call=lambda **_kwargs: {'state': 'DISPATCHED'},
-                github_get=lambda _url: [])
+                github_get=green_linux_ci)
         self.assertEqual(first['step'], 'DISPATCH_REVIEW')
         self.assertEqual(first['acked'], ['a' * 32])
         self.assertEqual(second['step'], first['step'])
@@ -1089,7 +1109,7 @@ class TaskAdvanceTests(unittest.TestCase):
              patch.object(task_advance.active_pm_inbox, 'ack', side_effect=RuntimeError('store')):
             result = task_advance.advance(task_id=record['task_id'], store=Store(),
                 pr_number=17, dispatch_review_call=lambda **_kwargs: {'state': 'DISPATCHED'},
-                github_get=lambda _url: [])
+                github_get=green_linux_ci)
         self.assertEqual(result['step'], 'DISPATCH_REVIEW')
         self.assertEqual(result['result'], {'state': 'DISPATCHED'})
         self.assertEqual(result['next'], 'DISPATCH_REVIEW')
@@ -1143,7 +1163,8 @@ class TaskAdvanceTests(unittest.TestCase):
         def dispatch_review(**_kwargs):
             print('{"reviewer_task":"reviewer-new"}')
             return {'ignored': True}
-        cases.append((dispatch_record, {'dispatch_review_call': dispatch_review},
+        cases.append((dispatch_record, {'dispatch_review_call': dispatch_review,
+                                        'github_get': green_linux_ci},
                       'DISPATCH_REVIEW', None))
 
         for record, adapters, expected_step, custom_store in cases:
@@ -1153,12 +1174,13 @@ class TaskAdvanceTests(unittest.TestCase):
                 with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
                      patch.object(task_advance, '_pr_snapshot', return_value=PR), \
                      patch.object(task_advance, '_review_outcomes', return_value=[]):
+                    adapters.setdefault('github_get', lambda _path: [])
                     args = parser_for_cli().parse_args([
                         'task', 'advance', record['task_id'], '--pr', '17'])
                     output = io.StringIO()
                     with redirect_stdout(output):
                         task_submission_cli.run_task_advance(args, store=store,
-                            github_get=lambda _path: [], **adapters)
+                            **adapters)
                 lines = output.getvalue().splitlines()
                 self.assertEqual(len(lines), 1)
                 self.assertTrue(lines[0])
@@ -1167,6 +1189,177 @@ class TaskAdvanceTests(unittest.TestCase):
                 self.assertEqual(result['step'], expected_step)
                 self.assertIn('next', result)
                 self.assertIn('codes', result)
+
+
+def check_run(run_id=1, *, head=HEAD, name='check (Linux 3.14)',
+              status='completed', conclusion='success'):
+    return {'id': run_id, 'head_sha': head, 'name': name, 'status': status,
+            'conclusion': conclusion}
+
+
+class CiGateStore:
+    def __init__(self, record):
+        self.record = record
+
+    def get(self, _task_id):
+        return self.record
+
+
+class TaskAdvanceCiGateTests(unittest.TestCase):
+    def advance_with_ci(self, reply, *, pr=PR):
+        record = base_record()
+        store = CiGateStore(record)
+        calls = []
+
+        def github_get(path):
+            calls.append(path)
+            if path.startswith('commits/'):
+                if isinstance(reply, Exception):
+                    raise reply
+                return reply[0]
+            if path.endswith('/files?per_page=100'):
+                return reply[1]
+            return pr
+
+        dispatched = []
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]):
+            result = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17, github_get=github_get,
+                dispatch_review_call=lambda **kw: dispatched.append(kw) or {'sent': True})
+        return result, dispatched, calls
+
+    def test_success_dispatches_reviewer(self):
+        result, dispatched, calls = self.advance_with_ci(
+            ({'total_count': 1, 'check_runs': [check_run()]},
+             [{'filename': 'src/app.py'}]))
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(len(dispatched), 1)
+        checks_read = f'commits/{HEAD}/check-runs?per_page=100'
+        files_read = 'pulls/17/files?per_page=100'
+        self.assertIn(checks_read, calls)
+        self.assertIn(files_read, calls)
+        self.assertLess(calls.index(checks_read), calls.index(files_read))
+
+    def test_missing_run_waits_without_dispatch(self):
+        result, dispatched, _ = self.advance_with_ci(
+            ({'total_count': 0, 'check_runs': []}, [{'filename': 'src/app.py'}]))
+        self.assertEqual((result['step'], result['codes']),
+                         ('WAITING_CI', ['LINUX_CI_PENDING']))
+        self.assertEqual(dispatched, [])
+
+    def test_incomplete_run_waits_without_dispatch(self):
+        result, dispatched, _ = self.advance_with_ci(
+            ({'total_count': 1, 'check_runs': [check_run(status='in_progress',
+                                                         conclusion=None)]},
+             [{'filename': 'src/app.py'}]))
+        self.assertEqual((result['step'], result['codes']),
+                         ('WAITING_CI', ['LINUX_CI_PENDING']))
+        self.assertEqual(dispatched, [])
+
+    def test_non_success_conclusion_fails_without_dispatch(self):
+        result, dispatched, _ = self.advance_with_ci(
+            ({'total_count': 1, 'check_runs': [check_run(conclusion='failure')]},
+             [{'filename': 'src/app.py'}]))
+        self.assertEqual((result['step'], result['codes']),
+                         ('CI_FAILED', ['LINUX_CI_FAILED']))
+        self.assertEqual(dispatched, [])
+
+    def test_read_failure_and_malformed_reply_wait_without_dispatch(self):
+        for reply in (RuntimeError('unavailable'), ({'check_runs': []}, [])):
+            with self.subTest(reply=reply):
+                result, dispatched, _ = self.advance_with_ci(reply)
+                self.assertEqual((result['step'], result['codes']),
+                                 ('WAITING_CI', ['LINUX_CI_UNAVAILABLE']))
+                self.assertEqual(dispatched, [])
+
+    def test_docs_only_selects_docs_check(self):
+        result, dispatched, _ = self.advance_with_ci(
+            ({'total_count': 1, 'check_runs': [check_run(name='check (docs)')]},
+             [{'filename': 'docs/guide.md'}]))
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(len(dispatched), 1)
+
+    def test_stale_head_run_is_ignored(self):
+        result, dispatched, _ = self.advance_with_ci(
+            ({'total_count': 1, 'check_runs': [check_run(head='b' * 40)]},
+             [{'filename': 'src/app.py'}]))
+        self.assertEqual((result['step'], result['codes']),
+                         ('WAITING_CI', ['LINUX_CI_PENDING']))
+        self.assertEqual(dispatched, [])
+
+    def test_highest_id_run_decides(self):
+        scenarios = (([check_run(2, conclusion='failure'), check_run(3)],
+                      'DISPATCH_REVIEW', []),
+                     ([check_run(2), check_run(3, conclusion='failure')],
+                      'CI_FAILED', ['LINUX_CI_FAILED']))
+        for runs, expected_step, expected_codes in scenarios:
+            with self.subTest(runs=runs):
+                result, dispatched, _ = self.advance_with_ci(
+                    ({'total_count': 2, 'check_runs': runs},
+                     [{'filename': 'src/app.py'}]))
+                self.assertEqual(result['step'], expected_step)
+                self.assertEqual(result['codes'], expected_codes)
+                self.assertEqual(len(dispatched), int(expected_step == 'DISPATCH_REVIEW'))
+
+    def test_remote_test_summary_and_pr_comment_exclude_excerpt(self):
+        record = base_record(remote_test_outcomes=[])
+        store = CiGateStore(record)
+        receipt = remote_receipt(record, result='FAIL', excerpt='private failure text')
+        receipt.update(ran_total=12, elapsed_s=3.5)
+        receipt.pop('receipt_digest')
+        receipt['receipt_digest'] = hashlib.sha256(_json_bytes(receipt)).hexdigest()
+        calls = []
+
+        def remote_test(_args, *, store):
+            store.record.setdefault('remote_test_receipts', []).append(receipt)
+            return 0
+
+        def gh_runner(_root, argv):
+            calls.append(argv)
+            return type('Response', (), {'returncode': 0})()
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(task_submission_cli, 'run_task_remote_test', side_effect=remote_test):
+            result = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17, publish_gh_runner=gh_runner)
+        summary = result['result']['remote_test']
+        self.assertEqual(summary, {'result': 'FAIL', 'modules': ['test_task_advance'],
+            'ran_total': 12, 'elapsed_s': 3.5,
+            'receipt_digest': receipt['receipt_digest'][:8]})
+        self.assertEqual(result['step'], 'RUN_REMOTE_TEST')
+        self.assertEqual(calls[0][:3], ['pr', 'comment', '17'])
+        body = calls[0][calls[0].index('--body') + 1]
+        self.assertTrue(body.startswith(
+            '<!-- activity: type=task actor=PM target=PR status=TRACKING -->\n'))
+        self.assertIn('EC2 remote-test', body)
+        self.assertIn('D6=executor-1', body)
+        self.assertNotIn(d6()['root'], body)
+        self.assertNotIn('private failure text', body)
+
+    def test_remote_test_comment_failure_adds_only_warning_code(self):
+        record = base_record(remote_test_outcomes=[])
+        store = CiGateStore(record)
+        receipt = remote_receipt(record)
+        receipt.update(ran_total=1, elapsed_s=1.0)
+        receipt.pop('receipt_digest')
+        receipt['receipt_digest'] = hashlib.sha256(_json_bytes(receipt)).hexdigest()
+
+        def remote_test(_args, *, store):
+            store.record.setdefault('remote_test_receipts', []).append(receipt)
+            return 0
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(task_submission_cli, 'run_task_remote_test', side_effect=remote_test):
+            result = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17,
+                publish_gh_runner=lambda *_args: type('Response', (), {'returncode': 1})())
+        self.assertEqual(result['codes'], ['REMOTE_TEST_COMMENT_FAILED'])
+        self.assertEqual(result['result']['remote_test']['result'], 'PASS')
 
 
 class TaskAdvancePublishTests(unittest.TestCase):
