@@ -246,6 +246,36 @@ class TaskCompletionTests(unittest.TestCase):
         args.extend(('-m', message))
         return subprocess.check_output(args, cwd=self.root, text=True).strip()
 
+    def _rename_deletion_head(self):
+        old = self.source_sha
+        guard = self.root / 'guard.txt'
+        guard_content = ''.join(f'guard line {index}\n' for index in range(30))
+        guard.write_text(guard_content)
+        self._git('add', 'guard.txt')
+        self._git('commit', '-m', 'add guard file to source')
+        self.source_sha = self._git('rev-parse', 'HEAD')
+        self._write_registration(self.task_id, 'executor-agent', 'Executor D6 session',
+                                 self.root, 'feat/executor', self.source_sha, self.source_sha,
+                                 native_session_id='native-executor')
+
+        target = self.root / self.source_path
+        target.unlink()
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'delete source path')
+        deletion = self._git('rev-parse', 'HEAD')
+        guard.unlink()
+        target.write_text(guard_content)
+        self._git('add', 'guard.txt', self.source_path)
+        self._git('commit', '-m', 'move guard content to deleted path')
+        tree = self._git('rev-parse', 'HEAD^{tree}')
+        merge = self._commit_tree(tree, deletion, old, message='merge old ancestor')
+        self._git('reset', '--hard', merge)
+        target.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                          '    def test_ok(self): self.assertTrue(True)\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'rewrite source path')
+        return old, self._git('rev-parse', 'HEAD')
+
     def _out_of_scope_merge_head(self):
         self._git('reset', '--hard', self.source_sha)
         self._git('checkout', '-b', 'scratch-outside')
@@ -440,6 +470,126 @@ class TaskCompletionTests(unittest.TestCase):
         paths = task_completion._developer_changed_paths(
             str(self.root), self.source_sha, result_sha, old_parent)
         self.assertIn('out.txt', paths)
+
+    def test_rename_detection_cannot_hide_deleted_source_path(self):
+        old, head = self._rename_deletion_head()
+        for setting in ('true', 'false', 'copies'):
+            with self.subTest(diff_renames=setting):
+                self._git('config', 'diff.renames', setting)
+                self.assertEqual(task_completion._developer_changed_paths(
+                    str(self.root), self.source_sha, head, self.source_sha),
+                    ('guard.txt', self.source_path))
+
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_registered_result(head, trusted_base_sha=self.source_sha)
+        self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
+
+        kwargs = {
+            'task_id': self.task_id, 'expected_common_dir': self.common,
+            'expected_root': str(self.root), 'expected_branch': 'feat/executor',
+            'source_sha': self.source_sha,
+            'task_binding': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                             'contract_digest': '3' * 64},
+            'expected_agent': 'executor-agent',
+            'expected_session_ref': 'Executor D6 session',
+            'expected_native_session_id': 'native-executor',
+            'write_paths': [self.source_path],
+            'claude_result': {'executor_task_id': self.task_id, 'head_sha': head},
+            'trusted_base_sha': self.source_sha,
+        }
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_claude_result(**kwargs)
+        self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
+
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, head],
+            cwd=self.root, text=True)
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_executor_result(
+                task_id=self.task_id, expected_common_dir=self.common,
+                expected_root=str(self.root), expected_branch='feat/executor',
+                source_sha=self.source_sha,
+                task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                              'contract_digest': '3' * 64},
+                expected_agent='executor-agent',
+                expected_session_ref='Executor D6 session',
+                expected_native_session_id='native-executor',
+                write_paths=[self.source_path], artifact=artifact,
+                artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest(),
+                artifact_segments=[(artifact, hashlib.sha256(artifact.encode()).hexdigest(),
+                                    self.source_sha, head)],
+                trusted_base_sha=self.source_sha)
+        self.assertEqual(raised.exception.completion_code,
+                         'DEVELOPER_ARTIFACT_CHAIN_INVALID')
+
+    def test_octopus_trusted_second_parent_is_refused_without_remerge_read(self):
+        old = self.source_sha
+        guard = self.root / 'guard.txt'
+        guard.write_text(''.join(f'guard line {index}\n' for index in range(30)))
+        self._git('add', 'guard.txt')
+        self._git('commit', '-m', 'add guard source')
+        source = self._git('rev-parse', 'HEAD')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# scoped change\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'in-scope developer change')
+        developer = self._git('rev-parse', 'HEAD')
+        tree = self._git('rev-parse', 'HEAD^{tree}')
+        side = self._commit_tree(tree, source, message='side branch')
+        octopus = self._commit_tree(tree, developer, old, side, message='octopus')
+
+        with patch.object(task_completion, '_remerge_diff_paths_raw') as remerge:
+            with self.assertRaises(LLMToolError) as raised:
+                task_completion._developer_changed_paths(
+                    str(self.root), source, octopus, source)
+        self.assertEqual(raised.exception.completion_code, 'RESULT_DIFF_INVALID')
+        remerge.assert_not_called()
+
+    def test_trusted_main_history_may_contain_octopus_merge(self):
+        source = self.source_sha
+        self._git('checkout', '-b', 'main', source)
+        for branch, path in (('main-side-one', 'main-one.txt'),
+                             ('main-side-two', 'main-two.txt')):
+            self._git('checkout', '-b', branch, source)
+            (self.root / path).write_text(path + '\n')
+            self._git('add', path)
+            self._git('commit', '-m', branch)
+        self._git('checkout', 'main')
+        self._git('merge', '--no-ff', '-m', 'octopus main merge',
+                  'main-side-one', 'main-side-two')
+        trusted = self._git('rev-parse', 'HEAD')
+        self._git('checkout', '-b', 'feat/executor', source)
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# developer change\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer change')
+        self._git('merge', '--no-ff', 'main', '-m', 'merge octopus main history')
+        head = self._git('rev-parse', 'HEAD')
+        self.assertEqual(task_completion._developer_changed_paths(
+            str(self.root), source, head, trusted), (self.source_path,))
+
+    def test_equal_blob_with_old_mode_is_developer_changed_path(self):
+        guard = self.root / 'guard.sh'
+        guard.write_text('#!/bin/sh\necho guard\n')
+        guard.chmod(0o755)
+        self._git('add', 'guard.sh')
+        self._git('commit', '-m', 'add executable guard as old commit')
+        old = self._git('rev-parse', 'HEAD')
+        guard.chmod(0o644)
+        self._git('add', 'guard.sh')
+        self._git('commit', '-m', 'source changes guard mode')
+        source = self._git('rev-parse', 'HEAD')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# scoped change\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'in-scope developer change')
+        developer = self._git('rev-parse', 'HEAD')
+        guard.chmod(0o755)
+        self._git('add', 'guard.sh')
+        tree = self._git('write-tree')
+        merge = self._commit_tree(tree, developer, old, message='restore old mode')
+        self.assertIn('guard.sh', task_completion._developer_changed_paths(
+            str(self.root), source, merge, source))
 
     def test_out_of_scope_merge_with_unrelated_first_parent_is_refused_by_collectors(self):
         result_sha, _, _ = self._out_of_scope_merge_head()
@@ -4172,7 +4322,8 @@ class TaskCompletionTests(unittest.TestCase):
 
 
     def _claude_bound_task_context(self, *, skip_remote_test=False,
-                                   skip_completed_claim=False, old_sha_receipt=False):
+                                   skip_completed_claim=False, old_sha_receipt=False,
+                                   guard_file=False):
         from llmtool import remote_test, review_dispatch
         from llmtool.cli import main
 
@@ -4197,6 +4348,11 @@ class TaskCompletionTests(unittest.TestCase):
                           '    def test_ok(self): self.assertTrue(True)\n')
         (root / 'README.md').write_text('Repository fixture.\n')
         self._git('add', self.source_path, 'tools/llmtool/.gitignore', 'README.md')
+        if guard_file:
+            self._git('commit', '-m', 'pre-source')
+            (root / 'guard.txt').write_text(
+                ''.join(f'guard line {index}\n' for index in range(30)))
+            self._git('add', 'guard.txt')
         self._git('commit', '-m', 'source')
         self.source_sha = self._git('rev-parse', 'HEAD')
         base = self.source_sha
@@ -4540,6 +4696,54 @@ class TaskCompletionTests(unittest.TestCase):
             context = self._claude_bound_task_context(old_sha_receipt=True)
         self._assert_cli_completion_waits(
             context, 'SOURCE_NOT_ANCESTOR', 'WAITING_EXECUTOR')
+
+    def test_claude_bound_complete_waits_on_renamed_out_of_scope_deletion(self):
+        original_make_result = self._make_result
+        calls = 0
+
+        def make_result_with_renamed_deletion(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls != 2:
+                return original_make_result(**kwargs)
+            old = self._git('rev-parse', self.source_sha + '^')
+            target = self.root / self.source_path
+            guard = self.root / 'guard.txt'
+            guard_content = ''.join(f'guard line {index}\n' for index in range(30))
+            target.unlink()
+            self._git('add', self.source_path)
+            self._git('commit', '-m', 'delete source path')
+            deletion = self._git('rev-parse', 'HEAD')
+            guard.unlink()
+            target.write_text(guard_content)
+            self._git('add', 'guard.txt', self.source_path)
+            self._git('commit', '-m', 'move guard to source path')
+            tree = self._git('rev-parse', 'HEAD^{tree}')
+            merge = self._commit_tree(tree, deletion, old,
+                                      message='merge old ancestor with renamed deletion')
+            self._git('reset', '--hard', merge)
+            target.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                              '    def test_ok(self): self.assertTrue(True)\n')
+            self._git('add', self.source_path)
+            self._git('commit', '-m', 'restore source content')
+            result = self._git('rev-parse', 'HEAD')
+            artifact = subprocess.check_output(
+                ['/usr/bin/git', 'diff', '--binary', self.source_sha, result],
+                cwd=self.root, text=True)
+            registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+            record = json.loads(registry_path.read_text())
+            record['head_sha'] = result
+            self._write_env2_marker(record, self.root, submitted_head=result,
+                                    current_head=result)
+            registry_path.write_text(json.dumps(record))
+            registry_path.chmod(0o600)
+            return result, artifact
+
+        with patch.object(self, '_make_result', side_effect=make_result_with_renamed_deletion):
+            context = self._claude_bound_task_context(
+                old_sha_receipt=True, guard_file=True)
+        self._assert_cli_completion_waits(
+            context, 'RESULT_SCOPE_MISMATCH', 'WAITING_EXECUTOR')
 
     def test_claude_bound_complete_requires_completed_review_dispatch_claim(self):
         context = self._claude_bound_task_context(skip_completed_claim=True)

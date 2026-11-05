@@ -1125,6 +1125,8 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
         if len(inherited_commits) > 4096:
             _stop('RESULT_DIFF_INVALID')
         inherited.update(inherited_commits)
+        if len(fields) > 3:
+            continue
         resolution_raw = _remerge_diff_paths_raw(root, commit)
         try:
             merge_resolution_paths[commit] = set(
@@ -1138,8 +1140,8 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
         if commit in inherited:
             continue
         fields = [commit, *commit_parents[commit]]
-        if len(fields) < 2:
-            _stop('SOURCE_NOT_ANCESTOR')
+        if len(fields) > 3 and commit in merge_parents:
+            _stop('RESULT_DIFF_INVALID')
         first_parent = fields[1]
         changed = _git(root, ('diff-tree', '--no-commit-id', '--name-only', '-r', '-z',
                               '--no-renames', first_parent, commit, '--'),
@@ -1176,7 +1178,7 @@ def _remerge_diff_paths_raw(root, commit):
         with tempfile.TemporaryDirectory(prefix='llmtool-remerge-objects-') as temporary:
             object_dir = Path(temporary) / 'objects'
             object_dir.mkdir(mode=0o700)
-            return _git(root, ('show', '--remerge-diff', '--format=',
+            return _git(root, ('show', '--remerge-diff', '--format=', '--no-renames',
                                '--name-only', '-z', commit), limit=1024 * 1024,
                         env_overrides={
                             'GIT_OBJECT_DIRECTORY': str(object_dir),
