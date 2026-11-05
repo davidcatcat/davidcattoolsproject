@@ -322,15 +322,14 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                 direct_event = next(item for item in patches
                     if item.attribute == 'run_task_direct_result_event')
                 with contextlib.ExitStack() as stack:
-                    for item in patches:
-                        stack.enter_context(item)
+                    entered = {id(item): stack.enter_context(item) for item in patches}
                     status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
                 developer = store.task['developer']
                 self.assertEqual(status, 1)
                 self.assertEqual(developer['state'], 'BLOCKED')
                 self.assertEqual(developer['error_code'], 'CLAUDE_NO_CHANGES')
                 self.assertIsNone(developer['artifact'])
-                direct_event.mock.assert_not_called()
+                entered[id(direct_event)].assert_not_called()
 
     def test_repair_packet_is_embedded_as_untrusted_reference(self):
         cli, store, args, _registration, _evaluations, prompts, _requests, patches, runner = self._setup()
@@ -513,7 +512,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
     def test_real_taskstore_owner_gate_binds_claude_cli_to_d6_id(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        root = Path(temp.name)
+        root = Path(temp.name).resolve()
         policy_path = root / 'worker-dispatch.json'
         owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
                      'issues/289#issuecomment-1234567890')
@@ -524,6 +523,12 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                 'decided_at': '2026-11-05', 'reason': 'test policy state',
                 'evidence': 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'}
             for worker in worker_dispatch.WORKERS
+        }
+        policy_workers['company-gw-agent'] = {
+            'dispatch': 'PAUSED', 'decided_by': 'PM',
+            'decided_at': '2026-11-03',
+            'reason': 'Paused pending the Owner decision tracked by #120',
+            'evidence': 'https://github.com/davidcatcat/davidcattoolsproject/issues/120',
         }
         policy_workers['claude-developer'] = {
             'dispatch': 'OWNER_ASSIGNMENT_ONLY', 'decided_by': 'Owner',
@@ -568,6 +573,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                 return {
                     'assignment_id': assignment_id, 'selection_source': 'PM',
                     'state': 'DEVELOPER_PENDING', 'provider_profile': 'claude',
+                    'execution': None,
                     'provider_type': None, 'model': None,
                     'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
                     'session_id': session_id, 'source_sha': 'f' * 40,
