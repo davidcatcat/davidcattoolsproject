@@ -12,9 +12,9 @@ Validate structured examples, paths, identifiers, and evidence labels against au
 1. **Read complete parser and constant definitions from source:**
    - Do not infer wire/JSON schemas from dataclass fields, partial line slices, or `<CONTEXT_SUMMARY>`.
    - Read `task_verification.py` when verifying Task Contract acceptance evidence and its result statuses.
-   - Read the complete parser function (for example, `_decode_host` in `tools/llmtool/llmtool/review_authority.py` or `parse_task_contract` in `tools/llmtool/llmtool/task_contract.py`) and grep authoritative constants (such as `REVIEWER_ROLES` in `tools/llmtool/llmtool/task_review.py`).
+   - Read the complete parser function (for example, `_decode_host` in `tools/llmtool/llmtool/review_authority.py` or `parse_task_contract` in `tools/llmtool/llmtool/task_verification.py`) and grep authoritative constants (such as `REVIEWER_ROLES` in `tools/llmtool/llmtool/task_review.py`).
 2. **Separate `TEMPLATE_ONLY` blocks from `SYNTHETIC_PARSER_VERIFIED` fixtures:**
-   - Label any example containing `<...>` placeholders or unprovisioned paths as `TEMPLATE_ONLY` and state that running it literally fails closed.
+   - Label any example containing `<...>` placeholders or unprovisioned paths as `TEMPLATE_ONLY` and state the actual failure point: a template the parser rejects fails schema validation, while a well-formed but unprovisioned path can pass static parsing and fail only at runtime.
    - When claiming an example is valid, test a concrete disposable synthetic fixture (mode `0600` inside a `0700` temporary directory outside the repository) against the real CLI or parser:
      ```sh
      tools/llmtool/.venv/bin/llmtool review-authority check --host /private/tmp/<0700-dir>/synthetic-host.json --json

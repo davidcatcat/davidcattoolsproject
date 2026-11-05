@@ -816,7 +816,7 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head):
 
 
 def _git(root, args, *, limit=_GIT_LIMIT, allow_exit_1=False,
-         return_exit_code=False):
+         return_exit_code=False, env_overrides=None):
     """Run one fixed Git read with bounded output and no inherited Git config."""
     env = {
         'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
@@ -827,6 +827,12 @@ def _git(root, args, *, limit=_GIT_LIMIT, allow_exit_1=False,
         'GIT_TERMINAL_PROMPT': '0', 'GIT_PAGER': 'cat', 'PAGER': 'cat',
         'GIT_LITERAL_PATHSPECS': '1', 'TMPDIR': '/tmp',
     }
+    if env_overrides is not None:
+        if (type(env_overrides) is not dict or
+                any(type(key) is not str or type(value) is not str
+                    for key, value in env_overrides.items())):
+            _stop('GIT_INSPECTION_FAILED')
+        env.update(env_overrides)
     safe = ('-c', 'core.useReplaceRefs=false', '-c', 'core.fsmonitor=false',
             '-c', 'core.hooksPath=/dev/null',
             '-c', 'core.untrackedCache=false', '-c', 'core.attributesFile=/dev/null',
@@ -1068,11 +1074,123 @@ def validate_host_worker_receipt(packet, *, task_binding, task_id, run_id,
             re.fullmatch(r'[0-9a-f]{64}', packet['delivery_digest']) is not None)
 
 
+def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None):
+    """Return Developer-attributed paths, excluding trusted main history."""
+    if trusted_base_sha is None:
+        trusted_base_sha = source_sha
+    if type(trusted_base_sha) is not str or _HEX40.fullmatch(trusted_base_sha) is None:
+        _stop('GIT_INSPECTION_FAILED')
+
+    commits = _git(root, ('rev-list', '--reverse', '--topo-order',
+                          source_sha + '..' + result_sha), limit=1024 * 1024)
+    try:
+        commit_ids = [item for item in commits.decode('ascii').splitlines() if item]
+    except UnicodeError:
+        _stop('GIT_INSPECTION_FAILED')
+    if len(commit_ids) > 4096:
+        _stop('RESULT_DIFF_INVALID')
+
+    inherited = set()
+    merge_parents = {}
+    merge_resolution_paths = {}
+    for commit in commit_ids:
+        raw = _git(root, ('rev-list', '--parents', '-n', '1', commit), limit=4096)
+        fields = raw.decode('ascii').split()
+        if len(fields) < 3:
+            continue
+        second_parent = fields[2]
+        if not _is_ancestor(root, second_parent, trusted_base_sha):
+            continue
+        merge_parents[commit] = second_parent
+        history = _git(root, ('rev-list', '--max-count=4097', second_parent,
+                              '^' + source_sha), limit=1024 * 1024)
+        inherited_commits = history.decode('ascii').splitlines()
+        if len(inherited_commits) > 4096:
+            _stop('RESULT_DIFF_INVALID')
+        inherited.update(inherited_commits)
+        resolution_raw = _remerge_diff_paths_raw(root, commit)
+        try:
+            merge_resolution_paths[commit] = set(
+                path for path in resolution_raw.decode('utf-8', 'strict').split('\x00')
+                if path)
+        except UnicodeError:
+            _stop('GIT_INSPECTION_FAILED')
+
+    developer_paths = set()
+    for commit in commit_ids:
+        if commit in inherited:
+            continue
+        parents = _git(root, ('rev-list', '--parents', '-n', '1', commit), limit=4096)
+        fields = parents.decode('ascii').split()
+        if len(fields) < 2:
+            continue
+        first_parent = fields[1]
+        changed = _git(root, ('diff-tree', '--no-commit-id', '--name-only', '-r', '-z',
+                              '--no-renames', first_parent, commit, '--'),
+                       limit=1024 * 1024)
+        try:
+            paths = [item for item in changed.decode('utf-8', 'strict').split('\x00') if item]
+        except UnicodeError:
+            _stop('GIT_INSPECTION_FAILED')
+        second_parent = merge_parents.get(commit)
+        for path in paths:
+            if (second_parent is not None and
+                    path not in merge_resolution_paths.get(commit, set()) and
+                    _tree_blob(root, commit, path) == _tree_blob(root, second_parent, path)):
+                continue
+            developer_paths.add(path)
+            if len(developer_paths) > 128:
+                _stop('RESULT_DIFF_INVALID')
+        developer_paths.update(merge_resolution_paths.get(commit, set()))
+        if len(developer_paths) > 128:
+            _stop('RESULT_DIFF_INVALID')
+    return tuple(sorted(developer_paths))
+
+
+def _remerge_diff_paths_raw(root, commit):
+    """Read resolution paths while containing synthetic merge object writes."""
+    try:
+        objects = _git(root, ('rev-parse', '--path-format=absolute', '--git-path', 'objects'),
+                       limit=4096).decode('utf-8', 'strict').strip()
+    except UnicodeError:
+        _stop('GIT_INSPECTION_FAILED')
+    if not objects or not os.path.isabs(objects):
+        _stop('GIT_INSPECTION_FAILED')
+    try:
+        with tempfile.TemporaryDirectory(prefix='llmtool-remerge-objects-') as temporary:
+            object_dir = Path(temporary) / 'objects'
+            object_dir.mkdir(mode=0o700)
+            return _git(root, ('show', '--remerge-diff', '--format=',
+                               '--name-only', '-z', commit), limit=1024 * 1024,
+                        env_overrides={
+                            'GIT_OBJECT_DIRECTORY': str(object_dir),
+                            'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
+                        })
+    except LLMToolError:
+        raise
+    except Exception:
+        _stop('GIT_INSPECTION_FAILED')
+
+
+def _is_ancestor(root, ancestor, descendant):
+    result = subprocess.run(['/usr/bin/git', '-c', 'core.useReplaceRefs=false',
+        '-C', root, 'merge-base', '--is-ancestor', ancestor, descendant],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, timeout=_TIMEOUT,
+        env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
+             'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_OPTIONAL_LOCKS': '0',
+             'GIT_NO_LAZY_FETCH': '1', 'GIT_NO_REPLACE_OBJECTS': '1'},
+        shell=False, check=False)
+    if result.returncode not in (0, 1):
+        _stop('GIT_INSPECTION_FAILED')
+    return result.returncode == 0
+
+
 def collect_executor_result(*, task_id, expected_common_dir, expected_root,
                            expected_branch, source_sha, task_binding,
                            expected_agent, expected_session_ref,
                            expected_native_session_id, write_paths, artifact, artifact_sha256,
-                           artifact_segments=None):
+                           artifact_segments=None, trusted_base_sha=None):
     """Compare the current registered Executor HEAD and actual source-to-result diff."""
     registration = read_d6_registration(task_id, expected_common_dir,
                                         allowed_states=_D6_EVIDENCE_STATES)
@@ -1111,14 +1229,19 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
     paths = tuple(sorted(set(path for path in changed.decode('utf-8', 'strict').split('\x00') if path)))
     if not paths or len(paths) > 128:
         _stop('RESULT_DIFF_INVALID')
-    if not set(paths).issubset(set(write_paths)):
+    developer_paths = _developer_changed_paths(
+        registration.root, source_sha, snapshot.head, trusted_base_sha)
+    if not developer_paths or len(developer_paths) > 128:
+        _stop('RESULT_DIFF_INVALID')
+    if not set(developer_paths).issubset(set(write_paths)):
         _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID' if artifact_segments is not None
               else 'RESULT_SCOPE_MISMATCH')
     patch = _git(registration.root, ('diff', '--binary', '--no-ext-diff', '--no-textconv',
                 '--no-renames', source_sha, snapshot.head, '--'), limit=_GIT_LIMIT)
     if artifact_segments is None:
         verify_artifact_applied(registration.root, artifact, artifact_sha256,
-                                source_sha, snapshot.head, paths, write_paths)
+                                source_sha, snapshot.head, paths, write_paths,
+                                scope_paths=developer_paths)
     else:
         if (type(artifact_segments) is not list or not artifact_segments or
                 any(type(segment) is not tuple or len(segment) != 4
@@ -1144,11 +1267,15 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
                  '--no-renames', start_sha, end_sha, '--'), limit=1024*1024)
             segment_paths = tuple(sorted(set(
                 path for path in changed_segment.decode('utf-8', 'strict').split('\x00') if path)))
-            if (not segment_paths or not set(segment_paths).issubset(set(write_paths))):
+            segment_developer_paths = _developer_changed_paths(
+                registration.root, start_sha, end_sha, trusted_base_sha)
+            if (not segment_paths or not segment_developer_paths or
+                    not set(segment_developer_paths).issubset(set(write_paths))):
                 _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
             try:
                 verify_artifact_applied(registration.root, segment_artifact,
-                    segment_digest, start_sha, end_sha, segment_paths, write_paths)
+                    segment_digest, start_sha, end_sha, segment_paths, write_paths,
+                    scope_paths=segment_developer_paths)
             except LLMToolError:
                 _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
             previous_end = end_sha
@@ -1164,6 +1291,7 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
         'branch': registration.branch,
         'source_sha': source_sha, 'result_head': snapshot.head,
         'changed_paths': list(paths),
+        'developer_changed_paths': list(developer_paths),
         'diff_sha256': hashlib.sha256(patch).hexdigest(),
     }
 
@@ -1368,7 +1496,7 @@ def _proposal_blob_size(root, tree_sha, path):
 
 
 def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_sha,
-                            changed_paths, write_paths):
+                            changed_paths, write_paths, *, scope_paths=None):
     """Apply the proposal in a bounded temp tree and compare result blobs/modes."""
     if (type(artifact) is not str or not artifact or
             len(artifact.encode('utf-8')) > _GIT_LIMIT or
@@ -1384,10 +1512,11 @@ def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_
             if match is None or match.group(1) != match.group(2):
                 _stop('DEVELOPER_ARTIFACT_INVALID')
             patch_paths.append(match.group(1))
+    scope_paths = patch_paths if scope_paths is None else scope_paths
     if (not patch_paths or len(patch_paths) > _PROPOSAL_FILE_LIMIT or
             len(patch_paths) != len(set(patch_paths)) or
             set(patch_paths) != set(changed_paths) or
-            not set(patch_paths).issubset(set(write_paths))):
+            not set(scope_paths).issubset(set(write_paths))):
         _stop('DEVELOPER_ARTIFACT_RESULT_MISMATCH')
     for path in patch_paths:
         parts = Path(path).parts

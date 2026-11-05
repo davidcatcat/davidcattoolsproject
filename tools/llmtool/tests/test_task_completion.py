@@ -79,6 +79,9 @@ class TaskCompletionTests(unittest.TestCase):
         self._git('add', self.source_path, 'tools/llmtool/.gitignore', 'README.md')
         self._git('commit', '-m', 'source')
         self.source_sha = self._git('rev-parse', 'HEAD')
+        trusted_ref = self._trusted_main_ref()
+        trusted_ref.start()
+        self.addCleanup(trusted_ref.stop)
         self.common = str(self.root / '.git')
         (Path(self.common) / 'llmtool-worktrees').mkdir(mode=0o700)
         self.task_id = 'executor-task'
@@ -102,6 +105,15 @@ class TaskCompletionTests(unittest.TestCase):
                   'task_record': {'developer': {'provider_profile': 'codex'}}}
         kwargs.update(overrides)
         return kwargs
+
+    def _trusted_main_ref(self):
+        def github_get(path):
+            if path != 'git/ref/heads/main':
+                raise AssertionError(f'unexpected GitHub path: {path}')
+            return {'ref': 'refs/heads/main',
+                    'object': {'type': 'commit', 'sha': self.source_sha}}
+
+        return patch.object(task_completion, '_github_get', side_effect=github_get)
 
     def _github_response_sequence(self, result_sha, pr, reviews, checks, *,
                                   workflow=None, runs=None, jobs=None, comments=()):
@@ -227,7 +239,7 @@ class TaskCompletionTests(unittest.TestCase):
         registry_path.chmod(0o600)
         return result_sha
 
-    def _collect_result(self, result_sha, artifact):
+    def _collect_result(self, result_sha, artifact, *, trusted_base_sha=None):
         return task_completion.collect_executor_result(
             task_id=self.task_id, expected_common_dir=self.common,
             expected_root=str(self.root), expected_branch='feat/executor',
@@ -237,7 +249,211 @@ class TaskCompletionTests(unittest.TestCase):
             expected_agent='executor-agent', expected_session_ref='Executor D6 session',
             expected_native_session_id='native-executor', write_paths=[self.source_path],
             artifact=artifact,
-            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest(),
+            **({'trusted_base_sha': trusted_base_sha}
+               if trusted_base_sha is not None else {}))
+
+    def _collect_registered_result(self, result_sha, *, trusted_base_sha=None):
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = result_sha
+        self._write_env2_marker(record, self.root, submitted_head=result_sha,
+                                current_head=result_sha)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+            cwd=self.root, text=True)
+        return self._collect_result(result_sha, artifact,
+                                    trusted_base_sha=trusted_base_sha)
+
+    def test_main_merge_changes_are_excluded_from_developer_scope(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        (self.root / 'README.md').write_text('Updated by main.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'main documentation update')
+        main_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# developer change\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer change')
+        self._git('merge', '--no-ff', 'main', '-m', 'merge main')
+        target.write_text(target.read_text() + '# later developer change\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'later developer change')
+
+        result_sha = self._git('rev-parse', 'HEAD')
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+            cwd=self.root, text=True)
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = result_sha
+        self._write_env2_marker(record, self.root, submitted_head=result_sha,
+                                current_head=result_sha)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+
+        result = self._collect_result(result_sha, artifact, trusted_base_sha=main_sha)
+        self.assertEqual(result['changed_paths'], ['README.md', self.source_path])
+        self.assertEqual(result['developer_changed_paths'], [self.source_path])
+
+    def test_fake_main_aliases_cannot_hide_malicious_merge(self):
+        self._git('branch', 'legitimate-pin', self.source_sha)
+        self._git('checkout', 'legitimate-pin')
+        (self.root / 'README.md').write_text('Legitimate pinned main.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'legitimate pinned main')
+        trusted_base_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\nDeveloper change.\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'scoped developer change')
+        self._git('branch', 'scoped-developer-change', 'HEAD')
+        outside = self.root / 'out.txt'
+        outside.write_text('Malicious imported content.\n')
+        self._git('add', 'out.txt')
+        self._git('commit', '-m', 'malicious out of scope change')
+        evil = self._git('rev-parse', 'HEAD')
+        self._git('branch', 'malicious-import', evil)
+
+        aliases = ('refs/heads/main', 'refs/heads/master', 'refs/remotes/origin/main')
+        for alias in aliases:
+            with self.subTest(alias=alias):
+                for candidate in aliases:
+                    self._git('update-ref', '-d', candidate)
+                self._git('update-ref', alias, evil)
+                self._git('reset', '--hard', 'scoped-developer-change')
+                self._git('merge', '--no-ff', 'malicious-import', '-m',
+                          'merge malicious branch')
+                result_sha = self._git('rev-parse', 'HEAD')
+                with self.assertRaises(LLMToolError) as raised:
+                    self._collect_registered_result(
+                        result_sha, trusted_base_sha=trusted_base_sha)
+                self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
+                self._git('reset', '--hard', 'scoped-developer-change')
+
+    def test_repair_chain_segment_uses_developer_path_classification(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        (self.root / 'README.md').write_text('Main update.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'main update')
+        trusted_base_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        segment_start = self.source_sha
+        self._git('merge', '--no-ff', 'main', '-m', 'merge main')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# repair segment\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'repair segment')
+        segment_end = self._git('rev-parse', 'HEAD')
+
+        paths = task_completion._developer_changed_paths(
+            str(self.root), segment_start, segment_end, trusted_base_sha)
+        self.assertEqual(paths, (self.source_path,))
+
+    def test_old_ancestor_second_parent_does_not_hide_changes(self):
+        old_parent = self.source_sha
+        (self.root / 'out.txt').write_text('Developer content.\n')
+        self._git('add', 'out.txt')
+        self._git('commit', '-m', 'out of scope before merge')
+        first_parent = self._git('rev-parse', 'HEAD')
+        tree = self._git('rev-parse', first_parent + '^{tree}')
+        result_sha = self._git('commit-tree', tree, '-p', first_parent,
+                               '-p', old_parent, '-m', 'merge old ancestor')
+
+        paths = task_completion._developer_changed_paths(
+            str(self.root), self.source_sha, result_sha, old_parent)
+        self.assertIn('out.txt', paths)
+
+    def test_invalid_trusted_main_pin_is_rejected(self):
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion._developer_changed_paths(
+                str(self.root), self.source_sha, self.source_sha, 'not-a-commit')
+        self.assertEqual(raised.exception.completion_code, 'GIT_INSPECTION_FAILED')
+
+    def test_nul_path_output_preserves_quoted_unicode_names(self):
+        path = 'folder/name with spaces é.py'
+        result_sha = self._make_path_result(path, 'value = 1\n')
+        paths = task_completion._developer_changed_paths(
+            str(self.root), self.source_sha, result_sha, self.source_sha)
+        self.assertEqual(paths, (path,))
+
+    def test_deletions_and_mode_changes_are_attributed(self):
+        deleted = 'delete me.txt'
+        executable = 'run me.sh'
+        for path in (deleted, executable):
+            (self.root / path).write_text('content\n')
+        self._git('add', deleted, executable)
+        self._git('commit', '-m', 'add mode fixtures')
+        base = self._git('rev-parse', 'HEAD')
+        (self.root / deleted).unlink()
+        (self.root / executable).chmod(0o755)
+        self._git('add', '-A')
+        self._git('commit', '-m', 'delete and change mode')
+        result = self._git('rev-parse', 'HEAD')
+        self.assertEqual(task_completion._developer_changed_paths(
+            str(self.root), base, result, base), (deleted, executable))
+
+    def test_overlapping_main_and_developer_edits_remain_attributed(self):
+        self._git('branch', 'main-overlap', self.source_sha)
+        self._git('checkout', 'main-overlap')
+        readme = self.root / 'README.md'
+        readme.write_text('Repository fixture.\nMain line.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'main overlapping file edit')
+        trusted_base_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        readme.write_text('Developer line.\nRepository fixture.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'developer overlapping file edit')
+        self._git('merge', '--no-ff', 'main-overlap', '-m', 'merge overlapping main')
+        paths = task_completion._developer_changed_paths(
+            str(self.root), self.source_sha, self._git('rev-parse', 'HEAD'), trusted_base_sha)
+        self.assertIn('README.md', paths)
+
+    def test_out_of_scope_merge_resolution_is_refused(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        fixture = self.root / self.source_path
+        fixture.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                           '    def test_main(self): self.assertTrue(True)\n')
+        (self.root / 'README.md').write_text('Main version.\n')
+        self._git('add', self.source_path, 'README.md')
+        self._git('commit', '-m', 'main edits')
+        trusted_base_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        fixture.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                           '    def test_developer(self): self.assertTrue(True)\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'scoped developer edit')
+        merge = subprocess.run(['/usr/bin/git', 'merge', '--no-ff', 'main', '-m',
+                                'merge main'], cwd=self.root, text=True,
+                               capture_output=True)
+        self.assertNotEqual(merge.returncode, 0)
+        fixture.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                           '    def test_resolved(self): self.assertTrue(True)\n')
+        (self.root / 'README.md').write_text('Developer conflict-resolution edit.\n')
+        self._git('add', self.source_path, 'README.md')
+        self._git('commit', '-m', 'resolve merge')
+
+        result_sha = self._git('rev-parse', 'HEAD')
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_registered_result(result_sha, trusted_base_sha=trusted_base_sha)
+        self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
+
+    def test_out_of_scope_developer_file_is_refused(self):
+        result_sha = self._make_path_result('README.md', 'Developer edit.\n')
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+            cwd=self.root, text=True)
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_result(result_sha, artifact)
+        self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
 
     def test_result_collection_ignores_replacement_commit_and_environment_override(self):
         result_sha, artifact = self._make_result()

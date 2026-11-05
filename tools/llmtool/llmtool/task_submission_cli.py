@@ -4773,6 +4773,60 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
     return artifacts
 
 
+def _main_pin_error():
+    error = LLMToolError('authenticated trusted main ref is unavailable or invalid')
+    error.completion_code = 'MAIN_REF_PIN_INVALID'
+    raise error
+
+
+def _validate_trusted_main_pin(pin, task, source_sha):
+    required = {'repository', 'ref', 'sha', 'provenance', 'task_id', 'run_id',
+                'contract_digest', 'source_sha', 'verified_result_heads'}
+    try:
+        repository = task_completion._trusted_slug()
+    except Exception:
+        _main_pin_error()
+    if (type(pin) is not dict or set(pin) != required or
+            pin.get('repository') != repository or
+            pin.get('ref') != 'refs/heads/main' or
+            type(pin.get('sha')) is not str or
+            re.fullmatch(r'[0-9a-f]{40}', pin['sha']) is None or
+            pin.get('provenance') != 'AUTHENTICATED_TRUSTED_SLUG_GITHUB_REF' or
+            pin.get('task_id') != task.get('task_id') or
+            pin.get('run_id') != task.get('run_id') or
+            pin.get('contract_digest') != task.get('task_binding', {}).get('contract_digest') or
+            pin.get('source_sha') != source_sha or
+            type(pin.get('verified_result_heads')) is not list or
+            any(type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None
+                for head in pin.get('verified_result_heads', [])) or
+            len(pin['verified_result_heads']) != len(set(pin['verified_result_heads']))):
+        _main_pin_error()
+    return pin
+
+
+def _capture_trusted_main_pin(task, source_sha):
+    response = task_completion._github_get('git/ref/heads/main')
+    if (type(response) is not dict or response.get('ref') != 'refs/heads/main' or
+            type(response.get('object')) is not dict or
+            response['object'].get('type') != 'commit' or
+            type(response['object'].get('sha')) is not str or
+            re.fullmatch(r'[0-9a-f]{40}', response['object']['sha']) is None):
+        _main_pin_error()
+    try:
+        repository = task_completion._trusted_slug()
+    except Exception:
+        _main_pin_error()
+    pin = {
+        'repository': repository,
+        'ref': 'refs/heads/main', 'sha': response['object']['sha'],
+        'provenance': 'AUTHENTICATED_TRUSTED_SLUG_GITHUB_REF',
+        'task_id': task['task_id'], 'run_id': task['run_id'],
+        'contract_digest': task['task_binding']['contract_digest'],
+        'source_sha': source_sha, 'verified_result_heads': [],
+    }
+    return _validate_trusted_main_pin(pin, task, source_sha)
+
+
 def run_task_complete(args, *, store=None, reviewer_adapter=None):
     """Verify an Executor result and make one non-replayable original-profile PM call.
 
@@ -4833,7 +4887,7 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
     admission_fields = ('executor_identity', 'executor_session_ref',
         'executor_native_session_id', 'executor_native_session', 'root',
         'common_dir', 'branch', 'source_sha', 'execution_mode',
-        'host_worker_receipt')
+        'host_worker_receipt', 'trusted_main_pin')
     evidence = {key: initial[key] for key in admission_fields if key in initial}
     evidence.update({'task_id': task['task_id'], 'run_id': task['run_id'],
                 'contract_digest': task['task_binding']['contract_digest'],
@@ -4852,6 +4906,12 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             error = LLMToolError('Executor admission source does not match Developer source')
             error.completion_code = 'D6_ADMISSION_SOURCE_MISMATCH'
             raise error
+        main_pin = evidence.get('trusted_main_pin')
+        if main_pin is None:
+            main_pin = _capture_trusted_main_pin(task, developer['source_sha'])
+        else:
+            _validate_trusted_main_pin(main_pin, task, developer['source_sha'])
+        evidence['trusted_main_pin'] = main_pin
         artifact_segments = _completion_repair_artifact_segments(
             task, store, executor_task=args.executor_task,
             common_dir=initial.get('common_dir'), root=initial.get('root'),
@@ -4865,8 +4925,15 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             expected_native_session_id=initial.get('executor_native_session_id'),
             write_paths=developer['write_paths'], artifact=developer['artifact'],
             artifact_sha256=developer['artifact_sha256'],
+            trusted_base_sha=main_pin['sha'],
             **({'artifact_segments': artifact_segments}
                if artifact_segments is not None else {}))
+        main_pin = dict(main_pin)
+        result_heads = list(main_pin['verified_result_heads'])
+        if git_evidence['result_head'] not in result_heads:
+            result_heads.append(git_evidence['result_head'])
+        main_pin['verified_result_heads'] = result_heads
+        evidence['trusted_main_pin'] = main_pin
         direct_callback = developer.get('direct_result_callback')
         callback_evidence = (direct_callback.get('evidence')
                              if type(direct_callback) is dict else None)
