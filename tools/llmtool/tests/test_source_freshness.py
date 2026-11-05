@@ -34,8 +34,9 @@ class SourceFreshnessTests(unittest.TestCase):
                                           str(self.package_file))
         self.package_patch.start()
         self.addCleanup(self.package_patch.stop)
-        self.home = self.root / 'home'
-        self.home.mkdir(mode=0o700)
+        self.home_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.home_temp.cleanup)
+        self.home = Path(self.home_temp.name)
         self.allow_patch = patch.dict(os.environ, {'HOME': str(self.home)}, clear=False)
         self.allow_patch.start()
         self.addCleanup(self.allow_patch.stop)
@@ -62,7 +63,7 @@ class SourceFreshnessTests(unittest.TestCase):
 
     def _pin_path(self):
         parent = self.home / '.local' / 'state' / 'llmtool'
-        parent.mkdir(parents=True, mode=0o700)
+        parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         parent.chmod(0o700)
         return parent / 'approved-install.json'
 
@@ -307,8 +308,9 @@ class SourceFreshnessTests(unittest.TestCase):
         ]
         for label, make_invalid in rows:
             with self.subTest(pin=label):
-                self.home = self.root / ('home-' + label.replace(' ', '-'))
-                self.home.mkdir(mode=0o700)
+                home_temp = tempfile.TemporaryDirectory()
+                self.addCleanup(home_temp.cleanup)
+                self.home = Path(home_temp.name)
                 with patch.dict(os.environ, {'HOME': str(self.home)}, clear=False):
                     path = self._pin_path()
                     make_invalid(path)
