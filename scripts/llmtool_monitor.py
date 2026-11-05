@@ -881,6 +881,9 @@ class Monitor:
         self.opencode_route_failed = False
         self.quota: list[str] = []
         self.quota_due = 0.0
+        self.loaded_blob = script_blob()
+        self.behind = False
+        self.behind_due = 0.0
         self.d6: list = []   # D6 task lines, refreshed with the office view
         self.ec2_heads = None
         self.stuck_records = None
@@ -1013,6 +1016,12 @@ class Monitor:
                 try:
                     self.quota = quota_warnings(time.time())
                 except Exception:  # local optional evidence; preserve last good value
+                    pass
+            if time.monotonic() >= self.behind_due:
+                self.behind_due = time.monotonic() + 300.0
+                try:
+                    self.behind = behind_main(self.loaded_blob, main_script_blob())
+                except Exception:  # unexpected errors keep the last result; main_script_blob returns empty for unknown, which clears the warning.
                     pass
             try:
                 office = office_rows(result.processes, finished_runs=finished,
@@ -1559,7 +1568,7 @@ CI_JOB_READS = 5   # finished runs' job lists read per refresh (they are cached)
 CI_RUN_READS = 10  # unfinished runs whose job lists are read per refresh (oldest first)
 GITHUB_LIMIT = 16 << 20   # one page of 100 comments; a larger page fails as a stale status
 GITHUB_PAGE = 100    # comments per request (the API maximum)
-GITHUB_PAGES = 5     # a busy 12 hours had 124 comments; beyond 500 the status says so
+GITHUB_PAGES = 10    # about 600 comments in 12 hours were seen on 2026-11-05
 
 
 def _github_time(value) -> float:
@@ -2405,6 +2414,18 @@ def script_digest() -> str:
     return digest
 
 
+def git_blob_id(data: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def script_blob() -> str:
+    try:
+        with open(SCRIPT_PATH, "rb") as handle:
+            return git_blob_id(handle.read())
+    except OSError:
+        return ""
+
+
 _GIT_RUN = subprocess.run   # bound at import: GitHub source tests fake subprocess.run
 
 
@@ -2430,6 +2451,30 @@ def monitor_version() -> str:
     if same and commit:
         return commit
     return f"本機修改 {script_digest()}"
+
+
+def main_script_blob() -> str:
+    rel = os.path.relpath(SCRIPT_PATH, SCRIPT_ROOT)
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    try:
+        found = _GIT_RUN(["git", "-C", SCRIPT_ROOT, "rev-parse", "--verify", "-q",
+                          f"origin/main:{rel}"], capture_output=True, text=True,
+                         timeout=2, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    output = found.stdout.strip() if found.returncode == 0 else ""
+    return output if HEX_SHA.fullmatch(output) else ""
+
+
+def behind_main(loaded: str, main: str) -> bool:
+    return bool(loaded and main and loaded != main)
+
+
+BEHIND_WARNING = "⚠ 這個監控和本機 origin/main 的版本不同，請更新後重開"
+
+
+def behind_line(mon) -> str:
+    return BEHIND_WARNING if getattr(mon, "behind", False) and not getattr(mon, "stale", False) else ""
 OFFICE_WINDOW = 6 * 3600       # sessions untouched for longer are left out
 OFFICE_DONE_WINDOW = 30 * 60   # finished subagent work stays visible this long
 OFFICE_BUSY = 90.0             # seconds since the last write that still mean "working"
@@ -3867,6 +3912,7 @@ class WorkBoard:
     note: str = ""
     window_hours: int = 12
     prs: list = field(default_factory=list)
+    owner_cut: bool = False
 
 
 # File format: a JSON object with schema_version 1, UTC updated_at, string
@@ -4070,6 +4116,7 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None) -> Work
     github_known = bool(github is not None and github.successful_read)
     board_known = board.status in ("ok", "stale")
     owner = list(github.pending if github is not None else [])
+    owner_cut = bool(getattr(github, "comments_cut", False)) if github_known else False
     running = list(board.running) if board_known else []
     queue = list(board.queue) if board_known else []
     blocked = list(board.blocked) if board_known else []
@@ -4124,7 +4171,7 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None) -> Work
                          ec2, reviewing, github.pending) if github_known else [])
     return WorkBoard(owner, running, queue, blocked, done, github_known, board_known,
                      github_status, board.status, board.age, board.skipped, note,
-                     int(github.window // 3600) if github is not None else 12, prs)
+                     int(github.window // 3600) if github is not None else 12, prs, owner_cut)
 
 
 def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
@@ -4136,7 +4183,12 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
     known_running = len(work.running)
     waiting_owner = sum(item.kind == "waiting_owner" for item in work.owner)
     other_owner = len(work.owner) - waiting_owner
-    owner_count = (f"{len(work.owner)}（等你決定 {waiting_owner}，其他 Owner 請求 {other_owner}）"
+    waiting_count = ("?" if work.owner_cut and not waiting_owner else
+                     f"{waiting_owner}{'+' if work.owner_cut else ''}")
+    other_count = ("?" if work.owner_cut and not other_owner else
+                   f"{other_owner}{'+' if work.owner_cut else ''}")
+    owner_count = ("?" if work.github_known and work.owner_cut and not work.owner else
+                   f"{len(work.owner)}{'+' if work.owner_cut else ''}（等你決定 {waiting_count}，其他 Owner 請求 {other_count}）"
                    if work.github_known else "?")
     counts = (f"今天合併 {today} · 進行中 {known_running if work.github_known else '?'} · "
               f"等 PM {sum(item.next == 'PM' for item in work.running + work.queue + work.blocked) if work.github_known and work.board_known else '?'} · "
@@ -4169,7 +4221,9 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
     for title, items, known in sections:
         append_header(f"── {title} ──", "section")
         if not items:
-            empty = (f"無（只看最近 {work.window_hours} 小時留言）"
+            empty = (f"未確認（留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則）"
+                     if known and title == "等你" and work.owner_cut else
+                     f"無（只看最近 {work.window_hours} 小時留言）"
                      if known and title == "等你" else "無" if known else "未知")
             append_header(empty, "dim")
             continue
@@ -7437,6 +7491,9 @@ def run_once(github: "GitHubSource | None" = None) -> int:
               f"{summary(mon.processes, mon.lingering, ci_view=github.ci_view if github else None)}")
     disk = disk_status(mon.disk_usage)
     print(header + (f"  ·  {disk}" if disk else ""))
+    behind = behind_line(mon)
+    if behind:
+        print(behind)
     alert = disk_alert(mon.disk_usage)
     if alert:
         print(alert)
@@ -7583,8 +7640,9 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
     alert = disk_alert(mon.disk_usage)
     stale = (f"⚠ 監控程式已更新，這個畫面還是舊版（{mon.version}），請按 q 後重開"
              if mon.stale else "")
-    if alert or stale:
-        put(2, "  ·  ".join(item for item in (stale, alert) if item),
+    behind = behind_line(mon)
+    if alert or stale or behind:
+        put(2, "  ·  ".join(item for item in (stale, behind, alert) if item),
             colors.get("!", 0) | curses.A_BOLD)
     if view == "log":
         entries = list(mon.log)
