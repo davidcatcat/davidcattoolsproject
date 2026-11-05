@@ -1191,6 +1191,8 @@ class TaskAdvancePublishTests(unittest.TestCase):
         self.git(['add', '--', 'allowed.txt'], cwd=self.root)
         self.git(['commit', '-m', 'base'], cwd=self.root)
         self.git(['remote', 'add', 'origin', self.bare], cwd=self.root)
+        self.git(['branch', 'main'], cwd=self.root)
+        self.git(['push', 'origin', 'main'], cwd=self.root)
         self.git(['push', '-u', 'origin', self.BRANCH], cwd=self.root)
         self.initial_head = self.git(['rev-parse', 'HEAD'], cwd=self.root).strip()
         self.recorded = []

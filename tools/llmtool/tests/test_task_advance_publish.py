@@ -134,6 +134,107 @@ class TaskAdvancePublishTests(unittest.TestCase):
         self.assertEqual(len(self.gh_calls), 4)
         self.assertEqual(pause.call_args_list, [call(2)] * 3)
 
+    def _fake_publish(self, *, main_state='contained', fetch_failed=False):
+        initial_head, committed_head, merged_head = 'a' * 40, 'b' * 40, 'c' * 40
+        state = {'head': initial_head}
+        events = []
+        git_calls = []
+
+        def result(args, code=0, output=b''):
+            return subprocess.CompletedProcess(['git', *args], code, output, b'')
+
+        def git(_root, args):
+            args = list(args)
+            git_calls.append(args)
+            events.append(('git', tuple(args)))
+            if args == ['rev-parse', '--show-toplevel']:
+                return result(args, output=b'/fake/d6\n')
+            if args == ['branch', '--show-current']:
+                return result(args, output=b'feature/task\n')
+            if args in (['ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
+                        ['ls-files', '--others', '--exclude-standard', '-z']):
+                return result(args)
+            if args == ['diff', '--no-renames', '--name-only', '-z', 'HEAD']:
+                return result(args, output=b'allowed.txt\0')
+            if args == ['ls-remote', '--heads', 'origin', 'refs/heads/feature/task']:
+                return result(args, output=f'{initial_head}\trefs/heads/feature/task\n'.encode())
+            if args == ['rev-parse', '--verify', 'HEAD']:
+                return result(args, output=(state['head'] + '\n').encode())
+            if args == ['merge-base', '--is-ancestor', initial_head, 'HEAD']:
+                return result(args)
+            if args == ['merge-base', '--is-ancestor', 'origin/main', 'HEAD']:
+                return result(args, 0 if main_state == 'contained' else 1)
+            if args == ['add', '--', 'allowed.txt']:
+                return result(args)
+            if args == ['diff', '--cached', '--no-renames', '--name-only', '-z', 'HEAD']:
+                return result(args, output=b'allowed.txt\0')
+            if args[:1] == ['commit']:
+                state['head'] = committed_head
+                return result(args)
+            if args == ['fetch', 'origin', 'main']:
+                return result(args, 1 if fetch_failed else 0)
+            if args == ['merge', '--no-edit', 'origin/main']:
+                if main_state == 'conflict':
+                    return result(args, 1)
+                state['head'] = merged_head
+                return result(args)
+            if args == ['ls-files', '--unmerged', '-z']:
+                return result(args, output=b'100644 conflict\0' if main_state == 'conflict' else b'')
+            if args == ['merge', '--abort']:
+                events.append(('abort', tuple(args)))
+                return result(args)
+            if args == ['push', 'origin', 'HEAD:refs/heads/feature/task']:
+                events.append(('push', state['head']))
+                return result(args)
+            raise AssertionError(f'unexpected git call: {args}')
+
+        def record_result(**_kwargs):
+            events.append(('record', state['head']))
+            return state['head']
+
+        def gh(_root, args):
+            if args[:2] == ['pr', 'list']:
+                return subprocess.CompletedProcess(['gh', *args], 0,
+                    json.dumps([{'number': 23, 'headRefOid': state['head']}]).encode(), b'')
+            raise AssertionError(f'unexpected gh call: {args}')
+
+        record = {'task_id': '1' * 32, 'developer': {'write_paths': ['allowed.txt']}}
+        binding = {'root': '/fake/d6', 'common_dir': '/fake/canonical/.git',
+                   'branch': 'feature/task', 'task_id': '3' * 32,
+                   'recorded_result_head': initial_head}
+        try:
+            value = task_advance._publish_task(record, binding, '3' * 32,
+                git_runner=git, gh_runner=gh, record_result_call=record_result)
+        except task_advance._PublishRefusal as exc:
+            value = exc.code
+        return value, events, git_calls, committed_head, merged_head
+
+    def test_main_already_contained_does_not_merge(self):
+        result, events, git_calls, committed, _merged = self._fake_publish()
+        self.assertEqual(result['head'], committed)
+        self.assertIn(['merge-base', '--is-ancestor', 'origin/main', 'HEAD'], git_calls)
+        self.assertNotIn(['merge', '--no-edit', 'origin/main'], git_calls)
+
+    def test_moved_main_merges_then_records_then_pushes_new_head(self):
+        result, events, _git_calls, _committed, merged = self._fake_publish(main_state='moved')
+        self.assertEqual(result['head'], merged)
+        merge = events.index(('git', ('merge', '--no-edit', 'origin/main')))
+        record = events.index(('record', merged))
+        push = events.index(('push', merged))
+        self.assertLess(merge, record)
+        self.assertLess(record, push)
+
+    def test_merge_conflict_aborts_and_never_pushes(self):
+        result, events, _git_calls, _committed, _merged = self._fake_publish(main_state='conflict')
+        self.assertEqual(result, 'PUBLISH_MERGE_CONFLICT')
+        self.assertIn(('abort', ('merge', '--abort')), events)
+        self.assertFalse(any(event[0] == 'push' for event in events))
+
+    def test_fetch_failure_refuses_without_push(self):
+        result, events, _git_calls, _committed, _merged = self._fake_publish(fetch_failed=True)
+        self.assertEqual(result, 'PUBLISH_COMMAND_FAILED')
+        self.assertFalse(any(event[0] == 'push' for event in events))
+
 
 if __name__ == '__main__':
     unittest.main()

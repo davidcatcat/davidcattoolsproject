@@ -545,6 +545,37 @@ def _publish_task(record, d6, executor_task, *, git_runner=None, gh_runner=None,
             ['commit', '-m', title, '-m', f'llmtool Task {task_id}'])
         local_head = _publish_command(git_runner, root,
             ['rev-parse', '--verify', 'HEAD']).strip()
+    # Bring the publication head up to date with main before recording it or
+    # pushing it, so the published PR and its checks bind the merged result.
+    _publish_command(git_runner, root, ['fetch', 'origin', 'main'])
+    try:
+        main_is_ancestor = git_runner(root, ['merge-base', '--is-ancestor', 'origin/main', 'HEAD'])
+    except Exception:
+        raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
+    ancestry_status = getattr(main_is_ancestor, 'returncode', 1)
+    if ancestry_status not in (0, 1):
+        raise _PublishRefusal('PUBLISH_COMMAND_FAILED')
+    if ancestry_status == 1:
+        try:
+            merged = git_runner(root, ['merge', '--no-edit', 'origin/main'])
+        except Exception:
+            raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
+        if getattr(merged, 'returncode', 1) != 0:
+            try:
+                conflicts = git_runner(root, ['ls-files', '--unmerged', '-z'])
+            except Exception:
+                conflicts = None
+            is_conflict = (getattr(conflicts, 'returncode', 1) == 0 and
+                           type(getattr(conflicts, 'stdout', None)) in (bytes, str) and
+                           bool(conflicts.stdout))
+            try:
+                git_runner(root, ['merge', '--abort'])
+            except Exception:
+                pass
+            raise _PublishRefusal('PUBLISH_MERGE_CONFLICT' if is_conflict else
+                                  'PUBLISH_COMMAND_FAILED')
+        local_head = _publish_command(git_runner, root,
+            ['rev-parse', '--verify', 'HEAD']).strip()
     if changed or d6.get('recorded_result_head') != local_head:
         try:
             record_result_call = _record_d6_result if record_result_call is None else record_result_call
