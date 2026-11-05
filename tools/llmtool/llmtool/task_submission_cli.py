@@ -3961,6 +3961,7 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
         _print(_task_view(saved))
         return 1
     except codex_direct_developer.DirectCodexError as exc:
+        changed_files_evidence = {}
         if (exc.direct_codex_code in ('CODEX_FINAL_INVALID_WITH_CHANGES',
                                       'CODEX_FINAL_JSON_INVALID',
                                       'CODEX_FINAL_MESSAGE_INVALID',
@@ -4223,15 +4224,13 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             raise LLMToolError(
                 f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
         if type(record) is not dict:
-            raise LLMToolError(
-                f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}')
+            continue
         completion = record.get('completion')
         if (type(completion) is dict and
                 completion.get('executor_task_id') == executor_task):
             developer = record.get('developer')
             if type(developer) is not dict:
-                raise LLMToolError(
-                    f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}')
+                continue
             created_at = developer.get('created_at')
             try:
                 stamp = datetime.strptime(created_at, '%Y-%m-%dT%H:%M:%SZ')

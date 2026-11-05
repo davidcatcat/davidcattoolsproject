@@ -131,7 +131,8 @@ class DelegateRepairCapTests(unittest.TestCase):
         store = self._at_cap()
 
         with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
-            task_submission_cli._check_delegate_repair_cap(_args(), store)
+            task_submission_cli._check_delegate_repair_cap(
+                _args(high_debug_ref=None, high_debug_task=None), store)
         self.assertEqual(store.recorded, [])
 
     def test_newer_no_work_assignment_still_dates_high_debug(self):

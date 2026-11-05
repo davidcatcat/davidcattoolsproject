@@ -25,7 +25,8 @@ def counts_as_repair_round(developer_record):
             return error_code != 'DEVELOPER_GW_AGENT_CONFIG_INVALID'
         return False
     if type(execution) is dict and execution.get('changed_files') is False:
-        if type(error_code) is str and error_code in _NO_WORK_EXECUTION_CODES:
+        if (state == 'DEVELOPER_OUTCOME_UNKNOWN' and
+                type(error_code) is str and error_code in _NO_WORK_EXECUTION_CODES):
             return False
         if (state == 'DEVELOPER_OUTPUT_REJECTED' and
                 error_code == 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'):

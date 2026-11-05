@@ -194,13 +194,14 @@ class CodexDelegateTests(unittest.TestCase):
                   registration=None, bound_registration=None, codex_error=None,
                   codex_result=None, codex_timeout=600, run_observer=None,
                   empty_diff=False, large_diff=False, background=False,
-                  dispatch_observer=None):
+                  dispatch_observer=None, write_paths=None):
         self._fake_codex(ignored=ignored, bytecode=bytecode,
                          overwrite_ignored=overwrite_ignored,
                          empty_diff=empty_diff, large_diff=large_diff)
+        write_paths = list(write_paths or ['src.py'])
         args = Namespace(task_id=task['task_id'], selection_source='PM',
             acceptance=['src.py is changed'], executor_task='executor-task-1',
-            read_path=['src.py'], write_path=['src.py'],
+            read_path=write_paths, write_path=write_paths,
             egress_basis='approved bounded fixture', mode='direct',
             provider='codex', background=background)
         snapshot = (SimpleNamespace(root=registration.root,
@@ -395,6 +396,71 @@ class CodexDelegateTests(unittest.TestCase):
                 task, codex_error=blocked_with_new_file, codex_result=result,
                 empty_diff=True)
         self.assertIs(saved['developer']['execution']['changed_files'], True)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(saved['developer']['error_code'],
+                         'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+        self.assertEqual(saved['developer']['execution']['status'], 'BLOCKED')
+
+    def test_blocked_run_with_in_scope_new_file_stays_codex_blocked(self):
+        task = self._task()
+        result = task_submission_cli.codex_direct_developer.DirectResult(
+            status='BLOCKED', summary='blocked safely', tests=(),
+            self_review='checked', blocked_reason='cannot safely edit',
+            exit_code=0, thread_id='12345678-1234-4234-8234-123456789abc',
+            stdout_sha256='a' * 64, elapsed_ms=1, cleanup_status='CONFIRMED',
+            usage=None)
+
+        def blocked_with_new_file(**_kwargs):
+            (self.root / 'new.py').write_text('VALUE = 2\n')
+            return result
+
+        with redirect_stdout(io.StringIO()):
+            _result, saved, _callback = self._dispatch(
+                task, codex_error=blocked_with_new_file, codex_result=result,
+                empty_diff=True, write_paths=['src.py', 'new.py'])
+        self.assertIs(saved['developer']['execution']['changed_files'], True)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(saved['developer']['error_code'], 'CODEX_BLOCKED')
+
+    def test_task_store_restricts_changed_files_evidence_to_valid_codex_shapes(self):
+        blocked_task = self._task()
+        blocked_result = task_submission_cli.codex_direct_developer.DirectResult(
+            status='BLOCKED', summary='blocked safely', tests=(),
+            self_review='checked', blocked_reason='cannot safely edit',
+            exit_code=0, thread_id='12345678-1234-4234-8234-123456789abc',
+            stdout_sha256='a' * 64, elapsed_ms=1, cleanup_status='CONFIRMED',
+            usage=None)
+        with redirect_stdout(io.StringIO()):
+            _result, blocked_saved, _callback = self._dispatch(
+                blocked_task, codex_result=blocked_result, empty_diff=True)
+        bad_execution = dict(blocked_saved['developer']['execution'],
+                             changed_files='false')
+        with self.assertRaises(task_submission_cli.LLMToolError):
+            self.store.update(blocked_task['task_id'], developer={
+                **blocked_saved['developer'], 'execution': bad_execution})
+
+        responded_task = self._task()
+        done_result = task_submission_cli.codex_direct_developer.DirectResult(
+            status='DONE', summary='updated', tests=(), self_review='checked',
+            blocked_reason=None, exit_code=0,
+            thread_id='12345678-1234-4234-8234-123456789abc',
+            stdout_sha256='b' * 64, elapsed_ms=1, cleanup_status='CONFIRMED',
+            usage=None)
+
+        def done_with_change(**_kwargs):
+            (self.root / 'src.py').write_text('VALUE = 2\n')
+            return done_result
+
+        with redirect_stdout(io.StringIO()):
+            _result, responded_saved, _callback = self._dispatch(
+                responded_task, codex_error=done_with_change,
+                codex_result=done_result)
+        self.assertEqual(responded_saved['developer']['state'], 'DEVELOPER_RESPONDED')
+        responded_execution = dict(responded_saved['developer']['execution'],
+                                   changed_files=True)
+        with self.assertRaises(task_submission_cli.LLMToolError):
+            self.store.update(responded_task['task_id'], developer={
+                **responded_saved['developer'], 'execution': responded_execution})
 
     def test_failed_status_check_omits_changed_files(self):
         task = self._task()

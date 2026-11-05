@@ -1593,9 +1593,13 @@ def _validate(record):
                             developer.get('result_status') == 'UNVERIFIED' and
                             developer.get('final_answer') == 'INVALID' and
                             execution['status'] == 'DONE')
+                        rejected_block = (
+                            developer['state'] == 'DEVELOPER_OUTPUT_REJECTED' and
+                            developer.get('error_code') in _DEVELOPER_REJECTION_CODES and
+                            execution['status'] == 'BLOCKED')
                         if (developer['provider_profile'] != 'codex' or
                                 not (no_work_block or invalid_final or
-                                     invalid_final_response) or
+                                     invalid_final_response or rejected_block) or
                                 type(execution['changed_files']) is not bool):
                             _fail()
                     if set(execution) in _DEVELOPER_EXECUTION_DIFF_SHAPES and (

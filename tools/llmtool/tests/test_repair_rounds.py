@@ -20,6 +20,8 @@ class RepairRoundTests(unittest.TestCase):
               'execution': {'changed_files': False}}, False),
             ({'state': 'DEVELOPER_OUTCOME_UNKNOWN', 'error_code': 'CODEX_BLOCKED',
               'execution': {'changed_files': True}}, True),
+            ({'state': 'DEVELOPER_OUTPUT_REJECTED', 'error_code': 'CODEX_BLOCKED',
+              'execution': {'changed_files': False}}, True),
             ({'state': 'DEVELOPER_OUTPUT_REJECTED',
               'error_code': 'DEVELOPER_OUTPUT_INVALID_ENVELOPE',
               'execution': {'changed_files': False}}, False),
