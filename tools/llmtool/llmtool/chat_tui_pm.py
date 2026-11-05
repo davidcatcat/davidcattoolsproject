@@ -381,12 +381,12 @@ def safe_name(name):
 
 
 def display_tool_name(raw_name):
-    """Return a safe, bounded tool name for tool summaries and /logs."""
+    """Return a safe tool name for tool summaries and /logs."""
     name = safe_name(raw_name)
     if (not isinstance(raw_name, str) or '/' in raw_name
             or not all(char.isprintable() for char in raw_name)):
         return "Tool"
-    return name if len(name) <= 60 else name[:59] + "…"
+    return name
 
 
 def safe_code(value):
@@ -463,7 +463,10 @@ def log_lines(turns, now=None):
         status = safe_code(turn.get("status"))
         origin = "背景" if turn.get("origin") == "background" else "前景"
         names = turn.get("tool_names")
-        tools = ",".join(display_tool_name(name) for name in names) if type(names) is list else ""
+        tools = ",".join(
+            name if len(name) <= 60 else name[:59] + "…"
+            for name in (display_tool_name(raw_name) for raw_name in names)
+        ) if type(names) is list else ""
         if not tools:
             tools = "無工具"
         fields = [_local_time(turn.get("started_at"), now),

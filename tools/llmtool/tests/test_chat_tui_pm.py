@@ -176,7 +176,7 @@ class PMLogsTests(unittest.TestCase):
             {"started_at": "2026-10-28T00:00:00+00:00", "status": "COMPLETED",
              "tool_names": ["a" + chr(10) + "b"]},
             {"started_at": "2026-10-28T00:00:00+00:00", "status": "COMPLETED",
-             "tool_names": ["a" * 61]},
+             "tool_names": ["a" * 70]},
         ]
         for turn in turns[:2]:
             rows = chat_tui_pm.log_lines([turn])
@@ -185,6 +185,7 @@ class PMLogsTests(unittest.TestCase):
         rows = chat_tui_pm.log_lines([turns[2]])
         self.assertEqual(len(rows), 1)
         self.assertTrue(rows[0].endswith("a" * 59 + "…"))
+        self.assertEqual(chat_tui_pm.tool_label({"name": "a" * 70}), "a" * 70)
 
     def test_log_lines_screens_status_and_reason_with_safe_code(self):
         rows = chat_tui_pm.log_lines([
