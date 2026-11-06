@@ -986,6 +986,20 @@ class GwAgentRealStoreTests(unittest.TestCase):
     def _reloaded(self):
         return task_store.TaskStore(self.store_root).get(self.task_id)
 
+    def _release_d6(self):
+        """Abandon the last delegated Task, as the PM must before reusing its D6.
+
+        A run that ends DEVELOPER_OUTCOME_UNKNOWN without confirmed cleanup
+        stays the live holder of ``executor-d6``. Subtests that delegate again
+        on the same D6 release it first instead of relying on a looser store.
+        """
+        if getattr(self, 'task_id', None) is None:
+            return
+        stranded = self._reloaded()
+        task_store.TaskStore(Path(self.base / 'tasks').resolve()).abandon(
+            self.task_id, pm_session_id=stranded['pm_session_id'],
+            reason='Synthetic subtest finished with the D6.')
+
     def _assert_success_persisted(self, task, target):
         developer = task['developer']
         self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
@@ -1153,22 +1167,28 @@ class GwAgentRealStoreTests(unittest.TestCase):
                  patch.object(task_submission_cli, 'run_task_direct_result_event') as callback:
                 self._fresh_store()
                 target = f'gw-agent-{name}.md'
-                code, task = self._delegate(target, route_runner=self._route_result_with(**fault))
-                callback.assert_not_called()
-                self.assertEqual(code, 1)
-                self._assert_failed(task, 'DEVELOPER_OUTCOME_UNKNOWN',
-                                    'DEVELOPER_RESULT_PERSISTENCE_REJECTED')
-                developer = task['developer']
-                if kept is not None:
-                    self.assertEqual(developer['execution']['status'], 'UNKNOWN')
-                    self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
-                    for field, value in kept.items():
-                        self.assertEqual(developer['execution'][field], value)
-                    self.assertEqual(developer['changed_files'], [target])
-                else:
-                    self.assertIsNone(developer['execution'])
-                    self.assertNotIn('changed_files', developer)
-                (self.root / target).unlink()
+                try:
+                    code, task = self._delegate(
+                        target, route_runner=self._route_result_with(**fault))
+                    callback.assert_not_called()
+                    self.assertEqual(code, 1)
+                    self._assert_failed(task, 'DEVELOPER_OUTCOME_UNKNOWN',
+                                        'DEVELOPER_RESULT_PERSISTENCE_REJECTED')
+                    developer = task['developer']
+                    if kept is not None:
+                        self.assertEqual(developer['execution']['status'], 'UNKNOWN')
+                        self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
+                        for field, value in kept.items():
+                            self.assertEqual(developer['execution'][field], value)
+                        self.assertEqual(developer['changed_files'], [target])
+                    else:
+                        self.assertIsNone(developer['execution'])
+                        self.assertNotIn('changed_files', developer)
+                    (self.root / target).unlink()
+                finally:
+                    # An unknown outcome without confirmed cleanup still holds
+                    # executor-d6; the next fault runs as a new Task on it.
+                    self._release_d6()
 
     def test_owner_pause_on_the_dispatching_write_is_persisted(self):
         paused = worker_dispatch.PolicyDecision('company-gw-agent', False, 'OWNER_PAUSED',
@@ -1266,11 +1286,59 @@ class GwAgentRealStoreTests(unittest.TestCase):
             def interrupted(*_args, _error=error, **_kwargs):
                 raise _error
             with self.subTest(error=type(error).__name__):
+<<<<<<< ours
                 self._fresh_store()
                 with self.assertRaises(type(error)):
                     self._delegate('gw-agent-interrupted.md', route_runner=interrupted)
                 self._assert_failed(self._reloaded(), 'DEVELOPER_OUTCOME_UNKNOWN',
                                     'DEVELOPER_INTERRUPTED')
+=======
+                try:
+                    with self.assertRaises(type(error)):
+                        self._delegate('gw-agent-interrupted.md', route_runner=interrupted)
+                    self._assert_failed(self._reloaded(), 'DEVELOPER_OUTCOME_UNKNOWN',
+                                        'DEVELOPER_INTERRUPTED')
+                finally:
+                    # The interrupted run may still be live, so it holds
+                    # executor-d6 until the PM abandons it.
+                    self._release_d6()
+
+    def test_interrupted_run_holds_the_d6_until_the_pm_abandons_it(self):
+        def interrupted(*_args, **_kwargs):
+            raise KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            self._delegate('gw-agent-held.md', route_runner=interrupted)
+        holder_id = self.task_id
+        self.server.script.clear()
+        with self.assertRaises(LLMToolError) as caught:
+            self._delegate('gw-agent-held-next.md', route_runner=self._unused_runner)
+        self.assertEqual(getattr(caught.exception, 'task_store_error_code', None),
+                         'TASK_D6_ALREADY_BOUND')
+        self.task_id = holder_id
+        self._assert_failed(self._reloaded(), 'DEVELOPER_OUTCOME_UNKNOWN',
+                            'DEVELOPER_INTERRUPTED')
+        self._release_d6()
+        self.server.script.clear()
+        target = 'gw-agent-held-after-abandon.md'
+        code, task = self._delegate(target)
+        self.assertEqual(code, 0)
+        self._assert_success_persisted(task, target)
+
+    def test_repair_round_after_a_failed_run_binds_the_same_d6(self):
+        def route_error(*_args, **_kwargs):
+            raise RouteError('GW_AGENT_TIMEOUT')
+        code, failed = self._delegate('gw-agent-repair-failed.md', route_runner=route_error)
+        self.assertEqual(code, 1)
+        self._assert_failed(failed, 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TIMEOUT')
+        # No abandonment: a run that ended DEVELOPER_UNAVAILABLE holds no D6.
+        self.server.script.clear()
+        target = 'gw-agent-repair.md'
+        code, task = self._delegate(target)
+        self.assertEqual(code, 0)
+        self._assert_success_persisted(task, target)
+        self.assertIsNone(task_store.TaskStore(Path(self.base / 'tasks').resolve()).get(
+            failed['task_id']).get('abandonment'))
+>>>>>>> theirs
 
     def test_interruption_before_the_run_is_persisted_and_still_raised(self):
         with self.assertRaises(KeyboardInterrupt):

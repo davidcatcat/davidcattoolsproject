@@ -1046,6 +1046,511 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(outcomes.count('BOUND'), 1)
         self.assertEqual(outcomes.count('TASK_D6_ALREADY_BOUND'), 1)
 
+    def test_d6_binding_with_many_finished_tasks_does_not_hold_lock_over_full_scan(self):
+        self._allow_codex_dispatch()
+        store = TaskStore(Path(self.temp.name).resolve())
+        finished_ids = set()
+        artifact = ('diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n'
+                    '@@ -1 +1 @@\n-x=1\n+x=2\n')
+        artifact_sha = hashlib.sha256(artifact.encode()).hexdigest()
+        for index in range(60):
+            finished = self._codex_dispatch_task()
+            store.create(finished)
+            developer = self._developer_assignment(provider='codex', max_tokens=None)
+            developer.update(
+                state='DEVELOPER_RESPONDED', provider_type='codex-cli',
+                model='gpt-6-luna', executor_task_id=f'executor-done-{index}',
+                artifact=artifact, artifact_sha256=artifact_sha)
+            completion = {
+                'state': 'WAITING_EXECUTOR',
+                'executor_task_id': f'executor-done-{index}',
+                'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+                'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+                'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+            }
+            store.compare_and_update(
+                finished['task_id'], expected={'developer': None, 'completion': None},
+                developer=developer, completion=completion)
+            finished_ids.add(finished['task_id'])
+
+        candidates = [self._codex_dispatch_task() for _ in range(2)]
+        for task in candidates:
+            store.create(task)
+
+        original_get = store.get
+        original_lock = store._lock_sidecar
+        original_unlock = store._unlock_sidecar
+        lock_owner = [None]
+        locked_finished_reads = []
+        barrier = threading.Barrier(2)
+        outcomes = []
+
+        def tracked_lock(directory, lock_name, *, exclusive, code):
+            fd = original_lock(directory, lock_name, exclusive=exclusive, code=code)
+            if lock_name == '.claude-d6-binding.lock':
+                lock_owner[0] = threading.get_ident()
+            return fd
+
+        def tracked_unlock(lock_fd):
+            if lock_fd is not None:
+                lock_owner[0] = None
+            return original_unlock(lock_fd)
+
+        def slow_finished_get(task_id):
+            if task_id in finished_ids:
+                if lock_owner[0] == threading.get_ident():
+                    locked_finished_reads.append(task_id)
+                time.sleep(0.005)
+            return original_get(task_id)
+
+        def bind(index, task):
+            executor_task_id = f'executor-many-{index}'
+            developer = self._developer_assignment(provider='codex', max_tokens=None)
+            developer['executor_task_id'] = executor_task_id
+            completion = {
+                'state': 'WAITING_EXECUTOR', 'executor_task_id': executor_task_id,
+                'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+                'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+                'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+            }
+            barrier.wait()
+            try:
+                store.d6_bind_compare_and_update(
+                    task['task_id'], executor_task_id=executor_task_id,
+                    expected={'developer': None, 'completion': None},
+                    developer=developer, completion=completion)
+                outcomes.append('BOUND')
+            except LLMToolError as exc:
+                outcomes.append(exc.task_store_error_code)
+
+        # 60 finished tasks * 5 ms = 300 ms per full scan, while the lock wait
+        # timeout is 100 ms: holding the lock during the scan would time out
+        # the second bind with TASK_D6_BINDING_BUSY.
+        with patch.object(task_store_module, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 0.1), \
+                patch.object(store, '_lock_sidecar', side_effect=tracked_lock), \
+                patch.object(store, '_unlock_sidecar', side_effect=tracked_unlock), \
+                patch.object(store, 'get', side_effect=slow_finished_get):
+            threads = [threading.Thread(target=bind, args=(i, task))
+                       for i, task in enumerate(candidates)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(outcomes, ['BOUND', 'BOUND'])
+        self.assertEqual(locked_finished_reads, [])
+
+        claude_task = self._codex_dispatch_task()
+        store.create(claude_task)
+        claude_dev = self._developer_assignment(provider='claude', max_tokens=None)
+        claude_dev['owner_assignment_ref'] = (
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+            '#issuecomment-1')
+        claude_dev['executor_task_id'] = 'executor-done-0'
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            with self.assertRaises(LLMToolError) as caught:
+                store.claude_bind_compare_and_update(
+                    claude_task['task_id'], executor_task_id='executor-done-0',
+                    expected={'developer': None}, developer=claude_dev)
+            self.assertEqual(caught.exception.task_store_error_code,
+                             'TASK_D6_ALREADY_BOUND')
+            claude_dev['executor_task_id'] = 'executor-claude-fresh'
+            saved = store.claude_bind_compare_and_update(
+                claude_task['task_id'], executor_task_id='executor-claude-fresh',
+                expected={'developer': None}, developer=claude_dev)
+        self.assertEqual(saved['developer']['executor_task_id'], 'executor-claude-fresh')
+
+    @staticmethod
+    def _d6_completion(executor_task_id):
+        return {
+            'state': 'WAITING_EXECUTOR', 'executor_task_id': executor_task_id,
+            'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+            'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+        }
+
+    def _d6_timed_out_task(self, store, executor_task_id):
+        """A Codex Task that timed out with confirmed cleanup: not a live holder."""
+        task = self._codex_dispatch_task()
+        store.create(task)
+        developer = self._developer_assignment(provider='codex', max_tokens=None)
+        developer.update(
+            state='DEVELOPER_OUTCOME_UNKNOWN', provider_type='codex-cli',
+            error_code='CODEX_TIMEOUT', executor_task_id=executor_task_id,
+            execution={'status': 'TIMEOUT', 'native_session_id': None,
+                       'process_exit_code': None, 'stdout_sha256': None,
+                       'elapsed_ms': 25, 'cleanup_status': 'CONFIRMED',
+                       'usage_source': 'UNKNOWN', 'source_bytes': None,
+                       'source_file_count': None, 'source_manifest_sha256': None})
+        saved = store.compare_and_update(
+            task['task_id'], expected={'developer': None, 'completion': None},
+            developer=developer, completion=self._d6_completion(executor_task_id))
+        self.assertFalse(store._d6_bind_holds(saved, executor_task_id))
+        return task['task_id']
+
+    def _d6_binder(self, store, kind, executor_task_id):
+        """Prepare one way of gaining a D6; return a call that tries it."""
+        if kind in ('continuation-bind', 'continuation-update'):
+            task_id = self._d6_timed_out_task(store, executor_task_id)
+            timed_out = store.get(task_id)
+            continued = self._developer_assignment(provider='codex', max_tokens=None)
+            continued['executor_task_id'] = executor_task_id
+            if kind == 'continuation-bind':
+                return lambda: store.d6_bind_compare_and_update(
+                    task_id, executor_task_id=executor_task_id,
+                    expected={'developer': timed_out['developer']}, developer=continued)
+            return lambda: store.compare_and_update(
+                task_id, expected={'record_sha256': timed_out['record_sha256']},
+                developer=continued)
+        if kind == 'create':
+            task = self._codex_dispatch_task()
+            developer = self._developer_assignment(provider='codex', max_tokens=None)
+            developer['executor_task_id'] = executor_task_id
+            task.update(developer=developer,
+                        completion=self._d6_completion(executor_task_id))
+            return lambda: store.create(task)
+        task = self._codex_dispatch_task()
+        store.create(task)
+        if kind == 'claude':
+            developer = self._developer_assignment(provider='claude', max_tokens=None)
+            developer['owner_assignment_ref'] = (
+                'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+                '#issuecomment-1')
+            developer['executor_task_id'] = executor_task_id
+            return lambda: store.claude_bind_compare_and_update(
+                task['task_id'], executor_task_id=executor_task_id,
+                expected={'developer': None}, developer=developer)
+        developer = self._developer_assignment(provider='codex', max_tokens=None)
+        return lambda: store.d6_bind_compare_and_update(
+            task['task_id'], executor_task_id=executor_task_id,
+            expected={'developer': None, 'completion': None},
+            developer=developer, completion=self._d6_completion(executor_task_id))
+
+    @staticmethod
+    def _d6_live_holders(store, executor_task_id):
+        return [task_id for task_id in store.task_ids()
+                if store._d6_bind_holds(store.get(task_id), executor_task_id)]
+
+    def _run_d6_interleaved(self, store, first, second, *, before_lock=None):
+        """Run ``second`` to completion after ``first`` scans but before it locks."""
+        original_lock = store._lock_sidecar
+        pending = [second]
+        outcomes = {}
+
+        def attempt(name, call):
+            try:
+                call()
+                outcomes[name] = 'BOUND'
+            except LLMToolError as exc:
+                outcomes[name] = exc.task_store_error_code
+
+        def racing_lock(directory, lock_name, *, exclusive, code):
+            if exclusive and lock_name == task_store_module.D6_BINDING_LOCK_NAME and pending:
+                attempt('second', pending.pop())
+                if before_lock is not None:
+                    before_lock()
+            return original_lock(directory, lock_name, exclusive=exclusive, code=code)
+
+        with patch.object(store, '_lock_sidecar', side_effect=racing_lock):
+            attempt('first', first)
+        self.assertEqual(pending, [])
+        return outcomes
+
+    def test_d6_interleaved_binders_never_commit_two_live_holders(self):
+        """Each binder finishes its scan, then the other commits before it locks."""
+        kinds = ('continuation-bind', 'continuation-update', 'fresh', 'claude', 'create')
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            for index, (first_kind, second_kind) in enumerate(
+                    (first, second) for first in kinds for second in kinds):
+                with self.subTest(first=first_kind, second=second_kind):
+                    store = TaskStore(Path(self.temp.name).resolve() / f'race-{index}')
+                    executor_task_id = f'executor-race-{index}'
+                    first = self._d6_binder(store, first_kind, executor_task_id)
+                    second = self._d6_binder(store, second_kind, executor_task_id)
+                    outcomes = self._run_d6_interleaved(store, first, second)
+                    self.assertEqual(sorted(outcomes.values()),
+                                     ['BOUND', 'TASK_D6_ALREADY_BOUND'])
+                    self.assertEqual(len(self._d6_live_holders(store, executor_task_id)), 1)
+
+    def test_d6_timeout_continuation_refused_while_another_task_holds(self):
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            for kind in ('continuation-bind', 'continuation-update'):
+                with self.subTest(kind=kind):
+                    store = TaskStore(Path(self.temp.name).resolve() / kind)
+                    executor_task_id = 'executor-continued'
+                    continuation = self._d6_binder(store, kind, executor_task_id)
+                    self._d6_binder(store, 'fresh', executor_task_id)()
+                    with self.assertRaises(LLMToolError) as caught:
+                        continuation()
+                    self.assertEqual(caught.exception.task_store_error_code,
+                                     'TASK_D6_ALREADY_BOUND')
+                    self.assertEqual(len(self._d6_live_holders(store, executor_task_id)), 1)
+
+    def test_d6_claude_binder_treats_live_callback_holder_as_bound(self):
+        store = TaskStore(Path(self.temp.name).resolve())
+        executor_task_id = 'executor-callback-held'
+        holder = self._codex_dispatch_task()
+        store.create(holder)
+        developer = self._developer_assignment(provider='codex', max_tokens=None)
+        developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', provider_type='codex-cli',
+                         error_code='CODEX_INTERRUPTED',
+                         executor_task_id='executor-other-bound',
+                         execution={'status': 'UNKNOWN', 'native_session_id': None,
+                            'process_exit_code': None, 'stdout_sha256': None,
+                            'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+                            'usage_source': 'UNKNOWN', 'source_bytes': None,
+                            'source_file_count': None, 'source_manifest_sha256': None})
+        registration = SimpleNamespace(task_id=executor_task_id, root='/registered/root',
+            common_dir='/repo/.git', branch='task-branch', result_sha='a' * 40,
+            trusted_agent_id='codex-developer', session_ref='session-ref',
+            native_session_id=None)
+        developer['direct_result_callback'] = task_submission_cli_module._direct_result_callback(
+            holder, registration, 'a' * 40, test_policy='LOCAL')
+        store.compare_and_update(holder['task_id'],
+            expected={'developer': None, 'completion': None}, developer=developer,
+            completion=self._d6_completion('executor-other-bound'))
+        self.assertFalse(store._claude_d6_holds(store.get(holder['task_id']),
+                                                executor_task_id))
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            with self.assertRaises(LLMToolError) as caught:
+                self._d6_binder(store, 'claude', executor_task_id)()
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_ALREADY_BOUND')
+
+    def test_d6_journal_gap_forces_a_new_scan(self):
+        store = TaskStore(Path(self.temp.name).resolve())
+        executor_task_id = 'executor-gap'
+        first = self._d6_binder(store, 'continuation-update', executor_task_id)
+        second = self._d6_binder(store, 'fresh', executor_task_id)
+        other = self._d6_binder(store, 'fresh', 'executor-gap-other')
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None), \
+                patch.object(task_store_module, 'D6_BINDING_JOURNAL_MAX_ENTRIES', 1):
+            # The other D6's claim pushes the same-D6 claim out of the journal.
+            outcomes = self._run_d6_interleaved(store, first, second, before_lock=other)
+        self.assertEqual(outcomes, {'second': 'BOUND', 'first': 'TASK_D6_ALREADY_BOUND'})
+        self.assertEqual(len(self._d6_live_holders(store, executor_task_id)), 1)
+
+    def test_d6_binding_read_failures_refuse(self):
+        executor_task_id = 'executor-read-failure'
+        with self.subTest(read='journal'):
+            root = Path(self.temp.name).resolve() / 'journal'
+            store = TaskStore(root)
+            bind = self._d6_binder(store, 'fresh', executor_task_id)
+            journal = root / task_store_module.D6_BINDING_JOURNAL_NAME
+            journal.write_text('{"not": "a journal"}', encoding='utf-8')
+            journal.chmod(0o600)
+            with self.assertRaises(LLMToolError) as caught:
+                bind()
+            self.assertEqual(caught.exception.task_store_error_code,
+                             'TASK_D6_BINDING_SCAN_FAILED')
+            self.assertEqual(self._d6_live_holders(store, executor_task_id), [])
+
+        with self.subTest(read='locked holder'):
+            store = TaskStore(Path(self.temp.name).resolve() / 'locked')
+            self._d6_binder(store, 'fresh', executor_task_id)()
+            holder_id, = self._d6_live_holders(store, executor_task_id)
+            bind = self._d6_binder(store, 'fresh', executor_task_id)
+            original_get = store.get
+            holder_reads = []
+
+            def failing_get(task_id):
+                if task_id == holder_id:
+                    holder_reads.append(task_id)
+                    if len(holder_reads) > 1:
+                        raise OSError('holder unreadable')
+                return original_get(task_id)
+
+            with patch.object(store, 'get', side_effect=failing_get):
+                with self.assertRaises(LLMToolError) as caught:
+                    bind()
+            self.assertEqual(caught.exception.task_store_error_code,
+                             'TASK_D6_BINDING_SCAN_FAILED')
+            self.assertEqual(len(holder_reads), 2)
+            self.assertEqual(self._d6_live_holders(store, executor_task_id), [holder_id])
+
+    def test_d6_binding_locked_work_does_not_grow_with_finished_tasks(self):
+        def locked_work(name, finished_count):
+            store = TaskStore(Path(self.temp.name).resolve() / name)
+            executor_task_id = 'executor-hold-time'
+            for _ in range(finished_count):
+                # Finished on the same D6, so each one is a former holder.
+                self._d6_timed_out_task(store, executor_task_id)
+            bind = self._d6_binder(store, 'continuation-update', executor_task_id)
+            original_lock = store._lock_sidecar
+            original_unlock = store._unlock_sidecar
+            original_read = store._read_at
+            original_ids = store.task_ids
+            held = [False]
+            reads, listings = [], []
+
+            def tracked_lock(directory, lock_name, *, exclusive, code):
+                fd = original_lock(directory, lock_name, exclusive=exclusive, code=code)
+                held[0] = exclusive and lock_name == task_store_module.D6_BINDING_LOCK_NAME
+                return fd
+
+            def tracked_unlock(lock_fd):
+                held[0] = False
+                return original_unlock(lock_fd)
+
+            def tracked_read(directory, task_id):
+                if held[0]:
+                    reads.append(task_id)
+                return original_read(directory, task_id)
+
+            def tracked_ids():
+                if held[0]:
+                    listings.append(True)
+                return original_ids()
+
+            with patch.object(worker_dispatch, 'authorize_task_store_change',
+                              return_value=None), \
+                    patch.object(store, '_lock_sidecar', side_effect=tracked_lock), \
+                    patch.object(store, '_unlock_sidecar', side_effect=tracked_unlock), \
+                    patch.object(store, '_read_at', side_effect=tracked_read), \
+                    patch.object(store, 'task_ids', side_effect=tracked_ids):
+                bind()
+            self.assertEqual(len(self._d6_live_holders(store, executor_task_id)), 1)
+            self.assertEqual(listings, [])
+            return len(reads), len(set(reads))
+
+        self.assertEqual(locked_work('none-finished', 0), locked_work('many-finished', 40))
+
+    @staticmethod
+    def _track_binding_locks(store):
+        """Patch ``store`` to record each D6 binding lock it takes."""
+        original_lock = store._lock_sidecar
+        taken = []
+
+        def tracked_lock(directory, lock_name, *, exclusive, code):
+            if lock_name == task_store_module.D6_BINDING_LOCK_NAME:
+                taken.append(exclusive)
+            return original_lock(directory, lock_name, exclusive=exclusive, code=code)
+        return patch.object(store, '_lock_sidecar', side_effect=tracked_lock), taken
+
+    def test_d6_repair_round_after_a_failed_run_still_binds(self):
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            for kind in ('continuation-bind', 'continuation-update', 'fresh'):
+                with self.subTest(kind=kind):
+                    store = TaskStore(Path(self.temp.name).resolve() / f'repair-{kind}')
+                    executor_task_id = 'executor-repair-round'
+                    # An earlier round on the same D6 failed with confirmed cleanup.
+                    failed_id = self._d6_timed_out_task(store, executor_task_id)
+                    repair = self._d6_binder(store, kind, executor_task_id)
+                    tracker, taken = self._track_binding_locks(store)
+                    with tracker:
+                        repair()
+                    holders = self._d6_live_holders(store, executor_task_id)
+                    self.assertEqual(len(holders), 1)
+                    self.assertNotIn(failed_id, holders)
+                    self.assertIn(True, taken)
+
+    def test_d6_owner_denial_is_audited_while_the_d6_is_held(self):
+        owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+                     '#issuecomment-1234567890')
+        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+        policy['workers']['claude-developer'] = {
+            'dispatch': 'OWNER_ASSIGNMENT_ONLY', 'decided_by': 'Owner',
+            'decided_at': '2026-11-05', 'reason': 'test D6-bound assignment',
+            'evidence': 'https://github.com/davidcatcat/davidcattoolsproject/issues/289',
+            'owner_assignments': [{'task_id': 'e' * 32, 'owner_assignment_ref': owner_ref}],
+        }
+        policy_path = Path(self.temp.name) / 'worker-dispatch-claude-denied.json'
+        policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        executor_task_id = 'f' * 32
+
+        def denied_developer():
+            developer = self._developer_assignment(provider='claude', max_tokens=None)
+            developer.update(backend_session_semantics='CLI_REPORTED_SESSION_ID',
+                             owner_assignment_ref=owner_ref,
+                             executor_task_id=executor_task_id)
+            return developer
+
+        def claude_task():
+            task = self._codex_dispatch_task()
+            task['pm_assignment'] = dict(task['pm_assignment'], route='claude')
+            return task
+
+        for path in ('create', 'update'):
+            with self.subTest(path=path):
+                root = Path(self.temp.name).resolve() / f'denied-{path}'
+                store = TaskStore(root)
+                with patch.object(worker_dispatch, 'authorize_task_store_change',
+                                  return_value=None):
+                    self._d6_binder(store, 'fresh', executor_task_id)()
+                holder_id, = self._d6_live_holders(store, executor_task_id)
+                journal = root / task_store_module.D6_BINDING_JOURNAL_NAME
+                journal_before = journal.read_bytes()
+                task = claude_task()
+                if path == 'update':
+                    store.create(task)
+                else:
+                    task['developer'] = denied_developer()
+                tracker, taken = self._track_binding_locks(store)
+                with patch.object(worker_dispatch, '_POLICY_PATH', policy_path), tracker:
+                    with self.assertRaises(worker_dispatch.WorkerDispatchDenied):
+                        if path == 'create':
+                            store.create(task)
+                        else:
+                            store.compare_and_update(task['task_id'],
+                                expected={'developer': None}, developer=denied_developer())
+                # Denied, so nothing was gained: the binding lock and journal
+                # were never touched and the denial is on record.
+                self.assertEqual(taken, [])
+                self.assertEqual(journal.read_bytes(), journal_before)
+                saved = store.get(task['task_id'])
+                self.assertIsNone(saved['developer'])
+                self.assertEqual(saved['dispatch_audit'][-1]['worker_key'], 'claude-developer')
+                self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'BLOCKED')
+                self.assertEqual(self._d6_live_holders(store, executor_task_id), [holder_id])
+
+    def test_d6_bind_target_that_can_never_bind_takes_no_binding_lock(self):
+        root = Path(self.temp.name).resolve() / 'never-binds'
+        store = TaskStore(root)
+        executor_task_id = 'executor-never-binds'
+        abandoned = self._codex_dispatch_task()
+        store.create(abandoned)
+        store.abandon(abandoned['task_id'], pm_session_id=abandoned['pm_session_id'],
+                      reason='Target was abandoned before dispatch')
+        stale = self._codex_dispatch_task()
+        store.create(stale)
+        claude_developer = self._developer_assignment(provider='claude', max_tokens=None)
+        claude_developer.update(
+            owner_assignment_ref=('https://github.com/davidcatcat/davidcattoolsproject/'
+                                  'issues/289#issuecomment-1'),
+            executor_task_id=executor_task_id)
+
+        def d6_bind(task_id, expected):
+            return store.d6_bind_compare_and_update(
+                task_id, executor_task_id=executor_task_id,
+                expected=dict(expected, completion=None),
+                developer=self._developer_assignment(provider='codex', max_tokens=None),
+                completion=self._d6_completion(executor_task_id))
+
+        def claude_bind(task_id, expected):
+            return store.claude_bind_compare_and_update(
+                task_id, executor_task_id=executor_task_id, expected=expected,
+                developer=claude_developer)
+
+        stale_expected = {'developer': None, 'response': 'not the stored response'}
+        cases = (
+            ('abandoned-d6', d6_bind, abandoned, {'developer': None},
+             'TASK_D6_ALREADY_BOUND'),
+            ('abandoned-claude', claude_bind, abandoned, {'developer': None},
+             'CLAUDE_TASK_ABANDONED'),
+            ('stale-d6', d6_bind, stale, stale_expected, 'TASK_STORE_CONFLICT'),
+            ('stale-claude', claude_bind, stale, stale_expected, 'TASK_STORE_CONFLICT'),
+        )
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            for name, bind, target, expected, error_code in cases:
+                with self.subTest(case=name):
+                    tracker, taken = self._track_binding_locks(store)
+                    with tracker, self.assertRaises(LLMToolError) as caught:
+                        bind(target['task_id'], expected)
+                    self.assertEqual(caught.exception.task_store_error_code, error_code)
+                    self.assertEqual(taken, [])
+                    self.assertIsNone(store.get(target['task_id'])['developer'])
+        self.assertFalse((root / task_store_module.D6_BINDING_JOURNAL_NAME).exists())
+        self.assertEqual(self._d6_live_holders(store, executor_task_id), [])
+
     def test_developer_reported_claims_are_bounded_and_strict(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
