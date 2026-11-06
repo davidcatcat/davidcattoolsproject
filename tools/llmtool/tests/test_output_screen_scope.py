@@ -77,6 +77,7 @@ def _keyword_value():
 
 
 def _keyword_line():
+    # synthetic-fixture: screen-tool test
     return 'pass' + 'word = "' + _keyword_value() + '"'
 
 
