@@ -280,11 +280,16 @@ class DeveloperOutputSensitiveRefusalGateTests(unittest.TestCase):
                                  'ref': self.ref,
                                  'recorded_at': record['recorded_at']}
         path.write_text(json.dumps(record), encoding='utf-8')
+        before = path.read_bytes()
         with self.assertRaises(LLMToolError) as raised:
             high_debug._read_screen_record(task_id, 'developer-output',
                                            root=self.store.root)
         self.assertEqual(raised.exception.high_debug_code,
                          'HIGH_DEBUG_SCREEN_RECORD_INVALID')
+        with self.assertRaises(LLMToolError) as raised:
+            self._dispatch()
+        self.assertNotIn(_keyword_value(), str(raised.exception))
+        self.assertEqual(path.read_bytes(), before)
 
     def test_record_with_omitted_zero_accepts_a_full_disposition(self):
         limit = high_debug._SCREEN_HIT_LIMIT
