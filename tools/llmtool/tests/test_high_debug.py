@@ -359,8 +359,9 @@ class HighDebugTests(unittest.TestCase):
         self.assertEqual(kwargs['env']['GH_CONFIG_DIR'], '/safe/gh-config')
         self.assertNotIn('GH_TOKEN', kwargs['env'])
 
-    def test_github_poster_uses_issue_comment_when_pr_comment_is_rejected(self):
-        rejected = subprocess.CompletedProcess([], 1, stdout=b'', stderr=b'')
+    def test_github_poster_uses_issue_comment_only_when_pr_reports_not_a_pull_request(self):
+        rejected = subprocess.CompletedProcess(
+            [], 1, stdout=b'', stderr=b'Could not resolve to a PullRequest\n')
         posted = subprocess.CompletedProcess([], 0, stdout=b'', stderr=b'')
         with patch.object(high_debug.shutil, 'which', return_value='/trusted/gh'), \
              patch.object(high_debug.task_completion, '_trusted_slug',
@@ -376,8 +377,42 @@ class HighDebugTests(unittest.TestCase):
               '--body-file', '-']])
         self.assertEqual(run.call_args_list[1].kwargs['input'], b'monitor body')
 
+    def test_github_poster_does_not_retry_other_pr_comment_failures(self):
+        failures = (b'', b'HTTP 502: Bad Gateway\n',
+                    b'error connecting to api.github.com\n')
+        for stderr in failures:
+            with self.subTest(stderr=stderr):
+                rejected = subprocess.CompletedProcess([], 1, stdout=b'', stderr=stderr)
+                with patch.object(high_debug.shutil, 'which', return_value='/trusted/gh'), \
+                     patch.object(high_debug.task_completion, '_trusted_slug',
+                                  return_value='owner/repo'), \
+                     patch.object(high_debug.subprocess, 'run',
+                                  return_value=rejected) as run:
+                    self.assertFalse(
+                        _REAL_POST_GITHUB_RECORD(17, 'monitor body', '/repo'))
+                self.assertEqual(run.call_count, 1)
+
+    def test_ambiguous_failure_stays_unposted_without_second_write_or_stderr(self):
+        rejected = subprocess.CompletedProcess(
+            [], 1, stdout=b'', stderr=b'HTTP 502: Bad Gateway\n')
+        entry = {'d6': 'run-1', 'status': 'RCA_CONFIRMED', 'report_sha256': 'b' * 64}
+        with patch.object(high_debug, '_post_github_record', _REAL_POST_GITHUB_RECORD), \
+             patch.object(high_debug.shutil, 'which', return_value='/trusted/gh'), \
+             patch.object(high_debug.task_completion, '_trusted_slug',
+                          return_value='owner/repo'), \
+             patch.object(high_debug.subprocess, 'run',
+                          return_value=rejected) as run:
+            self.assertFalse(high_debug._post_record(entry, 17, '/repo', 'a' * 32))
+        self.assertEqual(run.call_count, 1)
+        path = Path(self.unposted_root.name) / 'high-debug-unposted' / 'run-1.json'
+        saved = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual(saved['reason'], 'POST_FAILED')
+        self.assertIn('Status: RCA_CONFIRMED', saved['body'])
+        self.assertNotIn('HTTP 502', path.read_text(encoding='utf-8'))
+
     def test_both_comment_failures_leave_unposted_record(self):
-        rejected = subprocess.CompletedProcess([], 1, stdout=b'', stderr=b'')
+        rejected = subprocess.CompletedProcess(
+            [], 1, stdout=b'', stderr=b'Could not resolve to a PullRequest\n')
         entry = {'d6': 'run-1', 'status': 'RCA_CONFIRMED', 'report_sha256': 'b' * 64}
         with patch.object(high_debug, '_post_github_record', _REAL_POST_GITHUB_RECORD), \
              patch.object(high_debug.shutil, 'which', return_value='/trusted/gh'), \
