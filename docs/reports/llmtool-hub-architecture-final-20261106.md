@@ -56,7 +56,7 @@ PM 由 Claude 擔任，Claude 不可用時由 Codex 暫代；Reviewer 一律跟�
 | Developer | AGY | 底層為 Gemini 4 Argon |
 | Developer | 公司 LLM | 經 API Agent Gateway 在 worktree 裡讀寫，用法同 Codex、Claude |
 | Reviewer | Claude | 審 OpenAI 系模型（Codex）、Gemini（AGY）、OpenCode 寫的程式碼 |
-| Reviewer | Codex | 審 Claude 系模型（Claude）、公司 LLM 寫的程式碼 |
+| Reviewer | Codex | 審 Claude 系模型（Claude）、公司 LLM 寫的程式碼；Claude 不可用時，AGY 與 OpenCode 也可由 Codex 審 |
 | AI Debug | Codex 高階模型 | 唯讀除錯，每個任務最多介入一次 |
 | 顧問 | ChatGPT | Owner 的技術顧問，不接入 llmtool、不派工 |
 
