@@ -70,21 +70,27 @@ def _publication_text(record, executor_task, branch):
     old_body = f'Automated publication for llmtool Task {task_id}.'
     response = record.get('response') if type(record) is dict else None
     assignment = record.get('pm_assignment') if type(record) is dict else None
+    summary = None
     try:
         response = json.loads(response)
-        if type(response) is not dict or type(response.get('summary')) is not str:
-            return old_title, old_body
-        summary = response['summary'].strip()
-        if not summary or type(assignment) is not dict:
-            return old_title, old_body
+        if type(response) is dict and type(response.get('summary')) is str:
+            summary = response['summary'].strip()
+    except (TypeError, ValueError):
+        pass
+    title = re.sub(r'\s+', ' ', summary).strip()[:120] if summary else old_title
+    if not summary:
+        return title, old_body
+
+    try:
+        if type(assignment) is not dict:
+            return title, old_body
         goal = assignment.get('goal')
         acceptance = assignment.get('acceptance')
         if (type(goal) is not str or not goal.strip() or type(acceptance) is not list or
                 any(type(item) is not str or not item.strip() for item in acceptance) or
                 type(task_id) is not str or type(executor_task) is not str or
                 type(branch) is not str):
-            return old_title, old_body
-        title = re.sub(r'\s+', ' ', summary).strip()[:120]
+            return title, old_body
         body = '\n'.join([
             summary, '', goal.strip(), '', 'Acceptance:',
             *[f'- {item.strip()}' for item in acceptance], '',
@@ -93,7 +99,7 @@ def _publication_text(record, executor_task, branch):
         ])
         return title, body
     except (TypeError, ValueError, IndexError):
-        return old_title, old_body
+        return title, old_body
 
 
 def _find_published_pr(gh_runner, root, branch, expected_head):

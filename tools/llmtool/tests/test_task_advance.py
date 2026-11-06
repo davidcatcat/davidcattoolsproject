@@ -7,12 +7,8 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from contextlib import redirect_stdout
-<<<<<<< ours
-from unittest.mock import patch
-from pathlib import Path
-=======
 from unittest.mock import call, patch
->>>>>>> theirs
+from pathlib import Path
 
 from llmtool import task_advance
 from llmtool import task_submission_cli
@@ -283,7 +279,7 @@ class TaskAdvanceTests(unittest.TestCase):
                          'PUBLISH')
         new_head = 'b' * 40
         self.assertEqual(task_advance.decide(base_record(
-            review_dispatch_claim=[claim], remote_test_outcomes=[]),
+            review_dispatch_claim=[claim]),
             {'root': '/repo/task', 'result_head': new_head, 'recorded_result_head': new_head,
              'dirty': False}, {'number': 17, 'head': {'sha': new_head}},
             {'events': [{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
@@ -1661,6 +1657,17 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
             self.record, 'executor-1', 'feature/task'),
             (f'llmtool Task {self.record["task_id"]}',
              f'Automated publication for llmtool Task {self.record["task_id"]}.'))
+
+    def test_publication_title_uses_summary_when_assignment_is_unreadable(self):
+        for assignment in (None, {'goal': '', 'acceptance': ['acceptance']}):
+            with self.subTest(assignment=assignment):
+                record = dict(self.record,
+                    response=json.dumps({'summary': 'Keep this readable title'}),
+                    pm_assignment=assignment)
+                self.assertEqual(task_advance._publication_text(
+                    record, 'executor-1', 'feature/task'),
+                    ('Keep this readable title',
+                     f'Automated publication for llmtool Task {record["task_id"]}.'))
 
     def test_create_pr_uses_main_base_and_task_text(self):
         calls = []
