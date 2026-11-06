@@ -233,14 +233,15 @@ class DelegateRepairCapTests(unittest.TestCase):
 
 
 def _no_work(**overrides):
+    # The real shape persisted by the Codex route: no changed_files field.
     developer = {
         'state': 'DEVELOPER_OUTCOME_UNKNOWN',
         'provider_profile': 'codex',
         'error_code': 'CODEX_BLOCKED',
         'created_at': '2026-11-04T00:00:02Z',
+        'source_sha': _HEAD,
         'artifact': None,
         'artifact_sha256': None,
-        'changed_files': [],
         'execution': {'status': 'BLOCKED', 'cleanup_status': 'CONFIRMED'},
         'usage': None,
     }
@@ -252,12 +253,17 @@ class LaunchedNoWorkRepairCountTests(unittest.TestCase):
     _NEWEST = '00000000000000000000000000000000'
 
     def setUp(self):
+        self.diff = ([], b'')
         for name, target, kwargs in (
                 ('trust_patch', (task_submission_cli.trust, 'load_trust'),
                  {'return_value': SimpleNamespace(
                      repository={'slug': 'example/project'})}),
                 ('binding_patch', (task_submission_cli, '_delegate_d6_binding'),
-                 {'return_value': (None, SimpleNamespace(head=_HEAD))})):
+                 {'return_value': (SimpleNamespace(root='/d6'),
+                                   SimpleNamespace(head=_HEAD))}),
+                ('diff_patch', (task_submission_cli.task_completion,
+                                '_worktree_diff'),
+                 {'side_effect': lambda root, head: self.diff})):
             started = patch.object(*target, **kwargs)
             started.start()
             self.addCleanup(started.stop)
@@ -310,16 +316,40 @@ class LaunchedNoWorkRepairCountTests(unittest.TestCase):
     def test_artifact_sha_alone_counts(self):
         self._assert_counted(_no_work(artifact_sha256='0' * 64))
 
-    def test_changed_files_count(self):
-        self._assert_counted(_no_work(changed_files=['a.py']))
+    def test_run_that_left_uncommitted_files_counts(self):
+        # Real record: empty artifact, but the D6 holds uncommitted edits.
+        self.diff = (['a.py'], b'diff --git a/a.py b/a.py\n')
+        self._assert_counted(_no_work())
 
-    def test_missing_or_malformed_changed_files_count(self):
-        for value in (None, 'a.py', {}):
+    def test_untracked_or_raw_diff_counts(self):
+        for diff in (([], b'diff'), (['a.py'], b'')):
+            with self.subTest(diff=diff):
+                self.diff = diff
+                self._assert_counted(_no_work())
+
+    def test_moved_d6_head_counts(self):
+        self._assert_counted(_no_work(source_sha='b' * 40))
+
+    def test_missing_or_malformed_source_sha_counts(self):
+        for value in (None, 'abc', 5, 'A' * 40):
+            with self.subTest(value=value):
+                self._assert_counted(_no_work(source_sha=value))
+        developer = _no_work()
+        del developer['source_sha']
+        self._assert_counted(developer)
+
+    def test_unverifiable_d6_state_counts(self):
+        with patch.object(task_submission_cli, '_delegate_d6_binding',
+                          side_effect=OSError('dirty or unavailable')):
+            self._assert_counted(_no_work())
+        with patch.object(task_submission_cli.task_completion,
+                          '_worktree_diff', side_effect=OSError('git')):
+            self._assert_counted(_no_work())
+
+    def test_present_changed_files_must_be_empty_list(self):
+        for value in (['a.py'], None, 'a.py', {}):
             with self.subTest(value=value):
                 self._assert_counted(_no_work(changed_files=value))
-        developer = _no_work()
-        del developer['changed_files']
-        self._assert_counted(developer)
 
     def test_unknown_or_missing_cleanup_counts(self):
         for execution in (

@@ -4508,12 +4508,15 @@ _PRELAUNCH_REPAIR_REFUSALS = frozenset((
 ))
 
 
-def _launched_run_did_no_work(developer):
+def _launched_run_did_no_work(developer, d6_unchanged=None):
     """True only when a launched run's record proves it did no work.
 
-    It must have ended blocked or interrupted, with no artifact, an explicit
-    empty changed-file list and confirmed cleanup. Anything missing, malformed
-    or unknown does not prove that, so the run still counts.
+    It must have ended blocked or interrupted, with no artifact and confirmed
+    cleanup. Real records carry no changed-file list and an empty artifact
+    alone proves nothing, so ``d6_unchanged(source_sha)`` must also confirm
+    that the D6 head still equals the run's recorded source SHA and that its
+    tree is clean. Anything missing, malformed or unknown does not prove that,
+    so the run still counts.
     """
     if type(developer) is not dict:
         return False
@@ -4532,12 +4535,23 @@ def _launched_run_did_no_work(developer):
     if not all(key in developer and developer[key] is None
                for key in ('artifact', 'artifact_sha256')):
         return False
-    changed_files = developer.get('changed_files')
-    if type(changed_files) is not list or changed_files:
-        return False
+    if 'changed_files' in developer:
+        changed_files = developer['changed_files']
+        if type(changed_files) is not list or changed_files:
+            return False
     execution = developer.get('execution')
-    return (type(execution) is dict and
-            execution.get('cleanup_status') == 'CONFIRMED')
+    if not (type(execution) is dict and
+            execution.get('cleanup_status') == 'CONFIRMED'):
+        return False
+    source_sha = developer.get('source_sha')
+    if (type(source_sha) is not str or
+            re.fullmatch(r'[0-9a-f]{40}', source_sha) is None or
+            d6_unchanged is None):
+        return False
+    try:
+        return d6_unchanged(source_sha) is True
+    except Exception:
+        return False
 
 
 def _check_delegate_repair_cap(args, store, d6_binding=None):
@@ -4552,6 +4566,24 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     count = 0
     newest_assignment = None
     high_debug_task = getattr(args, 'high_debug_task', None)
+    d6_state = []
+
+    def d6_unchanged(source_sha):
+        # Evaluated lazily: a run that changed nothing leaves the D6 head at
+        # its source SHA with a clean tree. Any doubt means the run counts.
+        if not d6_state:
+            try:
+                binding = (d6_binding if d6_binding is not None
+                           else _delegate_d6_binding(args))
+                registration, snapshot = binding
+                changed_paths, raw = task_completion._worktree_diff(
+                    registration.root, snapshot.head)
+                d6_state.append((snapshot.head, not changed_paths and not raw))
+            except Exception:
+                d6_state.append((None, False))
+        head, clean = d6_state[0]
+        return head == source_sha and clean
+
     for task_id in task_ids:
         if task_id == current_task_id:
             continue
@@ -4590,7 +4622,7 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             if (known_prelaunch_refusal and known_empty and
                     changed_files_empty and 'progress' not in developer):
                 continue
-            if _launched_run_did_no_work(developer):
+            if _launched_run_did_no_work(developer, d6_unchanged):
                 continue
             created_at = developer.get('created_at')
             try:
