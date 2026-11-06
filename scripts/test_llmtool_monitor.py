@@ -6643,6 +6643,37 @@ class OfficeViewTests(unittest.TestCase):
                 self.assertEqual(any(self.EXEC_FAILED[-8:] in line for line in alerts), should_alert)
         self.assertTrue(next(self.codex.rglob(f"rollout-{self.EXEC_FAILED[-8:]}.jsonl")).exists())
 
+    def test_763_failed_debug_row_settles_with_parent_pr(self):
+        debug = self.task.parent / "wp-1-hd1-abcdef0"
+        other = self.task.parent / "wp-1-hdx-abcdef0"
+        os.makedirs(debug)
+        os.makedirs(other)
+        self._register("wp-1", str(self.task), branch="feature/failed")
+        self._register("wp-1-hd1-abcdef0", str(debug))
+        self._register("wp-1-hdx-abcdef0", str(other))
+        now = int(self.NOW)
+        db = self._turn_db([(self.EXEC_FAILED, "u", 0, "failed", now - 2400, now - 1800),
+                            (self.EXEC_NEWER, "u", 0, "failed", now - 2400, now - 1800)])
+        self._exec_708(self.EXEC_FAILED, 1800, cwd=debug)
+        self._exec_708(self.EXEC_NEWER, 1800, cwd=other)
+        cases = (
+            ({"feature/failed": (763, "CLOSED")}, mon.DONE, False),
+            ({"feature/failed": (763, "MERGED")}, mon.DONE, False),
+            ({"feature/failed": (763, "OPEN")}, mon.ATTENTION, True),
+            ({}, mon.ATTENTION, True),       # no PR for the registered branch
+            (None, mon.ATTENTION, True),     # unreadable PR snapshot
+        )
+        for prs, expected, should_alert in cases:
+            with self.subTest(prs=prs):
+                rows = self._office(db, prs=prs)
+                row = next(row for row in rows if row.sid == self.EXEC_FAILED[-8:])
+                self.assertEqual(row.state, expected)
+                unmatched = next(row for row in rows if row.sid == self.EXEC_NEWER[-8:])
+                self.assertEqual(unmatched.state, mon.ATTENTION)
+                alerts = [line for line in mon.office_lines(rows) if line.startswith("⚠")]
+                self.assertEqual(any(self.EXEC_FAILED[-8:] in line for line in alerts), should_alert)
+                self.assertTrue(any(self.EXEC_NEWER[-8:] in line for line in alerts))
+
     def test_708_completion_in_other_d6_does_not_clear(self):
         other = self.task.parent / "wp-2"
         os.makedirs(other)
