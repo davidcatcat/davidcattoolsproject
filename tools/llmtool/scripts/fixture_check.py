@@ -26,6 +26,7 @@ SCREEN_TOOL_TEST_MODULES = (
     "test_high_debug",
     "test_spec_preflight",
     "test_fixture_check",
+    "test_developer_diff_screen",
 )
 LABEL = "# synthetic-fixture: screen-tool test"
 BASELINE = REPO / "tools" / "llmtool" / "tests" / "fixture_check_baseline.json"

@@ -1549,8 +1549,29 @@ def _recount_developer_hunks(value):
     return ''.join(result)
 
 
-def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=True):
-    """Apply the unchanged envelope, strict diff, and write-scope checks."""
+def _mapping_sources(source_files):
+    """Pre-image reader over already-read source text, for the diff screen."""
+    if source_files is None:
+        return None
+    return lambda path: source_files[path]
+
+
+def _revision_sources(root, source_sha):
+    """Pre-image reader for one revision; reads a blob only when asked."""
+    def read(path):
+        raw = task_completion._git(
+            root, ('show', f'{source_sha}:{path}'), limit=8 * 1024 * 1024)
+        return raw.decode('utf-8', 'strict')
+    return read
+
+
+def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=True,
+                                       sources=None):
+    """Apply the unchanged envelope, strict diff, and write-scope checks.
+
+    ``sources`` optionally reads a path's pre-image text so the diff screen
+    can prove a Python release against the file's unchanged lines.
+    """
     if type(value) is not str or not value.strip():
         return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
     try:
@@ -1563,7 +1584,7 @@ def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=Tr
            127 <= ord(char) <= 159 or unicodedata.category(char) == 'Cf'
            for char in value):
         return 'DEVELOPER_OUTPUT_INVALID_TEXT'
-    if developer_diff_sensitive(value, _added_diff_content(value), _patch_paths):
+    if developer_diff_sensitive(value, _added_diff_content(value), _patch_paths, sources):
         return 'DEVELOPER_OUTPUT_SENSITIVE'
     if not value.startswith('diff --git '):
         return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
@@ -1587,7 +1608,8 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
     value = _recount_developer_hunks(value) if type(value) is str else value
     recount_tokens = (('HUNK_COUNTS_RECOUNTED',)
                       if value != original_value else ())
-    original_rejection = _strict_developer_output_rejection(value, write_paths)
+    sources = _mapping_sources(source_files)
+    original_rejection = _strict_developer_output_rejection(value, write_paths, sources=sources)
     if (original_rejection is not None and original_rejection not in
             ('DEVELOPER_OUTPUT_INVALID_ENVELOPE', 'DEVELOPER_OUTPUT_INVALID_DIFF')):
         return None, (), original_rejection
@@ -1597,7 +1619,8 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
         normalized, tokens = normalize_developer_output(value, write_paths)
         if normalized == value or not tokens:
             return None, (), original_rejection
-    normalized_rejection = _strict_developer_output_rejection(normalized, write_paths)
+    normalized_rejection = _strict_developer_output_rejection(
+        normalized, write_paths, sources=sources)
     if source_files is None and normalized_rejection is not None:
         return None, (), normalized_rejection
     if source_files is not None:
@@ -1633,7 +1656,8 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
             normalized, write_paths, dict(source_files), return_valid=True)
         if not valid_anchor:
             return None, (), 'DEVELOPER_OUTPUT_INVALID_DIFF'
-        anchored_rejection = _strict_developer_output_rejection(anchored, write_paths)
+        anchored_rejection = _strict_developer_output_rejection(
+            anchored, write_paths, sources=sources)
         if anchored_rejection is not None:
             return None, (), anchored_rejection
         normalized = anchored
@@ -1644,11 +1668,12 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
 
 
 def _developer_output_rejection(value, write_paths, *, normalize=False,
-                                allow_new_files=True):
+                                allow_new_files=True, sources=None):
     """Classify output strictly unless a text-proposal route opts into salvage."""
     if not normalize:
         return _strict_developer_output_rejection(value, write_paths,
-                                                  allow_new_files=allow_new_files)
+                                                  allow_new_files=allow_new_files,
+                                                  sources=sources)
     return _developer_normalized_output(value, write_paths)[2]
 
 
@@ -1717,7 +1742,8 @@ def _codex_cumulative_diff_rejection(root, source_sha, write_paths,
     if not validate_envelope:
         return None, artifact
     rejection = _developer_output_rejection(
-        artifact, write_paths, allow_new_files=True)
+        artifact, write_paths, allow_new_files=True,
+        sources=_revision_sources(root, source_sha))
     return rejection, artifact
 
 
@@ -2896,7 +2922,8 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             raise LLMToolError('OpenCode diff exceeds the supported size')
         artifact = artifact_raw.decode('utf-8', 'strict')
         rejection = _developer_output_rejection(
-            artifact, write_paths, normalize=False, allow_new_files=True)
+            artifact, write_paths, normalize=False, allow_new_files=True,
+            sources=_revision_sources(registration.root, snapshot.head))
         execution = _direct_execution(result)
         if rejection is not None:
             saved = _persist_developer_output_rejection(

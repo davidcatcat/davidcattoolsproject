@@ -17,6 +17,7 @@ from llmtool.test_output_excerpts import _emitted_sensitive
 
 CODE = 'DEVELOPER_OUTPUT_SENSITIVE'
 PY = 'pkg/mod.py'
+SHA = '0123456789abcdef0123456789abcdef01234567'
 
 # Keywords and screened values are assembled at run time so that this module's
 # own source never resembles text the screen refuses.
@@ -28,22 +29,27 @@ VALUE = 'zq' + 'xv' * 6
 
 
 def _cloud():
+    # synthetic-fixture: screen-tool test
     return 'AK' + 'IA' + 'Q' * 16
 
 
 def _jwt():
+    # synthetic-fixture: screen-tool test
     return 'ey' + 'J' + 'h' * 12 + '.' + 'p' * 10 + '.' + 's' * 10
 
 
 def _url():
+    # synthetic-fixture: screen-tool test
     return 'ht' + 'tps://' + 'u' * 4 + ':' + 'w' * 6 + '@' + 'example.invalid/x'
 
 
 def _auth():
+    # synthetic-fixture: screen-tool test
     return 'Bear' + 'er ' + 'r' * 16
 
 
 def _private():
+    # synthetic-fixture: screen-tool test
     return '-----BEGIN ' + 'PRIVATE KEY-----'
 
 
@@ -256,6 +262,150 @@ class DiffShapeTests(unittest.TestCase):
         value = (f'diff --git a/{PY} b/{PY}\n--- a/{PY}\n+++ b/{PY}\n@@ -1,2 +1,3 @@\n'
                  f'+{KW} = load_value(\n same\n+    other)\n-old\n')
         self.assertEqual(_strict_developer_output_rejection(value, [PY]), CODE)
+
+
+def _insert_diff(source, at, added, path=PY):
+    """Git-shaped diff adding ``added`` after source line ``at``, 3 context lines."""
+    old = source.split('\n')[:-1]
+    before, after = old[max(0, at - 3):at], old[at:at + 3]
+    start = at - len(before) + 1
+    context = len(before) + len(after)
+    return (f'diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n'
+            f'@@ -{start},{context} +{start},{context + len(added)} @@\n'
+            + ''.join(' ' + line + '\n' for line in before)
+            + ''.join('+' + line + '\n' for line in added)
+            + ''.join(' ' + line + '\n' for line in after))
+
+
+def _module_source():
+    # The docstring and the quotes in the comment sit outside the hunk.
+    return ('"""Module docstring."""\n'
+            '\n'
+            'import os  # a """ quote inside a comment\n'
+            '\n'
+            '\n'
+            'def load(other):\n'
+            '    value = os.environ.get(other)\n'
+            '    return value\n'
+            '\n'
+            '\n'
+            'def run(other):\n'
+            '    first = load(other)\n'
+            '    second = load(first)\n'
+            '    return second\n')
+
+
+def _string_source(opening, closing):
+    # A multi-line string opens on line 1 and closes on line 8.
+    return (opening + '\n' + ''.join(f'line {index}\n' for index in range(6))
+            + closing + '\n' + 'after = 1\n')
+
+
+_OPENED_STRINGS = (('NOTE = """', '"""'), ("NOTE = '''", "'''"),
+                   ('NOTE = f"""', '"""'), ('NOTE = call(rb"""', '""")'))
+
+
+class UnchangedLinesTests(unittest.TestCase):
+    """A release needs proof that no earlier string or comment covers the block."""
+
+    def test_original_981_assignment_in_existing_file_is_released(self):
+        source = _module_source()
+        added = [f'    {KW} = load(first)']
+        value = _insert_diff(source, 12, added)
+        self.assertTrue(_emitted_sensitive(_added_diff_content(value)))
+        self.assertNotIn('"""', value)
+        sources = {PY: source}
+        self.assertIsNone(_strict_developer_output_rejection(
+            value, [PY], sources=sources.__getitem__))
+        self.assertIsNone(_developer_output_rejection(
+            value, [PY], sources=sources.__getitem__))
+        self.assertIsNone(_developer_normalized_output(value, [PY], source_files=sources)[2])
+
+    def test_original_981_case_through_revision_reader(self):
+        source = _module_source()
+        value = _insert_diff(source, 12, [f'    {KW} = load(first)'])
+        sha = SHA
+        with mock.patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                               return_value=([PY], value.encode('utf-8'))), \
+                mock.patch.object(task_submission_cli.task_completion, '_git',
+                                  return_value=source.encode('utf-8')) as git:
+            self.assertEqual(task_submission_cli._codex_cumulative_diff_rejection(
+                'root', sha, [PY]), (None, value))
+        git.assert_called_once_with('root', ('show', f'{sha}:{PY}'), limit=8 * 1024 * 1024)
+        with mock.patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                               return_value=([PY], value.encode('utf-8'))), \
+                mock.patch.object(task_submission_cli.task_completion, '_git',
+                                  side_effect=OSError):
+            self.assertEqual(task_submission_cli._codex_cumulative_diff_rejection(
+                'root', sha, [PY]), (CODE, value))
+
+    def test_unavailable_unchanged_lines_keep_the_refusal(self):
+        source = _module_source()
+        value = _insert_diff(source, 12, [f'    {KW} = load(first)'])
+        self.assertEqual(_strict_developer_output_rejection(value, [PY]), CODE)
+
+        def missing(path):
+            raise KeyError(path)
+        self.assertEqual(_strict_developer_output_rejection(value, [PY], sources=missing), CODE)
+
+    def test_source_that_does_not_match_the_diff_keeps_the_refusal(self):
+        source = _module_source()
+        value = _insert_diff(source, 12, [f'    {KW} = load(first)'])
+        for other in (source.replace('first = load(other)', 'first = other'),
+                      source.replace('"""Module docstring."""\n', ''), ''):
+            with self.subTest(lines=len(other.splitlines())):
+                self.assertEqual(_strict_developer_output_rejection(
+                    value, [PY], sources=lambda path, other=other: other), CODE)
+
+    def test_keyword_text_in_string_opened_on_unchanged_line_is_refused(self):
+        added = [f'{KW} = other']
+        # The same block alone is a release, so only the earlier string refuses it.
+        self.assertIsNone(_strict_developer_output_rejection(_diff(PY, added), [PY]))
+        for opening, closing in _OPENED_STRINGS:
+            source = _string_source(opening, closing)
+            value = _insert_diff(source, 4, added)
+            with self.subTest(opening=opening):
+                self.assertNotIn('"""', value)
+                self.assertNotIn("'''", value)
+                self.assertTrue(_emitted_sensitive(_added_diff_content(value)))
+                self.assertEqual(_strict_developer_output_rejection(
+                    value, [PY], sources=lambda path, source=source: source), CODE)
+                self.assertEqual(_strict_developer_output_rejection(value, [PY]), CODE)
+                self.assertEqual(_developer_normalized_output(
+                    value, [PY], source_files={PY: source})[2], CODE)
+                with mock.patch.object(task_submission_cli.task_completion, '_git',
+                                       return_value=source.encode('utf-8')):
+                    self.assertEqual(_developer_output_rejection(
+                        value, [PY], sources=task_submission_cli._revision_sources(
+                            'root', SHA)), CODE)
+
+    def test_keyword_text_in_string_opened_on_context_line_is_refused(self):
+        added = [f'{KW} = other']
+        for opening, closing in _OPENED_STRINGS:
+            source = _string_source(opening, closing)
+            value = _insert_diff(source, 2, added)
+            with self.subTest(opening=opening):
+                self.assertIn(opening, value)
+                self.assertEqual(_strict_developer_output_rejection(value, [PY]), CODE)
+                self.assertEqual(_strict_developer_output_rejection(
+                    value, [PY], sources=lambda path, source=source: source), CODE)
+
+    def test_string_opened_in_an_earlier_added_block_is_refused(self):
+        value = (f'diff --git a/{PY} b/{PY}\n--- a/{PY}\n+++ b/{PY}\n@@ -1,2 +1,4 @@\n'
+                 '+NOTE = """\n same\n+' + f'{KW} = other\n' + ' """\n')
+        self.assertEqual(_strict_developer_output_rejection(value, [PY]), CODE)
+
+    def test_open_brackets_before_the_block_are_not_a_string(self):
+        source = ('x = 1\n' * 4 + 'result = call(\n    first,\n    second,\n'
+                  '    third,\n)\n')
+        value = _insert_diff(source, 8, [f'    {KW}=other'])
+        self.assertTrue(_emitted_sensitive(_added_diff_content(value)))
+        self.assertIsNone(_strict_developer_output_rejection(
+            value, [PY], sources=lambda path: source))
+        quoted = source.replace('    second,', '    """second,')
+        self.assertEqual(_strict_developer_output_rejection(
+            _insert_diff(quoted, 8, [f'    {KW}=other']), [PY],
+            sources=lambda path: quoted), CODE)
 
 
 if __name__ == '__main__':
