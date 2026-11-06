@@ -48,6 +48,7 @@ from .developer_routes.agy import (
 from .developer_routes.claude import MAX_PROMPT_BYTES as CLAUDE_MAX_PROMPT_BYTES
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_output_excerpts import _emitted_sensitive
+from .developer_diff_screen import developer_diff_sensitive
 from .developer_output_normalize import (normalize_developer_output,
                                          reanchor_developer_output)
 
@@ -1562,7 +1563,7 @@ def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=Tr
            127 <= ord(char) <= 159 or unicodedata.category(char) == 'Cf'
            for char in value):
         return 'DEVELOPER_OUTPUT_INVALID_TEXT'
-    if _emitted_sensitive(_added_diff_content(value)):
+    if developer_diff_sensitive(value, _added_diff_content(value), _patch_paths):
         return 'DEVELOPER_OUTPUT_SENSITIVE'
     if not value.startswith('diff --git '):
         return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
