@@ -798,6 +798,8 @@ class TaskStoreTests(unittest.TestCase):
         def create_task(provider, *, bind=False):
             task = self._codex_dispatch_task()
             store.create(task)
+            if not bind:
+                return task['task_id']
             developer = self._developer_assignment(provider=provider, max_tokens=None)
             if provider in ('opencode', 'agy', 'gw-agent'):
                 developer['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
@@ -808,13 +810,12 @@ class TaskStoreTests(unittest.TestCase):
                 self._allow_agy_assignment(task['task_id'], ref)
             completion = {
                 'state': 'WAITING_EXECUTOR',
-                'executor_task_id': executor_task_id if bind else 'executor-other-1',
+                'executor_task_id': executor_task_id,
                 'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
                 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
                 'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
             }
-            if bind:
-                developer['executor_task_id'] = executor_task_id
+            developer['executor_task_id'] = executor_task_id
             store.compare_and_update(
                 task['task_id'], expected={'developer': None, 'completion': None},
                 developer=developer, completion=completion)
