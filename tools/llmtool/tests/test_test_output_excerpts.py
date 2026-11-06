@@ -619,6 +619,110 @@ class TestOutputExcerptsTests(unittest.TestCase):
         self.assertTrue(_sensitive(jwt + 'x'))
         self.assertTrue(_sensitive_jwt(jwt + 'x'))
 
+    def test_diagnostics_cloud_key_screen_detects_cjk_neighbors_and_allows_longer_ascii_identifier(self):
+        from llmtool import diagnostics as d
+
+        # synthetic-fixture: screen-tool test
+        cloud_key = 'AKIA' + '0' * 16
+        # synthetic-fixture: screen-tool test
+        cjk_wrapped = '北' + cloud_key + '京'
+        with self.assertRaises(ValueError):
+            d.safe_diagnostic_text(cjk_wrapped)
+        identifier = 'prefix_' + cloud_key + '_suffix'
+        self.assertEqual(d.safe_diagnostic_text(identifier), identifier)
+
+    def test_remote_excerpt_cloud_key_boundary_matches_shared_rule(self):
+        import ast
+        import re
+        from llmtool import remote_test
+        from llmtool.test_output_excerpts import _CLOUD_KEY
+
+        parsed = ast.parse(remote_test._REMOTE_SCRIPT)
+        sensitive = next(node for node in parsed.body
+                         if isinstance(node, ast.Assign) and
+                         any(isinstance(target, ast.Name) and target.id == 'SENSITIVE'
+                             for target in node.targets))
+        helper = next(node for node in parsed.body
+                      if isinstance(node, ast.FunctionDef) and
+                      node.name == 'failure_excerpt')
+        pattern = sensitive.value.args[0].value
+        self.assertIn('|' + _CLOUD_KEY + '|', pattern)
+        namespace = {'re': re, '_emitted_sensitive': remote_test._emitted_sensitive}
+        exec(compile(ast.Module(body=[sensitive, helper], type_ignores=[]),
+                     '<remote-excerpt-helper>', 'exec'), namespace)
+        failure_excerpt = lambda output: namespace['failure_excerpt'](
+            [output.encode(), b''], '/tmp/llmtool-remote-test.Abc123', '/home/runner')
+
+        # synthetic-fixture: screen-tool test
+        cloud_key = 'AKIA' + '0' * 16
+        # synthetic-fixture: screen-tool test
+        cjk_wrapped = '北' + cloud_key + '京'
+        ascii_identifier = 'prefix_' + cloud_key + '_suffix'
+        # synthetic-fixture: screen-tool test
+        cjk_excerpt = failure_excerpt(
+            'FAIL: test_expected (test_remote_test.Case)\n'
+            'Traceback (most recent call last):\n'
+            'AssertionError: ' + cjk_wrapped + '\n'
+            '----------------------------------------------------------------------\n')
+        self.assertNotIn(cloud_key, cjk_excerpt)
+        identifier_excerpt = failure_excerpt(
+            'FAIL: test_expected (test_remote_test.Case)\n'
+            'Traceback (most recent call last):\n'
+            'AssertionError: ' + ascii_identifier + '\n'
+            '----------------------------------------------------------------------\n')
+        self.assertIn('AssertionError: ' + ascii_identifier, identifier_excerpt)
+
+    def test_test_run_summary_cloud_key_screen_detects_cjk_neighbors_and_allows_longer_ascii_identifier(self):
+        import llmtool.test_run_summary as summary_module
+        from llmtool.test_run_summary import summarize_test_run
+        from llmtool.test_selection import select_test_plan
+
+        head = 'e1b4ea2c85ff320d694168112da8fa531f126228'
+        plan = select_test_plan(['tools/llmtool/llmtool/task_lifecycle.py'])
+        ref = lambda value: 'sha256:' + hashlib.sha256(value).hexdigest()
+        plan_digest = ref(json.dumps(plan, ensure_ascii=True, sort_keys=True,
+                                     separators=(',', ':'), allow_nan=False).encode('ascii'))
+        commands = []
+        for level in plan['levels']:
+            commands_for_level = ([level['command']] if level['level'] == 'L0'
+                                  else [item['argv'] for item in level.get('commands', [])])
+            for argv in commands_for_level:
+                log_digest = ref(b'synthetic caller-asserted log digest input')
+                counts = ({'tests_run': 0, 'passed': 0, 'failed': 0, 'errors': 0, 'skipped': 0}
+                          if argv == ['make', 'syntax'] else
+                          {'tests_run': 1, 'passed': 1, 'failed': 0, 'errors': 0, 'skipped': 0})
+                commands.append({
+                    'argv_sha256': ref(json.dumps(argv, ensure_ascii=True, sort_keys=True,
+                                                  separators=(',', ':'), allow_nan=False).encode('ascii')),
+                    'exit_status': 0,
+                    'log_sha256': log_digest,
+                    'log_ref': log_digest,
+                    'counts': counts,
+                    'failure_ids': [],
+                })
+        source = {'schema_version': 1, 'head_sha': head, 'plan_sha256': plan_digest,
+                  'commands': commands}
+
+        # synthetic-fixture: screen-tool test
+        cloud_key = 'AKIA' + '0' * 16
+        # synthetic-fixture: screen-tool test
+        cjk_wrapped = '北' + cloud_key + '京'
+        ascii_identifier = 'prefix_' + cloud_key + '_suffix'
+
+        self.assertIsNotNone(summary_module._SENSITIVE_ID.search(cjk_wrapped))
+        self.assertIsNone(summary_module._SENSITIVE_ID.search(ascii_identifier))
+
+        source['commands'][1]['counts'] = {'tests_run': 1, 'passed': 0, 'failed': 1,
+                                           'errors': 0, 'skipped': 0}
+        source['commands'][1]['exit_status'] = 1
+        source['commands'][1]['failure_ids'] = [cjk_wrapped]
+        with self.assertRaises(ValueError):
+            summarize_test_run(plan, source, expected_head=head)
+
+        source['commands'][1]['failure_ids'] = [ascii_identifier]
+        summary = summarize_test_run(plan, source, expected_head=head)
+        self.assertEqual(summary['commands'][1]['failure_ids'], [ascii_identifier])
+
     def test_near_limit_jwt_scan_completes_without_false_success(self):
         # Repeated boundary-bearing prefixes, missing dots, and short or
         # boundary-less segments must complete rather than time out or leak.
