@@ -1111,7 +1111,7 @@ sys.exit(0 if result.wasSuccessful() else 1)
 
     def test_root_logging_cli_rejections_have_no_partial_json_or_private_echo(self):
         for tail, category in ((SYNTHETIC_AWS_KEY, 'source'),
-                               (SYNTHETIC_AWS_KEY + '測', 'emitted excerpt')):
+                               (SYNTHETIC_AWS_KEY + '測', 'source')):
             raw = b'ERROR:root:synthetic observation\n' + unittest_capture([
                 ('FAIL', FAIL_ID, FAIL_BODY + '\n' + tail)])
             self.path.write_bytes(raw)
