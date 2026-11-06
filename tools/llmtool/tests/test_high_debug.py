@@ -359,6 +359,39 @@ class HighDebugTests(unittest.TestCase):
         self.assertEqual(kwargs['env']['GH_CONFIG_DIR'], '/safe/gh-config')
         self.assertNotIn('GH_TOKEN', kwargs['env'])
 
+    def test_github_poster_uses_issue_comment_when_pr_comment_is_rejected(self):
+        rejected = subprocess.CompletedProcess([], 1, stdout=b'', stderr=b'')
+        posted = subprocess.CompletedProcess([], 0, stdout=b'', stderr=b'')
+        with patch.object(high_debug.shutil, 'which', return_value='/trusted/gh'), \
+             patch.object(high_debug.task_completion, '_trusted_slug',
+                          return_value='owner/repo'), \
+             patch.object(high_debug.subprocess, 'run',
+                          side_effect=(rejected, posted)) as run:
+            self.assertTrue(_REAL_POST_GITHUB_RECORD(17, 'monitor body', '/repo'))
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [['/trusted/gh', 'pr', 'comment', '17', '--repo', 'owner/repo',
+              '--body-file', '-'],
+             ['/trusted/gh', 'issue', 'comment', '17', '--repo', 'owner/repo',
+              '--body-file', '-']])
+        self.assertEqual(run.call_args_list[1].kwargs['input'], b'monitor body')
+
+    def test_both_comment_failures_leave_unposted_record(self):
+        rejected = subprocess.CompletedProcess([], 1, stdout=b'', stderr=b'')
+        entry = {'d6': 'run-1', 'status': 'RCA_CONFIRMED', 'report_sha256': 'b' * 64}
+        with patch.object(high_debug, '_post_github_record', _REAL_POST_GITHUB_RECORD), \
+             patch.object(high_debug.shutil, 'which', return_value='/trusted/gh'), \
+             patch.object(high_debug.task_completion, '_trusted_slug',
+                          return_value='owner/repo'), \
+             patch.object(high_debug.subprocess, 'run',
+                          side_effect=(rejected, rejected)) as run:
+            self.assertFalse(high_debug._post_record(entry, 17, '/repo', 'a' * 32))
+        self.assertEqual(run.call_count, 2)
+        path = Path(self.unposted_root.name) / 'high-debug-unposted' / 'run-1.json'
+        saved = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual(saved['reason'], 'POST_FAILED')
+        self.assertIn('Status: RCA_CONFIRMED', saved['body'])
+
     def test_github_poster_without_trusted_slug_does_not_run_subprocess(self):
         with patch.object(high_debug.shutil, 'which', return_value='/trusted/gh'), \
              patch.object(high_debug.task_completion, '_trusted_slug', return_value=None), \

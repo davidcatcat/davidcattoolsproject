@@ -95,12 +95,17 @@ def _post_github_record(pr_number, body, repo_root):
            'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1'}
     if os.environ.get('GH_CONFIG_DIR'):
         env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
-    result = subprocess.run(
-        [gh, 'pr', 'comment', str(pr_number), '--repo', slug, '--body-file', '-'],
-        cwd=repo_root, env=env, input=body.encode('utf-8'),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False,
-        check=False, timeout=30)
-    return result.returncode == 0
+    # --pr may name an Issue, which `gh pr comment` rejects. Fall back to the
+    # Issue API so the record posts on both thread kinds.
+    for command in ('pr', 'issue'):
+        result = subprocess.run(
+            [gh, command, 'comment', str(pr_number), '--repo', slug, '--body-file', '-'],
+            cwd=repo_root, env=env, input=body.encode('utf-8'),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False,
+            check=False, timeout=30)
+        if result.returncode == 0:
+            return True
+    return False
 
 
 def _write_unposted(entry, pr_number, task_id, reason, body=None):
