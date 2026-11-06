@@ -69,6 +69,7 @@ class CiTestShardsTests(unittest.TestCase):
         self.assertIn("needs.shards.result", workflow)
         self.assertIn("always()", workflow)
         self.assertIn("ec2-self-runner-3) account=ghrunner3", workflow)
+        self.assertEqual(workflow.count("ec2-self-runner-4) account=ghrunner4 ;;"), 3)
         self.assertIn("name: check (docs)", workflow)
         self.assertIn("needs: changes", workflow)
         self.assertIn("tools/llmtool/scripts/docs_check.py", workflow)

@@ -61,7 +61,8 @@ _CI_WORKFLOW_NAME = 'llmtool Mac CI'
 _LINUX_CI_WORKFLOW_PATH = '.github/workflows/llmtool-linux-ci.yml'
 _LINUX_CI_WORKFLOW_NAME = 'llmtool Linux CI'
 _LINUX_CI_RUNNER_NAMES = frozenset((
-    'ec2-self-runner', 'ec2-self-runner-2', 'ec2-self-runner-3'))
+    'ec2-self-runner', 'ec2-self-runner-2', 'ec2-self-runner-3',
+    'ec2-self-runner-4'))
 _GITHUB_ACTIONS_APP_ID = 15368
 _D6_EVIDENCE_STATES = frozenset(('ACTIVE', 'REVIEW_PENDING', 'REPAIR'))
 # A GitHub-hosted job reports this runner group; self-hosted groups never do.
