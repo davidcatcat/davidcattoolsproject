@@ -3465,7 +3465,12 @@ class TaskStore:
                 new_attempt = changes['merge_attempt']
                 valid = (old_attempt is None and new_attempt.get('state') == 'CLAIMED')
                 if type(old_attempt) is dict:
-                    valid = (old_attempt.get('state') == 'CLAIMED' and
+                    valid = (old_attempt.get('state') == 'UNKNOWN' and
+                        new_attempt.get('state') == 'CLAIMED' and
+                        all(old_attempt.get(key) == new_attempt.get(key)
+                            for key in ('pr', 'head_sha')) and
+                        old_attempt.get('claimed_at') != new_attempt.get('claimed_at'))
+                    valid = valid or (old_attempt.get('state') == 'CLAIMED' and
                         new_attempt.get('state') in ('UNKNOWN', 'MERGED') and
                         all(old_attempt.get(key) == new_attempt.get(key)
                             for key in ('pr', 'head_sha', 'claimed_at')))

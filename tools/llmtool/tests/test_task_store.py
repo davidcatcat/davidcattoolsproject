@@ -69,6 +69,46 @@ class TaskStoreTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve() / 'tasks'
         self.store = TaskStore(self.root)
 
+    def _store_merge_attempt(self, state, *, pr=17, head='a' * 40):
+        saved = self.store.create(record())
+        attempt = {'pr': pr, 'head_sha': head, 'state': 'CLAIMED',
+                   'claimed_at': '2026-11-06T00:00:00Z'}
+        saved = self.store.compare_and_update(saved['task_id'],
+            expected={'record_sha256': saved['record_sha256']}, merge_attempt=attempt)
+        if state != 'CLAIMED':
+            attempt = dict(attempt, state=state)
+            saved = self.store.compare_and_update(saved['task_id'],
+                expected={'merge_attempt': dict(attempt, state='CLAIMED')},
+                merge_attempt=attempt)
+        return saved
+
+    def test_merge_attempt_unknown_can_be_reclaimed_for_same_pr_and_head(self):
+        saved = self._store_merge_attempt('UNKNOWN')
+        replacement = {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+                       'claimed_at': '2026-11-06T00:00:01Z'}
+        updated = self.store.compare_and_update(saved['task_id'],
+            expected={'merge_attempt': saved['merge_attempt']},
+            merge_attempt=replacement)
+        self.assertEqual(updated['merge_attempt'], replacement)
+
+    def test_merge_attempt_rejects_unsafe_reclaims(self):
+        cases = (
+            ('MERGED', 17, 'a' * 40, 'TASK_MERGE_ATTEMPT_TRANSITION_INVALID'),
+            ('CLAIMED', 17, 'a' * 40, 'TASK_MERGE_ATTEMPT_TRANSITION_INVALID'),
+            ('UNKNOWN', 18, 'a' * 40, 'TASK_MERGE_ATTEMPT_TRANSITION_INVALID'),
+            ('UNKNOWN', 17, 'b' * 40, 'TASK_MERGE_ATTEMPT_TRANSITION_INVALID'),
+        )
+        for old_state, new_pr, new_head, expected_code in cases:
+            with self.subTest(old_state=old_state, new_pr=new_pr, new_head=new_head):
+                saved = self._store_merge_attempt(old_state)
+                replacement = {'pr': new_pr, 'head_sha': new_head, 'state': 'CLAIMED',
+                               'claimed_at': '2026-11-06T00:00:01Z'}
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.compare_and_update(saved['task_id'],
+                        expected={'merge_attempt': saved['merge_attempt']},
+                        merge_attempt=replacement)
+                self.assertEqual(caught.exception.task_store_error_code, expected_code)
+
     def test_high_debug_entries_are_append_only(self):
         task = self._codex_dispatch_task()
         self.store.create(task)

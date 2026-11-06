@@ -356,11 +356,15 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         current_pr = github_get(f'pulls/{number}')
     except Exception:
         return _merge_refusal('MERGE_PR_UNAVAILABLE')
+    prior = record.get('merge_attempt')
     current_head = current_pr.get('head') if type(current_pr) is dict else None
     if (type(current_head) is not dict or current_head.get('sha') != head or
             current_pr.get('number', number) != number):
         return _merge_refusal('MERGE_STALE_HEAD')
     if current_pr.get('state') not in (None, 'open') or current_pr.get('merged') is True:
+        return _merge_refusal('MERGE_PR_NOT_OPEN')
+    if (type(prior) is dict and prior.get('state') == 'UNKNOWN' and
+            (current_pr.get('state') != 'open' or current_pr.get('merged') is not False)):
         return _merge_refusal('MERGE_PR_NOT_OPEN')
     if current_pr.get('mergeable') is not True:
         return _merge_refusal('MERGE_PR_NOT_MERGEABLE')
@@ -380,13 +384,20 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
                 'MERGE_REQUIRED_CHECK_MISSING')
     if code:
         return _merge_refusal(code)
-    prior = record.get('merge_attempt')
     if prior is not None:
         if prior.get('pr') != number or prior.get('head_sha') != head:
             return _merge_refusal('MERGE_CONFLICTING_PR')
-        return _merge_refusal('MERGE_ALREADY_CLAIMED')
+        if prior.get('state') != 'UNKNOWN':
+            return _merge_refusal('MERGE_ALREADY_CLAIMED')
     claim = {'pr': number, 'head_sha': head, 'state': 'CLAIMED',
              'claimed_at': TaskStore._completion_now()}
+    if prior is not None and claim['claimed_at'] == prior.get('claimed_at'):
+        # TaskStore timestamps have second precision. Ensure a retry is a new
+        # claim even when the previous attempt completed in this same second.
+        from datetime import datetime, timedelta, timezone
+        claimed_at = datetime.strptime(claim['claimed_at'], '%Y-%m-%dT%H:%M:%SZ')
+        claim['claimed_at'] = (claimed_at.replace(tzinfo=timezone.utc) +
+                               timedelta(seconds=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
     try:
         store.compare_and_update(record['task_id'],
             expected={'record_sha256': record['record_sha256']}, merge_attempt=claim)
@@ -398,13 +409,21 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     except Exception:
         result = None
     if result is None or getattr(result, 'returncode', 1) != 0:
-        claim['state'] = 'UNKNOWN'
         try:
-            store.compare_and_update(record['task_id'], expected={'merge_attempt':
-                dict(claim, state='CLAIMED')}, merge_attempt=claim)
+            current_pr = github_get(f'pulls/{number}')
         except Exception:
-            pass
-        return _merge_refusal('MERGE_OUTCOME_UNKNOWN')
+            current_pr = None
+        current_head = current_pr.get('head') if type(current_pr) is dict else None
+        if (type(current_head) is not dict or current_head.get('sha') != head or
+                current_pr.get('number', number) != number or
+                current_pr.get('merged') is not True):
+            claim['state'] = 'UNKNOWN'
+            try:
+                store.compare_and_update(record['task_id'], expected={'merge_attempt':
+                    dict(claim, state='CLAIMED')}, merge_attempt=claim)
+            except Exception:
+                pass
+            return _merge_refusal('MERGE_OUTCOME_UNKNOWN')
     claim['state'] = 'MERGED'
     warning_codes = []
     try:
