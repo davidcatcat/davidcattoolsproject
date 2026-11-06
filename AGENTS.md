@@ -9,9 +9,9 @@
   - Role accounts and models resolve from the user-level llmtool config through `resolve_role`.
   - The PM uses sub-agent PMs proactively: mode A is read-only analysis; mode B executes one authorized work package. The PM and Developers may split work across sub-agents they start. No two PMs dispatch the same work, manage the same Task or edit conflicting files; one writer per D6 still applies. The main PM keeps overall responsibility. See [Sub-agent PMs](skills/ai-team-delivery/pm-continuation.md#sub-agent-pms-owner-d8-2026-11-02) for lease and hand-back details.
   - When an llmtool step fails, the PM records the defect and schedules its repair. Making the core llmtool flow work end to end is the priority.
-  - Codex Developer (`gpt-6-luna`, high reasoning effort) remains a Developer route and self-reviews and self-repairs before hand-back.
+  - Codex is Reviewer and debug Reviewer, and gets no new Developer work for now ([Owner](https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6685246395)).
   - OpenCode Developer remains a normal Developer route; the PM selects it from currently available Workers. Pause dispatch on a free-limit refusal or two consecutive route failures; no paid fallback.
-  - Claude Developer (`claude-developer`) stays paused except the one Owner gw-agent assignment recorded in [worker-dispatch.json](tools/llmtool/worker-dispatch.json) ([Owner assignment](https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6641326482)).
+  - Claude Developer (`claude-developer`) is `ALLOWED` for PM-selected Developer work; its formal Reviewer is `codex-reviewer` ([Owner](https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6685246395)).
   - OpenCode and AGY are PM-selected direct CLI routes under their current [worker-dispatch.json](tools/llmtool/worker-dispatch.json) entries; see their sections below.
   - The first Mac OpenCode CLI launch may require the Owner to start the prepared session once; the Owner does not handle routine dispatch.
 
