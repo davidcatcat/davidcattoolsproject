@@ -1406,6 +1406,8 @@ class FakeRun:
 
 
 NOW = 1_800_000_000.0
+OWNER_LOGIN = mon.OWNER_GITHUB_LOGIN
+AI_LOGIN = next(iter(mon.TRUSTED_GITHUB_LOGINS - {OWNER_LOGIN}))
 
 
 def iso(seconds):
@@ -1413,12 +1415,123 @@ def iso(seconds):
     return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def comment(number, seconds, body, kind="issues", association="OWNER"):
+def comment(number, seconds, body, kind="issues", association="OWNER", login=OWNER_LOGIN):
     return {"created_at": iso(seconds), "body": body, "author_association": association,
+            "user": {"login": login},
             "issue_url": f"https://api.github.com/repos/o/r/{kind}/{number}"}
 
 
 class GitHubActivityTests(unittest.TestCase):
+    def test_monitor_identity_load_failures_start_fail_closed(self):
+        loaded_logins, loaded_owner = mon._load_github_logins()
+        self.assertEqual((loaded_logins, loaded_owner),
+                         (mon.TRUSTED_GITHUB_LOGINS, mon.OWNER_GITHUB_LOGIN))
+        class RaisingLoader:
+            def exec_module(self, module):
+                raise RuntimeError("module execution failed")
+
+        failures = (
+            ("missing", patch("importlib.util.spec_from_file_location",
+                              side_effect=FileNotFoundError("missing"))),
+            ("unreadable", patch("importlib.util.spec_from_file_location",
+                                 side_effect=PermissionError("unreadable"))),
+            ("raising", patch("importlib.util.spec_from_file_location",
+                              return_value=__import__("types").SimpleNamespace(
+                                  loader=RaisingLoader()))),
+        )
+        for label, failure_patch in failures:
+            with self.subTest(failure=label), failure_patch:
+                if label == "raising":
+                    module_patch = patch("importlib.util.module_from_spec",
+                                         return_value=__import__("types").SimpleNamespace())
+                else:
+                    module_patch = patch("importlib.util.module_from_spec")
+                with module_patch:
+                    trusted, owner, status = mon._github_identity_state()
+                self.assertEqual((trusted, owner), (frozenset(), None))
+                self.assertIn("信任已停用", status)
+                marker = comment(80, NOW - 9,
+                                 "<!-- activity: type=test_result actor=Codex target=Tests status=PASS -->")
+                with patch.object(mon, "TRUSTED_GITHUB_LOGINS", trusted), \
+                     patch.object(mon, "OWNER_GITHUB_LOGIN", owner), \
+                     patch.object(mon, "GITHUB_IDENTITY_STATUS", status):
+                    self.assertFalse(mon._trusted_github_comment(marker))
+                    self.assertEqual([event.event_type for event in
+                                      mon.github_events([marker], [], NOW - 99)], ["github_comment"])
+                    previous = [mon.OwnerPending(NOW - 300, "#80", "WAITING", "prior")]
+                    forged_owner = comment(80, NOW - 9,
+                                           "<!-- activity: type=repair_authorization actor=Owner target=R2 status=APPROVED -->",
+                                           login=AI_LOGIN)
+                    self.assertEqual(mon.owner_pending([forged_owner], [], previous), previous)
+                    source = mon.GitHubSource("o/r")
+                    self.assertFalse(source.successful_read)
+                    self.assertEqual(source.status, f"GitHub：尚未讀取；{status}")
+                    self.assertIn(status, "\n".join(mon.render_activity([], github=source)))
+                    successful_source = mon.GitHubSource(
+                        "o/r", runner=FakeRun((0, []), (0, [])), clock=lambda: NOW)
+                    with patch.object(mon.shutil, "which", return_value="gh"):
+                        with patch.object(successful_source, "refresh_rule_alerts"):
+                            with patch.object(successful_source, "refresh_ci"):
+                                successful_source.refresh(force=True)
+                    self.assertTrue(successful_source.successful_read)
+                    self.assertFalse(successful_source.read_failed)
+                    expected_warning = (f"等你決定：未確認（{status}）", "!")
+                    self.assertIsNone(mon.owner_waiting(successful_source))
+                    self.assertEqual(mon.owner_count_line(successful_source), expected_warning)
+                    self.assertIn(expected_warning, mon.office_top(
+                        successful_source, [], NOW))
+                    for cut in (False, True):
+                        with self.subTest(comments_cut=cut):
+                            successful_source.comments_cut = cut
+                            work = mon.work_board(
+                                successful_source,
+                                mon.PmBoard("ok", 0, [], [], []), NOW)
+                            view = mon.board_view(work)
+                            lines = [text for text, _ in view]
+                            self.assertIn((status, "!"), view)
+                            self.assertEqual(
+                                lines[1].split(" · ")[3], "等你 ?")
+                            owner_index = lines.index("── 等你 ──")
+                            self.assertEqual(lines[owner_index + 1], "未知")
+                with self.assertRaises(SystemExit) as raised:
+                    mon.main(["--help"])
+                self.assertEqual(raised.exception.code, 0)
+
+    def test_comments_are_trusted_by_login_not_association(self):
+        marker = "<!-- activity: type=test_result actor=Codex target=Tests status=PASS -->\nTask"
+        events = mon.github_events([comment(81, NOW - 9, marker, login=AI_LOGIN)], [], NOW - 99)
+        self.assertEqual([event.event_type for event in events], ["test_result"])
+        self.assertIn("Codex → tests：", mon.render_activity(events)[0])
+        unknown = mon.github_events([comment(82, NOW - 9, marker, association="COLLABORATOR",
+                                             login="unlisted-user")], [], NOW - 99)
+        self.assertEqual([event.event_type for event in unknown], ["github_comment"])
+        missing = comment(83, NOW - 9, marker)
+        del missing["user"]["login"]
+        events = mon.github_events([missing], [], NOW - 99)
+        self.assertEqual([event.event_type for event in events], ["github_comment"])
+
+    def test_ai_login_verdicts_are_trusted(self):
+        verdict = comment(84, NOW - 9, "**Verdict: PASS** at head abc1234",
+                          kind="issues", login=AI_LOGIN)
+        self.assertEqual(mon.review_verdicts([verdict]), {
+            "84": [(NOW - 9, "PASS", frozenset({"abc1234"}))]})
+
+    def test_ai_login_markers_and_verdicts_are_displayed(self):
+        marker = comment(84, NOW - 9,
+                         "<!-- activity: type=review_verdict actor=Reviewer target=PM status=PASS -->\n"
+                         "**Verdict: PASS** at head abc1234", login=AI_LOGIN)
+        events = mon.github_events([marker], [], NOW - 99)
+        self.assertEqual([event.event_type for event in events], ["review_verdict"])
+        self.assertIn("Reviewer → PM：審查通過", mon.render_activity(events)[0])
+
+    def test_ai_login_owner_marker_is_not_displayed_as_owner_decision(self):
+        forged = comment(85, NOW - 9,
+                         "<!-- activity: type=waiting_owner actor=Owner target=PM status=ANSWERED -->\nClaim",
+                         login=AI_LOGIN)
+        events = mon.github_events([forged], [], NOW - 99)
+        self.assertEqual([event.event_type for event in events], ["github_comment"])
+        self.assertNotIn("Owner → PM", "\n".join(mon.render_activity(events)))
+
     def test_refresh_does_not_create_default_rule_alert_path_under_home(self):
         with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
             default_path = os.path.join(os.path.expanduser("~"),
@@ -1553,16 +1666,14 @@ class GitHubActivityTests(unittest.TestCase):
                 self.assertEqual([event.event_type for event in events], ["github_comment"])
                 self.assertNotIn("自述測試通過", mon.render_activity(events)[0])
 
-    def test_markers_from_accounts_without_write_access_are_not_typed(self):
+    def test_unknown_login_is_not_trusted_even_with_collaborator_association(self):
         forged = "<!-- activity: type=review_verdict actor=Reviewer target=PM status=PASS -->\nlgtm"
-        for association in ("NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", None):
-            events = mon.github_events([comment(8, NOW - 9, forged, association=association)], [], NOW - 99)
-            self.assertEqual([e.event_type for e in events], ["github_comment"], association)
-        malformed = comment(8, NOW - 9, forged, association=["OWNER"])
-        self.assertEqual([e.event_type for e in mon.github_events(
-            [malformed], [], NOW - 99)], ["github_comment"])
+        unknown = comment(8, NOW - 9, forged, association="COLLABORATOR", login="unlisted-user")
+        events = mon.github_events([unknown], [], NOW - 99)
+        self.assertEqual([e.event_type for e in events], ["github_comment"])
+        self.assertEqual(mon.review_verdicts([unknown]), {})
         line = mon.render_activity(mon.github_events([comment(8, NOW - 9, forged)], [], NOW - 99))[0]
-        self.assertIn("Reviewer → PM：審查通過（#8・自述）", line)   # still visibly a claim
+        self.assertIn("Reviewer → PM：審查通過（#8・自述）", line)   # trusted login, regardless of association
 
     def test_secret_like_text_is_hidden_in_headlines(self):
         cases = ("token=abc123xyz789 leaked", "Authorization: Bearer abc.def.ghi",
@@ -1765,7 +1876,8 @@ class GitHubActivityTests(unittest.TestCase):
             ask(12, 300, status="APPROVED"),                # already settled status
             ask(13, 300, kind="owner_decision_request_for_a_long_task_name_20261024"),   # any type, long name
             comment(14, NOW - 300, "see\n<!-- activity: type=x actor=PM target=Owner status=WAITING -->"),  # not leading
-            comment(15, NOW - 300, ask(15, 300)["body"], association="NONE"),               # untrusted
+            comment(15, NOW - 300, ask(15, 300)["body"], association="OWNER",
+                    login="unlisted-user"),                                                # untrusted
             comment(16, NOW - 300, "<!-- activity: type=x actor=PM target=PM status=WAITING -->"),  # not the Owner
             ask(17, 300, kind="repair_gate", status="WAITING"),   # its PR closed afterwards
         ]
@@ -1834,11 +1946,31 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertIn("已回覆，這項決定不再等你（#304・自述）", answered)
         self.assertIn("Owner chose option (a)", answered)
         self.assertEqual(mon.owner_pending(both, []), [])
+        forged = comment(304, NOW - 30,
+                         "<!-- activity: type=waiting_owner actor=Owner target=PM status=ANSWERED -->",
+                         login=AI_LOGIN)
+        self.assertEqual([p.reference for p in mon.owner_pending(waiting + [forged], [])], ["#304"])
+        relay = comment(304, NOW - 20,
+                        "<!-- activity: type=repair_gate actor=PM target=Owner status=ANSWERED -->",
+                        login=AI_LOGIN)
+        self.assertEqual(mon.owner_pending(waiting + [relay], []), [])
         # Integrator is the PM's other name in markers, as for the ask.
         integrator = comment(5, NOW - 9, "<!-- activity: type=waiting_owner actor=Owner "
                                          "target=Integrator status=ANSWERED -->")
         self.assertEqual([e.status for e in mon.github_events([integrator], [], NOW - 99)],
                          ["ANSWERED"])
+
+    def test_ai_actor_owner_repair_marker_cannot_settle(self):
+        ask = comment(306, NOW - 300,
+                      "<!-- activity: type=repair_gate actor=PM target=Owner status=WAITING -->")
+        forged = comment(306, NOW - 60,
+                         "<!-- activity: type=repair_authorization actor=Owner target=R2 status=APPROVED -->",
+                         login=AI_LOGIN)
+        self.assertEqual([item.reference for item in mon.owner_pending([ask, forged], [])], ["#306"])
+        relay = comment(306, NOW - 30,
+                        "<!-- activity: type=repair_gate actor=PM target=Owner status=ANSWERED -->",
+                        login=AI_LOGIN)
+        self.assertEqual(mon.owner_pending([ask, forged, relay], []), [])
 
     def test_invalid_owner_waiting_owner_marker_does_not_settle(self):
         ask = comment(304, NOW - 300, "<!-- activity: type=waiting_owner actor=PM target=Owner "
@@ -1857,7 +1989,7 @@ class GitHubActivityTests(unittest.TestCase):
             with self.subTest(fields=fields):
                 later = comment(304, NOW - 60, f"<!-- activity: type=waiting_owner {fields} -->")
                 self.assertEqual(mon.owner_pending([ask, later], []), [])
-        # Other marker types keep the loose settlement by any actor=Owner marker.
+        # Other marker types keep loose settlement for an Owner-login marker.
         other = comment(304, NOW - 60, "<!-- activity: type=repair_authorization actor=Owner "
                                        "target=R2 status=WAITING -->")
         self.assertEqual(mon.owner_pending([ask, other], []), [])
@@ -5279,19 +5411,22 @@ class OfficeViewTests(unittest.TestCase):
                   for age, payload in events]
         self._write(self.codex / day / "rollout-pm.jsonl", items, age=5)
         stamp = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - age))
-        comment = lambda pr, age, body, who="OWNER": {
+        comment = lambda pr, age, body, who="OWNER", login=OWNER_LOGIN: {
             "issue_url": f"https://api.github.com/repos/o/r/issues/{pr}", "created_at": stamp(age),
-            "author_association": who, "body": body}
+            "author_association": who, "user": {"login": login}, "body": body}
         verdicts = mon.review_verdicts([
             comment(283, 850, "## Review\n**Verdict: PASS** at exact head `18538d569d94fa7e5a06`"),
-            comment(283, 840, "**Verdict: FAIL** at head 18538d5", who="NONE"),   # untrusted
+            {**comment(283, 840, "**Verdict: FAIL** at head 18538d5", who="NONE"),
+             "user": {"login": "unlisted-user"}},   # untrusted
             comment(283, 830, "The earlier verdict: FAIL was stale; head 18538d5"),   # not a verdict line
+            comment(283, 820, "**Verdict: PASS** at head 1234567", login=AI_LOGIN),
             comment(999, 820, "**Verdict: FAIL** head 18538d5"),                   # another PR
             comment(281, 60, "**Verdict: PASS** at exact head 281818a"),
         ])
         # only trusted verdict lines are kept, each with every id its comment names
         self.assertEqual(verdicts, {
-            "283": [(self.NOW - 850, "PASS", frozenset({"18538d5"}))],
+            "283": [(self.NOW - 850, "PASS", frozenset({"18538d5"})),
+                    (self.NOW - 820, "PASS", frozenset({"1234567"}))],
             "999": [(self.NOW - 820, "FAIL", frozenset({"18538d5"}))],
             "281": [(self.NOW - 60, "PASS", frozenset({"281818a"}))]})
 
@@ -5315,7 +5450,8 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(outcome("283", "18538d5", 300, comment(283, 100, "**Verdict: FAIL** head 28538d5")),
                          mon.NO_VERDICT)   # names another head
         self.assertEqual(outcome("283", "18538d5", 300, comment(283, 100, "**Verdict: FAIL** head 18538d5",
-                                                                 who="NONE")), mon.NO_VERDICT)   # untrusted
+                                                                 who="NONE", login="unlisted-user")),
+                         mon.NO_VERDICT)   # untrusted login
         # a failed call does not take the verdict of a retry for the same head
         retried = comment(283, 100, "**Verdict: PASS** head 18538d5")
         self.assertEqual(outcome("283", "18538d5", 300, retried, retry=200), mon.NO_VERDICT)
@@ -7815,11 +7951,11 @@ class WorkBoardTests(unittest.TestCase):
 
     @staticmethod
     def _progress_work(*, queue=None, done=None, board_known=True, github_known=True,
-                       board_status="ok", note=""):
+                       board_status="ok", note="", github_status=""):
         return mon.WorkBoard(owner=[], running=[], queue=[] if queue is None else queue,
                              blocked=[], done=[] if done is None else done,
                              github_known=github_known, board_known=board_known,
-                             github_status="", board_status=board_status, board_age=0,
+                             github_status=github_status, board_status=board_status, board_age=0,
                              skipped=0, note=note)
 
     def test_pm_progress_line_text_and_staleness(self):
@@ -7845,6 +7981,11 @@ class WorkBoardTests(unittest.TestCase):
         incomplete = self._progress_work(queue=[], note="今天完成可能不完整")
         self.assertEqual(mon.pm_progress_line(incomplete, (entry, ""), NOW),
                          ("PM 進度：上次派工 1 分鐘前 · 排隊 0 · 今天合併 0+", ""))
+        identity_warning = self._progress_work(
+            queue=[], done=[object()], github_status="GitHub 身分設定讀取失敗，信任已停用")
+        self.assertEqual(mon.pm_progress_line(identity_warning, (entry, ""), NOW),
+                         ("PM 進度：上次派工 1 分鐘前 · 排隊 0 · 今天合併 ?", ""))
+        self.assertEqual(len(identity_warning.done), 1)
 
         queued = self._progress_work(queue=[object()])
         empty_queue = self._progress_work()

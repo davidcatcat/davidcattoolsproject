@@ -309,6 +309,64 @@ class TaskCompletionTests(unittest.TestCase):
         registry_path.chmod(0o600)
         return result, root_commit, developer_commit
 
+    def _modify_delete_conflict_head(self, conflict_path):
+        """Create a trusted-main deletion/developer modification; keep ours."""
+        self._git('config', 'merge.renames', 'false')
+        self._git('checkout', '-b', 'main-conflict', self.source_sha)
+        conflict_file = self.root / conflict_path
+        conflict_file.unlink()
+        self._git('add', conflict_path)
+        self._git('commit', '-m', 'trusted main deletes conflict path')
+        trusted_base = self._git('rev-parse', 'HEAD')
+
+        self._git('checkout', 'feat/executor')
+        self._git('reset', '--hard', self.source_sha)
+        source_file = self.root / self.source_path
+        if conflict_path != self.source_path:
+            source_file.write_text(
+                source_file.read_text() + '\n# scoped developer change\n')
+        conflict_content = 'Developer conflict modification.\n'
+        conflict_file.write_text(conflict_content)
+        self._git('add', self.source_path)
+        if conflict_path != self.source_path:
+            self._git('add', conflict_path)
+        self._git('commit', '-m', 'developer modifies conflict path')
+        segment_start = self._git('rev-parse', 'HEAD')
+        initial_merge = subprocess.run(
+            ['/usr/bin/git', '-c', 'merge.renames=false', '-c', 'diff.renames=false',
+             'merge', '--no-ff', 'main-conflict', '-m', 'merge trusted main'],
+            cwd=self.root, text=True, capture_output=True)
+        self.assertNotEqual(initial_merge.returncode, 0, initial_merge.stderr)
+        stages = self._git('ls-files', '-u', '--', conflict_path)
+        self.assertEqual(
+            {line.split('\t', 1)[0].split()[2] for line in stages.splitlines()},
+            {'1', '2'})
+        self.assertEqual(conflict_file.read_text(), conflict_content)
+        self._git('add', conflict_path)
+        self._git('commit', '-m', 'resolve modify/delete by keeping developer file')
+        result = self._git('rev-parse', 'HEAD')
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = result
+        self._write_env2_marker(record, self.root, submitted_head=result,
+                                current_head=result)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+        return result, trusted_base, segment_start
+
+    def _modify_delete_conflict_segment_result(self):
+        merge_sha, trusted_base, segment_start = self._modify_delete_conflict_head(
+            'README.md')
+        self.assertEqual(self._git(
+            'diff', '--name-only', segment_start, merge_sha), '')
+        self.assertNotIn('README.md',
+            task_completion._remerge_diff_paths_raw(
+                str(self.root), merge_sha).decode('utf-8').split('\x00'))
+        result_sha, artifact = self._make_result(source_sha=segment_start)
+        self.assertEqual(self._git(
+            'diff', '--name-only', segment_start, result_sha), self.source_path)
+        return result_sha, trusted_base, segment_start, artifact
+
     def _collect_result(self, result_sha, artifact, *, trusted_base_sha=None):
         return task_completion.collect_executor_result(
             task_id=self.task_id, expected_common_dir=self.common,
@@ -833,6 +891,179 @@ class TaskCompletionTests(unittest.TestCase):
         with self.assertRaises(LLMToolError) as raised:
             self._collect_registered_result(result_sha, trusted_base_sha=trusted_base_sha)
         self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
+
+    def test_modify_delete_conflict_is_attributed_by_both_committed_collectors(self):
+        result_sha, trusted_base, segment_start, artifact = (
+            self._modify_delete_conflict_segment_result())
+        common = {
+            'task_id': self.task_id, 'expected_common_dir': self.common,
+            'expected_root': str(self.root), 'expected_branch': 'feat/executor',
+            'source_sha': segment_start,
+            'task_binding': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                             'contract_digest': '3' * 64},
+            'expected_agent': 'executor-agent',
+            'expected_session_ref': 'Executor D6 session',
+            'expected_native_session_id': 'native-executor',
+            'write_paths': [self.source_path],
+            'trusted_base_sha': trusted_base,
+        }
+        routes = (
+            ('executor', task_completion.collect_executor_result, {
+                'artifact': artifact,
+                'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest()}),
+            ('claude', task_completion.collect_claude_result, {
+                'claude_result': {
+                    'executor_task_id': self.task_id, 'head_sha': result_sha}}),
+        )
+        for name, collector, extra in routes:
+            with self.subTest(collector=name, scope='outside'):
+                with self.assertRaises(LLMToolError) as raised:
+                    collector(**common, **extra)
+                self.assertEqual(raised.exception.completion_code,
+                                 'RESULT_SCOPE_MISMATCH')
+            with self.subTest(collector=name, scope='inside'):
+                result = collector(**{
+                    **common, 'write_paths': [self.source_path, 'README.md']},
+                    **extra)
+                self.assertEqual(result['result_head'], result_sha)
+                self.assertEqual(result['changed_paths'], [self.source_path])
+                self.assertEqual(result['developer_changed_paths'],
+                                 sorted([self.source_path, 'README.md']))
+
+    def test_modify_delete_conflict_is_attributed_in_repair_segment(self):
+        result_sha, trusted_base, segment_start, artifact = (
+            self._modify_delete_conflict_segment_result())
+        self.assertEqual(task_completion._developer_changed_paths(
+            str(self.root), segment_start, result_sha, trusted_base),
+            tuple(sorted(['README.md', self.source_path])))
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_executor_result(
+                task_id=self.task_id, expected_common_dir=self.common,
+                expected_root=str(self.root), expected_branch='feat/executor',
+                source_sha=segment_start,
+                task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                              'contract_digest': '3' * 64},
+                expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+                expected_native_session_id='native-executor', write_paths=[self.source_path],
+                artifact=artifact,
+                artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest(),
+                artifact_segments=[(artifact, hashlib.sha256(artifact.encode()).hexdigest(),
+                                    segment_start, result_sha)],
+                trusted_base_sha=trusted_base)
+        self.assertEqual(raised.exception.completion_code,
+                         'DEVELOPER_ARTIFACT_CHAIN_INVALID')
+
+    def test_worktree_modify_delete_conflict_is_refused(self):
+        _, _, segment_start = self._modify_delete_conflict_head('README.md')
+        self._git('reset', '--hard', segment_start)
+        merge = subprocess.run(['/usr/bin/git', 'merge', '--no-ff', 'main-conflict',
+                                '-m', 'merge trusted deletion'], cwd=self.root,
+                               text=True, capture_output=True)
+        self.assertNotEqual(merge.returncode, 0)
+        (self.root / 'README.md').unlink(missing_ok=True)
+        self._git('add', '-A', 'README.md')
+
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = segment_start
+        self._write_env2_marker(record, self.root, submitted_head=segment_start,
+                                current_head=segment_start)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', '--no-ext-diff', '--no-textconv',
+             '--no-renames', self.source_sha, '--'], cwd=self.root)
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_executor_worktree_result(
+                task_id=self.task_id, expected_common_dir=self.common,
+                expected_root=str(self.root), expected_branch='feat/executor',
+                source_sha=self.source_sha, expected_result_head=segment_start,
+                task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                              'contract_digest': '3' * 64},
+                expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+                expected_native_session_id='native-executor',
+                read_paths=[self.source_path], write_paths=[self.source_path],
+                artifact=artifact.decode('utf-8'),
+                artifact_sha256=hashlib.sha256(artifact).hexdigest())
+        self.assertEqual(raised.exception.completion_code, 'WORKTREE_SCOPE_MISMATCH')
+
+    def test_task_complete_rejects_out_of_scope_modify_delete_conflict(self):
+        result_sha, trusted_base, segment_start, artifact = (
+            self._modify_delete_conflict_segment_result())
+        real_collector = task_completion.collect_executor_result
+        store = TaskStore(self.base / 'modify-delete-task-complete')
+
+        def github_get(path):
+            self.assertEqual(path, 'git/ref/heads/main')
+            return {'ref': 'refs/heads/main',
+                    'object': {'type': 'commit', 'sha': trusted_base}}
+
+        for allow_conflict in (False, True):
+            with self.subTest(allow_conflict=allow_conflict):
+                task = self._active_pm_task(self._task(), route='company-gw')
+                paths = sorted([self.source_path] + (
+                    ['README.md'] if allow_conflict else []))
+                task['developer'].update(
+                    source_sha=segment_start, read_paths=paths, write_paths=paths,
+                    artifact=artifact,
+                    artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+                task['completion']['evidence'].update(
+                    source_sha=segment_start, result_head=segment_start,
+                    executor_native_session_id='native-executor',
+                    executor_native_session='VERIFIED')
+                store.create(task)
+                with patch.object(task_completion, '_github_get',
+                                  side_effect=github_get), \
+                     patch.object(task_completion, 'collect_executor_result',
+                                  wraps=real_collector) as collect, \
+                     patch.object(task_completion, 'run_bounded_tests',
+                                  return_value=[{
+                                      'path': self.source_path,
+                                      'source_sha': result_sha, 'exit_code': 0,
+                                      'output_sha256': '6' * 64}]) as tests, \
+                     patch('llmtool.task_submission_cli._remote_test_config_state',
+                           return_value='MISSING'), \
+                     patch('llmtool.task_submission_cli.resolve_profile_config',
+                           side_effect=AssertionError('unexpected provider')) as resolve, \
+                     patch.object(task_completion, 'collect_github_evidence',
+                           side_effect=AssertionError('unexpected review/CI')) as github, \
+                     redirect_stdout(StringIO()):
+                    code = run_task_complete(Namespace(
+                        task_id=task['task_id'], executor_task=self.task_id,
+                        reviewer_task=None, pr=None), store=store)
+                collect.assert_called_once()
+                self.assertEqual(collect.call_args.kwargs['source_sha'],
+                                 segment_start)
+                self.assertEqual(collect.call_args.kwargs['trusted_base_sha'],
+                                 trusted_base)
+                self.assertEqual(
+                    collect.call_args.kwargs['expected_native_session_id'],
+                    'native-executor')
+                resolve.assert_not_called()
+                github.assert_not_called()
+                completion = store.get(task['task_id'])['completion']
+                self.assertEqual(completion['pm_dispatch'], 'NOT_STARTED')
+                if allow_conflict:
+                    self.assertEqual(code, 0)
+                    tests.assert_called_once()
+                    self.assertEqual(completion['state'], 'PM_EVIDENCE_READY')
+                    self.assertEqual(completion['missing_gates'], [])
+                    result = completion['evidence']['result']
+                    self.assertEqual(result['source_sha'], segment_start)
+                    self.assertEqual(result['result_head'], result_sha)
+                    self.assertEqual(result['developer_changed_paths'],
+                                     sorted([self.source_path, 'README.md']))
+                else:
+                    self.assertEqual(code, 1)
+                    tests.assert_not_called()
+                    self.assertEqual(completion['state'], 'WAITING_EXECUTOR')
+                    self.assertEqual(completion['missing_gates'],
+                                     ['RESULT_SCOPE_MISMATCH'])
+
+    def test_in_scope_modify_delete_conflict_passes_scope_collection(self):
+        result_sha, trusted_base, _ = self._modify_delete_conflict_head(self.source_path)
+        result = self._collect_registered_result(result_sha, trusted_base_sha=trusted_base)
+        self.assertIn(self.source_path, result['developer_changed_paths'])
 
     def test_out_of_scope_developer_file_is_refused(self):
         result_sha = self._make_path_result('README.md', 'Developer edit.\n')
