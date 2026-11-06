@@ -2763,8 +2763,8 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        store.compare_and_update(
-            task['task_id'],
+        store.d6_bind_compare_and_update(
+            task['task_id'], executor_task_id=registration.task_id,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                       'completion': None},
             developer=developer, completion=completion,
@@ -3198,7 +3198,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        store.compare_and_update(task['task_id'],
+        store.d6_bind_compare_and_update(task['task_id'],
+            executor_task_id=registration.task_id,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                       'completion': None}, developer=developer, completion=completion)
     except TaskStoreConflict:
@@ -3733,7 +3734,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        claimed = store.compare_and_update(task['task_id'],
+        claimed = store.d6_bind_compare_and_update(task['task_id'],
+            executor_task_id=registration.task_id,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                       'completion': None}, developer=developer, completion=completion)
     except TaskStoreConflict:
@@ -4190,7 +4192,8 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        store.compare_and_update(task['task_id'],
+        store.d6_bind_compare_and_update(task['task_id'],
+            executor_task_id=registration.task_id,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED',
                       'developer': previous_developer,
                       'completion': task.get('completion')},
@@ -4830,8 +4833,8 @@ def run_task_delegate(args, *, store=None):
     # remains pending; this task cannot silently trigger a duplicate provider call.
     _check_delegate_repair_cap(args, store, (registration, snapshot))
     try:
-        store.compare_and_update(
-            task['task_id'],
+        store.d6_bind_compare_and_update(
+            task['task_id'], executor_task_id=registration.task_id,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                       'completion': None},
             developer=developer, completion=completion,
