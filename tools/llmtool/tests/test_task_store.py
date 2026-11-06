@@ -801,6 +801,10 @@ class TaskStoreTests(unittest.TestCase):
             if not bind:
                 return task['task_id']
             developer = self._developer_assignment(provider=provider, max_tokens=None)
+            if provider == 'opencode':
+                # OpenCode assignments always carry an execution record, even
+                # before a run has started.
+                developer['execution'] = None
             if provider in ('opencode', 'agy', 'gw-agent'):
                 developer['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
             if provider == 'agy':
@@ -827,6 +831,8 @@ class TaskStoreTests(unittest.TestCase):
                 live_id = create_task(route, bind=True)
                 candidate_id = create_task(route)
                 pending = self._developer_assignment(provider=route, max_tokens=None)
+                if route == 'opencode':
+                    pending['execution'] = None
                 if route in ('opencode', 'agy', 'gw-agent'):
                     pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
                 if route == 'agy':
