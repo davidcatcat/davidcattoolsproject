@@ -415,16 +415,34 @@ class TestOutputExcerptsTests(unittest.TestCase):
         self.assert_emitted_excerpt_rejected(
             raw, max_excerpt_bytes=self.excerpt_bound(raw, SYNTHETIC_AWS_KEY))
 
-    def test_excerpt_cut_cannot_emit_aws_like_or_jwt_indicator(self):
+    def test_excerpt_cut_cannot_emit_aws_like_indicator(self):
+        # synthetic-fixture: screen-tool test
+        raw = unittest_capture([
+            ('FAIL', FAIL_ID, FAIL_BODY + '\n' + SYNTHETIC_AWS_KEY + 'MORE測試')
+        ])
+        self.assertEqual(self.select(raw)['status'], 'COMPLETE')
+        self.assert_emitted_excerpt_rejected(
+            raw, max_excerpt_bytes=self.excerpt_bound(raw, SYNTHETIC_AWS_KEY))
+
+    def test_jwt_ascii_continuation_is_rejected_before_excerpt_cut(self):
+        # synthetic-fixture: screen-tool test
         jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
-        for value in (SYNTHETIC_AWS_KEY, jwt):
-            with self.subTest(value=value[:3]):
-                # The ASCII continuation keeps the source scan clear; truncation exposes the shape.
-                # synthetic-fixture: screen-tool test
-                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + value + 'MORE測試')])
-                self.assertEqual(self.select(raw)['status'], 'COMPLETE')
-                self.assert_emitted_excerpt_rejected(
-                    raw, max_excerpt_bytes=self.excerpt_bound(raw, value))
+        # MORE extends the JWT tail; the CJK boundary triggers source refusal.
+        # synthetic-fixture: screen-tool test
+        raw = unittest_capture([
+            ('FAIL', FAIL_ID, FAIL_BODY + '\n' + jwt + 'MORE測試')
+        ])
+        self.path.write_bytes(raw)
+        for bound in (MAX_EXCERPT_BYTES, self.excerpt_bound(raw, jwt)):
+            with self.subTest(max_excerpt_bytes=bound):
+                with self.assertRaises(LLMToolError) as caught:
+                    select_test_excerpts(self.path, 1, max_excerpt_bytes=bound)
+                self.assertEqual(
+                    str(caught.exception),
+                    'test-excerpts: source contains sensitive-content '
+                    'indicators; details omitted')
+                self.assertNotIn(str(self.path), str(caught.exception))
+                self.assertEqual(self.path.read_bytes(), raw)
 
     def test_ascii_escaped_json_cannot_emit_aws_like_or_jwt_indicator(self):
         # A non-ASCII word suffix now triggers the intended source refusal before JSON emission.
