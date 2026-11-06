@@ -4200,6 +4200,11 @@ class DelegateRepairCapTests(unittest.TestCase):
                 'direct_result_callback': submission_cli._direct_result_callback(
                     task, registration, 'a' * 40),
             }
+            if route == 'agy':
+                developer_record['owner_assignment_ref'] = (
+                    'https://github.com/davidcatcat/davidcattoolsproject/'
+                    'issues/289#issuecomment-1'
+                )
             if progress is not None:
                 developer_record['progress'] = progress
             completion = {
