@@ -7724,6 +7724,50 @@ def _line_style(row: OfficeRow, rows: list[OfficeRow]) -> str:
     return min(about, key=BANDS.index, default="dim")
 
 
+# The bracketed reference after a CI name (see _ci_text), e.g. the
+# （main @c85a0ec） of 「llmtool Linux CI（main @c85a0ec）」 or （PR #1098 @b29462a）.
+# The TUI draws it bright white on runner rows (#763); the text never changes.
+CI_REF = re.compile(r"（(?:PR #\d+|[^（）\s]+) @[0-9A-Fa-f]*）")
+RUNNER_ROW_NAME = re.compile(r"(?:\S+ )?ci runner\b")
+
+
+def _is_runner_row(row: OfficeRow) -> bool:
+    return row.kind == "worker" and bool(RUNNER_ROW_NAME.match(row.name))
+
+
+def _ref_flags(detail: str, pieces: list[str]) -> list[list[bool]]:
+    """For each wrapped piece of detail, which of its characters belong to a
+    CI reference; a reference that wrapping splits is lit on both lines."""
+    spans = [found.span() for found in CI_REF.finditer(detail)]
+    out, pos = [], 0
+    for piece in pieces:
+        start = detail.find(piece, pos)   # _wrap only drops spaces between pieces
+        if start < 0:
+            out.append([False] * len(piece))
+            continue
+        pos = start + len(piece)
+        out.append([any(s <= start + i < e for s, e in spans) for i in range(len(piece))])
+    return out
+
+
+def _split_lit(text: str, lit: list[bool]) -> list[tuple[str, bool]]:
+    """text as (text, highlighted) runs; lit is per character (extra flags ignored)."""
+    parts: list[tuple[str, bool]] = []
+    for char, on in zip(text, lit):
+        if parts and parts[-1][1] == on:
+            parts[-1] = (parts[-1][0] + char, on)
+        else:
+            parts.append((char, on))
+    return parts or [(text, False)]
+
+
+def ci_ref_parts(detail: str, pieces: list[str]) -> list[list[tuple[str, bool]]]:
+    """Each wrapped piece of a runner row's detail split into (text,
+    highlighted) parts that join back to the piece; highlighted is the CI
+    reference, e.g. （PR #1098 @b29462a）. A piece without one is one part."""
+    return [_split_lit(piece, lit) for piece, lit in zip(pieces, _ref_flags(detail, pieces))]
+
+
 def owner_count_line(github) -> tuple[str, str]:
     if github is None:
         return "等你決定：未讀 GitHub", ""
@@ -7847,8 +7891,11 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
                 pending: list[OwnerPending] | None = None,
                 now: float | None = None, scope: str = "", *,
                 waiting: int | None = None,
-                top: list[tuple[str, str]] | None = None) -> list[tuple[str, str]]:
+                top: list[tuple[str, str]] | None = None,
+                parts: dict[int, list[tuple[str, bool]]] | None = None) -> list[tuple[str, str]]:
     """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
+    parts, if given, gets {line index: [(text, highlighted)]} for each runner
+    row line holding a CI reference (the TUI draws those bright white).
     With a screen width, each detail is cut so the time column stays visible.
     Rows are ordered red, green, yellow, gray in each section; without expand
     the gray rows are folded into one count per section (key a in the TUI).
@@ -7927,12 +7974,20 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
         detail = _row_detail(row)
         pieces = [detail] if width is None else _wrap(detail, detail_cols)
         when = _short_ago(row.age)
-        line = f"{_pad(prefix + _shown(row), name_cols)}{_pad(row.state, 8)}{pieces[0]}"
+        head = f"{_pad(prefix + _shown(row), name_cols)}{_pad(row.state, 8)}"
+        line = head + pieces[0]
         if when:
             line = f"{_pad(line, name_cols + 8 + detail_cols)}  {when}"
         style = _line_style(row, rows)
+        first = len(out)
         out.append((line.rstrip(), style))
         out += [(" " * (name_cols + 8) + piece, style) for piece in pieces[1:]]
+        if parts is not None and _is_runner_row(row):
+            shifts = [len(head)] + [name_cols + 8] * (len(pieces) - 1)
+            for index, (shift, lit) in enumerate(zip(shifts, _ref_flags(detail, pieces)), first):
+                if any(lit):
+                    text = out[index][0]
+                    parts[index] = _split_lit(text, [False] * shift + lit + [False] * len(text))
     legend.append("工作中 = 最近有動作，不代表模型正在產生內容")
     if scope:
         legend.append(scope)
@@ -8046,16 +8101,19 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
                                        ("■", curses.COLOR_GREEN)), start=1):
             curses.init_pair(n, fg, -1)
             colors[key] = curses.color_pair(n)
+        if curses.COLOR_PAIRS > 10:   # CI references on runner rows (#763), drawn with A_BOLD
+            curses.init_pair(10, 15 if curses.COLORS >= 16 else curses.COLOR_WHITE, -1)
+            colors["ref"] = curses.color_pair(10)
     view, offset, next_poll = "office", 0, 0.0
     expanded = False   # office view: gray rows folded (default) or listed (key a)
     noise = False      # Activity view: feed noise hidden (default) or shown (key a)
     next_draw, dirty = 0.0, True
 
-    def put(y: int, text: str, attr: int = 0) -> None:
+    def put(y: int, text: str, attr: int = 0, x: int = 0) -> None:
         h, w = stdscr.getmaxyx()
-        if 0 <= y < h and w > 1:
+        if 0 <= y < h and 0 <= x < w - 1:
             try:
-                stdscr.addnstr(y, 0, text, w - 1, attr)
+                stdscr.addnstr(y, x, text, w - 1 - x, attr)
             except curses.error:
                 pass
 
@@ -8187,7 +8245,8 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
         if offset:
             hint = f"[scrolled back {offset}]  " + hint
     elif view == "office":
-        lines = office_view(mon.office, mon.office_error, w - 1, expanded,
+        parts: dict[int, list[tuple[str, bool]]] = {}
+        lines = office_view(mon.office, mon.office_error, w - 1, expanded, parts=parts,
                             pending=mon.github.pending if mon.github is not None else None,
                             scope=mon.github.scope if mon.github is not None else "",
                             waiting=owner_waiting(mon.github),
@@ -8198,8 +8257,15 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
         offset = max(0, min(offset, len(lines) - body))
         styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
                   "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
+        ref = colors.get("ref")   # None without colors: the rows stay as they were
         for row, (line, style) in enumerate(lines[offset:offset + body]):
             put(3 + row, line, styles.get(style, 0))
+            # The CI reference is drawn again over the row, bright white and bold.
+            x = 0
+            for text, lit in parts.get(offset + row, []) if ref is not None else []:
+                if lit:
+                    put(3 + row, text, ref | curses.A_BOLD, x)
+                x += _width(text)
         hint = ("Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  "
                 f"a: {'摺疊' if expanded else '展開'}灰色  q: quit")
     elif view == "board":
