@@ -4175,10 +4175,12 @@ class DelegateRepairCapTests(unittest.TestCase):
                 'provider_type': ({
                     'codex': 'codex-cli', 'opencode': 'opencode-cli',
                     'agy': 'agy-cli', 'gw-agent': 'gw-agent-cli',
+                    'claude': 'claude-cli',
                 }.get(route) if developer_state != 'DEVELOPER_PENDING' else None),
                 'model': ({
                     'codex': 'gpt-6-luna', 'opencode': 'opencode/test-free',
                     'agy': 'gemini-test', 'gw-agent': 'gw-agent-test',
+                    'claude': 'claude-test',
                 }.get(route) if developer_state != 'DEVELOPER_PENDING' else None),
                 'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
                 'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
@@ -4268,25 +4270,53 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertIsNone(submission_cli._check_delegate_repair_cap(
             self._args(task, 'opencode'), self.store))
 
-    def test_unstarted_and_no_work_blocked_records_do_not_count(self):
+    def test_exact_prelaunch_refusals_are_skipped(self):
         self._prior_assignments(2)
-        self._task(developer=True, developer_state='DEVELOPER_UNAVAILABLE',
-                   artifact=None, error_code='DEVELOPER_DISPATCH_REFUSED')
-        self._task(
-            developer=True, route='agy', developer_state='BLOCKED',
-            artifact=None, error_code='AGY_QUOTA_EXHAUSTED',
-            progress={
-                'state': 'QUOTA_EXHAUSTED',
-                'head_sha': 'a' * 40,
-                'changed_files': [],
-                'unfinished_checks': ['UNKNOWN'],
-                'session_id': 'conversation_12345678',
-            })
+        cases = (
+            ('codex', 'DEVELOPER_UNAVAILABLE',
+             'DEVELOPER_PROFILE_UNAVAILABLE'),
+            ('codex', 'DEVELOPER_UNAVAILABLE',
+             'DEVELOPER_CALL_BINDING_INVALID'),
+            ('gw-agent', 'DEVELOPER_UNAVAILABLE',
+             'DEVELOPER_GW_AGENT_CONFIG_INVALID'),
+            ('gw-agent', 'DEVELOPER_UNAVAILABLE',
+             'DEVELOPER_DISPATCH_DENIED'),
+            ('gw-agent', 'DEVELOPER_UNAVAILABLE',
+             'DEVELOPER_GW_AGENT_DISPATCH_DENIED'),
+            ('agy', 'BLOCKED', 'AGY_DISPATCH_DENIED'),
+            ('claude', 'BLOCKED', 'CLAUDE_DISPATCH_DENIED'),
+        )
+        for route, state, code in cases:
+            with self.subTest(route=route, code=code):
+                self._task(developer=True, route=route,
+                           developer_state=state, artifact=None,
+                           error_code=code)
         task = self._task()
         self.assertIsNone(submission_cli._check_delegate_repair_cap(
             self._args(task, 'opencode'), self.store))
 
-    def test_responded_blocked_artifact_and_changed_files_count(self):
+    def test_postrun_and_unclear_records_count(self):
+        for index, code in enumerate((
+                'DEVELOPER_GW_AGENT_MODEL_ERROR',
+                'DEVELOPER_GW_AGENT_MODEL_ERROR_DISPATCH_DENIED',
+                'DEVELOPER_DISPATCH_REFUSED',
+                'DEVELOPER_DISPATCH_DENIED_EXTRA',
+                None)):
+            with self.subTest(error_code=code):
+                self.store = TaskStore(
+                    Path(self.temp.name).resolve() / f'tasks-{index}')
+                self._prior_assignments(2)
+                self._task(
+                    developer=True, route='gw-agent',
+                    developer_state='DEVELOPER_UNAVAILABLE', artifact=None,
+                    error_code=code)
+                task = self._task()
+                with self.assertRaisesRegex(
+                        LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+                    submission_cli._check_delegate_repair_cap(
+                        self._args(task, 'opencode'), self.store)
+
+    def test_responded_artifact_and_changed_files_count(self):
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED',
                    artifact='diff',
@@ -4303,6 +4333,30 @@ class DelegateRepairCapTests(unittest.TestCase):
             })
         task = self._task()
         with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
+            submission_cli._check_delegate_repair_cap(
+                self._args(task, 'opencode'), self.store)
+
+    def test_codex_blocked_execution_counts(self):
+        self._prior_assignments(2)
+        self._task(
+            developer=True, route='codex',
+            developer_state='DEVELOPER_OUTCOME_UNKNOWN', artifact=None,
+            error_code='CODEX_BLOCKED',
+            execution={
+                'status': 'BLOCKED',
+                'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                'process_exit_code': 0,
+                'stdout_sha256': 'c' * 64,
+                'elapsed_ms': 1,
+                'cleanup_status': 'CONFIRMED',
+                'usage_source': 'UNKNOWN',
+                'source_bytes': None,
+                'source_file_count': None,
+                'source_manifest_sha256': None,
+            })
+        task = self._task()
+        with self.assertRaisesRegex(
+                LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
             submission_cli._check_delegate_repair_cap(
                 self._args(task, 'opencode'), self.store)
 

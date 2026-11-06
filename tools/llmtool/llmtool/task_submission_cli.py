@@ -4492,6 +4492,22 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
     return 1
 
 
+_PRELAUNCH_REPAIR_REFUSALS = frozenset((
+    ('codex', 'DEVELOPER_UNAVAILABLE',
+     'DEVELOPER_PROFILE_UNAVAILABLE'),
+    ('codex', 'DEVELOPER_UNAVAILABLE',
+     'DEVELOPER_CALL_BINDING_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE',
+     'DEVELOPER_GW_AGENT_CONFIG_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE',
+     'DEVELOPER_DISPATCH_DENIED'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE',
+     'DEVELOPER_GW_AGENT_DISPATCH_DENIED'),
+    ('agy', 'BLOCKED', 'AGY_DISPATCH_DENIED'),
+    ('claude', 'BLOCKED', 'CLAUDE_DISPATCH_DENIED'),
+))
+
+
 def _check_delegate_repair_cap(args, store, d6_binding=None):
     """Fail closed before dispatch when this D6 has exhausted its repair rounds."""
     executor_task = getattr(args, 'executor_task', None)
@@ -4521,36 +4537,26 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             if type(developer) is not dict:
                 raise LLMToolError(
                     f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
-            state = developer.get('state')
-            artifact_known_empty = ('artifact' in developer and
-                                    developer.get('artifact') is None)
-            changed_file_values = (
-                [developer['changed_files']] if 'changed_files' in developer else [])
-            progress = developer.get('progress')
-            if type(progress) is dict and 'changed_files' in progress:
-                changed_file_values.append(progress['changed_files'])
-            changed_files_known_empty = (
-                bool(changed_file_values) and
-                all(type(files) is list and not files
-                    for files in changed_file_values))
-            execution = developer.get('execution')
-            execution_blocked = (state == 'BLOCKED' or
-                                 (type(execution) is dict and
-                                  execution.get('status') == 'BLOCKED'))
-            error_code = developer.get('error_code')
-            explicitly_refused = (type(error_code) is str and
-                                  ('REFUSED' in error_code or
-                                   'DISPATCH_DENIED' in error_code))
-            never_started = (state == 'DEVELOPER_UNAVAILABLE' and
-                             execution is None and artifact_known_empty and
-                             (not changed_file_values or
-                              changed_files_known_empty))
-            ended_without_work = (
-                (execution_blocked or explicitly_refused) and
-                artifact_known_empty and
-                (changed_files_known_empty or
-                 (explicitly_refused and not changed_file_values)))
-            if never_started or ended_without_work:
+            refusal_key = (
+                developer.get('provider_profile'),
+                developer.get('state'),
+                developer.get('error_code'),
+            )
+            known_prelaunch_refusal = (
+                all(type(value) is str for value in refusal_key) and
+                refusal_key in _PRELAUNCH_REPAIR_REFUSALS
+            )
+            known_empty = all(
+                key in developer and developer[key] is None
+                for key in ('artifact', 'artifact_sha256', 'execution', 'usage')
+            )
+            changed_files_empty = (
+                'changed_files' not in developer or
+                (type(developer['changed_files']) is list and
+                 not developer['changed_files'])
+            )
+            if (known_prelaunch_refusal and known_empty and
+                    changed_files_empty and 'progress' not in developer):
                 continue
             created_at = developer.get('created_at')
             try:
