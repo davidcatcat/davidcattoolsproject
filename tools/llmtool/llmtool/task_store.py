@@ -3465,10 +3465,17 @@ class TaskStore:
                 new_attempt = changes['merge_attempt']
                 valid = (old_attempt is None and new_attempt.get('state') == 'CLAIMED')
                 if type(old_attempt) is dict:
-                    valid = (old_attempt.get('state') == 'CLAIMED' and
+                    same_identity = all(old_attempt.get(key) == new_attempt.get(key)
+                                        for key in ('pr', 'head_sha'))
+                    valid = (
+                        old_attempt.get('state') == 'CLAIMED' and
                         new_attempt.get('state') in ('UNKNOWN', 'MERGED') and
-                        all(old_attempt.get(key) == new_attempt.get(key)
-                            for key in ('pr', 'head_sha', 'claimed_at')))
+                        same_identity and
+                        old_attempt.get('claimed_at') == new_attempt.get('claimed_at')) or (
+                        old_attempt.get('state') == 'UNKNOWN' and
+                        new_attempt.get('state') == 'CLAIMED' and
+                        same_identity and
+                        old_attempt.get('claimed_at') != new_attempt.get('claimed_at'))
                 if not valid:
                     _fail('TASK_MERGE_ATTEMPT_TRANSITION_INVALID')
             if trusted_abandonment:

@@ -5,8 +5,10 @@ import os
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from contextlib import redirect_stdout
 from unittest.mock import patch
+from pathlib import Path
 
 from llmtool import task_advance
 from llmtool import task_submission_cli
@@ -2085,7 +2087,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                     self.assertEqual(result['codes'], [code])
                     self.assertEqual(calls, [])
 
-    def test_merge_unknown_is_never_retried_and_failed_checks_refuse(self):
+    def test_merge_unknown_retries_only_after_fresh_open_same_head_read(self):
         review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
                   'review_result': {'verdict': 'PASS'}}
         record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
@@ -2100,7 +2102,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                     raise RuntimeError('claim race')
                 self.attempt = dict(merge_attempt)
         store, calls = Store(), []
-        pr = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
+              'mergeable': True,
               'labels': [{'name': 'mac-ci'}]}
         def github_get(path):
             if path.startswith('commits/'):
@@ -2137,8 +2140,217 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         result = task_advance._merge_once(store=store, record=retry_record, number=17,
             head=HEAD, pr=pr, events=[event], github_get=github_get_green,
             gh_runner=ambiguous, root='/repo')
+        self.assertEqual(result['codes'], ['MERGE_OUTCOME_UNKNOWN'])
+        self.assertEqual(len(calls), 2)
+
+    def test_merge_unknown_retry_refuses_moved_head(self):
+        review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                  'review_result': {'verdict': 'PASS'}}
+        event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}
+        prior = {'pr': 17, 'head_sha': HEAD, 'state': 'UNKNOWN',
+                 'claimed_at': '2026-11-06T00:00:00Z'}
+        record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                  'review_dispatch_claim': [review], 'merge_attempt': prior}
+
+        class Store:
+            def __init__(self):
+                self.attempt = prior
+                self.updates = []
+            def compare_and_update(self, _task_id, *, expected, merge_attempt):
+                self.updates.append((expected, merge_attempt))
+                self.attempt = dict(merge_attempt)
+
+        store, calls, reads = Store(), [], []
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open',
+              'merged': False, 'mergeable': True, 'labels': [{'name': 'mac-ci'}]}
+        current = dict(pr, head={'sha': 'b' * 40})
+        def github_get(path):
+            reads.append(path)
+            if path.startswith('commits/'):
+                return {'total_count': 2, 'check_runs': [
+                    {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+                     'conclusion': 'success'},
+                    {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
+                     'conclusion': 'success'}]}
+            if path.endswith('/files?per_page=100'):
+                return [{'filename': 'src/module.py'}]
+            return current
+        result = task_advance._merge_once(store=store, record=record, number=17,
+            head=HEAD, pr=pr, events=[event],
+            github_get=github_get,
+            gh_runner=lambda _root, args: calls.append(args), root='/repo')
+        self.assertEqual(result['codes'], ['MERGE_STALE_HEAD'])
+        self.assertIn('pulls/17', reads)
+        self.assertEqual(calls, [])
+        self.assertEqual(store.updates, [])
+        self.assertEqual(store.attempt, prior)
+
+    def test_failed_merge_that_freshly_reads_merged_posts_provenance(self):
+        review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                  'review_result': {'verdict': 'PASS'}}
+        event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}
+        record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                  'review_dispatch_claim': [review]}
+
+        class Store:
+            def __init__(self):
+                self.attempt = None
+            def compare_and_update(self, _task_id, *, expected, merge_attempt):
+                if self.attempt != expected.get('merge_attempt'):
+                    raise RuntimeError('claim race')
+                self.attempt = dict(merge_attempt)
+
+        store, calls = Store(), []
+        opened = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open',
+                  'merged': False, 'mergeable': True, 'labels': [{'name': 'mac-ci'}]}
+        merged = dict(opened, state='closed', merged=True)
+        def github_get(path):
+            if path.startswith('commits/'):
+                return {'total_count': 2, 'check_runs': [
+                    {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+                     'conclusion': 'success'},
+                    {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
+                     'conclusion': 'success'}]}
+            if path.endswith('/files?per_page=100'):
+                return [{'filename': 'src/module.py'}]
+            return opened if sum(call[1] == 'merge' for call in calls) == 0 else merged
+        def failed_merge(_root, args):
+            calls.append(args)
+            if args[1] == 'merge':
+                return type('R', (), {'returncode': 1})()
+            return type('R', (), {'returncode': 0})()
+        result = task_advance._merge_once(store=store, record=record, number=17,
+            head=HEAD, pr=opened, events=[event], github_get=github_get,
+            gh_runner=failed_merge, root='/repo')
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual(store.attempt['state'], 'MERGED')
+        self.assertEqual(calls[1][:3], ['pr', 'comment', '17'])
+        self.assertIn('merge provenance', calls[1][-1])
+
+    def test_prior_claimed_attempt_is_refused(self):
+        review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                  'review_result': {'verdict': 'PASS'}}
+        event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}
+        prior = {'pr': 17, 'head_sha': HEAD, 'state': 'CLAIMED',
+                 'claimed_at': '2026-11-06T00:00:00Z'}
+        result = self._run_prior_merge_attempt(prior, review, event)
         self.assertEqual(result['codes'], ['MERGE_ALREADY_CLAIMED'])
-        self.assertEqual(len(calls), 1)
+
+    def test_unknown_retry_requires_explicit_open_and_unmerged_fields(self):
+        review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                  'review_result': {'verdict': 'PASS'}}
+        event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}
+        prior = {'pr': 17, 'head_sha': HEAD, 'state': 'UNKNOWN',
+                 'claimed_at': '2026-11-06T00:00:00Z'}
+        pr_without_status = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
+                             'labels': [{'name': 'mac-ci'}]}
+        result = self._run_prior_merge_attempt(prior, review, event,
+                                               pr=pr_without_status)
+        self.assertEqual(result['codes'], ['MERGE_ALREADY_CLAIMED'])
+
+    def test_prior_attempt_for_other_pr_or_head_is_conflicting(self):
+        review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                  'review_result': {'verdict': 'PASS'}}
+        event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}
+        for prior in (
+                {'pr': 18, 'head_sha': HEAD, 'state': 'UNKNOWN',
+                 'claimed_at': '2026-11-06T00:00:00Z'},
+                {'pr': 17, 'head_sha': 'b' * 40, 'state': 'UNKNOWN',
+                 'claimed_at': '2026-11-06T00:00:00Z'}):
+            with self.subTest(prior=prior):
+                result = self._run_prior_merge_attempt(prior, review, event)
+                self.assertEqual(result['codes'], ['MERGE_CONFLICTING_PR'])
+
+    def _run_prior_merge_attempt(self, prior, review, event, pr=None):
+        record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                  'review_dispatch_claim': [review], 'merge_attempt': prior}
+        class Store:
+            def compare_and_update(self, *_args, **_kwargs):
+                raise AssertionError('must not update a refused attempt')
+        pr = pr or {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
+                    'mergeable': True, 'labels': [{'name': 'mac-ci'}]}
+        def github_get(path):
+            if path.startswith('commits/'):
+                return {'total_count': 2, 'check_runs': [
+                    {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+                     'conclusion': 'success'},
+                    {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
+                     'conclusion': 'success'}]}
+            if path.endswith('/files?per_page=100'):
+                return [{'filename': 'src/module.py'}]
+            return pr
+        return task_advance._merge_once(store=Store(), record=record, number=17,
+            head=HEAD, pr=pr, events=[event], github_get=github_get,
+            gh_runner=lambda *_args: (_ for _ in ()).throw(AssertionError('merge called')),
+            root='/repo')
+
+    def test_failed_then_successful_merge_uses_real_task_store(self):
+        from llmtool.task_store import TaskStore
+        from llmtool.task_store import new_id
+        request = 'Bounded non-sensitive merge retry task.'
+        request_sha = hashlib.sha256(request.encode()).hexdigest()
+        task_id, run_id = new_id(), new_id()
+        task = task_submission_cli._record(
+            task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED', request_sha=request_sha)
+        task.update(pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                                      'base_url': None},
+                    response='PM returned a bounded task.', error_code=None,
+                    pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                                   'goal': 'Retry a safely verified merge.',
+                                   'acceptance': ['the PR is merged']})
+        with tempfile.TemporaryDirectory() as temp:
+            store = TaskStore(Path(temp).resolve() / 'tasks')
+            store.create(task)
+            actual = store.get(task_id)
+            review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                      'review_result': {'verdict': 'PASS'}}
+            event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                     'outcome': 'REVIEW_PASS'}
+            pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
+                  'mergeable': True, 'labels': [{'name': 'mac-ci'}]}
+            checks = {'total_count': 2, 'check_runs': [
+                {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+                 'conclusion': 'success'},
+                {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
+                 'conclusion': 'success'}]}
+            calls = []
+            def github_get(path):
+                if path.startswith('commits/'):
+                    return checks
+                if path.endswith('/files?per_page=100'):
+                    return [{'filename': 'src/module.py'}]
+                return pr
+            def gh_runner(_root, args):
+                calls.append(args)
+                if args[1] == 'merge' and sum(call[1] == 'merge' for call in calls) == 1:
+                    return type('R', (), {'returncode': 1})()
+                return type('R', (), {'returncode': 0})()
+            record = dict(actual, review_dispatch_claim=[review])
+            first = task_advance._merge_once(store=store, record=record, number=17,
+                head=HEAD, pr=pr, events=[event], github_get=github_get,
+                gh_runner=gh_runner, root='/repo')
+            self.assertEqual(first['codes'], ['MERGE_OUTCOME_UNKNOWN'])
+            persisted = store.get(task_id)
+            self.assertEqual(persisted['merge_attempt']['state'], 'UNKNOWN')
+            second_record = dict(persisted, review_dispatch_claim=[review])
+            second = task_advance._merge_once(store=store, record=second_record, number=17,
+                head=HEAD, pr=pr, events=[event], github_get=github_get,
+                gh_runner=gh_runner, root='/repo')
+            self.assertEqual(second['step'], 'MERGED')
+            attempts = [call for call in calls if call[1] == 'merge']
+            self.assertEqual(len(attempts), 2)
+            self.assertEqual(store.get(task_id)['merge_attempt']['state'], 'MERGED')
+            self.assertNotEqual(second_record['merge_attempt']['claimed_at'],
+                                store.get(task_id)['merge_attempt']['claimed_at'])
+            datetime.fromisoformat(
+                store.get(task_id)['merge_attempt']['claimed_at'].replace('Z', '+00:00'))
 
     def test_successful_merge_keeps_merged_state_when_record_or_comment_warns(self):
         review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
