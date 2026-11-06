@@ -1052,7 +1052,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
             declared_test_path, 'tools/llmtool/tests/test_fixture.py']))
         self.assertEqual(bound['dispatch_audit'][-1]['worker_key'], 'claude-developer')
         self.assertEqual(bound['dispatch_audit'][-1]['reason_code'],
-                         'OWNER_ASSIGNMENT_MATCHED')
+                         'OWNER_POLICY_ALLOWED')
         self.assertEqual(bound['completion']['executor_task_id'], d6_task_id)
         self.assertEqual(bound['completion']['evidence']['source_sha'],
                          self.executor_head)
