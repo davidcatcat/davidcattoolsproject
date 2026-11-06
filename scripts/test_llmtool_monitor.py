@@ -6320,6 +6320,49 @@ class OfficeViewTests(unittest.TestCase):
         # without a width (--once) nothing is cut
         self.assertIn("x" * 200, "\n".join(mon.office_lines(rows)))
 
+    def test_runner_row_ci_reference_is_split_out_for_highlighting(self):
+        # #763: the （main @sha） / （PR #N @sha） after a CI name is its own part.
+        detail = "執行中：llmtool Linux CI（PR #1098 @b29462a）（已執行 3 分鐘）；Linux"
+        self.assertEqual(mon.ci_ref_parts(detail, [detail]), [[
+            ("執行中：llmtool Linux CI", False), ("（PR #1098 @b29462a）", True),
+            ("（已執行 3 分鐘）；Linux", False)]])
+        # wrapped inside the reference: both halves are highlighted
+        self.assertEqual(
+            mon.ci_ref_parts(detail, ["執行中：llmtool Linux CI（PR", "#1098 @b29462a）（已執行 3 分鐘）；Linux"]),
+            [[("執行中：llmtool Linux CI", False), ("（PR", True)],
+             [("#1098 @b29462a）", True), ("（已執行 3 分鐘）；Linux", False)]])
+        pieces = mon._wrap(detail, 18)
+        split = mon.ci_ref_parts(detail, pieces)
+        self.assertGreater(len(pieces), 1)
+        self.assertEqual(["".join(text for text, _ in line) for line in split], pieces)
+        self.assertEqual("".join(text for line in split for text, lit in line if lit).replace(" ", ""),
+                         "（PR#1098@b29462a）")
+        # no reference: one plain part
+        self.assertEqual(mon.ci_ref_parts("閒置，等工作；Linux", ["閒置，等工作；Linux"]),
+                         [[("閒置，等工作；Linux", False)]])
+
+        rows = [mon.OfficeRow("linux ci runner ec2-a", mon.WORKING, detail, 180, 91, key="ec2-a",
+                              kind="worker", evidence="GitHub"),
+                mon.OfficeRow("mac ci runner", mon.IDLE,
+                              "閒置，等工作；上一個工作：llmtool Mac CI（main @c85a0ec） 成功（3 分鐘前）",
+                              600, 81, key="runner", kind="worker", evidence="程序"),
+                mon.OfficeRow("linux ci runner ec2-b", mon.IDLE, "閒置，等工作；Linux", 60, 92,
+                              key="ec2-b", kind="worker", evidence="GitHub"),
+                # not a runner row: its reference-like text stays plain
+                mon.OfficeRow("codex 主對話", mon.WORKING, "看 llmtool Linux CI（main @c85a0ec）", 5, 10,
+                              key="T1")]
+        for width in (None, 60, 200):
+            parts = {}
+            view = mon.office_view(rows, width=width, expand=True, parts=parts)
+            self.assertEqual(view, mon.office_view(rows, width=width, expand=True))   # text unchanged
+            for index, line in parts.items():
+                self.assertEqual("".join(text for text, _ in line), view[index][0])
+            self.assertFalse(any("ec2-b" in view[index][0] for index in parts))
+            lit = "".join(text for index in sorted(parts) for text, on in parts[index] if on)
+            self.assertEqual(lit.replace(" ", ""), "（PR#1098@b29462a）（main@c85a0ec）")
+            if width == 60:   # wrapped: the reference is on a continuation line
+                self.assertTrue(any(view[index][0].startswith(" ") for index in parts))
+
     def test_office_header_shows_working_and_waiting_counts_or_unknown(self):
         self.assertEqual(mon.office_view([], error="OSError")[0][0],
                          "辦公室 · 工作中 ? · 等你 ?")
