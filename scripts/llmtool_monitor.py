@@ -7481,11 +7481,32 @@ def _settled_codex_failures(rows: list[OfficeRow], canonical: str,
             settled[task_id] = True
     if not settled:
         return rows
+
+    def _parent_task_id(task_id: str) -> str:
+        if len(task_id) < 11:
+            return task_id
+        dash = len(task_id) - 8
+        if task_id[dash] != "-":
+            return task_id
+        sha = task_id[dash + 1:]
+        if not all(c in "0123456789abcdefABCDEF" for c in sha):
+            return task_id
+        prefix = task_id[:dash]
+        hd = prefix.rfind("-hd")
+        if hd <= 0:
+            return task_id
+        number = prefix[hd + 3:]
+        if not number or not all(c in "0123456789" for c in number):
+            return task_id
+        return prefix[:hd]
+
     return [replace(row, state=DONE,
                     detail=row.detail + "（上一輪失敗，PR 已結束）")
             if row.key.startswith("codex:") and row.state == ATTENTION
             and row.exec_result == "failed"
-            and row.task.startswith("task ") and row.task[5:] in settled
+            and row.task.startswith("task ")
+            and (row.task[5:] in settled
+                 or _parent_task_id(row.task[5:]) in settled)
             else row for row in rows]
 
 
