@@ -47,7 +47,7 @@ from .developer_routes.agy import (
 )
 from .developer_routes.claude import MAX_PROMPT_BYTES as CLAUDE_MAX_PROMPT_BYTES
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
-from .test_output_excerpts import _emitted_sensitive
+from .test_output_excerpts import _CLOUD_KEY, _emitted_sensitive
 from .developer_diff_screen import developer_diff_sensitive
 from .developer_output_normalize import (normalize_developer_output,
                                          reanchor_developer_output)
@@ -1753,7 +1753,7 @@ def _codex_cumulative_diff_rejection(root, source_sha, write_paths,
 
 _CAPTURE_SECRET_PATTERNS = (
     re.compile(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----', re.S),
-    re.compile(r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}|'
+    re.compile(_CLOUD_KEY + r'|\bsk-[A-Za-z0-9_-]{12,}|'
                r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|\bxox[abprs]-[A-Za-z0-9-]{20,}\b'),
     re.compile(r'\b(?:bearer|basic)\s+\S+', re.I),
     re.compile(r'(?i)(["\']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
