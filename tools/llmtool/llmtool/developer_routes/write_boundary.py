@@ -62,6 +62,11 @@ class SandboxExecBoundary(WriteBoundary):
         self.allow_claude_tmp = allow_claude_tmp
         self._prepared = None
 
+    def with_gw_agent_tmp(self):
+        """Return an unprepared copy that allows the gateway's exact temp names."""
+        return SandboxExecBoundary(executable=self.executable, denied_dirs=self.denied_dirs,
+                                   tmpdir=self.tmpdir, allow_gw_agent_tmp=True)
+
     def _policy(self, root, write_paths, state_dirs):
         root = Path(root).resolve(strict=True)
         if not root.is_dir():

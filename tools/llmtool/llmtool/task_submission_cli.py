@@ -1684,6 +1684,7 @@ def _codex_timeout_recovery(previous, *, executor_task_id, source_sha,
         previous.get('state') == 'DEVELOPER_OUTCOME_UNKNOWN' and
         previous.get('error_code') == 'CODEX_TIMEOUT_WITH_CHANGES' and
         type(execution) is dict and execution.get('status') == 'TIMEOUT' and
+        execution.get('cleanup_status') == 'CONFIRMED' and
         execution.get('diff_base_sha') == previous.get('source_sha') and
         type(execution.get('diff_sha256')) is str and
         re.fullmatch(r'[0-9a-f]{64}', execution['diff_sha256']) and
@@ -2763,8 +2764,8 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        store.compare_and_update(
-            task['task_id'],
+        store.d6_bind_compare_and_update(
+            task['task_id'], executor_task_id=registration.task_id,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                       'completion': None},
             developer=developer, completion=completion,
@@ -3198,7 +3199,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        store.compare_and_update(task['task_id'],
+        store.d6_bind_compare_and_update(task['task_id'],
+            executor_task_id=registration.task_id,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                       'completion': None}, developer=developer, completion=completion)
     except TaskStoreConflict:
@@ -3453,7 +3455,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        store.compare_and_update(task['task_id'],
+        store.d6_bind_compare_and_update(task['task_id'],
+            executor_task_id=registration.task_id,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                       'completion': None}, developer=developer, completion=completion)
     except TaskStoreConflict:
@@ -3733,7 +3736,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        claimed = store.compare_and_update(task['task_id'],
+        claimed = store.d6_bind_compare_and_update(task['task_id'],
+            executor_task_id=registration.task_id,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                       'completion': None}, developer=developer, completion=completion)
     except TaskStoreConflict:
@@ -3741,18 +3745,46 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     expected_developer = copy.deepcopy(claimed['developer'])
 
     def persist_failure(error_code, *, state='DEVELOPER_UNAVAILABLE'):
-        nonlocal expected_developer
-        developer.update(state=state, provider_type='gw-agent-cli', model=model,
-                         error_code=error_code, artifact=None, artifact_sha256=None)
+        # Start from the last saved record, never the in-flight one: the refused
+        # write may be what carries the fault, and the saved identity is the only
+        # one the store gate lets a failure state keep. A claim refused before
+        # DISPATCHING therefore stays unbound, with no provider type or model.
+        failed = {**expected_developer, 'state': state, 'error_code': error_code[:64]}
+        records = [failed]
+        if type(developer.get('execution')) is dict:
+            # Keep what the run observed, cleanup_status above all, whenever the
+            # store accepts it; the bare record stays valid whatever it held.
+            records.insert(0, {
+                **failed,
+                **{field: developer[field] for field in
+                   ('audit_sha256', 'audit_copy_path_sha256', 'changed_files')},
+                'execution': {**developer['execution'], 'status': 'UNKNOWN',
+                              'usage_source': 'UNKNOWN'}})
+        for record in records:
+            try:
+                store.compare_and_update(
+                    task['task_id'], expected={'developer': expected_developer},
+                    developer=record)
+            except Exception:
+                if not write_landed(record):
+                    continue
+            _print(_task_view(store.get(task['task_id'])))
+            return 1
+        raise LLMToolError('gw-agent outcome could not be persisted')
+
+    def persist_interrupted():
+        # Best effort: the interruption itself must still reach the caller.
         try:
-            saved = store.compare_and_update(
-                task['task_id'], expected={'developer': expected_developer},
-                developer=developer)
+            persist_failure('DEVELOPER_INTERRUPTED', state='DEVELOPER_OUTCOME_UNKNOWN')
         except Exception:
-            raise LLMToolError('gw-agent outcome could not be persisted') from None
-        expected_developer = copy.deepcopy(saved['developer'])
-        _print(_task_view(saved))
-        return 1
+            pass
+
+    def write_landed(record):
+        # A store write can fail after its rename, so read what is really saved.
+        try:
+            return store.get(task['task_id']).get('developer') == record
+        except Exception:
+            return False
 
     developer.update(state='DEVELOPER_DISPATCHING', provider_type='gw-agent-cli',
                      model=model)
@@ -3763,15 +3795,23 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         expected_developer = copy.deepcopy(dispatching['developer'])
     except worker_dispatch.WorkerDispatchDenied as exc:
         return persist_failure('DEVELOPER_' + exc.dispatch_code)
+    except Exception:
+        if not write_landed(developer):
+            return persist_failure('DEVELOPER_DISPATCH_PERSISTENCE_REJECTED')
+        expected_developer = copy.deepcopy(developer)
     try:
         worker_dispatch.authorize_dispatch(store, task['task_id'], 'company-gw-agent', 'DISPATCH')
-    except worker_dispatch.WorkerDispatchDenied as exc:
-        return persist_failure('DEVELOPER_' + exc.dispatch_code)
-    try:
         route = GwAgentRoute(route_config)
         route.validate_profile(model, effort)
+    except worker_dispatch.WorkerDispatchDenied as exc:
+        return persist_failure('DEVELOPER_' + exc.dispatch_code)
     except RouteError:
         return persist_failure('DEVELOPER_GW_AGENT_CONFIG_INVALID')
+    except Exception:
+        return persist_failure('DEVELOPER_DISPATCH_FAILED')
+    except BaseException:
+        persist_interrupted()
+        raise
     def validate_binding():
         current = store.get(task['task_id'])
         if (current.get('developer') != developer or current.get('task_binding') != binding or
@@ -3823,16 +3863,16 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         if usage is not None:
             usage['served_model'] = served_model
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
+            model=served_model,
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
             usage=usage, error_code=None,
             audit_sha256=audit_sha,
             audit_copy_path_sha256=hashlib.sha256(os.fsencode(route.audit_copy_path)).hexdigest(),
-            changed_files=changed_paths,
+            changed_files=list(changed_paths),
             execution={'status': 'DONE', 'native_session_id': result.session_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
                 'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
-                'usage_source': ('CLI_REPORTED' if result.usage is not None and
-                                 usage.get('status') != 'UNKNOWN' else 'UNKNOWN'),
+                'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None})
     except RouteError as exc:
@@ -3848,17 +3888,21 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     except Exception:
         return persist_failure('DEVELOPER_RESULT_UNKNOWN',
                                state='DEVELOPER_OUTCOME_UNKNOWN')
+    except BaseException:
+        persist_interrupted()
+        raise
     try:
-        saved = store.compare_and_update(
+        store.compare_and_update(
             task['task_id'], expected={'developer': expected_developer},
             developer=developer, completion=completion)
-        expected_developer = copy.deepcopy(saved['developer'])
     except Exception:
-        return persist_failure('DEVELOPER_RESULT_PERSISTENCE_REJECTED', state='DEVELOPER_OUTCOME_UNKNOWN')
-    if developer['state'] == 'DEVELOPER_RESPONDED':
-        return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
-    _print(_task_view(saved))
-    return 1
+        if not write_landed(developer):
+            return persist_failure('DEVELOPER_RESULT_PERSISTENCE_REJECTED',
+                                   state='DEVELOPER_OUTCOME_UNKNOWN')
+    except BaseException:
+        persist_interrupted()
+        raise
+    return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
 
 
 def _direct_child_liveness(execution):
@@ -4190,7 +4234,8 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        store.compare_and_update(task['task_id'],
+        store.d6_bind_compare_and_update(task['task_id'],
+            executor_task_id=registration.task_id,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED',
                       'developer': previous_developer,
                       'completion': task.get('completion')},
@@ -4896,8 +4941,8 @@ def run_task_delegate(args, *, store=None):
     # remains pending; this task cannot silently trigger a duplicate provider call.
     _check_delegate_repair_cap(args, store, (registration, snapshot))
     try:
-        store.compare_and_update(
-            task['task_id'],
+        store.d6_bind_compare_and_update(
+            task['task_id'], executor_task_id=registration.task_id,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                       'completion': None},
             developer=developer, completion=completion,
@@ -6228,7 +6273,8 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
     task = store.get(task_id)
     developer = task.get('developer')
     if (task['schema_version'] != 2 or task['state'] != 'PM_RESPONDED' or
-            type(developer) is not dict or developer.get('provider_profile') not in ('opencode', 'codex', 'agy', 'claude') or
+            type(developer) is not dict or developer.get('provider_profile') not in (
+                'opencode', 'codex', 'agy', 'claude', 'gw-agent') or
             developer.get('state') != 'DEVELOPER_RESPONDED' or
             developer.get('artifact') is None or developer.get('execution') is None or
             developer['execution'].get('status') not in ('SUCCEEDED', 'DONE') or
