@@ -379,6 +379,7 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
     deadline = started + timeout
     output, errors = bytearray(), bytearray()
     process = None
+    collection_error = None
     lifecycle = CLIProcessLifecycle('codex-direct-developer', deadline=deadline + 5)
     lifecycle.__enter__()
     lifecycle_closed = False
@@ -482,6 +483,11 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
                         except OSError:
                             pass
             except BaseException as exc:
+                # Keep the first collection failure across process cleanup.
+                # Cleanup can terminate the child with a signal; that signal
+                # is an observed cleanup result, not a replacement for the
+                # cap or adapter error that caused cleanup to start.
+                collection_error = exc
                 # Keep TMPDIR alive until the owned child has stopped using it.
                 close_lifecycle(type(exc), exc, exc.__traceback__)
                 raise
@@ -513,8 +519,9 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
             raise
         # An unexpected exception still becomes a typed, fail-closed result
         # with the observed process facts, never a bare adapter UNKNOWN.
-        error = (exc if isinstance(exc, DirectCodexError) else
-                 DirectCodexError(adapter_error_code(exc)))
+        original_error = collection_error or exc
+        error = (original_error if isinstance(original_error, DirectCodexError) else
+                 DirectCodexError(adapter_error_code(original_error)))
         if (error.direct_codex_code in ('CODEX_FINAL_JSON_INVALID',
                                         'CODEX_FINAL_MESSAGE_INVALID',
                                         'CODEX_FINAL_MESSAGE_MISSING') and
