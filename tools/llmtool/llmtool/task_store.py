@@ -570,6 +570,10 @@ class TaskStoreConflict(LLMToolError):
         self.task_store_error_code = 'TASK_STORE_CONFLICT'
 
 
+class _TaskNotFound(LLMToolError):
+    """No record exists for this Task ID; any other read failure is not this."""
+
+
 class _D6ClaimRequired(LLMToolError):
     """A commit would gain a live D6 that the binding lock has not cleared."""
 
@@ -2315,7 +2319,7 @@ class TaskStore:
             except LLMToolError:
                 raise
             except FileNotFoundError:
-                raise LLMToolError('task not found') from None
+                raise _TaskNotFound('task not found') from None
             except OSError as exc:
                 if _is_contention_error(exc):
                     time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
@@ -2591,7 +2595,12 @@ class TaskStore:
 
     def _d6_refuse_locked_holders(self, task_id, claims, holds, holders, journal,
                                   seen_epoch):
-        """Re-read only scan holders and same-D6 claims newer than the scan."""
+        """Re-read only scan holders and same-D6 claims newer than the scan.
+
+        A journal claim whose Task has no record holds nothing, so it is
+        skipped (see ``_d6_commit``). A scan holder was read moments ago, so
+        its record going missing still refuses, as does any other read failure.
+        """
         digests = {_d6_digest(claim) for claim in claims}
         recheck = set(holders)
         recheck.update(entry['task_id'] for entry in journal['entries']
@@ -2600,6 +2609,10 @@ class TaskStore:
         for other_id in sorted(recheck):
             try:
                 other = self.get(other_id)
+            except _TaskNotFound:
+                if other_id in holders:
+                    _fail('TASK_D6_BINDING_SCAN_FAILED')
+                continue
             except Exception:
                 _fail('TASK_D6_BINDING_SCAN_FAILED')
             if any(holds(other, claim) for claim in claims):
@@ -2620,6 +2633,14 @@ class TaskStore:
         finds it. Q's epoch came first: P's entry is newer than the scan, and Q
         re-reads P under the lock. Either way Q refuses. A journal that has
         dropped entries newer than the scan forces a new scan.
+
+        The entry must stay first: a commit with no entry yet is invisible to a
+        binder whose scan already passed that Task. So a writer that stops
+        between the two leaves an entry that gained nothing. Only the lock
+        holder can be between them, and the lock dies with its process, so
+        under the lock every entry's writer has finished. Its Task then either
+        has a record, re-read as usual, or never got one and holds nothing. A
+        retry of that Task is a new commit through this same path.
         """
         self._name(task_id)
         directory = self._dirfd()

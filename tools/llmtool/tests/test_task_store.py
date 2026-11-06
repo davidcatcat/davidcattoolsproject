@@ -1367,6 +1367,121 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(len(holder_reads), 2)
             self.assertEqual(self._d6_live_holders(store, executor_task_id), [holder_id])
 
+    def _stop_after_d6_journal_append(self, store, call):
+        """Run ``call`` in a child SIGKILLed between its journal append and commit.
+
+        Returns the Task ID the stopped writer left in the journal.
+        """
+        append = store._append_d6_journal_at
+
+        def append_then_stop(*args):
+            append(*args)
+            os.kill(os.getpid(), signal.SIGKILL)
+
+        pid = os.fork()
+        if pid == 0:
+            try:
+                store._append_d6_journal_at = append_then_stop
+                call()
+            finally:
+                os._exit(1)
+        deadline = time.monotonic() + 10
+        while True:
+            finished, status = os.waitpid(pid, os.WNOHANG)
+            if finished:
+                break
+            if time.monotonic() >= deadline:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+                self.fail('stopped writer never reached its journal append')
+            time.sleep(0.01)
+        self.assertTrue(os.WIFSIGNALED(status))
+        self.assertEqual(os.WTERMSIG(status), signal.SIGKILL)
+        journal = store.root / task_store_module.D6_BINDING_JOURNAL_NAME
+        return json.loads(journal.read_text(encoding='utf-8'))['entries'][-1]['task_id']
+
+    def test_d6_writer_stopped_before_its_commit_gains_nothing(self):
+        """The D6 stays bindable by exactly one Task after the stop."""
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            for kind in ('create', 'fresh', 'continuation-update'):
+                for timing in ('scan-before-stop', 'scan-after-stop'):
+                    with self.subTest(stopped=kind, timing=timing):
+                        store = TaskStore(Path(self.temp.name).resolve() /
+                                          f'stopped-{kind}-{timing}')
+                        executor_task_id = 'executor-stopped'
+                        stopped = self._d6_binder(store, kind, executor_task_id)
+                        binder = self._d6_binder(store, 'fresh', executor_task_id)
+
+                        def stop():
+                            stopped_id = self._stop_after_d6_journal_append(store, stopped)
+                            self.assertEqual(stopped_id in store.task_ids(), kind != 'create')
+                            self.assertEqual(self._d6_live_holders(store, executor_task_id), [])
+
+                        if timing == 'scan-before-stop':
+                            # The binder's epoch predates the stopped writer's
+                            # entry, so it re-reads that Task under the lock.
+                            outcomes = self._run_d6_interleaved(store, binder, stop)
+                            self.assertEqual(outcomes['first'], 'BOUND')
+                        else:
+                            stop()
+                            binder()
+                        holder_id, = self._d6_live_holders(store, executor_task_id)
+                        # The stopped writer's retry cannot become a second holder.
+                        with self.assertRaises(LLMToolError) as caught:
+                            stopped()
+                        self.assertEqual(caught.exception.task_store_error_code,
+                                         'TASK_D6_ALREADY_BOUND')
+                        self.assertEqual(self._d6_live_holders(store, executor_task_id),
+                                         [holder_id])
+
+    def test_d6_retry_of_a_stopped_writer_holds_against_a_racing_binder(self):
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            for kind in ('create', 'fresh', 'continuation-update'):
+                with self.subTest(stopped=kind):
+                    store = TaskStore(Path(self.temp.name).resolve() / f'retried-{kind}')
+                    executor_task_id = 'executor-retried'
+                    stopped = self._d6_binder(store, kind, executor_task_id)
+                    binder = self._d6_binder(store, 'fresh', executor_task_id)
+
+                    def stop_then_retry():
+                        self._stop_after_d6_journal_append(store, stopped)
+                        stopped()
+
+                    outcomes = self._run_d6_interleaved(store, binder, stop_then_retry)
+                    self.assertEqual(outcomes, {'second': 'BOUND',
+                                                'first': 'TASK_D6_ALREADY_BOUND'})
+                    self.assertEqual(len(self._d6_live_holders(store, executor_task_id)), 1)
+
+    def test_d6_only_a_journal_claim_with_no_record_is_skipped(self):
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            with self.subTest(read='stopped writer record unreadable'):
+                root = Path(self.temp.name).resolve() / 'stopped-unreadable'
+                store = TaskStore(root)
+                executor_task_id = 'executor-stopped-unreadable'
+                stopped = self._d6_binder(store, 'create', executor_task_id)
+                binder = self._d6_binder(store, 'fresh', executor_task_id)
+
+                def stop_then_corrupt():
+                    stopped_id = self._stop_after_d6_journal_append(store, stopped)
+                    corrupt = root / f'{stopped_id}.json'
+                    corrupt.write_text('{"not": "a task"}', encoding='utf-8')
+                    corrupt.chmod(0o600)
+
+                outcomes = self._run_d6_interleaved(store, binder, stop_then_corrupt)
+                self.assertEqual(outcomes['first'], 'TASK_D6_BINDING_SCAN_FAILED')
+
+            with self.subTest(read='scan holder record gone'):
+                root = Path(self.temp.name).resolve() / 'holder-gone'
+                store = TaskStore(root)
+                executor_task_id = 'executor-holder-gone'
+                self._d6_binder(store, 'fresh', executor_task_id)()
+                holder_id, = self._d6_live_holders(store, executor_task_id)
+                binder = self._d6_binder(store, 'fresh', executor_task_id)
+                outcomes = self._run_d6_interleaved(
+                    store, binder, (root / f'{holder_id}.json').unlink)
+                self.assertEqual(outcomes['first'], 'TASK_D6_BINDING_SCAN_FAILED')
+                self.assertEqual(self._d6_live_holders(store, executor_task_id), [])
+
     def test_d6_binding_locked_work_does_not_grow_with_finished_tasks(self):
         def locked_work(name, finished_count):
             store = TaskStore(Path(self.temp.name).resolve() / name)
