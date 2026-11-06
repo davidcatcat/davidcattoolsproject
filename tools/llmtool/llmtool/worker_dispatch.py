@@ -461,10 +461,39 @@ def _initial_provider_binding(old_developer, new_developer):
     )
 
 
+def _gw_agent_served_model_binding(old_developer, new_developer):
+    """Allow only a completed gw-agent result to replace its routing alias."""
+    if (type(old_developer) is not dict or type(new_developer) is not dict or
+            old_developer.get('provider_profile') != 'gw-agent' or
+            new_developer.get('provider_profile') != 'gw-agent' or
+            old_developer.get('state') != 'DEVELOPER_DISPATCHING' or
+            new_developer.get('state') != 'DEVELOPER_RESPONDED' or
+            old_developer.get('model') != 'gw'):
+        return False
+    served_model = new_developer.get('model')
+    if type(served_model) is not str or not served_model or served_model == 'gw':
+        return False
+    if not all(old_developer.get(field) == new_developer.get(field)
+               for field in _DEVELOPER_IDENTITY_FIELDS if field != 'model'):
+        return False
+    execution = new_developer.get('execution')
+    if (new_developer.get('error_code') is not None or type(execution) is not dict or
+            execution.get('status') != 'DONE' or
+            type(execution.get('process_exit_code')) is not int or
+            execution.get('process_exit_code') != 0 or
+            execution.get('cleanup_status') != 'CONFIRMED'):
+        return False
+    return all(type(new_developer.get(field)) is str and
+               re.fullmatch(r'[0-9a-f]{64}', new_developer[field]) is not None
+               for field in ('audit_sha256', 'audit_copy_path_sha256'))
+
+
 def _developer_identity_changed(old_developer, new_developer):
     changed = any(old_developer.get(field) != new_developer.get(field)
                   for field in _DEVELOPER_IDENTITY_FIELDS)
-    return changed and not _initial_provider_binding(old_developer, new_developer)
+    return (changed and
+            not _initial_provider_binding(old_developer, new_developer) and
+            not _gw_agent_served_model_binding(old_developer, new_developer))
 
 
 def task_store_attempts(current, changes):

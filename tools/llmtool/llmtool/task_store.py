@@ -1514,7 +1514,8 @@ def _validate(record):
             if 'execution' in developer:
                 execution = developer['execution']
                 if execution is not None:
-                    if (developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'claude') or
+                    if (developer['provider_profile'] not in (
+                            'opencode', 'codex', 'agy', 'claude', 'gw-agent') or
                             type(execution) is not dict or
                             set(execution) not in (
                                 _DIRECT_EXECUTION_FIELDS, _DIRECT_EXECUTION_BINDING_FIELDS,
@@ -1647,6 +1648,13 @@ def _validate(record):
                     re.fullmatch(r'[A-Z0-9_]{1,64}', developer['error_code']) is None):
                 _fail()
             dev_state = developer['state']
+            if developer['provider_profile'] == 'gw-agent':
+                if (dev_state == 'DEVELOPER_RESPONDED' and
+                        (type(model) is not str or _SERVED_MODEL.fullmatch(model) is None)):
+                    _fail()
+                if (type(usage) is dict and 'served_model' in usage and
+                        usage['served_model'] != model):
+                    _fail()
             if 'blocked_reason' in developer:
                 reason = developer['blocked_reason']
                 execution = developer.get('execution')
