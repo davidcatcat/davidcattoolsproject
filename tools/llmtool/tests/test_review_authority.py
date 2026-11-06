@@ -478,6 +478,14 @@ class WorkerJobIntegrationTests(unittest.TestCase):
     def harness(self,**changes):
         h=WorkerHarness(**changes);self.addCleanup(h.close);return h
 
+    def test_finalize_failure_skips_worker_completion_validation(self):
+        h=self.harness()
+        with patch.object(h.authority,'finalize',side_effect=RuntimeError('private')), \
+                patch.object(h.launcher,'validate_completion',side_effect=AssertionError('must not validate')) as validate:
+            result=h.run()
+        self.assertEqual(result['code'],'REVIEW_FINALIZE_UNKNOWN',result)
+        validate.assert_not_called()
+
     def test_reaped_worker_with_silent_descendant_is_unknown_not_approved(self):
         import time
         from llmtool.errors import LLMToolError

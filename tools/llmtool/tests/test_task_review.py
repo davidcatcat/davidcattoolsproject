@@ -1,10 +1,12 @@
 """S1b A full fake-only foreground journey; adversarial contract/data boundaries."""
+import ast
 import copy
 import hashlib
 import json
 import unittest
 from dataclasses import replace
 from datetime import datetime,timezone,timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 from llmtool import task_review as r, task_lifecycle as t, task_verification as v
@@ -148,6 +150,11 @@ class ReviewTests(unittest.TestCase):
     def setUp(self):
         self.ready,self.final,self.expect,self.events=fixture()
         self.host=FakeHost(self.ready,self.final,self.expect,self.events)
+    def test_task_review_has_no_return_inside_finally(self):
+        tree=ast.parse(Path(r.__file__).read_text(encoding='utf-8'))
+        returns=[ret for node in ast.walk(tree) if isinstance(node,ast.Try)
+                 for final in node.finalbody for ret in ast.walk(final) if isinstance(ret,ast.Return)]
+        self.assertEqual(returns,[])
     def test_host_instructions_findings_limit_spacing(self):
         self.assertIn('findings: array of at most 32 objects',r.HOST_INSTRUCTIONS)
         self.assertNotIn('most32',r.HOST_INSTRUCTIONS)
