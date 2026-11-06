@@ -108,6 +108,10 @@ class DeveloperRoute(ABC):
     def collect(self, tmpdir: str, request: Mapping[str, Any]) -> None:
         """Collect route outputs while its private temporary directory exists."""
 
+    def configure_boundary(self, boundary: Any) -> Any:
+        """Return the write boundary this route runs under; verified as usual."""
+        return boundary
+
     def validate_exit(self, exit_code: int, parsed: Mapping[str, Any]) -> None:
         """Validate provider-specific status and process exit consistency."""
 
@@ -476,6 +480,11 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         before_status_paths = set(_git_status_paths(value['root']))
     except Exception:
         raise RouteError(_route_code(route, 'GIT_STATE_CHANGED')) from None
+    try:
+        boundary = route.configure_boundary(boundary)
+    except Exception:
+        raise RouteError('BLOCKED_WRITE_ISOLATION',
+                         blocked_reason='UNSUPPORTED_BOUNDARY') from None
     if boundary is None or not all(callable(getattr(boundary, method, None))
                                    for method in ('prepare', 'verify')):
         raise RouteError('BLOCKED_WRITE_ISOLATION', blocked_reason='UNSUPPORTED_BOUNDARY')

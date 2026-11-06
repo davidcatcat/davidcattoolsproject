@@ -1097,7 +1097,8 @@ class Monitor:
                                      verdicts=self.github.verdicts if self.github else None,
                                      ci=self.github.ci_runs if self.github else None,
                                      ci_view=self.github.ci_view if self.github else None,
-                                     prs=self.github.branch_prs if self.github else None,
+                                     prs=(self.github.branch_prs if self.github and not self.github.read_failed
+                                          else None),
                                      runner_root=runner_roots(),
                                      agents=None if self.agents is None
                                      else self.agents.sessions(claude_config_dirs()))
@@ -7365,8 +7366,9 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     # A `codex exec` run without a live process has ended, however its
     # session file stops (Owner report 2026-11-03: killed runs showed 無回應).
     codex_execs = sum(p.codex_exec and family(p.role) == "Codex" for p in clis)
-    rows = (codex_rows(now, codex_root, canonical, calls, verdicts,
+    codex = codex_rows(now, codex_root, canonical, calls, verdicts,
                        codex_running=codex_running, codex_execs=codex_execs)
+    rows = (_settled_codex_failures(codex, canonical, prs)
             + claude_rows(now, claude_root, canonical, live))
     rows = _closed_codex_cli(rows, sum(family(p.role) == "Codex" for p in clis))
     keep_agents = ((sid, entry) for sid, entry in listed_agents
@@ -7457,6 +7459,34 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     rows = _bind_d6_pr_rows(rows, canonical, prs)
     return sorted(rows, key=lambda row: (row.order, row.age if row.age is not None else 1e12,
                                          row.name))
+
+
+def _settled_codex_failures(rows: list[OfficeRow], canonical: str,
+                            prs: dict[str, tuple[int, str]] | None) -> list[OfficeRow]:
+    """Demote failed Codex rows when their registered D6 PR is known done.
+
+    This changes displayed state only. Missing, unreadable, or unknown PR data
+    leaves the alert in place, as does a task without a registered branch.
+    """
+    if type(prs) is not dict or not prs:
+        return rows
+    details = registry_details(canonical)
+    settled = {}
+    for task_id, (_, _, _, _, branch) in details.items():
+        if not branch:
+            continue
+        pull = prs.get(branch)
+        if (type(pull) is tuple and len(pull) == 2 and type(pull[1]) is str
+                and pull[1] in PR_DONE_WORDS):
+            settled[task_id] = True
+    if not settled:
+        return rows
+    return [replace(row, state=DONE,
+                    detail=row.detail + "（上一輪失敗，PR 已結束）")
+            if row.key.startswith("codex:") and row.state == ATTENTION
+            and row.exec_result == "failed"
+            and row.task.startswith("task ") and row.task[5:] in settled
+            else row for row in rows]
 
 
 def _char_width(char: str) -> int:

@@ -59,6 +59,10 @@ class AgyRouteWiringTests(unittest.TestCase):
                 self.task.update(updates)
                 return dict(self.task)
 
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **updates):
+                return self.compare_and_update(task_id, expected=expected, **updates)
+
             def update(self, _task_id, **updates):
                 if (fail_success_persist and
                         updates.get('developer', {}).get('state') == 'DEVELOPER_RESPONDED'):

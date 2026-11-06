@@ -3761,9 +3761,9 @@ class OfficeViewTests(unittest.TestCase):
         db.commit()
         return path
 
-    def _office(self, db_path, processes=()):
+    def _office(self, db_path, processes=(), **kwargs):
         with patch.object(mon, "CODEX_HISTORY", str(db_path)):
-            return self.rows(processes)
+            return self.rows(processes, **kwargs)
 
     def _rollout(self, sid, markers, age=5, **meta):
         """markers: [(kind, seconds before NOW or None for untimed)]."""
@@ -6621,6 +6621,27 @@ class OfficeViewTests(unittest.TestCase):
     def test_708_newer_running_keeps_alert(self):
         old, _ = self._run_708("inProgress", ("task_started",), newer_age=5)
         self.assertEqual(old.state, mon.ATTENTION)
+
+    def test_763_failed_d6_codex_row_settles_only_for_known_closed_or_merged_pr(self):
+        self._register("wp-1", str(self.task), branch="feature/failed")
+        now = int(self.NOW)
+        db = self._turn_db([(self.EXEC_FAILED, "u", 0, "failed", now - 2400, now - 1800)])
+        self._exec_708(self.EXEC_FAILED, 1800)
+        cases = (
+            ({"feature/failed": (763, "CLOSED")}, mon.DONE, False),
+            ({"feature/failed": (763, "MERGED")}, mon.DONE, False),
+            ({"feature/failed": (763, "OPEN")}, mon.ATTENTION, True),
+            ({}, mon.ATTENTION, True),       # no PR for the registered branch
+            (None, mon.ATTENTION, True),     # unreadable PR snapshot
+        )
+        for prs, expected, should_alert in cases:
+            with self.subTest(prs=prs):
+                rows = self._office(db, prs=prs)
+                row = next(row for row in rows if row.sid == self.EXEC_FAILED[-8:])
+                self.assertEqual(row.state, expected)
+                alerts = [line for line in mon.office_lines(rows) if line.startswith("⚠")]
+                self.assertEqual(any(self.EXEC_FAILED[-8:] in line for line in alerts), should_alert)
+        self.assertTrue(next(self.codex.rglob(f"rollout-{self.EXEC_FAILED[-8:]}.jsonl")).exists())
 
     def test_708_completion_in_other_d6_does_not_clear(self):
         other = self.task.parent / "wp-2"
