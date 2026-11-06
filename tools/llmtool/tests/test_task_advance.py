@@ -2155,7 +2155,10 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
                  'conclusion': 'success'}]} if path.startswith('commits/') else
             [{'filename': 'src/module.py'}] if path.endswith('/files?per_page=100') else
-            pr)
+            {'number': 17, 'head': {'sha': HEAD}, 'state': 'open',
+             'merged': False, 'mergeable': True,
+             'labels': [{'name': 'mac-ci'}]} if path == 'pulls/17' else
+            [])
         result = task_advance._merge_once(store=store, record=record, number=17,
             head=HEAD, pr=pr, events=[event], github_get=github_get_green,
             gh_runner=ambiguous, root='/repo')
