@@ -799,7 +799,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertFalse(run_marker.exists())
 
     def test_source_byte_limit_blocks_cli_launch(self):
-        self.assertEqual(MAX_SOURCE_FILE_BYTES, 512 * 1024)
+        self.assertEqual(MAX_SOURCE_FILE_BYTES, 1024 * 1024)
         (self.root / 'source.py').write_text('x' * (MAX_SOURCE_FILE_BYTES + 1))
         marker = self.root / 'invoked'
         cli = self.fake_cli(self.event('step_start') + '\n', invocation_marker=marker)
