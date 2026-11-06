@@ -838,7 +838,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.head = self._git('rev-parse', 'HEAD')
         self.common = str(self.root / '.git')
         self._register_d6()
-        self.store = task_store.TaskStore(self.base / 'tasks')
+        self.store = task_store.TaskStore(Path(temp.name).resolve() / 'tasks')
 
     def _git(self, *args):
         return subprocess.check_output(['/usr/bin/git', '-C', str(self.root), *args],
@@ -897,13 +897,13 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.store.create(record)
         return task_id
 
-    def _delegate(self, target):
+    def _delegate(self, target, *, usage=(1026, 49)):
         task_id = self._active_pm_task(target)
         self.server.script.extend((
             self.reply(self.tool_call('apply_edit', path=target, new='hello synthetic\n',
-                                      create=True), model='qwen3.8-27b', usage=(1026, 49)),
+                                      create=True), model='qwen3.8-27b', usage=usage),
             self.reply(self.tool_call('finish', summary='done'), model='qwen3.8-27b',
-                       usage=(1092, 105))))
+                       usage=usage)))
         args = Namespace(task_id=task_id, mode='direct', context_stdin=False,
             data_class='SYNTHETIC', egress_basis='Synthetic test content only.',
             acceptance=[f'Only {target} is created.'], selection_source='PM',
@@ -923,14 +923,14 @@ class GwAgentRealStoreTests(unittest.TestCase):
              redirect_stdout(io.StringIO()):
             code = task_submission_cli.run_task_gw_agent_delegate(args, store=self.store)
         # A fresh store proves the record is on disk and still passes validation.
-        return code, task_store.TaskStore(self.base / 'tasks').get(task_id)
+        return code, task_store.TaskStore(Path(self.base / 'tasks').resolve()).get(task_id)
 
     def _assert_success_persisted(self, task, target):
         developer = task['developer']
         self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
         self.assertIsNone(developer['error_code'])
         self.assertEqual(developer['changed_files'], [target])
-        self.assertEqual(developer['model'], 'gw')
+        self.assertEqual(developer['model'], 'qwen3.8-27b')
         self.assertEqual(developer['usage'], {
             'prompt_tokens': 2118, 'completion_tokens': 154, 'total_tokens': 2272,
             'served_model': 'qwen3.8-27b'})
@@ -948,6 +948,30 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual((code, callback['state'], callback['missing_gates']),
                          (0, 'PM_EVIDENCE_READY', []))
         self.assertEqual(callback['evidence']['verification_state'], 'READY')
+
+    def test_docs_success_with_unknown_usage_persists_served_model(self):
+        target = 'gw-agent-unknown-usage.md'
+        code, task = self._delegate(target, usage=(None, None))
+        developer = task['developer']
+        self.assertEqual(code, 0)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['model'], 'qwen3.8-27b')
+        self.assertIsNone(developer['usage'])
+        self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
+        persisted = task_store.TaskStore(Path(self.base / 'tasks').resolve()).get(task['task_id'])
+        self.assertEqual(persisted['developer']['model'], 'qwen3.8-27b')
+
+    def test_docs_success_with_partial_usage_persists_served_model(self):
+        target = 'gw-agent-partial-usage.md'
+        code, task = self._delegate(target, usage=(1026, None))
+        developer = task['developer']
+        self.assertEqual(code, 0)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['model'], 'qwen3.8-27b')
+        self.assertIsNone(developer['usage'])
+        self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
+        persisted = task_store.TaskStore(Path(self.base / 'tasks').resolve()).get(task['task_id'])
+        self.assertEqual(persisted['developer']['model'], 'qwen3.8-27b')
 
     def test_untestable_file_persists_but_waits_with_a_named_gate(self):
         target = 'gw-agent-synthetic.txt'

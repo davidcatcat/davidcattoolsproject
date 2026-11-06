@@ -3823,6 +3823,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         if usage is not None:
             usage['served_model'] = served_model
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
+            model=served_model,
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
             usage=usage, error_code=None,
             audit_sha256=audit_sha,
@@ -3831,8 +3832,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             execution={'status': 'DONE', 'native_session_id': result.session_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
                 'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
-                'usage_source': ('CLI_REPORTED' if result.usage is not None and
-                                 usage.get('status') != 'UNKNOWN' else 'UNKNOWN'),
+                'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None})
     except RouteError as exc:
@@ -6120,11 +6120,8 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
     task = store.get(task_id)
     developer = task.get('developer')
     if (task['schema_version'] != 2 or task['state'] != 'PM_RESPONDED' or
-<<<<<<< ours
-            type(developer) is not dict or developer.get('provider_profile') not in ('opencode', 'codex', 'agy', 'claude') or
-=======
-            type(developer) is not dict or developer.get('provider_profile') not in ('opencode', 'codex', 'agy', 'gw-agent') or
->>>>>>> theirs
+            type(developer) is not dict or developer.get('provider_profile') not in (
+                'opencode', 'codex', 'agy', 'claude', 'gw-agent') or
             developer.get('state') != 'DEVELOPER_RESPONDED' or
             developer.get('artifact') is None or developer.get('execution') is None or
             developer['execution'].get('status') not in ('SUCCEEDED', 'DONE') or
