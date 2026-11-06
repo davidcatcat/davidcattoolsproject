@@ -287,13 +287,16 @@ class CLITests(unittest.TestCase):
         raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + SYNTHETIC_AWS_KEY + 'MORE')])
         bound = raw.index(SYNTHETIC_AWS_KEY.encode()) + len(SYNTHETIC_AWS_KEY) - raw.index(b'FAIL: ')
         escaped = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + SYNTHETIC_AWS_KEY + '測試')])
-        for capture, extra in ((raw, ('--max-excerpt-bytes', str(bound))), (escaped, ())):
+        for capture, extra, expected_error in (
+            (raw, ('--max-excerpt-bytes', str(bound)), EMITTED_SENSITIVE_ERROR),
+            (escaped, (), 'test-excerpts: source contains sensitive-content indicators; details omitted'),
+        ):
             with self.subTest(extra=extra):
                 path.write_bytes(capture)
                 result = self.run_cli('test-excerpts', '--file', str(path), '--exit-code', '1',
                                       '--json', *extra)
                 self.assert_failure(result)
-                self.assertEqual(result.stderr, b'llmtool: ' + EMITTED_SENSITIVE_ERROR.encode() + b'\n')
+                self.assertEqual(result.stderr, b'llmtool: ' + expected_error.encode() + b'\n')
                 for marker in (SYNTHETIC_AWS_KEY.encode(), b'AKIA', b'PRIVATE_CAPTURE_PATH', b'evidence'):
                     self.assertNotIn(marker, result.stdout + result.stderr)
                 self.assertEqual(path.read_bytes(), capture)
