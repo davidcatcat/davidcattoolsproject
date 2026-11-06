@@ -934,6 +934,8 @@ class TaskStoreTests(unittest.TestCase):
         store.create(holder)
         developer = self._developer_assignment(provider='codex', max_tokens=None)
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
+                         provider_type='codex-cli',
+                         error_code='CODEX_INTERRUPTED',
                          executor_task_id=executor_task_id,
                          execution={'status': 'UNKNOWN', 'native_session_id': None,
                             'process_exit_code': None, 'stdout_sha256': None,
