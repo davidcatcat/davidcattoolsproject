@@ -4248,6 +4248,22 @@ def _work_names(row: OfficeRow) -> str:
     return " ".join((row.task, row.work, row.detail, row.codex_title))
 
 
+# The PR part of a bound work label (_codex_work_label, _bind_d6_pr_rows).
+BOUND_PR = re.compile(r"(?:^|· )PR #([0-9]+)(?= ·|$)")
+
+
+def _bound_pr(row: OfficeRow) -> int | None:
+    """The PR a row's own bound label names. Text after "：" is a free summary."""
+    if not row.work_bound:
+        return None
+    found = BOUND_PR.search(row.work.partition("：")[0])
+    return int(found.group(1)) if found else None
+
+
+def _codex_family(row: OfficeRow) -> bool:
+    return "codex" in row.name.casefold() or row.key.startswith("codex:")
+
+
 def _names_pr(row: OfficeRow, number: int, head: str) -> bool:
     text = _work_names(row)
     review = _review_task(row.task[5:]) if row.role == "reviewer" and row.task.startswith("task ") else None
@@ -4257,7 +4273,11 @@ def _names_pr(row: OfficeRow, number: int, head: str) -> bool:
         if review is None or review[0] != str(number):
             return False
         return not head or review[1].casefold().startswith(head.casefold())
-    if re.search(rf"\bPR\s*#?{number}\b", text, re.IGNORECASE) is None:
+    bound = _bound_pr(row)
+    # A row bound to one PR is not working on another PR its title or summary mentions.
+    if bound is not None and bound != number:
+        return False
+    if bound is None and re.search(rf"\bPR\s*#?{number}\b", text, re.IGNORECASE) is None:
         return False
     commits = re.findall(r"@([0-9a-f]{7,40})(?![0-9a-f])", text, re.IGNORECASE)
     # Some real work labels name the PR but omit its head. Bind by the head
@@ -4274,57 +4294,80 @@ def _names_issue(row: OfficeRow, number: int) -> bool:
             or re.search(rf"(?<![\w#])(?<!PR )#{number}\b", text, re.IGNORECASE) is not None)
 
 
+PEOPLE_ORDER = ("Codex", "Reviewer", "Claude", "OpenCode", "AGY", "CompanyGW", "CI")
+
+
+def _row_person(row: OfficeRow) -> str:
+    if row.role == "reviewer":
+        return "Reviewer"
+    if _codex_family(row):
+        return "Codex"
+    name = row.name.casefold()
+    return next((label for marker, label in (
+        ("claude", "Claude"), ("opencode", "OpenCode"),
+        ("agy", "AGY"), ("antigravity", "AGY"),
+        ("company gw", "CompanyGW"), ("gw-agent", "CompanyGW"))
+                 if marker in name), "")
+
+
+def _current_people(rows, predicate) -> tuple[set, bool]:
+    """(who works on it, whether some relevant row leaves that uncertain).
+
+    A working row the predicate names is a person. An UNCHECKED row the
+    predicate names, or a live D6 row whose PR binding is unknown, adds
+    uncertainty; a row bound to another PR does not."""
+    people, uncertain = set(), False
+    for row in rows:
+        if row.state not in (WORKING, UNCHECKED) or row.role in ("pm", "debug reviewer"):
+            continue
+        if predicate(row):
+            if row.state == UNCHECKED:
+                uncertain = True
+            elif _row_person(row):
+                people.add(_row_person(row))
+            continue
+        if not row.task.startswith("task "):
+            continue
+        if row.role == "reviewer" and _review_task(row.task[5:]):
+            continue   # a review task names its own PR
+        if _bound_pr(row) is None:
+            uncertain = True
+    return people, uncertain
+
+
+def _people_text(people, uncertain) -> str:
+    """Known people first; 未確認 only when none is known, 沒人 only when nothing is uncertain."""
+    return ("、".join(person for person in PEOPLE_ORDER if person in people)
+            or ("未確認" if uncertain else "沒人"))
+
+
 def _current_person(rows, predicate, *, readable=True) -> str:
     if not readable:
         return "未確認"
-    matching = [row for row in rows if row.state == WORKING and predicate(row)]
-    def unresolved_binding(row):
-        if row.state not in (WORKING, UNCHECKED) or row.role == "pm" or not row.task.startswith("task "):
-            return False
-        review = _review_task(row.task[5:]) if row.role == "reviewer" else None
-        if review:
-            return False
-        return (not predicate(row)
-                and (not row.work_bound
-                     or not re.search(r"\bPR\s*#?[0-9]+\b", row.work)))
-    unresolved = any(unresolved_binding(row) for row in rows)
-    people = set()
-    for row in matching:
-        if row.role == "reviewer":
-            people.add("Reviewer")
-        elif "codex" in row.name.casefold() or row.key.startswith("codex:"):
-            people.add("Codex")
+    return _people_text(*_current_people(rows, predicate))
+
+
+def _pr_people(office, pull, ci_heads) -> tuple[set, bool]:
+    """The one person/CI answer per PR the PR table, running PR row and Issue rows share."""
+    if not pull or not pull.head:
+        return set(), True   # a PR missing from the read page has unknown head and CI
+    people, uncertain = _current_people(
+        office, lambda row: _names_pr(row, pull.number, pull.head))
+    if pull.state == "OPEN":
+        if ci_heads is None:
+            uncertain = True
         else:
-            name = row.name.casefold()
-            route = next((label for marker, label in (
-                ("claude", "Claude"), ("opencode", "OpenCode"),
-                ("agy", "AGY"), ("antigravity", "AGY"),
-                ("company gw", "CompanyGW"), ("gw-agent", "CompanyGW"))
-                          if marker in name), "")
-            if route:
-                people.add(route)
-    if not people:
-        return "未確認" if unresolved else "沒人"
-    order = ("Codex", "Reviewer", "Claude", "OpenCode", "AGY", "CompanyGW")
-    return "、".join(person for person in order if person in people)
+            ci = ci_heads.get(pull.head.lower(), {})
+            if any(_ci_word(ci.get(key), True) in ("執行中", "排隊") for key in ("linux", "mac")):
+                people.add("CI")
+    return people, uncertain
 
 
 def _current_pr_people(office, pull, ci_heads, *, github_known=True, office_known=True):
     """One shared person/CI answer for a PR and its issue-board aliases."""
-    if not github_known or not office_known or not pull or not pull.head:
+    if not github_known or not office_known:
         return "未確認"
-    current = _current_person(office, lambda row: _names_pr(row, pull.number, pull.head))
-    ci = ((ci_heads or {}).get(pull.head, {})
-          if ci_heads is not None and pull.state == "OPEN" else {})
-    ci_working = any(_ci_word(ci.get(key), True) in ("執行中", "排隊")
-                     for key in ("linux", "mac"))
-    if current == "沒人" and ci_working:
-        return "CI"
-    if current not in ("沒人", "未確認") and ci_working:
-        return current + "、CI"
-    if current == "沒人" and ci_heads is None and pull.state == "OPEN":
-        return "未確認"
-    return current
+    return _people_text(*_pr_people(office, pull, ci_heads))
 
 
 def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending, office=(), *, github_known=True,
@@ -4424,46 +4467,31 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
             running.append(PmBoardItem(f"PR #{pull.number}", what, next_step))
     # The current owner is derived from the live office rows and the already-read
     # PR page. An issue may be worked through an open PR whose body closes it.
+    # Issue aliases need a readable pulls page and come from open PRs only.
+    snapshot_known = github_known and pulls is not None
+    ci_heads = getattr(github, "ci_heads", None) if github is not None else None
     pulls_by_number = {pull.number: pull for pull in (pulls or [])}
     issue_prs = {}
-    if github_known:
-        for pull in pulls or []:
-            for issue in pull.closes:
-                issue_prs.setdefault(issue, set()).add(pull.number)
+    if snapshot_known:
+        for pull in pulls:
+            if pull.state == "OPEN":
+                for issue in pull.closes:
+                    issue_prs.setdefault(issue, set()).add(pull.number)
     resolved = []
     for item in running:
         number = _board_ref_number(item.ref)
-        is_pr = bool(re.match(r"PR\s", item.ref))
-        if not office_known or not github_known:
+        if not office_known or not snapshot_known:
             current = "未確認"
-        elif is_pr:
-            pull = pulls_by_number.get(number)
-            head = pull.head if pull else ""
-            current = _current_pr_people(
-                office, pull, getattr(github, "ci_heads", None),
-                github_known=github_known, office_known=office_known)
+        elif re.match(r"PR\s", item.ref):
+            current = _people_text(*_pr_people(office, pulls_by_number.get(number), ci_heads))
         else:
-            issue = number
-            related_prs = issue_prs.get(issue, set())
-            if not office_known or not github_known:
-                current = "未確認"
-            else:
-                people = set()
-                for pull in (pulls_by_number.get(pr) for pr in related_prs):
-                    answer = _current_pr_people(office, pull, getattr(github, "ci_heads", None),
-                                                github_known=github_known,
-                                                office_known=office_known)
-                    if answer == "未確認":
-                        people.add("未確認")
-                    elif answer != "沒人":
-                        people.update(answer.split("、"))
-                issue_people = _current_person(office, lambda row: _names_issue(row, issue))
-                if issue_people == "未確認":
-                    people.add("未確認")
-                elif issue_people != "沒人":
-                    people.update(issue_people.split("、"))
-                order = ("Codex", "Reviewer", "Claude", "OpenCode", "AGY", "CompanyGW", "CI", "未確認")
-                current = "、".join(person for person in order if person in people) or "沒人"
+            people, uncertain = _current_people(
+                office, lambda row, issue=number: _names_issue(row, issue))
+            for pr in sorted(issue_prs.get(number, ())):
+                more, unsure = _pr_people(office, pulls_by_number[pr], ci_heads)
+                people |= more
+                uncertain = uncertain or unsure
+            current = _people_text(people, uncertain)
         resolved.append(replace(item, current=current))
     running = resolved
     running.sort(key=lambda item: (_board_ref_number(item.ref) or 0, item.ref))
@@ -7219,7 +7247,8 @@ def _codex_work_rows(rows: list[OfficeRow], now: float, canonical: str,
 
 def _bind_d6_pr_rows(rows: list[OfficeRow], canonical: str,
                      prs: dict | None) -> list[OfficeRow]:
-    """Attach the already-read branch-to-PR binding to live non-Codex D6 rows."""
+    """Attach the already-read branch-to-PR binding to live non-Codex D6 rows.
+    Codex rows keep the label _codex_work_rows gave them, bound or not."""
     try:
         registered = registry_details(canonical)
     except Exception:
@@ -7229,7 +7258,7 @@ def _bind_d6_pr_rows(rows: list[OfficeRow], canonical: str,
         task_id = row.task[5:] if row.task.startswith("task ") else ""
         details = registered.get(task_id)
         if (not task_id or row.role in ("reviewer", "pm", "debug reviewer")
-                or row.work_bound or not details):
+                or _codex_family(row) or row.work or row.work_bound or not details):
             out.append(row)
             continue
         branch = details[4]
