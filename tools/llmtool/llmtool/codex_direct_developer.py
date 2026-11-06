@@ -536,7 +536,12 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
         error.cleanup_status = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'
         error.native_session_id = _thread_from_events(bytes(output))
         if error.usage is None:
-            error.usage = _usage_from_events(bytes(output))
+            # Usage is optional evidence. A malformed or truncated JSONL
+            # record must never replace the error that caused cleanup.
+            try:
+                error.usage = _usage_from_events(bytes(output))
+            except Exception:
+                error.usage = None
         if error is exc:
             raise
         raise error from None

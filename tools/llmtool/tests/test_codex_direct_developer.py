@@ -366,6 +366,43 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertGreaterEqual(error.elapsed_ms, 0)
         self.assertEqual(error.stdout_sha256, hashlib.sha256(b'').hexdigest())
 
+    def test_partial_jsonl_usage_error_does_not_replace_collection_error(self):
+        partial_line = (json.dumps({'type': 'thread.started', 'thread_id': self.THREAD}) +
+                        '\n{"type":"turn.completed"').encode('utf-8')
+        self.write_fake('import signal;signal.signal(signal.SIGTERM,signal.SIG_IGN)\n' +
+                        f"sys.stdout.write({partial_line.decode()!r});sys.stdout.flush();" +
+                        'time.sleep(10)\n')
+        original_selector = direct.selectors.DefaultSelector
+
+        class FailingAfterOutputSelector:
+            def __init__(self):
+                self.selector = original_selector()
+                self.output_seen = False
+
+            def __getattr__(self, name):
+                return getattr(self.selector, name)
+
+            def select(self, wait=None):
+                if self.output_seen:
+                    raise RuntimeError('adapter failure after partial JSONL')
+                events = self.selector.select(wait)
+                if any(key.data == 'stdout' for key, _ in events):
+                    self.output_seen = True
+                return events
+
+        with patch.object(direct.selectors, 'DefaultSelector', FailingAfterOutputSelector), \
+                patch.object(direct, '_usage_from_events',
+                             side_effect=direct.DirectCodexError('CODEX_EVENT_INVALID')), \
+                self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake()
+
+        error = caught.exception
+        self.assertEqual(error.direct_codex_code, 'CODEX_ADAPTER_RUNTIME_ERROR')
+        self.assertEqual(error.process_exit_code, -9)
+        self.assertEqual(error.cleanup_status, 'CONFIRMED')
+        self.assertEqual(error.stdout_sha256, hashlib.sha256(partial_line).hexdigest())
+        self.assertIsNone(error.usage)
+
     def test_host_keyboard_interrupt_propagates_from_run(self):
         self.write_fake('', delay=10)
         interrupt = KeyboardInterrupt()
