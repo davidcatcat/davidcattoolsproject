@@ -332,8 +332,12 @@ class TaskCompletionTests(unittest.TestCase):
         self._git('commit', '-m', 'scoped developer change')
         segment_start = self._git('rev-parse', 'HEAD')
         initial_merge = subprocess.run(
-            ['/usr/bin/git', 'merge', '--no-ff', 'main-conflict', '-m', 'merge trusted main'],
+            ['/usr/bin/git', '-c', 'merge.renames=false', '-c', 'diff.renames=false',
+             'merge', '--no-ff', 'main-conflict', '-m', 'merge trusted main'],
             cwd=self.root, text=True, capture_output=True)
+        if conflict_path != self.source_path:
+            unmerged = self._git('ls-files', '-u', '--', conflict_path)
+            self.assertTrue(unmerged, initial_merge.stderr)
         if conflict_path == self.source_path:
             self.assertNotEqual(initial_merge.returncode, 0)
             source_file.write_text('Resolved in-scope conflict.\n')
