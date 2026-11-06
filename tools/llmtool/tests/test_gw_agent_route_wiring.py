@@ -996,7 +996,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
         if getattr(self, 'task_id', None) is None:
             return
         stranded = self._reloaded()
-        task_store.TaskStore(Path(self.base / 'tasks').resolve()).abandon(
+        task_store.TaskStore(self.store_root).abandon(
             self.task_id, pm_session_id=stranded['pm_session_id'],
             reason='Synthetic subtest finished with the D6.')
 
@@ -1286,13 +1286,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
             def interrupted(*_args, _error=error, **_kwargs):
                 raise _error
             with self.subTest(error=type(error).__name__):
-<<<<<<< ours
                 self._fresh_store()
-                with self.assertRaises(type(error)):
-                    self._delegate('gw-agent-interrupted.md', route_runner=interrupted)
-                self._assert_failed(self._reloaded(), 'DEVELOPER_OUTCOME_UNKNOWN',
-                                    'DEVELOPER_INTERRUPTED')
-=======
                 try:
                     with self.assertRaises(type(error)):
                         self._delegate('gw-agent-interrupted.md', route_runner=interrupted)
@@ -1338,7 +1332,6 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self._assert_success_persisted(task, target)
         self.assertIsNone(task_store.TaskStore(Path(self.base / 'tasks').resolve()).get(
             failed['task_id']).get('abandonment'))
->>>>>>> theirs
 
     def test_interruption_before_the_run_is_persisted_and_still_raised(self):
         with self.assertRaises(KeyboardInterrupt):
