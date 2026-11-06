@@ -1,7 +1,11 @@
 import io
 import json
+import dataclasses
+import hashlib
+import tempfile
 import unittest
 from argparse import Namespace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -9,6 +13,7 @@ from llmtool import review_dispatch, task_completion, task_submission_cli, worke
 from llmtool.developer_routes import RouteError
 from llmtool.developer_routes.agy import owner_assignment_gate
 from llmtool.errors import LLMToolError
+from llmtool.task_store import TaskStore
 
 
 import review_trust_fixture
@@ -27,7 +32,10 @@ class AgyRouteWiringTests(unittest.TestCase):
                           decisions=None, repair_packet=None, usage=None,
                           binding_changes=False, fail_success_persist=False,
                           read_paths=None, changed_paths=None, request='AGY goal',
-                          goal='AGY goal'):
+                          goal='AGY goal', session_id='conversation_12345678',
+                          bind_result='BOUND', initial_native_session_id=None,
+                          bound_registration_mutation=False, audit=None,
+                          store=None):
         task_id = 'a' * 32
         task = {
             'schema_version': 2, 'task_id': task_id, 'run_id': 'b' * 32,
@@ -58,25 +66,66 @@ class AgyRouteWiringTests(unittest.TestCase):
                 self.task.update(updates)
                 return dict(self.task)
 
-        store = Store()
+        if store is None:
+            store = Store()
+        else:
+            record = task_submission_cli._record(
+                task_id, task['run_id'], 'pm-' + 'e' * 32, 'pm', request,
+                state='PM_RESPONDED',
+                provider_type='openai-compatible',
+                model='pm-model',
+                backend='NO_NATIVE_SESSION_ID_EXPOSED',
+                request_sha=hashlib.sha256(request.encode('utf-8')).hexdigest(),
+            )
+            record.update(
+                response=task['response'],
+                pm_route_binding=task['pm_route_binding'],
+                pm_assignment={'schema_version': 1, **task['pm_assignment']},
+            )
+            task = store.create(record)
         snapshot = SimpleNamespace(root='/registered/root', common_dir='/repo/.git',
                                    branch='task-branch', head='d' * 40, clean=True)
-        registration = SimpleNamespace(task_id='executor-d6', root=snapshot.root,
-            common_dir=snapshot.common_dir, branch=snapshot.branch, result_sha=snapshot.head,
-            trusted_agent_id='codex', session_ref='session-ref', native_session_id=None)
-        callback = {'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id}
+        registration = task_completion.D6Registration(
+            task_id='executor-d6', trusted_agent_id='codex', session_ref='session-ref',
+            root=snapshot.root, common_dir=snapshot.common_dir, branch=snapshot.branch,
+            source_sha=snapshot.head, result_sha=snapshot.head, state='ACTIVE',
+            lock_state='HELD', device=1, inode=2, uid=3,
+            native_session_id=initial_native_session_id, github_login=None,
+            env2_pass_marker=None, env2_approved_tooling_sha=snapshot.head)
+        callback = task_submission_cli._direct_result_callback(
+            task, registration, snapshot.head, test_policy='LOCAL')
         usage = ({'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
                  if usage is None else usage)
-        result = SimpleNamespace(session_id='conversation_12345678', exit_code=0,
+        result = SimpleNamespace(session_id=session_id, exit_code=0,
             stdout_sha256='e' * 64, elapsed_ms=42, cleanup_status='CONFIRMED', usage=usage)
         allowed = SimpleNamespace(allowed=True, reason_code='OWNER_ASSIGNMENT_MATCHED')
         denied = SimpleNamespace(allowed=False, reason_code='OWNER_ASSIGNMENT_MISMATCH')
         gate_decisions = iter(decisions or (allowed, allowed))
+        changed_registration = dataclasses.replace(registration, result_sha='f' * 40)
         binding_results = iter(((registration, snapshot), (registration, snapshot),
-                                (SimpleNamespace(**{**registration.__dict__,
-                                                    'result_sha': 'f' * 40}), snapshot)))
+                                (changed_registration, snapshot)))
+        bind_executor_calls = []
+        registration_reads = []
+        diff_calls = []
         inbox_events = []
         prompts = []
+        bind_called = False
+
+        def read_registration(*_args, **_kwargs):
+            registration_reads.append(True)
+            if (bind_called and initial_native_session_id is None and bind_result == 'BOUND' and
+                    type(session_id) is str and session_id not in ('', 'UNKNOWN')):
+                native = task_completion.D6Registration(
+                    **{**registration.__dict__, 'native_session_id': session_id})
+                if bound_registration_mutation:
+                    return dataclasses.replace(native, branch='changed-branch')
+                return native
+            return registration
+
+        def bind_native_session(*_args, **_kwargs):
+            nonlocal bind_called
+            bind_called = True
+            return bind_result
 
         def route_runner(_route, _request, *, gate, **_kwargs):
             prompts.append(_request['prompt'])
@@ -86,12 +135,22 @@ class AgyRouteWiringTests(unittest.TestCase):
                                  blocked_reason='OWNER_DISPATCH_DENIED')
             if route_error is not None:
                 raise route_error
+            if audit is not None:
+                audit['provider_results'] = audit.get('provider_results', 0) + 1
             return result
 
         def direct_event(event_task_id, executor_task_id, *, store, reviewer_adapter=None):
-            saved = store.get(event_task_id)['developer']
+            saved_task = store.get(event_task_id)
+            saved = saved_task['developer']
             self.assertEqual(saved['state'], 'DEVELOPER_RESPONDED')
-            self.assertEqual(saved['direct_result_callback'], callback)
+            completion_evidence = saved_task['completion']['evidence']
+            callback_evidence = saved['direct_result_callback']['evidence']
+            for key, value in completion_evidence.items():
+                self.assertEqual(callback_evidence[key], value)
+            self.assertEqual(callback_evidence['executor_task_id'], 'executor-d6')
+            self.assertEqual(callback_evidence['verification_state'], 'NOT_STARTED')
+            self.assertEqual(callback_evidence['test_policy'], 'LOCAL')
+            self.assertEqual(saved['direct_result_callback']['executor_task_id'], 'executor-d6')
             inbox_events.append({'task_id': event_task_id, 'executor_task_id': executor_task_id})
             return 0
 
@@ -109,15 +168,19 @@ class AgyRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli.task_completion, 'collect_git_snapshot', return_value=snapshot), \
              patch.object(task_submission_cli.task_completion, 'bind_executor_task',
                           side_effect=(lambda *_args, **_kwargs:
-                              next(binding_results) if binding_changes else
-                              (registration, snapshot))), \
+                              bind_executor_calls.append(True) or
+                              (next(binding_results) if binding_changes else
+                               (registration, snapshot)))), \
              patch.object(task_submission_cli.task_completion, 'read_d6_registration',
-                          return_value=registration), \
+                          side_effect=read_registration), \
+             patch.object(task_submission_cli, '_bind_codex_native_session',
+                          side_effect=bind_native_session), \
              patch.object(task_submission_cli.task_completion, '_worktree_diff',
-                          return_value=(changed_paths or ['src.py'], diff_bytes)), \
+                          side_effect=lambda *_args, **_kwargs:
+                              diff_calls.append(True) or
+                              (changed_paths or ['src.py'], diff_bytes)), \
              patch.object(task_submission_cli, '_assignment_paths',
                           return_value=(read_paths or ['src.py'], ['src.py'])), \
-             patch.object(task_submission_cli, '_direct_result_callback', return_value=callback), \
              patch.object(task_submission_cli, '_remote_receipt_test_policy', return_value='LOCAL'), \
              patch.object(task_submission_cli, 'load_route_config', return_value={
                  'routes': {'agy': {'executable': 'agy', 'default_model': 'gemini-test',
@@ -130,7 +193,12 @@ class AgyRouteWiringTests(unittest.TestCase):
                           side_effect=direct_event):
             status = task_submission_cli.run_task_agy_delegate(
                 args, store=store, route_runner=route_runner)
-        return status, store.task, inbox_events, prompts
+        if audit is not None:
+            audit.update(bind_executor_calls=len(bind_executor_calls),
+                         registration_reads=len(registration_reads),
+                         diff_calls=len(diff_calls), bind_calls=int(bind_called),
+                         result_events=len(inbox_events))
+        return status, store.get(task_id), inbox_events, prompts
 
     def test_record_pm_accepts_agy_recommendation(self):
         response = json.dumps({
@@ -182,8 +250,119 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
         self.assertEqual(task['developer']['provider_profile'], 'agy')
         self.assertEqual(task['developer']['direct_result_callback']['state'], 'WAITING_EXECUTOR')
+        for evidence in (task['completion']['evidence'],
+                         task['developer']['direct_result_callback']['evidence']):
+            self.assertEqual(evidence['executor_native_session_id'], 'conversation_12345678')
+            self.assertEqual(evidence['executor_native_session'], 'VERIFIED')
+        self.assertNotIn('native_session_binding', task['developer']['execution'])
         self.assertEqual(inbox_events, [{'task_id': 'a' * 32,
                                          'executor_task_id': 'executor-d6'}])
+
+    def test_agy_unbound_missing_empty_and_unknown_sessions_remain_unverified(self):
+        for session_id in (None, '', 'UNKNOWN'):
+            with self.subTest(session_id=session_id):
+                status, task, _events, _prompts = self._run_agy_delegate(
+                    session_id=session_id)
+                self.assertEqual(status, 0)
+                self.assertIsNone(task['completion']['evidence']['executor_native_session_id'])
+                self.assertEqual(task['completion']['evidence']['executor_native_session'],
+                                 'UNKNOWN')
+                self.assertIsNone(task['developer']['direct_result_callback']['evidence'][
+                    'executor_native_session_id'])
+                self.assertEqual(task['developer']['direct_result_callback']['evidence'][
+                    'executor_native_session'], 'UNKNOWN')
+
+    def test_agy_non_bound_session_result_preserves_registration_evidence(self):
+        status, task, _events, _prompts = self._run_agy_delegate(bind_result='D6_BIND_NATIVE_SESSION_ALREADY_SET',
+            initial_native_session_id='conversation_old1234')
+        self.assertEqual(status, 0)
+        self.assertNotIn('native_session_binding', task['developer']['execution'])
+        for evidence in (task['completion']['evidence'],
+                         task['developer']['direct_result_callback']['evidence']):
+            self.assertEqual(evidence['executor_native_session_id'], 'conversation_old1234')
+            self.assertEqual(evidence['executor_native_session'], 'VERIFIED')
+
+    def test_agy_repair_on_bound_d6_passes_real_executor_worktree_result_gate(self):
+        status, task, _events, _prompts = self._run_agy_delegate(
+            bind_result='D6_BIND_NATIVE_SESSION_ALREADY_SET',
+            initial_native_session_id='conversation_old1234')
+        self.assertEqual(status, 0)
+        evidence = task['developer']['direct_result_callback']['evidence']
+        registration = task_completion.D6Registration(
+            task_id=evidence['executor_task_id'], trusted_agent_id=evidence['executor_identity'],
+            session_ref=evidence['executor_session_ref'], root=evidence['root'],
+            common_dir=evidence['common_dir'], branch=evidence['branch'],
+            source_sha=evidence['source_sha'], result_sha=evidence['source_sha'],
+            state='ACTIVE', lock_state='HELD', device=1, inode=2, uid=3,
+            native_session_id='conversation_old1234', github_login=None,
+            env2_pass_marker=None, env2_approved_tooling_sha=evidence['source_sha'])
+        diff = task['developer']['artifact'].encode('utf-8')
+        live = {'common_dir': registration.common_dir, 'branch': registration.branch,
+                'source_sha': registration.result_sha, 'diff': diff,
+                'changed_paths': ['src.py'],
+                'diff_sha256': hashlib.sha256(diff).hexdigest(),
+                'status_sha256': 'f' * 64, 'file_manifest_sha256': 'e' * 64}
+        with patch.object(task_completion, 'read_d6_registration', return_value=registration), \
+                patch.object(task_completion, '_reject_legacy_grafts'), \
+                patch.object(task_completion, '_git', return_value=b''), \
+                patch.object(task_completion, '_worktree_snapshot', return_value=live), \
+                patch.object(task_completion, 'validate_env2_pass_marker'):
+            collected = task_completion.collect_executor_worktree_result(
+                task_id='a' * 32, expected_common_dir=registration.common_dir,
+                expected_root=registration.root, expected_branch=registration.branch,
+                source_sha=registration.source_sha,
+                task_binding={'task_id': 'a' * 32, 'run_id': 'b' * 32,
+                              'contract_digest': 'c' * 64},
+                expected_agent=registration.trusted_agent_id,
+                expected_session_ref=registration.session_ref,
+                expected_native_session_id=evidence['executor_native_session_id'],
+                write_paths=['src.py'], read_paths=['src.py'], artifact=diff.decode('utf-8'),
+                artifact_sha256=hashlib.sha256(diff).hexdigest())
+        self.assertEqual(collected['executor_native_session_id'], 'conversation_old1234')
+        self.assertEqual(collected['executor_native_session'], 'VERIFIED')
+
+    def test_agy_bound_registration_reread_mismatch_blocks_with_binding_changed(self):
+        status, task, inbox_events, _prompts = self._run_agy_delegate(
+            bound_registration_mutation=True)
+        self.assertEqual(status, 1)
+        self.assertEqual(task['developer']['error_code'], 'AGY_D6_BINDING_CHANGED')
+        self.assertEqual(inbox_events, [])
+
+    def test_agy_session_shared_with_reviewer_fails_native_independence_gate(self):
+        session_id = 'conversation_shared123'
+        status, task, _events, _prompts = self._run_agy_delegate(session_id=session_id)
+        self.assertEqual(status, 0)
+        self.assertEqual(task['completion']['evidence']['executor_native_session_id'],
+                         session_id)
+        result_sha = 'd' * 40
+        reviewer = task_completion.D6Registration(
+            task_id='reviewer-d6', trusted_agent_id='codex-reviewer',
+            session_ref='review-session', root='/reviewer/root', common_dir='/repo/.git',
+            branch='review-branch', source_sha=result_sha, result_sha=result_sha,
+            state='ACTIVE', lock_state='HELD', device=1, inode=2, uid=3,
+            native_session_id=session_id, github_login='reviewer',
+            env2_pass_marker=None, env2_approved_tooling_sha=result_sha)
+        pull = {'state': 'open', 'merged': False,
+                'head': {'sha': result_sha, 'ref': 'task-branch'},
+                'base': {'repo': {'full_name': 'owner/repo'}},
+                'user': {'login': 'author'}}
+        ci = {'successful_checks': [], 'required_checks': ['check'],
+              'docs_only': False, 'check_outcomes': {}, 'workflow_path': None,
+              'workflow_name': None, 'workflow_id': None, 'run_id': None,
+              'run_attempt': None, 'run_number': None, 'check_ids': []}
+        with patch.object(task_completion, '_trusted_slug', return_value='owner/repo'), \
+                patch.object(task_completion, '_github_get', side_effect=[pull, [], []]), \
+                patch.object(task_completion, 'read_d6_registration', return_value=reviewer), \
+                patch.object(task_completion, 'collect_git_snapshot', return_value=SimpleNamespace(
+                    common_dir=reviewer.common_dir, branch=reviewer.branch, head=result_sha)), \
+                patch.object(task_completion, '_collect_ci_evidence', return_value=ci):
+            result = task_completion.collect_github_evidence(
+                pr_number=1, result_sha=result_sha, task_id='a' * 32, run_id='b' * 32,
+                contract_digest='c' * 64, executor_identity='codex',
+                executor_session_ref='executor-session',
+                executor_native_session_id=session_id, reviewer_task_id=reviewer.task_id,
+                common_dir=reviewer.common_dir)
+        self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT', result['missing_gates'])
 
     def test_agy_prompt_contains_scope_but_no_source_file_payload(self):
         _status, _task, _inbox_events, prompts = self._run_agy_delegate()
@@ -236,10 +415,165 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(inbox_events, [])
 
     def test_agy_route_gate_binding_failure_has_binding_error(self):
-        status, task, inbox_events, _prompts = self._run_agy_delegate(binding_changes=True)
+        audit = {}
+        status, task, inbox_events, _prompts = self._run_agy_delegate(
+            binding_changes=True, audit=audit)
         self.assertEqual(status, 1)
         self.assertEqual(task['developer']['error_code'], 'AGY_D6_BINDING_CHANGED')
+        self.assertEqual(audit['bind_executor_calls'], 3)
+        self.assertEqual(audit.get('provider_results', 0), 0)
+        self.assertEqual(audit['registration_reads'], 0)
+        self.assertEqual(audit['diff_calls'], 0)
+        self.assertEqual(audit['bind_calls'], 0)
+        self.assertEqual(audit['result_events'], 0)
         self.assertEqual(inbox_events, [])
+
+    def test_agy_bound_result_persists_through_real_task_store(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve() / 'tasks'
+            store = TaskStore(root)
+            decision = worker_dispatch.PolicyDecision(
+                worker_key='agy',
+                allowed=True,
+                reason_code='OWNER_POLICY_ALLOWED',
+                policy_sha256='f' * 64,
+            )
+            audit = {}
+            with patch.object(
+                    task_submission_cli, '_agy_developer_profile',
+                    return_value=('gemini-test', 'high')):
+                status, task, events, _prompts = self._run_agy_delegate(
+                    store=store,
+                    decisions=(decision,) * 4,
+                    audit=audit,
+                )
+
+            persisted = TaskStore(root).get('a' * 32)
+            self.assertEqual(task, persisted)
+            self.assertEqual(status, 0)
+
+            developer = persisted['developer']
+            self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+            self.assertIsNone(developer['error_code'])
+            self.assertEqual(developer['execution']['status'], 'DONE')
+            self.assertEqual(
+                developer['execution']['native_session_id'],
+                'conversation_12345678',
+            )
+            self.assertNotIn(
+                'native_session_binding', developer['execution'])
+
+            artifact = 'diff --git a/src.py b/src.py\n'
+            self.assertEqual(developer['artifact'], artifact)
+            self.assertEqual(
+                developer['artifact_sha256'],
+                hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
+            )
+
+            completion_evidence = persisted['completion']['evidence']
+            callback_evidence = developer['direct_result_callback']['evidence']
+            for evidence in (completion_evidence, callback_evidence):
+                self.assertEqual(
+                    evidence['executor_native_session_id'],
+                    'conversation_12345678',
+                )
+                self.assertEqual(
+                    evidence['executor_native_session'], 'VERIFIED')
+                self.assertEqual(
+                    evidence['contract_digest'],
+                    persisted['task_binding']['contract_digest'],
+                )
+            for key, value in completion_evidence.items():
+                self.assertEqual(callback_evidence[key], value)
+
+            self.assertEqual(audit['provider_results'], 1)
+            self.assertEqual(audit['registration_reads'], 2)
+            self.assertEqual(audit['bind_calls'], 1)
+            self.assertEqual(audit['result_events'], 1)
+            self.assertEqual(events, [{
+                'task_id': 'a' * 32,
+                'executor_task_id': 'executor-d6',
+            }])
+
+    def test_agy_refused_bind_persists_through_real_task_store(self):
+        cases = (
+            ('D6_BIND_NATIVE_SESSION_REFUSED', None, 'UNKNOWN'),
+            (
+                'D6_BIND_NATIVE_SESSION_ALREADY_SET',
+                'conversation_old1234',
+                'VERIFIED',
+            ),
+        )
+        for bind_result, previous_session, verification in cases:
+            with self.subTest(bind_result=bind_result):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary).resolve() / 'tasks'
+                    store = TaskStore(root)
+                    decision = worker_dispatch.PolicyDecision(
+                        worker_key='agy',
+                        allowed=True,
+                        reason_code='OWNER_POLICY_ALLOWED',
+                        policy_sha256='f' * 64,
+                    )
+                    audit = {}
+                    with patch.object(
+                            task_submission_cli, '_agy_developer_profile',
+                            return_value=('gemini-test', 'high')):
+                        status, task, events, _prompts = self._run_agy_delegate(
+                            store=store,
+                            decisions=(decision,) * 4,
+                            bind_result=bind_result,
+                            initial_native_session_id=previous_session,
+                            audit=audit,
+                        )
+
+                    persisted = TaskStore(root).get('a' * 32)
+                    self.assertEqual(task, persisted)
+                    self.assertEqual(status, 0)
+
+                    developer = persisted['developer']
+                    self.assertEqual(
+                        developer['state'], 'DEVELOPER_RESPONDED')
+                    self.assertIsNone(developer['error_code'])
+                    self.assertEqual(
+                        developer['execution']['status'], 'DONE')
+                    self.assertEqual(
+                        developer['execution']['native_session_id'],
+                        'conversation_12345678',
+                    )
+                    self.assertNotIn(
+                        'native_session_binding', developer['execution'])
+
+                    artifact = 'diff --git a/src.py b/src.py\n'
+                    self.assertEqual(developer['artifact'], artifact)
+                    self.assertEqual(
+                        developer['artifact_sha256'],
+                        hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
+                    )
+
+                    completion_evidence = persisted['completion']['evidence']
+                    callback_evidence = developer[
+                        'direct_result_callback']['evidence']
+                    for evidence in (completion_evidence, callback_evidence):
+                        self.assertEqual(
+                            evidence['executor_native_session_id'],
+                            previous_session,
+                        )
+                        self.assertEqual(
+                            evidence['executor_native_session'],
+                            verification,
+                        )
+                    for key, value in completion_evidence.items():
+                        self.assertEqual(callback_evidence[key], value)
+
+                    self.assertEqual(audit['provider_results'], 1)
+                    self.assertEqual(audit['registration_reads'], 1)
+                    self.assertEqual(audit['bind_calls'], 1)
+                    self.assertEqual(audit['result_events'], 1)
+                    self.assertEqual(events, [{
+                        'task_id': 'a' * 32,
+                        'executor_task_id': 'executor-d6',
+                    }])
 
     def test_agy_isolation_failure_records_specific_boundary_reason(self):
         status, task, inbox_events, _prompts = self._run_agy_delegate(
