@@ -4492,6 +4492,22 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
     return 1
 
 
+_PRELAUNCH_REPAIR_REFUSALS = frozenset((
+    ('codex', 'DEVELOPER_UNAVAILABLE',
+     'DEVELOPER_PROFILE_UNAVAILABLE'),
+    ('codex', 'DEVELOPER_UNAVAILABLE',
+     'DEVELOPER_CALL_BINDING_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE',
+     'DEVELOPER_GW_AGENT_CONFIG_INVALID'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE',
+     'DEVELOPER_DISPATCH_DENIED'),
+    ('gw-agent', 'DEVELOPER_UNAVAILABLE',
+     'DEVELOPER_GW_AGENT_DISPATCH_DENIED'),
+    ('agy', 'BLOCKED', 'AGY_DISPATCH_DENIED'),
+    ('claude', 'BLOCKED', 'CLAUDE_DISPATCH_DENIED'),
+))
+
+
 def _check_delegate_repair_cap(args, store, d6_binding=None):
     """Fail closed before dispatch when this D6 has exhausted its repair rounds."""
     executor_task = getattr(args, 'executor_task', None)
@@ -4514,9 +4530,35 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
                 f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
         completion = record.get('completion')
         if (type(completion) is dict and
-                completion.get('executor_task_id') == executor_task and
-                type(record.get('developer')) is dict):
-            created_at = record['developer'].get('created_at')
+                completion.get('executor_task_id') == executor_task):
+            developer = record.get('developer')
+            if developer is None:
+                continue
+            if type(developer) is not dict:
+                raise LLMToolError(
+                    f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
+            refusal_key = (
+                developer.get('provider_profile'),
+                developer.get('state'),
+                developer.get('error_code'),
+            )
+            known_prelaunch_refusal = (
+                all(type(value) is str for value in refusal_key) and
+                refusal_key in _PRELAUNCH_REPAIR_REFUSALS
+            )
+            known_empty = all(
+                key in developer and developer[key] is None
+                for key in ('artifact', 'artifact_sha256', 'execution', 'usage')
+            )
+            changed_files_empty = (
+                'changed_files' not in developer or
+                (type(developer['changed_files']) is list and
+                 not developer['changed_files'])
+            )
+            if (known_prelaunch_refusal and known_empty and
+                    changed_files_empty and 'progress' not in developer):
+                continue
+            created_at = developer.get('created_at')
             try:
                 stamp = datetime.strptime(created_at, '%Y-%m-%dT%H:%M:%SZ')
                 if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != created_at:
