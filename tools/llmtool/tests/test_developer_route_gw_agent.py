@@ -752,6 +752,20 @@ class GwAgentRouteTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, 'GW_AGENT_MODEL_UNVERIFIED')
 
+    def test_routing_alias_served_model_is_refused_as_unverified(self):
+        server, reply, tool_call = self._fake_server()
+        route = self._alias_route(server.port)
+        server.script.append(reply(tool_call('finish', summary='done'), model='gw'))
+
+        with self.assertRaises(RouteError) as caught:
+            self.run_route_with_credential(
+                route, dict(self.request(), model='gw'), gate=lambda: True,
+                boundary=DirectBoundary(), snapshot=capture_snapshot)
+
+        self.assertEqual(caught.exception.code, 'GW_AGENT_MODEL_UNVERIFIED')
+        route._result = {'served_model': 'gw'}
+        self.assertIsNone(route.verified_model('', 'gw'))
+
     def test_blocked_run_keeps_the_tool_code_and_drops_the_model_summary(self):
         server, reply, tool_call = self._fake_server()
         self.route.profile['base_url'] = f'http://127.0.0.1:{server.port}/v1'

@@ -3742,8 +3742,13 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
 
     def persist_failure(error_code, *, state='DEVELOPER_UNAVAILABLE'):
         nonlocal expected_developer
-        developer.update(state=state, provider_type='gw-agent-cli', model=model,
-                         error_code=error_code, artifact=None, artifact_sha256=None)
+        execution = developer.get('execution')
+        updates = {'state': state, 'provider_type': 'gw-agent-cli', 'model': model,
+                   'error_code': error_code, 'artifact': None, 'artifact_sha256': None,
+                   'usage': None}
+        if type(execution) is dict:
+            updates['execution'] = {**execution, 'usage_source': 'UNKNOWN'}
+        developer.update(**updates)
         try:
             saved = store.compare_and_update(
                 task['task_id'], expected={'developer': expected_developer},
