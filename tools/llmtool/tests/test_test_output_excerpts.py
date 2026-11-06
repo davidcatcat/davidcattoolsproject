@@ -503,8 +503,8 @@ class TestOutputExcerptsTests(unittest.TestCase):
                 self.assertEqual(result['test_status'], 'FAILED')
                 self.assertEqual(result['failure_ids'], [FAIL_ID])
 
-        # synthetic-fixture: screen-tool test
     def test_sensitive_values_directly_after_cjk_text_are_rejected(self):
+        # synthetic-fixture: screen-tool test
         values = (
             'AK' + 'IA' + 'SYNTHETIC0TEST16',  # synthetic-fixture: screen-tool test
             'sk' + '-' + 'a' * 24,  # synthetic-fixture: screen-tool test
