@@ -4202,7 +4202,9 @@ class DelegateRepairCapTests(unittest.TestCase):
                 'direct_result_callback': submission_cli._direct_result_callback(
                     task, registration, 'a' * 40),
             }
-            if route == 'agy':
+            if route == 'claude':
+                developer_record['executor_task_id'] = executor
+            if route in ('agy', 'claude'):
                 developer_record['owner_assignment_ref'] = (
                     'https://github.com/davidcatcat/davidcattoolsproject/'
                     'issues/289#issuecomment-1'
@@ -4308,7 +4310,9 @@ class DelegateRepairCapTests(unittest.TestCase):
                 self._prior_assignments(2)
                 self._task(
                     developer=True, route='gw-agent',
-                    developer_state='DEVELOPER_UNAVAILABLE', artifact=None,
+                    developer_state=('DEVELOPER_PENDING' if code is None
+                                     else 'DEVELOPER_UNAVAILABLE'),
+                    artifact=None,
                     error_code=code)
                 task = self._task()
                 with self.assertRaisesRegex(
