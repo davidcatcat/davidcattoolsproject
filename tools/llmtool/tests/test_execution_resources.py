@@ -55,6 +55,21 @@ class ExecutionResourcesTests(unittest.TestCase):
             'role': 'Linux CI shard',
         })
 
+        # Runner 4 is on a second, smaller EC2 host (#1093); no host address.
+        ec2_2 = next(host for host in inventory['hosts'] if host['id'] == 'aws-ec2-2')
+        self.assertEqual(ec2_2['reported_vcpu'], 2)
+        self.assertEqual(ec2_2['reported_memory_gib'], 3)
+        self.assertEqual(ec2_2['capabilities'], ['self-hosted-linux-ci'])
+        self.assertEqual(ec2_2['runners'], [{
+            'name': 'ec2-self-runner-4',
+            'runner_label': 'local-ec2-linux-ci',
+            'service_account': 'ghrunner4',
+            'role': 'Linux CI',
+        }])
+        linux_accounts = [runner['service_account'] for host in inventory['hosts']
+                          for runner in host['runners'] if 'service_account' in runner]
+        self.assertEqual(linux_accounts, ['ghrunner', 'ghrunner2', 'ghrunner3', 'ghrunner4'])
+
     def test_worker_dispatch_policy_stays_separate_from_inventory(self):
         policy = worker_dispatch._parse_policy(POLICY_PATH.read_bytes())
         self.assertEqual(set(policy['workers']), worker_dispatch.WORKERS)
