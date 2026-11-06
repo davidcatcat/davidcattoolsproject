@@ -37,9 +37,14 @@ _PYTEST_STATS = re.compile(
     r'([0-9][^\n]*?) in [0-9]+(?:\.[0-9]+)?s(?: \([0-9:]+\))?')
 # Keep these ranges in step with CJK, kana, and hangul letter blocks.
 _CJK_LETTER = r'\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\u31f0-\u31ff\uac00-\ud7af\u1100-\u11ff\ua960-\ua97f\ud7b0-\ud7ff\U00020000-\U0003134f'
+_CJK_CHAR = re.compile('[' + _CJK_LETTER + ']')
+_CLOUD_KEY = (
+    r'(?:(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b|'
+    r'(?<=[' + _CJK_LETTER + r'])(?:AKIA|ASIA)[A-Z0-9]{16}(?=[' + _CJK_LETTER + r']))'
+)
 _SENSITIVE_PREFIX = (
     r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
-    r'(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}(?:\b|(?=[' + _CJK_LETTER + r']))|'
+    + _CLOUD_KEY + r'|'
     r'(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|'
     r'(?<![A-Za-z0-9_])(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
     r'(?<![A-Za-z0-9_])xox[abprs]-[A-Za-z0-9-]{20,}|'
@@ -62,7 +67,8 @@ _LOG_ERROR = re.compile(r'ERROR:[\w.-]+:')
 _PYTEST_LOG_ERROR = re.compile(r'ERROR(?::[\w.-]+:| {4}\S)')
 _JWT_SEGMENT = re.compile(r'[A-Za-z0-9_-]+', re.IGNORECASE)
 _JWT_START = re.compile(r'(?<![A-Za-z0-9_])eyJ', re.IGNORECASE)
-_JWT_END = re.compile(r'[A-Za-z0-9_-]{8,}(?:\b|(?=[' + _CJK_LETTER + r']))', re.IGNORECASE)
+_JWT_END = re.compile(r'[A-Za-z0-9_-]{8,}\b', re.IGNORECASE)
+_JWT_END_CJK = re.compile(r'[A-Za-z0-9_-]{8,}(?=[' + _CJK_LETTER + r'])', re.IGNORECASE)
 _URL_SCHEME = re.compile(r'[a-z][a-z0-9+.-]*', re.IGNORECASE)
 _URL_AUTHORITY = re.compile(r'[^\s/]+')
 
@@ -72,17 +78,24 @@ def _sensitive_jwt(text):
     # segments must end at dots; its last may end at an internal word boundary.
     # Each bounded prefix search / anchored tail match scans at most one
     # segment, never the remaining source from every overlapping eyJ start.
-    # Retain re.IGNORECASE's Unicode letters and accept CJK letters at the tail.
-    previous_end, first, second = None, False, False
+    # The raw-text CJK boundary requires CJK on both sides of the JWT.
+    previous_end, first, second, first_start = None, False, False, None
     for segment in _JWT_SEGMENT.finditer(text):
         start, end = segment.span()
         adjacent = (previous_end is not None and start == previous_end + 1
                     and text[previous_end] == '.')
-        if adjacent and second and _JWT_END.match(text, start):
-            return True
+        if adjacent and second:
+            if _JWT_END.match(text, start):
+                return True
+            if (_JWT_END_CJK.match(text, start) and first_start is not None
+                    and first_start > 0
+                    and _CJK_CHAR.fullmatch(text[first_start - 1]) is not None):
+                return True
         second = adjacent and first and end - start >= 8
         first = (end - start >= 11
                  and _JWT_START.search(text, start, end - 8) is not None)
+        if first:
+            first_start = start
         previous_end = end
     return False
 

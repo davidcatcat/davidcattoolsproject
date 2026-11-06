@@ -538,12 +538,16 @@ class TestOutputExcerptsTests(unittest.TestCase):
         from llmtool.test_output_excerpts import _sensitive, _sensitive_jwt
 
         jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
-        for value in (SYNTHETIC_AWS_KEY, 'ASIA' + 'SYNTHETIC0TEST16', jwt):
+        for value in (SYNTHETIC_AWS_KEY, 'ASIA' + 'SYNTHETIC0TEST16'):
             for text in ('x' + value, value + 'x'):
                 with self.subTest(shape=value[:4], text=text[:1]):
                     self.assertFalse(_sensitive(text))
-                    if value == jwt:
-                        self.assertFalse(_sensitive_jwt(text))
+        # An ASCII prefix blocks the JWT start; an ASCII suffix extends its
+        # final segment and remains sensitive by design.
+        self.assertFalse(_sensitive('x' + jwt))
+        self.assertFalse(_sensitive_jwt('x' + jwt))
+        self.assertTrue(_sensitive(jwt + 'x'))
+        self.assertTrue(_sensitive_jwt(jwt + 'x'))
 
     def test_near_limit_jwt_scan_completes_without_false_success(self):
         # Repeated boundary-bearing prefixes, missing dots, and short or
