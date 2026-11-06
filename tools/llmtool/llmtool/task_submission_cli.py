@@ -2998,7 +2998,7 @@ def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
         'pm_selected_goal. Read only allowed_read_paths; write only allowed_write_paths. '
         'Do not run Git writes, commit, push, or publish; llmtool and PM handle Git. '
         'Run only listed test_commands; if none, report that and invent none. Review '
-        'your diff and test results; allow at most one repair within budget. No web '
+        'your diff, and any listed test results; allow at most one repair within budget. No web '
         'search, memories, apps, hooks, plugins, subagents, or network. Return one '
         'strict JSON object exactly shaped as {"status":"DONE"|"BLOCKED",'
         '"summary":"...","tests":[...],"self_review":"...",'
