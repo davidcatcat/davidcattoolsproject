@@ -537,12 +537,18 @@ class TestOutputExcerptsTests(unittest.TestCase):
         # synthetic-fixture: screen-tool test
         jwt = (encode(b'{"alg":"HS256"}') + '.' +
                encode(b'{"sub":"1234567890"}') + '.signature123456')
+        left_sides = ('\uff1a', '\u300c', '\uff0c', '\uff08', '\u3000',
+                      '\u00a0', '\u0301', '', '\u0130', '\u0131', '\u017f',
+                      '\u212a', '-', 'prefix-', 'x-')
+        right_sides = ('\u6e2c', '\u3042', '\u00e9', '\u212a')
         side_pairs = (('\u6e2c', '\u3042'), ('\u3131', '\u3131'),
                       ('\uff71', '\uff71'), ('\u3005', '\u3005'),
                       ('\u6e2c', '\u00e9'), ('\u00e9', '\u6e2c'),
                       ('\u6e2c', '\u03b1'), ('\u03b1', '\u6e2c'),
                       ('\u6e2c', '\u0130'), ('\u6e2c', '\u0131'),
-                      ('\u6e2c', '\u017f'), ('\u6e2c', '\u212a'))
+                      ('\u6e2c', '\u017f'), ('\u6e2c', '\u212a')) + tuple(
+                      (left, right) for left in left_sides for right in right_sides)
+        # synthetic-fixture: screen-tool test
         for value in (SYNTHETIC_AWS_KEY, 'ASIA' + 'SYNTHETIC0TEST16', jwt):
             for left, right in side_pairs:
                 text = left + value + right
@@ -566,17 +572,18 @@ class TestOutputExcerptsTests(unittest.TestCase):
         jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
         # synthetic-fixture: screen-tool test
         for value in (SYNTHETIC_AWS_KEY, 'ASIA' + 'SYNTHETIC0TEST16'):
-            for text in ('x' + value, value + 'x'):
+            for text in ('x' + value, value + 'x', 'x' + value + '\u6e2c'):
                 with self.subTest(shape=value[:4], text=text[:1]):
                     self.assertFalse(_sensitive(text))
                     self.assertFalse(_emitted_sensitive(text))
                     self.assertFalse(_emitted_json_sensitive(text))
                     self.assertFalse(_screen_hits(text))
-        self.assertFalse(_sensitive('x' + jwt))
-        self.assertFalse(_sensitive_jwt('x' + jwt))
-        self.assertFalse(_emitted_sensitive('x' + jwt))
-        self.assertFalse(_emitted_json_sensitive('x' + jwt))
-        self.assertFalse(_screen_hits('x' + jwt))
+        for text in ('x' + jwt, 'x' + jwt + '\u6e2c'):
+            self.assertFalse(_sensitive(text))
+            self.assertFalse(_sensitive_jwt(text))
+            self.assertFalse(_emitted_sensitive(text))
+            self.assertFalse(_emitted_json_sensitive(text))
+            self.assertFalse(_screen_hits(text))
         # The existing ASCII suffix rule still recognizes a word boundary
         # inside a longer identifier as a JWT candidate.
         self.assertTrue(_sensitive(jwt + 'x'))

@@ -38,10 +38,9 @@ _PYTEST_STATS = re.compile(
 # Disable IGNORECASE for this boundary class: otherwise its negated ASCII range
 # also excludes İ, ı, ſ, and K when used inside the credential patterns.
 _NON_ASCII_WORD = r'(?-i:[^\W\x00-\x7f])'
-_NON_ASCII_WORD_CHAR = re.compile(_NON_ASCII_WORD)
 _CLOUD_KEY = (
     r'(?:(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b|'
-    r'(?<=' + _NON_ASCII_WORD + r')(?:AKIA|ASIA)[A-Z0-9]{16}(?=' + _NON_ASCII_WORD + r'))'
+    r'(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]{16}(?=' + _NON_ASCII_WORD + r'))'
 )
 _SENSITIVE_PREFIX = (
     r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
@@ -67,7 +66,7 @@ _SENSITIVE_JSON = re.compile(
 _LOG_ERROR = re.compile(r'ERROR:[\w.-]+:')
 _PYTEST_LOG_ERROR = re.compile(r'ERROR(?::[\w.-]+:| {4}\S)')
 _JWT_SEGMENT = re.compile(r'[A-Za-z0-9_-]+', re.IGNORECASE)
-_JWT_START = re.compile(r'(?<![A-Za-z0-9_])eyJ', re.IGNORECASE)
+_JWT_START = re.compile(r'(?<!(?-i:[A-Za-z0-9_]))eyJ', re.IGNORECASE)
 _JWT_END = re.compile(r'[A-Za-z0-9_-]{8,}\b', re.IGNORECASE)
 _JWT_END_NON_ASCII = re.compile(r'[A-Za-z0-9_-]{8,}(?=' + _NON_ASCII_WORD + r')', re.IGNORECASE)
 _URL_SCHEME = re.compile(r'[a-z][a-z0-9+.-]*', re.IGNORECASE)
@@ -79,26 +78,19 @@ def _sensitive_jwt(text):
     # segments must end at dots; its last may end at an internal word boundary.
     # Each bounded prefix search / anchored tail match scans at most one
     # segment, never the remaining source from every overlapping eyJ start.
-    # The fallback boundary requires an adjacent non-ASCII word character at
-    # both the header start and the final segment end.
-    previous_end, first, second, first_start = None, False, False, None
+    # _JWT_START enforces the header boundary; the fallback tail boundary
+    # requires an adjacent non-ASCII word character at the final segment end.
+    previous_end, first, second = None, False, False
     for segment in _JWT_SEGMENT.finditer(text):
         start, end = segment.span()
         adjacent = (previous_end is not None and start == previous_end + 1
                     and text[previous_end] == '.')
         if adjacent and second:
-            if _JWT_END.match(text, start):
-                return True
-            if (_JWT_END_NON_ASCII.match(text, start) and first_start is not None
-                    and first_start > 0
-                    and _NON_ASCII_WORD_CHAR.fullmatch(text[first_start - 1]) is not None):
+            if _JWT_END.match(text, start) or _JWT_END_NON_ASCII.match(text, start):
                 return True
         second = adjacent and first and end - start >= 8
         first = (end - start >= 11
                  and _JWT_START.search(text, start, end - 8) is not None)
-        # A JWT payload can also start with eyJ; keep the header's boundary.
-        if first and not second:
-            first_start = start
         previous_end = end
     return False
 
