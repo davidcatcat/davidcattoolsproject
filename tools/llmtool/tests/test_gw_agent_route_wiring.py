@@ -852,7 +852,9 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.head = self._git('rev-parse', 'HEAD')
         self.common = str(self.root / '.git')
         self._register_d6()
-        self.store = task_store.TaskStore(Path(temp.name).resolve() / 'tasks')
+        self.store_root = Path(temp.name).resolve() / 'tasks'
+        self.store = task_store.TaskStore(self.store_root)
+        self._store_serial = 0
 
     def _git(self, *args):
         return subprocess.check_output(['/usr/bin/git', '-C', str(self.root), *args],
@@ -974,8 +976,15 @@ class GwAgentRealStoreTests(unittest.TestCase):
         # A fresh store proves the record is on disk and still passes validation.
         return code, self._reloaded()
 
+    def _fresh_store(self):
+        # An unconfirmed Task holds its D6; each subtest that leaves one behind
+        # gets its own store so it cannot block the next subtest.
+        self._store_serial += 1
+        self.store_root = self.base / f'tasks-{self._store_serial}'
+        self.store = task_store.TaskStore(self.store_root)
+
     def _reloaded(self):
-        return task_store.TaskStore(Path(self.base / 'tasks').resolve()).get(self.task_id)
+        return task_store.TaskStore(self.store_root).get(self.task_id)
 
     def _assert_success_persisted(self, task, target):
         developer = task['developer']
@@ -1142,6 +1151,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
                 ('bad-stdout-digest', {'stdout_sha256': 'not-a-digest'}, None)):
             with self.subTest(fault=name), \
                  patch.object(task_submission_cli, 'run_task_direct_result_event') as callback:
+                self._fresh_store()
                 target = f'gw-agent-{name}.md'
                 code, task = self._delegate(target, route_runner=self._route_result_with(**fault))
                 callback.assert_not_called()
@@ -1256,6 +1266,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
             def interrupted(*_args, _error=error, **_kwargs):
                 raise _error
             with self.subTest(error=type(error).__name__):
+                self._fresh_store()
                 with self.assertRaises(type(error)):
                     self._delegate('gw-agent-interrupted.md', route_runner=interrupted)
                 self._assert_failed(self._reloaded(), 'DEVELOPER_OUTCOME_UNKNOWN',
