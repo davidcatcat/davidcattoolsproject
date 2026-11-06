@@ -64,7 +64,8 @@ class AgyRouteWiringTests(unittest.TestCase):
         registration = SimpleNamespace(task_id='executor-d6', root=snapshot.root,
             common_dir=snapshot.common_dir, branch=snapshot.branch, result_sha=snapshot.head,
             trusted_agent_id='codex', session_ref='session-ref', native_session_id=None)
-        callback = {'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id}
+        callback = task_submission_cli._direct_result_callback(
+            task, registration, snapshot.head, test_policy='LOCAL')
         usage = ({'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
                  if usage is None else usage)
         result = SimpleNamespace(session_id=session_id, exit_code=0,
