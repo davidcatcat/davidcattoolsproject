@@ -1,4 +1,5 @@
 import copy
+import dataclasses
 import hashlib
 import inspect
 import io
@@ -13,12 +14,13 @@ from argparse import Namespace
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from llmtool import review_dispatch, task_completion, task_submission_cli, worker_dispatch
 from llmtool.developer_routes import GwAgentRoute, RouteError, load_route_config
 from llmtool.developer_routes.gw_agent import cleanup_audit_copies
 from llmtool.errors import LLMToolError
+from llmtool.providers.cli_lifecycle import CLIHostTermination, _Cancelled
 from llmtool import task_store
 
 
@@ -898,8 +900,10 @@ class GwAgentRealStoreTests(unittest.TestCase):
         return task_id
 
     def _delegate(self, target, *, usage=(1026, 49), served_model='qwen3.8-27b',
-                  provider_model='gw', reject_responded=False):
-        task_id = self._active_pm_task(target)
+                  provider_model='gw', reject_responded=False, route_runner=None,
+                  wrap_store=None, gate=None, authorize=None, route_factory=None,
+                  content='hello synthetic\n'):
+        task_id = self.task_id = self._active_pm_task(target)
         if provider_model != 'gw':
             config = self.base / '.config' / 'llmtool' / 'config.yaml'
             config.write_text(
@@ -910,7 +914,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
                 f'    model: {provider_model}\n',
                 encoding='utf-8')
         self.server.script.extend((
-            self.reply(self.tool_call('apply_edit', path=target, new='hello synthetic\n',
+            self.reply(self.tool_call('apply_edit', path=target, new=content,
                                       create=True), model=served_model, usage=usage),
             self.reply(self.tool_call('finish', summary='done'), model=served_model,
                        usage=usage)))
@@ -942,16 +946,24 @@ class GwAgentRealStoreTests(unittest.TestCase):
                         task_id, expected=expected, **updates)
 
             store = _RejectRespondedStore()
+        if wrap_store is not None:
+            store = wrap_store(self.store)
         with patch.object(task_submission_cli, 'load_route_config',
                           return_value=real_config), \
              patch.object(task_submission_cli, 'for_platform',
                           return_value=_NoSandboxBoundary()), \
-             patch.object(worker_dispatch, 'authorize_dispatch'), \
-             patch.object(worker_dispatch, 'evaluate', return_value=decision), \
+             patch.object(worker_dispatch, 'authorize_dispatch', authorize or Mock()), \
+             patch.object(worker_dispatch, 'evaluate', return_value=gate or decision), \
+             patch.object(task_submission_cli, 'GwAgentRoute',
+                          route_factory or task_submission_cli.GwAgentRoute), \
              redirect_stdout(io.StringIO()):
-            code = task_submission_cli.run_task_gw_agent_delegate(args, store=store)
+            code = task_submission_cli.run_task_gw_agent_delegate(
+                args, store=store, route_runner=route_runner)
         # A fresh store proves the record is on disk and still passes validation.
-        return code, task_store.TaskStore(Path(self.base / 'tasks').resolve()).get(task_id)
+        return code, self._reloaded()
+
+    def _reloaded(self):
+        return task_store.TaskStore(Path(self.base / 'tasks').resolve()).get(self.task_id)
 
     def _assert_success_persisted(self, task, target):
         developer = task['developer']
@@ -1015,7 +1027,10 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertIsNone(developer['artifact'])
         self.assertIsNone(developer['artifact_sha256'])
         self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
-        self.assertEqual(developer['execution']['status'], 'DONE')
+        self.assertEqual(developer['execution']['status'], 'UNKNOWN')
+        self.assertEqual(developer['execution']['cleanup_status'], 'CONFIRMED')
+        self.assertEqual(developer['changed_files'], [target])
+        self.assertEqual(developer['model'], 'gw')
 
     def test_unknown_usage_control_persists_without_usage(self):
         target = 'gw-agent-unknown-usage-control.md'
@@ -1046,6 +1061,250 @@ class GwAgentRealStoreTests(unittest.TestCase):
         callback = task['developer']['direct_result_callback']
         self.assertEqual((code, callback['state'], callback['missing_gates']),
                          (1, 'WAITING_EXECUTOR', ['TEST_SCOPE_MISSING']))
+
+    def _assert_failed(self, task, state, error_code, *, provider_type='gw-agent-cli',
+                       model='gw'):
+        developer = task['developer']
+        self.assertEqual((developer['state'], developer['error_code']), (state, error_code))
+        self.assertEqual((developer['provider_type'], developer['model']),
+                         (provider_type, model))
+        self.assertIsNone(developer['artifact'])
+        self.assertIsNone(developer['artifact_sha256'])
+        self.assertIsNone(developer['usage'])
+
+    @staticmethod
+    def _route_result_with(**fault):
+        def runner(route, request, **kwargs):
+            return dataclasses.replace(
+                task_submission_cli.run_route(route, request, **kwargs), **fault)
+        return runner
+
+    @staticmethod
+    def _unused_runner(*_args, **_kwargs):
+        raise AssertionError('the provider must not start')
+
+    @staticmethod
+    def _store_faulting(*, state, landed=False, error=LLMToolError):
+        """Fail one developer state's write, before or after it reaches the disk."""
+        def wrap(base):
+            class FaultingStore:
+                fired = False
+
+                def __getattr__(self, name):
+                    return getattr(base, name)
+
+                def compare_and_update(self, task_id, *, expected, **updates):
+                    if self.fired or (updates.get('developer') or {}).get('state') != state:
+                        return base.compare_and_update(task_id, expected=expected, **updates)
+                    self.fired = True
+                    if landed:
+                        base.compare_and_update(task_id, expected=expected, **updates)
+                    raise error('injected write failure')
+            return FaultingStore()
+        return wrap
+
+    def test_store_rejecting_a_sensitive_artifact_never_strands_the_task(self):
+        target = 'gw-agent-sensitive.md'
+        with patch.object(task_submission_cli, 'run_task_direct_result_event') as callback:
+            code, task = self._delegate(target, content='password = synthetic-value-123456\n')
+        callback.assert_not_called()
+        self.assertEqual(code, 1)
+        self._assert_failed(task, 'DEVELOPER_OUTCOME_UNKNOWN',
+                            'DEVELOPER_RESULT_PERSISTENCE_REJECTED')
+        self.assertEqual(task['developer']['execution']['usage_source'], 'UNKNOWN')
+
+    def test_routing_alias_is_never_recorded_as_the_served_model(self):
+        code, task = self._delegate('gw-agent-alias.md', served_model='gw')
+        self.assertEqual(code, 1)
+        self._assert_failed(task, 'DEVELOPER_UNAVAILABLE',
+                            'DEVELOPER_GW_AGENT_MODEL_UNVERIFIED')
+
+    def test_rejected_execution_block_never_strands_the_task(self):
+        for name, fault, kept in (
+                ('unconfirmed-cleanup', {'cleanup_status': 'UNKNOWN'},
+                 {'cleanup_status': 'UNKNOWN'}),
+                ('no-session', {'session_id': None}, {'native_session_id': None}),
+                ('bad-session', {'session_id': 'not a session'}, None),
+                ('bad-cleanup', {'cleanup_status': 'LEFT_RUNNING'}, None),
+                ('bad-exit-code', {'exit_code': 999}, None),
+                ('bad-stdout-digest', {'stdout_sha256': 'not-a-digest'}, None)):
+            with self.subTest(fault=name), \
+                 patch.object(task_submission_cli, 'run_task_direct_result_event') as callback:
+                target = f'gw-agent-{name}.md'
+                code, task = self._delegate(target, route_runner=self._route_result_with(**fault))
+                callback.assert_not_called()
+                self.assertEqual(code, 1)
+                self._assert_failed(task, 'DEVELOPER_OUTCOME_UNKNOWN',
+                                    'DEVELOPER_RESULT_PERSISTENCE_REJECTED')
+                developer = task['developer']
+                if kept is not None:
+                    self.assertEqual(developer['execution']['status'], 'UNKNOWN')
+                    self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
+                    for field, value in kept.items():
+                        self.assertEqual(developer['execution'][field], value)
+                    self.assertEqual(developer['changed_files'], [target])
+                else:
+                    self.assertIsNone(developer['execution'])
+                    self.assertNotIn('changed_files', developer)
+                (self.root / target).unlink()
+
+    def test_owner_pause_on_the_dispatching_write_is_persisted(self):
+        paused = worker_dispatch.PolicyDecision('company-gw-agent', False, 'OWNER_PAUSED',
+                                                'f' * 64)
+        code, task = self._delegate('gw-agent-paused.md', gate=paused,
+                                    route_runner=self._unused_runner)
+        self.assertEqual(code, 1)
+        self._assert_failed(task, 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_OWNER_PAUSED',
+                            provider_type=None, model=None)
+        self.assertIsNone(task['developer']['execution'])
+        self.assertEqual([(entry['action'], entry['decision'], entry['reason_code'])
+                          for entry in task['dispatch_audit']],
+                         [('DISPATCH', 'BLOCKED', 'OWNER_PAUSED')])
+
+    def test_store_refusing_the_dispatching_write_is_persisted(self):
+        # The store's own validation: a model name longer than it accepts.
+        code, task = self._delegate('gw-agent-long-model.md', provider_model='m' * 300,
+                                    route_runner=self._unused_runner)
+        self.assertEqual(code, 1)
+        self._assert_failed(task, 'DEVELOPER_UNAVAILABLE',
+                            'DEVELOPER_DISPATCH_PERSISTENCE_REJECTED',
+                            provider_type=None, model=None)
+
+    def test_dispatching_write_conflict_is_persisted(self):
+        code, task = self._delegate(
+            'gw-agent-dispatch-conflict.md', route_runner=self._unused_runner,
+            wrap_store=self._store_faulting(state='DEVELOPER_DISPATCHING',
+                                            error=task_store.TaskStoreConflict))
+        self.assertEqual(code, 1)
+        self._assert_failed(task, 'DEVELOPER_UNAVAILABLE',
+                            'DEVELOPER_DISPATCH_PERSISTENCE_REJECTED',
+                            provider_type=None, model=None)
+
+    def test_dispatching_write_that_landed_continues_the_run(self):
+        target = 'gw-agent-dispatch-landed.md'
+        code, task = self._delegate(target, wrap_store=self._store_faulting(
+            state='DEVELOPER_DISPATCHING', landed=True))
+        self.assertEqual(code, 0)
+        self._assert_success_persisted(task, target)
+
+    def test_responded_write_that_landed_stays_a_success(self):
+        target = 'gw-agent-responded-landed.md'
+        code, task = self._delegate(target, wrap_store=self._store_faulting(
+            state='DEVELOPER_RESPONDED', landed=True))
+        self.assertEqual(code, 0)
+        self._assert_success_persisted(task, target)
+        self.assertEqual(task['developer']['direct_result_callback']['state'],
+                         'PM_EVIDENCE_READY')
+
+    def test_failure_write_that_landed_reports_the_failure(self):
+        def runner(*_args, **_kwargs):
+            raise RouteError('GW_AGENT_TIMEOUT')
+        code, task = self._delegate(
+            'gw-agent-failure-landed.md', route_runner=runner,
+            wrap_store=self._store_faulting(state='DEVELOPER_UNAVAILABLE', landed=True))
+        self.assertEqual(code, 1)
+        self._assert_failed(task, 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TIMEOUT')
+
+    def test_failures_after_dispatching_persist_on_a_real_store(self):
+        def route_error(*_args, **_kwargs):
+            raise RouteError('GW_AGENT_TIMEOUT')
+
+        def unexpected(*_args, **_kwargs):
+            raise RuntimeError('synthetic')
+
+        for name, options, state, error_code in (
+                ('adapter-gate-denied', {'authorize': Mock(
+                    side_effect=worker_dispatch.WorkerDispatchDenied('OWNER_PAUSED')),
+                    'route_runner': self._unused_runner},
+                 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_OWNER_PAUSED'),
+                ('adapter-gate-error', {'authorize': Mock(
+                    side_effect=RuntimeError('synthetic')),
+                    'route_runner': self._unused_runner},
+                 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_DISPATCH_FAILED'),
+                ('route-config', {'route_factory': Mock(
+                    side_effect=RouteError('GW_AGENT_CONFIG_INVALID')),
+                    'route_runner': self._unused_runner},
+                 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_CONFIG_INVALID'),
+                ('route-unexpected', {'route_factory': Mock(
+                    side_effect=TypeError('synthetic')),
+                    'route_runner': self._unused_runner},
+                 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_DISPATCH_FAILED'),
+                ('run-route-error', {'route_runner': route_error},
+                 'DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_TIMEOUT'),
+                ('run-unexpected', {'route_runner': unexpected},
+                 'DEVELOPER_OUTCOME_UNKNOWN', 'DEVELOPER_RESULT_UNKNOWN')):
+            with self.subTest(path=name):
+                code, task = self._delegate(f'gw-agent-{name}.md', **options)
+                self.assertEqual(code, 1)
+                self._assert_failed(task, state, error_code)
+                self.assertIsNone(task['developer']['execution'])
+
+    def test_interruption_during_the_run_is_persisted_and_still_raised(self):
+        for error in (KeyboardInterrupt(), CLIHostTermination(143), _Cancelled()):
+            def interrupted(*_args, _error=error, **_kwargs):
+                raise _error
+            with self.subTest(error=type(error).__name__):
+                with self.assertRaises(type(error)):
+                    self._delegate('gw-agent-interrupted.md', route_runner=interrupted)
+                self._assert_failed(self._reloaded(), 'DEVELOPER_OUTCOME_UNKNOWN',
+                                    'DEVELOPER_INTERRUPTED')
+
+    def test_interruption_before_the_run_is_persisted_and_still_raised(self):
+        with self.assertRaises(KeyboardInterrupt):
+            self._delegate('gw-agent-interrupted-gate.md', route_runner=self._unused_runner,
+                           authorize=Mock(side_effect=KeyboardInterrupt()))
+        self._assert_failed(self._reloaded(), 'DEVELOPER_OUTCOME_UNKNOWN',
+                            'DEVELOPER_INTERRUPTED')
+
+    def test_interruption_during_the_responded_write_is_persisted_and_still_raised(self):
+        target = 'gw-agent-interrupted-write.md'
+        with self.assertRaises(KeyboardInterrupt):
+            self._delegate(target, wrap_store=self._store_faulting(
+                state='DEVELOPER_RESPONDED', error=KeyboardInterrupt))
+        task = self._reloaded()
+        self._assert_failed(task, 'DEVELOPER_OUTCOME_UNKNOWN', 'DEVELOPER_INTERRUPTED')
+        self.assertEqual(task['developer']['changed_files'], [target])
+
+    def test_interruption_with_an_unwritable_store_still_reaches_the_caller(self):
+        def interrupted(*_args, **_kwargs):
+            raise KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            self._delegate('gw-agent-interrupted-no-store.md', route_runner=interrupted,
+                           wrap_store=self._store_faulting(state='DEVELOPER_OUTCOME_UNKNOWN'))
+        self.assertEqual(self._reloaded()['developer']['state'], 'DEVELOPER_DISPATCHING')
+
+    def test_unwritable_store_before_dispatching_leaves_a_task_the_pm_can_abandon(self):
+        refuse_dispatching = self._store_faulting(state='DEVELOPER_DISPATCHING')
+        refuse_failure = self._store_faulting(state='DEVELOPER_UNAVAILABLE')
+        with self.assertRaisesRegex(LLMToolError, 'gw-agent outcome could not be persisted'):
+            self._delegate('gw-agent-no-store-pending.md', route_runner=self._unused_runner,
+                           wrap_store=lambda base: refuse_dispatching(refuse_failure(base)))
+        stranded = self._reloaded()
+        self.assertEqual(stranded['developer']['state'], 'DEVELOPER_PENDING')
+        reloaded = task_store.TaskStore(Path(self.base / 'tasks').resolve())
+        saved = reloaded.abandon(self.task_id, pm_session_id=stranded['pm_session_id'],
+                                 reason='Synthetic store outage.')
+        self.assertEqual(saved['abandonment']['reason'], 'Synthetic store outage.')
+
+    def test_unwritable_store_leaves_a_task_the_pm_can_abandon(self):
+        def runner(*_args, **_kwargs):
+            raise RouteError('GW_AGENT_TIMEOUT')
+        with self.assertRaisesRegex(LLMToolError, 'gw-agent outcome could not be persisted'):
+            self._delegate('gw-agent-no-store.md', route_runner=runner,
+                           wrap_store=self._store_faulting(state='DEVELOPER_UNAVAILABLE'))
+        stranded = self._reloaded()
+        self.assertEqual(stranded['developer']['state'], 'DEVELOPER_DISPATCHING')
+
+        reloaded = task_store.TaskStore(Path(self.base / 'tasks').resolve())
+        saved = reloaded.abandon(self.task_id, pm_session_id=stranded['pm_session_id'],
+                                 reason='Synthetic store outage.')
+        self.assertEqual(saved['abandonment']['reason'], 'Synthetic store outage.')
+
+        self.server.script.clear()
+        target = 'gw-agent-after-abandon.md'
+        code, task = self._delegate(target)
+        self.assertEqual(code, 0)
+        self._assert_success_persisted(task, target)
 
 
 if __name__ == '__main__':
