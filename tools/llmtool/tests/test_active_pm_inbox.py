@@ -889,6 +889,28 @@ class ActivePMInboxTests(unittest.TestCase):
         self.assertEqual(len(events), 3)
         self.assertEqual(sum(event['source'] == 'DIRECT_D6_DEVELOPER' for event in events), 1)
 
+    def test_read_retries_when_concurrent_replace_unlinks_opened_inode(self):
+        task = self._record_pm()
+        path = self.store.root / (task['task_id'] + '.json')
+        current = json.loads(path.read_text())
+        target_ino = path.stat().st_ino
+        original_fstat = os.fstat
+        calls = []
+
+        def replace_before_after_fstat(fd):
+            info = original_fstat(fd)
+            if info.st_ino == target_ino:
+                calls.append(fd)
+                if len(calls) == 2:
+                    self.store._write(current, create=False)
+                    return original_fstat(fd)
+            return info
+
+        with patch('llmtool.task_store.os.fstat', side_effect=replace_before_after_fstat):
+            record = self.store.get(task['task_id'])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(record['task_id'], task['task_id'])
+
     # Session-file checks ----------------------------------------------------
 
     def test_session_file_must_be_a_regular_file_owned_by_the_user(self):

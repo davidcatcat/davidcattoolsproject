@@ -2244,13 +2244,14 @@ class TaskStore:
                     after = os.fstat(stream.fileno())
                     current = os.stat(name, dir_fd=directory, follow_symlinks=False)
                 if (len(raw) > MAX_RECORD_BYTES or raw != repeated or
-                        _identity(before) != _identity(after)):
+                        _identity(before)[:-1] != _identity(after)[:-1] or
+                        after.st_nlink not in (0, 1)):
                     _fail()
                 if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
                     if attempt < 2:
                         continue
                     _fail('TASK_STORE_BUSY')
-                if _identity(before) != _identity(current):
+                if _identity(before) != _identity(after) or _identity(before) != _identity(current):
                     _fail()
                 value = json.loads(raw.decode('utf-8'), object_pairs_hook=self._unique_pairs,
                                    parse_constant=lambda _: _fail())
