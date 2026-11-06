@@ -2506,7 +2506,10 @@ def render_activity(events: list[ActivityEvent], limit: int = 60,
     if github is None:
         lines.append("GitHub 動態已關閉（--no-github），跨工作階段的標記沒有顯示。")
     else:
-        lines.append(github.status + "；「自述」= 有權限的發文者自己標記，未經驗證。")
+        lines.append(
+            github.status
+            + "；「自述」= 已設定的 Owner／AI 帳號自行標記，未經獨立驗證；"
+              "actor=Owner 僅接受 Owner 帳號。")
     return lines
 
 
@@ -4349,6 +4352,9 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None) -> Work
     github_status = ("未讀 GitHub" if github is None else
                      "GitHub 讀取失敗，以下可能過時" if github.read_failed else
                      "GitHub 尚未讀取" if not github_known else "")
+    if github is not None and GITHUB_IDENTITY_STATUS:
+        github_status = "；".join(
+            part for part in (github_status, GITHUB_IDENTITY_STATUS) if part)
     prs = (pr_board_rows(pulls, github.verdicts, getattr(github, "ci_heads", None),
                          ec2, reviewing, github.pending) if github_known else [])
     return WorkBoard(owner, running, queue, blocked, done, github_known, board_known,
@@ -7471,6 +7477,8 @@ def _line_style(row: OfficeRow, rows: list[OfficeRow]) -> str:
 def owner_count_line(github) -> tuple[str, str]:
     if github is None:
         return "等你決定：未讀 GitHub", ""
+    if GITHUB_IDENTITY_STATUS:
+        return f"等你決定：未確認（{GITHUB_IDENTITY_STATUS}）", "!"
     if not github.successful_read:
         text = "等你決定：尚未讀取"
         if github.read_failed:
@@ -7549,7 +7557,8 @@ def install_lines(github, pin_file=None) -> list[tuple[str, str]]:
 
 
 def owner_waiting(github) -> int | None:
-    if (github is None or not github.successful_read or github.read_failed):
+    if (github is None or GITHUB_IDENTITY_STATUS
+            or not github.successful_read or github.read_failed):
         return None
     count = sum(item.kind == "waiting_owner" for item in github.pending)
     if getattr(github, "comments_cut", False) and count == 0:

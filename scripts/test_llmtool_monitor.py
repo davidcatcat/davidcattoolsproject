@@ -1467,6 +1467,22 @@ class GitHubActivityTests(unittest.TestCase):
                     self.assertFalse(source.successful_read)
                     self.assertEqual(source.status, f"GitHub：尚未讀取；{status}")
                     self.assertIn(status, "\n".join(mon.render_activity([], github=source)))
+                    successful_source = mon.GitHubSource(
+                        "o/r", runner=FakeRun((0, []), (0, [])), clock=lambda: NOW)
+                    with patch.object(mon.shutil, "which", return_value="gh"):
+                        with patch.object(successful_source, "refresh_rule_alerts"):
+                            with patch.object(successful_source, "refresh_ci"):
+                                successful_source.refresh(force=True)
+                    self.assertTrue(successful_source.successful_read)
+                    self.assertFalse(successful_source.read_failed)
+                    expected_warning = (f"等你決定：未確認（{status}）", "!")
+                    self.assertIsNone(mon.owner_waiting(successful_source))
+                    self.assertEqual(mon.owner_count_line(successful_source), expected_warning)
+                    self.assertIn(expected_warning, mon.office_top(
+                        successful_source, [], NOW))
+                    work = mon.work_board(
+                        successful_source, mon.PmBoard("ok", 0, [], [], []), NOW)
+                    self.assertIn((status, "!"), mon.board_view(work))
                 with self.assertRaises(SystemExit) as raised:
                     mon.main(["--help"])
                 self.assertEqual(raised.exception.code, 0)
@@ -7925,11 +7941,11 @@ class WorkBoardTests(unittest.TestCase):
 
     @staticmethod
     def _progress_work(*, queue=None, done=None, board_known=True, github_known=True,
-                       board_status="ok", note=""):
+                       board_status="ok", note="", github_status=""):
         return mon.WorkBoard(owner=[], running=[], queue=[] if queue is None else queue,
                              blocked=[], done=[] if done is None else done,
                              github_known=github_known, board_known=board_known,
-                             github_status="", board_status=board_status, board_age=0,
+                             github_status=github_status, board_status=board_status, board_age=0,
                              skipped=0, note=note)
 
     def test_pm_progress_line_text_and_staleness(self):
@@ -7955,6 +7971,11 @@ class WorkBoardTests(unittest.TestCase):
         incomplete = self._progress_work(queue=[], note="今天完成可能不完整")
         self.assertEqual(mon.pm_progress_line(incomplete, (entry, ""), NOW),
                          ("PM 進度：上次派工 1 分鐘前 · 排隊 0 · 今天合併 0+", ""))
+        identity_warning = self._progress_work(
+            queue=[], done=[object()], github_status="GitHub 身分設定讀取失敗，信任已停用")
+        self.assertEqual(mon.pm_progress_line(identity_warning, (entry, ""), NOW),
+                         ("PM 進度：上次派工 1 分鐘前 · 排隊 0 · 今天合併 ?", ""))
+        self.assertEqual(len(identity_warning.done), 1)
 
         queued = self._progress_work(queue=[object()])
         empty_queue = self._progress_work()
