@@ -35,12 +35,13 @@ _UNIT_OK = re.compile(r'OK(?: \(([^\n]+)\))?')
 _NODE_ID = re.compile(r'(?:[\w.-]+/)*[\w.-]+\.py(?:::[\w.]+)*(?:\[[^\n]*\])?')
 _PYTEST_STATS = re.compile(
     r'([0-9][^\n]*?) in [0-9]+(?:\.[0-9]+)?s(?: \([0-9:]+\))?')
-# Keep these ranges in step with CJK, kana, and hangul letter blocks.
-_CJK_LETTER = r'\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\u31f0-\u31ff\uac00-\ud7af\u1100-\u11ff\ua960-\ua97f\ud7b0-\ud7ff\U00020000-\U0003134f'
-_CJK_CHAR = re.compile('[' + _CJK_LETTER + ']')
+# Unicode word characters outside ASCII include CJK variants, compatibility
+# jamo, halfwidth kana, iteration marks, and mixed-script letters.
+_NON_ASCII_WORD = r'[^\W\x00-\x7f]'
+_NON_ASCII_WORD_CHAR = re.compile(_NON_ASCII_WORD)
 _CLOUD_KEY = (
     r'(?:(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b|'
-    r'(?<=[' + _CJK_LETTER + r'])(?:AKIA|ASIA)[A-Z0-9]{16}(?=[' + _CJK_LETTER + r']))'
+    r'(?<=' + _NON_ASCII_WORD + r')(?:AKIA|ASIA)[A-Z0-9]{16}(?=' + _NON_ASCII_WORD + r'))'
 )
 _SENSITIVE_PREFIX = (
     r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
@@ -68,7 +69,7 @@ _PYTEST_LOG_ERROR = re.compile(r'ERROR(?::[\w.-]+:| {4}\S)')
 _JWT_SEGMENT = re.compile(r'[A-Za-z0-9_-]+', re.IGNORECASE)
 _JWT_START = re.compile(r'(?<![A-Za-z0-9_])eyJ', re.IGNORECASE)
 _JWT_END = re.compile(r'[A-Za-z0-9_-]{8,}\b', re.IGNORECASE)
-_JWT_END_CJK = re.compile(r'[A-Za-z0-9_-]{8,}(?=[' + _CJK_LETTER + r'])', re.IGNORECASE)
+_JWT_END_NON_ASCII = re.compile(r'[A-Za-z0-9_-]{8,}(?=' + _NON_ASCII_WORD + r')', re.IGNORECASE)
 _URL_SCHEME = re.compile(r'[a-z][a-z0-9+.-]*', re.IGNORECASE)
 _URL_AUTHORITY = re.compile(r'[^\s/]+')
 
@@ -78,7 +79,7 @@ def _sensitive_jwt(text):
     # segments must end at dots; its last may end at an internal word boundary.
     # Each bounded prefix search / anchored tail match scans at most one
     # segment, never the remaining source from every overlapping eyJ start.
-    # The raw-text CJK boundary requires CJK on both sides of the JWT.
+    # The Unicode boundary requires non-ASCII word characters on both sides.
     previous_end, first, second, first_start = None, False, False, None
     for segment in _JWT_SEGMENT.finditer(text):
         start, end = segment.span()
@@ -87,14 +88,15 @@ def _sensitive_jwt(text):
         if adjacent and second:
             if _JWT_END.match(text, start):
                 return True
-            if (_JWT_END_CJK.match(text, start) and first_start is not None
+            if (_JWT_END_NON_ASCII.match(text, start) and first_start is not None
                     and first_start > 0
-                    and _CJK_CHAR.fullmatch(text[first_start - 1]) is not None):
+                    and _NON_ASCII_WORD_CHAR.fullmatch(text[first_start - 1]) is not None):
                 return True
         second = adjacent and first and end - start >= 8
         first = (end - start >= 11
                  and _JWT_START.search(text, start, end - 8) is not None)
-        if first:
+        # A JWT payload can also start with eyJ; keep the header's boundary.
+        if first and not second:
             first_start = start
         previous_end = end
     return False
