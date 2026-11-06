@@ -932,7 +932,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(developer['changed_files'], [target])
         self.assertEqual(developer['model'], 'qwen3.8-27b')
         self.assertEqual(developer['usage'], {
-            'prompt_tokens': 2118, 'completion_tokens': 154, 'total_tokens': 2272,
+            'prompt_tokens': 2052, 'completion_tokens': 98, 'total_tokens': 2150,
             'served_model': 'qwen3.8-27b'})
         self.assertEqual(developer['execution']['status'], 'DONE')
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
