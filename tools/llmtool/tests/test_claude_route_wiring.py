@@ -675,6 +675,11 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             self.assertEqual(denied_saved['dispatch_audit'][-1]['worker_key'],
                              'claude-developer')
             self.assertEqual(denied_saved['dispatch_audit'][-1]['decision'], 'BLOCKED')
+            # The denied create gained nothing, so the live holder of d6_id is
+            # untouched and the denial was audited, not refused as a D6 clash.
+            holder = store.get(second_task_id)['developer']
+            self.assertEqual((holder['executor_task_id'], holder['state']),
+                             (d6_id, 'DEVELOPER_PENDING'))
 
     def test_task_complete_accepts_cli_claude_binding_and_rejects_record_only_without_result(self):
         task_id = 'a' * 32
