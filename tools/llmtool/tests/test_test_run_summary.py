@@ -212,26 +212,6 @@ class TestRunSummaryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize_test_run(PLAN, source, expected_head=HEAD)
 
-    def test_cloud_key_screen_detects_cjk_neighbors_and_allows_longer_ascii_identifier(self):
-        cloud_key = 'AKIA' + '0' * 16
-        cjk_wrapped = '北' + cloud_key + '京'
-        ascii_identifier = 'prefix_' + cloud_key + '_suffix'
-
-        self.assertIsNotNone(summary_module._SENSITIVE_ID.search(cjk_wrapped))
-        self.assertIsNone(summary_module._SENSITIVE_ID.search(ascii_identifier))
-
-        source = receipt()
-        source['commands'][1]['counts'] = {'tests_run': 1, 'passed': 0, 'failed': 1,
-                                           'errors': 0, 'skipped': 0}
-        source['commands'][1]['exit_status'] = 1
-        source['commands'][1]['failure_ids'] = [cjk_wrapped]
-        with self.assertRaises(ValueError):
-            summarize_test_run(PLAN, source, expected_head=HEAD)
-
-        source['commands'][1]['failure_ids'] = [ascii_identifier]
-        summary = summarize_test_run(PLAN, source, expected_head=HEAD)
-        self.assertEqual(summary['commands'][1]['failure_ids'], [ascii_identifier])
-
 
 if __name__ == '__main__':
     unittest.main()

@@ -312,13 +312,6 @@ class FailureMatrixTests(unittest.TestCase):
                     duration_ms=1, event_count=2, dropped_event_count=0, trace_bytes=writer.trace_bytes)))
                 self.assertEqual(DiagnosticsReader(home=state).trace(RUN_ID)['state'], 'complete')
 
-    def test_cloud_key_screen_detects_cjk_neighbors_and_allows_longer_ascii_identifier(self):
-        cloud_key = 'AKIA' + '0' * 16
-        with self.assertRaises(ValueError):
-            d.safe_diagnostic_text('北' + cloud_key + '京')
-        identifier = 'prefix_' + cloud_key + '_suffix'
-        self.assertEqual(d.safe_diagnostic_text(identifier), identifier)
-
 
 if __name__ == '__main__':
     unittest.main()

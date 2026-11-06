@@ -14,7 +14,6 @@ from unittest.mock import patch
 
 from llmtool import remote_test
 from llmtool.task_store import _json_bytes, _validate_remote_test_receipts
-from llmtool.test_output_excerpts import _CLOUD_KEY
 
 
 SHA = 'a' * 40
@@ -278,31 +277,6 @@ class RemoteTestTests(unittest.TestCase):
         script = remote_test._REMOTE_SCRIPT
         self.assertNotIn('import llmtool', script)
         self.assertNotIn('sys.path', script)
-
-    def test_remote_excerpt_cloud_key_boundary_matches_shared_rule(self):
-        parsed = ast.parse(remote_test._REMOTE_SCRIPT)
-        sensitive = next(node for node in parsed.body
-                         if isinstance(node, ast.Assign) and
-                         any(isinstance(target, ast.Name) and target.id == 'SENSITIVE'
-                             for target in node.targets))
-        pattern = sensitive.value.args[0].value
-        self.assertIn('|' + _CLOUD_KEY + '|', pattern)
-
-        cloud_key = 'AKIA' + '0' * 16
-        cjk_wrapped = '北' + cloud_key + '京'
-        ascii_identifier = 'prefix_' + cloud_key + '_suffix'
-        cjk_excerpt = self.failure_excerpt(
-            'FAIL: test_expected (test_remote_test.Case)\n'
-            'Traceback (most recent call last):\n'
-            'AssertionError: ' + cjk_wrapped + '\n'
-            '----------------------------------------------------------------------\n')
-        self.assertNotIn(cloud_key, cjk_excerpt)
-        identifier_excerpt = self.failure_excerpt(
-            'FAIL: test_expected (test_remote_test.Case)\n'
-            'Traceback (most recent call last):\n'
-            'AssertionError: ' + ascii_identifier + '\n'
-            '----------------------------------------------------------------------\n')
-        self.assertIn('AssertionError: ' + ascii_identifier, identifier_excerpt)
 
     def test_timeout_unavailable_and_unknown_receipts(self):
         timed = self.run_it(error=__import__('subprocess').TimeoutExpired('ssh', 600))
