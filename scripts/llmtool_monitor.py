@@ -7282,8 +7282,10 @@ def _settled_codex_failures(rows: list[OfficeRow], canonical: str,
             settled[task_id] = True
     if not settled:
         return rows
-    return [replace(row, state=DONE)
+    return [replace(row, state=DONE,
+                    detail=row.detail + "（上一輪失敗，PR 已結束）")
             if row.key.startswith("codex:") and row.state == ATTENTION
+            and row.exec_result == "failed"
             and row.task.startswith("task ") and row.task[5:] in settled
             else row for row in rows]
 
