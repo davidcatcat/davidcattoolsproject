@@ -99,6 +99,10 @@ class AgyRouteWiringTests(unittest.TestCase):
         def bind_native_session(*_args, **_kwargs):
             nonlocal bind_called
             bind_called = True
+            if (bind_result == 'BOUND' and initial_native_session_id is None and
+                    type(session_id) is str and session_id not in ('', 'UNKNOWN')):
+                callback['evidence']['executor_native_session_id'] = session_id
+                callback['evidence']['executor_native_session'] = 'VERIFIED'
             return bind_result
 
         def route_runner(_route, _request, *, gate, **_kwargs):
@@ -116,11 +120,8 @@ class AgyRouteWiringTests(unittest.TestCase):
             saved = saved_task['developer']
             self.assertEqual(saved['state'], 'DEVELOPER_RESPONDED')
             expected_callback = json.loads(json.dumps(callback))
-            bound_evidence = saved_task['completion']['evidence']
-            expected_callback['evidence']['executor_native_session_id'] = (
-                bound_evidence['executor_native_session_id'])
-            expected_callback['evidence']['executor_native_session'] = (
-                bound_evidence['executor_native_session'])
+            self.assertEqual(saved_task['completion']['evidence'],
+                             saved['direct_result_callback']['evidence'])
             self.assertEqual(saved['direct_result_callback'], expected_callback)
             inbox_events.append({'task_id': event_task_id, 'executor_task_id': executor_task_id})
             return 0
@@ -257,7 +258,7 @@ class AgyRouteWiringTests(unittest.TestCase):
             state='ACTIVE', lock_state='HELD', device=1, inode=2, uid=3,
             native_session_id='conversation_old1234', github_login=None,
             env2_pass_marker=None, env2_approved_tooling_sha=evidence['source_sha'])
-        diff = b'diff --git a/src.py b/src.py\n'
+        diff = task['developer']['artifact'].encode('utf-8')
         live = {'common_dir': registration.common_dir, 'branch': registration.branch,
                 'source_sha': registration.result_sha, 'diff': diff,
                 'changed_paths': ['src.py'],
