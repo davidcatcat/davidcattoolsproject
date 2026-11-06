@@ -2385,38 +2385,105 @@ class TaskStore:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
 
-    def claude_bind_compare_and_update(self, task_id, *, executor_task_id,
-                                       expected, **changes):
-        """Atomically ensure a D6 is not already held by another live Task."""
+    @staticmethod
+    def _claude_d6_holds(record, executor_task_id):
+        if record.get('abandonment') is not None:
+            return False
+        dev = record.get('developer')
+        completion = record.get('completion')
+        return ((type(dev) is dict and
+                 dev.get('executor_task_id') == executor_task_id) or
+                (type(completion) is dict and
+                 completion.get('executor_task_id') == executor_task_id))
+
+    @staticmethod
+    def _d6_bind_holds(record, executor_task_id):
+        if record.get('abandonment') is not None:
+            return False
+        dev = record.get('developer')
+        if type(dev) is not dict:
+            return False
+        completion = record.get('completion')
+        callback = dev.get('direct_result_callback')
+        bound_ids = (
+            dev.get('executor_task_id'),
+            completion.get('executor_task_id') if type(completion) is dict else None,
+            callback.get('executor_task_id') if type(callback) is dict else None,
+        )
+        state = dev.get('state')
+        execution = dev.get('execution')
+        live = (state in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING') or
+                (state == 'DEVELOPER_OUTCOME_UNKNOWN' and
+                 (type(execution) is not dict or
+                  execution.get('cleanup_status') != 'CONFIRMED')))
+        return executor_task_id in bound_ids and live
+
+    @staticmethod
+    def _could_bind_d6(record):
+        """Return True if a schema-v2 Task has not yet bound a D6 and could bind one."""
+        if record.get('schema_version') != 2 or record.get('abandonment') is not None:
+            return False
+        dev = record.get('developer')
+        completion = record.get('completion')
+        if dev is None and completion is None:
+            return True
+        if type(dev) is dict and dev.get('state') in (
+                'DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING'):
+            callback = dev.get('direct_result_callback')
+            if (dev.get('executor_task_id') is None or
+                    (type(completion) is dict and
+                     completion.get('executor_task_id') is None) or
+                    (type(callback) is dict and
+                     callback.get('executor_task_id') is None)):
+                return True
+        return False
+
+    def _d6_bind_with_prefilter(self, task_id, *, executor_task_id, expected,
+                                holds, abandoned_target_code, **changes):
         if (type(executor_task_id) is not str or not executor_task_id or
                 type(expected) is not dict or not expected):
             _fail('TASK_D6_BINDING_SCAN_FAILED')
         directory = self._dirfd()
         lock_fd = None
         try:
-            lock_fd = self._lock_sidecar(directory, '.claude-d6-binding.lock',
-                                         exclusive=True, code='TASK_D6_BINDING')
             try:
-                ids = self.task_ids()
-                for other_id in ids:
+                before_ids = set(self.task_ids())
+                candidates = set()
+                for other_id in sorted(before_ids):
                     if other_id == task_id:
                         continue
                     try:
                         other = self.get(other_id)
                     except Exception:
                         _fail('TASK_D6_BINDING_SCAN_FAILED')
-                    if other.get('abandonment') is not None:
+                    if holds(other, executor_task_id):
+                        candidates.add(other_id)
+                    elif self._could_bind_d6(other):
+                        candidates.add(other_id)
+            except LLMToolError:
+                raise
+            except Exception:
+                _fail('TASK_D6_BINDING_SCAN_FAILED')
+            lock_fd = self._lock_sidecar(directory, '.claude-d6-binding.lock',
+                                         exclusive=True, code='TASK_D6_BINDING')
+            try:
+                try:
+                    locked_ids = set(self.task_ids())
+                except Exception:
+                    _fail('TASK_D6_BINDING_SCAN_FAILED')
+                for other_id in sorted((candidates & locked_ids) |
+                                       (locked_ids - before_ids)):
+                    if other_id == task_id:
                         continue
-                    dev = other.get('developer')
-                    completion = other.get('completion')
-                    if ((type(dev) is dict and
-                         dev.get('executor_task_id') == executor_task_id) or
-                            (type(completion) is dict and
-                             completion.get('executor_task_id') == executor_task_id)):
+                    try:
+                        other = self.get(other_id)
+                    except Exception:
+                        _fail('TASK_D6_BINDING_SCAN_FAILED')
+                    if holds(other, executor_task_id):
                         _fail('TASK_D6_ALREADY_BOUND')
                 target = self.get(task_id)
                 if target.get('abandonment') is not None:
-                    _fail('CLAUDE_TASK_ABANDONED')
+                    _fail(abandoned_target_code)
                 update_expected = dict(expected)
                 update_expected['record_sha256'] = target['record_sha256']
                 try:
@@ -2424,7 +2491,7 @@ class TaskStore:
                         task_id, expected=update_expected, **changes)
                 except TaskStoreConflict:
                     if self.get(task_id).get('abandonment') is not None:
-                        _fail('CLAUDE_TASK_ABANDONED')
+                        _fail(abandoned_target_code)
                     raise
             except LLMToolError:
                 raise
@@ -2434,69 +2501,21 @@ class TaskStore:
             self._unlock_sidecar(lock_fd)
             os.close(directory)
 
+    def claude_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                       expected, **changes):
+        """Atomically ensure a D6 is not already held by another live Task."""
+        return self._d6_bind_with_prefilter(
+            task_id, executor_task_id=executor_task_id, expected=expected,
+            holds=self._claude_d6_holds,
+            abandoned_target_code='CLAUDE_TASK_ABANDONED', **changes)
+
     def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
                                    expected, **changes):
         """Atomically bind a direct-route Task to an available D6 executor."""
-        if (type(executor_task_id) is not str or not executor_task_id or
-                type(expected) is not dict or not expected):
-            _fail('TASK_D6_BINDING_SCAN_FAILED')
-        directory = self._dirfd()
-        lock_fd = None
-        try:
-            lock_fd = self._lock_sidecar(directory, '.claude-d6-binding.lock',
-                                         exclusive=True, code='TASK_D6_BINDING')
-            try:
-                try:
-                    ids = self.task_ids()
-                except Exception:
-                    _fail('TASK_D6_BINDING_SCAN_FAILED')
-                for other_id in ids:
-                    if other_id == task_id:
-                        continue
-                    try:
-                        other = self.get(other_id)
-                    except Exception:
-                        _fail('TASK_D6_BINDING_SCAN_FAILED')
-                    if other.get('abandonment') is not None:
-                        continue
-                    dev = other.get('developer')
-                    completion = other.get('completion')
-                    callback = (dev.get('direct_result_callback')
-                                if type(dev) is dict else None)
-                    bound_ids = (
-                        dev.get('executor_task_id') if type(dev) is dict else None,
-                        completion.get('executor_task_id')
-                        if type(completion) is dict else None,
-                        callback.get('executor_task_id')
-                        if type(callback) is dict else None,
-                    )
-                    state = dev.get('state') if type(dev) is dict else None
-                    execution = dev.get('execution') if type(dev) is dict else None
-                    live = (state in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING') or
-                            (state == 'DEVELOPER_OUTCOME_UNKNOWN' and
-                             (type(execution) is not dict or
-                              execution.get('cleanup_status') != 'CONFIRMED')))
-                    if type(dev) is dict and executor_task_id in bound_ids and live:
-                        _fail('TASK_D6_ALREADY_BOUND')
-                target = self.get(task_id)
-                if target.get('abandonment') is not None:
-                    _fail('TASK_D6_ALREADY_BOUND')
-                update_expected = dict(expected)
-                update_expected['record_sha256'] = target['record_sha256']
-                try:
-                    return self.compare_and_update(
-                        task_id, expected=update_expected, **changes)
-                except TaskStoreConflict:
-                    if self.get(task_id).get('abandonment') is not None:
-                        _fail('TASK_D6_ALREADY_BOUND')
-                    raise
-            except LLMToolError:
-                raise
-            except Exception:
-                _fail('TASK_D6_BINDING_SCAN_FAILED')
-        finally:
-            self._unlock_sidecar(lock_fd)
-            os.close(directory)
+        return self._d6_bind_with_prefilter(
+            task_id, executor_task_id=executor_task_id, expected=expected,
+            holds=self._d6_bind_holds,
+            abandoned_target_code='TASK_D6_ALREADY_BOUND', **changes)
 
     def record_published_pr(self, task_id, pr, head_sha):
         """Record or replace the PR linked to this Task's published HEAD."""

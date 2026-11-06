@@ -1046,6 +1046,120 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(outcomes.count('BOUND'), 1)
         self.assertEqual(outcomes.count('TASK_D6_ALREADY_BOUND'), 1)
 
+    def test_d6_binding_with_many_finished_tasks_does_not_hold_lock_over_full_scan(self):
+        self._allow_codex_dispatch()
+        store = TaskStore(Path(self.temp.name).resolve())
+        finished_ids = set()
+        artifact = ('diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n'
+                    '@@ -1 +1 @@\n-x=1\n+x=2\n')
+        artifact_sha = hashlib.sha256(artifact.encode()).hexdigest()
+        for index in range(60):
+            finished = self._codex_dispatch_task()
+            store.create(finished)
+            developer = self._developer_assignment(provider='codex', max_tokens=None)
+            developer.update(
+                state='DEVELOPER_RESPONDED', provider_type='codex-cli',
+                model='gpt-6-luna', executor_task_id=f'executor-done-{index}',
+                artifact=artifact, artifact_sha256=artifact_sha)
+            completion = {
+                'state': 'WAITING_EXECUTOR',
+                'executor_task_id': f'executor-done-{index}',
+                'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+                'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+                'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+            }
+            store.compare_and_update(
+                finished['task_id'], expected={'developer': None, 'completion': None},
+                developer=developer, completion=completion)
+            finished_ids.add(finished['task_id'])
+
+        candidates = [self._codex_dispatch_task() for _ in range(2)]
+        for task in candidates:
+            store.create(task)
+
+        original_get = store.get
+        original_lock = store._lock_sidecar
+        original_unlock = store._unlock_sidecar
+        lock_owner = [None]
+        locked_finished_reads = []
+        barrier = threading.Barrier(2)
+        outcomes = []
+
+        def tracked_lock(directory, lock_name, *, exclusive, code):
+            fd = original_lock(directory, lock_name, exclusive=exclusive, code=code)
+            if lock_name == '.claude-d6-binding.lock':
+                lock_owner[0] = threading.get_ident()
+            return fd
+
+        def tracked_unlock(lock_fd):
+            if lock_fd is not None:
+                lock_owner[0] = None
+            return original_unlock(lock_fd)
+
+        def slow_finished_get(task_id):
+            if task_id in finished_ids:
+                if lock_owner[0] == threading.get_ident():
+                    locked_finished_reads.append(task_id)
+                time.sleep(0.005)
+            return original_get(task_id)
+
+        def bind(index, task):
+            executor_task_id = f'executor-many-{index}'
+            developer = self._developer_assignment(provider='codex', max_tokens=None)
+            developer['executor_task_id'] = executor_task_id
+            completion = {
+                'state': 'WAITING_EXECUTOR', 'executor_task_id': executor_task_id,
+                'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+                'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+                'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+            }
+            barrier.wait()
+            try:
+                store.d6_bind_compare_and_update(
+                    task['task_id'], executor_task_id=executor_task_id,
+                    expected={'developer': None, 'completion': None},
+                    developer=developer, completion=completion)
+                outcomes.append('BOUND')
+            except LLMToolError as exc:
+                outcomes.append(exc.task_store_error_code)
+
+        # 60 finished tasks * 5 ms = 300 ms per full scan, while the lock wait
+        # timeout is 100 ms: holding the lock during the scan would time out
+        # the second bind with TASK_D6_BINDING_BUSY.
+        with patch.object(task_store_module, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 0.1), \
+                patch.object(store, '_lock_sidecar', side_effect=tracked_lock), \
+                patch.object(store, '_unlock_sidecar', side_effect=tracked_unlock), \
+                patch.object(store, 'get', side_effect=slow_finished_get):
+            threads = [threading.Thread(target=bind, args=(i, task))
+                       for i, task in enumerate(candidates)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(outcomes, ['BOUND', 'BOUND'])
+        self.assertEqual(locked_finished_reads, [])
+
+        claude_task = self._codex_dispatch_task()
+        store.create(claude_task)
+        claude_dev = self._developer_assignment(provider='claude', max_tokens=None)
+        claude_dev['owner_assignment_ref'] = (
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+            '#issuecomment-1')
+        claude_dev['executor_task_id'] = 'executor-done-0'
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            with self.assertRaises(LLMToolError) as caught:
+                store.claude_bind_compare_and_update(
+                    claude_task['task_id'], executor_task_id='executor-done-0',
+                    expected={'developer': None}, developer=claude_dev)
+            self.assertEqual(caught.exception.task_store_error_code,
+                             'TASK_D6_ALREADY_BOUND')
+            claude_dev['executor_task_id'] = 'executor-claude-fresh'
+            saved = store.claude_bind_compare_and_update(
+                claude_task['task_id'], executor_task_id='executor-claude-fresh',
+                expected={'developer': None}, developer=claude_dev)
+        self.assertEqual(saved['developer']['executor_task_id'], 'executor-claude-fresh')
+
     def test_developer_reported_claims_are_bounded_and_strict(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
