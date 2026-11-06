@@ -521,14 +521,10 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
                 process is not None and process.returncode == 0 and
                 _d6_has_changes(root)):
             error.direct_codex_code = 'CODEX_FINAL_INVALID_WITH_CHANGES'
-        if (process is not None and process.returncode is not None and
-                process.returncode < 0 and
-                error.direct_codex_code != 'CODEX_TIMEOUT' and
-                not _has_valid_final_result(bytes(output))):
-            error.direct_codex_code = 'CODEX_INTERRUPTED'
         error.attempted = process is not None
         error.process_exit_code = process.returncode if process is not None else None
-        error.stdout_sha256 = hashlib.sha256(output).hexdigest() if output else None
+        error.stdout_sha256 = (hashlib.sha256(output).hexdigest()
+                               if process is not None else None)
         error.elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
         error.cleanup_status = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'
         error.native_session_id = _thread_from_events(bytes(output))

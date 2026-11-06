@@ -307,6 +307,65 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(caught.exception.direct_codex_code, 'CODEX_INTERRUPTED')
         self.assertEqual(caught.exception.process_exit_code, -15)
 
+    def test_stdout_cap_error_survives_cleanup_signal_with_observed_facts(self):
+        self.write_fake("import signal;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                        "sys.stdout.write('x' * (1024 * 1024 + 1));"
+                        "sys.stdout.flush();time.sleep(10)\n")
+
+        with self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake()
+
+        error = caught.exception
+        self.assertEqual(error.direct_codex_code, 'CODEX_OUTPUT_TOO_LARGE')
+        self.assertEqual(error.process_exit_code, -9)
+        self.assertEqual(error.cleanup_status, 'CONFIRMED')
+        self.assertIsInstance(error.elapsed_ms, int)
+        self.assertGreaterEqual(error.elapsed_ms, 0)
+        self.assertEqual(error.stdout_sha256,
+                         hashlib.sha256(b'x' * direct.MAX_OUTPUT_BYTES).hexdigest())
+
+    def test_stderr_cap_error_survives_cleanup_signal_with_observed_facts(self):
+        self.write_fake("import signal;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                        "sys.stderr.write('e' * (64 * 1024 + 1));"
+                        "sys.stderr.flush();time.sleep(10)\n")
+
+        with self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake()
+
+        error = caught.exception
+        self.assertEqual(error.direct_codex_code, 'CODEX_STDERR_TOO_LARGE')
+        self.assertEqual(error.process_exit_code, -9)
+        self.assertEqual(error.cleanup_status, 'CONFIRMED')
+        self.assertIsInstance(error.elapsed_ms, int)
+        self.assertGreaterEqual(error.elapsed_ms, 0)
+        self.assertEqual(error.stdout_sha256, hashlib.sha256(b'').hexdigest())
+
+    def test_adapter_error_survives_cleanup_signal_with_observed_facts(self):
+        self.write_fake('import signal;signal.signal(signal.SIGTERM,signal.SIG_IGN)\n', delay=10)
+        original_selector = direct.selectors.DefaultSelector
+
+        class FailingSelector:
+            def __init__(self):
+                self.selector = original_selector()
+
+            def __getattr__(self, name):
+                return getattr(self.selector, name)
+
+            def select(self, wait=None):
+                raise RuntimeError('adapter failure')
+
+        with patch.object(direct.selectors, 'DefaultSelector', FailingSelector), \
+                self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake()
+
+        error = caught.exception
+        self.assertEqual(error.direct_codex_code, 'CODEX_ADAPTER_RUNTIME_ERROR')
+        self.assertEqual(error.process_exit_code, -9)
+        self.assertEqual(error.cleanup_status, 'CONFIRMED')
+        self.assertIsInstance(error.elapsed_ms, int)
+        self.assertGreaterEqual(error.elapsed_ms, 0)
+        self.assertEqual(error.stdout_sha256, hashlib.sha256(b'').hexdigest())
+
     def test_host_keyboard_interrupt_propagates_from_run(self):
         self.write_fake('', delay=10)
         interrupt = KeyboardInterrupt()
