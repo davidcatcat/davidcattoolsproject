@@ -319,6 +319,8 @@ WORKER_AVAILABILITY_MAX_BYTES = 32 * 1024
 WORKER_AVAILABILITY_MAX_AGE_DAYS = 30
 TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 2.0
 TASK_UPDATE_LOCK_POLL_SECONDS = 0.01
+# An unlocked read reopens a record replaced under it at most this many times.
+TASK_READ_ATTEMPTS = 3
 _TASK_STORE_CONTENTION_ERRNOS = frozenset(
     value for value in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EBUSY, errno.EINTR,
                         errno.ENOLCK)
@@ -341,6 +343,21 @@ _WORKER_OBSERVATION_FIELDS = frozenset((
 _WORKER_AVAILABILITY_FIELDS = frozenset((
     'schema_version', 'observations', 'record_sha256',
 ))
+
+# #1081 One writer per D6. Every commit that gains a live D6 first appends a
+# claim to this bounded journal under the binding lock, so a binder's locked
+# check reads only the claims made since its unlocked scan began, never the
+# finished Tasks. See TaskStore._d6_commit.
+D6_BINDING_LOCK_NAME = '.claude-d6-binding.lock'
+D6_BINDING_JOURNAL_NAME = '.d6-binding-journal.json'
+D6_BINDING_JOURNAL_SCHEMA_VERSION = 1
+D6_BINDING_JOURNAL_MAX_BYTES = 32 * 1024
+D6_BINDING_JOURNAL_MAX_ENTRIES = 128
+D6_BINDING_ATTEMPTS = 4
+_D6_BINDING_JOURNAL_FIELDS = frozenset((
+    'schema_version', 'epoch', 'entries', 'record_sha256',
+))
+_D6_BINDING_ENTRY_FIELDS = frozenset(('epoch', 'd6_sha256', 'task_id'))
 
 # #367 Developer assignment inbox: PM -> Developer ASSIGNED events and their
 # one-time claim receipts, in one locked sidecar inside the TaskStore root so
@@ -553,6 +570,18 @@ class TaskStoreConflict(LLMToolError):
         self.task_store_error_code = 'TASK_STORE_CONFLICT'
 
 
+class _TaskNotFound(LLMToolError):
+    """No record exists for this Task ID; any other read failure is not this."""
+
+
+class _D6ClaimRequired(LLMToolError):
+    """A commit would gain a live D6 that the binding lock has not cleared."""
+
+    def __init__(self, claims):
+        super().__init__('D6 claim needs the binding lock')
+        self.claims = frozenset(claims)
+
+
 def new_id():
     return uuid.uuid4().hex
 
@@ -569,6 +598,10 @@ def _json_bytes(value):
 def _digest(record):
     value = {key: item for key, item in record.items() if key != 'record_sha256'}
     return hashlib.sha256(_json_bytes(value)).hexdigest()
+
+
+def _d6_digest(executor_task_id):
+    return hashlib.sha256(executor_task_id.encode('utf-8')).hexdigest()
 
 
 def _safe_identifier(value, pattern):
@@ -1514,7 +1547,8 @@ def _validate(record):
             if 'execution' in developer:
                 execution = developer['execution']
                 if execution is not None:
-                    if (developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'claude') or
+                    if (developer['provider_profile'] not in (
+                            'opencode', 'codex', 'agy', 'claude', 'gw-agent') or
                             type(execution) is not dict or
                             set(execution) not in (
                                 _DIRECT_EXECUTION_FIELDS, _DIRECT_EXECUTION_BINDING_FIELDS,
@@ -1647,6 +1681,13 @@ def _validate(record):
                     re.fullmatch(r'[A-Z0-9_]{1,64}', developer['error_code']) is None):
                 _fail()
             dev_state = developer['state']
+            if developer['provider_profile'] == 'gw-agent':
+                if (dev_state == 'DEVELOPER_RESPONDED' and
+                        (type(model) is not str or _SERVED_MODEL.fullmatch(model) is None)):
+                    _fail()
+                if (type(usage) is dict and 'served_model' in usage and
+                        usage['served_model'] != model):
+                    _fail()
             if 'blocked_reason' in developer:
                 reason = developer['blocked_reason']
                 execution = developer.get('execution')
@@ -2227,30 +2268,48 @@ class TaskStore:
 
     def _read_at(self, directory, task_id):
         name = self._name(task_id)
-        for attempt in range(3):
+        for _ in range(TASK_READ_ATTEMPTS):
+            fd = None
             try:
                 fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                              dir_fd=directory)
                 before = os.fstat(fd)
                 if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or
-                        stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or
+                        stat.S_IMODE(before.st_mode) != 0o600 or
+                        before.st_nlink not in (0, 1) or
                         before.st_size > MAX_RECORD_BYTES):
                     os.close(fd)
+                    fd = None
                     _fail()
+                if before.st_nlink == 0:
+                    # A concurrent replace unlinked the inode between open and
+                    # fstat; it is no longer the record. Reopen (finally closes fd).
+                    continue
                 with os.fdopen(fd, 'rb') as stream:
+                    fd = None
                     raw = stream.read(MAX_RECORD_BYTES + 1)
                     stream.seek(0)
                     repeated = stream.read(MAX_RECORD_BYTES + 1)
                     after = os.fstat(stream.fileno())
                     current = os.stat(name, dir_fd=directory, follow_symlinks=False)
                 if (len(raw) > MAX_RECORD_BYTES or raw != repeated or
-                        _identity(before) != _identity(after)):
+                        _identity(before)[:-1] != _identity(after)[:-1] or
+                        after.st_nlink not in (0, 1)):
                     _fail()
                 if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
-                    if attempt < 2:
-                        continue
-                    _fail('TASK_STORE_BUSY')
-                if _identity(before) != _identity(current):
+                    continue
+                if (current.st_nlink == 0 and
+                        _identity(before)[:-1] == _identity(current)[:-1]):
+                    # stat() resolved the name to the opened inode, then a
+                    # concurrent replace dropped its last link before stat()
+                    # read its attributes. The entry now names another inode;
+                    # reopen rather than return or reject this unlinked one.
+                    continue
+                # Opened fd and current directory entry are the same inode; it
+                # must still be a single-link live entry with identical metadata.
+                if (_identity(before) != _identity(after) or
+                        _identity(before) != _identity(current) or
+                        current.st_nlink != 1):
                     _fail()
                 value = json.loads(raw.decode('utf-8'), object_pairs_hook=self._unique_pairs,
                                    parse_constant=lambda _: _fail())
@@ -2260,9 +2319,18 @@ class TaskStore:
             except LLMToolError:
                 raise
             except FileNotFoundError:
-                raise LLMToolError('task not found') from None
+                raise _TaskNotFound('task not found') from None
+            except OSError as exc:
+                if _is_contention_error(exc):
+                    time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
+                    continue
+                _fail()
             except Exception:
                 _fail()
+            finally:
+                if fd is not None:
+                    os.close(fd)
+        _fail('TASK_STORE_BUSY')
 
     @staticmethod
     def _unique_pairs(pairs):
@@ -2301,18 +2369,7 @@ class TaskStore:
                         follow_symlinks=False)
                 os.unlink(temporary, dir_fd=directory)
             else:
-                deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
-                while True:
-                    try:
-                        os.replace(temporary, name, src_dir_fd=directory,
-                                   dst_dir_fd=directory)
-                        break
-                    except OSError as exc:
-                        if not _is_contention_error(exc):
-                            raise
-                        if time.monotonic() >= deadline:
-                            _fail('TASK_STORE_BUSY')
-                        time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
+                self._replace_at(directory, temporary, name)
             os.fsync(directory)
         except FileExistsError:
             _fail('TASK_STORE_CONFLICT')
@@ -2328,6 +2385,27 @@ class TaskStore:
             os.close(directory)
         return record
 
+    @staticmethod
+    def _replace_at(directory, temporary, name):
+        """Rename the fsynced temporary over ``name``, waiting out transient contention.
+
+        Only contention errnos are retried, within the TaskStore update-lock
+        wait; the temporary is untouched by a failed rename, so each attempt
+        installs the same bytes. Persistent contention fails closed BUSY; any
+        other error propagates to the caller's UNAVAILABLE/CONFLICT mapping.
+        """
+        deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+                return
+            except OSError as exc:
+                if not _is_contention_error(exc):
+                    raise
+                if time.monotonic() >= deadline:
+                    _fail('TASK_STORE_BUSY')
+                time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
+
     def create(self, record):
         if type(record) is dict and 'abandonment' in record:
             _fail('TASK_ABANDONMENT_MUTATION_FORBIDDEN')
@@ -2336,26 +2414,39 @@ class TaskStore:
                 'pm_session_adoptions' in record):
             _fail()
         record = dict(record)
+        # The owner gate runs first: a denied developer is cleared, so the
+        # record gains no D6 and its audited denial never waits on, or is
+        # refused by, the binding lock.
+        denial = self._gate_created_developer(record)
+        claims = self._d6_live_ids(record)
+        if claims:
+            saved = self._d6_commit(record['task_id'], claims, self._d6_bind_holds,
+                                    lambda _authorized: self._write(record, create=True))
+        else:
+            saved = self._write(record, create=True)
+        if denial is not None:
+            raise denial
+        return saved
+
+    @staticmethod
+    def _gate_created_developer(record):
+        """Apply the dispatch gate to a created developer; return its denial."""
         developer = record.get('developer')
-        if type(developer) is dict:
-            from . import worker_dispatch
-            gate_record = {'task_id': record['task_id'], 'developer': None,
-                           'dispatch_audit': []}
-            attempts = worker_dispatch.task_store_attempts(
-                gate_record, {'developer': developer})
-            if attempts:
-                denial = worker_dispatch.authorize_task_store_change(
-                    gate_record, {'developer': developer})
-                record['dispatch_audit'] = gate_record['dispatch_audit']
-                if denial is not None:
-                    record['developer'] = None
-                    if 'completion' in record:
-                        record['completion'] = None
-                saved = self._write(record, create=True)
-                if denial is not None:
-                    raise denial
-                return saved
-        return self._write(record, create=True)
+        if type(developer) is not dict:
+            return None
+        from . import worker_dispatch
+        gate_record = {'task_id': record['task_id'], 'developer': None,
+                       'dispatch_audit': []}
+        if not worker_dispatch.task_store_attempts(gate_record, {'developer': developer}):
+            return None
+        denial = worker_dispatch.authorize_task_store_change(
+            gate_record, {'developer': developer})
+        record['dispatch_audit'] = gate_record['dispatch_audit']
+        if denial is not None:
+            record['developer'] = None
+            if 'completion' in record:
+                record['completion'] = None
+        return denial
 
     def task_ids(self):
         """List stored Task IDs (names only; each record is validated on read)."""
@@ -2379,124 +2470,259 @@ class TaskStore:
     def update(self, task_id, **changes):
         return self._update(task_id, expected=None, changes=changes)
 
-    def compare_and_update(self, task_id, *, expected, **changes):
+    def compare_and_update(self, task_id, *, expected, _d6_claims=None, **changes):
         """Update only if selected persisted fields still match under the task lock."""
         if type(expected) is not dict or not expected:
             _fail()
-        return self._update(task_id, expected=expected, changes=changes)
+        return self._update(task_id, expected=expected, changes=changes,
+                            d6_claims=_d6_claims)
+
+    @staticmethod
+    def _claude_d6_holds(record, executor_task_id):
+        if record.get('abandonment') is not None:
+            return False
+        dev = record.get('developer')
+        completion = record.get('completion')
+        return ((type(dev) is dict and
+                 dev.get('executor_task_id') == executor_task_id) or
+                (type(completion) is dict and
+                 completion.get('executor_task_id') == executor_task_id))
+
+    @staticmethod
+    def _d6_bind_holds(record, executor_task_id):
+        if record.get('abandonment') is not None:
+            return False
+        dev = record.get('developer')
+        if type(dev) is not dict:
+            return False
+        completion = record.get('completion')
+        callback = dev.get('direct_result_callback')
+        bound_ids = (
+            dev.get('executor_task_id'),
+            completion.get('executor_task_id') if type(completion) is dict else None,
+            callback.get('executor_task_id') if type(callback) is dict else None,
+        )
+        state = dev.get('state')
+        execution = dev.get('execution')
+        live = (state in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING') or
+                (state == 'DEVELOPER_OUTCOME_UNKNOWN' and
+                 (type(execution) is not dict or
+                  execution.get('cleanup_status') != 'CONFIRMED')))
+        return executor_task_id in bound_ids and live
+
+    @staticmethod
+    def _claude_bind_holds(record, executor_task_id):
+        return (TaskStore._claude_d6_holds(record, executor_task_id) or
+                TaskStore._d6_bind_holds(record, executor_task_id))
+
+    @staticmethod
+    def _d6_live_ids(record):
+        """Return every D6 this record holds as a live holder."""
+        developer = record.get('developer')
+        callback = (developer.get('direct_result_callback')
+                    if type(developer) is dict else None)
+        bound = (item.get('executor_task_id')
+                 for item in (developer, record.get('completion'), callback)
+                 if type(item) is dict)
+        return frozenset(value for value in bound if type(value) is str and
+                         TaskStore._d6_bind_holds(record, value))
+
+    def _read_d6_journal_at(self, directory):
+        """Read the claim journal; anything unreadable refuses the bind."""
+        try:
+            record = self._read_sidecar_at(
+                directory, D6_BINDING_JOURNAL_NAME,
+                max_bytes=D6_BINDING_JOURNAL_MAX_BYTES, code='TASK_D6_BINDING')
+        except LLMToolError:
+            _fail('TASK_D6_BINDING_SCAN_FAILED')
+        if record is None:
+            return {'epoch': 0, 'entries': []}
+        valid = (type(record) is dict and set(record) == _D6_BINDING_JOURNAL_FIELDS and
+                 record['schema_version'] == D6_BINDING_JOURNAL_SCHEMA_VERSION and
+                 type(record['epoch']) is int and type(record['entries']) is list and
+                 len(record['entries']) <= D6_BINDING_JOURNAL_MAX_ENTRIES and
+                 record['epoch'] >= len(record['entries']) and
+                 record['record_sha256'] == _digest(record))
+        if valid:
+            first = record['epoch'] - len(record['entries']) + 1
+            valid = all(
+                type(entry) is dict and set(entry) == _D6_BINDING_ENTRY_FIELDS and
+                entry['epoch'] == first + index and
+                type(entry['d6_sha256']) is str and
+                re.fullmatch(r'[0-9a-f]{64}', entry['d6_sha256']) is not None and
+                _safe_identifier(entry['task_id'], TASK_ID)
+                for index, entry in enumerate(record['entries']))
+        if not valid:
+            _fail('TASK_D6_BINDING_SCAN_FAILED')
+        return record
+
+    def _append_d6_journal_at(self, directory, journal, task_id, claims):
+        epoch = journal['epoch']
+        entries = list(journal['entries'])
+        for claim in sorted(claims):
+            epoch += 1
+            entries.append({'epoch': epoch, 'd6_sha256': _d6_digest(claim),
+                            'task_id': task_id})
+        value = {'schema_version': D6_BINDING_JOURNAL_SCHEMA_VERSION, 'epoch': epoch,
+                 'entries': entries[-D6_BINDING_JOURNAL_MAX_ENTRIES:]}
+        value['record_sha256'] = _digest(value)
+        self._write_sidecar_at(directory, D6_BINDING_JOURNAL_NAME, _json_bytes(value),
+                               code='TASK_D6_BINDING')
+
+    def _d6_journal_epoch(self, directory):
+        # Read under the lock so no claim at or below this epoch is still
+        # waiting to commit: the scan that follows is certain to see it.
+        lock_fd = self._lock_sidecar(directory, D6_BINDING_LOCK_NAME,
+                                     exclusive=False, code='TASK_D6_BINDING')
+        try:
+            return self._read_d6_journal_at(directory)['epoch']
+        finally:
+            self._unlock_sidecar(lock_fd)
+
+    def _d6_scan_holders(self, task_id, claims, holds):
+        """Return the other Tasks holding a claimed D6. Runs without the lock."""
+        holders = set()
+        try:
+            for other_id in self.task_ids():
+                if other_id == task_id:
+                    continue
+                other = self.get(other_id)
+                if any(holds(other, claim) for claim in claims):
+                    holders.add(other_id)
+        except Exception:
+            _fail('TASK_D6_BINDING_SCAN_FAILED')
+        return holders
+
+    def _d6_refuse_locked_holders(self, task_id, claims, holds, holders, journal,
+                                  seen_epoch):
+        """Re-read only scan holders and same-D6 claims newer than the scan.
+
+        A journal claim whose Task has no record holds nothing, so it is
+        skipped (see ``_d6_commit``). A scan holder was read moments ago, so
+        its record going missing still refuses, as does any other read failure.
+        """
+        digests = {_d6_digest(claim) for claim in claims}
+        recheck = set(holders)
+        recheck.update(entry['task_id'] for entry in journal['entries']
+                       if entry['epoch'] > seen_epoch and entry['d6_sha256'] in digests)
+        recheck.discard(task_id)
+        for other_id in sorted(recheck):
+            try:
+                other = self.get(other_id)
+            except _TaskNotFound:
+                if other_id in holders:
+                    _fail('TASK_D6_BINDING_SCAN_FAILED')
+                continue
+            except Exception:
+                _fail('TASK_D6_BINDING_SCAN_FAILED')
+            if any(holds(other, claim) for claim in claims):
+                _fail('TASK_D6_ALREADY_BOUND')
+
+    def _d6_commit(self, task_id, claims, holds, commit):
+        """Run ``commit`` as the one writer gaining ``claims``, or refuse.
+
+        The full scan runs without the lock; the lock covers only a bounded
+        journal read, the re-read of what the scan found or the journal added,
+        one journal append and ``commit``. No Task is assumed to stay a
+        non-holder. ``_update_record`` refuses, under the Task lock, any commit
+        that gains a live D6 ``commit`` was not given here, so every gain has
+        a journal entry written before it and commits inside the binding lock.
+
+        So if P gained a D6 and is still live when Q tries to, one of two cases
+        holds. Q's epoch came after P's entry: P had committed, and Q's scan
+        finds it. Q's epoch came first: P's entry is newer than the scan, and Q
+        re-reads P under the lock. Either way Q refuses. A journal that has
+        dropped entries newer than the scan forces a new scan.
+
+        The entry must stay first: a commit with no entry yet is invisible to a
+        binder whose scan already passed that Task. So a writer that stops
+        between the two leaves an entry that gained nothing. Only the lock
+        holder can be between them, and the lock dies with its process, so
+        under the lock every entry's writer has finished. Its Task then either
+        has a record, re-read as usual, or never got one and holds nothing. A
+        retry of that Task is a new commit through this same path.
+        """
+        self._name(task_id)
+        directory = self._dirfd()
+        try:
+            for _ in range(D6_BINDING_ATTEMPTS):
+                seen_epoch = self._d6_journal_epoch(directory)
+                holders = self._d6_scan_holders(task_id, claims, holds)
+                lock_fd = self._lock_sidecar(directory, D6_BINDING_LOCK_NAME,
+                                             exclusive=True, code='TASK_D6_BINDING')
+                try:
+                    journal = self._read_d6_journal_at(directory)
+                    if journal['epoch'] < seen_epoch:
+                        _fail('TASK_D6_BINDING_SCAN_FAILED')
+                    if seen_epoch < journal['epoch'] - len(journal['entries']):
+                        continue
+                    self._d6_refuse_locked_holders(task_id, claims, holds, holders,
+                                                   journal, seen_epoch)
+                    self._append_d6_journal_at(directory, journal, task_id, claims)
+                    return commit(claims)
+                except _D6ClaimRequired as required:
+                    claims = claims | required.claims
+                finally:
+                    self._unlock_sidecar(lock_fd)
+            _fail('TASK_D6_BINDING_BUSY')
+        finally:
+            os.close(directory)
+
+    def _d6_bind(self, task_id, *, executor_task_id, expected, holds,
+                 abandoned_target_code, **changes):
+        if (type(executor_task_id) is not str or not executor_task_id or
+                type(expected) is not dict or not expected):
+            _fail('TASK_D6_BINDING_SCAN_FAILED')
+        # A target that is abandoned or no longer matches ``expected`` can
+        # never bind: refuse it before the scan, the binding lock and a
+        # journal claim. ``commit`` re-checks both under the lock.
+        try:
+            target = self.get(task_id)
+        except LLMToolError:
+            raise
+        except Exception:
+            _fail('TASK_D6_BINDING_SCAN_FAILED')
+        if target.get('abandonment') is not None:
+            _fail(abandoned_target_code)
+        if any(target.get(key) != value for key, value in expected.items()):
+            raise TaskStoreConflict() from None
+
+        def commit(claims):
+            try:
+                target = self.get(task_id)
+                if target.get('abandonment') is not None:
+                    _fail(abandoned_target_code)
+                update_expected = dict(expected)
+                update_expected['record_sha256'] = target['record_sha256']
+                try:
+                    return self.compare_and_update(
+                        task_id, expected=update_expected, _d6_claims=claims, **changes)
+                except TaskStoreConflict:
+                    if self.get(task_id).get('abandonment') is not None:
+                        _fail(abandoned_target_code)
+                    raise
+            except LLMToolError:
+                raise
+            except Exception:
+                _fail('TASK_D6_BINDING_SCAN_FAILED')
+
+        return self._d6_commit(task_id, frozenset((executor_task_id,)), holds, commit)
 
     def claude_bind_compare_and_update(self, task_id, *, executor_task_id,
                                        expected, **changes):
         """Atomically ensure a D6 is not already held by another live Task."""
-        if (type(executor_task_id) is not str or not executor_task_id or
-                type(expected) is not dict or not expected):
-            _fail('TASK_D6_BINDING_SCAN_FAILED')
-        directory = self._dirfd()
-        lock_fd = None
-        try:
-            lock_fd = self._lock_sidecar(directory, '.claude-d6-binding.lock',
-                                         exclusive=True, code='TASK_D6_BINDING')
-            try:
-                ids = self.task_ids()
-                for other_id in ids:
-                    if other_id == task_id:
-                        continue
-                    try:
-                        other = self.get(other_id)
-                    except Exception:
-                        _fail('TASK_D6_BINDING_SCAN_FAILED')
-                    if other.get('abandonment') is not None:
-                        continue
-                    dev = other.get('developer')
-                    completion = other.get('completion')
-                    if ((type(dev) is dict and
-                         dev.get('executor_task_id') == executor_task_id) or
-                            (type(completion) is dict and
-                             completion.get('executor_task_id') == executor_task_id)):
-                        _fail('TASK_D6_ALREADY_BOUND')
-                target = self.get(task_id)
-                if target.get('abandonment') is not None:
-                    _fail('CLAUDE_TASK_ABANDONED')
-                update_expected = dict(expected)
-                update_expected['record_sha256'] = target['record_sha256']
-                try:
-                    return self.compare_and_update(
-                        task_id, expected=update_expected, **changes)
-                except TaskStoreConflict:
-                    if self.get(task_id).get('abandonment') is not None:
-                        _fail('CLAUDE_TASK_ABANDONED')
-                    raise
-            except LLMToolError:
-                raise
-            except Exception:
-                _fail('TASK_D6_BINDING_SCAN_FAILED')
-        finally:
-            self._unlock_sidecar(lock_fd)
-            os.close(directory)
+        return self._d6_bind(
+            task_id, executor_task_id=executor_task_id, expected=expected,
+            holds=self._claude_bind_holds,
+            abandoned_target_code='CLAUDE_TASK_ABANDONED', **changes)
 
     def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
                                    expected, **changes):
         """Atomically bind a direct-route Task to an available D6 executor."""
-        if (type(executor_task_id) is not str or not executor_task_id or
-                type(expected) is not dict or not expected):
-            _fail('TASK_D6_BINDING_SCAN_FAILED')
-        directory = self._dirfd()
-        lock_fd = None
-        try:
-            lock_fd = self._lock_sidecar(directory, '.claude-d6-binding.lock',
-                                         exclusive=True, code='TASK_D6_BINDING')
-            try:
-                try:
-                    ids = self.task_ids()
-                except Exception:
-                    _fail('TASK_D6_BINDING_SCAN_FAILED')
-                for other_id in ids:
-                    if other_id == task_id:
-                        continue
-                    try:
-                        other = self.get(other_id)
-                    except Exception:
-                        _fail('TASK_D6_BINDING_SCAN_FAILED')
-                    if other.get('abandonment') is not None:
-                        continue
-                    dev = other.get('developer')
-                    completion = other.get('completion')
-                    callback = (dev.get('direct_result_callback')
-                                if type(dev) is dict else None)
-                    bound_ids = (
-                        dev.get('executor_task_id') if type(dev) is dict else None,
-                        completion.get('executor_task_id')
-                        if type(completion) is dict else None,
-                        callback.get('executor_task_id')
-                        if type(callback) is dict else None,
-                    )
-                    state = dev.get('state') if type(dev) is dict else None
-                    execution = dev.get('execution') if type(dev) is dict else None
-                    live = (state in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING') or
-                            (state == 'DEVELOPER_OUTCOME_UNKNOWN' and
-                             (type(execution) is not dict or
-                              execution.get('cleanup_status') != 'CONFIRMED')))
-                    if type(dev) is dict and executor_task_id in bound_ids and live:
-                        _fail('TASK_D6_ALREADY_BOUND')
-                target = self.get(task_id)
-                if target.get('abandonment') is not None:
-                    _fail('TASK_D6_ALREADY_BOUND')
-                update_expected = dict(expected)
-                update_expected['record_sha256'] = target['record_sha256']
-                try:
-                    return self.compare_and_update(
-                        task_id, expected=update_expected, **changes)
-                except TaskStoreConflict:
-                    if self.get(task_id).get('abandonment') is not None:
-                        _fail('TASK_D6_ALREADY_BOUND')
-                    raise
-            except LLMToolError:
-                raise
-            except Exception:
-                _fail('TASK_D6_BINDING_SCAN_FAILED')
-        finally:
-            self._unlock_sidecar(lock_fd)
-            os.close(directory)
+        return self._d6_bind(
+            task_id, executor_task_id=executor_task_id, expected=expected,
+            holds=self._d6_bind_holds,
+            abandoned_target_code='TASK_D6_ALREADY_BOUND', **changes)
 
     def record_published_pr(self, task_id, pr, head_sha):
         """Record or replace the PR linked to this Task's published HEAD."""
@@ -3415,10 +3641,27 @@ class TaskStore:
                 continue
         _fail('TASK_STORE_BUSY')
 
-    def _update(self, task_id, *, expected, changes, trusted_dispatch_audit=False,
-                trusted_completion_events=False, trusted_abandonment=False,
-                abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
-                trusted_codex_launch=False, trusted_opencode_launch=False):
+    def _update(self, task_id, *, expected, changes, d6_claims=None, **trusted):
+        """Commit one change; a commit gaining a live D6 goes through ``_d6_commit``."""
+        if d6_claims is not None:
+            return self._update_record(task_id, expected=expected, changes=changes,
+                                       d6_claims=d6_claims, **trusted)
+        try:
+            return self._update_record(task_id, expected=expected, changes=changes,
+                                       d6_claims=frozenset(), **trusted)
+        except _D6ClaimRequired as required:
+            claims = required.claims
+        return self._d6_commit(
+            task_id, claims, self._d6_bind_holds,
+            lambda authorized: self._update_record(
+                task_id, expected=expected, changes=changes,
+                d6_claims=authorized, **trusted))
+
+    def _update_record(self, task_id, *, expected, changes, d6_claims,
+                       trusted_dispatch_audit=False,
+                       trusted_completion_events=False, trusted_abandonment=False,
+                       abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
+                       trusted_codex_launch=False, trusted_opencode_launch=False):
         if ('developer' in changes and type(changes['developer']) is dict and
                 'execution' in changes['developer'] and
                 type(changes['developer'].get('execution')) is dict and
@@ -3705,6 +3948,15 @@ class TaskStore:
                 writable = writable | {'pm_session_id'}
             if set(changes) - writable:
                 _fail()
+            # Checked after every refusal above, so a change that can never
+            # commit (an invalid transition, a dispatch denial) is refused or
+            # audited here and never takes the binding lock. The gate re-runs
+            # on the locked retry against the record as it is then.
+            if 'developer' in changes or 'completion' in changes:
+                gained = (self._d6_live_ids({**current, **changes}) -
+                          self._d6_live_ids(current))
+                if not gained <= d6_claims:
+                    raise _D6ClaimRequired(gained)
             current.update(changes)
             current['updated_at'] = datetime.now(timezone.utc).replace(
                 microsecond=0).isoformat().replace('+00:00', 'Z')

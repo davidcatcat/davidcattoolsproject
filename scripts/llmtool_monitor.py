@@ -4059,6 +4059,7 @@ class PmBoardItem:
     what: str
     next: str
     reason: str = ""
+    current: str = ""
 
 
 @dataclass(frozen=True)
@@ -4080,6 +4081,7 @@ class BoardPull:
     updated_at: float
     head: str
     draft: bool
+    closes: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -4199,9 +4201,13 @@ def board_pulls(pulls, repo: str) -> list[BoardPull]:
         sha = head_data.get("sha")
         head = sha[:7].lower() if type(sha) is str and re.fullmatch(r"[0-9a-fA-F]+", sha) else ""
         title = re.sub(r"#(?=[0-9])", "", title)
+        body = pull.get("body")
+        closes = tuple(sorted({int(match.group(1)) for match in re.finditer(
+            r"(?im)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+#([0-9]{1,7})\b",
+            body if type(body) is str else "")}))
         out.append(BoardPull(pull["number"], _label(title, 60), state,
                              _github_time(pull.get("merged_at")), _github_time(pull.get("updated_at")),
-                             head, pull.get("draft") is True))
+                             head, pull.get("draft") is True, closes))
     return out
 
 
@@ -4215,6 +4221,7 @@ class PrRow:
     mac: str
     next: str
     owner: str
+    current: str = "未確認"
 
 
 def pr_reviewing(office) -> set[tuple[str, str]]:
@@ -4238,7 +4245,134 @@ def _ci_word(entry, known: bool) -> str:
     return "?"
 
 
-def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending) -> list[PrRow]:
+def _work_names(row: OfficeRow) -> str:
+    return " ".join((row.task, row.work, row.detail, row.codex_title))
+
+
+# The PR part of a bound work label (_codex_work_label, _bind_d6_pr_rows).
+BOUND_PR = re.compile(r"(?:^|· )PR #([0-9]+)(?= ·|$)")
+
+
+def _bound_pr(row: OfficeRow) -> int | None:
+    """The PR a row's own bound label names. Text after "：" is a free summary."""
+    if not row.work_bound:
+        return None
+    found = BOUND_PR.search(row.work.partition("：")[0])
+    return int(found.group(1)) if found else None
+
+
+def _codex_family(row: OfficeRow) -> bool:
+    return "codex" in row.name.casefold() or row.key.startswith("codex:")
+
+
+def _names_pr(row: OfficeRow, number: int, head: str) -> bool:
+    text = _work_names(row)
+    review = _review_task(row.task[5:]) if row.role == "reviewer" and row.task.startswith("task ") else None
+    if row.role in ("pm", "debug reviewer"):
+        return False
+    if row.role == "reviewer" and row.task.startswith("task "):
+        if review is None or review[0] != str(number):
+            return False
+        return not head or review[1].casefold().startswith(head.casefold())
+    bound = _bound_pr(row)
+    # A row bound to one PR is not working on another PR its title or summary mentions.
+    if bound is not None and bound != number:
+        return False
+    if bound is None and re.search(rf"\bPR\s*#?{number}\b", text, re.IGNORECASE) is None:
+        return False
+    commits = re.findall(r"@([0-9a-f]{7,40})(?![0-9a-f])", text, re.IGNORECASE)
+    # Some real work labels name the PR but omit its head. Bind by the head
+    # when a row states one; otherwise the PR reference is sufficient.
+    return not commits or bool(head and any(
+        commit.casefold().startswith(head.casefold()) for commit in commits))
+
+
+def _names_issue(row: OfficeRow, number: int) -> bool:
+    if row.role in ("pm", "debug reviewer"):
+        return False
+    text = _work_names(row)
+    return (re.search(rf"\bIssue\s*#?{number}\b", text, re.IGNORECASE) is not None
+            or re.search(rf"(?<![\w#])(?<!PR )#{number}\b", text, re.IGNORECASE) is not None)
+
+
+PEOPLE_ORDER = ("Codex", "Reviewer", "Claude", "OpenCode", "AGY", "CompanyGW", "CI")
+
+
+def _row_person(row: OfficeRow) -> str:
+    if row.role == "reviewer":
+        return "Reviewer"
+    if _codex_family(row):
+        return "Codex"
+    name = row.name.casefold()
+    return next((label for marker, label in (
+        ("claude", "Claude"), ("opencode", "OpenCode"),
+        ("agy", "AGY"), ("antigravity", "AGY"),
+        ("company gw", "CompanyGW"), ("gw-agent", "CompanyGW"))
+                 if marker in name), "")
+
+
+def _current_people(rows, predicate) -> tuple[set, bool]:
+    """(who works on it, whether some relevant row leaves that uncertain).
+
+    A working row the predicate names is a person. An UNCHECKED row the
+    predicate names, or a live D6 row whose PR binding is unknown, adds
+    uncertainty; a row bound to another PR does not."""
+    people, uncertain = set(), False
+    for row in rows:
+        if row.state not in (WORKING, UNCHECKED) or row.role in ("pm", "debug reviewer"):
+            continue
+        if predicate(row):
+            if row.state == UNCHECKED:
+                uncertain = True
+            elif _row_person(row):
+                people.add(_row_person(row))
+            continue
+        if not row.task.startswith("task "):
+            continue
+        if row.role == "reviewer" and _review_task(row.task[5:]):
+            continue   # a review task names its own PR
+        if _bound_pr(row) is None:
+            uncertain = True
+    return people, uncertain
+
+
+def _people_text(people, uncertain) -> str:
+    """Known people first; 未確認 only when none is known, 沒人 only when nothing is uncertain."""
+    return ("、".join(person for person in PEOPLE_ORDER if person in people)
+            or ("未確認" if uncertain else "沒人"))
+
+
+def _current_person(rows, predicate, *, readable=True) -> str:
+    if not readable:
+        return "未確認"
+    return _people_text(*_current_people(rows, predicate))
+
+
+def _pr_people(office, pull, ci_heads) -> tuple[set, bool]:
+    """The one person/CI answer per PR the PR table, running PR row and Issue rows share."""
+    if not pull or not pull.head:
+        return set(), True   # a PR missing from the read page has unknown head and CI
+    people, uncertain = _current_people(
+        office, lambda row: _names_pr(row, pull.number, pull.head))
+    if pull.state == "OPEN":
+        if ci_heads is None:
+            uncertain = True
+        else:
+            ci = ci_heads.get(pull.head.lower(), {})
+            if any(_ci_word(ci.get(key), True) in ("執行中", "排隊") for key in ("linux", "mac")):
+                people.add("CI")
+    return people, uncertain
+
+
+def _current_pr_people(office, pull, ci_heads, *, github_known=True, office_known=True):
+    """One shared person/CI answer for a PR and its issue-board aliases."""
+    if not github_known or not office_known:
+        return "未確認"
+    return _people_text(*_pr_people(office, pull, ci_heads))
+
+
+def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending, office=(), *, github_known=True,
+                  office_known=True) -> list[PrRow]:
     """Build the read-only PR status table from already-read local/GitHub data."""
     rows = []
     for pull in sorted((item for item in pulls or []
@@ -4288,7 +4422,10 @@ def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending) -> list[Pr
                 next_step, owner = "加 mac-ci", "PM"
         elif review == "未審":
             next_step, owner = "派審查", "PM"
-        rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, next_step, owner))
+        current = _current_pr_people(office, pull, ci_heads,
+                                     github_known=github_known,
+                                     office_known=office_known)
+        rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, next_step, owner, current))
     return rows
 
 
@@ -4297,7 +4434,7 @@ def _board_ref_number(ref):
     return int(match.group(1)) if match else None
 
 
-def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None) -> WorkBoard:
+def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=(), office_known=True) -> WorkBoard:
     pulls = github.board_pulls if github is not None else None
     github_known = bool(github is not None and github.successful_read)
     board_known = board.status in ("ok", "stale")
@@ -4329,6 +4466,35 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None) -> Work
                 next_step = "未確認"
                 what += "「未見審查結論」"
             running.append(PmBoardItem(f"PR #{pull.number}", what, next_step))
+    # The current owner is derived from the live office rows and the already-read
+    # PR page. An issue may be worked through an open PR whose body closes it.
+    # Issue aliases need a readable pulls page and come from open PRs only.
+    snapshot_known = github_known and pulls is not None
+    ci_heads = getattr(github, "ci_heads", None) if github is not None else None
+    pulls_by_number = {pull.number: pull for pull in (pulls or [])}
+    issue_prs = {}
+    if snapshot_known:
+        for pull in pulls:
+            if pull.state == "OPEN":
+                for issue in pull.closes:
+                    issue_prs.setdefault(issue, set()).add(pull.number)
+    resolved = []
+    for item in running:
+        number = _board_ref_number(item.ref)
+        if not office_known or not snapshot_known:
+            current = "未確認"
+        elif re.match(r"PR\s", item.ref):
+            current = _people_text(*_pr_people(office, pulls_by_number.get(number), ci_heads))
+        else:
+            people, uncertain = _current_people(
+                office, lambda row, issue=number: _names_issue(row, issue))
+            for pr in sorted(issue_prs.get(number, ())):
+                more, unsure = _pr_people(office, pulls_by_number[pr], ci_heads)
+                people |= more
+                uncertain = uncertain or unsure
+            current = _people_text(people, uncertain)
+        resolved.append(replace(item, current=current))
+    running = resolved
     running.sort(key=lambda item: (_board_ref_number(item.ref) or 0, item.ref))
     queue.sort(key=lambda item: (_board_ref_number(item.ref) or 0, item.ref))
     blocked.sort(key=lambda item: (_board_ref_number(item.ref) or 0, item.ref))
@@ -4357,7 +4523,8 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None) -> Work
         github_status = "；".join(
             part for part in (github_status, GITHUB_IDENTITY_STATUS) if part)
     prs = (pr_board_rows(pulls, github.verdicts, getattr(github, "ci_heads", None),
-                         ec2, reviewing, github.pending) if github_known else [])
+                         ec2, reviewing, github.pending, office, github_known=github_known,
+                         office_known=office_known) if github_known else [])
     return WorkBoard(owner, running, queue, blocked, done, github_known, board_known,
                      github_status, board.status, board.age, board.skipped, note,
                      int(github.window // 3600) if github is not None else 12, prs, owner_cut)
@@ -4423,13 +4590,14 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
             elif isinstance(item, PrRow):
                 ref = f"PR #{item.number}"
                 rest = (f"審查 {item.review} · EC2 {item.ec2} · Linux {item.linux} · "
-                        f"macOS {item.mac}  → {item.next}（{item.owner}）")
+                        f"macOS {item.mac}  → {item.next}（{item.owner}） · 現在：{item.current}")
             elif isinstance(item, OwnerPending):
                 ref = item.reference
                 rest = f"{item.summary or item.status}  → 你"
             else:
                 ref = item.ref
-                rest = f"{item.what}  → {item.next}"
+                current = f" · 現在：{item.current}" if item.current else ""
+                rest = f"{item.what}  → {item.next}{current}"
             if width:
                 first_width = max(1, width - _width(ref) - 2)
                 if first_width < 12:
@@ -5348,7 +5516,11 @@ def agy_rows(processes: list[Process], canonical: str, cwd_of=process_cwd,
     rows = []
     procs = sorted((p for p in processes if p.role == "AGY CLI"), key=lambda p: p.pid)
     for number, proc in enumerate(procs, 1):
-        where = _where(cwd_of(proc.pid), canonical)
+        cwd = cwd_of(proc.pid)
+        place = _place(cwd, canonical)
+        where = _where(cwd, canonical)
+        task = f"task {place[1]}" if place and place[0] == "task" else ""
+        role = _d6_role(canonical, place[1]) if task else ""
         cpu = cpu_of(proc.pid)
         opened = _elapsed_seconds(proc.elapsed)
         if cpu is None:
@@ -5358,7 +5530,8 @@ def agy_rows(processes: list[Process], canonical: str, cwd_of=process_cwd,
         else:
             state, note = IDLE, "CLI 已開啟，閒置（依 CPU 推算）"
         rows.append(OfficeRow(f"agy cli #{number}", state, f"{where}：{note}",
-                              opened if opened is not None else 0.0, 60 + number, kind="worker"))
+                              opened if opened is not None else 0.0, 60 + number, kind="worker",
+                              role=role, task=task, evidence="程序"))
     return rows
 
 
@@ -7073,6 +7246,31 @@ def _codex_work_rows(rows: list[OfficeRow], now: float, canonical: str,
     return out
 
 
+def _bind_d6_pr_rows(rows: list[OfficeRow], canonical: str,
+                     prs: dict | None) -> list[OfficeRow]:
+    """Attach the already-read branch-to-PR binding to live non-Codex D6 rows.
+    Codex rows keep the label _codex_work_rows gave them, bound or not."""
+    try:
+        registered = registry_details(canonical)
+    except Exception:
+        registered = {}
+    out = []
+    for row in rows:
+        task_id = row.task[5:] if row.task.startswith("task ") else ""
+        details = registered.get(task_id)
+        if (not task_id or row.role in ("reviewer", "pm", "debug reviewer")
+                or _codex_family(row) or row.work or row.work_bound or not details):
+            out.append(row)
+            continue
+        branch = details[4]
+        pr = prs.get(branch, (None, "OPEN"))[0] if prs is not None and branch else None
+        if pr is None:
+            out.append(replace(row, work=f"PR 未確認（D6 {task_id}）", work_bound=False))
+        else:
+            out.append(replace(row, work=f"PR #{pr} · D6 {task_id}", work_bound=True))
+    return out
+
+
 def _live_rank(entry: dict) -> int:
     """How urgent a live session's status words are: 0 waits for a person,
     1 works, 2 sits idle, 3 anything else."""
@@ -7258,6 +7456,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                               alert=alert))
     rows = _codex_work_rows(rows, now, canonical,
                             LLMTOOL_TASKS if llmtool_tasks is None else llmtool_tasks, prs)
+    rows = _bind_d6_pr_rows(rows, canonical, prs)
     return sorted(rows, key=lambda row: (row.order, row.age if row.age is not None else 1e12,
                                          row.name))
 
@@ -7805,7 +8004,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
                                                 install=rule_alert_lines() + install_lines(github)))))
     print("\n".join(line for line, _ in board_view(
         work_board(github, mon.pm_board, time.time(), ec2=mon.ec2_heads,
-                   reviewing=pr_reviewing(mon.office)))))
+                   reviewing=pr_reviewing(mon.office), office=mon.office,
+                   office_known=not bool(mon.office_error)))))
     print()
     print("\n".join(table_lines(mon.processes)))
     print("\n".join(["", *d6_lines(mon.d6), "", *record_lines(mon.records), "",
@@ -8005,7 +8205,9 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
     elif view == "board":
         lines = board_view(work_board(mon.github, mon.pm_board, time.time(),
                                       ec2=mon.ec2_heads,
-                                      reviewing=pr_reviewing(mon.office)), w - 1)
+                                      reviewing=pr_reviewing(mon.office),
+                                      office=mon.office,
+                                      office_known=not bool(mon.office_error)), w - 1)
         offset = max(0, min(offset, len(lines) - body))
         styles = {"title": colors.get("title", 0) | curses.A_BOLD,
                   "!": colors.get("!", 0) | curses.A_BOLD,

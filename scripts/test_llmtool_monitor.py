@@ -8487,7 +8487,69 @@ class WorkBoardTests(unittest.TestCase):
 
 
 class PrBoardTests(unittest.TestCase):
+    NOW = 1_800_000_000.0
     SHA = "abcdef0" + "1" * 33
+    PRS = {"feature/978": (978, "OPEN")}
+    DETAILS = {"wp-1": ("ACTIVE", "codex-developer", 1, 1, "feature/978"),
+               "pr978-codex-rv1-abcdef0": ("ACTIVE", "codex-reviewer", 1, 1, "")}
+    ACTIVE_CI = {"abcdef0": {"linux": ("in_progress", "")}}
+
+    def _real_codex_rows(self, prs, records=None, summary="board work"):
+        """[Codex developer, Codex reviewer] as _codex_work_rows then _bind_d6_pr_rows label them."""
+        developer = mon.OfficeRow("codex developer", mon.WORKING, "Current action", 0, 10,
+                                  key="codex:dev", kind="agent", role="developer",
+                                  task="task wp-1", codex_session="2" * 32)
+        reviewer = mon.OfficeRow("codex reviewer", mon.WORKING, "Reviewing", 0, 10,
+                                 key="codex:rv", kind="agent", role="reviewer",
+                                 task="task pr978-codex-rv1-abcdef0")
+        work = mon.CodexWork("1" * 32, "wp-1", "2" * 32, "DEVELOPER_RESPONDED", 1, "965", summary)
+        found = ({"side_effect": records} if isinstance(records, Exception)
+                 else {"return_value": records if records is not None else ([work], "")})
+        with patch.object(mon, "registry_details", return_value=self.DETAILS), \
+             patch.object(mon, "codex_work_records", **found):
+            rows = mon._codex_work_rows([developer, reviewer], self.NOW, "/repo", "/tasks", prs)
+            return mon._bind_d6_pr_rows(rows, "/repo", prs)
+
+    @staticmethod
+    def _claude_reviewer():
+        with patch.object(mon, "_d6_role", return_value="reviewer"):
+            return mon._claude_row(
+                {"name": "claude-reviewer", "status": "busy"}, mon.WORKING, "審查中", 0,
+                ("task", "pr978-claude-rv1-abcdef0"),
+                "task pr978-claude-rv1-abcdef0", "claude:review", "session-id", "/repo")
+
+    def _agy_row(self, prs, cpu=50):
+        details = {"wp-1": ("ACTIVE", "agy-developer", 1, 1, "feature/978")}
+        process = mon.Process(77, 1, 77, "00:01", "S", "AGY CLI")
+        with patch.object(mon, "_place", return_value=("task", "wp-1")), \
+             patch.object(mon, "registry_details", return_value=details), \
+             patch.object(mon, "_d6_role", return_value="developer"):
+            rows = mon.agy_rows([process], "/repo", cwd_of=lambda _pid: "/repo/.worktrees/wp-1",
+                                cpu_of=lambda _pid: cpu)
+            return mon._bind_d6_pr_rows(rows, "/repo", prs)[0]
+
+    def _three_views(self, office, ci_heads=None):
+        """(PR table, running PR #978, Issue #965 named by the Codex label, Issue #966 closed by PR #978)."""
+        github = self._github([replace(self._pull(978), closes=(966,))], ci_heads)
+        board = self._board([mon.PmBoardItem("#965", "Issue", "Developer"),
+                             mon.PmBoardItem("#966", "Issue", "Developer"),
+                             mon.PmBoardItem("PR #978", "PR", "Developer")])
+        work = mon.work_board(github, board, self.NOW, office=office)
+        current = {item.ref: item.current for item in work.running}
+        table = next(row.current for row in work.prs if row.number == 978)
+        return table, current["PR #978"], current["#965"], current["#966"]
+
+    @staticmethod
+    def _github(pulls, ci_heads=None):
+        from types import SimpleNamespace
+        return SimpleNamespace(successful_read=True, board_pulls=pulls, verdicts={},
+                               ci_heads=ci_heads or {}, pending=[], window=43200,
+                               read_failed=False, board_page_count=len(pulls),
+                               board_oldest_updated=0)
+
+    @staticmethod
+    def _board(running=()):
+        return mon.PmBoard("ok", 0, list(running), [], [])
 
     @staticmethod
     def _pull(number, *, head="abcdef0", draft=False, state="OPEN"):
@@ -8496,6 +8558,148 @@ class PrBoardTests(unittest.TestCase):
     @staticmethod
     def _verdict(word, when=1, head="abcdef0", number="1"):
         return {number: [(when, word, frozenset({head}))]}
+
+    def test_current_people_use_real_codex_and_d6_review_labels(self):
+        codex, codex_review = self._real_codex_rows(self.PRS)
+        # The labels come from the producers; _bind_d6_pr_rows leaves Codex labels alone.
+        self.assertEqual(codex.work, "#965 · PR #978 · task 11111111 · D6 wp-1：board work")
+        self.assertEqual(codex_review.work, "審查 PR #978 @abcdef0")
+        self.assertTrue(codex.work_bound and codex_review.work_bound)
+        claude_review = self._claude_reviewer()
+        self.assertEqual(claude_review.role, "reviewer")
+        self.assertEqual(mon._review_task(claude_review.task[5:]), ("978", "abcdef0"))
+        self.assertTrue(mon._names_issue(codex, 965))
+        self.assertFalse(mon._names_pr(codex_review, 979, "abcdef0"))
+        self.assertFalse(mon._names_pr(replace(codex, detail="@fedcba9"), 978, "abcdef0"))
+
+        # (PR table, running PR, its own Issue #965, Issue #966 closed by the open PR)
+        self.assertEqual(self._three_views([codex]), ("Codex",) * 4)
+        self.assertEqual(self._three_views([claude_review]), ("Reviewer", "Reviewer", "沒人", "Reviewer"))
+        self.assertEqual(self._three_views([codex_review]), ("Reviewer", "Reviewer", "沒人", "Reviewer"))
+
+        task_root = "/repo/.worktrees/wp-1"
+        agy = self._agy_row(self.PRS)
+        self.assertEqual((agy.work, agy.work_bound), ("PR #978 · D6 wp-1", True))
+        opencode_proc = mon.Process(78, 1, 78, "00:01", "S", "OpenCode CLIENT")
+        with patch.object(mon, "opencode_sessions", return_value=[(task_root, "Title", self.NOW, None)]), \
+             patch.object(mon, "_place", return_value=("task", "wp-1")), \
+             patch.object(mon, "registry_details",
+                          return_value={"wp-1": ("ACTIVE", "opencode-developer", 1, 1, "feature/978")}), \
+             patch.object(mon, "_d6_role", return_value="developer"):
+            opencode = mon.opencode_rows([opencode_proc], self.NOW, "/repo", cwd_of=lambda _pid: task_root)
+            opencode = mon._bind_d6_pr_rows(opencode, "/repo", self.PRS)[0]
+        for route_row, route in ((agy, "AGY"), (opencode, "OpenCode")):
+            self.assertEqual(self._three_views([route_row]), (route, route, "沒人", route))
+
+    def test_one_pr_answer_is_shared_by_table_running_row_and_issue_row(self):
+        codex, codex_review = self._real_codex_rows(self.PRS)
+        office = [codex, self._claude_reviewer(), codex_review]
+        table, running, own_issue, closed_issue = self._three_views(office, self.ACTIVE_CI)
+        self.assertEqual((table, running, closed_issue), ("Codex、Reviewer、CI",) * 3)
+        self.assertEqual(own_issue, "Codex")
+        # Without the Codex row the three views still agree on the remaining people.
+        self.assertEqual(self._three_views(office[1:], self.ACTIVE_CI),
+                         ("Reviewer、CI", "Reviewer、CI", "沒人", "Reviewer、CI"))
+
+    def test_issue_aliases_come_from_open_prs_in_a_readable_snapshot(self):
+        codex, _ = self._real_codex_rows(self.PRS)
+        board = self._board([mon.PmBoardItem("#966", "Issue", "Developer")])
+        merged = self._github([replace(self._pull(978, state="MERGED"), closes=(966,))])
+        work = mon.work_board(merged, board, self.NOW, office=[codex])
+        self.assertEqual(work.running[0].current, "沒人")
+        no_page = self._github([])
+        no_page.board_pulls = None
+        work = mon.work_board(no_page, board, self.NOW, office=[codex])
+        self.assertEqual(work.running[0].current, "未確認")
+
+    def test_unreadable_office_keeps_pr_table_unknown(self):
+        codex, _ = self._real_codex_rows(self.PRS)
+        table = mon.pr_board_rows([self._pull(978)], {}, {}, ({}, ""), set(), [], [codex],
+                                  office_known=False)[0]
+        self.assertEqual(table.current, "未確認")
+        work = mon.work_board(self._github([self._pull(978)]), self._board(), self.NOW,
+                              office=[codex], office_known=False)
+        self.assertEqual([row.current for row in work.prs], ["未確認"])
+        self.assertEqual([item.current for item in work.running], ["未確認"])
+
+    def test_unreadable_github_keeps_issue_rows_unknown(self):
+        codex, _ = self._real_codex_rows(self.PRS)
+        unreadable = self._github([replace(self._pull(978), closes=(966,))])
+        unreadable.successful_read = False
+        unreadable.read_failed = True
+        board = self._board([mon.PmBoardItem("#965", "Issue", "Developer"),
+                             mon.PmBoardItem("#966", "Issue", "Developer")])
+        work = mon.work_board(unreadable, board, self.NOW, office=[codex])
+        self.assertEqual([item.current for item in work.running], ["未確認", "未確認"])
+
+    def test_board_pr_missing_from_pulls_page_has_unknown_head_and_ci(self):
+        codex, _ = self._real_codex_rows(self.PRS)
+        work = mon.work_board(self._github([self._pull(977)]),
+                              self._board([mon.PmBoardItem("PR #978", "PR", "Developer")]),
+                              self.NOW, office=[codex])
+        running = next(item for item in work.running if item.ref == "PR #978")
+        self.assertEqual(running.current, "未確認")
+
+    def test_unresolved_work_bindings_are_unknown_for_each_failure_path(self):
+        unknown = ("未確認",) * 3
+        # 1. Task records not fully read: the Codex label says so and keeps saying so.
+        unread = self._real_codex_rows(self.PRS, records=([], "over budget"))[0]
+        self.assertEqual((unread.work, unread.work_bound), ("工作紀錄未讀完，未確認（D6 wp-1）", False))
+        # 2. Reading the records raises.
+        raised = self._real_codex_rows(self.PRS, records=OSError("unreadable"))[0]
+        self.assertFalse(raised.work_bound)
+        # 3. No pulls page: the Codex label names no PR.
+        no_prs = self._real_codex_rows(None)[0]
+        self.assertEqual(no_prs.work, "#965 · task 11111111 · D6 wp-1：board work")
+        # 4. An UNCHECKED row, unbound, or bound to this very PR.
+        unchecked = self._agy_row(None, cpu=None)
+        self.assertEqual((unchecked.state, unchecked.work), (mon.UNCHECKED, "PR 未確認（D6 wp-1）"))
+        unchecked_here = self._agy_row(self.PRS, cpu=None)
+        self.assertTrue(mon._names_pr(unchecked_here, 978, "abcdef0"))
+        for row in (unread, raised, no_prs, unchecked, unchecked_here):
+            with self.subTest(work=row.work):
+                table, running, _, closed_issue = self._three_views([row])
+                self.assertEqual((table, running, closed_issue), unknown)
+        # A positive match still names its person; an UNCHECKED row on another PR adds nothing.
+        codex = self._real_codex_rows(self.PRS)[0]
+        self.assertEqual(self._three_views([codex, unchecked_here])[:2], ("Codex", "Codex"))
+        elsewhere = self._agy_row({"feature/978": (979, "OPEN")}, cpu=None)
+        self.assertEqual(self._three_views([elsewhere])[:2], ("沒人", "沒人"))
+
+    def test_row_bound_to_another_pr_does_not_name_this_pr(self):
+        codex = self._real_codex_rows(self.PRS, summary="follow-up to PR #979")[0]
+        self.assertEqual(codex.work, "#965 · PR #978 · task 11111111 · D6 wp-1：follow-up to PR #979")
+        self.assertEqual(mon._bound_pr(codex), 978)
+        self.assertTrue(mon._names_pr(codex, 978, "abcdef0"))
+        self.assertFalse(mon._names_pr(codex, 979, "abcdef0"))
+        agy = replace(self._agy_row(self.PRS), detail="task wp-1：PR #979 follow-up")
+        self.assertTrue(mon._names_pr(agy, 978, "abcdef0"))
+        self.assertFalse(mon._names_pr(agy, 979, "abcdef0"))
+        on_979 = lambda row: mon._names_pr(row, 979, "abcdef0")
+        self.assertEqual(mon._current_person([codex, agy], on_979), "沒人")
+
+    def test_d6_pm_row_never_counts_as_pr_or_issue_worker(self):
+        on_978 = lambda row: mon._names_pr(row, 978, "abcdef0")
+        with patch.object(mon, "_d6_role", return_value="pm"):
+            pm = mon._claude_row({"name": "claude-pm", "status": "busy"},
+                                 mon.WORKING, "PR #978 Issue #965", 0,
+                                 ("task", "wp-pm"), "task wp-pm", "claude:session",
+                                 "session-id", "/repo")
+        self.assertEqual(pm.role, "pm")
+        self.assertFalse(mon._names_pr(pm, 978, "abcdef0"))
+        self.assertFalse(mon._names_issue(pm, 965))
+        self.assertEqual(mon._current_person([pm], on_978), "沒人")
+        # A PM in the canonical checkout, launched as claude-pm, is role pm too.
+        canonical = mon._claude_row({"name": "claude-pm", "status": "busy"},
+                                    mon.WORKING, "PR #978 Issue #965", 0, ("pm", ""), "",
+                                    "claude:pm", "session-id", "/repo")
+        self.assertEqual((canonical.role, canonical.task), ("pm", ""))
+        self.assertFalse(on_978(canonical))
+        # claude_rows renames a bound PM runtime to PM（TUI） and clears its role: its
+        # text then names the PR, but the row maps to no person and adds no doubt.
+        tui = replace(canonical, name="PM（TUI）", role="")
+        self.assertTrue(on_978(tui))
+        self.assertEqual(mon._current_person([tui], on_978), "沒人")
 
     def test_ci_head_runs_choose_highest_id_and_skip_malformed_items(self):
         def run(run_id, conclusion, name="llmtool Linux CI", sha=None, status="completed"):
@@ -8822,6 +9026,44 @@ class PrBoardTests(unittest.TestCase):
         self.assertIn("審查 通過", " ".join(rows))
         self.assertIn("macOS 成功", " ".join(rows))
         self.assertTrue(all(mon._width(line) <= 40 for line in lines))
+
+    def test_running_pr_shows_live_reviewer(self):
+        pull = self._pull(978)
+        office = [mon.OfficeRow("Claude reviewer", mon.WORKING, "", 0, 0,
+                                role="reviewer", task="PR #978 @abcdef0")]
+        work = mon.work_board(self._github([pull]), self._board(), NOW, office=office)
+        row = next(item for item in work.running if item.ref == "PR #978")
+        self.assertEqual(row.current, "Reviewer")
+        self.assertIn("現在：Reviewer", "\n".join(line for line, _ in mon.board_view(work)))
+
+    def test_running_pr_shows_exact_head_checks_without_session(self):
+        pull = self._pull(978)
+        github = self._github([pull], ci_heads={"abcdef0": {
+            "linux": ("in_progress", "")}})
+        work = mon.work_board(github, self._board(), NOW)
+        row = next(item for item in work.running if item.ref == "PR #978")
+        self.assertEqual(row.current, "CI")
+
+    def test_running_issue_shows_codex_session_naming_issue(self):
+        board = self._board(running=[mon.PmBoardItem("#55", "Issue work", "PM")])
+        office = [mon.OfficeRow("Codex CLI", mon.WORKING, "", 0, 0,
+                                role="developer", task="Issue #55")]
+        work = mon.work_board(self._github([]), board, NOW, office=office)
+        self.assertEqual(work.running[0].current, "Codex")
+
+    def test_idle_session_does_not_count_as_current_worker(self):
+        board = self._board(running=[mon.PmBoardItem("#55", "Issue work", "PM")])
+        office = [mon.OfficeRow("Codex CLI", mon.IDLE, "", 0, 0,
+                                role="developer", task="Issue #55")]
+        work = mon.work_board(self._github([]), board, NOW, office=office)
+        self.assertEqual(work.running[0].current, "沒人")
+
+    def test_unreadable_github_source_shows_unknown_current_not_idle(self):
+        board = self._board(running=[mon.PmBoardItem("PR #978", "PR work", "PM")])
+        work = mon.work_board(None, board, NOW,
+                              office=[mon.OfficeRow("Codex CLI", mon.WORKING, "", 0, 0,
+                                                    task="PR #978 @abcdef0")])
+        self.assertEqual(work.running[0].current, "未確認")
 
 
 class StuckAlertTests(unittest.TestCase):
