@@ -490,8 +490,11 @@ class TestOutputExcerptsTests(unittest.TestCase):
                   'eyJaaaaaaaa..bbbbbbbb.cccccccc',
                   'eyJaaaaaaaa.bbbbbbbb',
                   'eyJaaaaaaaa/bbbbbbbb.cccccccc',
-                  'aeyJaaaaaaaa.bbbbbbbb.cccccccc',
-                  '測eyJaaaaaaaa.bbbbbbbb.cccccccc')
+                  'a' + 'ey' + 'J' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8,  # synthetic-fixture: screen-tool test
+                  )
+        # synthetic-fixture: screen-tool test
+        cjk_jwt = '\u6e2c' + 'ey' + 'J' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8  # synthetic-fixture: screen-tool test
+        self.assert_rejected(cjk_jwt.encode() + b'\n' + UNIT_FAILURE)
         for token in tokens:
             with self.subTest(token=token):
                 raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + token)])
@@ -499,6 +502,20 @@ class TestOutputExcerptsTests(unittest.TestCase):
                 self.assertEqual(result['status'], 'COMPLETE')
                 self.assertEqual(result['test_status'], 'FAILED')
                 self.assertEqual(result['failure_ids'], [FAIL_ID])
+
+    def test_sensitive_values_directly_after_cjk_text_are_rejected(self):
+        # synthetic-fixture: screen-tool test
+        values = (
+            'AK' + 'IA' + 'SYNTHETIC0TEST16',  # synthetic-fixture: screen-tool test
+            'sk' + '-' + 'a' * 24,  # synthetic-fixture: screen-tool test
+            'github' + '_pat_' + 'a' * 24,  # synthetic-fixture: screen-tool test
+            'xox' + 'b-' + 'a' * 20,  # synthetic-fixture: screen-tool test
+            'bear' + 'er' + ' ' + 'SYNTHETIC' + 'VALUE',  # synthetic-fixture: screen-tool test
+            'to' + 'ken' + '=' + 'SYNTHETIC' + 'VALUE',  # synthetic-fixture: screen-tool test
+        )
+        for value in values:
+            with self.subTest(shape=value[:3]):
+                self.assert_rejected(('\u6e2c' + value).encode() + b'\n' + UNIT_FAILURE)  # synthetic-fixture: screen-tool test
 
     def test_near_limit_jwt_scan_completes_without_false_success(self):
         # Repeated boundary-bearing prefixes, missing dots, and short or
