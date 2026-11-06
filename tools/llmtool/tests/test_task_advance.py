@@ -2161,10 +2161,12 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 self.updates.append((expected, merge_attempt))
                 self.attempt = dict(merge_attempt)
 
-        store, calls = Store(), []
-        current = {'number': 17, 'head': {'sha': 'b' * 40}, 'state': 'open',
-                   'merged': False, 'mergeable': True, 'labels': [{'name': 'mac-ci'}]}
+        store, calls, reads = Store(), [], []
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open',
+              'merged': False, 'mergeable': True, 'labels': [{'name': 'mac-ci'}]}
+        current = dict(pr, head={'sha': 'b' * 40})
         def github_get(path):
+            reads.append(path)
             if path.startswith('commits/'):
                 return {'total_count': 2, 'check_runs': [
                     {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
@@ -2175,10 +2177,11 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 return [{'filename': 'src/module.py'}]
             return current
         result = task_advance._merge_once(store=store, record=record, number=17,
-            head=HEAD, pr=current, events=[event],
+            head=HEAD, pr=pr, events=[event],
             github_get=github_get,
             gh_runner=lambda _root, args: calls.append(args), root='/repo')
         self.assertEqual(result['codes'], ['MERGE_STALE_HEAD'])
+        self.assertIn('pulls/17', reads)
         self.assertEqual(calls, [])
         self.assertEqual(store.updates, [])
         self.assertEqual(store.attempt, prior)
