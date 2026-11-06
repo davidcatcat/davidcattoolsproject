@@ -133,6 +133,8 @@ This single recurring schedule (about every 5 minutes in the PM session, for exa
 2. **Check the backlog list:** reconcile the #763 inventory with GitHub deltas (new, reopened and unblocked items) within authorized scope. Never decide from only a few Issues, and never invent low-value Issues.
 3. **Dispatch executable work (1–2 new Tasks):** when executable authorized work and a free Developer exist below the concurrency cap, dispatch at least 1 and at most 2 new Developer Tasks per sweep; a new Task may share a file with an in-flight Task, and only a real conflict on the same lines blocks it, with the later merge resolving any overlap. At the concurrency cap, make no new Developer Task dispatch. The concurrency cap is the maximum concurrent in-flight Developer Tasks set on tracking Issue #763 (bounded by distinct authorized, live-available Developer routes in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) and one writer per D6 Task under [AGENTS.md](../../AGENTS.md)). An Owner wait blocks only its dependent item and never stops other work.
 
+**Board:** every sweep writes `~/.local/state/llmtool/pm-board.json`. Check each row against its real Issue, PR or Task and update its text, not only `updated_at`. A closed Issue leaves the board. A row nobody works on is not `running`: find its next step, dispatch it or move it (Owner 2026-11-07, #763).
+
 **Sweep record:** post one short comment per sweep on tracking Issue #763 (no new Issue, no raw logs) starting with the exact whole-line marker:
 
 `<!-- activity: type=pm_progress actor=PM target=PM status=SWEEP -->`
