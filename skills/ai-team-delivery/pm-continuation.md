@@ -131,7 +131,7 @@ This single recurring schedule (about every 10 minutes in the PM session, for ex
 
 1. **Continue in-flight work (uncapped):** advance every active Task, formal review, bounded repair, CI check and merge that can move. The per-sweep cap of 2 applies only to new Developer Tasks in step 3; reviews, repairs, CI checks and merges have no per-sweep cap.
 2. **Check the backlog list:** reconcile the #763 inventory with GitHub deltas (new, reopened and unblocked items) within authorized scope. Never decide from only a few Issues, and never invent low-value Issues.
-3. **Dispatch executable work (1–2 new Tasks):** when executable authorized work and a free Developer exist below the concurrency cap, dispatch at least 1 and at most 2 new Developer Tasks per sweep that write no file another in-flight Task writes; at the concurrency cap, make no new Developer Task dispatch. The concurrency cap is the maximum concurrent in-flight Developer Tasks set on tracking Issue #763 (bounded by distinct authorized, live-available Developer routes in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) and one writer per D6 Task with non-overlapping `write_paths` under [AGENTS.md](../../AGENTS.md)). An Owner wait blocks only its dependent item and never stops other work.
+3. **Dispatch executable work (1–2 new Tasks):** when executable authorized work and a free Developer exist below the concurrency cap, dispatch at least 1 and at most 2 new Developer Tasks per sweep; a new Task may share a file with an in-flight Task, and only a real conflict on the same lines blocks it, with the later merge resolving any overlap. At the concurrency cap, make no new Developer Task dispatch. The concurrency cap is the maximum concurrent in-flight Developer Tasks set on tracking Issue #763 (bounded by distinct authorized, live-available Developer routes in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) and one writer per D6 Task under [AGENTS.md](../../AGENTS.md)). An Owner wait blocks only its dependent item and never stops other work.
 
 **Sweep record:** post one short comment per sweep on tracking Issue #763 (no new Issue, no raw logs) starting with the exact whole-line marker:
 
@@ -143,6 +143,7 @@ Sweep records must never use `target=Owner`, so [llmtool_monitor.py](../../scrip
 - backlog, in-flight and dispatchable counts;
 - new Task IDs with Developer and Issue, plus verified Developer start evidence (per [Transition record](#transition-record));
 - for each undispatched item (or by reference to the previous sweep comment when the undispatched list is unchanged), one allowed reason class with its evidence—`running` (`PR #N` or `Task <id>`), `waiting_owner` (link to the open `type=waiting_owner` comment), `blocked` (`blocked by #N` or overlapping writer `Task <id>`), `unauthorized` (specific scope/policy/budget/availability clause), or `closed` (`PR/Issue #N`)—forbidding vague free text such as `not suitable`, `later` or `low priority`;
+- `running` applies only to the row it names and must not stand for the rest of the queue. Owner 2026-11-06: 「同檔案可派」 (“sharing a file with an in-flight Task does not block a dispatch; only a real conflict on the same lines does”).
 - next steps.
 
 **Anomalies, notifications and schedule control:**
