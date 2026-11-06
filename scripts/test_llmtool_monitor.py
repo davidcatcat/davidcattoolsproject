@@ -1406,6 +1406,8 @@ class FakeRun:
 
 
 NOW = 1_800_000_000.0
+OWNER_LOGIN = mon.OWNER_GITHUB_LOGIN
+AI_LOGIN = next(iter(mon.TRUSTED_GITHUB_LOGINS - {OWNER_LOGIN}))
 
 
 def iso(seconds):
@@ -1413,12 +1415,40 @@ def iso(seconds):
     return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def comment(number, seconds, body, kind="issues", association="OWNER"):
+def comment(number, seconds, body, kind="issues", association="OWNER", login=OWNER_LOGIN):
     return {"created_at": iso(seconds), "body": body, "author_association": association,
+            "user": {"login": login},
             "issue_url": f"https://api.github.com/repos/o/r/{kind}/{number}"}
 
 
 class GitHubActivityTests(unittest.TestCase):
+    def test_comments_are_trusted_by_login_not_association(self):
+        marker = "<!-- activity: type=test_result actor=Codex target=Tests status=PASS -->\nTask"
+        events = mon.github_events([comment(81, NOW - 9, marker, login=AI_LOGIN)], [], NOW - 99)
+        self.assertEqual([event.event_type for event in events], ["test_result"])
+        self.assertIn("Codex → Tests：", mon.render_activity(events)[0])
+        unknown = mon.github_events([comment(82, NOW - 9, marker, association="COLLABORATOR",
+                                             login="unlisted-user")], [], NOW - 99)
+        self.assertEqual([event.event_type for event in unknown], ["github_comment"])
+        missing = comment(83, NOW - 9, marker)
+        del missing["user"]["login"]
+        events = mon.github_events([missing], [], NOW - 99)
+        self.assertEqual([event.event_type for event in events], ["github_comment"])
+
+    def test_ai_login_verdicts_are_trusted(self):
+        verdict = comment(84, NOW - 9, "**Verdict: PASS** at head abc1234",
+                          kind="issues", login=AI_LOGIN)
+        self.assertEqual(mon.review_verdicts([verdict]), {
+            "84": [(NOW - 9, "PASS", frozenset({"abc1234"}))]})
+
+    def test_ai_login_owner_marker_is_not_displayed_as_owner_decision(self):
+        forged = comment(85, NOW - 9,
+                         "<!-- activity: type=waiting_owner actor=Owner target=PM status=ANSWERED -->\nClaim",
+                         login=AI_LOGIN)
+        events = mon.github_events([forged], [], NOW - 99)
+        self.assertEqual([event.event_type for event in events], ["github_comment"])
+        self.assertNotIn("Owner → PM", "\n".join(mon.render_activity(events)))
+
     def test_refresh_does_not_create_default_rule_alert_path_under_home(self):
         with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
             default_path = os.path.join(os.path.expanduser("~"),
@@ -1834,6 +1864,14 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertIn("已回覆，這項決定不再等你（#304・自述）", answered)
         self.assertIn("Owner chose option (a)", answered)
         self.assertEqual(mon.owner_pending(both, []), [])
+        forged = comment(304, NOW - 30,
+                         "<!-- activity: type=waiting_owner actor=Owner target=PM status=ANSWERED -->",
+                         login=AI_LOGIN)
+        self.assertEqual([p.reference for p in mon.owner_pending(waiting + [forged], [])], ["#304"])
+        relay = comment(304, NOW - 20,
+                        "<!-- activity: type=repair_gate actor=PM target=Owner status=ANSWERED -->",
+                        login=AI_LOGIN)
+        self.assertEqual(mon.owner_pending(waiting + [relay], []), [])
         # Integrator is the PM's other name in markers, as for the ask.
         integrator = comment(5, NOW - 9, "<!-- activity: type=waiting_owner actor=Owner "
                                          "target=Integrator status=ANSWERED -->")
@@ -5279,19 +5317,22 @@ class OfficeViewTests(unittest.TestCase):
                   for age, payload in events]
         self._write(self.codex / day / "rollout-pm.jsonl", items, age=5)
         stamp = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - age))
-        comment = lambda pr, age, body, who="OWNER": {
+        comment = lambda pr, age, body, who="OWNER", login=OWNER_LOGIN: {
             "issue_url": f"https://api.github.com/repos/o/r/issues/{pr}", "created_at": stamp(age),
-            "author_association": who, "body": body}
+            "author_association": who, "user": {"login": login}, "body": body}
         verdicts = mon.review_verdicts([
             comment(283, 850, "## Review\n**Verdict: PASS** at exact head `18538d569d94fa7e5a06`"),
-            comment(283, 840, "**Verdict: FAIL** at head 18538d5", who="NONE"),   # untrusted
+            {**comment(283, 840, "**Verdict: FAIL** at head 18538d5", who="NONE"),
+             "user": {"login": "unlisted-user"}},   # untrusted
             comment(283, 830, "The earlier verdict: FAIL was stale; head 18538d5"),   # not a verdict line
+            comment(283, 820, "**Verdict: PASS** at head 1234567", login=AI_LOGIN),
             comment(999, 820, "**Verdict: FAIL** head 18538d5"),                   # another PR
             comment(281, 60, "**Verdict: PASS** at exact head 281818a"),
         ])
         # only trusted verdict lines are kept, each with every id its comment names
         self.assertEqual(verdicts, {
-            "283": [(self.NOW - 850, "PASS", frozenset({"18538d5"}))],
+            "283": [(self.NOW - 850, "PASS", frozenset({"18538d5"})),
+                    (self.NOW - 820, "PASS", frozenset({"1234567"}))],
             "999": [(self.NOW - 820, "FAIL", frozenset({"18538d5"}))],
             "281": [(self.NOW - 60, "PASS", frozenset({"281818a"}))]})
 

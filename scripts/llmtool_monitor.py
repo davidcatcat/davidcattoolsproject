@@ -1623,7 +1623,29 @@ SECRETISH = re.compile(
     r"|\b[A-Fa-f0-9]{32,}\b|\b[A-Za-z0-9+/_-]{40,}={0,2})")
 # Markers are honoured only from accounts with write access; on a shared account
 # they remain the poster's own claim, so typed lines are labelled 自述.
-TRUSTED_ASSOCIATION = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+def _load_github_logins():
+    """Load the canonical identities directly, without importing llmtool."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "tools", "llmtool", "llmtool", "github_identity.py")
+    name = "_llmtool_monitor_github_identity"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError("cannot load GitHub identity module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return frozenset((module.owner_login(), module.ai_login())), module.owner_login()
+
+
+TRUSTED_GITHUB_LOGINS, OWNER_GITHUB_LOGIN = _load_github_logins()
+
+
+def _trusted_github_comment(comment):
+    user = comment.get("user") if type(comment) is dict else None
+    login = user.get("login") if type(user) is dict else None
+    return type(login) is str and login in TRUSTED_GITHUB_LOGINS
+
+
 URL = re.compile(r"https?://\S+")
 FEED_NOISE = re.compile(r"(?i)^(?:subpm-lease\b|correction\b)")
 MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
@@ -1765,9 +1787,10 @@ def github_events(comments, pulls, since: float) -> list[ActivityEvent]:
         if when < since or not number:
             continue
         body = comment.get("body")
-        association = comment.get("author_association")
-        trusted = type(association) is str and association in TRUSTED_ASSOCIATION
+        trusted = _trusted_github_comment(comment)
         typed = _marker_events(body, when, number) if trusted else []
+        if typed and comment["user"]["login"] != OWNER_GITHUB_LOGIN:
+            typed = [event for event in typed if event.actor.casefold() != "owner"]
         if not typed:
             headline = _headline(body)
             typed = [ActivityEvent(when, "github_comment", "", "", "POSTED", f"#{number}",
@@ -1835,10 +1858,11 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
     for comment in comments if type(comments) is list else []:
         if type(comment) is not dict:
             continue
-        association = comment.get("author_association")
+        login = (comment.get("user", {}).get("login")
+                 if type(comment.get("user")) is dict else None)
         number = _issue_number(comment.get("issue_url"))
         body = comment.get("body")
-        if not (type(association) is str and association in TRUSTED_ASSOCIATION and number
+        if not (_trusted_github_comment(comment) and number
                 and type(body) is str):
             continue
         for line in body.splitlines()[:MAX_MARKERS]:
@@ -1849,7 +1873,8 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
                 value = value.rstrip("-")   # "status=APPROVED-->" written without a space
                 fields.setdefault(key, value.casefold() if key in ("actor", "target") else value.upper())
             order = comment.get("id") if type(comment.get("id")) is int else 0
-            marked.append((_github_time(comment.get("created_at")), order, number, fields, body))
+            marked.append((_github_time(comment.get("created_at")), order, number, fields, body,
+                           login))
     closed = {}
     for pull in pulls if type(pulls) is list else []:
         if type(pull) is dict and type(pull.get("number")) is int:
@@ -1857,13 +1882,13 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
                                              _github_time(pull.get("closed_at")))
     # One open request per thread (the latest); an Owner marker settles the thread.
     open_requests = {item.reference[1:]: item for item in earlier}
-    for when, _, number, fields, body in sorted(marked, key=lambda item: item[:2]):
+    for when, _, number, fields, body, login in sorted(marked, key=lambda item: item[:2]):
         status = fields.get("status", "")
         held = open_requests.get(number)
         if held is not None and when < held.when:
             continue   # older than the open request: neither asks nor settles again
-        settles = fields.get("actor") == "owner" or (fields.get("target") == "owner"
-                                                     and status in OWNER_SETTLED)
+        actor_owner = fields.get("actor") == "owner" and login == OWNER_GITHUB_LOGIN
+        settles = actor_owner or (fields.get("target") == "owner" and status in OWNER_SETTLED)
         if settles and not _owner_settlement_valid(fields):
             continue   # e.g. actor=Owner status=WAITING: not a typed answer, settles nothing
         if settles:
@@ -3991,7 +4016,7 @@ def review_verdicts(comments) -> dict:
     comment names, and the comment's last-edit time. Pure; no I/O."""
     found: dict = {}
     for comment in comments if type(comments) is list else []:
-        if type(comment) is not dict or comment.get("author_association") not in TRUSTED_ASSOCIATION:
+        if not _trusted_github_comment(comment):
             continue
         body, number = comment.get("body"), _issue_number(comment.get("issue_url"))
         verdict = REVIEW_VERDICT.search(body) if type(body) is str and number else None
