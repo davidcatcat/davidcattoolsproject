@@ -127,7 +127,7 @@ After a work package completes, or after a Task is isolated, the PM runs the [Sc
 
 ## Scheduled sweep
 
-This single recurring schedule (about every 10 minutes in the PM session, for example `/loop 10m`, and after every result) (Owner 2026-11-02, #763). The PM does not wait on CI, a review or a single Worker while other authorized work in the #763 inventory can move. The schedule never authorizes work outside the authorized #763 scope, a Worker the policy does not allow, or a merge without its gates. Every sweep runs in this order:
+This single recurring schedule (about every 5 minutes in the PM session, for example `/loop 5m`, and after every result) (Owner 2026-11-02, #763). The PM does not wait on CI, a review or a single Worker while other authorized work in the #763 inventory can move. The schedule never authorizes work outside the authorized #763 scope, a Worker the policy does not allow, or a merge without its gates. Every sweep runs in this order:
 
 1. **Continue in-flight work (uncapped):** advance every active Task, formal review, bounded repair, CI check and merge that can move. The per-sweep cap of 2 applies only to new Developer Tasks in step 3; reviews, repairs, CI checks and merges have no per-sweep cap.
 2. **Check the backlog list:** reconcile the #763 inventory with GitHub deltas (new, reopened and unblocked items) within authorized scope. Never decide from only a few Issues, and never invent low-value Issues.
@@ -151,8 +151,10 @@ Sweep records must never use `target=Owner`, so [llmtool_monitor.py](../../scrip
 - Zero new dispatch while executable work and a free Developer are available below the concurrency cap is an anomaly, not **IDLE**.
 - Normal sweeps are silent in chat (send no chat message) but still post the `type=pm_progress` sweep record on the tracking Issue; anomalies, sweep failures, Developer start failures and real Owner decisions also get dedicated GitHub records.
 - Owner asks use `<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->`; a relayed Owner answer uses `<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->` (never an `actor=Owner` marker; the Owner does not use GitHub); verify both with `llmtool_monitor.py --once`.
+- An Owner ask is made only when its `type=waiting_owner` marker is posted and shows in `llmtool_monitor.py --once`. Post it before asking in chat; a chat-only ask does not count, because the Owner does not scroll back (Owner 2026-11-07, #763).
 - Status answers give numbers first (`dispatched`, `merged`, `remaining`).
 - The schedule prompt must instruct the PM to re-read this `Scheduled sweep` section from canonical `main` on every sweep. The PM may stop and re-enable the schedule, recording both on the tracking Issue.
+- The schedule interval is an Owner decision. No AI changes it, including on takeover or when rebuilding the schedule (Owner 2026-11-07, #763).
 
 ## Transition record
 
