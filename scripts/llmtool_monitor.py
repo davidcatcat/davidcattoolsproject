@@ -82,7 +82,7 @@ PYTHON_VALUE_OPTIONS = frozenset({"-X", "-W", "-Q"})
 # Roles whose process groups are not expanded (GUI apps with many helpers).
 NO_EXPAND = frozenset({"Claude Desktop", "Antigravity App (AGY)"})
 DISK_REFRESH_SECONDS = 60.0
-DISK_WARNING_PERCENT = 90
+DISK_WARNING_PERCENT = 95
 DISK_ATTENTION_PERCENT = 95
 RULE_ALERT_FILE = os.path.join(os.path.expanduser("~"), ".local/state/llmtool/rule-file-alerts.json")
 
