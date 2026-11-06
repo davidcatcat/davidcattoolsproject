@@ -517,6 +517,34 @@ class TestOutputExcerptsTests(unittest.TestCase):
             with self.subTest(shape=value[:3]):
                 self.assert_rejected(('\u6e2c' + value).encode() + b'\n' + UNIT_FAILURE)  # synthetic-fixture: screen-tool test
 
+    def test_cloud_keys_and_jwts_between_cjk_letters_are_rejected(self):
+        from llmtool.test_output_excerpts import (
+            _emitted_json_sensitive, _emitted_sensitive, _sensitive,
+            _sensitive_jwt,
+        )
+
+        jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
+        for value in (SYNTHETIC_AWS_KEY, 'ASIA' + 'SYNTHETIC0TEST16', jwt):
+            text = '\u6e2c' + value + '\u3042'
+            with self.subTest(shape=value[:4]):
+                self.assertTrue(_sensitive(text))
+                self.assertTrue(_emitted_sensitive(text))
+                self.assertTrue(_emitted_json_sensitive(text))
+                if value == jwt:
+                    self.assertTrue(_sensitive_jwt(text))
+                self.assert_rejected(text.encode() + b'\n' + UNIT_FAILURE)
+
+    def test_ascii_identifiers_around_cloud_keys_and_jwts_remain_allowed(self):
+        from llmtool.test_output_excerpts import _sensitive, _sensitive_jwt
+
+        jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
+        for value in (SYNTHETIC_AWS_KEY, 'ASIA' + 'SYNTHETIC0TEST16', jwt):
+            for text in ('x' + value, value + 'x'):
+                with self.subTest(shape=value[:4], text=text[:1]):
+                    self.assertFalse(_sensitive(text))
+                    if value == jwt:
+                        self.assertFalse(_sensitive_jwt(text))
+
     def test_near_limit_jwt_scan_completes_without_false_success(self):
         # Repeated boundary-bearing prefixes, missing dots, and short or
         # boundary-less segments must complete rather than time out or leak.

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from .errors import LLMToolError
 from . import task_completion, task_store, worker_dispatch
 from .test_output_excerpts import (
-    _SENSITIVE, _emitted_sensitive, _sensitive_jwt, _sensitive_url,
+    _CJK_LETTER, _SENSITIVE, _emitted_sensitive, _sensitive_jwt, _sensitive_url,
 )
 
 REPORT_SECTIONS = ('Identity and source', 'Symptom and reproduction', 'Root Cause',
@@ -31,7 +31,8 @@ _REFUSAL_CODES = frozenset((
 _SCREEN_HIT_LIMIT = 32
 _SCREEN_RULES = (
     ('private_key', re.compile(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----', re.I)),
-    ('cloud_key', re.compile(r'(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b', re.I)),
+    ('cloud_key', re.compile(
+        r'(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}(?:\b|(?=[' + _CJK_LETTER + r']))', re.I)),
     ('provider_key', re.compile(r'(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}', re.I)),
     ('git_host_key', re.compile(r'(?<![A-Za-z0-9_])(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}', re.I)),
     ('chat_key', re.compile(r'(?<![A-Za-z0-9_])xox[abprs]-[A-Za-z0-9-]{20,}', re.I)),
