@@ -53,16 +53,16 @@ PM 由 Claude 擔任，Claude 不可用時由 Codex 暫代；Reviewer 一律跟�
 | Developer | Codex | 主力 |
 | Developer | Claude | 一般可選路線；獨立工作階段與 worktree，不能是 PM 順手改 |
 | Developer | OpenCode | 免費模型 |
-| Developer | AGY | 底層為 Claude Sonnet |
+| Developer | AGY | 底層為 Gemini 4 Argon |
 | Developer | 公司 LLM | 經 API Agent Gateway 在 worktree 裡讀寫，用法同 Codex、Claude |
-| Reviewer | Claude | 審 OpenAI 系模型（Codex）寫的程式碼 |
-| Reviewer | Codex | 審 Claude 系模型（Claude、AGY）、OpenCode、公司 LLM 寫的程式碼 |
+| Reviewer | Claude | 審 OpenAI 系模型（Codex）、Gemini（AGY）、OpenCode 寫的程式碼 |
+| Reviewer | Codex | 審 Claude 系模型（Claude）、公司 LLM 寫的程式碼；Claude 不可用時，AGY 與 OpenCode 也可由 Codex 審 |
 | AI Debug | Codex 高階模型 | 唯讀除錯，每個任務最多介入一次 |
 | 顧問 | ChatGPT | Owner 的技術顧問，不接入 llmtool、不派工 |
 
 Reviewer 配對規則：
 
-- **看實際模型，不看路線名稱：** llmtool 在正式審查前驗證 developer 實際使用的模型家族、reviewer 實際模型、`worker-dispatch.json` 授權狀態與工作階段獨立性；任何一項不滿足就不接受正式 PASS。上表是依各路線目前的預設模型推得的配對，例如 AGY 底層是 Claude Sonnet，所以由 Codex 審。
+- **看實際模型，不看路線名稱：** llmtool 在正式審查前驗證 developer 實際使用的模型家族、reviewer 實際模型、`worker-dispatch.json` 授權狀態與工作階段獨立性；任何一項不滿足就不接受正式 PASS。上表是依各路線目前的預設模型推得的配對，例如 AGY 底層是 Gemini 4 Argon，所以由 Claude 審。
 - **OpenCode 預審保留：** 沿用現行規則，OpenCode 交付前仍須先過一次實際免費、跨模型家族的預審；預審不是正式審查。
 
 PM 備援規則：

@@ -95,12 +95,26 @@ def _post_github_record(pr_number, body, repo_root):
            'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1'}
     if os.environ.get('GH_CONFIG_DIR'):
         env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
-    result = subprocess.run(
-        [gh, 'pr', 'comment', str(pr_number), '--repo', slug, '--body-file', '-'],
-        cwd=repo_root, env=env, input=body.encode('utf-8'),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False,
-        check=False, timeout=30)
-    return result.returncode == 0
+    def comment(command):
+        return subprocess.run(
+            [gh, command, 'comment', str(pr_number), '--repo', slug, '--body-file', '-'],
+            cwd=repo_root, env=env, input=body.encode('utf-8'),
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, shell=False,
+            check=False, timeout=30)
+
+    # --pr may name an Issue, which `gh pr comment` rejects with a specific
+    # message. Retry on the Issue API only for that confirmed case: any other
+    # failure may mean GitHub accepted a write whose response was lost, and a
+    # second write would duplicate the comment. Stderr is never logged.
+    result = comment('pr')
+    if result.returncode == 0:
+        return True
+    stderr = result.stderr
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode('utf-8', 'replace')
+    if not isinstance(stderr, str) or 'Could not resolve to a PullRequest' not in stderr:
+        return False
+    return comment('issue').returncode == 0
 
 
 def _write_unposted(entry, pr_number, task_id, reason, body=None):
