@@ -2,13 +2,16 @@
 
 import hashlib
 import contextlib
+from datetime import datetime, timedelta, timezone
 import io
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from argparse import Namespace
 
@@ -35,6 +38,10 @@ def _publish_run_gh(root, args):
                           check=False, timeout=30)
 
 
+def _publish_pause(seconds):
+    time.sleep(seconds)
+
+
 def _publish_output(result):
     if type(getattr(result, 'stdout', None)) is bytes:
         try:
@@ -56,7 +63,65 @@ def _publish_command(runner, root, args, *, code='PUBLISH_COMMAND_FAILED'):
     return _publish_output(result)
 
 
-def _publish_pr(gh_runner, root, branch, task_id, expected_head):
+def _publication_text(record, executor_task, branch):
+    """Build publication title/body from the screened PM intake when readable."""
+    task_id = record.get('task_id') if type(record) is dict else None
+    old_title = f'llmtool Task {task_id}'
+    old_body = f'Automated publication for llmtool Task {task_id}.'
+    response = record.get('response') if type(record) is dict else None
+    assignment = record.get('pm_assignment') if type(record) is dict else None
+    summary = None
+    try:
+        response = json.loads(response)
+        if type(response) is dict and type(response.get('summary')) is str:
+            summary = response['summary'].strip()
+    except (TypeError, ValueError):
+        pass
+    title = re.sub(r'\s+', ' ', summary).strip()[:120] if summary else old_title
+    if not summary:
+        return title, old_body
+
+    try:
+        if type(assignment) is not dict:
+            return title, old_body
+        goal = assignment.get('goal')
+        acceptance = assignment.get('acceptance')
+        if (type(goal) is not str or not goal.strip() or type(acceptance) is not list or
+                any(type(item) is not str or not item.strip() for item in acceptance) or
+                type(task_id) is not str or type(executor_task) is not str or
+                type(branch) is not str):
+            return title, old_body
+        body = '\n'.join([
+            summary, '', goal.strip(), '', 'Acceptance:',
+            *[f'- {item.strip()}' for item in acceptance], '',
+            f'Task ID: {task_id}', f'D6 executor: {executor_task}',
+            f'Branch: {branch}',
+        ])
+        return title, body
+    except (TypeError, ValueError, IndexError):
+        return title, old_body
+
+
+def _find_published_pr(gh_runner, root, branch, expected_head):
+    """Find one PR for an exact published D6 head, without changing GitHub."""
+    try:
+        output = _publish_command(gh_runner, root,
+            ['pr', 'list', '--head', branch, '--state', 'all',
+             '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
+        pulls = json.loads(output)
+    except Exception:
+        return None
+    if type(pulls) is not list:
+        return None
+    matches = [pull for pull in pulls if type(pull) is dict and
+               pull.get('headRefOid') == expected_head]
+    if len(matches) != 1:
+        return None
+    number = matches[0].get('number')
+    return number if type(number) is int and number > 0 else None
+
+
+def _publish_pr(gh_runner, root, branch, task_id, expected_head, title, body):
     output = _publish_command(gh_runner, root,
         ['pr', 'list', '--head', branch, '--state', 'open',
          '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
@@ -69,8 +134,7 @@ def _publish_pr(gh_runner, root, branch, task_id, expected_head):
     if not pulls:
         _publish_command(gh_runner, root,
             ['pr', 'create', '--head', branch,
-             '--title', f'llmtool Task {task_id}',
-             '--body', f'Automated publication for llmtool Task {task_id}.'],
+             '--base', 'main', '--title', title, '--body', body],
             code='PUBLISH_GITHUB_FAILED')
         output = _publish_command(gh_runner, root,
             ['pr', 'list', '--head', branch, '--state', 'open',
@@ -79,15 +143,26 @@ def _publish_pr(gh_runner, root, branch, task_id, expected_head):
             pulls = json.loads(output)
         except (ValueError, TypeError):
             raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
-    if type(pulls) is not list or not pulls:
-        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
-    pull = pulls[0]
-    number = pull.get('number') if type(pull) is dict else None
-    head = pull.get('headRefOid') if type(pull) is dict else None
-    if (type(number) is not int or number < 1 or type(head) is not str or
-            head != expected_head):
-        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
-    return number
+    for attempt in range(4):
+        if type(pulls) is not list or not pulls:
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+        pull = pulls[0]
+        number = pull.get('number') if type(pull) is dict else None
+        head = pull.get('headRefOid') if type(pull) is dict else None
+        if type(number) is not int or number < 1 or type(head) is not str:
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+        if head == expected_head:
+            return number
+        if attempt == 3:
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+        _publish_pause(2)
+        output = _publish_command(gh_runner, root,
+            ['pr', 'list', '--head', branch, '--state', 'open',
+             '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
+        try:
+            pulls = json.loads(output)
+        except (ValueError, TypeError):
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
 
 
 def _merge_refusal(code):
@@ -149,7 +224,7 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     paths = [item.get('filename') for item in files if type(item) is dict]
     if len(paths) != len(files) or any(type(path) is not str for path in paths):
         return 'MERGE_CHECKS_UNAVAILABLE'
-    docs_only = bool(paths) and all(path.endswith('.md') for path in paths)
+    docs_only = task_completion._docs_only_ci(paths)
     required_checks = ['check (docs)'] if docs_only else ['check (Linux 3.14)']
     requires_macos = not docs_only
     if requires_macos:
@@ -176,6 +251,102 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
         return ('MERGE_MACOS_CHECK_MISSING' if allow_missing_macos else
                 'MERGE_REQUIRED_CHECK_MISSING')
     return None
+
+
+def _review_ci_gate(number, head, github_get):
+    """Require the newest exact-head Linux CI check to pass before review."""
+    try:
+        checks = github_get(f'commits/{head}/check-runs?per_page=100')
+        files = github_get(f'pulls/{number}/files?per_page=100')
+    except Exception:
+        return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+    if (type(checks) is not dict or type(checks.get('check_runs')) is not list or
+            type(checks.get('total_count')) is not int or
+            checks['total_count'] < len(checks['check_runs']) or
+            checks['total_count'] < 0 or len(checks['check_runs']) > 100 or
+            type(files) is not list or len(files) >= 100):
+        return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+    paths = []
+    for item in files:
+        path = item.get('filename') if type(item) is dict else None
+        if type(path) is not str:
+            return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+        paths.append(path)
+    required_name = ('check (docs)' if task_completion._docs_only_ci(paths)
+                     else 'check (Linux 3.14)')
+    runs = checks['check_runs']
+    if any(type(item) is not dict for item in runs):
+        return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+    candidates = [item for item in runs if item.get('head_sha') == head and
+                  item.get('name') == required_name]
+    for item in candidates:
+        if (type(item.get('id')) is not int or item['id'] < 1 or
+                type(item.get('status')) is not str):
+            return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+    if not candidates:
+        return 'WAITING_CI', 'LINUX_CI_PENDING'
+    latest = max(candidates, key=lambda item: item['id'])
+    if latest['status'] != 'completed':
+        return 'WAITING_CI', 'LINUX_CI_PENDING'
+    if type(latest.get('conclusion')) is not str:
+        return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+    if latest['conclusion'] == 'success':
+        return None, None
+    return 'CI_FAILED', 'LINUX_CI_FAILED'
+
+
+def _remote_test_receipt_summary(record, head):
+    receipts = record.get('remote_test_receipts', []) if type(record) is dict else []
+    if type(receipts) is not list:
+        return None
+    for receipt in reversed(receipts):
+        if type(receipt) is not dict or receipt.get('source_sha') != head:
+            continue
+        digest = receipt.get('receipt_digest')
+        modules = receipt.get('modules')
+        elapsed = receipt.get('elapsed_s')
+        if (type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None or
+                receipt.get('result') not in ('PASS', 'FAIL', 'TIMEOUT', 'SHA_MISMATCH') or
+                type(modules) is not list or not modules or
+                any(type(module) is not str or
+                    re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', module) is None
+                    for module in modules) or
+                type(receipt.get('ran_total')) is not int or receipt['ran_total'] < 0 or
+                type(elapsed) not in (int, float) or not math.isfinite(elapsed) or
+                elapsed < 0):
+            return None
+        digest_input = dict(receipt)
+        digest_input.pop('receipt_digest', None)
+        try:
+            if hashlib.sha256(_json_bytes(digest_input)).hexdigest() != digest:
+                return None
+        except Exception:
+            return None
+        return {
+            'result': receipt.get('result'),
+            'modules': receipt.get('modules'),
+            'ran_total': receipt.get('ran_total'),
+            'elapsed_s': receipt.get('elapsed_s'),
+            'receipt_digest': digest[:8],
+        }
+    return None
+
+
+def _post_remote_test_comment(gh_runner, root, number, task_id, d6, head, summary):
+    modules = ','.join(summary['modules'])
+    body = ('<!-- activity: type=task actor=PM target=PR status=TRACKING -->\n'
+            f"EC2 remote-test, result={summary['result']}, modules={modules}, "
+            f"tests run={summary['ran_total']}, seconds={summary['elapsed_s']}, "
+            f"receipt={summary['receipt_digest']}, Task={task_id}, D6={d6.get('task_id')}, head={head}")
+    response = gh_runner(root, ['pr', 'comment', str(number), '--body', body])
+    if getattr(response, 'returncode', 1) != 0:
+        raise _PublishRefusal('REMOTE_TEST_COMMENT_FAILED')
+
+
+def _post_review_verdict_comment(gh_runner, root, number, review_text):
+    response = gh_runner(root, ['pr', 'comment', str(number), '--body', review_text])
+    if getattr(response, 'returncode', 1) != 0:
+        raise _PublishRefusal('REVIEW_VERDICT_COMMENT_FAILED')
 
 
 def _merge_pass_claim(record, number, head, events):
@@ -287,12 +458,23 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     if prior is not None:
         if prior.get('pr') != number or prior.get('head_sha') != head:
             return _merge_refusal('MERGE_CONFLICTING_PR')
-        return _merge_refusal('MERGE_ALREADY_CLAIMED')
+        if prior.get('state') != 'UNKNOWN':
+            return _merge_refusal('MERGE_ALREADY_CLAIMED')
+        if (current_pr.get('state') != 'open' or current_pr.get('merged') is not False):
+            return _merge_refusal('MERGE_ALREADY_CLAIMED')
+    claimed_at_time = datetime.now(timezone.utc)
+    claimed_at = claimed_at_time.isoformat(timespec='microseconds').replace('+00:00', 'Z')
+    if prior is not None and claimed_at == prior.get('claimed_at'):
+        # Keep a retry distinct even if the clock has not advanced.
+        claimed_at = (claimed_at_time + timedelta(microseconds=1)).isoformat(
+            timespec='microseconds').replace('+00:00', 'Z')
     claim = {'pr': number, 'head_sha': head, 'state': 'CLAIMED',
-             'claimed_at': TaskStore._completion_now()}
+             'claimed_at': claimed_at}
     try:
-        store.compare_and_update(record['task_id'],
-            expected={'record_sha256': record['record_sha256']}, merge_attempt=claim)
+        expected = {'record_sha256': record['record_sha256']}
+        if prior is not None:
+            expected['merge_attempt'] = prior
+        store.compare_and_update(record['task_id'], expected=expected, merge_attempt=claim)
     except Exception:
         return _merge_refusal('MERGE_CLAIM_CONFLICT')
     args = ['pr', 'merge', str(number), '--squash', '--match-head-commit', head]
@@ -301,6 +483,32 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     except Exception:
         result = None
     if result is None or getattr(result, 'returncode', 1) != 0:
+        # The command outcome can be ambiguous. A fresh exact-head merged read
+        # resolves it as success; every other read preserves UNKNOWN.
+        try:
+            resolved_pr = github_get(f'pulls/{number}')
+        except Exception:
+            resolved_pr = None
+        resolved_head = (resolved_pr.get('head')
+                         if type(resolved_pr) is dict else None)
+        merged = (type(resolved_pr) is dict and
+                  resolved_pr.get('number', number) == number and
+                  type(resolved_head) is dict and resolved_head.get('sha') == head and
+                  resolved_pr.get('merged') is True)
+        if merged:
+            claim['state'] = 'MERGED'
+            warning_codes = []
+            try:
+                store.compare_and_update(record['task_id'], expected={'merge_attempt':
+                    dict(claim, state='CLAIMED')}, merge_attempt=claim)
+            except Exception:
+                try:
+                    store.compare_and_update(record['task_id'], expected={'merge_attempt':
+                        dict(claim, state='CLAIMED')}, merge_attempt=claim)
+                except Exception:
+                    warning_codes.append('MERGE_RESULT_RECORD_FAILED')
+            return _merge_success(record, number, head, review_version, gh_runner, root,
+                                  warning_codes)
         claim['state'] = 'UNKNOWN'
         try:
             store.compare_and_update(record['task_id'], expected={'merge_attempt':
@@ -322,6 +530,11 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         except Exception:
             pass
         warning_codes.append('MERGE_RESULT_RECORD_FAILED')
+    return _merge_success(record, number, head, review_version, gh_runner, root,
+                          warning_codes)
+
+
+def _merge_success(record, number, head, review_version, gh_runner, root, warning_codes):
     body = (f'llmtool task advance merge provenance: task={record["task_id"]} '
             f'head={head} review_version={review_version} checks=exact-head-success-or-skipped')
     try:
@@ -473,8 +686,40 @@ def _publish_task(record, d6, executor_task, *, git_runner=None, gh_runner=None,
         staged_paths = [path for path in staged.split('\0') if path]
         if not staged_paths or any(path not in write_paths for path in staged_paths):
             raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
+        title, _ = _publication_text(record, executor_task, branch)
         _publish_command(git_runner, root,
-            ['commit', '-m', f'llmtool Task {task_id}'])
+            ['commit', '-m', title, '-m', f'llmtool Task {task_id}'])
+        local_head = _publish_command(git_runner, root,
+            ['rev-parse', '--verify', 'HEAD']).strip()
+    # Bring the publication head up to date with main before recording it or
+    # pushing it, so the published PR and its checks bind the merged result.
+    _publish_command(git_runner, root, ['fetch', 'origin', 'main'])
+    try:
+        main_is_ancestor = git_runner(root, ['merge-base', '--is-ancestor', 'origin/main', 'HEAD'])
+    except Exception:
+        raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
+    ancestry_status = getattr(main_is_ancestor, 'returncode', 1)
+    if ancestry_status not in (0, 1):
+        raise _PublishRefusal('PUBLISH_COMMAND_FAILED')
+    if ancestry_status == 1:
+        try:
+            merged = git_runner(root, ['merge', '--no-edit', 'origin/main'])
+        except Exception:
+            raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
+        if getattr(merged, 'returncode', 1) != 0:
+            try:
+                conflicts = git_runner(root, ['ls-files', '--unmerged', '-z'])
+            except Exception:
+                conflicts = None
+            is_conflict = (getattr(conflicts, 'returncode', 1) == 0 and
+                           type(getattr(conflicts, 'stdout', None)) in (bytes, str) and
+                           bool(conflicts.stdout))
+            try:
+                git_runner(root, ['merge', '--abort'])
+            except Exception:
+                pass
+            raise _PublishRefusal('PUBLISH_MERGE_CONFLICT' if is_conflict else
+                                  'PUBLISH_COMMAND_FAILED')
         local_head = _publish_command(git_runner, root,
             ['rev-parse', '--verify', 'HEAD']).strip()
     if changed or d6.get('recorded_result_head') != local_head:
@@ -491,7 +736,8 @@ def _publish_task(record, d6, executor_task, *, git_runner=None, gh_runner=None,
         _publish_command(git_runner, root,
             ['push', 'origin', f'HEAD:refs/heads/{branch}'],
             code='PUBLISH_PUSH_FAILED')
-    number = _publish_pr(gh_runner, root, branch, task_id, local_head)
+    title, body = _publication_text(record, executor_task, branch)
+    number = _publish_pr(gh_runner, root, branch, task_id, local_head, title, body)
     return {'pr': number, 'head': local_head}
 
 
@@ -911,6 +1157,14 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     number = _pr_number(record, pr_number)
     get = task_completion._github_get if github_get is None else github_get
     d6 = _d6_snapshot(record, executor_task) if type(executor_task) is str else None
+    if (number is None and type(d6) is dict and d6.get('dirty') is False and
+            type(d6.get('root')) is str and d6.get('root') and
+            type(d6.get('branch')) is str and d6.get('branch') and
+            type(d6.get('result_head')) is str and
+            d6.get('recorded_result_head') == d6.get('result_head')):
+        number = _find_published_pr(
+            _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
+            d6['root'], d6['branch'], d6['result_head'])
     try:
         pr = _pr_snapshot(number, get) if number is not None else None
     except Exception:
@@ -999,9 +1253,30 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                 codes.append(code)
             result = {'task_id': task_id, 'executor_task': executor_task,
                       'head': d6['result_head']}
+            try:
+                fresh_record = store.get(task_id)
+            except Exception:
+                fresh_record = None
+            summary = _remote_test_receipt_summary(fresh_record, d6['result_head'])
+            if summary is not None:
+                result['remote_test'] = summary
+                if number is not None:
+                    try:
+                        _post_remote_test_comment(
+                            _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
+                            d6.get('root') or cwd or os.getcwd(), number, task_id,
+                            d6, d6['result_head'], summary)
+                    except Exception:
+                        codes.append('REMOTE_TEST_COMMENT_FAILED')
         except Exception as exc:
             codes.append(_refusal(exc, 'remote_test_code'))
     elif step == 'DISPATCH_REVIEW':
+        gate_step, ci_code = _review_ci_gate(number, d6['result_head'], get)
+        if gate_step is not None:
+            step = gate_step
+            if ci_code is not None:
+                codes.append(ci_code)
+    if step == 'DISPATCH_REVIEW':
         claims = _claims(record)
         versions = [c.get('version', 0) for c in claims if type(c) is dict and
                     type(c.get('version')) is int]
@@ -1012,6 +1287,19 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                             pr_number=number, version=version)
         except Exception as exc:
             codes.append(_refusal(exc, 'review_dispatch_code'))
+        if type(result) is dict:
+            review_text = result.get('review_text')
+            if (result.get('state') == 'COMPLETED' and
+                    type(review_text) is str and review_text):
+                try:
+                    _post_review_verdict_comment(
+                        _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
+                        d6.get('root') or cwd or os.getcwd(), number, review_text)
+                except Exception:
+                    codes.append('REVIEW_VERDICT_COMMENT_FAILED')
+            if 'review_text' in result:
+                result = dict(result)
+                result.pop('review_text', None)
     elif step == 'RECORD_REVIEW_RESULT':
         claim = next(c for c in reversed(_claims(record)) if type(c) is dict and
                      c.get('pr') == number and c.get('head_sha') == d6['result_head'])
@@ -1098,6 +1386,23 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             elif missing:
                 codes.extend(missing)
                 step = 'WAITING_EXECUTOR'
+            if 'CI_WORKFLOW_JOBS_INVALID' in missing:
+                try:
+                    label_result = label_mac_ci_for_skipped_check(
+                        task_id=task_id, store=store, pr_number=number,
+                        github_get=get, merge_gh_runner=merge_gh_runner, cwd=cwd)
+                    if type(label_result) is dict:
+                        if label_result.get('step') == 'WAITING_CI':
+                            step = 'WAITING_CI'
+                            codes.append('MAC_CI_LABEL_READY')
+                        elif label_result.get('step') == 'MERGE_REFUSED':
+                            step = 'WAITING_CI'
+                            label_codes = label_result.get('codes', [])
+                            if type(label_codes) is list:
+                                codes.extend(label_codes)
+                except Exception:
+                    step = 'WAITING_CI'
+                    codes.append('MAC_CI_LABEL_FAILED')
         except Exception as exc:
             codes.append(_refusal(exc, 'completion_code'))
     elif step == 'READY_FOR_INTEGRATION':

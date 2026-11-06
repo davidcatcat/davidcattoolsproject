@@ -351,7 +351,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         # The callback profile allowlist is enforced in TaskStore._validate;
         # guard its gw-agent entry without creating a TaskStore root or record.
         validator = inspect.getsource(task_store._validate)
-        self.assertIn("developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'gw-agent')",
+        self.assertIn("developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'gw-agent', 'claude')",
                       validator)
 
     def test_pending_gw_agent_provider_binding_is_validated_at_dispatch(self):
@@ -838,7 +838,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.head = self._git('rev-parse', 'HEAD')
         self.common = str(self.root / '.git')
         self._register_d6()
-        self.store = task_store.TaskStore(self.base / 'tasks')
+        self.store = task_store.TaskStore(Path(temp.name).resolve() / 'tasks')
 
     def _git(self, *args):
         return subprocess.check_output(['/usr/bin/git', '-C', str(self.root), *args],
@@ -897,13 +897,23 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.store.create(record)
         return task_id
 
-    def _delegate(self, target):
+    def _delegate(self, target, *, usage=(1026, 49), served_model='qwen3.8-27b',
+                  provider_model='gw', reject_responded=False):
         task_id = self._active_pm_task(target)
+        if provider_model != 'gw':
+            config = self.base / '.config' / 'llmtool' / 'config.yaml'
+            config.write_text(
+                'active_provider: company-gw\n'
+                'generation:\n  max_tokens: 49152\n'
+                'providers:\n  company-gw:\n    type: openai-compatible\n'
+                f'    base_url: http://127.0.0.1:{self.server.port}\n'
+                f'    model: {provider_model}\n',
+                encoding='utf-8')
         self.server.script.extend((
             self.reply(self.tool_call('apply_edit', path=target, new='hello synthetic\n',
-                                      create=True), model='qwen3.8-27b', usage=(1026, 49)),
-            self.reply(self.tool_call('finish', summary='done'), model='qwen3.8-27b',
-                       usage=(1092, 105))))
+                                      create=True), model=served_model, usage=usage),
+            self.reply(self.tool_call('finish', summary='done'), model=served_model,
+                       usage=usage)))
         args = Namespace(task_id=task_id, mode='direct', context_stdin=False,
             data_class='SYNTHETIC', egress_basis='Synthetic test content only.',
             acceptance=[f'Only {target} is created.'], selection_source='PM',
@@ -914,6 +924,24 @@ class GwAgentRealStoreTests(unittest.TestCase):
             Path(__file__).resolve().parents[2] / 'api-agent-gateway')
         decision = worker_dispatch.PolicyDecision('company-gw-agent', True,
                                                   'OWNER_POLICY_ALLOWED', 'f' * 64)
+        store = self.store
+        if reject_responded:
+            base_store = self.store
+
+            class _RejectRespondedStore:
+                def __getattr__(self, name):
+                    return getattr(base_store, name)
+
+                def compare_and_update(self, task_id, *, expected, **updates):
+                    developer_update = updates.get('developer')
+                    if (type(developer_update) is dict and
+                            developer_update.get('state') == 'DEVELOPER_RESPONDED'):
+                        raise task_store.TaskStoreConflict(
+                            'injected RESPONDED write rejection')
+                    return base_store.compare_and_update(
+                        task_id, expected=expected, **updates)
+
+            store = _RejectRespondedStore()
         with patch.object(task_submission_cli, 'load_route_config',
                           return_value=real_config), \
              patch.object(task_submission_cli, 'for_platform',
@@ -921,18 +949,18 @@ class GwAgentRealStoreTests(unittest.TestCase):
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
              redirect_stdout(io.StringIO()):
-            code = task_submission_cli.run_task_gw_agent_delegate(args, store=self.store)
+            code = task_submission_cli.run_task_gw_agent_delegate(args, store=store)
         # A fresh store proves the record is on disk and still passes validation.
-        return code, task_store.TaskStore(self.base / 'tasks').get(task_id)
+        return code, task_store.TaskStore(Path(self.base / 'tasks').resolve()).get(task_id)
 
     def _assert_success_persisted(self, task, target):
         developer = task['developer']
         self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
         self.assertIsNone(developer['error_code'])
         self.assertEqual(developer['changed_files'], [target])
-        self.assertEqual(developer['model'], 'gw')
+        self.assertEqual(developer['model'], 'qwen3.8-27b')
         self.assertEqual(developer['usage'], {
-            'prompt_tokens': 2118, 'completion_tokens': 154, 'total_tokens': 2272,
+            'prompt_tokens': 2052, 'completion_tokens': 98, 'total_tokens': 2150,
             'served_model': 'qwen3.8-27b'})
         self.assertEqual(developer['execution']['status'], 'DONE')
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
@@ -948,6 +976,68 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual((code, callback['state'], callback['missing_gates']),
                          (0, 'PM_EVIDENCE_READY', []))
         self.assertEqual(callback['evidence']['verification_state'], 'READY')
+
+    def test_docs_success_with_unknown_usage_persists_served_model(self):
+        target = 'gw-agent-unknown-usage.md'
+        code, task = self._delegate(target, usage=(None, None))
+        developer = task['developer']
+        self.assertEqual(code, 0)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['model'], 'qwen3.8-27b')
+        self.assertIsNone(developer['usage'])
+        self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
+        persisted = task_store.TaskStore(Path(self.base / 'tasks').resolve()).get(task['task_id'])
+        self.assertEqual(persisted['developer']['model'], 'qwen3.8-27b')
+
+    def test_docs_success_with_partial_usage_persists_served_model(self):
+        target = 'gw-agent-partial-usage.md'
+        code, task = self._delegate(target, usage=(1026, None))
+        developer = task['developer']
+        self.assertEqual(code, 0)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['model'], 'qwen3.8-27b')
+        self.assertIsNone(developer['usage'])
+        self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
+        persisted = task_store.TaskStore(Path(self.base / 'tasks').resolve()).get(task['task_id'])
+        self.assertEqual(persisted['developer']['model'], 'qwen3.8-27b')
+
+    def test_rejected_responded_write_clears_reported_usage_and_artifact(self):
+        target = 'gw-agent-rejected-responded.md'
+        with patch.object(task_submission_cli, 'run_task_direct_result_event') as callback:
+            code, task = self._delegate(target, reject_responded=True)
+
+        callback.assert_not_called()
+        developer = task['developer']
+        self.assertEqual(code, 1)
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(developer['error_code'], 'DEVELOPER_RESULT_PERSISTENCE_REJECTED')
+        self.assertIsNone(developer['usage'])
+        self.assertIsNone(developer['artifact'])
+        self.assertIsNone(developer['artifact_sha256'])
+        self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
+        self.assertEqual(developer['execution']['status'], 'DONE')
+
+    def test_unknown_usage_control_persists_without_usage(self):
+        target = 'gw-agent-unknown-usage-control.md'
+        code, task = self._delegate(target, usage=(None, None))
+
+        developer = task['developer']
+        self.assertEqual(code, 0)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertIsNone(developer['usage'])
+        self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
+        self.assertEqual(developer['model'], 'qwen3.8-27b')
+
+    def test_matching_model_control_persists_served_model(self):
+        target = 'gw-agent-matching-model-control.md'
+        code, task = self._delegate(target, provider_model='qwen3.8-27b')
+
+        developer = task['developer']
+        self.assertEqual(code, 0)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['model'], 'qwen3.8-27b')
+        self.assertEqual(developer['usage']['served_model'], 'qwen3.8-27b')
+        self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
 
     def test_untestable_file_persists_but_waits_with_a_named_gate(self):
         target = 'gw-agent-synthetic.txt'

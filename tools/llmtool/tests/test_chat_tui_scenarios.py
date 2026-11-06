@@ -66,9 +66,10 @@ def _line_numbers(rows):
     return [int(match.group(1)) for row in rows for match in [LINE.match(row)] if match]
 
 
-def _pm_working(rows):
-    """The pane's working line (first turn: 暖機中…, then 處理中…/思考中…)."""
-    return re.search(r"^PM (暖機中|處理中|思考中)… \d+s", "\n".join(rows), re.M) is not None
+def _pm_busy(rows):
+    """The fixed busy line above the input (first turn: 暖機中…, then turn state)."""
+    return re.search(r"(?:✽|✻|✶|✢) (?:暖機中|處理中|思考中|回答中)…（\d+ 秒）",
+                     "\n".join(rows)) is not None
 
 
 def _pm_idle(rows):
@@ -186,7 +187,7 @@ class TUIScenarioCase(unittest.TestCase):
         terminal.connect_pm()
         first = "slow:%d 第一則" % (4 * self.slow)
         terminal.submit(first)
-        terminal.wait_for(_pm_working, "first turn working")
+        terminal.wait_for(_pm_busy, "first turn busy")
         for number, text in enumerate(("第二則", "第三則", "第四則"), 1):
             terminal.submit(text)
             terminal.wait_text("已排入佇列（第 %d 則）" % number, "queued draft %d" % number)
@@ -304,18 +305,18 @@ class TUIUserScenarioTests(TUIScenarioCase):
             if rows == 16:
                 self.assertLess(len(terminal.pane()), tall)
 
-    def test_s08_long_pm_think_shows_working_line(self):
-        """[Mac PTY (fake provider)] S8 a long PM think shows a ticking working line, never the thought"""
+    def test_s08_long_pm_think_shows_busy_line(self):
+        """[Mac PTY (fake provider)] S8 a long PM think shows a ticking busy line, never the thought"""
         terminal = self.open_terminal()
         terminal.connect_pm()
         terminal.submit("think:3.5 長考題")
         for second in (1, 2, 3):
-            terminal.wait_text("PM 思考中… %ds" % second, "working line at %ds" % second)
+            terminal.wait_text("思考中…（%d 秒）" % second, "busy line at %ds" % second)
         self.assertNotIn("PRIVATE_REASONING", terminal.text())
         terminal.wait_text("PM 回覆：長考題", "reply after thinking")
         terminal.wait_for(_pm_idle, "turn end")
         text = terminal.text()
-        self.assertNotIn("PM 思考中", text, "the working line must be replaced by the reply")
+        self.assertNotIn("思考中", text, "the busy line must disappear when the turn ends")
         self.assertNotIn("PRIVATE_REASONING", text)
 
     def test_s09_three_queued_drafts_sent_fifo(self):
@@ -328,7 +329,7 @@ class TUIUserScenarioTests(TUIScenarioCase):
         terminal = self.open_terminal()
         terminal.connect_pm()
         terminal.submit("slow:6 第一則")
-        terminal.wait_for(_pm_working, "first turn working")
+        terminal.wait_for(_pm_busy, "first turn busy")
         terminal.submit("第二則")
         terminal.wait_text("已排入佇列（第 1 則）")
         terminal.submit("第三則")
@@ -355,7 +356,7 @@ class TUIUserScenarioTests(TUIScenarioCase):
         terminal.wait_text("PM 回覆：第一題")
         terminal.wait_for(_pm_idle, "first turn end")
         terminal.submit("slow:6 第二題")
-        terminal.wait_for(_pm_working, "second turn working")
+        terminal.wait_for(_pm_busy, "second turn busy")
         terminal.esc()
         terminal.wait_for(_pm_interrupted, "interrupted turn end")
         terminal.submit("/pm disconnect")

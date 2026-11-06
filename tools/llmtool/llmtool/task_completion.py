@@ -1090,12 +1090,29 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
     if len(commit_ids) > 4096:
         _stop('RESULT_DIFF_INVALID')
 
+    listed_commits = set(commit_ids)
+    commit_parents = {}
+    for commit in commit_ids:
+        raw = _git(root, ('rev-list', '--parents', '-n', '1', commit), limit=4096)
+        fields = raw.decode('ascii').split()
+        if len(fields) < 2:
+            _stop('SOURCE_NOT_ANCESTOR')
+        commit_parents[commit] = fields[1:]
+
+    current = result_sha
+    while current != source_sha:
+        if current not in listed_commits:
+            _stop('SOURCE_NOT_ANCESTOR')
+        parents = commit_parents[current]
+        if not parents:
+            _stop('SOURCE_NOT_ANCESTOR')
+        current = parents[0]
+
     inherited = set()
     merge_parents = {}
     merge_resolution_paths = {}
     for commit in commit_ids:
-        raw = _git(root, ('rev-list', '--parents', '-n', '1', commit), limit=4096)
-        fields = raw.decode('ascii').split()
+        fields = [commit, *commit_parents[commit]]
         if len(fields) < 3:
             continue
         second_parent = fields[2]
@@ -1108,11 +1125,25 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
         if len(inherited_commits) > 4096:
             _stop('RESULT_DIFF_INVALID')
         inherited.update(inherited_commits)
+        if len(fields) > 3:
+            continue
         resolution_raw = _remerge_diff_paths_raw(root, commit)
+        first_parent = fields[1]
+        conflict_raw = _merge_tree_conflict_paths_raw(
+            root, first_parent, second_parent)
         try:
-            merge_resolution_paths[commit] = set(
+            resolution_paths = set(
                 path for path in resolution_raw.decode('utf-8', 'strict').split('\x00')
                 if path)
+            conflict_fields = conflict_raw.decode('utf-8', 'strict').split('\x00')
+            if (len(conflict_fields) < 2 or
+                    re.fullmatch(r'[0-9a-f]{40}', conflict_fields[0]) is None or
+                    conflict_fields[-1] != ''):
+                _stop('GIT_INSPECTION_FAILED')
+            conflict_paths = conflict_fields[1:-1]
+            if any(not path for path in conflict_paths):
+                _stop('GIT_INSPECTION_FAILED')
+            merge_resolution_paths[commit] = resolution_paths | set(conflict_paths)
         except UnicodeError:
             _stop('GIT_INSPECTION_FAILED')
 
@@ -1120,10 +1151,9 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
     for commit in commit_ids:
         if commit in inherited:
             continue
-        parents = _git(root, ('rev-list', '--parents', '-n', '1', commit), limit=4096)
-        fields = parents.decode('ascii').split()
-        if len(fields) < 2:
-            continue
+        fields = [commit, *commit_parents[commit]]
+        if len(fields) > 3 and commit in merge_parents:
+            _stop('RESULT_DIFF_INVALID')
         first_parent = fields[1]
         changed = _git(root, ('diff-tree', '--no-commit-id', '--name-only', '-r', '-z',
                               '--no-renames', first_parent, commit, '--'),
@@ -1160,12 +1190,41 @@ def _remerge_diff_paths_raw(root, commit):
         with tempfile.TemporaryDirectory(prefix='llmtool-remerge-objects-') as temporary:
             object_dir = Path(temporary) / 'objects'
             object_dir.mkdir(mode=0o700)
-            return _git(root, ('show', '--remerge-diff', '--format=',
+            return _git(root, ('show', '--remerge-diff', '--format=', '--no-renames',
                                '--name-only', '-z', commit), limit=1024 * 1024,
                         env_overrides={
                             'GIT_OBJECT_DIRECTORY': str(object_dir),
                             'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
                         })
+    except LLMToolError:
+        raise
+    except Exception:
+        _stop('GIT_INSPECTION_FAILED')
+
+
+def _merge_tree_conflict_paths_raw(root, first_parent, second_parent):
+    """List conflict paths with all merge-tree object writes kept temporary."""
+    try:
+        objects = _git(root, ('rev-parse', '--path-format=absolute', '--git-path', 'objects'),
+                       limit=4096).decode('utf-8', 'strict').strip()
+    except UnicodeError:
+        _stop('GIT_INSPECTION_FAILED')
+    if not objects or not os.path.isabs(objects):
+        _stop('GIT_INSPECTION_FAILED')
+    try:
+        with tempfile.TemporaryDirectory(prefix='llmtool-merge-tree-objects-') as temporary:
+            object_dir = Path(temporary) / 'objects'
+            object_dir.mkdir(mode=0o700)
+            output, status = _git(root, ('merge-tree', '--write-tree', '--name-only',
+                                  '--no-messages', '-z', first_parent, second_parent),
+                limit=1024 * 1024, allow_exit_1=True, return_exit_code=True,
+                env_overrides={
+                    'GIT_OBJECT_DIRECTORY': str(object_dir),
+                    'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
+                })
+            if status not in (0, 1):
+                _stop('GIT_INSPECTION_FAILED')
+            return output
     except LLMToolError:
         raise
     except Exception:

@@ -170,9 +170,13 @@ class Base(unittest.TestCase):
         self.background_read_patch = patch.object(chat_tui_status, 'read_background',
                                                   return_value=[])
         self.background_read_patch.start()
+        patch.object(chat_tui_status, 'read_attention', return_value=None).start()
         # W57: Task mode is behind the developer flag; these tests exercise it, and
         # NonDevTaskTests checks the default without the flag.
         patch.dict(os.environ, {chat_tui.DEV_ENV: '1'}).start()
+
+    def test_attention_reader_is_patched_in_tui_base(self):
+        self.assertTrue(hasattr(chat_tui_status.read_attention, 'assert_not_called'))
 
 
 class FinishRedrawTests(Base):
@@ -377,6 +381,32 @@ class WidgetTests(Base):
         self.assertEqual(seen['new_draft'], '/pm new ')
         self.assertEqual(seen['argument_draft'], '/pm new --runtime')
         self.assertEqual(ui.input.text, '/pm new --runtime')
+
+    def test_settings_ghost_hints_render_without_editing_input(self):
+        seen = {}
+
+        def capture(ui, key):
+            screen = ui.app.renderer.last_rendered_screen
+            size = ui.app.output.get_size()
+            seen[key] = "".join(screen.data_buffer[y][x].char
+                                for y in range(size.rows) for x in range(size.columns))
+            seen[key + "_draft"] = ui.input.text
+
+        ui, _ = self.drive(['/settings', lambda ui: capture(ui, 'command'),
+                            ' ', lambda ui: capture(ui, 'command_space'),
+                            'auto-resume', lambda ui: capture(ui, 'setting'),
+                            ' ', lambda ui: capture(ui, 'setting_space'),
+                            'on', lambda ui: capture(ui, 'value')])
+        self.assertIn('auto-resume on|off', seen['command'])
+        self.assertIn('auto-resume on|off', seen['command_space'])
+        self.assertIn('on|off', seen['setting'])
+        self.assertIn('on|off', seen['setting_space'])
+        self.assertNotIn('on|off', seen['value'])
+        self.assertEqual(seen['command_draft'], '/settings')
+        self.assertEqual(seen['command_space_draft'], '/settings ')
+        self.assertEqual(seen['setting_draft'], '/settings auto-resume')
+        self.assertEqual(seen['setting_space_draft'], '/settings auto-resume ')
+        self.assertEqual(seen['value_draft'], '/settings auto-resume on')
 
     def test_saved_history_is_identified_in_opening_text(self):
         history_path = self.temp_root / '.local/state/llmtool/chat/history.json'
@@ -698,11 +728,12 @@ class WidgetTests(Base):
     def test_slash_picker_lists_only_existing_commands(self):
         labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
         self.assertEqual(labels, ['/pm connect', '/pm new', '/pm', '/pm disconnect',
-                                  '/pm history', '/pm queue', '/help', '/status', '/provider', '/skill',
+                                  '/pm history', '/pm queue', '/help', '/status',
+                                  '/provider', '/skill',
                                   '/clear', '/history', '/exit', '/quit', '/task submit',
                                   '/task show', '/task mode', '/task list', '/task events',
                                   '/theme', '/links', '/settings', '/pm list', '/pm use',
-                                  '/pm accounts'])
+                                  '/pm accounts', '/logs', '/attention'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:3],
                          ['/status', '/skill', '/settings'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/p')][:3],
@@ -718,7 +749,8 @@ class WidgetTests(Base):
 
     def test_picker_completes_draft_without_executing(self):
         def open_menu(ui):
-            self.assertEqual([c[0] for c in ui.menu_items], ['/status', '/skill', '/settings'])
+            self.assertEqual([c[0] for c in ui.menu_items],
+                             ['/status', '/skill', '/settings'])
         ui, _ = self.drive(['/s', open_menu, '\x1b[B', '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/skill '),
                             lambda ui: self.assertEqual(ui.menu_items, []),
@@ -738,6 +770,28 @@ class WidgetTests(Base):
                             '\x15', '/provider', '\t',
                             lambda ui: self.assertEqual(ui.input.text, '/provider ')])
         self.assertEqual(ui.menu_items, [])
+        self.factory.assert_not_called()
+
+    def test_settings_exact_command_still_runs_from_the_draft(self):
+        ui, _ = self.drive(['/settings\r',
+                            lambda ui: self.assertEqual(ui.input.text, '')])
+        self.assertIn('Settings: auto-resume', ui.conversation.text)
+
+    def test_settings_with_trailing_space_runs_from_the_draft(self):
+        ui, _ = self.drive(['/settings ', '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '')])
+        self.assertIn('Settings: auto-resume', ui.conversation.text)
+
+    def test_tab_keeps_settings_command_draft_and_closes_picker(self):
+        ui, _ = self.drive(['/settings', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/settings '),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
+        self.factory.assert_not_called()
+
+    def test_tab_keeps_settings_prefix_draft_and_closes_picker(self):
+        ui, _ = self.drive(['/sett', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/settings '),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
         self.factory.assert_not_called()
 
     def test_tab_extends_ambiguous_prefix_and_lists_candidates(self):
@@ -799,7 +853,8 @@ class WidgetTests(Base):
 
     def test_picker_esc_enter_inserts_newline_instead_of_closing_and_submitting(self):
         def open_menu(ui):
-            self.assertEqual([c[0] for c in ui.menu_items], ['/status', '/skill', '/settings'])
+            self.assertEqual([c[0] for c in ui.menu_items],
+                             ['/status', '/skill', '/settings'])
             # The short lone-Esc timeout applies only while the picker is open.
             self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
         ui, _ = self.drive(['/s', open_menu, '\x1b\r',
@@ -823,6 +878,7 @@ class WidgetTests(Base):
     def test_help_lists_pm_first_and_marks_task_submit_as_dev_test_only(self):
         # Owner decision 022:A (#525): /pm is the product entry; /task submit stays, labelled.
         help_text = chat_tui.key_help(True)
+        self.assertIn('/attention            Show what needs attention', help_text)
         self.assertLess(help_text.index('Talk to the PM'), help_text.index('/task submit'))
         self.assertLess(help_text.index('/pm new'), help_text.index('/task submit'))
         self.assertIn('開發測試用：只登記，不會派工', help_text.split('/task submit', 1)[1][:200])
@@ -835,12 +891,26 @@ class WidgetTests(Base):
         self.assertEqual(dict((c[0], c[1]) for c in picker)['/task submit'], '/task submit --provider ')
         ui, _ = self.drive(['/help\r'])
         shown = ui.conversation.text.split('> /help', 1)[1]
+        self.assertIn('  /attention              Show what needs attention', shown)
         self.assertLess(shown.index('/pm new'), shown.index('/status'))
         self.assertIn('Talk to the PM', shown)
         self.assertIn('Type / to choose a command', shown)
         self.assertIn('/task ...', shown)
         self.assertNotIn('Ctrl-J', shown)
         self.factory.assert_not_called()
+
+    def test_help_points_to_pm_setup_guide_before_chat_heading(self):
+        ui, _ = self.drive(['/help\r'])
+        shown = ui.conversation.text.split('> /help', 1)[1]
+        guide = 'docs/guides/llmtool-pm-setup-zh-tw.md'
+        self.assertIn(guide, shown)
+        self.assertLess(shown.index(guide), shown.index('Chat'))
+
+    def test_key_help_points_to_pm_setup_guide(self):
+        help_text = chat_tui.key_help(False)
+        guide = 'docs/guides/llmtool-pm-setup-zh-tw.md'
+        self.assertIn(guide, help_text)
+        self.assertGreater(help_text.index(guide), help_text.index('/pm queue'))
 
     def test_picker_enter_on_exact_typed_command_submits_like_no_picker(self):
         # Rule: Enter only completes a draft that differs from the chosen suggestion and
@@ -922,24 +992,24 @@ class WidgetTests(Base):
 
     def test_picker_scrolls_and_counts_hidden_entries(self):
         def first_page(ui):
-            self.assertEqual(len(ui.menu_items), 25)
+            self.assertEqual(len(ui.menu_items), 27)
             rows = self.menu_rows(ui)
             self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
             self.assertIn('/pm connect', rows[0])
-            self.assertIn('20 more (0 above, 20 below)', rows[-1])
+            self.assertIn('22 more (0 above, 22 below)', rows[-1])
 
         def scrolled(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
             self.assertNotIn('/pm connect', ''.join(rows))
             self.assertIn('/help', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('20 more (2 above, 18 below)', rows[-1])
+            self.assertIn('22 more (2 above, 20 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
-            self.assertEqual(ui.menu_index, 24)
-            self.assertIn('/pm accounts', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('(20 above, 0 below)', rows[-1])
+            self.assertEqual(ui.menu_index, 26)
+            self.assertIn('/attention', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('(22 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/help'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
@@ -1837,6 +1907,7 @@ class W57ChatTests(Base):
         self.assertIn('狀態：待命', status)
         self.assertNotIn('not probed', status)
         self.assertNotIn('connectivity', status)
+        self.assertNotIn('用量（本 session）', status)
 
     def test_chat_status_shows_the_served_model_of_the_last_reply(self):
         self.client.complete.return_value = Reply('reply', {'served_model': 'qwen3-coder-480b'})
@@ -2123,6 +2194,179 @@ class StatusProjectionTests(unittest.TestCase):
         loaded, unreadable = self.status.load_records(Store())
         self.assertEqual([r['task_id'] for r in loaded], ['b' * 32, 'a' * 32])
         self.assertEqual(unreadable, 1)
+
+    def test_attention_items_states_and_readiness(self):
+        blocked = _record(task_id='task-blocked', developer=_developer(
+            state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_BLOCKED'))
+        unavailable = _record(task_id='task-unavailable',
+                              developer=_developer(state='DEVELOPER_UNAVAILABLE'))
+        failed = _record(task_id='task-failed',
+                         developer=_developer(state='DEVELOPER_OUTPUT_REJECTED'))
+        running = _record(task_id='task-running',
+                          developer=_developer(state='DEVELOPER_DISPATCHING'))
+        evidence_ready = _record(task_id='task-evidence', developer=_developer(
+            state='DEVELOPER_RESPONDED', direct_result_callback={'state': 'PM_EVIDENCE_READY'}))
+        self.assertEqual(self.status.attention_items([blocked, unavailable, failed, running]), [
+            {'label': '卡住', 'task': 'task-blocked',
+             'reason': 'Developer outcome unknown (CODEX_BLOCKED)'},
+            {'label': '供應商不可用', 'task': 'task-unavailable', 'reason': ''},
+            {'label': '失敗', 'task': 'task-failed', 'reason': ''}])
+        ready = self.status.attention_items([running], {'task-running'})
+        self.assertEqual(ready, [{'label': '證據已就緒，等 PM 處理',
+                                  'task': 'task-running', 'reason': ''}])
+        self.assertEqual(self.status.attention_items([running, evidence_ready]), [])
+        self.assertEqual(self.status.attention_items([evidence_ready], {'task-evidence'}), [
+            {'label': '證據已就緒，等 PM 處理', 'task': 'task-evidence', 'reason': ''}])
+        terminal = _record(task_id='task-done', completion={'state': 'DONE'})
+        self.assertEqual(self.status.attention_items([terminal], {'task-done'}), [])
+
+    def test_read_attention_counts_unreadable_sources_independently(self):
+        session = '11111111-1111-4111-8111-111111111111'
+        records = [_record(task_id='task-running',
+                           developer=_developer(state='DEVELOPER_DISPATCHING'))]
+        cases = ((1, 0), (0, 1), (1, 1))
+        for task_bad, inbox_bad in cases:
+            with self.subTest(task_bad=task_bad, inbox_bad=inbox_bad), \
+                 patch('llmtool.active_pm_inbox._session_records',
+                       return_value=(records, task_bad)), \
+                 patch('llmtool.active_pm_inbox.peek_inbox', return_value={
+                     'events': [], 'pending': [], 'unreadable_task_count': inbox_bad}):
+                result = self.status.read_attention(session, store=object())
+            self.assertEqual(result['task_unreadable_count'], task_bad)
+            self.assertEqual(result['inbox_unreadable_count'], inbox_bad)
+            self.assertEqual(result['unread'], 0)
+            self.assertEqual(result['items'], [])
+
+    def test_read_attention_counts_pending_current_and_stale_events(self):
+        session = '11111111-1111-4111-8111-111111111111'
+        ready = _record(task_id='task-running',
+                        developer=_developer(state='DEVELOPER_DISPATCHING'))
+        inbox = {'events': [
+            {'task_id': 'task-running', 'current': True, 'state': 'DELIVERED'},
+            {'task_id': 'task-stale', 'current': False, 'state': 'DELIVERED'},
+            {'task_id': 'task-acked', 'current': True, 'state': 'ACKED'}],
+            'pending': [{'task_id': 'task-pending', 'state': 'NOT_YET_RECORDED'}]}
+        with patch('llmtool.active_pm_inbox._session_records', return_value=([ready], 0)), \
+             patch('llmtool.active_pm_inbox.peek_inbox', return_value=inbox):
+            result = self.status.read_attention(session, store=object())
+        self.assertEqual(result['unread'], 4)
+        self.assertEqual(result['items'], [{'label': '證據已就緒，等 PM 處理',
+                                            'task': 'task-running', 'reason': ''}])
+        with patch('llmtool.active_pm_inbox._session_records', return_value=([ready], 0)), \
+             patch('llmtool.active_pm_inbox.peek_inbox', return_value={
+                 'events': [{'task_id': 'task-running', 'current': True, 'state': 'ACKED'}],
+                 'pending': []}):
+            acked = self.status.read_attention(session, store=object())
+        self.assertEqual(acked['unread'], 1)
+        self.assertEqual(acked['items'], [])
+
+
+@unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
+class AttentionReportTests(Base):
+    drive = WidgetTests.drive
+
+    def connected_ui(self, ui):
+        ui.pm_target = ('11111111-1111-4111-8111-111111111111', str(self.temp_root))
+        ui.pm_runtime = Mock()
+        ui.pm_mode = True
+        return ui
+
+    def test_attention_command_disconnected_and_never_read(self):
+        ui, _ = self.drive(['/attention\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1],
+                         '注意事項：尚未連線 PM。先 /pm connect。')
+        ui, _ = self.drive([lambda ui: self.connected_ui(ui), '/attention\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1],
+                         '注意事項：讀取中，稍後再試。')
+
+    def test_attention_ignores_a_stale_session_snapshot(self):
+        def stale(ui):
+            self.connected_ui(ui)
+            ui.finish_attention('22222222-2222-4222-8222-222222222222', {
+                'items': [{'label': '卡住', 'task': 'oldtask', 'reason': 'old fact'}],
+                'unread': 1, 'task_unreadable_count': 0, 'inbox_unreadable_count': 0})
+
+        ui, _ = self.drive([stale, '/attention\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1],
+                         '注意事項：讀取中，稍後再試。')
+        self.assertEqual(ui.attention_lines(), [])
+
+    def test_attention_chip_drops_first_at_narrow_status_width(self):
+        def check(ui):
+            self.connected_ui(ui)
+            ui.app.output.get_size = lambda: Size(rows=24, columns=140)
+            ui.finish_attention(ui.pm_target[0], {'items': [
+                {'label': '卡住', 'task': 'task-blocked', 'reason': ''}], 'unread': 0,
+                'task_unreadable_count': 0, 'inbox_unreadable_count': 0})
+            self.assertIn('注意 1', ui.status_text())
+            ui.app.output.get_size = lambda: Size(rows=24, columns=70)
+            self.assertNotIn('注意 1', ui.status_text())
+
+        self.drive([check])
+
+    def test_attention_failed_snapshot_keeps_local_facts(self):
+        ui, _ = self.drive([])
+        self.connected_ui(ui)
+        ui.pm_outbox.append('plain queued text')
+        ui.pm_outbox_paused = 'interrupted'
+        ui.pm_state = 'error(PM_FAILED)'
+        ui.finish_attention(ui.pm_target[0], None)
+        text = ui.attention_report()
+        self.assertIn('注意事項：UNKNOWN（TaskStore 無法讀取）', text)
+        self.assertIn('PM 佇列暫停：interrupted', text)
+        self.assertIn('最近的 PM 回合出錯', text)
+        self.assertTrue(text.rstrip().endswith('需要你決定：無法提供（Core 尚未記錄）'))
+
+    def test_attention_report_partial_read_and_safe_single_rows(self):
+        snapshot = {'items': [{'label': '卡住', 'task': 'attention-task',
+                               'reason': 'line\nwith\tcontrols\rand ' + 'x' * 200}],
+                    'unread': 3, 'task_unreadable_count': 1,
+                    'inbox_unreadable_count': 1}
+        ui, _ = self.drive([lambda ui: self.connected_ui(ui),
+                            lambda ui: ui.finish_attention(ui.pm_target[0], snapshot),
+                            '/attention\r'])
+        text = ui.conversation.text.split('> /attention', 1)[1]
+        self.assertIn('注意事項：UNKNOWN（TaskStore 部分無法讀取）', text)
+        self.assertIn('部分讀取失敗：Tasks 1；PM inbox 1', text)
+        rows = [line for line in text.splitlines() if '卡住｜attentio' in line]
+        self.assertEqual(len(rows), 1)
+        self.assertLessEqual(len(rows[0].strip()), 162)
+        self.assertTrue(text.rstrip().endswith('需要你決定：無法提供（Core 尚未記錄）'))
+
+    def test_attention_report_limits_facts_but_keeps_full_count(self):
+        items = [{'label': '卡住', 'task': 'task-%02d' % i, 'reason': ''} for i in range(25)]
+
+        def show(ui):
+            self.connected_ui(ui)
+            ui.app.output.get_size = lambda: Size(rows=24, columns=140)
+            ui.finish_attention(ui.pm_target[0], {'items': items, 'unread': 0,
+                'task_unreadable_count': 0, 'inbox_unreadable_count': 0})
+            self.assertIn('注意 25', ui.pm_status_fields(lambda value, _width: value)['attention'])
+
+        ui, _ = self.drive([show, '/attention\r'])
+        text = ui.conversation.text.split('> /attention', 1)[1]
+        self.assertIn('注意事項（25 項）', text)
+        self.assertEqual(sum('卡住｜' in row for row in text.splitlines()), 20)
+        self.assertIn('另有 5 項未顯示', text)
+        self.assertTrue(text.rstrip().endswith('需要你決定：無法提供（Core 尚未記錄）'))
+
+    def test_attention_read_exception_still_posts_background_completion(self):
+        posted = []
+
+        class Loop:
+            def call_soon_threadsafe(_self, callback, *args):
+                posted.append((callback, args))
+
+        def exercise(ui):
+            with patch.object(chat_tui_status, 'read_attention',
+                              side_effect=RuntimeError('private')):
+                ui._read_background(Loop(), '11111111-1111-4111-8111-111111111111')
+
+        ui, _ = self.drive([exercise])
+        self.assertEqual([callback.__name__ for callback, _args in posted],
+                         ['finish_attention', 'finish_background'])
+        self.assertEqual(posted[0][1][1], None)
+        self.assertEqual(posted[1][1][1], ([], None))
 
 
 @unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
@@ -3735,8 +3979,6 @@ class PMTypewriterTests(Base):
     def shown(self):
         """Text of the last PM block as the pane shows it (None: no block opened)."""
         text = self.ui.conversation.text
-        if self.ui.pm_working_at is not None:   # the working line below the block (W52 F1)
-            text = text[:self.ui.pm_working_at]
         if text.endswith('\nPM'):
             return ''                                # the label opened; no text yet
         if '\nPM\n' not in text:
@@ -4756,26 +4998,26 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(list(ui.pm_outbox), ['next one'])
         self.assertEqual(ui.pm_outbox_paused, 'Esc 中斷')
 
-    def test_disconnect_mid_turn_leaves_no_working_timer_and_ignores_the_old_worker(self):
+    def test_disconnect_mid_turn_leaves_no_busy_timer_and_ignores_the_old_worker(self):
         # #636 Codex review v2 finding 2: after a disconnect mid-turn, append() redrew the
-        # working line and scheduled another tick.
+        # busy line and scheduled another tick.
         self.turns = [_thinking() + ['HOLD', _result('late')]]
         seen = {}
 
         async def thinking(ui):
-            await self.until(ui, lambda ui: ui.conversation.text.endswith('PM 思考中… 0s'),
-                             'working line')
-            self.assertIsNotNone(ui._pm_working_handle)
+            await self.until(ui, lambda ui: '思考中…（' in ui._pm_busy_line(),
+                             'busy line')
+            self.assertIsNotNone(ui._pm_busy_handle)
             seen['seq'] = ui._pm_turn_seq
 
         async def disconnected(ui):
             await self.until(ui, lambda ui: ui.pm_runtime is None and not ui.pm_pending,
                              'disconnected')
             self.assertFalse(ui.pm_turn_active)
-            self.assertIsNone(ui._pm_working_handle)
-            self.assertIsNone(ui.pm_working_at)
+            self.assertFalse(ui._pm_busy_wanted())
+            self.assertIsNone(ui._pm_busy_handle)
             ui.append('later output')
-            self.assertIsNone(ui._pm_working_handle)
+            self.assertIsNone(ui._pm_busy_handle)
             self.assertTrue(ui.conversation.text.endswith('later output'))
             await asyncio.sleep(1.3)                  # a surviving tick would redraw by now
             self.assertTrue(ui.conversation.text.endswith('later output'))
@@ -4787,19 +5029,19 @@ class PMConversationTests(BoundedPMTest):
 
         ui, _ = self.drive([self.connect(), self.connected, 'think\r', thinking,
                             '/pm disconnect\r', disconnected])
-        self.assertNotIn('PM 思考中', ui.conversation.text)
-        self.assertNotIn('PM 處理中', ui.conversation.text)
+        self.assertNotIn('思考中', ui.conversation.text)
+        self.assertNotIn('處理中', ui.conversation.text)
 
     def test_exit_mid_turn_cancels_every_timer(self):
         self.turns = [_thinking() + ['HOLD', _result('late')]]
 
         async def thinking(ui):
-            await self.until(ui, lambda ui: ui._pm_working_handle is not None, 'working line')
+            await self.until(ui, lambda ui: ui._pm_busy_handle is not None, 'busy line')
 
         ui, _ = self.drive([self.connect(), self.connected, 'think\r', thinking])
         # drive() exits the app and runs close_pm(), as run() does on exit.
         self.assertFalse(ui.pm_turn_active)
-        self.assertIsNone(ui._pm_working_handle)
+        self.assertIsNone(ui._pm_busy_handle)
         self.assertIsNone(ui._pm_tick_handle)
         self.assertIsNone(ui._autoscroll_handle)
         self.assertIsNone(ui._drag_copy_handle)
@@ -4954,19 +5196,17 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
                          ['PM request', 'queued'])     # Esc paused the queue; send resumed it
 
-    def test_working_line_shows_at_once_ticks_each_second_and_gives_way_to_text(self):
-        # W52 F1: a long think showed only "owner → PM:"; now the pane says so, every second.
+    def test_busy_line_ticks_while_reply_streams_and_disappears_at_turn_end(self):
         self.turns = [_thinking() + ['HOLD', _delta('答案', index=1), 'HOLD',
                                      _assistant({'type': 'text', 'text': '答案'}), _result('答案')]]
         seen = {}
 
         async def working(ui):
-            await self.until(ui, lambda ui: '\n\nPM ' in ui.conversation.text, 'working line')
             await self.until(ui, lambda ui: ui.pm_state == 'thinking', 'thinking')
-            self.assertTrue(ui.conversation.text.endswith('PM 思考中… 0s'))
+            self.assertIn('思考中…（0 秒）', ui._pm_busy_line())
             await asyncio.sleep(1.2)
-            self.assertTrue(ui.conversation.text.endswith('PM 思考中… 1s'))
-            self.assertEqual(ui.conversation.text.count('PM 思考中…'), 1)   # redrawn in place
+            self.assertIn('思考中…（1 秒）', ui._pm_busy_line())
+            self.assertNotIn('思考中', ui.conversation.text)
             self.assertNotIn('PRIVATE_REASONING', ui.conversation.text)
             self.fakes[0].gate.set()
 
@@ -4977,10 +5217,11 @@ class PMConversationTests(BoundedPMTest):
 
         ui, _ = self.drive([self.connect(), self.connected, '想一想\r', working, text_arrived,
                             self.turn_done])
-        self.assertNotIn('思考中', seen['text'])     # replaced when the text arrived
-        self.assertNotIn('PM 思考中', ui.conversation.text)
-        self.assertNotIn('PM 處理中', ui.conversation.text)
-        self.assertIsNone(ui._pm_working_handle)
+        self.assertNotIn('思考中', seen['text'])
+        self.assertFalse(ui._pm_busy_wanted())
+        self.assertNotIn('思考中', ui.conversation.text)
+        self.assertNotIn('處理中', ui.conversation.text)
+        self.assertIsNone(ui._pm_busy_handle)
 
     def test_escape_interrupts_and_ctrl_c_interrupts_then_exits(self):
         self.turns = [[_delta('working…'), 'HOLD', _result('stopped')],
@@ -5425,8 +5666,75 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('佇列（本機設定）：沒有', status)
         self.assertRegex(status, '背景：(讀取中|UNKNOWN（TaskStore：.*）|[0-9]+ 件進行中)')
         self.assertIn('主題（本機設定）：', status)
+        ordered = ['狀態（PM 模式）', 'PM session：', 'Claude 帳號目錄：',
+                   '權限模式（本機設定）：', 'PM 狀態：', '背景：', '佇列（本機設定）：',
+                   '主題（本機設定）：', '用量（本 session）：', 'Context 與額度：']
+        positions = [status.index(line) for line in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(status.rstrip().splitlines()[-2:], [
+            '  用量（本 session）：尚無回合',
+            '  Context 與額度：UNAVAILABLE（llmtool 沒有這項資料）'])
         self.assertNotIn('供應商', status)
         self.assertNotIn('provider:', status)
+
+    def test_status_pm_history_read_failure_shows_unknown_and_returns(self):
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: setattr(ui.pm_api, 'read_all_turns',
+                                               Mock(side_effect=OSError('history unavailable'))),
+                            '/status\r',
+                            lambda ui: self.until(ui, lambda ui: '狀態（PM 模式）' in
+                                                  ui.conversation.text)])
+        status = ui.conversation.text.split('> /status', 1)[1]
+        self.assertIn('用量（本 session）：UNKNOWN（PM 歷史無法讀取）', status)
+        self.assertIn('Context 與額度：UNAVAILABLE（llmtool 沒有這項資料）', status)
+
+    def test_logs_disconnected_and_picker_enter_on_exact_command_runs(self):
+        expected = 'PM 紀錄：尚未連線 PM。先 /pm connect。'
+        ui, _ = self.drive(['/logs\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1], expected)
+        ui, _ = self.drive(['/logs', '\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1], expected)
+
+    def test_logs_read_failure_and_empty_history_have_exact_text(self):
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: setattr(ui.pm_api, 'read_recent_turns',
+                                               Mock(side_effect=OSError('history unavailable'))),
+                            '/logs\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1],
+                         'PM 紀錄：UNKNOWN（PM 歷史無法讀取）')
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: setattr(ui.pm_api, 'read_recent_turns',
+                                               Mock(return_value=[])),
+                            '/logs\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1], 'PM 紀錄：尚無回合')
+
+    def test_logs_formatter_failure_shows_unknown(self):
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: setattr(ui.pm_api, 'read_recent_turns',
+                                               Mock(return_value=[])),
+                            lambda ui: patch.object(chat_tui_pm, 'log_lines',
+                                                    side_effect=RuntimeError('plain failure')).start(),
+                            '/logs\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1],
+                         'PM 紀錄：UNKNOWN（PM 歷史無法讀取）')
+
+    def test_logs_shows_oldest_first_and_requests_at_most_twenty(self):
+        turns = [
+            {'started_at': '2026-10-28T00:00:00+00:00', 'status': 'COMPLETED',
+             'origin': 'foreground', 'tool_names': ['first-tool']},
+            {'started_at': '2026-10-28T00:01:00+00:00', 'status': 'INTERRUPTED',
+             'origin': 'background', 'tool_names': ['second-tool'], 'reason': 'USER_INTERRUPT'},
+        ]
+        read = Mock(return_value=turns)
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: setattr(ui.pm_api, 'read_recent_turns', read),
+                            '/logs\r'])
+        text = ui.conversation.text.split('> /logs', 1)[1]
+        self.assertEqual(read.call_args.args[1], chat_tui_pm.LOGS_SHOWN)
+        self.assertEqual(read.call_args.args[0], self.session_id)
+        self.assertLess(text.index('first-tool'), text.index('second-tool'))
+        self.assertIn('PM 紀錄（最近 2 回合）', text)
+        self.assertIn('  不顯示工具指令與輸出', text)
 
     def test_status_background_read_failure_shows_unknown_source_and_reason(self):
         reason = 'TaskStore read denied'

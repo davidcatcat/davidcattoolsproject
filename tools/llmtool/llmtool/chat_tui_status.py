@@ -436,7 +436,7 @@ BACKGROUND_ROLES = {"RUNNING": "Developer", "WAITING_EXECUTOR_EVIDENCE": "Develo
 
 
 def background_items(records):
-    """In-flight work of a PM's Tasks, oldest update first: role, Task, PR, state, update."""
+    """In-flight work of a PM's Tasks, oldest update first."""
     items = []
     for record in records:
         derived, _reason = stage(record)
@@ -444,11 +444,58 @@ def background_items(records):
         if role is None:
             continue
         numbers = sorted({number for number, _label in _pr_sources(record)})
+        developer = _dict(record.get("developer")) or {}
+        if derived == "REPAIRING":
+            claim = _latest(record.get("review_repair_claims"))
+            started_at = claim.get("claimed_at") if claim is not None else None
+        elif derived == "WAITING_REVIEW":
+            claim = _latest(record.get("review_dispatch_claim"))
+            started_at = claim.get("claimed_at") if claim is not None else None
+        else:
+            started_at = developer.get("created_at")
+            if type(started_at) is not str:
+                started_at = record.get("created_at")
+        if type(started_at) is not str:
+            started_at = None
         items.append({"role": role, "task": str(value(record, "task_id")),
                       "pr": " ".join("#%d" % number for number in numbers),
-                      "state": derived, "updated_at": record.get("updated_at")})
+                      "state": derived, "updated_at": record.get("updated_at"),
+                      "started_at": started_at})
     items.sort(key=lambda item: str(item["updated_at"] or ""))
     return items
+
+
+def background_summary(item, now=None):
+    """Compact live summary for one in-flight item; omit elapsed time when unknown."""
+    item = _dict(item) or {}
+    prs = item.get("pr")
+    label = next((word for word in prs.split() if word), "") if type(prs) is str else ""
+    if not label:
+        task = item.get("task")
+        label = task[:8] if type(task) is str else ""
+    role = item.get("role")
+    doing = {"Developer": "開發中", "Reviewer": "審查中"}.get(role, item.get("state", ""))
+    parts = [part for part in (label, doing) if type(part) is str and part]
+    started_at = item.get("started_at")
+    if type(started_at) is str:
+        try:
+            started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            current = now or datetime.now(timezone.utc)
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=timezone.utc)
+            seconds = max(0, int((current - started).total_seconds()))
+            if seconds < 3600:
+                elapsed = "%d:%02d" % divmod(seconds, 60)
+            else:
+                hours, remainder = divmod(seconds, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                elapsed = "%d:%02d:%02d" % (hours, minutes, seconds)
+            parts.append(elapsed)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            pass
+    return " · ".join(parts)
 
 
 def group_rows(records, now, show_all):
@@ -533,6 +580,49 @@ def read_background(pm_session, store=None):
     store = TaskStore() if store is None else store
     records, _unreadable = _session_records(store, pm_session_key(pm_session))
     return background_items(records)
+
+
+def attention_items(records, ready_task_ids=()):
+    """Tasks needing PM attention, plus current evidence ready for PM handling."""
+    from .task_status import derive_state
+
+    ready_task_ids = set(ready_task_ids)
+    labels = {"BLOCKED": "卡住", "UNAVAILABLE": "供應商不可用", "FAILED": "失敗"}
+    items = []
+    for record in records:
+        state = derive_state(record)
+        if state in labels:
+            items.append({"label": labels[state], "task": str(value(record, "task_id")),
+                          "reason": blocked_reason(record) or ""})
+        elif state == "RUNNING" and record.get("task_id") in ready_task_ids:
+            items.append({"label": "證據已就緒，等 PM 處理",
+                          "task": str(value(record, "task_id")), "reason": ""})
+    return items
+
+
+def read_attention(pm_session, store=None):
+    """Read attention facts and unread completion events without reconciling or acking."""
+    from .active_pm_inbox import _session_records, peek_inbox, pm_session_key
+    from .task_store import TaskStore
+
+    store = TaskStore() if store is None else store
+    session_key = pm_session_key(pm_session)
+    records, unreadable = _session_records(store, session_key)
+    inbox = peek_inbox(store, session_key)
+    events = inbox.get("events", [])
+    pending = inbox.get("pending", [])
+    ready_task_ids = {
+        entry.get("task_id") for entry in pending
+        if type(entry) is dict and entry.get("state") == "NOT_YET_RECORDED"
+    }
+    ready_task_ids.update(
+        event.get("task_id") for event in events
+        if type(event) is dict and event.get("current") is True and event.get("state") != "ACKED"
+    )
+    return {"items": attention_items(records, ready_task_ids),
+            "unread": len(events) + len(pending),
+            "task_unreadable_count": unreadable,
+            "inbox_unreadable_count": inbox.get("unreadable_task_count", 0)}
 
 
 def age_text(timestamp, now=None):

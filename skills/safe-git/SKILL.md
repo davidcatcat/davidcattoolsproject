@@ -56,7 +56,7 @@ For GitHub API documentation edits, pin reads and the change branch to a known b
 
 ## PR review and merge
 
-Before merge, verify current base/head, exact-head CI, formal non-author review and every Task Contract-required Security/QA/runtime gate. A changed head invalidates affected evidence. Merge only when delegated authority covers the PR and all required gates pass; verify the resulting commit. Do not use paid fallback or force operations.
+Before merge, verify current base/head, exact-head CI, formal non-author review and every Task Contract-required Security/QA/runtime gate. A PR that changes a path in `tools/llmtool/sensitive-paths.json` follows [Rule-file PRs](../ai-team-delivery/pm-continuation.md#rule-file-prs-owner-2026-11-05-1019): no per-PR approval, and its merge raises a monitor alert. A changed head invalidates affected evidence. Merge only when delegated authority covers the PR and all required gates pass; verify the resulting commit. Do not use paid fallback or force operations.
 
 ## Done when
 

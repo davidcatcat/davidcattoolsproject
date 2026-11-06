@@ -22,6 +22,7 @@ from .chat_tui_task import UNKNOWN
 from .test_output_excerpts import _emitted_sensitive
 
 HISTORY_SHOWN = 20  # Most recent stored turns rendered on connect.
+LOGS_SHOWN = 20  # Most recent PM turn summaries shown by /logs.
 TOOL_LABEL_CELLS = 120  # W57: most display cells of a tool line's description.
 WITHHELD = "[PM text withheld: it contains credential-like text]"
 # While a PM reply streams, the ASCII token still growing at the end (any run of
@@ -182,6 +183,99 @@ class PMRuntimeAPI:
         from .pm_runtime import read_history
         return read_history(session_id, after=0, limit=200, state_root=self.state_root)
 
+    def read_all_turns(self, session_id):
+        from .pm_runtime import read_history
+        turns = []
+        after = 0
+        while True:
+            page = read_history(session_id, after=after, limit=200, state_root=self.state_root)
+            page_turns = page['turns']
+            if not page_turns:
+                return turns
+            turns.extend(page_turns)
+            after = page['next_after']
+
+    def read_recent_turns(self, session_id, count):
+        from .pm_runtime import read_history
+        return read_history(session_id, latest=count, state_root=self.state_root)['turns']
+
+
+_USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens',
+               'cache_creation_input_tokens')
+
+
+def usage_totals(turns):
+    """Return recorded token totals and the number of recorded and missing turns."""
+    totals = {key: None for key in _USAGE_KEYS}
+    counted = missing = 0
+    for turn in turns:
+        usage = turn.get('usage') if type(turn) is dict else None
+        recorded = False
+        if type(usage) is dict:
+            for key in _USAGE_KEYS:
+                value = usage.get(key)
+                if type(value) is int and value >= 0:
+                    if totals[key] is None:
+                        totals[key] = 0
+                    totals[key] += value
+                    recorded = True
+        if recorded:
+            counted += 1
+        else:
+            missing += 1
+    return totals, counted, missing
+
+
+def usage_gaps(turns):
+    """Count counted turns that lack a valid value for each usage key."""
+    valid_counts = {key: 0 for key in _USAGE_KEYS}
+    counted = 0
+    for turn in turns:
+        usage = turn.get('usage') if type(turn) is dict else None
+        valid = set()
+        if type(usage) is dict:
+            for key in _USAGE_KEYS:
+                value = usage.get(key)
+                if type(value) is int and value >= 0:
+                    valid.add(key)
+        if valid:
+            counted += 1
+            for key in valid:
+                valid_counts[key] += 1
+    return {key: counted - valid_counts[key] for key in _USAGE_KEYS}
+
+
+def usage_status_line(turns, formatter):
+    """Format PM turn usage, preserving UNKNOWN when no turns recorded usage."""
+    if not turns:
+        return '用量（本 session）：尚無回合'
+    totals, counted, missing = usage_totals(turns)
+    if not counted:
+        return '用量（本 session）：UNKNOWN（%d 回合沒有用量紀錄）' % missing
+    dropped = min((turn.get('seq') for turn in turns
+                   if type(turn) is dict and type(turn.get('seq')) is int), default=0) - 1
+    dropped = max(0, dropped)
+    gaps = usage_gaps(turns)
+
+    def display(key):
+        if totals[key] is None:
+            return '未回報'
+        prefix = '≥' if dropped > 0 or gaps[key] > 0 else ''
+        return prefix + formatter(totals[key])
+
+    count_prefix = '≥' if dropped > 0 else ''
+    line = ('用量（本 session）：輸入 %s · 輸出 %s · 快取讀取 %s · 快取建立 %s tokens（%s%d 回合'
+            % (display('input_tokens'), display('output_tokens'),
+               display('cache_read_input_tokens'), display('cache_creation_input_tokens'),
+               count_prefix, counted))
+    if missing:
+        line += '，%s%d 回合沒有紀錄' % (count_prefix, missing)
+    if dropped:
+        line += '，前 %d 回合已不在紀錄中' % dropped
+    if any(totals[key] is not None and gaps[key] > 0 for key in _USAGE_KEYS):
+        line += '，部分回合缺少部分種類'
+    return line + '）'
+
 
 def binding_text(binding):
     """Dedicated-binding status from pm_runtime.current_binding (a dict or None)."""
@@ -286,6 +380,15 @@ def safe_name(name):
     return "[withheld]" if _emitted_sensitive(name) else name
 
 
+def display_tool_name(raw_name):
+    """Return a safe tool name for tool summaries and /logs."""
+    name = safe_name(raw_name)
+    if (not isinstance(raw_name, str) or '/' in raw_name
+            or not all(char.isprintable() for char in raw_name)):
+        return "Tool"
+    return name
+
+
 def safe_code(value):
     """A typed code (error, status, reason) shown only when it has the code shape."""
     return value if type(value) is str and _CODE.fullmatch(value) else UNKNOWN
@@ -317,10 +420,7 @@ def tool_label(event):
     from .tui_markdown import display_width
     from . import pm_runtime
     raw_name = event.get("name")
-    name = safe_name(raw_name)
-    if (not isinstance(raw_name, str) or '/' in raw_name
-            or not all(char.isprintable() for char in raw_name)):
-        name = "Tool"
+    name = display_tool_name(raw_name)
     text = event.get("description")
     if type(text) is not str:
         return name
@@ -350,6 +450,31 @@ def _local_time(value, now=None):
         return "時間不明"
     now = now or datetime.now().astimezone()
     return when.strftime("%H:%M" if when.date() == now.date() else "%m-%d %H:%M")
+
+
+def log_lines(turns, now=None):
+    """Format safe, metadata-only PM turn summaries for /logs."""
+    rows = []
+    status_labels = {"COMPLETED": "完成", "INTERRUPTED": "已中斷",
+                     "ERROR": "錯誤", "ACTIVE": "進行中"}
+    for turn in turns:
+        if type(turn) is not dict:
+            continue
+        status = safe_code(turn.get("status"))
+        origin = "背景" if turn.get("origin") == "background" else "前景"
+        names = turn.get("tool_names")
+        tools = ",".join(
+            name if len(name) <= 60 else name[:59] + "…"
+            for name in (display_tool_name(raw_name) for raw_name in names)
+        ) if type(names) is list else ""
+        if not tools:
+            tools = "無工具"
+        fields = [_local_time(turn.get("started_at"), now),
+                  status_labels.get(status, status), origin, tools]
+        if "reason" in turn:
+            fields.append(safe_code(turn.get("reason")))
+        rows.append("｜".join(fields))
+    return rows
 
 
 def _local_history_time(value):

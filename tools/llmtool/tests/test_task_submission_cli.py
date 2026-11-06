@@ -4142,7 +4142,9 @@ class DelegateRepairCapTests(unittest.TestCase):
         authorization.start()
         self.addCleanup(authorization.stop)
 
-    def _task(self, *, executor='executor-task-1', developer=False, route='codex'):
+    def _task(self, *, executor='executor-task-1', developer=False, route='codex',
+              developer_state='DEVELOPER_RESPONDED', artifact='diff',
+              progress=None, error_code=None, execution=None):
         task_id, run_id = new_id(), new_id()
         request = 'Bounded repair-cap fixture.'
         request_sha = hashlib.sha256(request.encode()).hexdigest()
@@ -4169,21 +4171,46 @@ class DelegateRepairCapTests(unittest.TestCase):
             )
             developer_record = {
                 'assignment_id': new_id(), 'selection_source': 'PM',
-                'state': 'DEVELOPER_PENDING', 'provider_profile': route,
-                'provider_type': None, 'model': None,
+                'state': developer_state, 'provider_profile': route,
+                'provider_type': ({
+                    'codex': 'codex-cli', 'opencode': 'opencode-cli',
+                    'agy': 'agy-cli', 'gw-agent': 'gw-agent-cli',
+                    'claude': 'claude-cli',
+                }.get(route) if developer_state != 'DEVELOPER_PENDING' else None),
+                'model': ({
+                    'codex': 'gpt-6-luna', 'opencode': 'opencode/test-free',
+                    'agy': 'gemini-test', 'gw-agent': 'gw-agent-test',
+                    'claude': 'claude-test',
+                }.get(route) if developer_state != 'DEVELOPER_PENDING' else None),
                 'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
                 'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
                 'source_sha_binding': 'D6_REGISTRY_OBSERVED',
                 'read_paths': ['sample.py'], 'write_paths': ['sample.py'],
                 'acceptance': ['dispatch is bounded'], 'context_sha256': 'b' * 64,
                 'egress_basis': 'Approved synthetic test context.', 'input_bytes': 10,
-                'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
-                'artifact_sha256': None, 'usage': None, 'error_code': None,
-                'execution': None,
+                'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': artifact,
+                'artifact_sha256': (hashlib.sha256(artifact.encode()).hexdigest()
+                                    if artifact is not None else None),
+                'usage': None,
+                'error_code': (error_code or
+                               ('CODEX_BLOCKED' if route == 'codex' and
+                                developer_state == 'DEVELOPER_OUTCOME_UNKNOWN' and
+                                execution is not None and
+                                execution.get('status') == 'BLOCKED' else None)),
+                'execution': execution,
                 'created_at': '2026-11-04T00:00:00Z',
                 'direct_result_callback': submission_cli._direct_result_callback(
                     task, registration, 'a' * 40),
             }
+            if route == 'claude':
+                developer_record['executor_task_id'] = executor
+            if route in ('agy', 'claude'):
+                developer_record['owner_assignment_ref'] = (
+                    'https://github.com/davidcatcat/davidcattoolsproject/'
+                    'issues/289#issuecomment-1'
+                )
+            if progress is not None:
+                developer_record['progress'] = progress
             completion = {
                 'state': 'WAITING_EXECUTOR', 'executor_task_id': executor,
                 'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
@@ -4244,6 +4271,204 @@ class DelegateRepairCapTests(unittest.TestCase):
         task = self._task(executor='executor-task-1', developer=True)
         self.assertIsNone(submission_cli._check_delegate_repair_cap(
             self._args(task, 'opencode'), self.store))
+
+    def test_exact_prelaunch_refusals_are_skipped(self):
+        self._prior_assignments(2)
+        cases = (
+            ('codex', 'DEVELOPER_UNAVAILABLE',
+             'DEVELOPER_PROFILE_UNAVAILABLE'),
+            ('codex', 'DEVELOPER_UNAVAILABLE',
+             'DEVELOPER_CALL_BINDING_INVALID'),
+            ('gw-agent', 'DEVELOPER_UNAVAILABLE',
+             'DEVELOPER_GW_AGENT_CONFIG_INVALID'),
+            ('gw-agent', 'DEVELOPER_UNAVAILABLE',
+             'DEVELOPER_DISPATCH_DENIED'),
+            ('gw-agent', 'DEVELOPER_UNAVAILABLE',
+             'DEVELOPER_GW_AGENT_DISPATCH_DENIED'),
+            ('agy', 'BLOCKED', 'AGY_DISPATCH_DENIED'),
+            ('claude', 'BLOCKED', 'CLAUDE_DISPATCH_DENIED'),
+        )
+        for route, state, code in cases:
+            with self.subTest(route=route, code=code):
+                self._task(developer=True, route=route,
+                           developer_state=state, artifact=None,
+                           error_code=code)
+        task = self._task()
+        self.assertIsNone(submission_cli._check_delegate_repair_cap(
+            self._args(task, 'opencode'), self.store))
+
+    def _assert_prelaunch_evidence_counts(
+            self, route, state, code, **changes):
+        self._prior_assignments(2)
+        prior = self._task(
+            developer=True, route=route,
+            developer_state=state, artifact=None, error_code=code)
+        before = self.store.get(prior['task_id'])['developer']
+        developer = {**before, **changes}
+
+        self.store.compare_and_update(
+            prior['task_id'], expected={'developer': before},
+            developer=developer)
+
+        persisted = self.store.get(prior['task_id'])['developer']
+        self.assertEqual(persisted, developer)
+        self.assertIn(
+            (persisted['provider_profile'],
+             persisted['state'], persisted['error_code']),
+            submission_cli._PRELAUNCH_REPAIR_REFUSALS)
+
+        current = self._task()
+        with self.assertRaisesRegex(
+                LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+            submission_cli._check_delegate_repair_cap(
+                self._args(current, 'opencode'), self.store)
+
+    def test_prelaunch_refusal_with_execution_counts(self):
+        self._assert_prelaunch_evidence_counts(
+            'codex', 'DEVELOPER_UNAVAILABLE',
+            'DEVELOPER_PROFILE_UNAVAILABLE',
+            execution={
+                'status': 'UNKNOWN',
+                'native_session_id': None,
+                'process_exit_code': None,
+                'stdout_sha256': None,
+                'elapsed_ms': None,
+                'cleanup_status': 'UNKNOWN',
+                'usage_source': 'UNKNOWN',
+                'source_bytes': None,
+                'source_file_count': None,
+                'source_manifest_sha256': None,
+            })
+
+    def test_prelaunch_refusal_with_changed_files_counts(self):
+        self._assert_prelaunch_evidence_counts(
+            'gw-agent', 'DEVELOPER_UNAVAILABLE',
+            'DEVELOPER_DISPATCH_DENIED',
+            audit_sha256='c' * 64,
+            audit_copy_path_sha256='d' * 64,
+            changed_files=['sample.py'])
+
+    def test_prelaunch_refusal_with_progress_changed_files_counts(self):
+        self._assert_prelaunch_evidence_counts(
+            'agy', 'BLOCKED', 'AGY_DISPATCH_DENIED',
+            progress={
+                'state': 'QUOTA_EXHAUSTED',
+                'head_sha': 'a' * 40,
+                'changed_files': ['sample.py'],
+                'unfinished_checks': ['UNKNOWN'],
+                'session_id': 'conversation_12345678',
+            })
+
+    def test_prelaunch_refusal_with_artifact_is_rejected(self):
+        for route, state, code in sorted(
+                submission_cli._PRELAUNCH_REPAIR_REFUSALS):
+            with self.subTest(route=route, state=state, code=code):
+                with self.assertRaises(LLMToolError) as caught:
+                    self._task(
+                        developer=True, route=route,
+                        developer_state=state,
+                        artifact='diff', error_code=code)
+                self.assertEqual(
+                    caught.exception.task_store_error_code,
+                    'TASK_STORE_INVALID')
+
+    def test_postrun_and_unclear_records_count(self):
+        for index, code in enumerate((
+                'DEVELOPER_GW_AGENT_MODEL_ERROR',
+                'DEVELOPER_GW_AGENT_MODEL_ERROR_DISPATCH_DENIED',
+                'DEVELOPER_DISPATCH_REFUSED',
+                'DEVELOPER_DISPATCH_DENIED_EXTRA',
+                None)):
+            with self.subTest(error_code=code):
+                self.store = TaskStore(
+                    Path(self.temp.name).resolve() / f'tasks-{index}')
+                self._prior_assignments(2)
+                self._task(
+                    developer=True, route='gw-agent',
+                    developer_state=('DEVELOPER_PENDING' if code is None
+                                     else 'DEVELOPER_UNAVAILABLE'),
+                    artifact=None,
+                    error_code=code)
+                task = self._task()
+                with self.assertRaisesRegex(
+                        LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+                    submission_cli._check_delegate_repair_cap(
+                        self._args(task, 'opencode'), self.store)
+
+    def test_responded_artifact_and_changed_files_count(self):
+        self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
+        self._task(developer=True, developer_state='DEVELOPER_RESPONDED',
+                   artifact='diff',
+                   error_code=None)
+        self._task(
+            developer=True, route='agy', developer_state='BLOCKED',
+            artifact=None, error_code='AGY_QUOTA_EXHAUSTED',
+            progress={
+                'state': 'QUOTA_EXHAUSTED',
+                'head_sha': 'a' * 40,
+                'changed_files': ['sample.py'],
+                'unfinished_checks': ['UNKNOWN'],
+                'session_id': 'conversation_12345678',
+            })
+        task = self._task()
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
+            submission_cli._check_delegate_repair_cap(
+                self._args(task, 'opencode'), self.store)
+
+    def test_codex_blocked_execution_counts(self):
+        self._prior_assignments(2)
+        self._task(
+            developer=True, route='codex',
+            developer_state='DEVELOPER_OUTCOME_UNKNOWN', artifact=None,
+            error_code='CODEX_BLOCKED',
+            execution={
+                'status': 'BLOCKED',
+                'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                'process_exit_code': 0,
+                'stdout_sha256': 'c' * 64,
+                'elapsed_ms': 1,
+                'cleanup_status': 'CONFIRMED',
+                'usage_source': 'UNKNOWN',
+                'source_bytes': None,
+                'source_file_count': None,
+                'source_manifest_sha256': None,
+            })
+        task = self._task()
+        with self.assertRaisesRegex(
+                LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+            submission_cli._check_delegate_repair_cap(
+                self._args(task, 'opencode'), self.store)
+
+    def test_pending_prior_record_is_ambiguous_and_counts(self):
+        self._task(developer=True, developer_state='DEVELOPER_PENDING', artifact=None)
+        self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
+        self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
+        task = self._task()
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
+            submission_cli._check_delegate_repair_cap(
+                self._args(task, 'opencode'), self.store)
+
+    def test_partial_prior_developer_record_counts(self):
+        prior = self._task(
+            developer=True, developer_state='DEVELOPER_OUTCOME_UNKNOWN',
+            artifact=None, error_code='CODEX_RESULT_EVIDENCE_UNKNOWN')
+        saved = self.store.get(prior['task_id'])
+        developer = dict(saved['developer'])
+        developer.pop('execution')
+        developer.pop('direct_result_callback')
+        self.store.compare_and_update(
+            prior['task_id'], expected={'developer': saved['developer']},
+            developer=developer)
+        persisted = self.store.get(prior['task_id'])
+        self.assertNotIn('execution', persisted['developer'])
+        self.assertEqual(persisted['developer']['state'],
+                         'DEVELOPER_OUTCOME_UNKNOWN')
+        self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
+        self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
+        task = self._task()
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
+            submission_cli._check_delegate_repair_cap(
+                self._args(task, 'opencode'), self.store)
 
     def test_background_cap_refuses_codex_and_opencode_before_launch(self):
         self._prior_assignments()

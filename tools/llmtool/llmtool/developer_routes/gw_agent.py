@@ -447,7 +447,9 @@ class GwAgentRoute(DeveloperRoute):
                 type(result.get('audit_sha256')) is not str or
                 re.fullmatch(r'[0-9a-f]{64}', result['audit_sha256']) is None):
             raise RouteError('GW_AGENT_OUTPUT_INVALID')
-        if result['served_model'] == 'UNKNOWN' and result['status'] == 'DONE':
+        if (result['status'] == 'DONE' and
+                (result['served_model'] == 'UNKNOWN' or
+                 result['served_model'] in _ROUTING_ALIASES)):
             raise RouteError('GW_AGENT_MODEL_UNVERIFIED', facts={
                 'gateway_code': self._gateway_code, 'gateway_status': result['status']})
         if ((result['status'] == 'DONE' and result['code'] is not None) or
@@ -508,7 +510,7 @@ class GwAgentRoute(DeveloperRoute):
             return None
         model = self._result.get('served_model')
         if (type(model) is not str or _MODEL.fullmatch(model) is None or
-                model == 'UNKNOWN'):
+                model == 'UNKNOWN' or model in _ROUTING_ALIASES):
             return None
         return model
 

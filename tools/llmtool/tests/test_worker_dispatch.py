@@ -281,8 +281,9 @@ class WorkerDispatchTests(unittest.TestCase):
             Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes())
         worker = real_policy['workers']['claude-developer']
         self.assertEqual(worker['dispatch'], 'OWNER_ASSIGNMENT_ONLY')
-        self.assertEqual(worker['owner_assignments'], [{
-            'task_id': task_id, 'owner_assignment_ref': ref}])
+        self.assertEqual(worker['owner_assignments'], [
+            {'task_id': task_id, 'owner_assignment_ref': ref},
+        ])
 
     def test_owner_assignment_policy_rejects_duplicate_or_malformed_bindings(self):
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-9999999999'
@@ -634,6 +635,44 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(saved['dispatch_audit'][-1]['worker_key'], 'opencode-developer')
         self.assertEqual(saved['dispatch_audit'][-1]['action'], 'REASSIGN')
         self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'ALLOWED')
+
+    def test_gw_agent_served_model_binding_only_allows_a_valid_success_result(self):
+        old = self.developer(state='DEVELOPER_DISPATCHING', provider='gw-agent')
+        old.update(provider_type='gw-agent-cli', model='gw')
+        new = {**old, 'state': 'DEVELOPER_RESPONDED', 'model': 'qwen3.8-27b',
+               'error_code': None,
+               'execution': {'status': 'DONE', 'process_exit_code': 0,
+                             'cleanup_status': 'CONFIRMED'},
+               'audit_sha256': 'a' * 64, 'audit_copy_path_sha256': 'b' * 64}
+
+        self.assertFalse(worker_dispatch._developer_identity_changed(old, new))
+        self.assertEqual(worker_dispatch.task_store_attempts(
+            {'developer': old}, {'developer': new}), [])
+
+        for field in worker_dispatch._DEVELOPER_IDENTITY_FIELDS:
+            if field == 'model':
+                continue
+            with self.subTest(stable_field=field):
+                changed = {**new, field: 'changed'}
+                self.assertFalse(worker_dispatch._gw_agent_served_model_binding(
+                    old, changed))
+                self.assertTrue(worker_dispatch._developer_identity_changed(
+                    old, changed))
+
+        for field, value in (
+                ('state', 'DEVELOPER_OUTCOME_UNKNOWN'),
+                ('error_code', 'DEVELOPER_RESULT_UNKNOWN'),
+                ('execution', {**new['execution'], 'status': 'FAILED'}),
+                ('execution', {**new['execution'], 'process_exit_code': 1}),
+                ('execution', {**new['execution'], 'cleanup_status': 'UNKNOWN'}),
+                ('audit_sha256', None),
+                ('audit_copy_path_sha256', 'not-a-digest')):
+            with self.subTest(completion_evidence=(field, value)):
+                changed = {**new, field: value}
+                self.assertFalse(worker_dispatch._gw_agent_served_model_binding(
+                    old, changed))
+                self.assertTrue(worker_dispatch._developer_identity_changed(
+                    old, changed))
 
     def test_audit_cannot_be_forged_by_generic_taskstore_update(self):
         with self.assertRaises(LLMToolError):

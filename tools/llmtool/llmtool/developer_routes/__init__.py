@@ -2,6 +2,7 @@
 
 from .base import DeveloperRoute, RouteError, RouteResult, capture_snapshot, run_route
 from .agy import AgyRoute, owner_assignment_gate
+from .claude import ClaudeRoute
 from .gw_agent import GwAgentRoute
 from .write_boundary import (
     SandboxExecBoundary,
@@ -12,7 +13,7 @@ from .write_boundary import (
 
 __all__ = [
     'DeveloperRoute', 'RouteError', 'RouteResult', 'capture_snapshot', 'run_route',
-    'AgyRoute', 'GwAgentRoute', 'owner_assignment_gate', 'load_route_config',
+    'AgyRoute', 'ClaudeRoute', 'GwAgentRoute', 'owner_assignment_gate', 'load_route_config',
     'SandboxExecBoundary', 'UnsupportedBoundary', 'WriteBoundary',
     'for_platform',
 ]
@@ -37,8 +38,9 @@ def load_route_config(path=None):
             type(value.get('routes')) is not dict):
         raise RouteError('ROUTE_CONFIG_INVALID')
     routes = value['routes']
-    if ('agy' not in routes or set(routes) - {'agy', 'gw-agent'} or
+    if ('agy' not in routes or set(routes) - {'agy', 'claude', 'gw-agent'} or
             type(routes['agy']) is not dict or
+            ('claude' in routes and type(routes['claude']) is not dict) or
             ('gw-agent' in routes and type(routes['gw-agent']) is not dict)):
         raise RouteError('ROUTE_CONFIG_INVALID')
     entry = routes['agy']
@@ -53,6 +55,21 @@ def load_route_config(path=None):
             entry['state_dirs'] != {'policy': 'private-temp-only'}):
         raise RouteError('ROUTE_CONFIG_INVALID')
     normalized = {'agy': dict(entry)}
+    if 'claude' in routes:
+        claude = routes['claude']
+        expected_claude = {'executable', 'default_model', 'default_effort',
+                           'denied_dirs', 'state_dirs'}
+        if (set(claude) != expected_claude or claude.get('executable') != 'claude' or
+                type(claude.get('default_model')) is not str or
+                re.fullmatch(r'claude-[a-z0-9][a-z0-9.-]{0,120}',
+                             claude['default_model']) is None or
+                type(claude.get('default_effort')) is not str or
+                claude['default_effort'] not in ('low', 'medium', 'high', 'xhigh', 'max') or
+                type(claude.get('denied_dirs')) is not list or
+                claude['denied_dirs'] != ['.claude'] or
+                claude.get('state_dirs') != {'policy': 'private-temp-only'}):
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        normalized['claude'] = dict(claude)
     if 'gw-agent' in routes:
         gw = routes['gw-agent']
         expected_gw = {'package_path', 'default_model', 'default_effort',

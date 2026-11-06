@@ -91,6 +91,8 @@ Talk to the PM: the dedicated PM (/pm …) is the product entry
                         no SESSION is given; "pm>" prompt, Enter sends
   /pm disconnect        End the connection and return to chat mode
   /pm history           Show the turns pm_runtime stored for this PM session
+  /logs                 Show recent PM turns
+  /attention            Show what needs attention
   /pm                   Show the connected PM and its state
   Enter (during a turn) Queue the draft (已排入佇列（第 N 則）): queued messages are sent one turn
                         at a time, in order, each after the previous turn COMPLETED; a
@@ -101,6 +103,8 @@ Talk to the PM: the dedicated PM (/pm …) is the product entry
                         and pause the queue: nothing more is sent. Enter on an empty draft
                         sends the next queued message, /pm queue send resumes them all.
                         Ctrl-C interrupts and pauses the queue; a second Ctrl-C exits
+PM setup
+  設定 PM（帳號、Codex、工作目錄、預設）：docs/guides/llmtool-pm-setup-zh-tw.md
 A PM turn and a chat request never run together: in chat mode, Enter during a PM turn
 keeps the draft and sends nothing until the turn ends.
 A CWD with spaces: /pm new "/path/with space" or /pm new /path/with\\ space.
@@ -112,9 +116,10 @@ does (▸ 執行中：description… 23s, counting every second, then ✓ descri
 ✗ description（38s，失敗）; the tool name only when the PM gave no description); F7 lists
 every call. Commands and tool output are never
 shown. The turn ends with a short usage line (seconds · tokens). /pm history replays stored
-turns beneath the 「上次對話（時間）」 header. PM thinking is never shown as the answer: while the PM thinks
-or works the pane shows a working line (PM 思考中… 12s), updated every second and
-replaced by the reply. Chat replies are never sent to or shown as the PM.
+turns beneath the 「上次對話（時間）」 header. PM thinking is never shown as the answer: a busy line
+above the input shows what the PM is doing and the seconds, and stays until the turn ends. It
+also shows background work while the PM waits.
+Chat replies are never sent to or shown as the PM.
 
 Display
   /theme [dark|light|auto]
@@ -214,22 +219,32 @@ SLASH_COMMANDS = (
     ("/task events", "/task events", "Recent Task events from TaskStore"),
     ("/theme", "/theme ", "Colour theme: dark, light or auto (saved)"),
     ("/links", "/links ", "Clickable file and #PR links: on or off (saved)"),
-    ("/settings", "/settings ", "Automatic PM resume after reconnect"),
+    ("/settings", "/settings ", "PM 重連後自動接續：/settings auto-resume on|off"),
     ("/pm list", "/pm list", "List dedicated PM sessions"),
     ("/pm use", "/pm use ", "Select a dedicated PM session without connecting"),
     ("/pm accounts", "/pm accounts", "List configured PM accounts and folder status"),
+    ("/logs", "/logs", "PM 回合紀錄：時間、狀態、工具"),
+    ("/attention", "/attention", "需要注意的事：卡住、失敗、未讀"),
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 BACKGROUND_LIMIT = 6  # Most rows of the ↓ background panel shown below its header.
 TASK_ID = re.compile(r"[0-9a-f]{32}")   # W59: a background row opens a detail only for one
 TURN_ROW_REASON = "這一列是 PM 自行開始的背景回合，沒有 Task 記錄"
+
+
+def _attention_text(value):
+    text = " ".join(str(value).split())
+    text = terminal_safe_text(text)
+    return text if len(text) <= 160 else text[:159] + "…"
+
+
 # Status bar fields in display order, and the order they drop when the row is too narrow.
 STATUS_FIELDS = ("mode", "session", "provider", "model", "state", "queue", "usage", "keys",
                  "scroll", "mouse", "help")
 STATUS_DROP_ORDER = ("help", "keys", "usage", "model", "provider", "scroll", "session", "mouse")
 # PM mode (W56d): the longer ▸▸ lead stays; the scroll position and session go before the
 # keys that act now (Esc 中斷, F7 工具).
-PM_STATUS_DROP_ORDER = ("help", "scroll", "session", "mouse", "identity", "keys")
+PM_STATUS_DROP_ORDER = ("attention", "background_item", "help", "scroll", "session", "mouse", "identity", "keys")
 STATUS_KEY_FIELDS = ("keys", "mouse", "help")   # drawn as status.key
 STATUS_SEPARATOR = " | "
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
@@ -269,8 +284,9 @@ PM_ACCOUNTS_GUIDANCE = (
     "    kind: codex\n"
     "    config_dir: <CODEX_HOME>\n"
     "The built-in default Claude account is used meanwhile.")
-# The pane's PM working line (W52 F1): redrawn this often while a turn has no text showing.
-PM_WORKING_SECONDS = 1.0
+# Busy-line and running-tool refresh cadence; this is the existing PM timer.
+PM_BUSY_SECONDS = 0.5
+PM_BUSY_GLYPHS = ('✽', '✻', '✶', '✢')
 # P0-3: how long the background watcher waits per pm_runtime.background_turn call; it
 # re-checks that the runtime is still alive between waits.
 PM_WATCH_SECONDS = 0.5
@@ -857,6 +873,9 @@ class ChatTUI:
         self.background_error = None
         self.background_loaded = None    # monotonic time of the last finished read
         self.background_reader = None
+        self.attention = None
+        self.attention_key = None
+        self.attention_read_at = None
         self.show_background = False
         # W59: the selected panel row is an identity, (role, task), changed only by the
         # Owner's navigation (opening the panel, Up/Down) and never by a draw or a refresh;
@@ -904,10 +923,9 @@ class ChatTUI:
         self._pm_background_waiting = collections.deque()
         self._pm_held_attempts = set()   # turn ids whose draft went back to the queue
         self._quit_warned = False    # first Ctrl-C with queued messages only warned
-        # W52 F1: the working line at the end of the pane while a turn shows no text yet.
-        self.pm_working_at = None    # offset where it starts (its leading blank line included)
-        self.pm_working_text = ""
-        self._pm_working_handle = None
+        # W58b-4: the fixed busy line above the input, animated by the existing PM tick.
+        self._pm_busy_frame = 0
+        self._pm_busy_handle = None
         # W52 F3: a moving drag copies its selection shortly after it changes, so the
         # clipboard is right even when the terminal never reports the release (Warp).
         self._drag_copy_handle = None
@@ -1016,6 +1034,8 @@ class ChatTUI:
         self.menu_window = Window(
             FormattedTextControl(self.menu_text), style="class:menu",
             height=lambda: Dimension.exact(max(1, sum(self.picker_layout()))), wrap_lines=False)
+        self.busy_window = Window(FormattedTextControl(self.busy_fragments),
+                                  height=1, wrap_lines=False)
         self.rule_window = Window(height=1, char=chat_tui_view.RULE_CHAR,
                                   style=lambda: self._style("rule"))
         self.status_window = Window(FormattedTextControl(self.status_fragments),
@@ -1029,6 +1049,8 @@ class ChatTUI:
                        ConditionalContainer(self.detail, filter=showing_detail),
                        ConditionalContainer(self.list_window, filter=showing_list),
                        ConditionalContainer(self.events, filter=showing_events),
+                       ConditionalContainer(self.busy_window,
+                                            filter=Condition(lambda: self.busy_rows() > 0)),
                        self.rule_window,
                        ConditionalContainer(self.background_window, filter=showing_background),
                        ConditionalContainer(self.menu_window, filter=picker_shown),
@@ -1409,12 +1431,13 @@ class ChatTUI:
         if self.pm_mode:
             # Chat provider/model/usage are not the PM's; in PM mode only PM fields show.
             fields.update(self.pm_status_fields(compact))
-            shown = ["mode", "identity", "session", "state", "keys", "scroll", "mouse", "help"]
+            shown = ["mode", "attention", "background_item", "identity", "session", "state", "keys",
+                     "scroll", "mouse", "help"]
         shown = [key for key in shown if fields.get(key)]
         if self.busy or self.pm_turn_active or self.task_view_visible():
             # Keep identity ahead of optional context while busy or in the Task detail;
             # Task detail key hints remain last so the copy/return actions stay visible.
-            pm_drop_order = ("help", "identity", "scroll", "session", "mouse", "keys")
+            pm_drop_order = ("attention", "background_item", "help", "identity", "scroll", "session", "mouse", "keys")
         else:
             # At idle, preserve the PM runtime/account identity at narrow widths.
             pm_drop_order = PM_STATUS_DROP_ORDER
@@ -1565,8 +1588,12 @@ class ChatTUI:
             "  /pm history             Show recent PM turns",
             "  /pm queue               List, clear, or resume queued messages",
             "  /pm disconnect         Leave the PM session",
+            "PM setup",
+            "  設定 PM（帳號、Codex、工作目錄、預設）：docs/guides/llmtool-pm-setup-zh-tw.md",
             "Chat",
             "  /status                 Show the current chat or PM status",
+            "  /logs                   Show recent PM turns",
+            "  /attention              Show what needs attention",
             "  /provider [PROFILE]     List or switch chat profiles",
             "  /skill [NAME]           List, choose, or clear a skill",
             "  /history                Show recent chat turns",
@@ -1607,6 +1634,12 @@ class ChatTUI:
                                    str(self.background_error or "read failed")).replace("\n", " ")
                                + "）" if count == "?" else "%d 件進行中" % count),
                      "佇列（本機設定）：" + queue, theme]
+            try:
+                turns = self.pm_api.read_all_turns(self.pm_target[0])
+                usage = chat_tui_pm.usage_status_line(turns, _short_count)
+            except Exception:
+                usage = "用量（本 session）：UNKNOWN（PM 歷史無法讀取）"
+            lines.extend((usage, "Context 與額度：UNAVAILABLE（llmtool 沒有這項資料）"))
             return "\n  ".join(lines)
         session = self.session
         model = selected_provider(session.config).get("model")
@@ -1694,7 +1727,7 @@ class ChatTUI:
         if not (self.searching or self.menu_items):
             return 0, 0, 0
         input_rows = min(4, max(1, self.input.buffer.document.line_count))
-        free = self.app.output.get_size().rows - 3 - input_rows  # conversation, rule, status
+        free = self.app.output.get_size().rows - 3 - input_rows - self.busy_rows()
         if free < 1:
             return 0, 0, 0
         header = 1 if self.searching else 0
@@ -1708,6 +1741,55 @@ class ChatTUI:
             elif shown >= 2:
                 shown, hint = shown - 1, 1
         return header, shown, hint
+
+    def _pm_busy_wanted(self):
+        return (self.pm_turn_active and self.pm_runtime is not None
+                and self.pm_turn_status is None and self.pm_turn_error is None
+                and self.pm_state != "closing")
+
+    def _pm_waiting_wanted(self):
+        count = self.background_count()
+        return (self.pm_mode and self.pm_runtime is not None and not self.pm_turn_active
+                and not self.menu_items and not self.searching and not self.background_open()
+                and self.pm_state != "closing" and type(count) is int and count > 0)
+
+    def _pm_waiting_line(self):
+        items = self.background_all()
+        line = "◌ PM 在等背景工作，完成會自動通知：" + chat_tui_status.background_summary(items[0])
+        if len(items) > 1:
+            line += "（另 %d 項）" % (len(items) - 1)
+        return line
+
+    def busy_rows(self):
+        input_rows = min(4, max(1, self.input.buffer.document.line_count))
+        free = self.app.output.get_size().rows - 3 - input_rows
+        return int((self._pm_busy_wanted() or self._pm_waiting_wanted()) and free >= 1)
+
+    def busy_fragments(self):
+        text = self._pm_busy_line() if self._pm_busy_wanted() else self._pm_waiting_line()
+        line = fit_width(text, self.app.output.get_size().columns,
+                         self._get_cwidth)
+        return [(self._style("meta.usage"), line)]
+
+    def _pm_busy_line(self):
+        elapsed = int(max(0.0, time.monotonic() - (self.pm_turn_started or time.monotonic())))
+        if self.pm_state == "interrupting":
+            verb = "中斷中…"
+        elif self.pm_state == "thinking":
+            verb = "思考中…"
+        elif self.pm_warm:
+            verb = "暖機中…"
+        elif any(call[1] is None for call in self.pm_tool_calls):
+            verb = "執行工具中…"
+        elif self.pm_block_raw is not None:
+            verb = "回答中…"
+        else:
+            verb = "處理中…"
+        line = "%s %s（%d 秒" % (PM_BUSY_GLYPHS[self._pm_busy_frame % len(PM_BUSY_GLYPHS)],
+                                  verb, elapsed)
+        if self.pm_outbox:
+            line += " · 佇列 %d 則" % len(self.pm_outbox)
+        return line + "）"
 
     def _menu_top(self, shown, count):
         """First visible entry: follows the selection and stays inside the list."""
@@ -1860,13 +1942,12 @@ class ChatTUI:
         ``segments`` ([(text, token)]) styles the block; without it an owner header gets
         the 「你」 layout, an ``llmtool:`` notice ``role.system`` and anything else ``text``.
         New output closes the Task detail so it is never hidden behind that pane. During a
-        PM turn the working line moves below it (not when it opens a PM text block). Output
+        PM turn the busy line stays fixed above the input. Output
         of an Owner key or command while a PM block streams goes below that block (W55).
         """
         if self._owner_output and self.pm_block_raw is not None:
             self._pm_notice(text)
             return
-        self._pm_working_remove()   # The working line always stays the last thing shown.
         self._pm_finalize()  # Any other output ends the streaming PM block (shown in full).
         block = self._stream_detach()  # A streaming chat reply stays one block, below.
         if self.show_detail:
@@ -1887,7 +1968,7 @@ class ChatTUI:
         if block is not None:
             self._stream_attach(block)
         if show_working:
-            self._pm_working_show()
+            self._pm_busy_show()
         self.app.invalidate()
 
     # -- layout (W56a) -----------------------------------------------------------------
@@ -1951,7 +2032,6 @@ class ChatTUI:
         """Open the PM text block: under the 「PM」 label the first time in a turn."""
         if self.pm_header_open:   # right under a background turn's header line
             self.pm_header_open = False
-            self._pm_working_remove()   # the reply replaces the working line
             self.pm_block_start = len(self.conversation.text) + 1   # after "\n"
         elif self.pm_labelled:
             self.append("", show_working=False)   # a blank line, then the block
@@ -1978,8 +2058,6 @@ class ChatTUI:
         self.pm_labelled = True
         self.append(shown, segments=label + segments)
         end = len(self.conversation.text)
-        if self.pm_working_at is not None:
-            end = self.pm_working_at    # the working line went back below it
         self.pm_tool_block = [end - len(shown), end, self.pm_tool_calls, self._pm_turn_seq, shown]
 
     def _replace_block(self, segments, shown):
@@ -1987,7 +2065,7 @@ class ChatTUI:
         start, end = self.pm_tool_block[0], self.pm_tool_block[1]
         delta = len(shown) - (end - start)
         self.view.replace(start, end, segments)
-        for name in ("pm_block_start", "pm_working_at", "stream_head", "stream_start"):
+        for name in ("pm_block_start", "stream_head", "stream_start"):
             value = getattr(self, name)
             if value is not None and value >= end:
                 setattr(self, name, value + delta)
@@ -1995,12 +2073,14 @@ class ChatTUI:
         self.app.invalidate()
 
     def _pm_tool_tick(self):
-        """Every working-line tick: a running tool's seconds advance in its line (W57)."""
+        """Every busy-line tick: a running tool's seconds advance in its line (W57)."""
         block = self.pm_tool_block
         if (block is not None and block[3] == self._pm_turn_seq and self._tool_block_valid()
                 and any(call[1] is None for call in block[2])):
             segments = tool_summary_lines(block[2], self.pm_tools_expanded)
-            self._replace_block(segments, "".join(part for part, _token in segments))
+            shown = "".join(part for part, _token in segments)
+            if shown != block[4]:
+                self._replace_block(segments, shown)
 
     def toggle_tools(self):
         """F7: expand or collapse the latest tool summary (and the ones after it)."""
@@ -2559,6 +2639,27 @@ class ChatTUI:
         if text.strip() == "/status":
             self.append(self.status_report())
             return
+        if text.strip() == "/logs":
+            if self.pm_runtime is None or not self.pm_target:
+                self.append("PM 紀錄：尚未連線 PM。先 /pm connect。")
+                return
+            try:
+                turns = self.pm_api.read_recent_turns(
+                    self.pm_target[0], chat_tui_pm.LOGS_SHOWN)
+                rows = chat_tui_pm.log_lines(turns)
+            except Exception:
+                self.append("PM 紀錄：UNKNOWN（PM 歷史無法讀取）")
+                return
+            if not rows:
+                self.append("PM 紀錄：尚無回合")
+                return
+            self.append("PM 紀錄（最近 %d 回合）\n" % len(rows)
+                        + "\n".join("  " + row for row in rows)
+                        + "\n  不顯示工具指令與輸出")
+            return
+        if text.strip() == "/attention":
+            self.append(self.attention_report())
+            return
         if text.strip().split(maxsplit=1)[0] in ("/theme", "/links", "/settings"):
             self.run_display_command(text.strip())
             return
@@ -2853,7 +2954,7 @@ class ChatTUI:
 
     # -- real-time PM (pm_runtime only; never ChatSession) ---------------------------
     def pm_status_fields(self, compact):
-        """PM-mode status fields: mode, short session id, PM state and queue count."""
+        """PM-mode status fields: mode, background item, session, PM state and queue count."""
         session_id = self.pm_target[0][:8] if self.pm_target else chat_tui_task.UNKNOWN
         state = self.pm_state or chat_tui_task.UNKNOWN
         elapsed = (" %.1fs" % max(0.0, time.monotonic() - self.pm_turn_started)
@@ -2883,11 +2984,19 @@ class ChatTUI:
                 lead.append("↓ 查看")
         if self.pm_outbox:
             lead.append("佇列 %d" % len(self.pm_outbox) + (" 暫停" if self.pm_outbox_paused else ""))
-        return {"mode": " · ".join(lead),
+        fields = {"mode": " · ".join(lead),
                 "identity": compact(chat_tui_pm.safe_text(runtime) + "/"
                                      + chat_tui_pm.safe_text(account), 20),
                 "session": compact(session_id, 8),
                 "state": compact(state, 18)}
+        attention_count = len(self.attention_lines())
+        if attention_count:
+            fields["attention"] = "注意 %d" % attention_count
+        if type(count) is int and count > 0:
+            items = self.background_all()
+            if items:
+                fields["background_item"] = chat_tui_status.background_summary(items[0])
+        return fields
 
     # -- PM background work (W56d) ---------------------------------------------------
     def background_all(self):
@@ -2925,9 +3034,83 @@ class ChatTUI:
         except Exception:
             outcome = ([], "TaskStore read failed; details omitted")
         try:
+            attention = chat_tui_status.read_attention(key)
+        except Exception:
+            attention = None
+        try:
+            loop.call_soon_threadsafe(self.finish_attention, key, attention)
             loop.call_soon_threadsafe(self.finish_background, key, outcome)
         except RuntimeError:
             pass
+
+    def finish_attention(self, key, value):
+        self.attention = value
+        self.attention_key = key
+        self.attention_read_at = time.strftime("%H:%M:%S")
+        self.app.invalidate()
+
+    def attention_lines(self):
+        """Current connected PM attention facts, including local queue/runtime signals."""
+        if not self.pm_runtime or not self.pm_target:
+            return []
+        lines = []
+        partial = False
+        snapshot = (self.attention if self.attention_key == self.pm_target[0]
+                    and type(self.attention) is dict else None)
+        if snapshot is not None:
+            task_bad = snapshot.get("task_unreadable_count", 0)
+            inbox_bad = snapshot.get("inbox_unreadable_count", 0)
+            partial = task_bad > 0 or inbox_bad > 0
+            if partial:
+                lines.append(_attention_text(
+                    "部分讀取失敗：Tasks %s；PM inbox %s（計數可能重複；注意事項與未讀事件總數未知）"
+                    % (task_bad, inbox_bad)))
+            for item in snapshot.get("items", []):
+                if type(item) is not dict:
+                    continue
+                text = "%s｜%s" % (item.get("label", ""), str(item.get("task", ""))[:8])
+                if item.get("reason"):
+                    text += "｜" + str(item["reason"])
+                lines.append(_attention_text(text))
+            unread = snapshot.get("unread", 0)
+            if unread > 0:
+                lines.append(_attention_text(
+                    "PM 至少有 %s 則未讀事件（總數未知）" % unread if partial
+                    else "PM 有 %s 則未讀事件" % unread))
+        if self.pm_outbox and self.pm_outbox_paused:
+            lines.append(_attention_text("PM 佇列暫停：" + str(self.pm_outbox_paused)))
+        if type(self.pm_state) is str and self.pm_state.startswith("error("):
+            lines.append(_attention_text("最近的 PM 回合出錯"))
+        return lines
+
+    def attention_report(self):
+        """Read-only /attention report for this connected PM session."""
+        if not self.pm_runtime or not self.pm_target:
+            return "注意事項：尚未連線 PM。先 /pm connect。"
+        if self.attention_key != self.pm_target[0]:
+            return "注意事項：讀取中，稍後再試。"
+        snapshot = (self.attention if self.attention_key == self.pm_target[0]
+                    and type(self.attention) is dict else None)
+        if snapshot is None:
+            heading = "注意事項：UNKNOWN（TaskStore 無法讀取）"
+            facts = self.attention_lines()
+        else:
+            partial = (snapshot.get("task_unreadable_count", 0) > 0 or
+                       snapshot.get("inbox_unreadable_count", 0) > 0)
+            count = len(self.attention_lines())
+            heading = ("注意事項：UNKNOWN（TaskStore 部分無法讀取）" if partial
+                       else "注意事項（%d 項）" % count)
+            facts = self.attention_lines()
+        rows = [heading, "  來源：TaskStore（本機）｜讀取於 " +
+                (self.attention_read_at or time.strftime("%H:%M:%S"))]
+        shown = facts[:20]
+        rows.extend("  " + _attention_text(line) for line in shown)
+        if len(facts) > 20:
+            rows.append("  另有 %d 項未顯示" % (len(facts) - 20))
+        elif not facts and snapshot is not None and not partial:
+            rows.append("  目前沒有")
+        rows.append("  需要你決定：無法提供（Core 尚未記錄）")
+        return "\n".join(rows)
 
     def finish_background(self, key, outcome):
         self.background_reader = None
@@ -2957,7 +3140,8 @@ class ChatTUI:
     def background_rows(self):
         """Panel rows (header + items) that fit beside the minimum chat layout."""
         input_rows = min(4, max(1, self.input.buffer.document.line_count))
-        free = self.app.output.get_size().rows - 3 - input_rows - sum(self.picker_layout())
+        free = (self.app.output.get_size().rows - 3 - input_rows - self.busy_rows()
+                - sum(self.picker_layout()))
         items = self.background_all()
         body = min(len(items) + (1 if self._background_note(items) else 0), BACKGROUND_LIMIT)
         return max(0, min(1 + body, free))
@@ -3258,7 +3442,7 @@ class ChatTUI:
 
     @staticmethod
     def pm_ghost_hint(text, width=None, get_cwidth=None):
-        """Display-only completion for the PM command prefixes accepted by the TUI."""
+        """Display-only completion for the /pm and /settings commands accepted by the TUI."""
         hints = {
             "/pm ": "new | list [--all] | use N|SESSION | accounts [--check] | "
                     "connect [SESSION [CWD]] | disconnect | history | queue",
@@ -3266,6 +3450,10 @@ class ChatTUI:
             "/pm accounts ": "[--check]",
             "/pm use ": "N|SESSION",
             "/pm connect ": "[SESSION [CWD]]",
+            "/settings": " auto-resume on|off",
+            "/settings ": "auto-resume on|off",
+            "/settings auto-resume": " on|off",
+            "/settings auto-resume ": "on|off",
         }
         hint = hints.get(text, "")
         if width is not None and get_cwidth is not None:
@@ -3477,7 +3665,7 @@ class ChatTUI:
                 return
             self._auto_resume_pending = False
             self.pm_state = "closing"
-            self._pm_working_stop()   # never redrawn once disconnecting (see _pm_working_wanted)
+            self._pm_busy_stop()   # never redrawn once disconnecting
             self._pm_worker(self._pm_disconnect, self.pm_runtime)
             return
         if parts == ["/pm", "history"]:
@@ -3888,7 +4076,7 @@ class ChatTUI:
     def _pm_start_turn(self, text, header):
         self._pm_begin(PM_LABEL, "owner")
         self.append(header, segments=self._owner_segments(header + chat_tui_pm.safe_text(text),
-                                                        rule=True))   # also shows the working line
+                                                        rule=True))   # also refreshes the busy line
         # One idempotency key per submitted draft: pm_runtime never runs it twice.
         key = uuid.uuid4().hex
         self._loop = asyncio.get_running_loop()
@@ -4072,11 +4260,11 @@ class ChatTUI:
 
     def _pm_drop_turn(self):
         """The connection is gone (disconnect, exit): end the turn here. Its worker's late
-        events and end are stale from now on, the working line and its timer are gone."""
+        events and end are stale from now on, the busy-line timer is gone."""
         self._pm_turn_seq += 1
         self._pm_finalize()
         self.pm_turn_active, self.pm_turn_started, self.pm_interrupted = False, None, False
-        self._pm_working_stop()
+        self._pm_busy_stop()
 
     def _pm_extend(self, text):
         """Queue text for the current PM block; the typewriter tick releases it. Every
@@ -4085,7 +4273,7 @@ class ChatTUI:
         if not text:
             return
         if self.pm_block_raw is None:
-            self._pm_open_block()   # the reply replaces the working line
+            self._pm_open_block()   # the reply streams while the busy line stays visible
         self.pm_queue += text
         self._pm_rate = max(self._pm_rate, -(-len(self.pm_queue) // PM_MAX_LAG_TICKS))
         self._pm_schedule_tick()
@@ -4147,65 +4335,35 @@ class ChatTUI:
         self.pm_block_raw = None
         self.pm_tail = []   # the notices stay where they are, below the finished block
 
-    # -- working line (W52 F1) -----------------------------------------------------------
-    def _pm_working_line(self):
-        elapsed = int(max(0.0, time.monotonic() - (self.pm_turn_started or time.monotonic())))
-        if self.pm_state == "thinking":
-            verb = "思考中…"
-        elif self.pm_warm:
-            verb = "暖機中…"
-        elif self.pm_state == "interrupting":
-            verb = "中斷中…"
-        else:
-            verb = "處理中…"
-        return ("PM " + verb + " %ds" % elapsed
-                + ("（佇列 %d 則）" % len(self.pm_outbox) if self.pm_outbox else ""))
-
-    def _pm_working_wanted(self):
-        return (self.pm_turn_active and self.pm_block_raw is None and self.pm_turn_status is None
-                and self.pm_turn_error is None and self.pm_runtime is not None
-                and self.pm_state != "closing")
-
-    def _pm_working_show(self):
-        """Put (or redraw) the working line at the end of the pane; tick every second."""
-        if not self._pm_working_wanted():
-            self._pm_working_remove()
+    def _pm_busy_show(self):
+        """Keep one timer for the busy line and running-tool durations."""
+        if not self._pm_busy_wanted():
+            self._pm_busy_cancel()
             return
-        self._pm_working_remove()
-        self.pm_working_text = "\n\n" + self._pm_working_line()
-        self.pm_working_at = len(self.conversation.text)
-        self.conversation.set_text(self.conversation.text + self.pm_working_text)
-        if self._pm_working_handle is None:
+        if self._pm_busy_handle is None:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                return   # No loop (unit tests): the line is drawn, not ticked.
-            self._pm_working_handle = loop.call_later(PM_WORKING_SECONDS, self._pm_working_tick)
+                self.app.invalidate()
+                return   # No loop (unit tests): the line is rendered on demand.
+            self._pm_busy_handle = loop.call_later(PM_BUSY_SECONDS, self._pm_busy_tick)
+        self.app.invalidate()
 
-    def _pm_working_tick(self):
-        self._pm_working_handle = None
+    def _pm_busy_tick(self):
+        self._pm_busy_handle = None
         if self.pm_turn_active:
             self._pm_tool_tick()
-            self._pm_working_show()   # Shows it again after a block or tool, or redraws it.
-            self.app.invalidate()
+            self._pm_busy_frame = (self._pm_busy_frame + 1) % len(PM_BUSY_GLYPHS)
+        self._pm_busy_show()
 
-    def _pm_working_remove(self):
-        text = self.conversation.text
-        if self.pm_working_at is not None and text[self.pm_working_at:] == self.pm_working_text:
-            self.conversation.set_text(text[:self.pm_working_at])
-        self.pm_working_at = None   # Anything else rewrote the tail: the line is gone already.
-        if not self.pm_turn_active:
-            self._pm_working_cancel()
+    def _pm_busy_cancel(self):
+        if self._pm_busy_handle is not None:
+            self._pm_busy_handle.cancel()
+            self._pm_busy_handle = None
 
-    def _pm_working_cancel(self):
-        if self._pm_working_handle is not None:
-            self._pm_working_handle.cancel()
-            self._pm_working_handle = None
-
-    def _pm_working_stop(self):
-        """Remove the working line and cancel its timer, turn or no turn."""
-        self._pm_working_remove()
-        self._pm_working_cancel()
+    def _pm_busy_stop(self):
+        """Cancel the busy-line timer, turn or no turn."""
+        self._pm_busy_cancel()
 
     def pm_event(self, event, seq=None):
         if self._pm_stale(seq):
@@ -4244,7 +4402,7 @@ class ChatTUI:
             # Status only: thinking content never reaches the pane (pm_runtime sends none).
             if self.pm_state == "working":
                 self.pm_state = "thinking"
-            self._pm_working_show()
+            self._pm_busy_show()
             self.app.invalidate()
         elif kind == "TEXT_DELTA" and type(event.get("text")) is str:
             index = event.get("block_index")
@@ -4259,7 +4417,7 @@ class ChatTUI:
                 self._pm_extend(event["text"])
             self._pm_finalize()
             self.pm_deltas = False
-            self._pm_working_show()   # until the next text, tool or the turn end
+            self._pm_busy_show()   # until the next text, tool or the turn end
         elif kind == "TOOL_USE":
             label = chat_tui_pm.tool_label(event)   # W57: what it does, else its name
             self.pm_tools[event.get("tool_use_id")] = label
@@ -4291,7 +4449,7 @@ class ChatTUI:
             if code == "PM_SESSION_FORKED":
                 # pm_runtime closed itself; the TUI no longer holds a usable connection.
                 self.pm_runtime, self.pm_mode = None, False
-                self._pm_working_stop()
+                self._pm_busy_stop()
         elif kind == "TURN_REPLAY":
             self.pm_turn_status = "REPLAY"
             notice = chat_tui_pm.replay_text(event)
@@ -4317,7 +4475,7 @@ class ChatTUI:
             self._pm_background_live.pop((kind, self._pm_turn_seq), None)
         self._pm_finalize()   # Nothing queued survives the turn (interrupt without TURN_END).
         self.pm_turn_active, self.pm_turn_started = False, None
-        self._pm_working_stop()
+        self._pm_busy_stop()
         if self.pm_state in ("working", "thinking", "interrupting"):
             self.pm_state = "idle"
         if self.pm_outbox and not self.pm_outbox_paused:
@@ -4381,11 +4539,11 @@ class ChatTUI:
         self.pm_turn_active, self.pm_turn_started = False, None
         self._pm_background_waiting.clear()
         self._pm_background_live.clear()
-        for handle in (self._pm_tick_handle, self._pm_working_handle, self._drag_copy_handle,
+        for handle in (self._pm_tick_handle, self._pm_busy_handle, self._drag_copy_handle,
                        self._autoscroll_handle):
             if handle is not None:
                 handle.cancel()
-        self._pm_tick_handle = self._pm_working_handle = self._drag_copy_handle = None
+        self._pm_tick_handle = self._pm_busy_handle = self._drag_copy_handle = None
         self._autoscroll_handle = None
         for runtime in runtimes:
             if runtime is not None:

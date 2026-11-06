@@ -31,13 +31,13 @@ _REFUSAL_CODES = frozenset((
 _SCREEN_HIT_LIMIT = 32
 _SCREEN_RULES = (
     ('private_key', re.compile(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----', re.I)),
-    ('cloud_key', re.compile(r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b', re.I)),
-    ('provider_key', re.compile(r'\bsk-[A-Za-z0-9_-]{12,}', re.I)),
-    ('git_host_key', re.compile(r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}', re.I)),
-    ('chat_key', re.compile(r'\bxox[abprs]-[A-Za-z0-9-]{20,}', re.I)),
-    ('auth_scheme', re.compile(r'\b(?:bearer|basic)\s+\S+', re.I)),
+    ('cloud_key', re.compile(r'(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b', re.I)),
+    ('provider_key', re.compile(r'(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}', re.I)),
+    ('git_host_key', re.compile(r'(?<![A-Za-z0-9_])(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}', re.I)),
+    ('chat_key', re.compile(r'(?<![A-Za-z0-9_])xox[abprs]-[A-Za-z0-9-]{20,}', re.I)),
+    ('auth_scheme', re.compile(r'(?<![A-Za-z0-9_])(?:bearer|basic)\s+\S+', re.I)),
     ('keyword_assign', re.compile(
-        r'["\']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
+        r'["\']?(?<![A-Za-z0-9_])(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
         r'client[_-]?secret|aws_secret_access_key)["\']?\s*[:=]', re.I)),
 )
 _SCREEN_NAME = re.compile(r'[a-z_]+\Z')
@@ -95,12 +95,26 @@ def _post_github_record(pr_number, body, repo_root):
            'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1'}
     if os.environ.get('GH_CONFIG_DIR'):
         env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
-    result = subprocess.run(
-        [gh, 'pr', 'comment', str(pr_number), '--repo', slug, '--body-file', '-'],
-        cwd=repo_root, env=env, input=body.encode('utf-8'),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False,
-        check=False, timeout=30)
-    return result.returncode == 0
+    def comment(command):
+        return subprocess.run(
+            [gh, command, 'comment', str(pr_number), '--repo', slug, '--body-file', '-'],
+            cwd=repo_root, env=env, input=body.encode('utf-8'),
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, shell=False,
+            check=False, timeout=30)
+
+    # --pr may name an Issue, which `gh pr comment` rejects with a specific
+    # message. Retry on the Issue API only for that confirmed case: any other
+    # failure may mean GitHub accepted a write whose response was lost, and a
+    # second write would duplicate the comment. Stderr is never logged.
+    result = comment('pr')
+    if result.returncode == 0:
+        return True
+    stderr = result.stderr
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode('utf-8', 'replace')
+    if not isinstance(stderr, str) or 'Could not resolve to a PullRequest' not in stderr:
+        return False
+    return comment('issue').returncode == 0
 
 
 def _write_unposted(entry, pr_number, task_id, reason, body=None):

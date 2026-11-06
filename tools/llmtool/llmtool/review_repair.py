@@ -10,7 +10,7 @@ from argparse import Namespace
 
 from . import review_result, run_budget, task_completion, worker_dispatch
 from .errors import LLMToolError
-from .task_store import new_id
+from .task_store import _json_bytes, new_id
 
 # This same-class repair cap is separate from worker_dispatch's per-dispatch limit of 1.
 MAX_REPAIR_ATTEMPTS = run_budget.MAX_REPAIR_ATTEMPTS
@@ -69,7 +69,7 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
     registration, _snapshot = _registered_d6(original_task, executor_task)
     args = Namespace(
         task_id=task['task_id'], provider=developer['provider_profile'],
-        mode='direct' if developer['provider_profile'] in ('codex', 'agy') else 'proposal',
+        mode='direct' if developer['provider_profile'] in ('codex', 'agy', 'claude') else 'proposal',
         owner_ref=developer.get('owner_assignment_ref'),
         selection_source='PM',
         executor_task=executor_task, cwd=registration.root,
@@ -91,7 +91,7 @@ def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_
             type(provenance.get('pm_cwd')) is not str):
         _refuse('REPAIR_PM_SESSION_UNAVAILABLE')
     route = developer.get('provider_profile')
-    if route not in ('codex', 'opencode', 'agy'):
+    if route not in ('codex', 'opencode', 'agy', 'claude'):
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     pm_assignment = task.get('pm_assignment')
     if type(pm_assignment) is not dict or type(pm_assignment.get('goal')) is not str:
@@ -239,9 +239,7 @@ def _remote_test_failure(task, *, executor_task, pr_number, receipt):
         _refuse('REMOTE_TEST_RECEIPT_INVALID')
     digest_input = dict(receipt)
     claimed = digest_input.pop('receipt_digest', None)
-    digest = hashlib.sha256(json.dumps(
-        digest_input, ensure_ascii=True, sort_keys=True,
-        separators=(',', ':')).encode('utf-8')).hexdigest()
+    digest = hashlib.sha256(_json_bytes(digest_input)).hexdigest()
     excerpt = receipt.get('failure_excerpt')
     try:
         valid_excerpt = (type(excerpt) is str and len(excerpt.encode('utf-8')) <= 4096 and
@@ -283,6 +281,10 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             developer.get('state') not in ('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED')):
         _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
     profile = developer.get('provider_profile')
+    claude_cli = (profile == 'claude' and
+                  developer.get('backend_session_semantics') == 'CLI_REPORTED_SESSION_ID')
+    if profile == 'claude' and not claude_cli:
+        _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     worker = _worker_key(profile)
     if worker is None:
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
@@ -298,8 +300,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                       pr_number=pr_number, receipt=remote_test_receipt)
     if _current_d6_head(task, executor_task, current_head) != packet['failed_head']:
         _refuse('REPAIR_HEAD_MOVED')
+    policy_task = executor_task if claude_cli else task_id
     decision = worker_dispatch.evaluate(
-        worker, developer.get('owner_assignment_ref'), task_id)
+        worker, developer.get('owner_assignment_ref'), policy_task)
     if not decision.allowed:
         _refuse(decision.reason_code)
     family = f'pr-{pr_number}' if family is None else family
@@ -389,8 +392,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         _refuse('REPAIR_TASK_RECORD_UNAVAILABLE')
 
     # Re-read the Owner switch immediately before the provider side effect.
+    policy_task = executor_task if claude_cli else task_id
     decision = worker_dispatch.evaluate(
-        worker, developer.get('owner_assignment_ref'), task_id)
+        worker, developer.get('owner_assignment_ref'), policy_task)
     if not decision.allowed:
         _refuse(decision.reason_code)
     adapter = dispatch_adapter
