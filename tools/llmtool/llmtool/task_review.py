@@ -603,6 +603,7 @@ def run_review(ready, final, expect, events, fixture):
     call_complete = False
     consumed = False
     fake = getattr(fixture.authority,'test_only',False) is True
+    result = None
     try:
         real_start = time.monotonic()
         real_deadline = real_start + min(180, fixture.budget.wall_clock_ms / 1000)
@@ -731,7 +732,7 @@ def run_review(ready, final, expect, events, fixture):
         # UNKNOWN and never re-decides an otherwise valid, already-authorized
         # verdict. Pre-call admission above remains the only budget gate.
         approve = verdict['security'] == verdict['functional'] == 'APPROVE'
-        return envelope(('REVIEW_FAKE_APPROVED' if fake else 'REVIEW_APPROVED') if approve else 'REVIEW_CHANGES_REQUIRED' if
+        result = envelope(('REVIEW_FAKE_APPROVED' if fake else 'REVIEW_APPROVED') if approve else 'REVIEW_CHANGES_REQUIRED' if
             'CHANGES_REQUIRED' in (verdict['security'],verdict['functional']) else 'REVIEW_BLOCKED',
             snapshot=snapshot,fake=fake,calls=calls,status='APPROVE' if approve else 'BLOCKED',
             collector_status='FAKE_VALIDATED' if fake else 'HOST_VALIDATED',invocation_status=invocation,verdict_validation='SUCCESS',
@@ -744,16 +745,16 @@ def run_review(ready, final, expect, events, fixture):
             reviewer_role=binding.reviewer_role,job_evidence=job_evidence,
             review_authority='WORKER_DATA_ONLY' if worker else 'REVIEW_DATA_ONLY')
     except (LLMToolError,ValueError,TypeError,AttributeError,KeyError,UnicodeError,RecursionError,TimeoutError) as exc:
-        return envelope(getattr(exc,'review_code','REVIEW_PROVIDER_UNAVAILABLE' if calls else 'REVIEW_INPUT_INVALID'),
+        result = envelope(getattr(exc,'review_code','REVIEW_PROVIDER_UNAVAILABLE' if calls else 'REVIEW_INPUT_INVALID'),
                         snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation,
                         limit_metadata=getattr(exc,'review_metadata',{}))
     except Exception:
         # Consume already happened: unexpected transport errors must retain the
         # attempted call and UNKNOWN effect rather than reset CLI accounting.
-        return envelope('REVIEW_PROVIDER_UNAVAILABLE' if calls else 'REVIEW_INPUT_INVALID',
+        result = envelope('REVIEW_PROVIDER_UNAVAILABLE' if calls else 'REVIEW_INPUT_INVALID',
                         snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation)
     except KeyboardInterrupt:
-        return envelope('REVIEW_CANCELLED',snapshot=snapshot,fake=fake,calls=calls,
+        result = envelope('REVIEW_CANCELLED',snapshot=snapshot,fake=fake,calls=calls,
                         invocation_status=invocation)
 
     finally:
@@ -765,15 +766,16 @@ def run_review(ready, final, expect, events, fixture):
             except Exception:
                 # Preserve original SystemExit/BaseException on unwind.
                 if not unwinding:
-                    return envelope('REVIEW_FINALIZE_UNKNOWN',snapshot=snapshot,fake=fake,calls=calls,
-                                    invocation_status=invocation)
+                    result = envelope('REVIEW_FINALIZE_UNKNOWN',snapshot=snapshot,fake=fake,calls=calls,
+                                      invocation_status=invocation)
             if not unwinding and binding.reviewer_role == REVIEWER_ROLES[1] and call_complete:
                 try:
                     fixture.launcher.validate_completion(token)
                     if time.monotonic() >= real_deadline: reject('REVIEW_TIMEOUT')
                 except Exception as exc:
-                    return envelope(getattr(exc,'review_code','REVIEW_FINALIZE_UNKNOWN'),
-                                    snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation)
+                    result = envelope(getattr(exc,'review_code','REVIEW_FINALIZE_UNKNOWN'),
+                                      snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation)
+    return result
 
 
 def _run_fake_review(ready,final,expect,events,fixture):
