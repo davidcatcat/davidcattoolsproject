@@ -4142,7 +4142,9 @@ class DelegateRepairCapTests(unittest.TestCase):
         authorization.start()
         self.addCleanup(authorization.stop)
 
-    def _task(self, *, executor='executor-task-1', developer=False, route='codex'):
+    def _task(self, *, executor='executor-task-1', developer=False, route='codex',
+              developer_state='DEVELOPER_RESPONDED', artifact='diff',
+              changed_files=None, error_code=None):
         task_id, run_id = new_id(), new_id()
         request = 'Bounded repair-cap fixture.'
         request_sha = hashlib.sha256(request.encode()).hexdigest()
@@ -4169,7 +4171,7 @@ class DelegateRepairCapTests(unittest.TestCase):
             )
             developer_record = {
                 'assignment_id': new_id(), 'selection_source': 'PM',
-                'state': 'DEVELOPER_PENDING', 'provider_profile': route,
+                'state': developer_state, 'provider_profile': route,
                 'provider_type': None, 'model': None,
                 'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
                 'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
@@ -4177,13 +4179,15 @@ class DelegateRepairCapTests(unittest.TestCase):
                 'read_paths': ['sample.py'], 'write_paths': ['sample.py'],
                 'acceptance': ['dispatch is bounded'], 'context_sha256': 'b' * 64,
                 'egress_basis': 'Approved synthetic test context.', 'input_bytes': 10,
-                'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
-                'artifact_sha256': None, 'usage': None, 'error_code': None,
+                'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': artifact,
+                'artifact_sha256': None, 'usage': None, 'error_code': error_code,
                 'execution': None,
                 'created_at': '2026-11-04T00:00:00Z',
                 'direct_result_callback': submission_cli._direct_result_callback(
                     task, registration, 'a' * 40),
             }
+            if changed_files is not None:
+                developer_record['changed_files'] = changed_files
             completion = {
                 'state': 'WAITING_EXECUTOR', 'executor_task_id': executor,
                 'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
@@ -4244,6 +4248,41 @@ class DelegateRepairCapTests(unittest.TestCase):
         task = self._task(executor='executor-task-1', developer=True)
         self.assertIsNone(submission_cli._check_delegate_repair_cap(
             self._args(task, 'opencode'), self.store))
+
+    def test_unstarted_and_no_work_blocked_records_do_not_count(self):
+        self._task(developer=True, developer_state='DEVELOPER_PENDING', artifact=None)
+        self._task(developer=True, developer_state='DEVELOPER_UNAVAILABLE',
+                   artifact=None, error_code='DEVELOPER_DISPATCH_REFUSED')
+        self._task(developer=True, developer_state='BLOCKED', artifact=None,
+                   changed_files=[])
+        task = self._task()
+        self.assertIsNone(submission_cli._check_delegate_repair_cap(
+            self._args(task, 'opencode'), self.store))
+
+    def test_responded_blocked_artifact_and_changed_files_count(self):
+        self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
+        self._task(developer=True, developer_state='BLOCKED', artifact='diff',
+                   changed_files=[])
+        self._task(developer=True, developer_state='BLOCKED', artifact=None,
+                   changed_files=['sample.py'])
+        task = self._task()
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
+            submission_cli._check_delegate_repair_cap(
+                self._args(task, 'opencode'), self.store)
+
+    def test_partial_prior_developer_record_counts(self):
+        prior = self._task(developer=True)
+        path = self.store.root / (prior['task_id'] + '.json')
+        payload = json.loads(path.read_text(encoding='utf-8'))
+        payload['developer'].pop('state')
+        payload['developer'].pop('changed_files')
+        path.write_text(json.dumps(payload), encoding='utf-8')
+        self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
+        self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
+        task = self._task()
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
+            submission_cli._check_delegate_repair_cap(
+                self._args(task, 'opencode'), self.store)
 
     def test_background_cap_refuses_codex_and_opencode_before_launch(self):
         self._prior_assignments()

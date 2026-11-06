@@ -4514,9 +4514,41 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
                 f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
         completion = record.get('completion')
         if (type(completion) is dict and
-                completion.get('executor_task_id') == executor_task and
-                type(record.get('developer')) is dict):
-            created_at = record['developer'].get('created_at')
+                completion.get('executor_task_id') == executor_task):
+            developer = record.get('developer')
+            if developer is None:
+                continue
+            if type(developer) is not dict:
+                raise LLMToolError(
+                    f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
+            state = developer.get('state')
+            artifact_known_empty = ('artifact' in developer and
+                                    developer.get('artifact') is None)
+            changed_file_values = [developer[key] for key in
+                                   ('changed_files', 'changed_paths')
+                                   if key in developer]
+            changed_files_known_empty = (
+                bool(changed_file_values) and
+                all(type(files) is list and not files
+                    for files in changed_file_values))
+            execution = developer.get('execution')
+            execution_blocked = (type(execution) is dict and
+                                 execution.get('status') == 'BLOCKED')
+            error_code = developer.get('error_code')
+            explicitly_refused = (type(error_code) is str and
+                                  ('REFUSED' in error_code or
+                                   'DISPATCH_DENIED' in error_code))
+            never_started = (state in ('DEVELOPER_PENDING',
+                                       'DEVELOPER_UNAVAILABLE') and
+                             execution is None and artifact_known_empty and
+                             (not changed_file_values or
+                              changed_files_known_empty))
+            ended_without_work = (
+                state == 'BLOCKED' or execution_blocked or explicitly_refused
+            ) and artifact_known_empty and changed_files_known_empty
+            if never_started or ended_without_work:
+                continue
+            created_at = developer.get('created_at')
             try:
                 stamp = datetime.strptime(created_at, '%Y-%m-%dT%H:%M:%SZ')
                 if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != created_at:
