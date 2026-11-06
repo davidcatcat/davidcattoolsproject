@@ -1476,13 +1476,12 @@ def _patch_paths(patch):
     return paths
 
 
-def _added_diff_content(value):
-    """Return added hunk lines, excluding unified-diff file headers."""
-    lines = value.splitlines()
+def _added_diff_lines(value):
+    """Return (1-based output line, text) for each added hunk line."""
     added = []
     in_hunk = False
     previous = None
-    for line in lines:
+    for number, line in enumerate(value.splitlines(), 1):
         if line.startswith('diff --git '):
             in_hunk = False
         elif line.startswith('@@ '):
@@ -1493,9 +1492,14 @@ def _added_diff_content(value):
             # a hunk is always source content (including lines beginning '++').
             pass
         elif in_hunk and line.startswith('+'):
-            added.append(line[1:])
+            added.append((number, line[1:]))
         previous = line
-    return '\n'.join(added)
+    return added
+
+
+def _added_diff_content(value):
+    """Return added hunk lines, excluding unified-diff file headers."""
+    return '\n'.join(text for _number, text in _added_diff_lines(value))
 
 
 def _recount_developer_hunks(value):
@@ -1805,10 +1809,99 @@ def _capture_rejected_output(store, task_id, value):
             'sha256': hashlib.sha256(raw).hexdigest()}
 
 
+# A DEVELOPER_OUTPUT_SENSITIVE refusal reuses the High Debug screen record and
+# its disposition command (python -m llmtool.high_debug screen-disposition),
+# keyed by the refused Task and this fixed family (#981).
+_DEVELOPER_SCREEN_FAMILY = 'developer-output'
+_DEVELOPER_SCREEN_SOURCE = 'DEVELOPER_OUTPUT'
+_DEVELOPER_SCREEN_UNLOCATED = ('unlocated', 0)
+
+
+def _developer_screen_root(store):
+    """The Task store root the screen record sits beside; None is the default."""
+    root = getattr(store, 'root', None)
+    return Path(root) if isinstance(root, (str, os.PathLike)) else None
+
+
+def _developer_screen_hits(value):
+    """Return sorted (rule, output line) pairs for the screened added lines.
+
+    Lines are 1-based lines of the refused Developer output. Only rule names
+    and line numbers are returned, never matched text.
+    """
+    from .high_debug import _screen_hits
+    if type(value) is not str:
+        return [_DEVELOPER_SCREEN_UNLOCATED]
+    added = _added_diff_lines(value)
+    located = set()
+    for rule, line in _screen_hits('\n'.join(text for _number, text in added)):
+        located.add((rule, added[line - 1][0] if 1 <= line <= len(added) else 0))
+    return sorted(located) or [_DEVELOPER_SCREEN_UNLOCATED]
+
+
+def _record_developer_screen_refusal(store, task_id, value):
+    """Best-effort text-free record of one sensitive Developer output refusal.
+
+    If it cannot be written (or the store names no root), the delegate gate
+    still refuses from the Task record and records the refusal as unlocated.
+    """
+    from . import high_debug
+    root = _developer_screen_root(store)
+    if root is None:
+        return
+    try:
+        byte_count = (len(value.encode('utf-8', 'replace'))
+                      if type(value) is str else 0)
+        high_debug._write_screen_record(
+            task_id, _DEVELOPER_SCREEN_FAMILY, 'DEVELOPER_OUTPUT_SENSITIVE',
+            _DEVELOPER_SCREEN_SOURCE, _developer_screen_hits(value), byte_count,
+            root=root)
+    except Exception:
+        pass
+
+
+def _check_developer_screen_disposition(store, task_id, developer):
+    """Refuse while Task ``task_id`` has an undisposed sensitive output refusal."""
+    from . import high_debug
+    refused = (type(developer) is dict and
+               developer.get('error_code') == 'DEVELOPER_OUTPUT_SENSITIVE')
+    root = _developer_screen_root(store)
+    invalid = f'DELEGATE_SCREEN_RECORD_INVALID: Task {task_id}'
+    try:
+        path = high_debug._screen_location(task_id, _DEVELOPER_SCREEN_FAMILY, root)
+        exists = high_debug._screen_record_exists(path)
+        if not exists and not refused:
+            return
+        if not exists:
+            # An older refusal or a failed write left no record. Record the
+            # refusal without a location so it still needs a disposition.
+            high_debug._write_screen_record(
+                task_id, _DEVELOPER_SCREEN_FAMILY, 'DEVELOPER_OUTPUT_SENSITIVE',
+                _DEVELOPER_SCREEN_SOURCE, [_DEVELOPER_SCREEN_UNLOCATED], 0, root=root)
+        record = high_debug._read_screen_record(task_id, _DEVELOPER_SCREEN_FAMILY, root)
+    except Exception:
+        raise LLMToolError(invalid) from None
+    if record.get('source') != _DEVELOPER_SCREEN_SOURCE:
+        raise LLMToolError(invalid)
+    if record['disposition'] is None:
+        raise LLMToolError('DELEGATE_SCREEN_DISPOSITION_REQUIRED: ' + high_debug._screen_detail(
+            [tuple(hit) for hit in record['hits']],
+            f'Task {task_id} family={_DEVELOPER_SCREEN_FAMILY}',
+            omitted=record['omitted']))
+
+
 def _persist_developer_output_rejection(store, task_id, developer, error_code,
                                         usage, value, *, expected_developer=None,
-                                        **fields):
-    """Persist the rejection even if its optional private diagnostic capture fails."""
+                                        screened=None, **fields):
+    """Persist the rejection even if its optional private diagnostic capture fails.
+
+    ``screened`` is the output the screen refused when ``value`` (the text
+    captured for diagnosis) is a different text.
+    """
+    if error_code == 'DEVELOPER_OUTPUT_SENSITIVE':
+        # Written before the Task record so a failed Task update keeps it.
+        _record_developer_screen_refusal(
+            store, task_id, value if screened is None else screened)
     try:
         capture = _capture_rejected_output(store, task_id, value)
     except Exception:
@@ -4379,7 +4472,7 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
                     rejection_developer = dict(developer, execution=execution)
                     saved = _persist_developer_output_rejection(
                         store, task['task_id'], rejection_developer, rejection, exc.usage,
-                        exc.final_message or artifact)
+                        exc.final_message or artifact, screened=artifact)
                     _print(_task_view(saved))
                     return 1
                 if not completion_evidence:
@@ -4669,6 +4762,9 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
         if (type(completion) is dict and
                 completion.get('executor_task_id') == executor_task):
             developer = record.get('developer')
+            # A sensitive output refusal on this D6 blocks every new dispatch
+            # until its rules and lines carry a stored disposition (#981).
+            _check_developer_screen_disposition(store, task_id, developer)
             if developer is None:
                 continue
             if type(developer) is not dict:
