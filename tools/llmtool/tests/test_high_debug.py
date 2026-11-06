@@ -862,7 +862,7 @@ class HighDebugTests(unittest.TestCase):
         with patch.object(high_debug, '_SCREEN_RULES', table):
             self.assertEqual(high_debug._screen_rule('alpha beta'), 'starts_here')
 
-    def test_screen_record_counts_omitted_hits_and_disposition_uses_kept_set(self):
+    def test_screen_record_counts_omitted_hits_and_refuses_disposition(self):
         task_id, family = 'a' * 32, 'family'
         hits = [('unclassified', number) for number in range(1, 36)]
         with patch.object(high_debug, '_screen_hits', return_value=hits):
@@ -885,8 +885,157 @@ class HighDebugTests(unittest.TestCase):
             self.assertEqual(caught.exception.high_debug_code,
                              'HIGH_DEBUG_SCREEN_RECORD_INVALID')
         record_path.write_text(json.dumps(record), encoding='utf-8')
-        high_debug.record_screen_disposition(task_id, family, hits[:32], 'FALSE_POSITIVE',
+        before = record_path.read_bytes()
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.record_screen_disposition(task_id, family, hits[:32], 'FALSE_POSITIVE',
+                'https://github.com/org/repo/issues/1#issuecomment-2')
+        self.assertEqual(caught.exception.high_debug_code,
+                         'HIGH_DEBUG_SCREEN_HITS_OMITTED')
+        self.assertEqual(record_path.read_bytes(), before)
+        self.assertIsNone(json.loads(before)['disposition'])
+
+    def _write_screen_hits(self, source, count):
+        """Record ``count`` unique hits for ``source``; return them and the path."""
+        task_id, family = 'a' * 32, 'family'
+        hits = [('unclassified', number) for number in range(1, count + 1)]
+        high_debug._write_screen_record(task_id, family,
+                                        high_debug._SCREEN_SOURCE_CODES[source],
+                                        source, hits, count)
+        return hits, high_debug._screen_path(task_id, family)
+
+    def test_exactly_limit_unique_hits_accept_a_complete_disposition(self):
+        limit = high_debug._SCREEN_HIT_LIMIT
+        ref = 'https://github.com/org/repo/issues/1#issuecomment-2'
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS) + 'RCA_CONFIRMED'
+        for source in high_debug._SCREEN_SOURCE_CODES:
+            with self.subTest(source=source):
+                hits, path = self._write_screen_hits(source, limit)
+                record = json.loads(path.read_text(encoding='utf-8'))
+                self.assertEqual(len(record['hits']), limit)
+                self.assertEqual(record['omitted'], 0)
+                high_debug.record_screen_disposition('a' * 32, 'family', hits,
+                                                     'FALSE_POSITIVE', ref)
+                record = json.loads(path.read_text(encoding='utf-8'))
+                self.assertEqual(record['disposition']['ref'], ref)
+                _result, _invoke, store = self._run_case(report)
+                self.assertEqual(store.entries[0]['status'], 'RCA_CONFIRMED')
+
+    def test_repeated_hits_do_not_count_toward_the_limit(self):
+        limit = high_debug._SCREEN_HIT_LIMIT
+        task_id, family = 'a' * 32, 'family'
+        hits = [('unclassified', number) for number in range(1, limit + 1)]
+        high_debug._write_screen_record(task_id, family, 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
+                                        'EVIDENCE', hits + hits[:1], limit)
+        path = high_debug._screen_path(task_id, family)
+        self.assertEqual(json.loads(path.read_text(encoding='utf-8'))['omitted'], 0)
+        high_debug.record_screen_disposition(task_id, family, hits, 'FALSE_POSITIVE',
             'https://github.com/org/repo/issues/1#issuecomment-2')
+        self.assertIsNotNone(
+            json.loads(path.read_text(encoding='utf-8'))['disposition'])
+
+    def test_over_limit_hits_cannot_be_disposed_for_any_source(self):
+        limit = high_debug._SCREEN_HIT_LIMIT
+        for source in high_debug._SCREEN_SOURCE_CODES:
+            hits, path = self._write_screen_hits(source, limit + 1)
+            before = path.read_bytes()
+            for supplied in (hits[:limit], hits, []):
+                with self.subTest(source=source, supplied=len(supplied)):
+                    with self.assertRaises(LLMToolError) as caught:
+                        high_debug.record_screen_disposition('a' * 32, 'family', supplied,
+                            'FALSE_POSITIVE',
+                            'https://github.com/org/repo/issues/1#issuecomment-2')
+                    self.assertEqual(caught.exception.high_debug_code,
+                                     'HIGH_DEBUG_SCREEN_HITS_OMITTED')
+                    self.assertEqual(path.read_bytes(), before)
+                    self.assertEqual([item.name for item in path.parent.iterdir()],
+                                     [path.name])
+            self.assertIsNone(json.loads(before)['disposition'])
+
+    def test_screen_disposition_module_entry_refuses_overflow_and_keeps_record(self):
+        hits, path = self._write_screen_hits('EVIDENCE', high_debug._SCREEN_HIT_LIMIT + 1)
+        before = path.read_bytes()
+        argv = ['screen-disposition', '--task-id', 'a' * 32, '--family', 'family',
+                '--classification', 'FALSE_POSITIVE',
+                '--ref', 'https://github.com/org/repo/issues/1#issuecomment-2']
+        for rule, line in hits:
+            argv.extend(('--hit', rule + ':' + str(line)))
+        out, err = StringIO(), StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            self.assertEqual(high_debug._screen_disposition_main(argv), 1)
+        self.assertEqual(out.getvalue(), '')
+        self.assertEqual(err.getvalue(), 'HIGH_DEBUG_SCREEN_HITS_OMITTED\n')
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_legacy_disposed_overflow_record_keeps_high_debug_gate_closed(self):
+        limit = high_debug._SCREEN_HIT_LIMIT
+        ref = 'https://github.com/org/repo/issues/1#issuecomment-2'
+        for source in high_debug._SCREEN_SOURCE_CODES:
+            with self.subTest(source=source):
+                hits, path = self._write_screen_hits(source, limit + 1)
+                record = json.loads(path.read_text(encoding='utf-8'))
+                record['disposition'] = {'classification': 'FALSE_POSITIVE', 'ref': ref,
+                                         'recorded_at': record['recorded_at']}
+                path.write_text(json.dumps(record), encoding='utf-8')
+                before = path.read_bytes()
+                create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+                with patch.object(high_debug.worker_dispatch, 'evaluate') as evaluate:
+                    with self.assertRaises(LLMToolError) as caught:
+                        high_debug.run_high_debug(store=_Store(), task_id='a' * 32,
+                            executor_task='executor', pr_number=17, family='family',
+                            failed_corrections=2, runner=runner, create_d6=create)
+                self.assertEqual(caught.exception.high_debug_code,
+                                 'HIGH_DEBUG_SCREEN_RECORD_INVALID')
+                evaluate.assert_not_called()
+                create.assert_not_called()
+                runner.assert_not_called()
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.record_screen_disposition('a' * 32, 'family', hits[:limit],
+                                                         'FALSE_POSITIVE', ref)
+                self.assertEqual(caught.exception.high_debug_code,
+                                 'HIGH_DEBUG_SCREEN_RECORD_INVALID')
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_pending_overflow_record_blocks_before_evidence_or_worker_start(self):
+        missing = str(Path(self.unposted_root.name) / 'missing')
+        for source in high_debug._SCREEN_SOURCE_CODES:
+            with self.subTest(source=source):
+                hits, path = self._write_screen_hits(
+                    source, high_debug._SCREEN_HIT_LIMIT + 3)
+                before = path.read_bytes()
+                create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+                with patch.object(high_debug.worker_dispatch, 'evaluate') as evaluate:
+                    with self.assertRaises(LLMToolError) as caught:
+                        high_debug.run_high_debug(store=_Store(), task_id='a' * 32,
+                            executor_task='executor', pr_number=17, family='family',
+                            failed_corrections=2, evidence=missing,
+                            runner=runner, create_d6=create)
+                # A read of the missing evidence would refuse with another code.
+                self.assertEqual(caught.exception.high_debug_code,
+                                 'HIGH_DEBUG_SCREEN_DISPOSITION_REQUIRED')
+                self._assert_screen_detail_count(caught.exception.high_debug_detail,
+                                                 len(hits))
+                evaluate.assert_not_called()
+                create.assert_not_called()
+                runner.assert_not_called()
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_failed_attempts_preserve_the_screen_record(self):
+        ref = 'https://github.com/org/repo/issues/1#issuecomment-2'
+        hits, path = self._write_screen_hits('EVIDENCE', high_debug._SCREEN_HIT_LIMIT)
+        before = path.read_bytes()
+        with patch.object(high_debug.os, 'replace', side_effect=OSError('disk')):
+            with self.assertRaises(OSError):
+                high_debug.record_screen_disposition('a' * 32, 'family', hits,
+                                                     'FALSE_POSITIVE', ref)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual([item.name for item in path.parent.iterdir()], [path.name])
+        high_debug.record_screen_disposition('a' * 32, 'family', hits,
+                                             'FALSE_POSITIVE', ref)
+        disposed = path.read_bytes()
+        code, _created = self._failing_case(_Store(), self._repo(), returncode=1)
+        self.assertEqual(code, 'HIGH_DEBUG_RUN_FAILED')
+        self.assertEqual(path.read_bytes(), disposed)
 
     def test_many_screen_hits_evidence_refusal_detail_counts_overflow_once(self):
         hits = [('unclassified', number) for number in range(1, 36)]
