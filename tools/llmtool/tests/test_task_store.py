@@ -857,6 +857,7 @@ class TaskStoreTests(unittest.TestCase):
                                  'DEVELOPER_PENDING')
 
     def test_non_claude_d6_binding_allows_finished_and_abandoned_tasks(self):
+        self._allow_codex_dispatch()
         store = TaskStore(Path(self.temp.name).resolve())
         executor_task_id = 'executor-repair-1'
         finished = self._codex_dispatch_task()
@@ -872,10 +873,12 @@ class TaskStoreTests(unittest.TestCase):
         store.compare_and_update(finished['task_id'],
             expected={'developer': None, 'completion': None},
             developer=developer, completion=completion)
+        dispatching = dict(developer, state='DEVELOPER_DISPATCHING',
+                           provider_type='codex-cli', model='gpt-6-luna')
+        store.update(finished['task_id'], developer=dispatching)
         artifact = ('diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n'
                     '@@ -1 +1 @@\n-x=1\n+x=2\n')
-        responded = dict(developer, state='DEVELOPER_RESPONDED',
-                         provider_type='codex-cli', model='gpt-6-luna',
+        responded = dict(dispatching, state='DEVELOPER_RESPONDED',
                          artifact=artifact,
                          artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
         store.update(finished['task_id'], developer=responded)
