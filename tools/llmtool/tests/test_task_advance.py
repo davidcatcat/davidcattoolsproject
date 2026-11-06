@@ -2127,7 +2127,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                     raise RuntimeError('claim race')
                 self.attempt = dict(merge_attempt)
         store, calls = Store(), []
-        pr = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open',
+              'merged': False, 'mergeable': True,
               'labels': [{'name': 'mac-ci'}]}
         def github_get(path):
             if path.startswith('commits/'):
