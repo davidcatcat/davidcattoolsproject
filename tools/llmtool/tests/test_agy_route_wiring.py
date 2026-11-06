@@ -2,8 +2,10 @@ import io
 import json
 import dataclasses
 import hashlib
+import tempfile
 import unittest
 from argparse import Namespace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -11,6 +13,7 @@ from llmtool import review_dispatch, task_completion, task_submission_cli, worke
 from llmtool.developer_routes import RouteError
 from llmtool.developer_routes.agy import owner_assignment_gate
 from llmtool.errors import LLMToolError
+from llmtool.task_store import TaskStore
 
 
 import review_trust_fixture
@@ -31,7 +34,8 @@ class AgyRouteWiringTests(unittest.TestCase):
                           read_paths=None, changed_paths=None, request='AGY goal',
                           goal='AGY goal', session_id='conversation_12345678',
                           bind_result='BOUND', initial_native_session_id=None,
-                          bound_registration_mutation=False, audit=None):
+                          bound_registration_mutation=False, audit=None,
+                          store=None):
         task_id = 'a' * 32
         task = {
             'schema_version': 2, 'task_id': task_id, 'run_id': 'b' * 32,
@@ -62,7 +66,23 @@ class AgyRouteWiringTests(unittest.TestCase):
                 self.task.update(updates)
                 return dict(self.task)
 
-        store = Store()
+        if store is None:
+            store = Store()
+        else:
+            record = task_submission_cli._record(
+                task_id, task['run_id'], 'pm-' + 'e' * 32, 'pm', request,
+                state='PM_RESPONDED',
+                provider_type='openai-compatible',
+                model='pm-model',
+                backend='NO_NATIVE_SESSION_ID_EXPOSED',
+                request_sha=hashlib.sha256(request.encode('utf-8')).hexdigest(),
+            )
+            record.update(
+                response=task['response'],
+                pm_route_binding=task['pm_route_binding'],
+                pm_assignment={'schema_version': 1, **task['pm_assignment']},
+            )
+            task = store.create(record)
         snapshot = SimpleNamespace(root='/registered/root', common_dir='/repo/.git',
                                    branch='task-branch', head='d' * 40, clean=True)
         registration = task_completion.D6Registration(
@@ -178,7 +198,7 @@ class AgyRouteWiringTests(unittest.TestCase):
                          registration_reads=len(registration_reads),
                          diff_calls=len(diff_calls), bind_calls=int(bind_called),
                          result_events=len(inbox_events))
-        return status, store.task, inbox_events, prompts
+        return status, store.get(task_id), inbox_events, prompts
 
     def test_record_pm_accepts_agy_recommendation(self):
         response = json.dumps({
@@ -402,11 +422,158 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(task['developer']['error_code'], 'AGY_D6_BINDING_CHANGED')
         self.assertEqual(audit['bind_executor_calls'], 3)
         self.assertEqual(audit.get('provider_results', 0), 0)
-        self.assertEqual(audit['registration_reads'], 1)
+        self.assertEqual(audit['registration_reads'], 0)
         self.assertEqual(audit['diff_calls'], 0)
         self.assertEqual(audit['bind_calls'], 0)
         self.assertEqual(audit['result_events'], 0)
         self.assertEqual(inbox_events, [])
+
+    def test_agy_bound_result_persists_through_real_task_store(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve() / 'tasks'
+            store = TaskStore(root)
+            decision = worker_dispatch.PolicyDecision(
+                worker_key='agy',
+                allowed=True,
+                reason_code='OWNER_POLICY_ALLOWED',
+                policy_sha256='f' * 64,
+            )
+            audit = {}
+            with patch.object(
+                    task_submission_cli, '_agy_developer_profile',
+                    return_value=('gemini-test', 'high')):
+                status, task, events, _prompts = self._run_agy_delegate(
+                    store=store,
+                    decisions=(decision,) * 4,
+                    audit=audit,
+                )
+
+            persisted = TaskStore(root).get('a' * 32)
+            self.assertEqual(task, persisted)
+            self.assertEqual(status, 0)
+
+            developer = persisted['developer']
+            self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+            self.assertIsNone(developer['error_code'])
+            self.assertEqual(developer['execution']['status'], 'DONE')
+            self.assertEqual(
+                developer['execution']['native_session_id'],
+                'conversation_12345678',
+            )
+            self.assertNotIn(
+                'native_session_binding', developer['execution'])
+
+            artifact = 'diff --git a/src.py b/src.py\n'
+            self.assertEqual(developer['artifact'], artifact)
+            self.assertEqual(
+                developer['artifact_sha256'],
+                hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
+            )
+
+            completion_evidence = persisted['completion']['evidence']
+            callback_evidence = developer['direct_result_callback']['evidence']
+            for evidence in (completion_evidence, callback_evidence):
+                self.assertEqual(
+                    evidence['executor_native_session_id'],
+                    'conversation_12345678',
+                )
+                self.assertEqual(
+                    evidence['executor_native_session'], 'VERIFIED')
+                self.assertEqual(
+                    evidence['contract_digest'],
+                    persisted['task_binding']['contract_digest'],
+                )
+            for key, value in completion_evidence.items():
+                self.assertEqual(callback_evidence[key], value)
+
+            self.assertEqual(audit['provider_results'], 1)
+            self.assertEqual(audit['registration_reads'], 2)
+            self.assertEqual(audit['bind_calls'], 1)
+            self.assertEqual(audit['result_events'], 1)
+            self.assertEqual(events, [{
+                'task_id': 'a' * 32,
+                'executor_task_id': 'executor-d6',
+            }])
+
+    def test_agy_refused_bind_persists_through_real_task_store(self):
+        cases = (
+            ('D6_BIND_NATIVE_SESSION_REFUSED', None, 'UNKNOWN'),
+            (
+                'D6_BIND_NATIVE_SESSION_ALREADY_SET',
+                'conversation_old1234',
+                'VERIFIED',
+            ),
+        )
+        for bind_result, previous_session, verification in cases:
+            with self.subTest(bind_result=bind_result):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary).resolve() / 'tasks'
+                    store = TaskStore(root)
+                    decision = worker_dispatch.PolicyDecision(
+                        worker_key='agy',
+                        allowed=True,
+                        reason_code='OWNER_POLICY_ALLOWED',
+                        policy_sha256='f' * 64,
+                    )
+                    audit = {}
+                    with patch.object(
+                            task_submission_cli, '_agy_developer_profile',
+                            return_value=('gemini-test', 'high')):
+                        status, task, events, _prompts = self._run_agy_delegate(
+                            store=store,
+                            decisions=(decision,) * 4,
+                            bind_result=bind_result,
+                            initial_native_session_id=previous_session,
+                            audit=audit,
+                        )
+
+                    persisted = TaskStore(root).get('a' * 32)
+                    self.assertEqual(task, persisted)
+                    self.assertEqual(status, 0)
+
+                    developer = persisted['developer']
+                    self.assertEqual(
+                        developer['state'], 'DEVELOPER_RESPONDED')
+                    self.assertIsNone(developer['error_code'])
+                    self.assertEqual(
+                        developer['execution']['status'], 'DONE')
+                    self.assertEqual(
+                        developer['execution']['native_session_id'],
+                        'conversation_12345678',
+                    )
+                    self.assertNotIn(
+                        'native_session_binding', developer['execution'])
+
+                    artifact = 'diff --git a/src.py b/src.py\n'
+                    self.assertEqual(developer['artifact'], artifact)
+                    self.assertEqual(
+                        developer['artifact_sha256'],
+                        hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
+                    )
+
+                    completion_evidence = persisted['completion']['evidence']
+                    callback_evidence = developer[
+                        'direct_result_callback']['evidence']
+                    for evidence in (completion_evidence, callback_evidence):
+                        self.assertEqual(
+                            evidence['executor_native_session_id'],
+                            previous_session,
+                        )
+                        self.assertEqual(
+                            evidence['executor_native_session'],
+                            verification,
+                        )
+                    for key, value in completion_evidence.items():
+                        self.assertEqual(callback_evidence[key], value)
+
+                    self.assertEqual(audit['provider_results'], 1)
+                    self.assertEqual(audit['registration_reads'], 1)
+                    self.assertEqual(audit['bind_calls'], 1)
+                    self.assertEqual(audit['result_events'], 1)
+                    self.assertEqual(events, [{
+                        'task_id': 'a' * 32,
+                        'executor_task_id': 'executor-d6',
+                    }])
 
     def test_agy_isolation_failure_records_specific_boundary_reason(self):
         status, task, inbox_events, _prompts = self._run_agy_delegate(
