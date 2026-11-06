@@ -35,9 +35,9 @@ _UNIT_OK = re.compile(r'OK(?: \(([^\n]+)\))?')
 _NODE_ID = re.compile(r'(?:[\w.-]+/)*[\w.-]+\.py(?:::[\w.]+)*(?:\[[^\n]*\])?')
 _PYTEST_STATS = re.compile(
     r'([0-9][^\n]*?) in [0-9]+(?:\.[0-9]+)?s(?: \([0-9:]+\))?')
-# Unicode word characters outside ASCII include CJK variants, compatibility
-# jamo, halfwidth kana, iteration marks, and mixed-script letters.
-_NON_ASCII_WORD = r'[^\W\x00-\x7f]'
+# Disable IGNORECASE for this boundary class: otherwise its negated ASCII range
+# also excludes İ, ı, ſ, and K when used inside the credential patterns.
+_NON_ASCII_WORD = r'(?-i:[^\W\x00-\x7f])'
 _NON_ASCII_WORD_CHAR = re.compile(_NON_ASCII_WORD)
 _CLOUD_KEY = (
     r'(?:(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b|'
@@ -79,7 +79,8 @@ def _sensitive_jwt(text):
     # segments must end at dots; its last may end at an internal word boundary.
     # Each bounded prefix search / anchored tail match scans at most one
     # segment, never the remaining source from every overlapping eyJ start.
-    # The Unicode boundary requires non-ASCII word characters on both sides.
+    # The fallback boundary requires an adjacent non-ASCII word character at
+    # both the header start and the final segment end.
     previous_end, first, second, first_start = None, False, False, None
     for segment in _JWT_SEGMENT.finditer(text):
         start, end = segment.span()

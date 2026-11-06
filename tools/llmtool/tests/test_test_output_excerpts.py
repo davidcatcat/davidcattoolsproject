@@ -470,9 +470,10 @@ class TestOutputExcerptsTests(unittest.TestCase):
         self.assertTrue(result['excerpts'][0]['text'].endswith(control))
 
     def test_jwt_shapes_preserve_case_segments_and_word_boundaries(self):
-        # synthetic-fixture: screen-tool test; covers all four Unicode
-        # letters matched by ASCII ranges under Python's IGNORECASE.
+        # Covers ASCII and Unicode JWT boundary behavior.
+        # synthetic-fixture: screen-tool test
         jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
+        # synthetic-fixture: screen-tool test
         tokens = (jwt, jwt.upper(), 'prefix-' + jwt, 'prefix.' + jwt,
                   'eyJ-' * 6 + jwt, jwt + '-trailer', jwt + '.extra',
                   'eyJ' + '_' * 8 + '.' + '-' * 8 + '.' + '_' * 8,
@@ -486,6 +487,7 @@ class TestOutputExcerptsTests(unittest.TestCase):
                 self.assert_sensitive_with_deadline(raw)
 
     def test_non_jwt_shapes_preserve_supported_report_coverage(self):
+        # synthetic-fixture: screen-tool test
         tokens = ('eyJaaaaaaa.bbbbbbbb.cccccccc',
                   'eyJaaaaaaaa.bbbbbbb.cccccccc',
                   'eyJaaaaaaaa.bbbbbbbb.ccccccc',
@@ -494,10 +496,10 @@ class TestOutputExcerptsTests(unittest.TestCase):
                   'eyJaaaaaaaa..bbbbbbbb.cccccccc',
                   'eyJaaaaaaaa.bbbbbbbb',
                   'eyJaaaaaaaa/bbbbbbbb.cccccccc',
-                  'a' + 'ey' + 'J' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8,  # synthetic-fixture: screen-tool test
+                  'a' + 'ey' + 'J' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8,
                   )
         # synthetic-fixture: screen-tool test
-        cjk_jwt = '\u6e2c' + 'ey' + 'J' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8  # synthetic-fixture: screen-tool test
+        cjk_jwt = '\u6e2c' + 'ey' + 'J' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
         self.assert_rejected(cjk_jwt.encode() + b'\n' + UNIT_FAILURE)
         for token in tokens:
             with self.subTest(token=token):
@@ -510,16 +512,17 @@ class TestOutputExcerptsTests(unittest.TestCase):
     def test_sensitive_values_directly_after_cjk_text_are_rejected(self):
         # synthetic-fixture: screen-tool test
         values = (
-            'AK' + 'IA' + 'SYNTHETIC0TEST16',  # synthetic-fixture: screen-tool test
-            'sk' + '-' + 'a' * 24,  # synthetic-fixture: screen-tool test
-            'github' + '_pat_' + 'a' * 24,  # synthetic-fixture: screen-tool test
-            'xox' + 'b-' + 'a' * 20,  # synthetic-fixture: screen-tool test
-            'bear' + 'er' + ' ' + 'SYNTHETIC' + 'VALUE',  # synthetic-fixture: screen-tool test
-            'to' + 'ken' + '=' + 'SYNTHETIC' + 'VALUE',  # synthetic-fixture: screen-tool test
+            'AK' + 'IA' + 'SYNTHETIC0TEST16',
+            'sk' + '-' + 'a' * 24,
+            'github' + '_pat_' + 'a' * 24,
+            'xox' + 'b-' + 'a' * 20,
+            'bear' + 'er' + ' ' + 'SYNTHETIC' + 'VALUE',
+            'to' + 'ken' + '=' + 'SYNTHETIC' + 'VALUE',
         )
         for value in values:
             with self.subTest(shape=value[:3]):
-                self.assert_rejected(('\u6e2c' + value).encode() + b'\n' + UNIT_FAILURE)  # synthetic-fixture: screen-tool test
+                # synthetic-fixture: screen-tool test
+                self.assert_rejected(('\u6e2c' + value).encode() + b'\n' + UNIT_FAILURE)
 
     def test_cloud_keys_and_jwts_between_cjk_letters_are_rejected(self):
         from llmtool.test_output_excerpts import (
@@ -528,8 +531,10 @@ class TestOutputExcerptsTests(unittest.TestCase):
         )
         from llmtool.high_debug import _screen_hits
 
-        # synthetic-fixture: screen-tool test; this is a synthetic JWT shape.
+        # This is a base64url encoded synthetic JWT shape.
+        # synthetic-fixture: screen-tool test
         encode = lambda value: base64.urlsafe_b64encode(value).rstrip(b'=').decode()
+        # synthetic-fixture: screen-tool test
         jwt = (encode(b'{"alg":"HS256"}') + '.' +
                encode(b'{"sub":"1234567890"}') + '.signature123456')
         side_pairs = (('\u6e2c', '\u3042'), ('\u3131', '\u3131'),
@@ -555,19 +560,23 @@ class TestOutputExcerptsTests(unittest.TestCase):
             _emitted_json_sensitive, _emitted_sensitive, _sensitive,
             _sensitive_jwt,
         )
+        from llmtool.high_debug import _screen_hits
 
-        # synthetic-fixture: screen-tool test.
+        # synthetic-fixture: screen-tool test
         jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
+        # synthetic-fixture: screen-tool test
         for value in (SYNTHETIC_AWS_KEY, 'ASIA' + 'SYNTHETIC0TEST16'):
             for text in ('x' + value, value + 'x'):
                 with self.subTest(shape=value[:4], text=text[:1]):
                     self.assertFalse(_sensitive(text))
                     self.assertFalse(_emitted_sensitive(text))
                     self.assertFalse(_emitted_json_sensitive(text))
+                    self.assertFalse(_screen_hits(text))
         self.assertFalse(_sensitive('x' + jwt))
         self.assertFalse(_sensitive_jwt('x' + jwt))
         self.assertFalse(_emitted_sensitive('x' + jwt))
         self.assertFalse(_emitted_json_sensitive('x' + jwt))
+        self.assertFalse(_screen_hits('x' + jwt))
         # The existing ASCII suffix rule still recognizes a word boundary
         # inside a longer identifier as a JWT candidate.
         self.assertTrue(_sensitive(jwt + 'x'))
