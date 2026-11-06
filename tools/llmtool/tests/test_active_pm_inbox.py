@@ -7,8 +7,10 @@ transcript file under a temporary CLAUDE_CONFIG_DIR.
 import hashlib
 import json
 import os
+import stat
 import threading
 import time
+import traceback
 import uuid
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -853,13 +855,23 @@ class ActivePMInboxTests(unittest.TestCase):
                 try:
                     operation()
                     return True
-                except LLMToolError as exc:
-                    if (exc.task_store_error_code != 'TASK_STORE_BUSY' or
+                except Exception as exc:
+                    if (getattr(exc, 'task_store_error_code', None) != 'TASK_STORE_BUSY' or
                             time.monotonic() >= deadline):
-                        errors.append(exc)
+                        errors.append((threading.current_thread().name, exc))
                         return False
                     ready_retries.append(exc.task_store_error_code)
                     time.sleep(0.01)
+
+        def guarded(target, *args):
+            # A thread that dies (for example on a broken barrier) is reported,
+            # not silently lost.
+            def run():
+                try:
+                    target(*args)
+                except BaseException as exc:
+                    errors.append((threading.current_thread().name, exc))
+            return run
 
         def ready_event():
             barrier.wait(timeout=10)
@@ -876,18 +888,43 @@ class ActivePMInboxTests(unittest.TestCase):
                     source_sha='a' * 40, sequence=0, payload_sha256='d' * 64)
             retry_busy(record)
 
-        threads = [threading.Thread(target=ready_event) for _ in range(2)]
-        threads += [threading.Thread(target=other_event, args=(n,)) for n in range(2)]
+        threads = [threading.Thread(target=guarded(ready_event), name='ready-%d' % n)
+                   for n in range(2)]
+        threads += [threading.Thread(target=guarded(other_event, n), name='other-%d' % n)
+                    for n in range(2)]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join(30)
-        error_codes = [error.task_store_error_code for error in errors]
-        self.assertEqual(errors, [], f'collected task-store error codes: {error_codes}')
-        self.assertTrue(all(code == 'TASK_STORE_BUSY' for code in ready_retries))
-        events = self.store.get(task['task_id'])['completion_events']
-        self.assertEqual(len(events), 3)
-        self.assertEqual(sum(event['source'] == 'DIRECT_D6_DEVELOPER' for event in events), 1)
+
+        # Diagnostics are gathered only after every join, so they describe the
+        # final state; each error keeps the traceback that names its _fail site.
+        alive = [thread.name for thread in threads if thread.is_alive()]
+        try:
+            events = self.store.get(task['task_id']).get('completion_events', [])
+            final_read = 'ok'
+        except Exception as exc:
+            events = []
+            final_read = '%s %s' % (type(exc).__name__,
+                                    getattr(exc, 'task_store_error_code', None))
+        diagnostics = '\n'.join([
+            'alive threads: %r' % alive,
+            'busy retries: %d' % len(ready_retries),
+            'final read: %s' % final_read,
+            'events: %r' % [(event['source'], event['session_id'], event['sequence'],
+                             event['state']) for event in events],
+            *('%s: %s %s\n%s' % (
+                name, type(exc).__name__, getattr(exc, 'task_store_error_code', None),
+                ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+              for name, exc in errors),
+        ])
+        self.assertEqual(alive, [], diagnostics)
+        self.assertEqual(errors, [], diagnostics)
+        self.assertTrue(all(code == 'TASK_STORE_BUSY' for code in ready_retries), diagnostics)
+        self.assertEqual(final_read, 'ok', diagnostics)
+        self.assertEqual(len(events), 3, diagnostics)
+        self.assertEqual(sum(event['source'] == 'DIRECT_D6_DEVELOPER' for event in events), 1,
+                         diagnostics)
 
     def test_read_retries_when_concurrent_replace_unlinks_opened_inode(self):
         task = self._record_pm()
@@ -942,7 +979,7 @@ class ActivePMInboxTests(unittest.TestCase):
             hard_link.unlink()
 
         # If a directory entry is swapped and no retry converges within the
-        # bounded window, read fails closed with TASK_STORE_BUSY; if the same
+        # bounded read attempts, read fails closed with TASK_STORE_BUSY; if the same
         # inode is mutated in place (size/mtime/nlink mismatch), it fails closed
         # with TASK_STORE_INVALID.
         current = json.loads(path.read_text())
@@ -960,6 +997,130 @@ class ActivePMInboxTests(unittest.TestCase):
             with self.assertRaises(LLMToolError) as mutated:
                 self.store.get(task['task_id'])
         self.assertEqual(mutated.exception.task_store_error_code, 'TASK_STORE_INVALID')
+
+    def test_read_retries_when_path_stat_reports_opened_inode_unlinked(self):
+        # #1071: os.stat(name) resolves the name to the opened inode, a
+        # concurrent replace drops that inode's last link, then stat() reads
+        # its attributes, so the path reports the opened inode with
+        # st_nlink == 0. Modelled by a real replace followed by the opened
+        # descriptor's own fstat. The read must reopen and return the new
+        # record, and if the entry never settles fail BUSY, never return the
+        # unlinked record.
+        task = self._record_pm()
+        name = task['task_id'] + '.json'
+        path = self.store.root / name
+        current = json.loads(path.read_text())
+        original_stat, original_fstat = os.stat, os.fstat
+        opened, replaced, nlinks = [], [], []
+        limit = [1]
+
+        def remember_record_fd(fd):
+            info = original_fstat(fd)
+            if stat.S_ISREG(info.st_mode):
+                opened.append(fd)
+            return info
+
+        def stat_resolving_replaced_inode(target, *args, **kwargs):
+            if target != name or len(replaced) >= limit[0]:
+                return original_stat(target, *args, **kwargs)
+            stamp = '2026-11-06T00:00:%02dZ' % len(replaced)
+            replaced.append(stamp)
+            self.store._write(dict(current, updated_at=stamp), create=False)
+            info = original_fstat(opened[-1])
+            nlinks.append(info.st_nlink)
+            return info
+
+        with patch('llmtool.task_store.os.fstat', side_effect=remember_record_fd), \
+             patch('llmtool.task_store.os.stat', side_effect=stat_resolving_replaced_inode):
+            record = self.store.get(task['task_id'])
+        self.assertEqual(replaced, ['2026-11-06T00:00:00Z'])
+        self.assertEqual(nlinks, [0])
+        self.assertEqual(record['updated_at'], '2026-11-06T00:00:00Z')
+
+        for seen in (opened, replaced, nlinks):
+            seen.clear()
+        limit[0] = 100
+        with patch('llmtool.task_store.os.fstat', side_effect=remember_record_fd), \
+             patch('llmtool.task_store.os.stat', side_effect=stat_resolving_replaced_inode):
+            with self.assertRaises(LLMToolError) as unsettled:
+                self.store.get(task['task_id'])
+        self.assertEqual(unsettled.exception.task_store_error_code, 'TASK_STORE_BUSY')
+        self.assertEqual(len(replaced), task_store_module.TASK_READ_ATTEMPTS)
+        self.assertEqual(nlinks, [0] * task_store_module.TASK_READ_ATTEMPTS)
+        self.assertEqual(self.store.get(task['task_id'])['updated_at'], replaced[-1])
+
+    def test_unlink_tolerance_still_refuses_linked_or_swapped_records(self):
+        # Tolerating st_nlink == 0 for a replaced inode must not admit a record
+        # that gains a second link, or an entry swapped to a hard-linked or
+        # tampered file, at any point of the read.
+        task = self._record_pm()
+        name = task['task_id'] + '.json'
+        path = self.store.root / name
+        valid = path.read_bytes()
+        extra = self.store.root / 'extra-link'
+        staged = self.store.root / 'staged-record'
+        original_stat, original_fstat = os.stat, os.fstat
+
+        def stage(raw):
+            staged.write_bytes(raw)
+            staged.chmod(0o600)
+
+        def link_live_record():
+            os.link(path, extra)
+
+        def swap_in_hard_linked_copy():
+            stage(valid)
+            os.link(staged, extra)
+            os.replace(staged, path)
+
+        def swap_in_tampered_copy():
+            value = json.loads(valid)
+            value['updated_at'] = '2000-01-01T00:00:00Z'  # record_sha256 no longer matches
+            stage(json.dumps(value).encode('utf-8'))
+            os.replace(staged, path)
+
+        def read_with(mutate, at):
+            calls, fired = [], []
+
+            def fire():
+                if not calls:
+                    calls.append(True)
+                    mutate()
+                    fired.append(True)
+
+            def on_fstat(fd):
+                info = original_fstat(fd)
+                if at == 'fstat' and stat.S_ISREG(info.st_mode):
+                    fire()
+                return info
+
+            def on_stat(target, *args, **kwargs):
+                if at == 'stat' and target == name:
+                    fire()
+                return original_stat(target, *args, **kwargs)
+
+            try:
+                with patch('llmtool.task_store.os.fstat', side_effect=on_fstat), \
+                     patch('llmtool.task_store.os.stat', side_effect=on_stat):
+                    with self.assertRaises(LLMToolError) as caught:
+                        self.store.get(task['task_id'])
+            finally:
+                for leftover in (extra, staged):
+                    if os.path.lexists(leftover):
+                        leftover.unlink()
+                self.store._write(json.loads(valid), create=False)
+            self.assertEqual(fired, [True])
+            return caught.exception.task_store_error_code
+
+        for label, mutate, at in (
+                ('hard link after open', link_live_record, 'fstat'),
+                ('hard link before path stat', link_live_record, 'stat'),
+                ('swap to hard-linked copy after open', swap_in_hard_linked_copy, 'fstat'),
+                ('swap to hard-linked copy before path stat', swap_in_hard_linked_copy, 'stat'),
+                ('swap to tampered copy before path stat', swap_in_tampered_copy, 'stat')):
+            with self.subTest(label):
+                self.assertEqual(read_with(mutate, at), 'TASK_STORE_INVALID')
+        self.assertEqual(self.store.get(task['task_id'])['task_id'], task['task_id'])
 
     # Session-file checks ----------------------------------------------------
 
