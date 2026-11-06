@@ -69,6 +69,82 @@ class TaskStoreTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve() / 'tasks'
         self.store = TaskStore(self.root)
 
+    def test_merge_attempt_unknown_can_be_reclaimed_for_same_pr_and_head(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        claimed = {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+                   'claimed_at': '2026-11-06T00:00:00Z'}
+        current = self.store.get(task['task_id'])
+        self.store.compare_and_update(task['task_id'],
+            expected={'record_sha256': current['record_sha256']}, merge_attempt=claimed)
+        unknown = dict(claimed, state='UNKNOWN')
+        current = self.store.get(task['task_id'])
+        self.store.compare_and_update(task['task_id'],
+            expected={'record_sha256': current['record_sha256']}, merge_attempt=unknown)
+        retry = dict(claimed, claimed_at='2026-11-06T00:00:00.000001Z')
+        current = self.store.get(task['task_id'])
+        saved = self.store.compare_and_update(task['task_id'],
+            expected={'record_sha256': current['record_sha256'], 'merge_attempt': unknown},
+            merge_attempt=retry)
+        self.assertEqual(saved['merge_attempt'], retry)
+
+    def test_merge_attempt_transition_refusals_remain_strict(self):
+        cases = (
+            ('MERGED to CLAIMED', 'MERGED', 17, 'a' * 40,
+             {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+              'claimed_at': '2026-11-06T00:00:01Z'}),
+            ('CLAIMED to CLAIMED', 'CLAIMED', 17, 'a' * 40,
+             {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+              'claimed_at': '2026-11-06T00:00:01Z'}),
+            ('UNKNOWN to another PR', 'UNKNOWN', 17, 'a' * 40,
+             {'pr': 18, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+              'claimed_at': '2026-11-06T00:00:01Z'}),
+            ('UNKNOWN to another head', 'UNKNOWN', 17, 'a' * 40,
+             {'pr': 17, 'head_sha': 'b' * 40, 'state': 'CLAIMED',
+              'claimed_at': '2026-11-06T00:00:01Z'}),
+            ('UNKNOWN without a new claim time', 'UNKNOWN', 17, 'a' * 40,
+             {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+              'claimed_at': '2026-11-06T00:00:00Z'}),
+        )
+        for label, old_state, pr, head, new_attempt in cases:
+            with self.subTest(label=label):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                old = {'pr': pr, 'head_sha': head, 'state': 'CLAIMED',
+                       'claimed_at': '2026-11-06T00:00:00Z'}
+                current = self.store.get(task['task_id'])
+                self.store.compare_and_update(task['task_id'],
+                    expected={'record_sha256': current['record_sha256']}, merge_attempt=old)
+                if old_state != 'CLAIMED':
+                    old = dict(old, state=old_state)
+                    current = self.store.get(task['task_id'])
+                    self.store.compare_and_update(task['task_id'],
+                        expected={'record_sha256': current['record_sha256']}, merge_attempt=old)
+                current = self.store.get(task['task_id'])
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.compare_and_update(task['task_id'],
+                        expected={'record_sha256': current['record_sha256']},
+                        merge_attempt=new_attempt)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_MERGE_ATTEMPT_TRANSITION_INVALID')
+
+    def test_claimed_merge_attempt_still_allows_unknown_and_merged(self):
+        for next_state in ('UNKNOWN', 'MERGED'):
+            with self.subTest(next_state=next_state):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                claim = {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+                         'claimed_at': '2026-11-06T00:00:00Z'}
+                current = self.store.get(task['task_id'])
+                self.store.compare_and_update(task['task_id'],
+                    expected={'record_sha256': current['record_sha256']}, merge_attempt=claim)
+                updated = dict(claim, state=next_state)
+                current = self.store.get(task['task_id'])
+                saved = self.store.compare_and_update(task['task_id'],
+                    expected={'record_sha256': current['record_sha256']},
+                    merge_attempt=updated)
+                self.assertEqual(saved['merge_attempt'], updated)
+
     def test_high_debug_entries_are_append_only(self):
         task = self._codex_dispatch_task()
         self.store.create(task)

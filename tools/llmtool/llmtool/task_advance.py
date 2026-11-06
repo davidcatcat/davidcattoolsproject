@@ -2,6 +2,7 @@
 
 import hashlib
 import contextlib
+from datetime import datetime, timedelta, timezone
 import io
 import importlib.util
 import json
@@ -384,12 +385,23 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     if prior is not None:
         if prior.get('pr') != number or prior.get('head_sha') != head:
             return _merge_refusal('MERGE_CONFLICTING_PR')
-        return _merge_refusal('MERGE_ALREADY_CLAIMED')
+        if prior.get('state') != 'UNKNOWN':
+            return _merge_refusal('MERGE_ALREADY_CLAIMED')
+        if (current_pr.get('state') != 'open' or current_pr.get('merged') is not False):
+            return _merge_refusal('MERGE_ALREADY_CLAIMED')
+    claimed_at_time = datetime.now(timezone.utc)
+    claimed_at = claimed_at_time.isoformat(timespec='microseconds').replace('+00:00', 'Z')
+    if prior is not None and claimed_at == prior.get('claimed_at'):
+        # Keep a retry distinct even if the clock has not advanced.
+        claimed_at = (claimed_at_time + timedelta(microseconds=1)).isoformat(
+            timespec='microseconds').replace('+00:00', 'Z')
     claim = {'pr': number, 'head_sha': head, 'state': 'CLAIMED',
-             'claimed_at': TaskStore._completion_now()}
+             'claimed_at': claimed_at}
     try:
-        store.compare_and_update(record['task_id'],
-            expected={'record_sha256': record['record_sha256']}, merge_attempt=claim)
+        expected = {'record_sha256': record['record_sha256']}
+        if prior is not None:
+            expected['merge_attempt'] = prior
+        store.compare_and_update(record['task_id'], expected=expected, merge_attempt=claim)
     except Exception:
         return _merge_refusal('MERGE_CLAIM_CONFLICT')
     args = ['pr', 'merge', str(number), '--squash', '--match-head-commit', head]
@@ -398,6 +410,32 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     except Exception:
         result = None
     if result is None or getattr(result, 'returncode', 1) != 0:
+        # The command outcome can be ambiguous. A fresh exact-head merged read
+        # resolves it as success; every other read preserves UNKNOWN.
+        try:
+            resolved_pr = github_get(f'pulls/{number}')
+        except Exception:
+            resolved_pr = None
+        resolved_head = (resolved_pr.get('head')
+                         if type(resolved_pr) is dict else None)
+        merged = (type(resolved_pr) is dict and
+                  resolved_pr.get('number', number) == number and
+                  type(resolved_head) is dict and resolved_head.get('sha') == head and
+                  resolved_pr.get('merged') is True)
+        if merged:
+            claim['state'] = 'MERGED'
+            warning_codes = []
+            try:
+                store.compare_and_update(record['task_id'], expected={'merge_attempt':
+                    dict(claim, state='CLAIMED')}, merge_attempt=claim)
+            except Exception:
+                try:
+                    store.compare_and_update(record['task_id'], expected={'merge_attempt':
+                        dict(claim, state='CLAIMED')}, merge_attempt=claim)
+                except Exception:
+                    warning_codes.append('MERGE_RESULT_RECORD_FAILED')
+            return _merge_success(record, number, head, review_version, gh_runner, root,
+                                  warning_codes)
         claim['state'] = 'UNKNOWN'
         try:
             store.compare_and_update(record['task_id'], expected={'merge_attempt':
@@ -419,6 +457,11 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         except Exception:
             pass
         warning_codes.append('MERGE_RESULT_RECORD_FAILED')
+    return _merge_success(record, number, head, review_version, gh_runner, root,
+                          warning_codes)
+
+
+def _merge_success(record, number, head, review_version, gh_runner, root, warning_codes):
     body = (f'llmtool task advance merge provenance: task={record["task_id"]} '
             f'head={head} review_version={review_version} checks=exact-head-success-or-skipped')
     try:
