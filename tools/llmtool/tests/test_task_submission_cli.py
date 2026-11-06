@@ -4172,7 +4172,14 @@ class DelegateRepairCapTests(unittest.TestCase):
             developer_record = {
                 'assignment_id': new_id(), 'selection_source': 'PM',
                 'state': developer_state, 'provider_profile': route,
-                'provider_type': None, 'model': None,
+                'provider_type': ({
+                    'codex': 'codex-cli', 'opencode': 'opencode-cli',
+                    'agy': 'agy-cli', 'gw-agent': 'gw-agent-cli',
+                }.get(route) if developer_state != 'DEVELOPER_PENDING' else None),
+                'model': ({
+                    'codex': 'gpt-6-luna', 'opencode': 'opencode/test-free',
+                    'agy': 'gemini-test', 'gw-agent': 'gw-agent-test',
+                }.get(route) if developer_state != 'DEVELOPER_PENDING' else None),
                 'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
                 'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
                 'source_sha_binding': 'D6_REGISTRY_OBSERVED',
@@ -4180,7 +4187,14 @@ class DelegateRepairCapTests(unittest.TestCase):
                 'acceptance': ['dispatch is bounded'], 'context_sha256': 'b' * 64,
                 'egress_basis': 'Approved synthetic test context.', 'input_bytes': 10,
                 'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': artifact,
-                'artifact_sha256': None, 'usage': None, 'error_code': error_code,
+                'artifact_sha256': (hashlib.sha256(artifact.encode()).hexdigest()
+                                    if artifact is not None else None),
+                'usage': None,
+                'error_code': (error_code or
+                               ('CODEX_BLOCKED' if route == 'codex' and
+                                developer_state == 'DEVELOPER_OUTCOME_UNKNOWN' and
+                                execution is not None and
+                                execution.get('status') == 'BLOCKED' else None)),
                 'execution': execution,
                 'created_at': '2026-11-04T00:00:00Z',
                 'direct_result_callback': submission_cli._direct_result_callback(
@@ -4254,6 +4268,7 @@ class DelegateRepairCapTests(unittest.TestCase):
                    artifact=None, error_code='DEVELOPER_DISPATCH_REFUSED')
         self._task(developer=True, developer_state='DEVELOPER_OUTCOME_UNKNOWN',
                    artifact=None, changed_files=[],
+                   error_code='CODEX_BLOCKED',
                    execution={
                        'status': 'BLOCKED', 'native_session_id': 'session-1',
                        'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
@@ -4267,17 +4282,12 @@ class DelegateRepairCapTests(unittest.TestCase):
 
     def test_responded_blocked_artifact_and_changed_files_count(self):
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
-        self._task(developer=True, developer_state='DEVELOPER_OUTCOME_UNKNOWN',
+        self._task(developer=True, developer_state='DEVELOPER_RESPONDED',
                    artifact='diff', changed_files=[],
-                   execution={
-                       'status': 'BLOCKED', 'native_session_id': 'session-1',
-                       'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
-                       'elapsed_ms': 1, 'cleanup_status': 'CONFIRMED',
-                       'usage_source': 'UNKNOWN', 'source_bytes': None,
-                       'source_file_count': None, 'source_manifest_sha256': None,
-                   })
+                   error_code=None)
         self._task(developer=True, developer_state='DEVELOPER_OUTCOME_UNKNOWN',
                    artifact=None, changed_files=['sample.py'],
+                   error_code='CODEX_BLOCKED',
                    execution={
                        'status': 'BLOCKED', 'native_session_id': 'session-1',
                        'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
