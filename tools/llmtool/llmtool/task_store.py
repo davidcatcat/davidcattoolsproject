@@ -1611,6 +1611,13 @@ def _validate(record):
             model = developer['model']
             if model is not None and (type(model) is not str or len(model) > 256):
                 _fail()
+            if developer['provider_profile'] == 'gw-agent':
+                if (dev_state == 'DEVELOPER_RESPONDED' and
+                        (type(model) is not str or _SERVED_MODEL.fullmatch(model) is None)):
+                    _fail()
+                if (type(usage) is dict and 'served_model' in usage and
+                        usage['served_model'] != model):
+                    _fail()
             for field in ('read_paths', 'write_paths'):
                 values = developer[field]
                 if (type(values) is not list or not values or len(values) > 32 or
