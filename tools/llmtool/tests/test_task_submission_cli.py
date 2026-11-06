@@ -3086,6 +3086,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
             def compare_and_update(self, task_id, **kwargs):
                 return backing.compare_and_update(task_id, **kwargs)
 
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **kwargs):
+                return backing.d6_bind_compare_and_update(
+                    task_id, executor_task_id=executor_task_id,
+                    expected=expected, **kwargs)
+
             def update(self, task_id, **kwargs):
                 return backing.update(task_id, **kwargs)
 
@@ -3137,6 +3143,16 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 if kwargs.get('developer', {}).get('state') == 'DEVELOPER_PENDING':
                     # Model a process interruption at the exact durable-claim boundary,
                     # before config resolution, client creation, or provider execution.
+                    raise SystemExit(77)
+                return result
+
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **kwargs):
+                result = backing.d6_bind_compare_and_update(
+                    task_id, executor_task_id=executor_task_id,
+                    expected=expected, **kwargs)
+                if kwargs.get('developer', {}).get('state') == 'DEVELOPER_PENDING':
+                    # Model interruption after the durable shared D6 claim.
                     raise SystemExit(77)
                 return result
 

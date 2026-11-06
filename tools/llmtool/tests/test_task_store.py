@@ -913,6 +913,101 @@ class TaskStoreTests(unittest.TestCase):
             developer=allowed_developer, completion=allowed_completion)
         self.assertEqual(saved['completion']['executor_task_id'], 'executor-abandoned-1')
 
+        abandoned_target = self._codex_dispatch_task()
+        store.create(abandoned_target)
+        store.abandon(abandoned_target['task_id'],
+                      pm_session_id=abandoned_target['pm_session_id'],
+                      reason='Target was abandoned before dispatch')
+        with self.assertRaises(LLMToolError) as caught:
+            store.d6_bind_compare_and_update(
+                abandoned_target['task_id'], executor_task_id='executor-target-abandoned',
+                expected={'developer': None, 'completion': None},
+                developer=self._developer_assignment(provider='codex', max_tokens=None),
+                completion=dict(completion, executor_task_id='executor-target-abandoned'))
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_ALREADY_BOUND')
+        self.assertIsNone(store.get(abandoned_target['task_id'])['developer'])
+
+    def test_d6_binding_unknown_cleanup_and_callback_holders_are_live(self):
+        store = TaskStore(Path(self.temp.name).resolve())
+        executor_task_id = 'executor-unknown-cleanup'
+        holder = self._codex_dispatch_task()
+        store.create(holder)
+        developer = self._developer_assignment(provider='codex', max_tokens=None)
+        developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
+                         executor_task_id=executor_task_id,
+                         execution={'status': 'UNKNOWN', 'native_session_id': None,
+                            'process_exit_code': None, 'stdout_sha256': None,
+                            'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+                            'usage_source': 'UNKNOWN', 'source_bytes': None,
+                            'source_file_count': None, 'source_manifest_sha256': None})
+        registration = SimpleNamespace(task_id=executor_task_id, root='/registered/root',
+            common_dir='/repo/.git', branch='task-branch', result_sha='a' * 40,
+            trusted_agent_id='codex-developer', session_ref='session-ref',
+            native_session_id=None)
+        developer['direct_result_callback'] = task_submission_cli_module._direct_result_callback(
+            holder, registration, 'a' * 40, test_policy='LOCAL')
+        completion = {'state': 'WAITING_EXECUTOR', 'executor_task_id': executor_task_id,
+            'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+            'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None}
+        store.compare_and_update(holder['task_id'],
+            expected={'developer': None, 'completion': None},
+            developer=developer, completion=completion)
+
+        candidate = self._codex_dispatch_task()
+        store.create(candidate)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        with self.assertRaises(LLMToolError) as caught:
+            store.d6_bind_compare_and_update(candidate['task_id'],
+                executor_task_id=executor_task_id,
+                expected={'developer': None, 'completion': None},
+                developer=pending, completion=completion)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_ALREADY_BOUND')
+
+        callback_only = dict(developer, executor_task_id='executor-other-bound')
+        store.update(holder['task_id'], developer=callback_only,
+                     completion=dict(completion, executor_task_id='executor-other-bound'))
+        with self.assertRaises(LLMToolError) as caught:
+            store.d6_bind_compare_and_update(candidate['task_id'],
+                executor_task_id=executor_task_id,
+                expected={'developer': None, 'completion': None},
+                developer=pending, completion=completion)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_ALREADY_BOUND')
+
+        confirmed = dict(developer, execution={
+            'status': 'UNKNOWN', 'native_session_id': None,
+            'process_exit_code': None, 'stdout_sha256': None, 'elapsed_ms': None,
+            'cleanup_status': 'CONFIRMED', 'usage_source': 'UNKNOWN',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None})
+        store.update(holder['task_id'], developer=confirmed)
+        candidate_completion = dict(completion, executor_task_id=executor_task_id)
+        saved = store.d6_bind_compare_and_update(candidate['task_id'],
+            executor_task_id=executor_task_id,
+            expected={'developer': None, 'completion': None},
+            developer=pending, completion=candidate_completion)
+        self.assertEqual(saved['completion']['executor_task_id'], executor_task_id)
+
+    def test_d6_binding_scan_failure_refuses_claim(self):
+        store = TaskStore(Path(self.temp.name).resolve())
+        candidate = self._codex_dispatch_task()
+        store.create(candidate)
+        with patch.object(store, 'task_ids', side_effect=OSError('scan unavailable')):
+            with self.assertRaises(LLMToolError) as caught:
+                store.d6_bind_compare_and_update(candidate['task_id'],
+                    executor_task_id='executor-scan-failure',
+                    expected={'developer': None, 'completion': None},
+                    developer=self._developer_assignment(provider='codex', max_tokens=None),
+                    completion={'state': 'WAITING_EXECUTOR',
+                                'executor_task_id': 'executor-scan-failure',
+                                'reviewer_task_id': None, 'evidence': None,
+                                'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
+                                'pm_response': None, 'pm_recommendation': None,
+                                'pm_usage': None, 'pm_error_code': None})
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'TASK_D6_BINDING_SCAN_FAILED')
+        self.assertIsNone(store.get(candidate['task_id'])['developer'])
+
     def test_non_claude_concurrent_d6_binds_allow_exactly_one_winner(self):
         store = TaskStore(Path(self.temp.name).resolve())
         executor_task_id = 'executor-concurrent-1'

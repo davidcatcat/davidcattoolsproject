@@ -2436,7 +2436,7 @@ class TaskStore:
 
     def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
                                    expected, **changes):
-        """Atomically bind a non-Claude Task to an available D6 executor."""
+        """Atomically bind a direct-route Task to an available D6 executor."""
         if (type(executor_task_id) is not str or not executor_task_id or
                 type(expected) is not dict or not expected):
             _fail('TASK_D6_BINDING_SCAN_FAILED')
@@ -2470,15 +2470,26 @@ class TaskStore:
                         callback.get('executor_task_id')
                         if type(callback) is dict else None,
                     )
-                    if (type(dev) is dict and executor_task_id in bound_ids and
-                            dev.get('state') in ('DEVELOPER_PENDING',
-                                                'DEVELOPER_DISPATCHING')):
+                    state = dev.get('state') if type(dev) is dict else None
+                    execution = dev.get('execution') if type(dev) is dict else None
+                    live = (state in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING') or
+                            (state == 'DEVELOPER_OUTCOME_UNKNOWN' and
+                             (type(execution) is not dict or
+                              execution.get('cleanup_status') != 'CONFIRMED')))
+                    if type(dev) is dict and executor_task_id in bound_ids and live:
                         _fail('TASK_D6_ALREADY_BOUND')
                 target = self.get(task_id)
+                if target.get('abandonment') is not None:
+                    _fail('TASK_D6_ALREADY_BOUND')
                 update_expected = dict(expected)
                 update_expected['record_sha256'] = target['record_sha256']
-                return self.compare_and_update(
-                    task_id, expected=update_expected, **changes)
+                try:
+                    return self.compare_and_update(
+                        task_id, expected=update_expected, **changes)
+                except TaskStoreConflict:
+                    if self.get(task_id).get('abandonment') is not None:
+                        _fail('TASK_D6_ALREADY_BOUND')
+                    raise
             except LLMToolError:
                 raise
             except Exception:

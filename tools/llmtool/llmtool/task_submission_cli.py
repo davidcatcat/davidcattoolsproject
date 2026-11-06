@@ -1684,6 +1684,7 @@ def _codex_timeout_recovery(previous, *, executor_task_id, source_sha,
         previous.get('state') == 'DEVELOPER_OUTCOME_UNKNOWN' and
         previous.get('error_code') == 'CODEX_TIMEOUT_WITH_CHANGES' and
         type(execution) is dict and execution.get('status') == 'TIMEOUT' and
+        execution.get('cleanup_status') == 'CONFIRMED' and
         execution.get('diff_base_sha') == previous.get('source_sha') and
         type(execution.get('diff_sha256')) is str and
         re.fullmatch(r'[0-9a-f]{64}', execution['diff_sha256']) and
@@ -3454,7 +3455,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        store.compare_and_update(task['task_id'],
+        store.d6_bind_compare_and_update(task['task_id'],
+            executor_task_id=registration.task_id,
             expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                       'completion': None}, developer=developer, completion=completion)
     except TaskStoreConflict:
