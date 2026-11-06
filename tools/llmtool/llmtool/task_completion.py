@@ -1128,10 +1128,22 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
         if len(fields) > 3:
             continue
         resolution_raw = _remerge_diff_paths_raw(root, commit)
+        first_parent = fields[1]
+        conflict_raw = _merge_tree_conflict_paths_raw(
+            root, first_parent, second_parent)
         try:
-            merge_resolution_paths[commit] = set(
+            resolution_paths = set(
                 path for path in resolution_raw.decode('utf-8', 'strict').split('\x00')
                 if path)
+            conflict_fields = conflict_raw.decode('utf-8', 'strict').split('\x00')
+            if (len(conflict_fields) < 2 or
+                    re.fullmatch(r'[0-9a-f]{40}', conflict_fields[0]) is None or
+                    conflict_fields[-1] != ''):
+                _stop('GIT_INSPECTION_FAILED')
+            conflict_paths = conflict_fields[1:-1]
+            if any(not path for path in conflict_paths):
+                _stop('GIT_INSPECTION_FAILED')
+            merge_resolution_paths[commit] = resolution_paths | set(conflict_paths)
         except UnicodeError:
             _stop('GIT_INSPECTION_FAILED')
 
@@ -1184,6 +1196,35 @@ def _remerge_diff_paths_raw(root, commit):
                             'GIT_OBJECT_DIRECTORY': str(object_dir),
                             'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
                         })
+    except LLMToolError:
+        raise
+    except Exception:
+        _stop('GIT_INSPECTION_FAILED')
+
+
+def _merge_tree_conflict_paths_raw(root, first_parent, second_parent):
+    """List conflict paths with all merge-tree object writes kept temporary."""
+    try:
+        objects = _git(root, ('rev-parse', '--path-format=absolute', '--git-path', 'objects'),
+                       limit=4096).decode('utf-8', 'strict').strip()
+    except UnicodeError:
+        _stop('GIT_INSPECTION_FAILED')
+    if not objects or not os.path.isabs(objects):
+        _stop('GIT_INSPECTION_FAILED')
+    try:
+        with tempfile.TemporaryDirectory(prefix='llmtool-merge-tree-objects-') as temporary:
+            object_dir = Path(temporary) / 'objects'
+            object_dir.mkdir(mode=0o700)
+            output, status = _git(root, ('merge-tree', '--write-tree', '--name-only',
+                                  '--no-messages', '-z', first_parent, second_parent),
+                limit=1024 * 1024, allow_exit_1=True, return_exit_code=True,
+                env_overrides={
+                    'GIT_OBJECT_DIRECTORY': str(object_dir),
+                    'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
+                })
+            if status not in (0, 1):
+                _stop('GIT_INSPECTION_FAILED')
+            return output
     except LLMToolError:
         raise
     except Exception:
