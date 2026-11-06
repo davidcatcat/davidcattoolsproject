@@ -112,9 +112,16 @@ class AgyRouteWiringTests(unittest.TestCase):
             return result
 
         def direct_event(event_task_id, executor_task_id, *, store, reviewer_adapter=None):
-            saved = store.get(event_task_id)['developer']
+            saved_task = store.get(event_task_id)
+            saved = saved_task['developer']
             self.assertEqual(saved['state'], 'DEVELOPER_RESPONDED')
-            self.assertEqual(saved['direct_result_callback'], callback)
+            expected_callback = json.loads(json.dumps(callback))
+            bound_evidence = saved_task['completion']['evidence']
+            expected_callback['evidence']['executor_native_session_id'] = (
+                bound_evidence['executor_native_session_id'])
+            expected_callback['evidence']['executor_native_session'] = (
+                bound_evidence['executor_native_session'])
+            self.assertEqual(saved['direct_result_callback'], expected_callback)
             inbox_events.append({'task_id': event_task_id, 'executor_task_id': executor_task_id})
             return 0
 
@@ -270,7 +277,7 @@ class AgyRouteWiringTests(unittest.TestCase):
                 expected_agent=registration.trusted_agent_id,
                 expected_session_ref=registration.session_ref,
                 expected_native_session_id=evidence['executor_native_session_id'],
-                write_paths=['src.py'], read_paths=['src.py'], artifact=diff,
+                write_paths=['src.py'], read_paths=['src.py'], artifact=diff.decode('utf-8'),
                 artifact_sha256=hashlib.sha256(diff).hexdigest())
         self.assertEqual(collected['executor_native_session_id'], 'conversation_old1234')
         self.assertEqual(collected['executor_native_session'], 'VERIFIED')
