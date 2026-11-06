@@ -4297,6 +4297,81 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertIsNone(submission_cli._check_delegate_repair_cap(
             self._args(task, 'opencode'), self.store))
 
+    def _assert_prelaunch_evidence_counts(
+            self, route, state, code, **changes):
+        self._prior_assignments(2)
+        prior = self._task(
+            developer=True, route=route,
+            developer_state=state, artifact=None, error_code=code)
+        before = self.store.get(prior['task_id'])['developer']
+        developer = {**before, **changes}
+
+        self.store.compare_and_update(
+            prior['task_id'], expected={'developer': before},
+            developer=developer)
+
+        persisted = self.store.get(prior['task_id'])['developer']
+        self.assertEqual(persisted, developer)
+        self.assertIn(
+            (persisted['provider_profile'],
+             persisted['state'], persisted['error_code']),
+            submission_cli._PRELAUNCH_REPAIR_REFUSALS)
+
+        current = self._task()
+        with self.assertRaisesRegex(
+                LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+            submission_cli._check_delegate_repair_cap(
+                self._args(current, 'opencode'), self.store)
+
+    def test_prelaunch_refusal_with_execution_counts(self):
+        self._assert_prelaunch_evidence_counts(
+            'codex', 'DEVELOPER_UNAVAILABLE',
+            'DEVELOPER_PROFILE_UNAVAILABLE',
+            execution={
+                'status': 'UNKNOWN',
+                'native_session_id': None,
+                'process_exit_code': None,
+                'stdout_sha256': None,
+                'elapsed_ms': None,
+                'cleanup_status': 'UNKNOWN',
+                'usage_source': 'UNKNOWN',
+                'source_bytes': None,
+                'source_file_count': None,
+                'source_manifest_sha256': None,
+            })
+
+    def test_prelaunch_refusal_with_changed_files_counts(self):
+        self._assert_prelaunch_evidence_counts(
+            'gw-agent', 'DEVELOPER_UNAVAILABLE',
+            'DEVELOPER_DISPATCH_DENIED',
+            audit_sha256='c' * 64,
+            audit_copy_path_sha256='d' * 64,
+            changed_files=['sample.py'])
+
+    def test_prelaunch_refusal_with_progress_changed_files_counts(self):
+        self._assert_prelaunch_evidence_counts(
+            'agy', 'BLOCKED', 'AGY_DISPATCH_DENIED',
+            progress={
+                'state': 'QUOTA_EXHAUSTED',
+                'head_sha': 'a' * 40,
+                'changed_files': ['sample.py'],
+                'unfinished_checks': ['UNKNOWN'],
+                'session_id': 'conversation_12345678',
+            })
+
+    def test_prelaunch_refusal_with_artifact_is_rejected(self):
+        for route, state, code in sorted(
+                submission_cli._PRELAUNCH_REPAIR_REFUSALS):
+            with self.subTest(route=route, state=state, code=code):
+                with self.assertRaises(LLMToolError) as caught:
+                    self._task(
+                        developer=True, route=route,
+                        developer_state=state,
+                        artifact='diff', error_code=code)
+                self.assertEqual(
+                    caught.exception.task_store_error_code,
+                    'TASK_STORE_INVALID')
+
     def test_postrun_and_unclear_records_count(self):
         for index, code in enumerate((
                 'DEVELOPER_GW_AGENT_MODEL_ERROR',
