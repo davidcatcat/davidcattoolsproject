@@ -32,8 +32,8 @@
       "dispatch": "ALLOWED",
       "decided_by": "Owner",
       "decided_at": "2026-11-04",
-      "reason": "PM-selected AGY Developer route uses claude-sonnet-5-5-medium and requires a formal Reviewer from a different model family than the actual author; pause after 2 consecutive route failures; no automatic retry or fallback",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6624144132"
+      "reason": "PM-selected AGY Developer route uses gemini-4-argon-medium and requires its formal Reviewer (Claude Reviewer) to be a different model family than the actual author; pause after 2 consecutive route failures; no automatic retry or fallback",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6683494255"
     },
     "company-gw": {
       "dispatch": "ALLOWED",
