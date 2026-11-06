@@ -45,6 +45,11 @@ _SCREEN_RECORD_LIMIT = 16384
 _SCREEN_FAMILY = re.compile(r'[a-z0-9._-]{1,64}\Z')
 _SCREEN_TASK_ID = re.compile(r'[a-f0-9]{32}\Z')
 _SCREEN_REF = re.compile(r'https://github\.com/[^/\s]+/[^/\s]+/issues/[0-9]+#issuecomment-[0-9]+\Z')
+# Each record source has exactly one refusal code. DEVELOPER_OUTPUT records
+# are written by the Developer output gate (#981) under the same disposition.
+_SCREEN_SOURCE_CODES = {'EVIDENCE': 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
+                        'REPORT': 'HIGH_DEBUG_REPORT_INVALID',
+                        'DEVELOPER_OUTPUT': 'DEVELOPER_OUTPUT_SENSITIVE'}
 
 
 def _record_body(entry, task_id, refusal_code=None):
@@ -321,6 +326,13 @@ def _screen_path(task_id, family):
     return Path(task_store.default_root()).parent / 'high-debug-screen' / (task_id + '-' + family + '.json')
 
 
+def _screen_location(task_id, family, root=None):
+    """The record path beside Task store ``root``; None means the default store."""
+    if root is None:
+        return _screen_path(task_id, family)
+    return Path(root).parent / 'high-debug-screen' / (task_id + '-' + family + '.json')
+
+
 def _valid_screen_timestamp(value):
     if type(value) is not str:
         return False
@@ -331,8 +343,8 @@ def _valid_screen_timestamp(value):
         return False
 
 
-def _write_screen_record(task_id, family, code, source, hits, byte_count):
-    directory = _screen_path(task_id, family).parent
+def _write_screen_record(task_id, family, code, source, hits, byte_count, root=None):
+    directory = _screen_location(task_id, family, root).parent
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     directory_info = directory.lstat()
     if not stat.S_ISDIR(directory_info.st_mode) or directory.is_symlink():
@@ -351,7 +363,7 @@ def _write_screen_record(task_id, family, code, source, hits, byte_count):
         with os.fdopen(fd, 'w', encoding='utf-8') as stream:
             json.dump(record, stream, sort_keys=True)
             stream.write('\n')
-        target = _screen_path(task_id, family)
+        target = _screen_location(task_id, family, root)
         os.replace(temporary, target)
         os.chmod(target, 0o600)
     except Exception:
@@ -362,8 +374,8 @@ def _write_screen_record(task_id, family, code, source, hits, byte_count):
         raise
 
 
-def _read_screen_record(task_id, family):
-    path = _screen_path(task_id, family)
+def _read_screen_record(task_id, family, root=None):
+    path = _screen_location(task_id, family, root)
     try:
         parent_info = path.parent.lstat()
         if not stat.S_ISDIR(parent_info.st_mode):
@@ -384,7 +396,7 @@ def _read_screen_record(task_id, family):
         record = json.loads(raw.decode('utf-8'))
         if (type(record) is not dict or set(record) !=
                 {'code', 'source', 'hits', 'omitted', 'bytes', 'recorded_at', 'disposition'} or
-                record.get('source') not in ('EVIDENCE', 'REPORT') or
+                record.get('source') not in _SCREEN_SOURCE_CODES or
                 type(record.get('hits')) is not list or not record['hits'] or
                 len(record['hits']) > _SCREEN_HIT_LIMIT or
                 type(record.get('omitted')) is not int or record['omitted'] < 0 or
@@ -399,8 +411,7 @@ def _read_screen_record(task_id, family):
             hits.append((hit[0], hit[1]))
         if hits != sorted(set(hits)):
             _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
-        expected_code = ('HIGH_DEBUG_EVIDENCE_SENSITIVE' if record['source'] == 'EVIDENCE'
-                         else 'HIGH_DEBUG_REPORT_INVALID')
+        expected_code = _SCREEN_SOURCE_CODES[record['source']]
         disposition = record['disposition']
         if record['code'] != expected_code or (disposition is not None and
                 (type(disposition) is not dict or set(disposition) !=
@@ -410,6 +421,10 @@ def _read_screen_record(task_id, family):
                  type(disposition.get('ref')) is not str or
                  _SCREEN_REF.fullmatch(disposition['ref']) is None or
                  not _valid_screen_timestamp(disposition.get('recorded_at')))):
+            _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+        # A disposition can only speak for stored hits, so one stored beside
+        # omitted hits (for example from before this check) clears nothing.
+        if disposition is not None and record['omitted']:
             _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
         return record
     except LLMToolError:
@@ -461,16 +476,20 @@ def _screen_record_exists(path):
     return True
 
 
-def record_screen_disposition(task_id, family, hits, classification, ref):
+def record_screen_disposition(task_id, family, hits, classification, ref, root=None):
     if (type(task_id) is not str or _SCREEN_TASK_ID.fullmatch(task_id) is None or
             type(family) is not str or _SCREEN_FAMILY.fullmatch(family) is None):
         _refuse('HIGH_DEBUG_SCREEN_DISPOSITION_INVALID')
-    path = _screen_path(task_id, family)
+    path = _screen_location(task_id, family, root)
     if not _screen_record_exists(path):
         _refuse('HIGH_DEBUG_SCREEN_NO_REFUSAL')
-    record = _read_screen_record(task_id, family)
+    record = _read_screen_record(task_id, family, root)
     if record['disposition'] is not None:
         _refuse('HIGH_DEBUG_SCREEN_NO_REFUSAL')
+    # The record names only its first hits. The omitted ones were never seen by
+    # whoever classifies the list, so no list of hits can account for them.
+    if record['omitted']:
+        _refuse('HIGH_DEBUG_SCREEN_HITS_OMITTED')
     if type(hits) not in (list, tuple):
         _refuse('HIGH_DEBUG_SCREEN_DISPOSITION_INVALID')
     supplied = []
