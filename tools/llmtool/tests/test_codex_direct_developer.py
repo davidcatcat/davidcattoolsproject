@@ -457,6 +457,10 @@ class CodexDirectDeveloperTests(unittest.TestCase):
                 self.value.update(changes)
                 return self.value
 
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **changes):
+                return self.compare_and_update(task_id, expected, **changes)
+
             def update(self, _task_id, **changes):
                 self.value.update(changes)
                 return self.value
@@ -654,7 +658,8 @@ class CodexDirectDeveloperTests(unittest.TestCase):
             'state': 'DEVELOPER_OUTCOME_UNKNOWN',
             'error_code': 'CODEX_TIMEOUT_WITH_CHANGES',
             'execution': {'status': 'TIMEOUT', 'diff_base_sha': base_sha,
-                          'diff_sha256': hashlib.sha256(raw).hexdigest()},
+                          'diff_sha256': hashlib.sha256(raw).hexdigest(),
+                          'cleanup_status': 'CONFIRMED'},
             'source_sha': base_sha, 'executor_task_id': 'executor-1',
             'read_paths': ['src.py'], 'write_paths': ['src.py'],
             'acceptance': ['works'],

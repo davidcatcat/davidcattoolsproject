@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import uuid
@@ -789,6 +790,261 @@ class TaskStoreTests(unittest.TestCase):
                                  developer.get('progress'))
                 self.assertEqual(saved['developer'].get('execution'),
                                  developer.get('execution'))
+
+    def test_non_claude_d6_binding_refuses_second_live_task_for_each_route(self):
+        store = TaskStore(Path(self.temp.name).resolve())
+        routes = ('codex', 'company-gw', 'opencode', 'agy', 'gw-agent')
+
+        def create_task(provider, *, bind=False):
+            task = self._codex_dispatch_task()
+            store.create(task)
+            if not bind:
+                return task['task_id']
+            developer = self._developer_assignment(provider=provider, max_tokens=None)
+            if provider == 'opencode':
+                # OpenCode assignments always carry an execution record, even
+                # before a run has started.
+                developer['execution'] = None
+            if provider in ('opencode', 'agy', 'gw-agent'):
+                developer['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+            if provider == 'agy':
+                ref = ('https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+                       '#issuecomment-1')
+                developer['owner_assignment_ref'] = ref
+                self._allow_agy_assignment(task['task_id'], ref)
+            completion = {
+                'state': 'WAITING_EXECUTOR',
+                'executor_task_id': executor_task_id,
+                'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+                'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+                'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+            }
+            developer['executor_task_id'] = executor_task_id
+            store.compare_and_update(
+                task['task_id'], expected={'developer': None, 'completion': None},
+                developer=developer, completion=completion)
+            return task['task_id']
+
+        for route in routes:
+            with self.subTest(route=route):
+                executor_task_id = 'executor-shared-' + route
+                live_id = create_task(route, bind=True)
+                candidate_id = create_task(route)
+                pending = self._developer_assignment(provider=route, max_tokens=None)
+                if route == 'opencode':
+                    pending['execution'] = None
+                if route in ('opencode', 'agy', 'gw-agent'):
+                    pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+                if route == 'agy':
+                    ref = ('https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+                           '#issuecomment-1')
+                    pending['owner_assignment_ref'] = ref
+                    self._allow_agy_assignment(candidate_id, ref)
+                completion = {
+                    'state': 'WAITING_EXECUTOR', 'executor_task_id': executor_task_id,
+                    'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+                    'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+                    'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+                }
+                with self.assertRaises(LLMToolError) as caught:
+                    store.d6_bind_compare_and_update(
+                        candidate_id, executor_task_id=executor_task_id,
+                        expected={'developer': None, 'completion': None},
+                        developer=pending, completion=completion)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_D6_ALREADY_BOUND')
+                self.assertEqual(store.get(live_id)['developer']['state'],
+                                 'DEVELOPER_PENDING')
+
+    def test_non_claude_d6_binding_allows_finished_and_abandoned_tasks(self):
+        self._allow_codex_dispatch()
+        store = TaskStore(Path(self.temp.name).resolve())
+        executor_task_id = 'executor-repair-1'
+        finished = self._codex_dispatch_task()
+        store.create(finished)
+        developer = self._developer_assignment(provider='codex', max_tokens=None)
+        developer['executor_task_id'] = executor_task_id
+        completion = {
+            'state': 'WAITING_EXECUTOR', 'executor_task_id': executor_task_id,
+            'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+            'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+        }
+        store.compare_and_update(finished['task_id'],
+            expected={'developer': None, 'completion': None},
+            developer=developer, completion=completion)
+        dispatching = dict(developer, state='DEVELOPER_DISPATCHING',
+                           provider_type='codex-cli', model='gpt-6-luna')
+        store.update(finished['task_id'], developer=dispatching)
+        artifact = ('diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n'
+                    '@@ -1 +1 @@\n-x=1\n+x=2\n')
+        responded = dict(dispatching, state='DEVELOPER_RESPONDED',
+                         artifact=artifact,
+                         artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        store.update(finished['task_id'], developer=responded)
+
+        candidate = self._codex_dispatch_task()
+        store.create(candidate)
+        candidate_developer = self._developer_assignment(provider='codex', max_tokens=None)
+        candidate_completion = dict(completion)
+        saved = store.d6_bind_compare_and_update(
+            candidate['task_id'], executor_task_id=executor_task_id,
+            expected={'developer': None, 'completion': None},
+            developer=candidate_developer, completion=candidate_completion)
+        self.assertEqual(saved['completion']['executor_task_id'], executor_task_id)
+
+        abandoned = self._codex_dispatch_task()
+        store.create(abandoned)
+        abandoned_developer = self._developer_assignment(provider='codex', max_tokens=None)
+        abandoned_developer['executor_task_id'] = 'executor-abandoned-1'
+        abandoned_completion = dict(completion, executor_task_id='executor-abandoned-1')
+        store.compare_and_update(abandoned['task_id'],
+            expected={'developer': None, 'completion': None},
+            developer=abandoned_developer, completion=abandoned_completion)
+        store.abandon(abandoned['task_id'], pm_session_id=abandoned['pm_session_id'],
+                      reason='Task stopped before D6 work')
+        after_abandonment = self._codex_dispatch_task()
+        store.create(after_abandonment)
+        allowed_developer = self._developer_assignment(provider='codex', max_tokens=None)
+        allowed_completion = dict(completion, executor_task_id='executor-abandoned-1')
+        saved = store.d6_bind_compare_and_update(
+            after_abandonment['task_id'], executor_task_id='executor-abandoned-1',
+            expected={'developer': None, 'completion': None},
+            developer=allowed_developer, completion=allowed_completion)
+        self.assertEqual(saved['completion']['executor_task_id'], 'executor-abandoned-1')
+
+        abandoned_target = self._codex_dispatch_task()
+        store.create(abandoned_target)
+        store.abandon(abandoned_target['task_id'],
+                      pm_session_id=abandoned_target['pm_session_id'],
+                      reason='Target was abandoned before dispatch')
+        with self.assertRaises(LLMToolError) as caught:
+            store.d6_bind_compare_and_update(
+                abandoned_target['task_id'], executor_task_id='executor-target-abandoned',
+                expected={'developer': None, 'completion': None},
+                developer=self._developer_assignment(provider='codex', max_tokens=None),
+                completion=dict(completion, executor_task_id='executor-target-abandoned'))
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_ALREADY_BOUND')
+        self.assertIsNone(store.get(abandoned_target['task_id'])['developer'])
+
+    def test_d6_binding_unknown_cleanup_and_callback_holders_are_live(self):
+        store = TaskStore(Path(self.temp.name).resolve())
+        executor_task_id = 'executor-unknown-cleanup'
+        holder = self._codex_dispatch_task()
+        store.create(holder)
+        developer = self._developer_assignment(provider='codex', max_tokens=None)
+        developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
+                         provider_type='codex-cli',
+                         error_code='CODEX_INTERRUPTED',
+                         executor_task_id=executor_task_id,
+                         execution={'status': 'UNKNOWN', 'native_session_id': None,
+                            'process_exit_code': None, 'stdout_sha256': None,
+                            'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+                            'usage_source': 'UNKNOWN', 'source_bytes': None,
+                            'source_file_count': None, 'source_manifest_sha256': None})
+        registration = SimpleNamespace(task_id=executor_task_id, root='/registered/root',
+            common_dir='/repo/.git', branch='task-branch', result_sha='a' * 40,
+            trusted_agent_id='codex-developer', session_ref='session-ref',
+            native_session_id=None)
+        developer['direct_result_callback'] = task_submission_cli_module._direct_result_callback(
+            holder, registration, 'a' * 40, test_policy='LOCAL')
+        completion = {'state': 'WAITING_EXECUTOR', 'executor_task_id': executor_task_id,
+            'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+            'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None}
+        store.compare_and_update(holder['task_id'],
+            expected={'developer': None, 'completion': None},
+            developer=developer, completion=completion)
+
+        candidate = self._codex_dispatch_task()
+        store.create(candidate)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        with self.assertRaises(LLMToolError) as caught:
+            store.d6_bind_compare_and_update(candidate['task_id'],
+                executor_task_id=executor_task_id,
+                expected={'developer': None, 'completion': None},
+                developer=pending, completion=completion)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_ALREADY_BOUND')
+
+        callback_only = dict(developer, executor_task_id='executor-other-bound')
+        store.update(holder['task_id'], developer=callback_only,
+                     completion=dict(completion, executor_task_id='executor-other-bound'))
+        with self.assertRaises(LLMToolError) as caught:
+            store.d6_bind_compare_and_update(candidate['task_id'],
+                executor_task_id=executor_task_id,
+                expected={'developer': None, 'completion': None},
+                developer=pending, completion=completion)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_ALREADY_BOUND')
+
+        confirmed = dict(developer, execution={
+            'status': 'UNKNOWN', 'native_session_id': None,
+            'process_exit_code': None, 'stdout_sha256': None, 'elapsed_ms': None,
+            'cleanup_status': 'CONFIRMED', 'usage_source': 'UNKNOWN',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None})
+        store.update(holder['task_id'], developer=confirmed)
+        candidate_completion = dict(completion, executor_task_id=executor_task_id)
+        saved = store.d6_bind_compare_and_update(candidate['task_id'],
+            executor_task_id=executor_task_id,
+            expected={'developer': None, 'completion': None},
+            developer=pending, completion=candidate_completion)
+        self.assertEqual(saved['completion']['executor_task_id'], executor_task_id)
+
+    def test_d6_binding_scan_failure_refuses_claim(self):
+        store = TaskStore(Path(self.temp.name).resolve())
+        candidate = self._codex_dispatch_task()
+        store.create(candidate)
+        with patch.object(store, 'task_ids', side_effect=OSError('scan unavailable')):
+            with self.assertRaises(LLMToolError) as caught:
+                store.d6_bind_compare_and_update(candidate['task_id'],
+                    executor_task_id='executor-scan-failure',
+                    expected={'developer': None, 'completion': None},
+                    developer=self._developer_assignment(provider='codex', max_tokens=None),
+                    completion={'state': 'WAITING_EXECUTOR',
+                                'executor_task_id': 'executor-scan-failure',
+                                'reviewer_task_id': None, 'evidence': None,
+                                'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
+                                'pm_response': None, 'pm_recommendation': None,
+                                'pm_usage': None, 'pm_error_code': None})
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'TASK_D6_BINDING_SCAN_FAILED')
+        self.assertIsNone(store.get(candidate['task_id'])['developer'])
+
+    def test_non_claude_concurrent_d6_binds_allow_exactly_one_winner(self):
+        store = TaskStore(Path(self.temp.name).resolve())
+        executor_task_id = 'executor-concurrent-1'
+        candidates = [self._codex_dispatch_task() for _ in range(2)]
+        for task in candidates:
+            store.create(task)
+        barrier = threading.Barrier(2)
+        outcomes = []
+
+        def bind(task):
+            developer = self._developer_assignment(provider='codex', max_tokens=None)
+            completion = {
+                'state': 'WAITING_EXECUTOR', 'executor_task_id': executor_task_id,
+                'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+                'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+                'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+            }
+            barrier.wait()
+            try:
+                store.d6_bind_compare_and_update(
+                    task['task_id'], executor_task_id=executor_task_id,
+                    expected={'developer': None, 'completion': None},
+                    developer=developer, completion=completion)
+                outcomes.append('BOUND')
+            except LLMToolError as exc:
+                outcomes.append(exc.task_store_error_code)
+
+        threads = [threading.Thread(target=bind, args=(task,)) for task in candidates]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(outcomes.count('BOUND'), 1)
+        self.assertEqual(outcomes.count('TASK_D6_ALREADY_BOUND'), 1)
 
     def test_developer_reported_claims_are_bounded_and_strict(self):
         task = self._codex_dispatch_task()

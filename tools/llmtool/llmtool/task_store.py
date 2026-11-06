@@ -2434,6 +2434,70 @@ class TaskStore:
             self._unlock_sidecar(lock_fd)
             os.close(directory)
 
+    def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                   expected, **changes):
+        """Atomically bind a direct-route Task to an available D6 executor."""
+        if (type(executor_task_id) is not str or not executor_task_id or
+                type(expected) is not dict or not expected):
+            _fail('TASK_D6_BINDING_SCAN_FAILED')
+        directory = self._dirfd()
+        lock_fd = None
+        try:
+            lock_fd = self._lock_sidecar(directory, '.claude-d6-binding.lock',
+                                         exclusive=True, code='TASK_D6_BINDING')
+            try:
+                try:
+                    ids = self.task_ids()
+                except Exception:
+                    _fail('TASK_D6_BINDING_SCAN_FAILED')
+                for other_id in ids:
+                    if other_id == task_id:
+                        continue
+                    try:
+                        other = self.get(other_id)
+                    except Exception:
+                        _fail('TASK_D6_BINDING_SCAN_FAILED')
+                    if other.get('abandonment') is not None:
+                        continue
+                    dev = other.get('developer')
+                    completion = other.get('completion')
+                    callback = (dev.get('direct_result_callback')
+                                if type(dev) is dict else None)
+                    bound_ids = (
+                        dev.get('executor_task_id') if type(dev) is dict else None,
+                        completion.get('executor_task_id')
+                        if type(completion) is dict else None,
+                        callback.get('executor_task_id')
+                        if type(callback) is dict else None,
+                    )
+                    state = dev.get('state') if type(dev) is dict else None
+                    execution = dev.get('execution') if type(dev) is dict else None
+                    live = (state in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING') or
+                            (state == 'DEVELOPER_OUTCOME_UNKNOWN' and
+                             (type(execution) is not dict or
+                              execution.get('cleanup_status') != 'CONFIRMED')))
+                    if type(dev) is dict and executor_task_id in bound_ids and live:
+                        _fail('TASK_D6_ALREADY_BOUND')
+                target = self.get(task_id)
+                if target.get('abandonment') is not None:
+                    _fail('TASK_D6_ALREADY_BOUND')
+                update_expected = dict(expected)
+                update_expected['record_sha256'] = target['record_sha256']
+                try:
+                    return self.compare_and_update(
+                        task_id, expected=update_expected, **changes)
+                except TaskStoreConflict:
+                    if self.get(task_id).get('abandonment') is not None:
+                        _fail('TASK_D6_ALREADY_BOUND')
+                    raise
+            except LLMToolError:
+                raise
+            except Exception:
+                _fail('TASK_D6_BINDING_SCAN_FAILED')
+        finally:
+            self._unlock_sidecar(lock_fd)
+            os.close(directory)
+
     def record_published_pr(self, task_id, pr, head_sha):
         """Record or replace the PR linked to this Task's published HEAD."""
         if (type(pr) is not int or not 1 <= pr <= 9999999 or

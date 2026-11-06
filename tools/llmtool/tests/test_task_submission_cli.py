@@ -1972,16 +1972,20 @@ class TaskSubmissionCLITests(unittest.TestCase):
             }):
                 with self.subTest(interruption=type(interruption).__name__,
                                   evidence=evidence is not None):
-                    task = self._pm_task_with_opencode_assignment()
-                    args = self._opencode_delegate_args(task)
-                    if evidence is not None:
-                        interruption._llmtool_direct_opencode_execution = evidence
-                    output = io.StringIO()
-                    with patch.dict(os.environ, {'HOME': str(self.home)}), \
-                            patch('llmtool.task_submission_cli.opencode_direct_developer.run',
-                                  side_effect=interruption), redirect_stdout(output), \
-                            self.assertRaises(type(interruption)) as caught:
-                        run_task_delegate(args)
+                    store = TaskStore(
+                        Path(self.temp.name).resolve() /
+                        f'interrupt-store-{expected_code}-{evidence is not None}')
+                    with patch.object(submission_cli, 'TaskStore', return_value=store):
+                        task = self._pm_task_with_opencode_assignment()
+                        args = self._opencode_delegate_args(task)
+                        if evidence is not None:
+                            interruption._llmtool_direct_opencode_execution = evidence
+                        output = io.StringIO()
+                        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                                      side_effect=interruption), redirect_stdout(output), \
+                                self.assertRaises(type(interruption)) as caught:
+                            run_task_delegate(args)
                     if isinstance(interruption, CLIHostTermination):
                         self.assertEqual(caught.exception.code, 143)
                     result = json.loads(output.getvalue())
@@ -1998,8 +2002,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                                      35 if evidence else None)
                     self.assertEqual(developer['execution']['source_manifest_sha256'],
                                      'e' * 64 if evidence else None)
-                    stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(
-                        task['task_id'])
+                    stored = store.get(task['task_id'])
                     self.assertEqual(stored['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
                     self.assertEqual(stored['developer']['error_code'], expected_code)
 
@@ -3086,6 +3089,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
             def compare_and_update(self, task_id, **kwargs):
                 return backing.compare_and_update(task_id, **kwargs)
 
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **kwargs):
+                return backing.d6_bind_compare_and_update(
+                    task_id, executor_task_id=executor_task_id,
+                    expected=expected, **kwargs)
+
             def update(self, task_id, **kwargs):
                 return backing.update(task_id, **kwargs)
 
@@ -3137,6 +3146,16 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 if kwargs.get('developer', {}).get('state') == 'DEVELOPER_PENDING':
                     # Model a process interruption at the exact durable-claim boundary,
                     # before config resolution, client creation, or provider execution.
+                    raise SystemExit(77)
+                return result
+
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **kwargs):
+                result = backing.d6_bind_compare_and_update(
+                    task_id, executor_task_id=executor_task_id,
+                    expected=expected, **kwargs)
+                if kwargs.get('developer', {}).get('state') == 'DEVELOPER_PENDING':
+                    # Model interruption after the durable shared D6 claim.
                     raise SystemExit(77)
                 return result
 

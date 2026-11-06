@@ -255,6 +255,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                     self.developer_records.append(copy.deepcopy(self.value['developer']))
                 return copy.deepcopy(self.value)
 
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **updates):
+                return self.compare_and_update(task_id, expected=expected, **updates)
+
             def update(self, _task_id, **updates):
                 self.value.update(copy.deepcopy(updates))
                 return copy.deepcopy(self.value)
@@ -438,6 +442,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             def compare_and_update(self, _task_id, *, expected, **updates):
                 self.value.update(updates)
                 return dict(self.value)
+
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **updates):
+                return self.compare_and_update(task_id, expected=expected, **updates)
 
             def update(self, _task_id, **updates):
                 self.value.update(updates)
@@ -625,6 +633,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                     raise denial
                 self.value.update(copy.deepcopy(updates))
                 return copy.deepcopy(self.value)
+
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **updates):
+                return self.compare_and_update(task_id, expected=expected, **updates)
 
         registration = SimpleNamespace(task_id='executor-d6', root=str(Path.cwd()),
             common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
