@@ -4251,7 +4251,11 @@ def _work_names(row: OfficeRow) -> str:
 def _names_pr(row: OfficeRow, number: int, head: str) -> bool:
     text = _work_names(row)
     review = _review_task(row.task[5:]) if row.role == "reviewer" and row.task.startswith("task ") else None
-    if review and review[0] == str(number):
+    if row.role in ("pm", "debug reviewer"):
+        return False
+    if row.role == "reviewer" and row.task.startswith("task "):
+        if review is None or review[0] != str(number):
+            return False
         return not head or review[1].casefold().startswith(head.casefold())
     if re.search(rf"\bPR\s*#?{number}\b", text, re.IGNORECASE) is None:
         return False
@@ -4263,6 +4267,8 @@ def _names_pr(row: OfficeRow, number: int, head: str) -> bool:
 
 
 def _names_issue(row: OfficeRow, number: int) -> bool:
+    if row.role in ("pm", "debug reviewer"):
+        return False
     text = _work_names(row)
     return (re.search(rf"\bIssue\s*#?{number}\b", text, re.IGNORECASE) is not None
             or re.search(rf"(?<![\w#])(?<!PR )#{number}\b", text, re.IGNORECASE) is not None)
@@ -4272,6 +4278,16 @@ def _current_person(rows, predicate, *, readable=True) -> str:
     if not readable:
         return "未確認"
     matching = [row for row in rows if row.state == WORKING and predicate(row)]
+    def unresolved_binding(row):
+        if row.state not in (WORKING, UNCHECKED) or row.role == "pm" or not row.task.startswith("task "):
+            return False
+        review = _review_task(row.task[5:]) if row.role == "reviewer" else None
+        if review:
+            return False
+        return (not predicate(row)
+                and (not row.work_bound
+                     or not re.search(r"\bPR\s*#?[0-9]+\b", row.work)))
+    unresolved = any(unresolved_binding(row) for row in rows)
     people = set()
     for row in matching:
         if row.role == "reviewer":
@@ -4288,9 +4304,27 @@ def _current_person(rows, predicate, *, readable=True) -> str:
             if route:
                 people.add(route)
     if not people:
-        return "沒人"
+        return "未確認" if unresolved else "沒人"
     order = ("Codex", "Reviewer", "Claude", "OpenCode", "AGY", "CompanyGW")
     return "、".join(person for person in order if person in people)
+
+
+def _current_pr_people(office, pull, ci_heads, *, github_known=True, office_known=True):
+    """One shared person/CI answer for a PR and its issue-board aliases."""
+    if not github_known or not office_known or not pull or not pull.head:
+        return "未確認"
+    current = _current_person(office, lambda row: _names_pr(row, pull.number, pull.head))
+    ci = ((ci_heads or {}).get(pull.head, {})
+          if ci_heads is not None and pull.state == "OPEN" else {})
+    ci_working = any(_ci_word(ci.get(key), True) in ("執行中", "排隊")
+                     for key in ("linux", "mac"))
+    if current == "沒人" and ci_working:
+        return "CI"
+    if current not in ("沒人", "未確認") and ci_working:
+        return current + "、CI"
+    if current == "沒人" and ci_heads is None and pull.state == "OPEN":
+        return "未確認"
+    return current
 
 
 def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending, office=(), *, github_known=True,
@@ -4344,15 +4378,9 @@ def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending, office=(),
                 next_step, owner = "加 mac-ci", "PM"
         elif review == "未審":
             next_step, owner = "派審查", "PM"
-        current = _current_person(office, lambda row: _names_pr(row, pull.number, head),
-                                  readable=github_known and office_known and bool(head))
-        ci_working = linux in ("執行中", "排隊") or mac in ("執行中", "排隊")
-        if current == "沒人" and ci_working:
-            current = "CI"
-        elif current not in ("沒人", "未確認") and ci_working:
-            current += "、CI"
-        elif current == "沒人" and ci_heads is None:
-            current = "未確認"
+        current = _current_pr_people(office, pull, ci_heads,
+                                     github_known=github_known,
+                                     office_known=office_known)
         rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, next_step, owner, current))
     return rows
 
@@ -4411,37 +4439,31 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
         elif is_pr:
             pull = pulls_by_number.get(number)
             head = pull.head if pull else ""
-            current = ("未確認" if pull is None or not head else
-                       _current_person(office, lambda row: _names_pr(row, number, head)))
-            if current == "沒人" and pull and pull.state == "OPEN" and head:
-                ci_heads = getattr(github, "ci_heads", None) if github_known else None
-                if ci_heads is None:
-                    current = "未確認"
-                else:
-                    ci = ci_heads.get(head, {})
-                    if any(_ci_word(ci.get(key), True) in ("執行中", "排隊") for key in ("linux", "mac")):
-                        current = "CI"
-            if current == "沒人" and pull and pull.state == "OPEN" and not head:
-                current = "未確認"
+            current = _current_pr_people(
+                office, pull, getattr(github, "ci_heads", None),
+                github_known=github_known, office_known=office_known)
         else:
             issue = number
             related_prs = issue_prs.get(issue, set())
-            current = _current_person(office, lambda row: _names_issue(row, issue))
-            if current == "沒人" and related_prs:
-                current = _current_person(office, lambda row: any(
-                    _names_pr(row, pr, pulls_by_number.get(pr).head if pulls_by_number.get(pr) else "")
-                    for pr in related_prs))
-                if current == "沒人":
-                    related = [pulls_by_number.get(pr) for pr in related_prs]
-                    if any(pull and pull.state == "OPEN" and not pull.head for pull in related):
-                        current = "未確認"
-                    elif any(pull and pull.state == "OPEN" and getattr(github, "ci_heads", None) is None
-                             for pull in related):
-                        current = "未確認"
-                    elif any(pull and pull.state == "OPEN" and any(
-                            _ci_word((getattr(github, "ci_heads", {}) or {}).get(pull.head, {}).get(key), True)
-                            in ("執行中", "排隊") for key in ("linux", "mac")) for pull in related):
-                        current = "CI"
+            if not office_known or not github_known:
+                current = "未確認"
+            else:
+                people = set()
+                for pull in (pulls_by_number.get(pr) for pr in related_prs):
+                    answer = _current_pr_people(office, pull, getattr(github, "ci_heads", None),
+                                                github_known=github_known,
+                                                office_known=office_known)
+                    if answer == "未確認":
+                        people.add("未確認")
+                    elif answer != "沒人":
+                        people.update(answer.split("、"))
+                issue_people = _current_person(office, lambda row: _names_issue(row, issue))
+                if issue_people == "未確認":
+                    people.add("未確認")
+                elif issue_people != "沒人":
+                    people.update(issue_people.split("、"))
+                order = ("Codex", "Reviewer", "Claude", "OpenCode", "AGY", "CompanyGW", "CI", "未確認")
+                current = "、".join(person for person in order if person in people) or "沒人"
         resolved.append(replace(item, current=current))
     running = resolved
     running.sort(key=lambda item: (_board_ref_number(item.ref) or 0, item.ref))
@@ -5465,7 +5487,11 @@ def agy_rows(processes: list[Process], canonical: str, cwd_of=process_cwd,
     rows = []
     procs = sorted((p for p in processes if p.role == "AGY CLI"), key=lambda p: p.pid)
     for number, proc in enumerate(procs, 1):
-        where = _where(cwd_of(proc.pid), canonical)
+        cwd = cwd_of(proc.pid)
+        place = _place(cwd, canonical)
+        where = _where(cwd, canonical)
+        task = f"task {place[1]}" if place and place[0] == "task" else ""
+        role = _d6_role(canonical, place[1]) if task else ""
         cpu = cpu_of(proc.pid)
         opened = _elapsed_seconds(proc.elapsed)
         if cpu is None:
@@ -5475,7 +5501,8 @@ def agy_rows(processes: list[Process], canonical: str, cwd_of=process_cwd,
         else:
             state, note = IDLE, "CLI 已開啟，閒置（依 CPU 推算）"
         rows.append(OfficeRow(f"agy cli #{number}", state, f"{where}：{note}",
-                              opened if opened is not None else 0.0, 60 + number, kind="worker"))
+                              opened if opened is not None else 0.0, 60 + number, kind="worker",
+                              role=role, task=task, evidence="程序"))
     return rows
 
 
@@ -7190,6 +7217,30 @@ def _codex_work_rows(rows: list[OfficeRow], now: float, canonical: str,
     return out
 
 
+def _bind_d6_pr_rows(rows: list[OfficeRow], canonical: str,
+                     prs: dict | None) -> list[OfficeRow]:
+    """Attach the already-read branch-to-PR binding to live non-Codex D6 rows."""
+    try:
+        registered = registry_details(canonical)
+    except Exception:
+        registered = {}
+    out = []
+    for row in rows:
+        task_id = row.task[5:] if row.task.startswith("task ") else ""
+        details = registered.get(task_id)
+        if (not task_id or row.role in ("reviewer", "pm", "debug reviewer")
+                or row.work_bound or not details):
+            out.append(row)
+            continue
+        branch = details[4]
+        pr = prs.get(branch, (None, "OPEN"))[0] if prs is not None and branch else None
+        if pr is None:
+            out.append(replace(row, work=f"PR 未確認（D6 {task_id}）", work_bound=False))
+        else:
+            out.append(replace(row, work=f"PR #{pr} · D6 {task_id}", work_bound=True))
+    return out
+
+
 def _live_rank(entry: dict) -> int:
     """How urgent a live session's status words are: 0 waits for a person,
     1 works, 2 sits idle, 3 anything else."""
@@ -7374,6 +7425,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                               alert=alert))
     rows = _codex_work_rows(rows, now, canonical,
                             LLMTOOL_TASKS if llmtool_tasks is None else llmtool_tasks, prs)
+    rows = _bind_d6_pr_rows(rows, canonical, prs)
     return sorted(rows, key=lambda row: (row.order, row.age if row.age is not None else 1e12,
                                          row.name))
 

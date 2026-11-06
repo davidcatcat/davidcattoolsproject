@@ -8460,21 +8460,29 @@ class PrBoardTests(unittest.TestCase):
     def test_current_people_use_real_codex_and_d6_review_labels(self):
         codex_work = mon.CodexWork("1" * 32, "wp-1", "session", "DEVELOPER_RESPONDED",
                                    1, "965", "board work")
-        codex_label = mon._codex_work_label(codex_work, 978)
-        codex = mon.OfficeRow("codex developer", mon.WORKING, "", 0, 0,
-                              role="developer", work=codex_label)
+        original = mon.OfficeRow("codex developer", mon.WORKING, "", 0, 0,
+                                 key="codex:session", kind="agent", role="developer",
+                                 task="task wp-1", codex_session="2" * 32)
+        with patch.object(mon, "codex_work_records", return_value=([codex_work], "")), \
+             patch.object(mon, "registry_details", return_value={"wp-1": ("ACTIVE", "codex-developer", 1, 1, "feature/978")}), \
+             patch.object(mon, "_codex_work_match", return_value=(codex_work, True)):
+            codex = mon._codex_work_rows([original], self.NOW, "/repo", "/tasks",
+                                         {"feature/978": (978, "OPEN")})[0]
         self.assertTrue(mon._names_issue(codex, 965))
         self.assertTrue(mon._names_pr(codex, 978, "abcdef0"))
 
-        claude_review = mon.OfficeRow(
-            "claude developer", mon.WORKING, "", 0, 0, role="reviewer",
-            task="task pr978-claude-rv1-abcdef0")
+        with patch.object(mon, "_d6_role", return_value="reviewer"):
+            claude_review = mon._claude_row(
+                {"name": "claude-reviewer", "status": "busy"}, mon.WORKING, "", 0,
+                ("task", "pr978-claude-rv1-abcdef0"),
+                "task pr978-claude-rv1-abcdef0", "claude:review", "session-id", "/repo")
         codex_review = mon.OfficeRow(
             "codex reviewer", mon.WORKING, "", 0, 0, role="reviewer",
             task="task pr978-codex-rv1-abcdef0")
         self.assertEqual(mon._review_task(claude_review.task[5:]), ("978", "abcdef0"))
         self.assertTrue(mon._names_pr(claude_review, 978, "abcdef0"))
         self.assertTrue(mon._names_pr(codex_review, 978, "abcdef0"))
+        self.assertFalse(mon._names_pr(codex_review, 979, "abcdef0"))
         wrong_head = replace(codex, detail="@fedcba9")
         self.assertFalse(mon._names_pr(wrong_head, 978, "abcdef0"))
 
@@ -8483,9 +8491,30 @@ class PrBoardTests(unittest.TestCase):
         row = mon.pr_board_rows([pull], {}, active_ci, ({}, ""), set(), [],
                                 [codex, claude_review, codex_review])[0]
         self.assertEqual(row.current, "Codex、Reviewer、CI")
-        agy = mon.OfficeRow("agy cli #1", mon.WORKING, "", 0, 0, work="PR #978")
-        row = mon.pr_board_rows([pull], {}, {}, ({}, ""), set(), [], [agy])[0]
-        self.assertEqual(row.current, "AGY")
+        task_root = "/repo/.worktrees/wp-1"
+        details = {"wp-1": ("ACTIVE", "agy-developer", 1, 1, "feature/978")}
+        process = mon.Process(77, 1, 77, "00:01", "S", "AGY CLI")
+        with patch.object(mon, "_place", return_value=("task", "wp-1")), \
+             patch.object(mon, "registry_details", return_value=details), \
+             patch.object(mon, "_d6_role", return_value="developer"):
+            agy = mon.agy_rows([process], "/repo", cwd_of=lambda _pid: task_root,
+                               cpu_of=lambda _pid: 50)
+            agy = mon._bind_d6_pr_rows(agy, "/repo", {"feature/978": (978, "OPEN")})
+            opencode_proc = mon.Process(78, 1, 78, "00:01", "S", "OpenCode CLIENT")
+            with patch.object(mon, "opencode_sessions", return_value=[(task_root, "Title", self.NOW, None)]), \
+                 patch.object(mon, "_place", return_value=("task", "wp-1")), \
+                 patch.object(mon, "_d6_role", return_value="developer"):
+                opencode = mon.opencode_rows([opencode_proc], self.NOW, "/repo", cwd_of=lambda _pid: task_root)
+                opencode = mon._bind_d6_pr_rows(opencode, "/repo", {"feature/978": (978, "OPEN")})
+        for route_row, route in ((agy[0], "AGY"), (opencode[0], "OpenCode")):
+            self.assertTrue(mon._names_pr(route_row, 978, "abcdef0"))
+            self.assertEqual(mon.pr_board_rows([pull], {}, {}, ({}, ""), set(), [], [route_row])[0].current,
+                             route)
+            github = self._github([replace(pull, closes=(965,))])
+            work = mon.work_board(github, self._board([mon.PmBoardItem("#965", "Issue", "Developer")]),
+                                  self.NOW, office=[route_row])
+            issue = next(item for item in work.running if item.ref == "#965")
+            self.assertEqual(issue.current, route)
 
     def test_board_issue_closed_by_open_pr_uses_codex_label(self):
         codex_work = mon.CodexWork("1" * 32, "wp-1", "session", "DEVELOPER_RESPONDED",
@@ -8493,12 +8522,20 @@ class PrBoardTests(unittest.TestCase):
         codex = mon.OfficeRow("codex developer", mon.WORKING, "", 0, 0,
                               role="developer", work=mon._codex_work_label(codex_work, 978))
         github = self._github([mon.BoardPull(978, "Work", "OPEN", 0, 0, "abcdef0", False,
-                                               closes=(965,))])
+                                               closes=(965,))],
+                              {"abcdef0": {"linux": ("in_progress", "")}})
+        reviewer = mon.OfficeRow("claude reviewer", mon.WORKING, "", 0, 0, role="reviewer",
+                                 task="task pr978-claude-rv1-abcdef0")
+        codex_reviewer = mon.OfficeRow("codex reviewer", mon.WORKING, "", 0, 0, role="reviewer",
+                                       task="task pr978-codex-rv1-abcdef0")
         work = mon.work_board(github, self._board([mon.PmBoardItem("#965", "Issue", "Developer")]),
-                              NOW, office=[codex])
+                              NOW, office=[codex, reviewer, codex_reviewer])
         issue = next(item for item in work.running if item.ref == "#965")
         pull = next(item for item in work.running if item.ref == "PR #978")
-        self.assertEqual((issue.current, pull.current), ("Codex", "Codex"))
+        table = mon.pr_board_rows(github.board_pulls, {}, github.ci_heads, ({}, ""), set(), [],
+                                  [codex, reviewer, codex_reviewer])[0]
+        self.assertEqual((issue.current, pull.current, table.current),
+                         ("Codex、Reviewer、CI", "Codex、Reviewer、CI", "Codex、Reviewer、CI"))
 
     def test_unreadable_sources_and_missing_pull_keep_current_unknown(self):
         office = [mon.OfficeRow("codex developer", mon.WORKING, "", 0, 0,
@@ -8520,6 +8557,45 @@ class PrBoardTests(unittest.TestCase):
             missing_pull, self._board([mon.PmBoardItem("PR #978", "PR", "Developer")]),
             NOW, office=office)
         self.assertEqual(missing_work.running[0].current, "未確認")
+
+    def test_unresolved_work_bindings_are_unknown_for_each_failure_path(self):
+        pull = self._pull(978)
+        base = mon.OfficeRow("codex developer", mon.WORKING, "", 0, 0, role="developer",
+                             key="codex:s", task="task wp-1", kind="agent",
+                             codex_session="1" * 32)
+        details = {"wp-1": ("ACTIVE", "codex-developer", 1, 1, "feature/978")}
+        with patch.object(mon, "registry_details", return_value=details), \
+             patch.object(mon, "codex_work_records", side_effect=OSError("unreadable")):
+            raised = mon._codex_work_rows([base], self.NOW, "/repo", "/tasks", None)[0]
+        raised_result = mon.pr_board_rows([pull], {}, {}, ({}, ""), set(), [], [raised])[0]
+        self.assertEqual(raised_result.current, "未確認")
+
+        work = mon.CodexWork("2" * 32, "wp-1", "1" * 32, "DEVELOPER_RUNNING",
+                             self.NOW - 1, "965", "Work")
+        with patch.object(mon, "registry_details", return_value=details), \
+             patch.object(mon, "codex_work_records", return_value=([work], "")), \
+             patch.object(mon, "_codex_work_match", return_value=(work, True)):
+            no_pr_page = mon._codex_work_rows([base], self.NOW, "/repo", "/tasks", None)[0]
+        no_pr_result = mon.pr_board_rows([pull], {}, {}, ({}, ""), set(), [], [no_pr_page])[0]
+        self.assertEqual(no_pr_result.current, "未確認")
+
+        unchecked = mon.OfficeRow("agy cli #1", mon.UNCHECKED, "CLI busy unknown", 0, 0,
+                                  task="task wp-1", role="developer")
+        unchecked = mon._bind_d6_pr_rows([unchecked], "/repo", None)[0]
+        unchecked_result = mon.pr_board_rows([pull], {}, {}, ({}, ""), set(), [], [unchecked])[0]
+        self.assertEqual(unchecked_result.current, "未確認")
+
+    def test_d6_pm_row_never_counts_as_pr_or_issue_worker(self):
+        with patch.object(mon, "_d6_role", return_value="pm"):
+            pm = mon._claude_row({"name": "claude-pm", "status": "busy"},
+                                 mon.WORKING, "PR #978 Issue #965", 0,
+                                 ("task", "wp-pm"), "task wp-pm", "claude:session",
+                                 "session-id", "/repo")
+        self.assertEqual(pm.role, "pm")
+        self.assertFalse(mon._names_pr(pm, 978, "abcdef0"))
+        self.assertFalse(mon._names_issue(pm, 965))
+        self.assertEqual(mon._current_person([pm], lambda row: mon._names_pr(row, 978, "abcdef0")),
+                         "沒人")
 
     def test_ci_head_runs_choose_highest_id_and_skip_malformed_items(self):
         def run(run_id, conclusion, name="llmtool Linux CI", sha=None, status="completed"):
