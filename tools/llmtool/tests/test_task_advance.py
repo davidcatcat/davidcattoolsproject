@@ -2175,7 +2175,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 return [{'filename': 'src/module.py'}]
             return current
         result = task_advance._merge_once(store=store, record=record, number=17,
-            head=HEAD, pr={'number': 17, 'head': {'sha': HEAD}}, events=[event],
+            head=HEAD, pr=current, events=[event],
             github_get=github_get,
             gh_runner=lambda _root, args: calls.append(args), root='/repo')
         self.assertEqual(result['codes'], ['MERGE_STALE_HEAD'])
