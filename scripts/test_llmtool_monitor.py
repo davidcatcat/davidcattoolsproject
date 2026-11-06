@@ -8801,21 +8801,21 @@ class PrBoardTests(unittest.TestCase):
         self.assertEqual(row.current, "CI")
 
     def test_running_issue_shows_codex_session_naming_issue(self):
-        board = self._board(running=[{"ref": "#55", "what": "Issue work", "next": "PM"}])
+        board = self._board(running=[mon.PmBoardItem("#55", "Issue work", "PM")])
         office = [mon.OfficeRow("Codex CLI", mon.WORKING, "", 0, 0,
                                 role="developer", task="Issue #55")]
         work = mon.work_board(self._github([]), board, NOW, office=office)
         self.assertEqual(work.running[0].current, "Codex")
 
     def test_idle_session_does_not_count_as_current_worker(self):
-        board = self._board(running=[{"ref": "#55", "what": "Issue work", "next": "PM"}])
+        board = self._board(running=[mon.PmBoardItem("#55", "Issue work", "PM")])
         office = [mon.OfficeRow("Codex CLI", mon.IDLE, "", 0, 0,
                                 role="developer", task="Issue #55")]
         work = mon.work_board(self._github([]), board, NOW, office=office)
         self.assertEqual(work.running[0].current, "沒人")
 
     def test_unreadable_github_source_shows_unknown_current_not_idle(self):
-        board = self._board(running=[{"ref": "PR #978", "what": "PR work", "next": "PM"}])
+        board = self._board(running=[mon.PmBoardItem("PR #978", "PR work", "PM")])
         work = mon.work_board(None, board, NOW,
                               office=[mon.OfficeRow("Codex CLI", mon.WORKING, "", 0, 0,
                                                     task="PR #978 @abcdef0")])
