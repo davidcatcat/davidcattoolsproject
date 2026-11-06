@@ -3279,7 +3279,6 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         if (type(result.session_id) is str and
                 AGY_CONVERSATION.fullmatch(result.session_id)):
             binding = _bind_codex_native_session(registration, result.session_id)
-            developer['execution']['native_session_binding'] = binding
             if binding == 'BOUND':
                 bound_registration = task_completion.read_d6_registration(
                     registration.task_id, registration.common_dir)

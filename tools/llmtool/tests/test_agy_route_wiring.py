@@ -31,7 +31,7 @@ class AgyRouteWiringTests(unittest.TestCase):
                           read_paths=None, changed_paths=None, request='AGY goal',
                           goal='AGY goal', session_id='conversation_12345678',
                           bind_result='BOUND', initial_native_session_id=None,
-                          bound_registration_mutation=False):
+                          bound_registration_mutation=False, audit=None):
         task_id = 'a' * 32
         task = {
             'schema_version': 2, 'task_id': task_id, 'run_id': 'b' * 32,
@@ -82,11 +82,17 @@ class AgyRouteWiringTests(unittest.TestCase):
         denied = SimpleNamespace(allowed=False, reason_code='OWNER_ASSIGNMENT_MISMATCH')
         gate_decisions = iter(decisions or (allowed, allowed))
         changed_registration = dataclasses.replace(registration, result_sha='f' * 40)
+        binding_results = iter(((registration, snapshot), (registration, snapshot),
+                                (changed_registration, snapshot)))
+        bind_executor_calls = []
+        registration_reads = []
+        diff_calls = []
         inbox_events = []
         prompts = []
         bind_called = False
 
         def read_registration(*_args, **_kwargs):
+            registration_reads.append(True)
             if (bind_called and initial_native_session_id is None and bind_result == 'BOUND' and
                     type(session_id) is str and session_id not in ('', 'UNKNOWN')):
                 native = task_completion.D6Registration(
@@ -99,10 +105,6 @@ class AgyRouteWiringTests(unittest.TestCase):
         def bind_native_session(*_args, **_kwargs):
             nonlocal bind_called
             bind_called = True
-            if (bind_result == 'BOUND' and initial_native_session_id is None and
-                    type(session_id) is str and session_id not in ('', 'UNKNOWN')):
-                callback['evidence']['executor_native_session_id'] = session_id
-                callback['evidence']['executor_native_session'] = 'VERIFIED'
             return bind_result
 
         def route_runner(_route, _request, *, gate, **_kwargs):
@@ -113,16 +115,22 @@ class AgyRouteWiringTests(unittest.TestCase):
                                  blocked_reason='OWNER_DISPATCH_DENIED')
             if route_error is not None:
                 raise route_error
+            if audit is not None:
+                audit['provider_results'] = audit.get('provider_results', 0) + 1
             return result
 
         def direct_event(event_task_id, executor_task_id, *, store, reviewer_adapter=None):
             saved_task = store.get(event_task_id)
             saved = saved_task['developer']
             self.assertEqual(saved['state'], 'DEVELOPER_RESPONDED')
-            expected_callback = json.loads(json.dumps(callback))
-            self.assertEqual(saved_task['completion']['evidence'],
-                             saved['direct_result_callback']['evidence'])
-            self.assertEqual(saved['direct_result_callback'], expected_callback)
+            completion_evidence = saved_task['completion']['evidence']
+            callback_evidence = saved['direct_result_callback']['evidence']
+            for key, value in completion_evidence.items():
+                self.assertEqual(callback_evidence[key], value)
+            self.assertEqual(callback_evidence['executor_task_id'], 'executor-d6')
+            self.assertEqual(callback_evidence['verification_state'], 'NOT_STARTED')
+            self.assertEqual(callback_evidence['test_policy'], 'LOCAL')
+            self.assertEqual(saved['direct_result_callback']['executor_task_id'], 'executor-d6')
             inbox_events.append({'task_id': event_task_id, 'executor_task_id': executor_task_id})
             return 0
 
@@ -140,14 +148,17 @@ class AgyRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli.task_completion, 'collect_git_snapshot', return_value=snapshot), \
              patch.object(task_submission_cli.task_completion, 'bind_executor_task',
                           side_effect=(lambda *_args, **_kwargs:
-                              (changed_registration, snapshot) if binding_changes else
-                              (registration, snapshot))), \
+                              bind_executor_calls.append(True) or
+                              (next(binding_results) if binding_changes else
+                               (registration, snapshot)))), \
              patch.object(task_submission_cli.task_completion, 'read_d6_registration',
                           side_effect=read_registration), \
              patch.object(task_submission_cli, '_bind_codex_native_session',
                           side_effect=bind_native_session), \
              patch.object(task_submission_cli.task_completion, '_worktree_diff',
-                          return_value=(changed_paths or ['src.py'], diff_bytes)), \
+                          side_effect=lambda *_args, **_kwargs:
+                              diff_calls.append(True) or
+                              (changed_paths or ['src.py'], diff_bytes)), \
              patch.object(task_submission_cli, '_assignment_paths',
                           return_value=(read_paths or ['src.py'], ['src.py'])), \
              patch.object(task_submission_cli, '_remote_receipt_test_policy', return_value='LOCAL'), \
@@ -162,6 +173,11 @@ class AgyRouteWiringTests(unittest.TestCase):
                           side_effect=direct_event):
             status = task_submission_cli.run_task_agy_delegate(
                 args, store=store, route_runner=route_runner)
+        if audit is not None:
+            audit.update(bind_executor_calls=len(bind_executor_calls),
+                         registration_reads=len(registration_reads),
+                         diff_calls=len(diff_calls), bind_calls=int(bind_called),
+                         result_events=len(inbox_events))
         return status, store.task, inbox_events, prompts
 
     def test_record_pm_accepts_agy_recommendation(self):
@@ -218,6 +234,7 @@ class AgyRouteWiringTests(unittest.TestCase):
                          task['developer']['direct_result_callback']['evidence']):
             self.assertEqual(evidence['executor_native_session_id'], 'conversation_12345678')
             self.assertEqual(evidence['executor_native_session'], 'VERIFIED')
+        self.assertNotIn('native_session_binding', task['developer']['execution'])
         self.assertEqual(inbox_events, [{'task_id': 'a' * 32,
                                          'executor_task_id': 'executor-d6'}])
 
@@ -239,6 +256,7 @@ class AgyRouteWiringTests(unittest.TestCase):
         status, task, _events, _prompts = self._run_agy_delegate(bind_result='D6_BIND_NATIVE_SESSION_ALREADY_SET',
             initial_native_session_id='conversation_old1234')
         self.assertEqual(status, 0)
+        self.assertNotIn('native_session_binding', task['developer']['execution'])
         for evidence in (task['completion']['evidence'],
                          task['developer']['direct_result_callback']['evidence']):
             self.assertEqual(evidence['executor_native_session_id'], 'conversation_old1234')
@@ -377,9 +395,17 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(inbox_events, [])
 
     def test_agy_route_gate_binding_failure_has_binding_error(self):
-        status, task, inbox_events, _prompts = self._run_agy_delegate(binding_changes=True)
+        audit = {}
+        status, task, inbox_events, _prompts = self._run_agy_delegate(
+            binding_changes=True, audit=audit)
         self.assertEqual(status, 1)
         self.assertEqual(task['developer']['error_code'], 'AGY_D6_BINDING_CHANGED')
+        self.assertEqual(audit['bind_executor_calls'], 3)
+        self.assertEqual(audit.get('provider_results', 0), 0)
+        self.assertEqual(audit['registration_reads'], 1)
+        self.assertEqual(audit['diff_calls'], 0)
+        self.assertEqual(audit['bind_calls'], 0)
+        self.assertEqual(audit['result_events'], 0)
         self.assertEqual(inbox_events, [])
 
     def test_agy_isolation_failure_records_specific_boundary_reason(self):
