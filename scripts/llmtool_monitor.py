@@ -4250,28 +4250,51 @@ def _work_names(row: OfficeRow) -> str:
 
 def _names_pr(row: OfficeRow, number: int, head: str) -> bool:
     text = _work_names(row)
-    commit = re.search(r"@([0-9a-f]{7,40})(?![0-9a-f])", text, re.IGNORECASE)
-    return (re.search(rf"\bPR\s*#?{number}\b", text, re.IGNORECASE) is not None
-            and bool(head) and commit is not None
-            and commit.group(1).casefold().startswith(head.casefold()))
+    review = _review_task(row.task[5:]) if row.role == "reviewer" and row.task.startswith("task ") else None
+    if review and review[0] == str(number):
+        return not head or review[1].casefold().startswith(head.casefold())
+    if re.search(rf"\bPR\s*#?{number}\b", text, re.IGNORECASE) is None:
+        return False
+    commits = re.findall(r"@([0-9a-f]{7,40})(?![0-9a-f])", text, re.IGNORECASE)
+    # Some real work labels name the PR but omit its head. Bind by the head
+    # when a row states one; otherwise the PR reference is sufficient.
+    return not commits or bool(head and any(
+        commit.casefold().startswith(head.casefold()) for commit in commits))
 
 
 def _names_issue(row: OfficeRow, number: int) -> bool:
-    return re.search(rf"\bIssue\s*#?{number}\b", _work_names(row), re.IGNORECASE) is not None
+    text = _work_names(row)
+    return (re.search(rf"\bIssue\s*#?{number}\b", text, re.IGNORECASE) is not None
+            or re.search(rf"(?<![\w#])(?<!PR )#{number}\b", text, re.IGNORECASE) is not None)
 
 
 def _current_person(rows, predicate, *, readable=True) -> str:
     if not readable:
         return "未確認"
     matching = [row for row in rows if row.state == WORKING and predicate(row)]
-    if any("codex" in row.name.casefold() for row in matching):
-        return "Codex"
-    if any(row.role == "reviewer" or "reviewer" in row.name.casefold() for row in matching):
-        return "Reviewer"
-    return "沒人"
+    people = set()
+    for row in matching:
+        if row.role == "reviewer":
+            people.add("Reviewer")
+        elif "codex" in row.name.casefold() or row.key.startswith("codex:"):
+            people.add("Codex")
+        else:
+            name = row.name.casefold()
+            route = next((label for marker, label in (
+                ("claude", "Claude"), ("opencode", "OpenCode"),
+                ("agy", "AGY"), ("antigravity", "AGY"),
+                ("company gw", "CompanyGW"), ("gw-agent", "CompanyGW"))
+                          if marker in name), "")
+            if route:
+                people.add(route)
+    if not people:
+        return "沒人"
+    order = ("Codex", "Reviewer", "Claude", "OpenCode", "AGY", "CompanyGW")
+    return "、".join(person for person in order if person in people)
 
 
-def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending, office=(), *, github_known=True) -> list[PrRow]:
+def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending, office=(), *, github_known=True,
+                  office_known=True) -> list[PrRow]:
     """Build the read-only PR status table from already-read local/GitHub data."""
     rows = []
     for pull in sorted((item for item in pulls or []
@@ -4322,9 +4345,12 @@ def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending, office=(),
         elif review == "未審":
             next_step, owner = "派審查", "PM"
         current = _current_person(office, lambda row: _names_pr(row, pull.number, head),
-                                  readable=github_known)
-        if current == "沒人" and (linux in ("執行中", "排隊") or mac in ("執行中", "排隊")):
+                                  readable=github_known and office_known and bool(head))
+        ci_working = linux in ("執行中", "排隊") or mac in ("執行中", "排隊")
+        if current == "沒人" and ci_working:
             current = "CI"
+        elif current not in ("沒人", "未確認") and ci_working:
+            current += "、CI"
         elif current == "沒人" and ci_heads is None:
             current = "未確認"
         rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, next_step, owner, current))
@@ -4380,12 +4406,13 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
     for item in running:
         number = _board_ref_number(item.ref)
         is_pr = bool(re.match(r"PR\s", item.ref))
-        if not office_known or (is_pr and not github_known):
+        if not office_known or not github_known:
             current = "未確認"
         elif is_pr:
             pull = pulls_by_number.get(number)
             head = pull.head if pull else ""
-            current = _current_person(office, lambda row: _names_pr(row, number, head))
+            current = ("未確認" if pull is None or not head else
+                       _current_person(office, lambda row: _names_pr(row, number, head)))
             if current == "沒人" and pull and pull.state == "OPEN" and head:
                 ci_heads = getattr(github, "ci_heads", None) if github_known else None
                 if ci_heads is None:
@@ -4445,7 +4472,8 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
         github_status = "；".join(
             part for part in (github_status, GITHUB_IDENTITY_STATUS) if part)
     prs = (pr_board_rows(pulls, github.verdicts, getattr(github, "ci_heads", None),
-                         ec2, reviewing, github.pending, office, github_known=github_known) if github_known else [])
+                         ec2, reviewing, github.pending, office, github_known=github_known,
+                         office_known=office_known) if github_known else [])
     return WorkBoard(owner, running, queue, blocked, done, github_known, board_known,
                      github_status, board.status, board.age, board.skipped, note,
                      int(github.window // 3600) if github is not None else 12, prs, owner_cut)

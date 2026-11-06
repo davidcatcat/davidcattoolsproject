@@ -8457,6 +8457,70 @@ class PrBoardTests(unittest.TestCase):
     def _verdict(word, when=1, head="abcdef0", number="1"):
         return {number: [(when, word, frozenset({head}))]}
 
+    def test_current_people_use_real_codex_and_d6_review_labels(self):
+        codex_work = mon.CodexWork("1" * 32, "wp-1", "session", "DEVELOPER_RESPONDED",
+                                   1, "965", "board work")
+        codex_label = mon._codex_work_label(codex_work, 978)
+        codex = mon.OfficeRow("codex developer", mon.WORKING, "", 0, 0,
+                              role="developer", work=codex_label)
+        self.assertTrue(mon._names_issue(codex, 965))
+        self.assertTrue(mon._names_pr(codex, 978, "abcdef0"))
+
+        claude_review = mon.OfficeRow(
+            "claude developer", mon.WORKING, "", 0, 0, role="reviewer",
+            task="task pr978-claude-rv1-abcdef0")
+        codex_review = mon.OfficeRow(
+            "codex reviewer", mon.WORKING, "", 0, 0, role="reviewer",
+            task="task pr978-codex-rv1-abcdef0")
+        self.assertEqual(mon._review_task(claude_review.task[5:]), ("978", "abcdef0"))
+        self.assertTrue(mon._names_pr(claude_review, 978, "abcdef0"))
+        self.assertTrue(mon._names_pr(codex_review, 978, "abcdef0"))
+        wrong_head = replace(codex, detail="@fedcba9")
+        self.assertFalse(mon._names_pr(wrong_head, 978, "abcdef0"))
+
+        pull = self._pull(978)
+        active_ci = {"abcdef0": {"linux": ("in_progress", "")}}
+        row = mon.pr_board_rows([pull], {}, active_ci, ({}, ""), set(), [],
+                                [codex, claude_review, codex_review])[0]
+        self.assertEqual(row.current, "Codex、Reviewer、CI")
+        agy = mon.OfficeRow("agy cli #1", mon.WORKING, "", 0, 0, work="PR #978")
+        row = mon.pr_board_rows([pull], {}, {}, ({}, ""), set(), [], [agy])[0]
+        self.assertEqual(row.current, "AGY")
+
+    def test_board_issue_closed_by_open_pr_uses_codex_label(self):
+        codex_work = mon.CodexWork("1" * 32, "wp-1", "session", "DEVELOPER_RESPONDED",
+                                   1, "965", "board work")
+        codex = mon.OfficeRow("codex developer", mon.WORKING, "", 0, 0,
+                              role="developer", work=mon._codex_work_label(codex_work, 978))
+        github = self._github([mon.BoardPull(978, "Work", "OPEN", 0, 0, "abcdef0", False,
+                                               closes=(965,))])
+        work = mon.work_board(github, self._board([mon.PmBoardItem("#965", "Issue", "Developer")]),
+                              NOW, office=[codex])
+        issue = next(item for item in work.running if item.ref == "#965")
+        pull = next(item for item in work.running if item.ref == "PR #978")
+        self.assertEqual((issue.current, pull.current), ("Codex", "Codex"))
+
+    def test_unreadable_sources_and_missing_pull_keep_current_unknown(self):
+        office = [mon.OfficeRow("codex developer", mon.WORKING, "", 0, 0,
+                                work="PR #978")]
+        unreadable_office = mon.pr_board_rows(
+            [self._pull(978)], {}, {}, ({}, ""), set(), [], office, office_known=False)[0]
+        self.assertEqual(unreadable_office.current, "未確認")
+
+        unreadable_github = self._github([])
+        unreadable_github.successful_read = False
+        unreadable_github.read_failed = True
+        issue_work = mon.work_board(
+            unreadable_github, self._board([mon.PmBoardItem("#965", "Issue", "Developer")]),
+            NOW, office=office)
+        self.assertEqual(issue_work.running[0].current, "未確認")
+
+        missing_pull = self._github([], ci_heads=None)
+        missing_work = mon.work_board(
+            missing_pull, self._board([mon.PmBoardItem("PR #978", "PR", "Developer")]),
+            NOW, office=office)
+        self.assertEqual(missing_work.running[0].current, "未確認")
+
     def test_ci_head_runs_choose_highest_id_and_skip_malformed_items(self):
         def run(run_id, conclusion, name="llmtool Linux CI", sha=None, status="completed"):
             return {"id": run_id, "name": name, "head_sha": sha or self.SHA,
