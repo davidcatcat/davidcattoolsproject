@@ -4,6 +4,7 @@ Everything is offline. A Claude Code session is represented only by its local
 transcript file under a temporary CLAUDE_CONFIG_DIR.
 """
 
+import errno
 import hashlib
 import json
 import os
@@ -1121,6 +1122,50 @@ class ActivePMInboxTests(unittest.TestCase):
             with self.subTest(label):
                 self.assertEqual(read_with(mutate, at), 'TASK_STORE_INVALID')
         self.assertEqual(self.store.get(task['task_id'])['task_id'], task['task_id'])
+
+    def test_write_replace_contention_is_bounded_and_fails_closed(self):
+        # The unlocked read fix must not cost the write side its contention
+        # retry: a transient rename error is waited out, persistent contention
+        # fails BUSY, any other rename error stays UNAVAILABLE, and a failed
+        # write never changes the record or leaves its temporary behind.
+        task = self._record_pm()
+        name = task['task_id'] + '.json'
+        current = json.loads((self.store.root / name).read_text())
+        original_replace = os.replace
+        calls = []
+
+        def replace_failing(code, times):
+            def replace(*args, **kwargs):
+                calls.append(args[1])
+                if len(calls) <= times:
+                    raise OSError(code, os.strerror(code))
+                return original_replace(*args, **kwargs)
+            return replace
+
+        def temporaries():
+            return [entry for entry in os.listdir(self.store.root) if entry.endswith('.tmp')]
+
+        with patch('llmtool.task_store.os.replace', side_effect=replace_failing(errno.EBUSY, 2)):
+            self.store._write(dict(current, updated_at='2026-11-06T00:00:01Z'), create=False)
+        self.assertEqual(calls, [name] * 3)
+        self.assertEqual(self.store.get(task['task_id'])['updated_at'], '2026-11-06T00:00:01Z')
+        self.assertEqual(temporaries(), [])
+
+        saved = self.store.get(task['task_id'])
+        for code, times, expected in ((errno.EAGAIN, 10 ** 6, 'TASK_STORE_BUSY'),
+                                      (errno.EACCES, 1, 'TASK_STORE_UNAVAILABLE')):
+            with self.subTest(errno.errorcode[code]):
+                calls.clear()
+                with patch('llmtool.task_store.os.replace',
+                           side_effect=replace_failing(code, times)), \
+                     patch.object(task_store_module, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 0.05):
+                    with self.assertRaises(LLMToolError) as caught:
+                        self.store._write(dict(saved, updated_at='2026-11-06T00:00:02Z'),
+                                          create=False)
+                self.assertEqual(caught.exception.task_store_error_code, expected)
+                self.assertEqual(len(calls) > 1, code == errno.EAGAIN)
+                self.assertEqual(self.store.get(task['task_id']), saved)
+                self.assertEqual(temporaries(), [])
 
     # Session-file checks ----------------------------------------------------
 

@@ -2330,7 +2330,7 @@ class TaskStore:
                         follow_symlinks=False)
                 os.unlink(temporary, dir_fd=directory)
             else:
-                os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+                self._replace_at(directory, temporary, name)
             os.fsync(directory)
         except FileExistsError:
             _fail('TASK_STORE_CONFLICT')
@@ -2345,6 +2345,27 @@ class TaskStore:
                 pass
             os.close(directory)
         return record
+
+    @staticmethod
+    def _replace_at(directory, temporary, name):
+        """Rename the fsynced temporary over ``name``, waiting out transient contention.
+
+        Only contention errnos are retried, within the TaskStore update-lock
+        wait; the temporary is untouched by a failed rename, so each attempt
+        installs the same bytes. Persistent contention fails closed BUSY; any
+        other error propagates to the caller's UNAVAILABLE/CONFLICT mapping.
+        """
+        deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+                return
+            except OSError as exc:
+                if not _is_contention_error(exc):
+                    raise
+                if time.monotonic() >= deadline:
+                    _fail('TASK_STORE_BUSY')
+                time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
 
     def create(self, record):
         if type(record) is dict and 'abandonment' in record:
