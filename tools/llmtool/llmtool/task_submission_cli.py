@@ -4538,14 +4538,15 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             explicitly_refused = (type(error_code) is str and
                                   ('REFUSED' in error_code or
                                    'DISPATCH_DENIED' in error_code))
-            never_started = (state in ('DEVELOPER_PENDING',
-                                       'DEVELOPER_UNAVAILABLE') and
+            never_started = (state == 'DEVELOPER_UNAVAILABLE' and
                              execution is None and artifact_known_empty and
                              (not changed_file_values or
                               changed_files_known_empty))
             ended_without_work = (
-                state == 'BLOCKED' or execution_blocked or explicitly_refused
-            ) and artifact_known_empty and changed_files_known_empty
+                (execution_blocked or explicitly_refused) and
+                artifact_known_empty and
+                (changed_files_known_empty or
+                 (explicitly_refused and not changed_file_values)))
             if never_started or ended_without_work:
                 continue
             created_at = developer.get('created_at')
