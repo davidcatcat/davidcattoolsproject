@@ -22,6 +22,15 @@ Each account is non-admin, in its own group only, with a `700` home; accounts
 cannot read another runner's folder or credentials. Python 3.14 is the distro package
 `python3.14` (AppStream) beside the system 3.9; jobs build their own venv.
 
+## Fresh host
+
+- Install `git`, `tar`, `make`, `python3.14` and the runner's libraries first
+  (a missing `make` failed the first job on runner 4).
+- Before `install.sh`, move `bin` and `externals` to `bin.<version>` and
+  `externals.<version>` with links, or the installer refuses the node symlinks.
+- With SELinux enforcing, give `runsvc.sh` type `bin_t` with `semanage fcontext`
+  and `restorecon`.
+
 ## Root-owned runner install
 
 Run the permission installer on the EC2 host after a runner has been configured.
