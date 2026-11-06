@@ -2,6 +2,7 @@ import io
 import json
 import unittest
 from argparse import Namespace
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -61,9 +62,12 @@ class AgyRouteWiringTests(unittest.TestCase):
         store = Store()
         snapshot = SimpleNamespace(root='/registered/root', common_dir='/repo/.git',
                                    branch='task-branch', head='d' * 40, clean=True)
-        registration = SimpleNamespace(task_id='executor-d6', root=snapshot.root,
-            common_dir=snapshot.common_dir, branch=snapshot.branch, result_sha=snapshot.head,
-            trusted_agent_id='codex', session_ref='session-ref', native_session_id=None)
+        registration = task_completion.D6Registration(
+            task_id='executor-d6', trusted_agent_id='codex', session_ref='session-ref',
+            root=snapshot.root, common_dir=snapshot.common_dir, branch=snapshot.branch,
+            source_sha='c' * 40, result_sha=snapshot.head, state='ACTIVE',
+            lock_state='LOCKED', device=1, inode=2, uid=3, native_session_id=None,
+            github_login=None, env2_pass_marker=None, env2_approved_tooling_sha=None)
         callback = task_submission_cli._direct_result_callback(
             task, registration, snapshot.head, test_policy='LOCAL')
         usage = ({'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
@@ -75,8 +79,7 @@ class AgyRouteWiringTests(unittest.TestCase):
         denied = SimpleNamespace(allowed=False, reason_code='OWNER_ASSIGNMENT_MISMATCH')
         gate_decisions = iter(decisions or (allowed, allowed))
         binding_results = iter(((registration, snapshot), (registration, snapshot),
-                                (SimpleNamespace(**{**registration.__dict__,
-                                                    'result_sha': 'f' * 40}), snapshot)))
+                                (replace(registration, result_sha='f' * 40), snapshot)))
         inbox_events = []
         prompts = []
 
@@ -117,9 +120,8 @@ class AgyRouteWiringTests(unittest.TestCase):
                           side_effect=lambda *_args, **_kwargs: bound_registration[0]), \
              patch.object(task_submission_cli, '_bind_codex_native_session',
                           side_effect=lambda _registration, native: (
-                              bound_registration.__setitem__(0, SimpleNamespace(
-                                  **{**registration.__dict__,
-                                     'native_session_id': native})) or 'BOUND')) , \
+                              bound_registration.__setitem__(
+                                  0, replace(registration, native_session_id=native)) or 'BOUND')) , \
              patch.object(task_submission_cli.task_completion, '_worktree_diff',
                           return_value=(changed_paths or ['src.py'], diff_bytes)), \
              patch.object(task_submission_cli, '_assignment_paths',
