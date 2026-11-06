@@ -31,13 +31,13 @@ _REFUSAL_CODES = frozenset((
 _SCREEN_HIT_LIMIT = 32
 _SCREEN_RULES = (
     ('private_key', re.compile(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----', re.I)),
-    ('cloud_key', re.compile(r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b', re.I)),
-    ('provider_key', re.compile(r'\bsk-[A-Za-z0-9_-]{12,}', re.I)),
-    ('git_host_key', re.compile(r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}', re.I)),
-    ('chat_key', re.compile(r'\bxox[abprs]-[A-Za-z0-9-]{20,}', re.I)),
-    ('auth_scheme', re.compile(r'\b(?:bearer|basic)\s+\S+', re.I)),
+    ('cloud_key', re.compile(r'(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b', re.I)),
+    ('provider_key', re.compile(r'(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}', re.I)),
+    ('git_host_key', re.compile(r'(?<![A-Za-z0-9_])(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}', re.I)),
+    ('chat_key', re.compile(r'(?<![A-Za-z0-9_])xox[abprs]-[A-Za-z0-9-]{20,}', re.I)),
+    ('auth_scheme', re.compile(r'(?<![A-Za-z0-9_])(?:bearer|basic)\s+\S+', re.I)),
     ('keyword_assign', re.compile(
-        r'["\']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
+        r'["\']?(?<![A-Za-z0-9_])(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
         r'client[_-]?secret|aws_secret_access_key)["\']?\s*[:=]', re.I)),
 )
 _SCREEN_NAME = re.compile(r'[a-z_]+\Z')
