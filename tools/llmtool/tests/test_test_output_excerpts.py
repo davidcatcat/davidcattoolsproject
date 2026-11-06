@@ -415,28 +415,39 @@ class TestOutputExcerptsTests(unittest.TestCase):
         self.assert_emitted_excerpt_rejected(
             raw, max_excerpt_bytes=self.excerpt_bound(raw, SYNTHETIC_AWS_KEY))
 
-    def test_utf8_cut_cannot_emit_aws_like_or_jwt_indicator(self):
+    def test_excerpt_cut_cannot_emit_aws_like_or_jwt_indicator(self):
         jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
         for value in (SYNTHETIC_AWS_KEY, jwt):
             with self.subTest(value=value[:3]):
-                # A Unicode word character continues the word until a cut inside it is dropped.
-                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + value + '測試')])
+                # The ASCII continuation keeps the source scan clear; truncation exposes the shape.
+                # synthetic-fixture: screen-tool test
+                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + value + 'MORE測試')])
+                self.assertEqual(self.select(raw)['status'], 'COMPLETE')
                 self.assert_emitted_excerpt_rejected(
-                    raw, max_excerpt_bytes=self.excerpt_bound(raw, value, extra=1))
+                    raw, max_excerpt_bytes=self.excerpt_bound(raw, value))
 
     def test_ascii_escaped_json_cannot_emit_aws_like_or_jwt_indicator(self):
-        # The source scan passes (no source-level error), but CLI JSON's \uXXXX
-        # escape after the value adds a boundary, so uncut output is rejected too.
+        # A non-ASCII word suffix now triggers the intended source refusal before JSON emission.
         jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
         for value in (SYNTHETIC_AWS_KEY, jwt):
             with self.subTest(value=value[:3]):
                 raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + value + '測試')])
-                self.assert_emitted_excerpt_rejected(raw)
+                self.path.write_bytes(raw)
+                with self.assertRaises(LLMToolError) as caught:
+                    select_test_excerpts(self.path, 1)
+                self.assertEqual(str(caught.exception),
+                                 'test-excerpts: source contains sensitive-content indicators; details omitted')
+                self.assertEqual(self.path.read_bytes(), raw)
 
     def test_ascii_escaped_failure_id_without_excerpt_is_rejected(self):
         hidden = 'test_k (sample.' + SYNTHETIC_AWS_KEY + '測.test_k)'
         raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY), ('FAIL', hidden, FAIL_BODY)])
-        self.assert_emitted_excerpt_rejected(raw, max_excerpts=1)
+        self.path.write_bytes(raw)
+        with self.assertRaises(LLMToolError) as caught:
+            select_test_excerpts(self.path, 1, max_excerpts=1)
+        self.assertEqual(str(caught.exception),
+                         'test-excerpts: source contains sensitive-content indicators; details omitted')
+        self.assertEqual(self.path.read_bytes(), raw)
 
     def test_near_miss_indicator_shapes_are_still_emitted(self):
         for value, extra in (('AKIA' + 'SYNTHETIC0TEST1', 0), ('AKIB' + 'SYNTHETIC0TEST16', 0),
@@ -541,6 +552,7 @@ class TestOutputExcerptsTests(unittest.TestCase):
                       '\u00a0', '\u0301', '', '\u0130', '\u0131', '\u017f',
                       '\u212a', '-', 'prefix-', 'x-')
         right_sides = ('\u6e2c', '\u3042', '\u00e9', '\u212a')
+        # synthetic-fixture: screen-tool test
         side_pairs = (('\u6e2c', '\u3042'), ('\u3131', '\u3131'),
                       ('\uff71', '\uff71'), ('\u3005', '\u3005'),
                       ('\u6e2c', '\u00e9'), ('\u00e9', '\u6e2c'),
@@ -1030,13 +1042,17 @@ sys.exit(0 if result.wasSuccessful() else 1)
 
     def test_root_logging_does_not_hide_sensitive_original_or_emitted_forms(self):
         prefix = b'ERROR:root:synthetic observation\n'
+        # synthetic-fixture: screen-tool test
         for tail, expected in ((SYNTHETIC_AWS_KEY, 'source'),
-                               (SYNTHETIC_AWS_KEY + '測', 'emitted excerpt')):
+                               (SYNTHETIC_AWS_KEY + 'MORE測', 'emitted excerpt')):
             raw = prefix + unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + tail)])
             with self.subTest(form=expected):
                 self.path.write_bytes(raw)
                 with self.assertRaises(LLMToolError) as error:
-                    select_test_excerpts(self.path, 1)
+                    select_test_excerpts(
+                        self.path, 1,
+                        **({'max_excerpt_bytes': self.excerpt_bound(raw, SYNTHETIC_AWS_KEY)}
+                           if expected == 'emitted excerpt' else {}))
                 self.assertEqual(str(error.exception), 'test-excerpts: ' + expected +
                                  ' contains sensitive-content indicators; details omitted')
                 self.assertNotIn(SYNTHETIC_AWS_KEY, str(error.exception))
