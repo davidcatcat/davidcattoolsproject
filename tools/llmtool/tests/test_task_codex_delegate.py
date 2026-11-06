@@ -403,6 +403,10 @@ class CodexDelegateTests(unittest.TestCase):
                 self.value.update(changes)
                 return self.value
 
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **changes):
+                return self.compare_and_update(task_id, expected, **changes)
+
             def record_codex_launch(self, _task_id, *, assignment_id, pid,
                                     start_time, pgid):
                 developer = self.value['developer']
@@ -797,7 +801,7 @@ class CodexDelegateTests(unittest.TestCase):
             'state': 'DEVELOPER_OUTCOME_UNKNOWN',
             'error_code': 'CODEX_TIMEOUT_WITH_CHANGES',
             'execution': {'status': 'TIMEOUT', 'diff_base_sha': self.source_sha,
-                          'diff_sha256': 'a' * 64},
+                          'diff_sha256': 'a' * 64, 'cleanup_status': 'CONFIRMED'},
             'source_sha': self.source_sha, 'executor_task_id': 'executor-task-1',
             'read_paths': ['src.py'], 'write_paths': ['src.py'],
             'acceptance': ['src.py is changed'],
@@ -818,6 +822,14 @@ class CodexDelegateTests(unittest.TestCase):
             previous, **{**args, 'write_paths': ['other.py']}))
         self.assertFalse(task_submission_cli._codex_timeout_recovery(
             previous, **{**args, 'acceptance': ['other criterion']}))
+        for cleanup_status in (None, 'UNKNOWN'):
+            execution = dict(previous['execution'])
+            if cleanup_status is None:
+                execution.pop('cleanup_status')
+            else:
+                execution['cleanup_status'] = cleanup_status
+            self.assertFalse(task_submission_cli._codex_timeout_recovery(
+                dict(previous, execution=execution), **args))
 
     def test_timeout_recovery_rejects_sibling_of_timed_out_source_before_launch(self):
         task = self._task()
@@ -1059,6 +1071,10 @@ class CodexDelegateTests(unittest.TestCase):
                 self.value.update(changes)
                 return self.value
 
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **changes):
+                return self.compare_and_update(task_id, expected, **changes)
+
             def record_codex_launch(self, _task_id, *, assignment_id, pid,
                                     start_time, pgid):
                 developer = self.value['developer']
@@ -1150,6 +1166,10 @@ class CodexDelegateTests(unittest.TestCase):
                     raise AssertionError('unexpected Task update')
                 self.value.update(changes)
                 return self.value
+
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **changes):
+                return self.compare_and_update(task_id, expected, **changes)
 
             def record_codex_launch(self, _task_id, *, assignment_id, pid,
                                     start_time, pgid):

@@ -49,6 +49,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             def __init__(self):
                 self.task = dict(task)
                 self.writes = 0
+                self.d6_bindings = []
 
             def get(self, _task_id):
                 return dict(self.task)
@@ -57,6 +58,11 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                 self.writes += 1
                 self.task.update(updates)
                 return dict(self.task)
+
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **updates):
+                self.d6_bindings.append(executor_task_id)
+                return self.compare_and_update(task_id, expected=expected, **updates)
 
             def update(self, _task_id, **updates):
                 self.writes += 1
@@ -249,6 +255,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         self.assertEqual(developer['provider_type'], 'claude-cli')
         self.assertEqual(developer['backend_session_semantics'], 'CLI_REPORTED_SESSION_ID')
         self.assertEqual(developer['executor_task_id'], registration.task_id)
+        self.assertEqual(store.d6_bindings, [registration.task_id])
         self.assertEqual(developer['usage']['total_tokens'], 5)
         self.assertEqual(developer['artifact'], 'diff --git a/src.py b/src.py\n')
         self.assertTrue(all(call[0] == 'claude-developer' and call[2] == registration.task_id

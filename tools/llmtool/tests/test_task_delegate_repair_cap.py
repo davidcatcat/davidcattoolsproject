@@ -232,5 +232,184 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertEqual(store.recorded, [])
 
 
+def _no_work(**overrides):
+    # The real shape persisted by the Codex route: no changed_files field.
+    developer = {
+        'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+        'provider_profile': 'codex',
+        'error_code': 'CODEX_BLOCKED',
+        'created_at': '2026-11-04T00:00:02Z',
+        'source_sha': _HEAD,
+        'artifact': None,
+        'artifact_sha256': None,
+        'execution': {'status': 'BLOCKED', 'cleanup_status': 'CONFIRMED'},
+        'usage': None,
+    }
+    developer.update(overrides)
+    return developer
+
+
+class LaunchedNoWorkRepairCountTests(unittest.TestCase):
+    _NEWEST = '00000000000000000000000000000000'
+
+    def setUp(self):
+        self.diff = ([], b'')
+        for name, target, kwargs in (
+                ('trust_patch', (task_submission_cli.trust, 'load_trust'),
+                 {'return_value': SimpleNamespace(
+                     repository={'slug': 'example/project'})}),
+                ('binding_patch', (task_submission_cli, '_delegate_d6_binding'),
+                 {'return_value': (SimpleNamespace(root='/d6'),
+                                   SimpleNamespace(head=_HEAD))}),
+                ('diff_patch', (task_submission_cli.task_completion,
+                                '_worktree_diff'),
+                 {'side_effect': lambda root, head: self.diff})):
+            started = patch.object(*target, **kwargs)
+            started.start()
+            self.addCleanup(started.stop)
+
+    def _store(self, developer):
+        # One extra record so the cap is still reached after one is skipped.
+        store = _Store(count=2 + MAX_REPAIR_ATTEMPTS,
+                       diagnosis=_diagnosis([_entry()]))
+        store.records[self._NEWEST]['developer'] = developer
+        return store
+
+    def _assert_skipped(self, developer):
+        store = self._store(developer)
+        task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [(
+            _CURRENT_TASK, _HIGH_DEBUG_REF, 2 + MAX_REPAIR_ATTEMPTS)])
+
+    def _assert_counted(self, developer):
+        store = self._store(developer)
+        # The newer counted record becomes the newest assignment, so the
+        # earlier High Debug diagnosis is stale.
+        with self.assertRaisesRegex(
+                LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_blocked_run_with_no_work_is_skipped(self):
+        self._assert_skipped(_no_work())
+
+    def test_blocked_state_with_no_work_is_skipped(self):
+        self._assert_skipped(_no_work(
+            state='BLOCKED', error_code='AGY_BLOCKED'))
+
+    def test_interrupted_run_with_no_work_is_skipped(self):
+        self._assert_skipped(_no_work(
+            error_code='CODEX_INTERRUPTED',
+            execution={'status': 'UNKNOWN', 'cleanup_status': 'CONFIRMED'}))
+
+    def test_skipped_record_is_not_the_newest_assignment(self):
+        store = self._store(_no_work(created_at='2026-11-05T00:00:00Z'))
+        task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(len(store.recorded), 1)
+
+    def test_skipped_record_needs_no_valid_timestamp(self):
+        self._assert_skipped(_no_work(created_at='bad'))
+
+    def test_artifact_counts(self):
+        self._assert_counted(_no_work(artifact='diff', artifact_sha256='0' * 64))
+
+    def test_artifact_sha_alone_counts(self):
+        self._assert_counted(_no_work(artifact_sha256='0' * 64))
+
+    def test_run_that_left_uncommitted_files_counts(self):
+        # Real record: empty artifact, but the D6 holds uncommitted edits.
+        self.diff = (['a.py'], b'diff --git a/a.py b/a.py\n')
+        self._assert_counted(_no_work())
+
+    def test_untracked_or_raw_diff_counts(self):
+        for diff in (([], b'diff'), (['a.py'], b'')):
+            with self.subTest(diff=diff):
+                self.diff = diff
+                self._assert_counted(_no_work())
+
+    def test_moved_d6_head_counts(self):
+        self._assert_counted(_no_work(source_sha='b' * 40))
+
+    def test_missing_or_malformed_source_sha_counts(self):
+        for value in (None, 'abc', 5, 'A' * 40):
+            with self.subTest(value=value):
+                self._assert_counted(_no_work(source_sha=value))
+        developer = _no_work()
+        del developer['source_sha']
+        self._assert_counted(developer)
+
+    def test_unverifiable_d6_state_counts(self):
+        with patch.object(task_submission_cli, '_delegate_d6_binding',
+                          side_effect=OSError('dirty or unavailable')):
+            self._assert_counted(_no_work())
+        with patch.object(task_submission_cli.task_completion,
+                          '_worktree_diff', side_effect=OSError('git')):
+            self._assert_counted(_no_work())
+
+    def test_present_changed_files_must_be_empty_list(self):
+        for value in (['a.py'], None, 'a.py', {}):
+            with self.subTest(value=value):
+                self._assert_counted(_no_work(changed_files=value))
+
+    def test_unknown_or_missing_cleanup_counts(self):
+        for execution in (
+                {'status': 'BLOCKED', 'cleanup_status': 'UNKNOWN'},
+                {'status': 'BLOCKED'},
+                {'status': 'BLOCKED', 'cleanup_status': None},
+                None, 'CONFIRMED', []):
+            with self.subTest(execution=execution):
+                self._assert_counted(_no_work(execution=execution))
+        developer = _no_work()
+        del developer['execution']
+        self._assert_counted(developer)
+
+    def test_missing_artifact_fields_count(self):
+        for key in ('artifact', 'artifact_sha256'):
+            developer = _no_work()
+            del developer[key]
+            with self.subTest(key=key):
+                self._assert_counted(developer)
+
+    def test_other_outcomes_count(self):
+        for overrides in (
+                {'state': 'DEVELOPER_RESPONDED', 'error_code': None},
+                {'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                 'error_code': 'CODEX_TIMEOUT'},
+                {'state': 'DEVELOPER_OUTCOME_UNKNOWN', 'error_code': None},
+                {'state': 'DEVELOPER_OUTPUT_REJECTED',
+                 'error_code': 'CODEX_BLOCKED'},
+                {'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                 'error_code': 'CODEX_NOT_BLOCKED_X'}):
+            with self.subTest(overrides=overrides):
+                self._assert_counted(_no_work(**overrides))
+
+    def test_unreadable_record_still_fails_closed(self):
+        store = self._store(_no_work())
+        store.records[self._NEWEST]['developer'] = 'unreadable'
+        with self.assertRaisesRegex(
+                LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+
+    def test_counted_record_without_valid_timestamp_is_unavailable(self):
+        store = self._store(_no_work(changed_files=['a.py'], created_at='bad'))
+        with self.assertRaisesRegex(
+                LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+
+    def test_skip_does_not_hide_a_reached_cap(self):
+        store = self._store(_no_work())
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
+            task_submission_cli._check_delegate_repair_cap(
+                _args(high_debug_ref=None, high_debug_task=None), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_skip_can_bring_count_below_cap(self):
+        store = _Store(count=1 + MAX_REPAIR_ATTEMPTS)
+        store.records[self._NEWEST]['developer'] = _no_work()
+        task_submission_cli._check_delegate_repair_cap(
+            _args(high_debug_ref=None, high_debug_task=None), store)
+        self.assertEqual(store.recorded, [])
+
+
 if __name__ == '__main__':
     unittest.main()
