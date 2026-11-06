@@ -4524,16 +4524,19 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             state = developer.get('state')
             artifact_known_empty = ('artifact' in developer and
                                     developer.get('artifact') is None)
-            changed_file_values = [developer[key] for key in
-                                   ('changed_files', 'changed_paths')
-                                   if key in developer]
+            changed_file_values = (
+                [developer['changed_files']] if 'changed_files' in developer else [])
+            progress = developer.get('progress')
+            if type(progress) is dict and 'changed_files' in progress:
+                changed_file_values.append(progress['changed_files'])
             changed_files_known_empty = (
                 bool(changed_file_values) and
                 all(type(files) is list and not files
                     for files in changed_file_values))
             execution = developer.get('execution')
-            execution_blocked = (type(execution) is dict and
-                                 execution.get('status') == 'BLOCKED')
+            execution_blocked = (state == 'BLOCKED' or
+                                 (type(execution) is dict and
+                                  execution.get('status') == 'BLOCKED'))
             error_code = developer.get('error_code')
             explicitly_refused = (type(error_code) is str and
                                   ('REFUSED' in error_code or

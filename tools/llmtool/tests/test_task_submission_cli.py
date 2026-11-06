@@ -4144,7 +4144,7 @@ class DelegateRepairCapTests(unittest.TestCase):
 
     def _task(self, *, executor='executor-task-1', developer=False, route='codex',
               developer_state='DEVELOPER_RESPONDED', artifact='diff',
-              changed_files=None, error_code=None, execution=None):
+              progress=None, error_code=None, execution=None):
         task_id, run_id = new_id(), new_id()
         request = 'Bounded repair-cap fixture.'
         request_sha = hashlib.sha256(request.encode()).hexdigest()
@@ -4200,8 +4200,8 @@ class DelegateRepairCapTests(unittest.TestCase):
                 'direct_result_callback': submission_cli._direct_result_callback(
                     task, registration, 'a' * 40),
             }
-            if changed_files is not None:
-                developer_record['changed_files'] = changed_files
+            if progress is not None:
+                developer_record['progress'] = progress
             completion = {
                 'state': 'WAITING_EXECUTOR', 'executor_task_id': executor,
                 'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
@@ -4264,18 +4264,19 @@ class DelegateRepairCapTests(unittest.TestCase):
             self._args(task, 'opencode'), self.store))
 
     def test_unstarted_and_no_work_blocked_records_do_not_count(self):
+        self._prior_assignments(2)
         self._task(developer=True, developer_state='DEVELOPER_UNAVAILABLE',
                    artifact=None, error_code='DEVELOPER_DISPATCH_REFUSED')
-        self._task(developer=True, developer_state='DEVELOPER_OUTCOME_UNKNOWN',
-                   artifact=None, changed_files=[],
-                   error_code='CODEX_BLOCKED',
-                   execution={
-                       'status': 'BLOCKED', 'native_session_id': 'session-1',
-                       'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
-                       'elapsed_ms': 1, 'cleanup_status': 'CONFIRMED',
-                       'usage_source': 'UNKNOWN', 'source_bytes': None,
-                       'source_file_count': None, 'source_manifest_sha256': None,
-                   })
+        self._task(
+            developer=True, route='agy', developer_state='BLOCKED',
+            artifact=None, error_code='AGY_QUOTA_EXHAUSTED',
+            progress={
+                'state': 'QUOTA_EXHAUSTED',
+                'head_sha': 'a' * 40,
+                'changed_files': [],
+                'unfinished_checks': ['UNKNOWN'],
+                'session_id': 'conversation_12345678',
+            })
         task = self._task()
         self.assertIsNone(submission_cli._check_delegate_repair_cap(
             self._args(task, 'opencode'), self.store))
@@ -4283,18 +4284,18 @@ class DelegateRepairCapTests(unittest.TestCase):
     def test_responded_blocked_artifact_and_changed_files_count(self):
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED',
-                   artifact='diff', changed_files=[],
+                   artifact='diff',
                    error_code=None)
-        self._task(developer=True, developer_state='DEVELOPER_OUTCOME_UNKNOWN',
-                   artifact=None, changed_files=['sample.py'],
-                   error_code='CODEX_BLOCKED',
-                   execution={
-                       'status': 'BLOCKED', 'native_session_id': 'session-1',
-                       'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
-                       'elapsed_ms': 1, 'cleanup_status': 'CONFIRMED',
-                       'usage_source': 'UNKNOWN', 'source_bytes': None,
-                       'source_file_count': None, 'source_manifest_sha256': None,
-                   })
+        self._task(
+            developer=True, route='agy', developer_state='BLOCKED',
+            artifact=None, error_code='AGY_QUOTA_EXHAUSTED',
+            progress={
+                'state': 'QUOTA_EXHAUSTED',
+                'head_sha': 'a' * 40,
+                'changed_files': ['sample.py'],
+                'unfinished_checks': ['UNKNOWN'],
+                'session_id': 'conversation_12345678',
+            })
         task = self._task()
         with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
             submission_cli._check_delegate_repair_cap(
@@ -4310,12 +4311,20 @@ class DelegateRepairCapTests(unittest.TestCase):
                 self._args(task, 'opencode'), self.store)
 
     def test_partial_prior_developer_record_counts(self):
-        prior = self._task(developer=True)
-        path = self.store.root / (prior['task_id'] + '.json')
-        payload = json.loads(path.read_text(encoding='utf-8'))
-        payload['developer'].pop('state')
-        payload['developer'].pop('changed_files')
-        path.write_text(json.dumps(payload), encoding='utf-8')
+        prior = self._task(
+            developer=True, developer_state='DEVELOPER_OUTCOME_UNKNOWN',
+            artifact=None, error_code='CODEX_RESULT_EVIDENCE_UNKNOWN')
+        saved = self.store.get(prior['task_id'])
+        developer = dict(saved['developer'])
+        developer.pop('execution')
+        developer.pop('direct_result_callback')
+        self.store.compare_and_update(
+            prior['task_id'], expected={'developer': saved['developer']},
+            developer=developer)
+        persisted = self.store.get(prior['task_id'])
+        self.assertNotIn('execution', persisted['developer'])
+        self.assertEqual(persisted['developer']['state'],
+                         'DEVELOPER_OUTCOME_UNKNOWN')
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
         self._task(developer=True, developer_state='DEVELOPER_RESPONDED')
         task = self._task()
