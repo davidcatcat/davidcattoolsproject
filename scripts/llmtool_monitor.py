@@ -1598,8 +1598,8 @@ MARKER_ACTOR_TARGETS = {
 }
 MARKER_NAMES = {"CompanyGW": "company gw", "Tests": "tests"}
 # waiting_owner runs both ways: the PM/Integrator asks the Owner (BLOCKED, WAITING,
-# UNKNOWN) and the Owner's answer comes back to them as ANSWERED. Any other pairing
-# of direction and status is not a typed event.
+# UNKNOWN) and an Owner-login comment answers as ANSWERED. Any other pairing of
+# direction, author login, and status is not a typed event.
 _WAITING_ASK = frozenset({"BLOCKED", "WAITING", "UNKNOWN"})
 WAITING_OWNER_DIRECTIONS = {
     ("Integrator", "Owner"): _WAITING_ASK, ("PM", "Owner"): _WAITING_ASK,
@@ -1621,9 +1621,40 @@ SECRETISH = re.compile(
     r"|\b(?:bearer|basic)\s+\S+"
     r"|\b(?:password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|credential)s?\s*[:=]\s*\S+"
     r"|\b[A-Fa-f0-9]{32,}\b|\b[A-Za-z0-9+/_-]{40,}={0,2})")
-# Markers are honoured only from accounts with write access; on a shared account
-# they remain the poster's own claim, so typed lines are labelled 自述.
-TRUSTED_ASSOCIATION = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+# Markers are honoured only from the canonical Owner and AI logins. The AI login
+# can relay comments, but an actor=Owner claim is valid only from the Owner login.
+def _load_github_logins():
+    """Load the canonical identities directly, without importing llmtool."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "tools", "llmtool", "llmtool", "github_identity.py")
+    name = "_llmtool_monitor_github_identity"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError("cannot load GitHub identity module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return frozenset((module.owner_login(), module.ai_login())), module.owner_login()
+
+
+def _github_identity_state():
+    """Load trusted logins; identity failures disable all marker trust."""
+    try:
+        logins, owner = _load_github_logins()
+        return logins, owner, ""
+    except Exception:
+        return frozenset(), None, "GitHub 身分設定無法載入；留言標記信任已停用"
+
+
+TRUSTED_GITHUB_LOGINS, OWNER_GITHUB_LOGIN, GITHUB_IDENTITY_STATUS = _github_identity_state()
+
+
+def _trusted_github_comment(comment):
+    user = comment.get("user") if type(comment) is dict else None
+    login = user.get("login") if type(user) is dict else None
+    return type(login) is str and login in TRUSTED_GITHUB_LOGINS
+
+
 URL = re.compile(r"https?://\S+")
 FEED_NOISE = re.compile(r"(?i)^(?:subpm-lease\b|correction\b)")
 MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
@@ -1765,9 +1796,10 @@ def github_events(comments, pulls, since: float) -> list[ActivityEvent]:
         if when < since or not number:
             continue
         body = comment.get("body")
-        association = comment.get("author_association")
-        trusted = type(association) is str and association in TRUSTED_ASSOCIATION
+        trusted = _trusted_github_comment(comment)
         typed = _marker_events(body, when, number) if trusted else []
+        if typed and comment.get("user", {}).get("login") != OWNER_GITHUB_LOGIN:
+            typed = [event for event in typed if event.actor.casefold() != "owner"]
         if not typed:
             headline = _headline(body)
             typed = [ActivityEvent(when, "github_comment", "", "", "POSTED", f"#{number}",
@@ -1791,8 +1823,8 @@ def github_events(comments, pulls, since: float) -> list[ActivityEvent]:
 # Anything a marker addresses to the Owner is a decision the Owner owes, whatever
 # type the PM chose (repair_gate, waiting_owner, ...). Fields are read loosely
 # here (a target may be a long task name); only trusted, leading marker lines
-# count. A later marker on the same thread with actor=Owner, or a resolved
-# status, or the PR closing, settles it.
+# count. A later Owner-login marker with actor=Owner, an AI/Owner relay marker
+# with a settled status, or the PR closing, settles it.
 # A field starts after whitespace or right after "activity:", so a value such
 # as note=actor=Owner is never read as a field of its own.
 OWNER_FIELD = re.compile(r"(?:(?<=\s)|(?<=activity:))(type|actor|target|status)="
@@ -1835,10 +1867,11 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
     for comment in comments if type(comments) is list else []:
         if type(comment) is not dict:
             continue
-        association = comment.get("author_association")
+        login = (comment.get("user", {}).get("login")
+                 if type(comment.get("user")) is dict else None)
         number = _issue_number(comment.get("issue_url"))
         body = comment.get("body")
-        if not (type(association) is str and association in TRUSTED_ASSOCIATION and number
+        if not (_trusted_github_comment(comment) and number
                 and type(body) is str):
             continue
         for line in body.splitlines()[:MAX_MARKERS]:
@@ -1849,7 +1882,8 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
                 value = value.rstrip("-")   # "status=APPROVED-->" written without a space
                 fields.setdefault(key, value.casefold() if key in ("actor", "target") else value.upper())
             order = comment.get("id") if type(comment.get("id")) is int else 0
-            marked.append((_github_time(comment.get("created_at")), order, number, fields, body))
+            marked.append((_github_time(comment.get("created_at")), order, number, fields, body,
+                           login))
     closed = {}
     for pull in pulls if type(pulls) is list else []:
         if type(pull) is dict and type(pull.get("number")) is int:
@@ -1857,13 +1891,16 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
                                              _github_time(pull.get("closed_at")))
     # One open request per thread (the latest); an Owner marker settles the thread.
     open_requests = {item.reference[1:]: item for item in earlier}
-    for when, _, number, fields, body in sorted(marked, key=lambda item: item[:2]):
+    for when, _, number, fields, body, login in sorted(marked, key=lambda item: item[:2]):
         status = fields.get("status", "")
         held = open_requests.get(number)
         if held is not None and when < held.when:
             continue   # older than the open request: neither asks nor settles again
-        settles = fields.get("actor") == "owner" or (fields.get("target") == "owner"
-                                                     and status in OWNER_SETTLED)
+        actor_is_owner = fields.get("actor") == "owner"
+        actor_owner = actor_is_owner and login == OWNER_GITHUB_LOGIN
+        relay_settles = (not actor_is_owner and fields.get("target") == "owner"
+                         and status in OWNER_SETTLED)
+        settles = actor_owner or relay_settles
         if settles and not _owner_settlement_valid(fields):
             continue   # e.g. actor=Owner status=WAITING: not a typed answer, settles nothing
         if settles:
@@ -1978,7 +2015,7 @@ class GitHubSource:
         self.ci_view: CiView | None = None   # self-hosted runners; None until GitHub was read
         self._finished: dict = {}   # run id -> ci_finished_jobs(); a finished run never changes
         self._jobs: dict = {}   # run id -> (updated_at, read at, jobs payload) of unfinished runs
-        self.status = "GitHub：尚未讀取"
+        self.status = "GitHub：尚未讀取" + (f"；{GITHUB_IDENTITY_STATUS}" if GITHUB_IDENTITY_STATUS else "")
         self.fetched = None   # monotonic time of the last attempt
         self.settled = None   # monotonic time the last attempt ended
         self.wait = GITHUB_REFRESH   # seconds between attempts; grows while gh keeps failing
@@ -2224,7 +2261,8 @@ class GitHubSource:
             self.verdicts = review_verdicts(unique)
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
                            f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
-                           + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else ""))
+                           + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else "")
+                           + (f"；{GITHUB_IDENTITY_STATUS}" if GITHUB_IDENTITY_STATUS else ""))
             self.successful_read = True
             self.read_failed = False
             failed = False
@@ -2232,6 +2270,8 @@ class GitHubSource:
             # Keep the previous events; say plainly that they may be stale.
             detail = str(exc)[:40] if isinstance(exc, RuntimeError) else type(exc).__name__
             self.status = f"GitHub：讀取失敗（{detail}），以下 GitHub 項目可能過時"
+            if GITHUB_IDENTITY_STATUS:
+                self.status += f"；{GITHUB_IDENTITY_STATUS}"
             self.read_failed = True
         self.refresh_ci()
         if self.want_main:
@@ -2466,7 +2506,10 @@ def render_activity(events: list[ActivityEvent], limit: int = 60,
     if github is None:
         lines.append("GitHub 動態已關閉（--no-github），跨工作階段的標記沒有顯示。")
     else:
-        lines.append(github.status + "；「自述」= 有權限的發文者自己標記，未經驗證。")
+        lines.append(
+            github.status
+            + "；「自述」= 已設定的 Owner／AI 帳號自行標記，未經獨立驗證；"
+              "actor=Owner 僅接受 Owner 帳號。")
     return lines
 
 
@@ -3991,7 +4034,7 @@ def review_verdicts(comments) -> dict:
     comment names, and the comment's last-edit time. Pure; no I/O."""
     found: dict = {}
     for comment in comments if type(comments) is list else []:
-        if type(comment) is not dict or comment.get("author_association") not in TRUSTED_ASSOCIATION:
+        if not _trusted_github_comment(comment):
             continue
         body, number = comment.get("body"), _issue_number(comment.get("issue_url"))
         verdict = REVIEW_VERDICT.search(body) if type(body) is str and number else None
@@ -4309,6 +4352,9 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None) -> Work
     github_status = ("未讀 GitHub" if github is None else
                      "GitHub 讀取失敗，以下可能過時" if github.read_failed else
                      "GitHub 尚未讀取" if not github_known else "")
+    if github is not None and GITHUB_IDENTITY_STATUS:
+        github_status = "；".join(
+            part for part in (github_status, GITHUB_IDENTITY_STATUS) if part)
     prs = (pr_board_rows(pulls, github.verdicts, getattr(github, "ci_heads", None),
                          ec2, reviewing, github.pending) if github_known else [])
     return WorkBoard(owner, running, queue, blocked, done, github_known, board_known,
@@ -4322,6 +4368,7 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
         out.extend((line, style) for line in lines)
 
     today = len(work.done) if work.github_known else "?"
+    owner_known = work.github_known and not GITHUB_IDENTITY_STATUS
     known_running = len(work.running)
     waiting_owner = sum(item.kind == "waiting_owner" for item in work.owner)
     other_owner = len(work.owner) - waiting_owner
@@ -4329,9 +4376,8 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
                      f"{waiting_owner}{'+' if work.owner_cut else ''}")
     other_count = ("?" if work.owner_cut and not other_owner else
                    f"{other_owner}{'+' if work.owner_cut else ''}")
-    owner_count = ("?" if work.github_known and work.owner_cut and not work.owner else
-                   f"{len(work.owner)}{'+' if work.owner_cut else ''}（等你決定 {waiting_count}，其他 Owner 請求 {other_count}）"
-                   if work.github_known else "?")
+    owner_count = ("?" if not owner_known or (work.owner_cut and not work.owner) else
+                   f"{len(work.owner)}{'+' if work.owner_cut else ''}（等你決定 {waiting_count}，其他 Owner 請求 {other_count}）")
     counts = (f"今天合併 {today} · 進行中 {known_running if work.github_known else '?'} · "
               f"等 PM {sum(item.next == 'PM' for item in work.running + work.queue + work.blocked) if work.github_known and work.board_known else '?'} · "
               f"等你 {owner_count} · 排隊 {len(work.queue) if work.board_known else '?'} · "
@@ -4356,7 +4402,7 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
         append_header(f"白板檔有 {work.skipped} 筆略過", "!")
     if work.note:
         append_header(work.note, "!")
-    sections = (("等你", work.owner, work.github_known), ("進行中", work.running, work.github_known),
+    sections = (("等你", work.owner, owner_known), ("進行中", work.running, work.github_known),
                 ("排隊", work.queue, work.board_known), ("卡住", work.blocked, work.board_known),
                 (f"今天完成（累計 {today}）", work.done, work.github_known),
                 ("PR 看板", work.prs, work.github_known))
@@ -7431,6 +7477,8 @@ def _line_style(row: OfficeRow, rows: list[OfficeRow]) -> str:
 def owner_count_line(github) -> tuple[str, str]:
     if github is None:
         return "等你決定：未讀 GitHub", ""
+    if GITHUB_IDENTITY_STATUS:
+        return f"等你決定：未確認（{GITHUB_IDENTITY_STATUS}）", "!"
     if not github.successful_read:
         text = "等你決定：尚未讀取"
         if github.read_failed:
@@ -7509,7 +7557,8 @@ def install_lines(github, pin_file=None) -> list[tuple[str, str]]:
 
 
 def owner_waiting(github) -> int | None:
-    if (github is None or not github.successful_read or github.read_failed):
+    if (github is None or GITHUB_IDENTITY_STATUS
+            or not github.successful_read or github.read_failed):
         return None
     count = sum(item.kind == "waiting_owner" for item in github.pending)
     if getattr(github, "comments_cut", False) and count == 0:
