@@ -1422,6 +1422,51 @@ def comment(number, seconds, body, kind="issues", association="OWNER", login=OWN
 
 
 class GitHubActivityTests(unittest.TestCase):
+    def test_monitor_identity_load_failures_start_fail_closed(self):
+        loaded_logins, loaded_owner = mon._load_github_logins()
+        self.assertEqual((loaded_logins, loaded_owner),
+                         (mon.TRUSTED_GITHUB_LOGINS, mon.OWNER_GITHUB_LOGIN))
+        class RaisingLoader:
+            def exec_module(self, module):
+                raise RuntimeError("module execution failed")
+
+        failures = (
+            ("missing", patch("importlib.util.spec_from_file_location",
+                              side_effect=FileNotFoundError("missing"))),
+            ("unreadable", patch("importlib.util.spec_from_file_location",
+                                 side_effect=PermissionError("unreadable"))),
+            ("raising", patch("importlib.util.spec_from_file_location",
+                              return_value=__import__("types").SimpleNamespace(
+                                  loader=RaisingLoader()))),
+        )
+        for label, failure_patch in failures:
+            with self.subTest(failure=label), failure_patch:
+                if label == "raising":
+                    module_patch = patch("importlib.util.module_from_spec",
+                                         return_value=__import__("types").SimpleNamespace())
+                else:
+                    module_patch = patch("importlib.util.module_from_spec")
+                with module_patch:
+                    trusted, owner, status = mon._github_identity_state()
+                self.assertEqual((trusted, owner), (frozenset(), None))
+                self.assertIn("信任已停用", status)
+                marker = comment(80, NOW - 9,
+                                 "<!-- activity: type=test_result actor=Codex target=Tests status=PASS -->")
+                with patch.object(mon, "TRUSTED_GITHUB_LOGINS", trusted), \
+                     patch.object(mon, "OWNER_GITHUB_LOGIN", owner):
+                    self.assertFalse(mon._trusted_github_comment(marker))
+                    self.assertEqual([event.event_type for event in
+                                      mon.github_events([marker], [], NOW - 99)], ["github_comment"])
+                    previous = [mon.OwnerPending(NOW - 300, "#80", "WAITING", "prior")]
+                    forged_owner = comment(80, NOW - 9,
+                                           "<!-- activity: type=repair_authorization actor=Owner target=R2 status=APPROVED -->",
+                                           login=AI_LOGIN)
+                    self.assertEqual(mon.owner_pending([forged_owner], [], previous), previous)
+                    self.assertIn(status, mon.GitHubSource("o/r").status)
+                with self.assertRaises(SystemExit) as raised:
+                    mon.main(["--help"])
+                self.assertEqual(raised.exception.code, 0)
+
     def test_comments_are_trusted_by_login_not_association(self):
         marker = "<!-- activity: type=test_result actor=Codex target=Tests status=PASS -->\nTask"
         events = mon.github_events([comment(81, NOW - 9, marker, login=AI_LOGIN)], [], NOW - 99)
@@ -1885,6 +1930,18 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertEqual([e.status for e in mon.github_events([integrator], [], NOW - 99)],
                          ["ANSWERED"])
 
+    def test_ai_actor_owner_repair_marker_cannot_settle(self):
+        ask = comment(306, NOW - 300,
+                      "<!-- activity: type=repair_gate actor=PM target=Owner status=WAITING -->")
+        forged = comment(306, NOW - 60,
+                         "<!-- activity: type=repair_authorization actor=Owner target=R2 status=APPROVED -->",
+                         login=AI_LOGIN)
+        self.assertEqual([item.reference for item in mon.owner_pending([ask, forged], [])], ["#306"])
+        relay = comment(306, NOW - 30,
+                        "<!-- activity: type=repair_gate actor=PM target=Owner status=ANSWERED -->",
+                        login=AI_LOGIN)
+        self.assertEqual(mon.owner_pending([ask, forged, relay], []), [])
+
     def test_invalid_owner_waiting_owner_marker_does_not_settle(self):
         ask = comment(304, NOW - 300, "<!-- activity: type=waiting_owner actor=PM target=Owner "
                                       "status=WAITING -->\n## Decide")
@@ -1902,7 +1959,7 @@ class GitHubActivityTests(unittest.TestCase):
             with self.subTest(fields=fields):
                 later = comment(304, NOW - 60, f"<!-- activity: type=waiting_owner {fields} -->")
                 self.assertEqual(mon.owner_pending([ask, later], []), [])
-        # Other marker types keep the loose settlement by any actor=Owner marker.
+        # Other marker types keep loose settlement for an Owner-login marker.
         other = comment(304, NOW - 60, "<!-- activity: type=repair_authorization actor=Owner "
                                        "target=R2 status=WAITING -->")
         self.assertEqual(mon.owner_pending([ask, other], []), [])

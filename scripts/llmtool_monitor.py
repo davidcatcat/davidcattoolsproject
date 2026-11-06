@@ -1598,8 +1598,8 @@ MARKER_ACTOR_TARGETS = {
 }
 MARKER_NAMES = {"CompanyGW": "company gw", "Tests": "tests"}
 # waiting_owner runs both ways: the PM/Integrator asks the Owner (BLOCKED, WAITING,
-# UNKNOWN) and the Owner's answer comes back to them as ANSWERED. Any other pairing
-# of direction and status is not a typed event.
+# UNKNOWN) and an Owner-login comment answers as ANSWERED. Any other pairing of
+# direction, author login, and status is not a typed event.
 _WAITING_ASK = frozenset({"BLOCKED", "WAITING", "UNKNOWN"})
 WAITING_OWNER_DIRECTIONS = {
     ("Integrator", "Owner"): _WAITING_ASK, ("PM", "Owner"): _WAITING_ASK,
@@ -1621,8 +1621,8 @@ SECRETISH = re.compile(
     r"|\b(?:bearer|basic)\s+\S+"
     r"|\b(?:password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|credential)s?\s*[:=]\s*\S+"
     r"|\b[A-Fa-f0-9]{32,}\b|\b[A-Za-z0-9+/_-]{40,}={0,2})")
-# Markers are honoured only from accounts with write access; on a shared account
-# they remain the poster's own claim, so typed lines are labelled 自述.
+# Markers are honoured only from the canonical Owner and AI logins. The AI login
+# can relay comments, but an actor=Owner claim is valid only from the Owner login.
 def _load_github_logins():
     """Load the canonical identities directly, without importing llmtool."""
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -1637,7 +1637,16 @@ def _load_github_logins():
     return frozenset((module.owner_login(), module.ai_login())), module.owner_login()
 
 
-TRUSTED_GITHUB_LOGINS, OWNER_GITHUB_LOGIN = _load_github_logins()
+def _github_identity_state():
+    """Load trusted logins; identity failures disable all marker trust."""
+    try:
+        logins, owner = _load_github_logins()
+        return logins, owner, ""
+    except Exception:
+        return frozenset(), None, "GitHub 身分設定無法載入；留言標記信任已停用"
+
+
+TRUSTED_GITHUB_LOGINS, OWNER_GITHUB_LOGIN, GITHUB_IDENTITY_STATUS = _github_identity_state()
 
 
 def _trusted_github_comment(comment):
@@ -1789,7 +1798,7 @@ def github_events(comments, pulls, since: float) -> list[ActivityEvent]:
         body = comment.get("body")
         trusted = _trusted_github_comment(comment)
         typed = _marker_events(body, when, number) if trusted else []
-        if typed and comment["user"]["login"] != OWNER_GITHUB_LOGIN:
+        if typed and comment.get("user", {}).get("login") != OWNER_GITHUB_LOGIN:
             typed = [event for event in typed if event.actor.casefold() != "owner"]
         if not typed:
             headline = _headline(body)
@@ -1814,8 +1823,8 @@ def github_events(comments, pulls, since: float) -> list[ActivityEvent]:
 # Anything a marker addresses to the Owner is a decision the Owner owes, whatever
 # type the PM chose (repair_gate, waiting_owner, ...). Fields are read loosely
 # here (a target may be a long task name); only trusted, leading marker lines
-# count. A later marker on the same thread with actor=Owner, or a resolved
-# status, or the PR closing, settles it.
+# count. A later Owner-login marker with actor=Owner, an AI/Owner relay marker
+# with a settled status, or the PR closing, settles it.
 # A field starts after whitespace or right after "activity:", so a value such
 # as note=actor=Owner is never read as a field of its own.
 OWNER_FIELD = re.compile(r"(?:(?<=\s)|(?<=activity:))(type|actor|target|status)="
@@ -1887,8 +1896,11 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
         held = open_requests.get(number)
         if held is not None and when < held.when:
             continue   # older than the open request: neither asks nor settles again
-        actor_owner = fields.get("actor") == "owner" and login == OWNER_GITHUB_LOGIN
-        settles = actor_owner or (fields.get("target") == "owner" and status in OWNER_SETTLED)
+        actor_is_owner = fields.get("actor") == "owner"
+        actor_owner = actor_is_owner and login == OWNER_GITHUB_LOGIN
+        relay_settles = (not actor_is_owner and fields.get("target") == "owner"
+                         and status in OWNER_SETTLED)
+        settles = actor_owner or relay_settles
         if settles and not _owner_settlement_valid(fields):
             continue   # e.g. actor=Owner status=WAITING: not a typed answer, settles nothing
         if settles:
@@ -2003,7 +2015,7 @@ class GitHubSource:
         self.ci_view: CiView | None = None   # self-hosted runners; None until GitHub was read
         self._finished: dict = {}   # run id -> ci_finished_jobs(); a finished run never changes
         self._jobs: dict = {}   # run id -> (updated_at, read at, jobs payload) of unfinished runs
-        self.status = "GitHub：尚未讀取"
+        self.status = "GitHub：尚未讀取" + (f"；{GITHUB_IDENTITY_STATUS}" if GITHUB_IDENTITY_STATUS else "")
         self.fetched = None   # monotonic time of the last attempt
         self.settled = None   # monotonic time the last attempt ended
         self.wait = GITHUB_REFRESH   # seconds between attempts; grows while gh keeps failing
@@ -2249,7 +2261,8 @@ class GitHubSource:
             self.verdicts = review_verdicts(unique)
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
                            f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
-                           + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else ""))
+                           + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else "")
+                           + (f"；{GITHUB_IDENTITY_STATUS}" if GITHUB_IDENTITY_STATUS else ""))
             self.successful_read = True
             self.read_failed = False
             failed = False
@@ -2257,6 +2270,8 @@ class GitHubSource:
             # Keep the previous events; say plainly that they may be stale.
             detail = str(exc)[:40] if isinstance(exc, RuntimeError) else type(exc).__name__
             self.status = f"GitHub：讀取失敗（{detail}），以下 GitHub 項目可能過時"
+            if GITHUB_IDENTITY_STATUS:
+                self.status += f"；{GITHUB_IDENTITY_STATUS}"
             self.read_failed = True
         self.refresh_ci()
         if self.want_main:
