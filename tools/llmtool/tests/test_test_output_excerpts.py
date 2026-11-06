@@ -723,6 +723,53 @@ class TestOutputExcerptsTests(unittest.TestCase):
         summary = summarize_test_run(plan, source, expected_head=head)
         self.assertEqual(summary['commands'][1]['failure_ids'], [ascii_identifier])
 
+    def test_pm_runtime_cloud_key_screen_detects_cjk_neighbors_and_allows_longer_ascii_identifier(self):
+        from llmtool import pm_runtime
+        from llmtool.test_output_excerpts import _CLOUD_KEY
+
+        self.assertIn(_CLOUD_KEY, pm_runtime._STREAM_SECRET_START.pattern)
+        # synthetic-fixture: screen-tool test
+        cloud_key = 'AKIA' + '0' * 16
+        # synthetic-fixture: screen-tool test
+        cjk_wrapped = '北' + cloud_key + '京'
+        ascii_identifier = 'prefix_' + cloud_key + '_suffix'
+        self.assertIsNotNone(pm_runtime._STREAM_SECRET_START.search(cjk_wrapped))
+        self.assertEqual(pm_runtime._stream_safe_end(cjk_wrapped), 1)
+        self.assertEqual(pm_runtime._screen_stream_text(cjk_wrapped), '北[REDACTED]京')
+        self.assertIsNone(pm_runtime._STREAM_SECRET_START.search(ascii_identifier))
+        self.assertEqual(pm_runtime._stream_safe_end(ascii_identifier), len(ascii_identifier))
+        self.assertEqual(pm_runtime._screen_stream_text(ascii_identifier), ascii_identifier)
+
+    def test_feedback_cloud_key_screen_detects_cjk_neighbors_and_allows_longer_ascii_identifier(self):
+        from llmtool import feedback
+
+        # synthetic-fixture: screen-tool test
+        cloud_key = 'AKIA' + '0' * 16
+        # synthetic-fixture: screen-tool test
+        cjk_wrapped = '北' + cloud_key + '京'
+        with self.assertRaises(LLMToolError):
+            feedback._reject_credentials(cjk_wrapped)
+        ascii_identifier = 'prefix_' + cloud_key + '_suffix'
+        feedback._reject_credentials(ascii_identifier)
+
+    def test_task_submission_cloud_key_screen_detects_cjk_neighbors_and_allows_longer_ascii_identifier(self):
+        from llmtool import task_submission_cli
+        from llmtool.test_output_excerpts import _CLOUD_KEY
+
+        self.assertTrue(any(_CLOUD_KEY in pattern.pattern
+                            for pattern in task_submission_cli._CAPTURE_SECRET_PATTERNS))
+        # synthetic-fixture: screen-tool test
+        cloud_key = 'AKIA' + '0' * 16
+        # synthetic-fixture: screen-tool test
+        cjk_wrapped = '北' + cloud_key + '京'
+        ascii_identifier = 'prefix_' + cloud_key + '_suffix'
+        self.assertTrue(any(pattern.search(cjk_wrapped)
+                            for pattern in task_submission_cli._CAPTURE_SECRET_PATTERNS))
+        self.assertEqual(task_submission_cli._redact_rejected_output(cjk_wrapped), '北[REDACTED]京')
+        self.assertFalse(any(pattern.search(ascii_identifier)
+                             for pattern in task_submission_cli._CAPTURE_SECRET_PATTERNS))
+        self.assertEqual(task_submission_cli._redact_rejected_output(ascii_identifier), ascii_identifier)
+
     def test_near_limit_jwt_scan_completes_without_false_success(self):
         # Repeated boundary-bearing prefixes, missing dots, and short or
         # boundary-less segments must complete rather than time out or leak.

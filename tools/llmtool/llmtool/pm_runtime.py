@@ -20,7 +20,7 @@ from pathlib import Path
 
 from . import active_pm_inbox, role_config
 from .errors import LLMToolError
-from .test_output_excerpts import _emitted_sensitive
+from .test_output_excerpts import _CLOUD_KEY, _emitted_sensitive
 
 # The Claude Code permission mode of the dedicated PM process (shown in the TUI status).
 PM_PERMISSION_MODE = 'auto'
@@ -294,6 +294,7 @@ def _tool_description(name, tool_input, cwd=None):
 
 _STREAM_SECRET_START = re.compile(
     r'-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----|'
+    + _CLOUD_KEY + r'|'
     r'\b(?:AKIA|ASIA)[A-Z0-9]*|\bsk-[A-Za-z0-9_-]*|'
     r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]*|'
     r'\bxox[abprs]-[A-Za-z0-9-]*|\b(?:bearer|basic)\s+\S*|'
