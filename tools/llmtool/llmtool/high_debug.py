@@ -422,6 +422,10 @@ def _read_screen_record(task_id, family, root=None):
                  _SCREEN_REF.fullmatch(disposition['ref']) is None or
                  not _valid_screen_timestamp(disposition.get('recorded_at')))):
             _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+        # A disposition can only speak for stored hits, so one stored beside
+        # omitted hits (for example from before this check) clears nothing.
+        if disposition is not None and record['omitted']:
+            _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
         return record
     except LLMToolError:
         raise
@@ -482,6 +486,10 @@ def record_screen_disposition(task_id, family, hits, classification, ref, root=N
     record = _read_screen_record(task_id, family, root)
     if record['disposition'] is not None:
         _refuse('HIGH_DEBUG_SCREEN_NO_REFUSAL')
+    # The record names only its first hits. The omitted ones were never seen by
+    # whoever classifies the list, so no list of hits can account for them.
+    if record['omitted']:
+        _refuse('HIGH_DEBUG_SCREEN_HITS_OMITTED')
     if type(hits) not in (list, tuple):
         _refuse('HIGH_DEBUG_SCREEN_DISPOSITION_INVALID')
     supplied = []
