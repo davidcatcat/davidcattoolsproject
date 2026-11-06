@@ -17,6 +17,7 @@ from llmtool.cli import main, parser_for_cli
 
 
 HEAD = 'a' * 40
+MAIN_SHA = 'e' * 40
 PR = {'number': 17, 'head': {'sha': HEAD}, 'merged': False}
 
 
@@ -66,6 +67,17 @@ def green_linux_ci(path, pr=PR):
     if path.startswith('pulls/'):
         return pr
     return []
+
+
+def with_current_main(github_get, status='ahead'):
+    """Answer the merge step's current-main reads, then defer to github_get."""
+    def read(path):
+        if path == 'branches/main':
+            return {'commit': {'sha': MAIN_SHA}}
+        if path == f'compare/{MAIN_SHA}...{HEAD}':
+            return {'status': status}
+        return github_get(path)
+    return read
 
 
 class TaskAdvanceMergeDocsRuleTests(unittest.TestCase):
@@ -1927,6 +1939,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         calls = []
         pr = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
               'labels': [{'name': 'mac-ci'}]}
+        @with_current_main
         def github_get(path):
             if path.startswith('commits/'):
                 return {'total_count': 2, 'check_runs': [
@@ -1999,6 +2012,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 def compare_and_update(self, *_args, **_kwargs):
                     return None
 
+            @with_current_main
             def github_get(path):
                 if path.startswith('commits/'):
                     return checks
@@ -2225,6 +2239,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             ]
             calls = []
             pulls = 0
+            @with_current_main
             def github_get(path):
                 nonlocal pulls
                 if path.startswith('commits/'):
@@ -2365,14 +2380,14 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             gh_runner=ambiguous, root='/repo')
         self.assertEqual(result['codes'], ['MERGE_CHECKS_NOT_GREEN'])
         self.assertEqual(calls, [])
-        github_get_green = lambda path: (
+        github_get_green = with_current_main(lambda path: (
             {'total_count': 2, 'check_runs': [
                 {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
                  'conclusion': 'success'},
                 {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
                  'conclusion': 'success'}]} if path.startswith('commits/') else
             [{'filename': 'src/module.py'}] if path.endswith('/files?per_page=100') else
-            pr)
+            pr))
         result = task_advance._merge_once(store=store, record=record, number=17,
             head=HEAD, pr=pr, events=[event], github_get=github_get_green,
             gh_runner=ambiguous, root='/repo')
@@ -2448,6 +2463,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         opened = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open',
                   'merged': False, 'mergeable': True, 'labels': [{'name': 'mac-ci'}]}
         merged = dict(opened, state='closed', merged=True)
+        @with_current_main
         def github_get(path):
             if path.startswith('commits/'):
                 return {'total_count': 2, 'check_runs': [
@@ -2516,6 +2532,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 raise AssertionError('must not update a refused attempt')
         pr = pr or {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
                     'mergeable': True, 'labels': [{'name': 'mac-ci'}]}
+        @with_current_main
         def github_get(path):
             if path.startswith('commits/'):
                 return {'total_count': 2, 'check_runs': [
@@ -2563,6 +2580,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
                  'conclusion': 'success'}]}
             calls = []
+            @with_current_main
             def github_get(path):
                 if path.startswith('commits/'):
                     return checks
@@ -2625,6 +2643,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
              'conclusion': 'success'},
             {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
              'conclusion': 'success'}]}
+        @with_current_main
         def github_get(path):
             if path.startswith('commits/'):
                 return checks
@@ -2642,6 +2661,133 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             'MERGE_RESULT_RECORD_FAILED', 'MERGE_PROVENANCE_COMMENT_FAILED'])
         self.assertEqual(store.attempt['state'], 'MERGED')
         self.assertEqual(sum(call[1] == 'merge' for call in gh_calls), 1)
+
+
+class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
+    """#1019 row 31: task advance --merge refuses a head that lacks current main."""
+
+    LINUX = {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+             'conclusion': 'success'}
+    MACOS = dict(LINUX, name='check (macOS 3.13)')
+    COMPARE_PATH = f'compare/{MAIN_SHA}...{HEAD}'
+
+    def merge(self, *, main_reply=None, compare_reply=None, check_runs=None,
+              labels=('mac-ci',)):
+        from llmtool.task_completion import _GITHUB_API_PATH
+        main_reply = {'commit': {'sha': MAIN_SHA}} if main_reply is None else main_reply
+        compare_reply = {'status': 'ahead'} if compare_reply is None else compare_reply
+        check_runs = [self.LINUX, self.MACOS] if check_runs is None else check_runs
+        record = base_record(
+            record_sha256='r' * 64,
+            review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1,
+                                    'state': 'COMPLETED',
+                                    'review_result': {'verdict': 'PASS'}}],
+            completion_events=[{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                                'outcome': 'REVIEW_PASS'}])
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
+              'mergeable': True, 'labels': [{'name': name} for name in labels]}
+        reads, calls, claims = [], [], []
+
+        class Store:
+            def get(self, _task_id):
+                return record
+
+            def compare_and_update(self, _task_id, *, expected, merge_attempt):
+                claims.append(dict(merge_attempt))
+
+        def reply(value):
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        def github_get(path):
+            # The same validator guards the production GitHub read.
+            self.assertTrue(_GITHUB_API_PATH.fullmatch(path), path)
+            reads.append(path)
+            if path == 'branches/main':
+                return reply(main_reply)
+            if path.startswith('compare/'):
+                return reply(compare_reply)
+            if path.startswith('commits/'):
+                return {'total_count': len(check_runs), 'check_runs': check_runs}
+            if path.endswith('/files?per_page=100'):
+                return [{'filename': 'src/module.py'}]
+            if path == 'pulls/17':
+                return pr
+            return []
+
+        def gh_runner(_root, args):
+            calls.append(args)
+            return type('R', (), {'returncode': 0})()
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]):
+            result = task_advance.advance(
+                task_id=record['task_id'], store=Store(), pr_number=17, merge=True,
+                github_get=github_get, merge_gh_runner=gh_runner)
+        return result, reads, calls, claims
+
+    def assert_refused(self, outcome, code):
+        result, _reads, calls, claims = outcome
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertEqual(result['codes'], [code])
+        self.assertEqual(calls, [])
+        self.assertEqual(claims, [])
+
+    def test_head_without_current_main_refuses_before_label_claim_and_merge(self):
+        for status in ('behind', 'diverged'):
+            for name, kwargs in (
+                    ('merge ready', {}),
+                    ('label would be added', {'check_runs': [self.LINUX], 'labels': ()})):
+                with self.subTest(status=status, case=name):
+                    self.assert_refused(
+                        self.merge(compare_reply={'status': status}, **kwargs),
+                        'MERGE_PR_BEHIND_MAIN')
+
+    def test_head_with_current_main_merges(self):
+        for status in ('ahead', 'identical'):
+            with self.subTest(status=status):
+                result, reads, calls, claims = self.merge(compare_reply={'status': status})
+                self.assertEqual(result['step'], 'MERGED')
+                self.assertEqual(calls[0], ['pr', 'merge', '17', '--squash',
+                                            '--match-head-commit', HEAD])
+                self.assertEqual(sum(call[1] == 'merge' for call in calls), 1)
+                self.assertEqual([claim['state'] for claim in claims],
+                                 ['CLAIMED', 'MERGED'])
+                self.assertEqual(reads[-3:], ['pulls/17', 'branches/main',
+                                              self.COMPARE_PATH])
+
+    def test_current_main_still_reaches_the_mac_label_step(self):
+        result, _reads, calls, claims = self.merge(check_runs=[self.LINUX], labels=())
+        self.assertEqual(result['step'], 'WAITING_CI')
+        self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
+        self.assertEqual(claims, [])
+
+    def test_main_read_failure_or_malformed_reply_fails_closed(self):
+        cases = (
+            ('main read raises', {'main_reply': RuntimeError('offline')}),
+            ('main reply is a list', {'main_reply': []}),
+            ('main reply has no commit', {'main_reply': {'name': 'main'}}),
+            ('main commit is not an object', {'main_reply': {'commit': MAIN_SHA}}),
+            ('main SHA is missing', {'main_reply': {'commit': {}}}),
+            ('main SHA is not text', {'main_reply': {'commit': {'sha': 7}}}),
+            ('main SHA is short', {'main_reply': {'commit': {'sha': 'e' * 39}}}),
+            ('main SHA is long', {'main_reply': {'commit': {'sha': 'e' * 41}}}),
+            ('main SHA is not hex', {'main_reply': {'commit': {'sha': 'z' * 40}}}),
+            ('compare read raises', {'compare_reply': RuntimeError('offline')}),
+            ('compare reply is a list', {'compare_reply': []}),
+            ('compare status is missing', {'compare_reply': {'ahead_by': 1}}),
+            ('compare status is unknown', {'compare_reply': {'status': 'unknown'}}),
+            ('compare status is not text', {'compare_reply': {'status': ['ahead']}}),
+        )
+        for name, kwargs in cases:
+            with self.subTest(name):
+                self.assert_refused(self.merge(**kwargs), 'MERGE_CHECKS_UNAVAILABLE')
+
+    def test_malformed_main_sha_is_never_used_in_a_compare_read(self):
+        _result, reads, _calls, _claims = self.merge(
+            main_reply={'commit': {'sha': 'z' * 40}})
+        self.assertFalse(any(path.startswith('compare/') for path in reads))
 
 
 class TaskAdvanceMacLabelTests(unittest.TestCase):
