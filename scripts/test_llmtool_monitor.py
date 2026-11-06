@@ -6631,7 +6631,7 @@ class OfficeViewTests(unittest.TestCase):
             ({"feature/failed": (763, "CLOSED")}, mon.DONE, False),
             ({"feature/failed": (763, "MERGED")}, mon.DONE, False),
             ({"feature/failed": (763, "OPEN")}, mon.ATTENTION, True),
-            ({}, mon.ATTENTION, True),       # no PR for the registered branch
+            ({}, mon.ATTENTION, True),       # empty PR snapshot returns early
             (None, mon.ATTENTION, True),     # unreadable PR snapshot
         )
         for prs, expected, should_alert in cases:
@@ -6646,21 +6646,34 @@ class OfficeViewTests(unittest.TestCase):
     def test_763_failed_debug_row_settles_with_parent_pr(self):
         debug = self.task.parent / "wp-1-hd1-abcdef0"
         other = self.task.parent / "wp-1-hdx-abcdef0"
-        os.makedirs(debug)
-        os.makedirs(other)
+        orphan = self.task.parent / "wp-9-hd1-abcdef0"
+        non_hex = self.task.parent / "wp-1-hd1-zzzzzzz"
+        for path in (debug, other, orphan, non_hex):
+            os.makedirs(path)
         self._register("wp-1", str(self.task), branch="feature/failed")
         self._register("wp-1-hd1-abcdef0", str(debug))
         self._register("wp-1-hdx-abcdef0", str(other))
+        self._register("wp-9-hd1-abcdef0", str(orphan))
+        self._register("wp-1-hd1-zzzzzzz", str(non_hex))
+        exec_orphan = "01a18bdd-19b2-7a21-8b5e-0000000c0003"
+        exec_non_hex = "01a18bdd-19b2-7a21-8b5e-0000000d0004"
         now = int(self.NOW)
-        db = self._turn_db([(self.EXEC_FAILED, "u", 0, "failed", now - 2400, now - 1800),
-                            (self.EXEC_NEWER, "u", 0, "failed", now - 2400, now - 1800)])
+        db = self._turn_db([
+            (self.EXEC_FAILED, "u", 0, "failed", now - 2400, now - 1800),
+            (self.EXEC_NEWER, "u", 0, "failed", now - 2400, now - 1800),
+            (exec_orphan, "u", 0, "failed", now - 2400, now - 1800),
+            (exec_non_hex, "u", 0, "failed", now - 2400, now - 1800),
+        ])
         self._exec_708(self.EXEC_FAILED, 1800, cwd=debug)
         self._exec_708(self.EXEC_NEWER, 1800, cwd=other)
+        self._exec_708(exec_orphan, 1800, cwd=orphan)
+        self._exec_708(exec_non_hex, 1800, cwd=non_hex)
         cases = (
             ({"feature/failed": (763, "CLOSED")}, mon.DONE, False),
             ({"feature/failed": (763, "MERGED")}, mon.DONE, False),
             ({"feature/failed": (763, "OPEN")}, mon.ATTENTION, True),
-            ({}, mon.ATTENTION, True),       # no PR for the registered branch
+            ({"feature/other": (1, "MERGED")}, mon.ATTENTION, True),  # no PR for the parent branch
+            ({}, mon.ATTENTION, True),       # empty PR snapshot returns early
             (None, mon.ATTENTION, True),     # unreadable PR snapshot
         )
         for prs, expected, should_alert in cases:
@@ -6668,11 +6681,12 @@ class OfficeViewTests(unittest.TestCase):
                 rows = self._office(db, prs=prs)
                 row = next(row for row in rows if row.sid == self.EXEC_FAILED[-8:])
                 self.assertEqual(row.state, expected)
-                unmatched = next(row for row in rows if row.sid == self.EXEC_NEWER[-8:])
-                self.assertEqual(unmatched.state, mon.ATTENTION)
                 alerts = [line for line in mon.office_lines(rows) if line.startswith("⚠")]
                 self.assertEqual(any(self.EXEC_FAILED[-8:] in line for line in alerts), should_alert)
-                self.assertTrue(any(self.EXEC_NEWER[-8:] in line for line in alerts))
+                for sid in (self.EXEC_NEWER, exec_orphan, exec_non_hex):
+                    unmatched = next(row for row in rows if row.sid == sid[-8:])
+                    self.assertEqual(unmatched.state, mon.ATTENTION)
+                    self.assertTrue(any(sid[-8:] in line for line in alerts))
 
     def test_708_completion_in_other_d6_does_not_clear(self):
         other = self.task.parent / "wp-2"
