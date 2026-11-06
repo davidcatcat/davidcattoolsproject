@@ -103,6 +103,21 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.fake.write_text(script, encoding='utf-8')
         self.fake.chmod(0o700)
 
+    def write_fake_script(self, body, *, hold_open=10):
+        """Write body as executable fake-process source instead of stdout text."""
+        script = "#!/usr/bin/env python3\nimport json,os,signal,sys,time\n"
+        script += f"open({str(self.invoked)!r},'w').write('yes')\n"
+        script += (
+            'expected_cache = "shell_environment_policy.set.PYTHONPYCACHEPREFIX=" + '
+            'json.dumps(os.environ["TMPDIR"])\n'
+            'assert expected_cache in sys.argv\n')
+        script += 'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+        script += body if body.endswith('\n') else body + '\n'
+        if hold_open:
+            script += f'time.sleep({hold_open!r})\n'
+        self.fake.write_text(script, encoding='utf-8')
+        self.fake.chmod(0o700)
+
     def run_fake(self, **kwargs):
         timeout = kwargs.pop('timeout', 10)
         prompt = kwargs.pop('prompt', 'bounded prompt')
@@ -306,6 +321,99 @@ class CodexDirectDeveloperTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.direct_codex_code, 'CODEX_INTERRUPTED')
         self.assertEqual(caught.exception.process_exit_code, -15)
+
+    def test_stdout_cap_error_survives_cleanup_signal_with_observed_facts(self):
+        self.write_fake_script("sys.stdout.write('x' * (1024 * 1024 + 1));"
+                               "sys.stdout.flush()\n")
+
+        with self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake()
+
+        error = caught.exception
+        self.assertEqual(error.direct_codex_code, 'CODEX_OUTPUT_TOO_LARGE')
+        self.assertEqual(error.process_exit_code, -9)
+        self.assertEqual(error.cleanup_status, 'CONFIRMED')
+        self.assertIsInstance(error.elapsed_ms, int)
+        self.assertGreaterEqual(error.elapsed_ms, 0)
+        self.assertEqual(error.stdout_sha256,
+                         hashlib.sha256(b'x' * direct.MAX_OUTPUT_BYTES).hexdigest())
+
+    def test_stderr_cap_error_survives_cleanup_signal_with_observed_facts(self):
+        self.write_fake_script("sys.stderr.write('e' * (64 * 1024 + 1));"
+                               "sys.stderr.flush()\n")
+
+        with self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake()
+
+        error = caught.exception
+        self.assertEqual(error.direct_codex_code, 'CODEX_STDERR_TOO_LARGE')
+        self.assertEqual(error.process_exit_code, -9)
+        self.assertEqual(error.cleanup_status, 'CONFIRMED')
+        self.assertIsInstance(error.elapsed_ms, int)
+        self.assertGreaterEqual(error.elapsed_ms, 0)
+        self.assertEqual(error.stdout_sha256, hashlib.sha256(b'').hexdigest())
+
+    def test_adapter_error_survives_cleanup_signal_with_observed_facts(self):
+        self.write_fake('import signal;signal.signal(signal.SIGTERM,signal.SIG_IGN)\n', delay=10)
+        original_selector = direct.selectors.DefaultSelector
+
+        class FailingSelector:
+            def __init__(self):
+                self.selector = original_selector()
+
+            def __getattr__(self, name):
+                return getattr(self.selector, name)
+
+            def select(self, wait=None):
+                raise RuntimeError('adapter failure')
+
+        with patch.object(direct.selectors, 'DefaultSelector', FailingSelector), \
+                self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake()
+
+        error = caught.exception
+        self.assertEqual(error.direct_codex_code, 'CODEX_ADAPTER_RUNTIME_ERROR')
+        self.assertEqual(error.process_exit_code, -9)
+        self.assertEqual(error.cleanup_status, 'CONFIRMED')
+        self.assertIsInstance(error.elapsed_ms, int)
+        self.assertGreaterEqual(error.elapsed_ms, 0)
+        self.assertEqual(error.stdout_sha256, hashlib.sha256(b'').hexdigest())
+
+    def test_partial_jsonl_usage_error_does_not_replace_collection_error(self):
+        partial_line = (json.dumps({'type': 'thread.started', 'thread_id': self.THREAD}) +
+                        '\n{"type":"turn.completed"').encode('utf-8')
+        self.write_fake_script(
+            f"sys.stdout.write({partial_line.decode()!r});sys.stdout.flush()\n")
+        original_selector = direct.selectors.DefaultSelector
+
+        class FailingAfterOutputSelector:
+            def __init__(self):
+                self.selector = original_selector()
+                self.output_seen = False
+
+            def __getattr__(self, name):
+                return getattr(self.selector, name)
+
+            def select(self, wait=None):
+                if self.output_seen:
+                    raise RuntimeError('adapter failure after partial JSONL')
+                events = self.selector.select(wait)
+                if any(key.data == 'stdout' for key, _ in events):
+                    self.output_seen = True
+                return events
+
+        with patch.object(direct.selectors, 'DefaultSelector', FailingAfterOutputSelector), \
+                patch.object(direct, '_usage_from_events',
+                             side_effect=direct.DirectCodexError('CODEX_EVENT_INVALID')), \
+                self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake()
+
+        error = caught.exception
+        self.assertEqual(error.direct_codex_code, 'CODEX_ADAPTER_RUNTIME_ERROR')
+        self.assertEqual(error.process_exit_code, -9)
+        self.assertEqual(error.cleanup_status, 'CONFIRMED')
+        self.assertEqual(error.stdout_sha256, hashlib.sha256(partial_line).hexdigest())
+        self.assertIsNone(error.usage)
 
     def test_host_keyboard_interrupt_propagates_from_run(self):
         self.write_fake('', delay=10)
