@@ -1046,6 +1046,45 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(outcomes.count('BOUND'), 1)
         self.assertEqual(outcomes.count('TASK_D6_ALREADY_BOUND'), 1)
 
+    def test_d6_bound_refusal_names_the_code_and_the_holder_task(self):
+        store = TaskStore(Path(self.temp.name).resolve())
+        executor_task_id = 'executor-bound-message'
+        holder, candidate = self._codex_dispatch_task(), self._codex_dispatch_task()
+        store.create(holder)
+        store.create(candidate)
+
+        def bind(task):
+            return store.d6_bind_compare_and_update(
+                task['task_id'], executor_task_id=executor_task_id,
+                expected={'developer': None, 'completion': None},
+                developer=self._developer_assignment(provider='codex', max_tokens=None),
+                completion=self._d6_completion(executor_task_id))
+
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            bind(holder)
+            with self.assertRaises(LLMToolError) as caught:
+                bind(candidate)
+        self.assertEqual(str(caught.exception),
+                         'TASK_D6_ALREADY_BOUND: D6 is held by Task ' + holder['task_id'])
+        self.assertEqual(caught.exception.task_store_code, 'INVALID')
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_ALREADY_BOUND')
+
+    def test_other_task_store_failures_keep_the_omitted_details_message(self):
+        holder_id = new_id()
+        cases = (
+            ('TASK_D6_BINDING_SCAN_FAILED', holder_id),
+            ('TASK_STORE_INVALID', None),
+            ('TASK_D6_ALREADY_BOUND', None),
+            ('TASK_D6_ALREADY_BOUND', '../private/path'),
+        )
+        for code, holder_task_id in cases:
+            with self.subTest(code=code, holder_task_id=holder_task_id):
+                with self.assertRaises(LLMToolError) as caught:
+                    task_store_module._fail(code, holder_task_id=holder_task_id)
+                self.assertEqual(str(caught.exception),
+                                 'task store unavailable; details omitted')
+                self.assertEqual(caught.exception.task_store_error_code, code)
+
     def test_d6_binding_with_many_finished_tasks_does_not_hold_lock_over_full_scan(self):
         self._allow_codex_dispatch()
         store = TaskStore(Path(self.temp.name).resolve())

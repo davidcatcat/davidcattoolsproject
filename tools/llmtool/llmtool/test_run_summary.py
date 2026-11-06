@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 
+from .test_output_excerpts import _CLOUD_KEY
 from .test_selection import IMPACT_MAP_VERSION, select_test_plan
 
 
@@ -40,7 +41,7 @@ _PYTEST_FAILURE_ID = re.compile(
     r'[A-Za-z_][A-Za-z0-9_.-]{0,95}'
     r'(?:\[[A-Za-z0-9_.:-]{1,64}\])?')
 _SENSITIVE_ID = re.compile(
-    r'-----BEGIN|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}|'
+    r'-----BEGIN|' + _CLOUD_KEY + r'|\bsk-[A-Za-z0-9_-]{12,}|'
     r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
     r'\bxox[abprs]-[A-Za-z0-9-]{20,}|\beyJ[A-Za-z0-9_-]{10,}\.'
     r'[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|'

@@ -4,8 +4,8 @@ name: llmtool Linux CI
 # version, runs the full offline suite on every PR and main push. 3.9, the
 # oldest pyproject.toml declares (requires-python >=3.9), runs only before a
 # release: start this workflow by hand on main with `python39` (Owner
-# 2026-10-25). All three runners carry the same label, so each can take a job
-# and three jobs run at the same time. Each runner runs under its own non-admin
+# 2026-10-25). All four runners carry the same label, so each can take a job
+# and four jobs run at the same time. Each runner runs under its own non-admin
 # account with the instance metadata service blocked for its service; the
 # root-owned job-started hook on the host
 # (tools/ec2-runner, installed in /opt/llmtool-ci) refuses any job that is
@@ -144,6 +144,7 @@ jobs:
             ec2-self-runner) account=ghrunner ;;
             ec2-self-runner-2) account=ghrunner2 ;;
             ec2-self-runner-3) account=ghrunner3 ;;
+            ec2-self-runner-4) account=ghrunner4 ;;
             *) fail "unexpected runner" ;;
           esac
           user=$(id -un) || fail "cannot identify job user"
@@ -248,6 +249,7 @@ jobs:
             ec2-self-runner) account=ghrunner ;;
             ec2-self-runner-2) account=ghrunner2 ;;
             ec2-self-runner-3) account=ghrunner3 ;;
+            ec2-self-runner-4) account=ghrunner4 ;;
             *) fail "unexpected runner" ;;
           esac
           user=$(id -un) || fail "cannot identify job user"
@@ -397,6 +399,7 @@ jobs:
             ec2-self-runner) account=ghrunner ;;
             ec2-self-runner-2) account=ghrunner2 ;;
             ec2-self-runner-3) account=ghrunner3 ;;
+            ec2-self-runner-4) account=ghrunner4 ;;
             *) fail "unexpected runner" ;;
           esac
           user=$(id -un) || fail "cannot identify job user"

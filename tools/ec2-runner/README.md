@@ -1,20 +1,22 @@
 # EC2 Linux runners
 
-Three persistent GitHub Actions runners on the Owner's EC2 (CentOS Stream 9,
-x86_64, 4 vCPU / 8 GiB) run [llmtool Linux CI](../../.github/workflows/llmtool-linux-ci.yml)
-(Issue #99). They are set up on the host, not by a workflow, so a PR cannot
-turn the checks off.
+Four persistent GitHub Actions runners on the Owner's EC2 (CentOS Stream 9,
+x86_64) run [llmtool Linux CI](../../.github/workflows/llmtool-linux-ci.yml)
+(Issue #99). Runners 1-3 share the first host (4 vCPU / 8 GiB). Runner 4
+(#1093) is on a second, smaller host (2 vCPU / 3 GiB). They are set up on the
+host, not by a workflow, so a PR cannot turn the checks off.
 
 | Runner | Account | Folder | Label |
 |---|---|---|---|
 | `ec2-self-runner` (id 24) | `ghrunner` | `/home/ghrunner/actions-runner` | `local-ec2-linux-ci` |
 | `ec2-self-runner-2` (id 25) | `ghrunner2` | `/home/ghrunner2/actions-runner` | `local-ec2-linux-ci` |
 | `ec2-self-runner-3` | `ghrunner3` | `/home/ghrunner3/actions-runner` | `local-ec2-linux-ci` |
+| `ec2-self-runner-4` | `ghrunner4` | `/home/ghrunner4/actions-runner` | `local-ec2-linux-ci` |
 
 Any runner takes any job: Python 3.14 on every PR and main push, and
 Python 3.9 when the workflow is started by hand on main with `python39`
 before a release (Owner 2026-10-25). The three shards can run at the same time
-on the three runners.
+on any three of the four runners.
 
 Each account is non-admin, in its own group only, with a `700` home; accounts
 cannot read another runner's folder or credentials. Python 3.14 is the distro package
@@ -36,10 +38,10 @@ sudo bash tools/ec2-runner/selftest.sh --account ghrunner
 sudo systemctl start actions.runner.davidcatcat-davidcattoolsproject.ec2-self-runner.service
 ```
 
-For runner 2 or 3, substitute the matching account and service name in all
+For runner 2, 3 or 4, substitute the matching account and service name in all
 commands. Review the read-only plan first with
 `sudo bash tools/ec2-runner/install.sh --account ghrunner2 --dry-run` (or
-`ghrunner3`). The plan does not change files.
+`ghrunner3`, `ghrunner4`). The plan does not change files.
 The install root and its ordinary files/directories
 become `root:root`; executable files are `0755`, other files `0644`, and
 directories `0755`. `_work` and `_diag` must already exist. `_tmp` may be
@@ -73,9 +75,10 @@ sudo chmod -R u+rwX,go-rwx /home/ghrunner/actions-runner
 sudo systemctl start actions.runner.davidcatcat-davidcattoolsproject.ec2-self-runner.service
 ```
 
-For runners 2 and 3, substitute `ghrunner2`/`ghrunner3`, the matching
-`/home/ghrunnerN/actions-runner` path, and the matching service name ending in
-`ec2-self-runner-2.service` or `ec2-self-runner-3.service`. This restores
+For runners 2, 3 and 4, substitute `ghrunner2`/`ghrunner3`/`ghrunner4`, the
+matching `/home/ghrunnerN/actions-runner` path, and the matching service name
+ending in `ec2-self-runner-2.service`, `ec2-self-runner-3.service` or
+`ec2-self-runner-4.service`. This restores
 account-only ownership and access. The existing systemd drop-ins remain
 installed. The recursive commands do not follow the runner's version
 symlinks; inspect those links after rollback.

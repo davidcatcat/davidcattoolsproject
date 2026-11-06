@@ -510,7 +510,7 @@ def _validate_assignments(record):
     return record
 
 
-def _fail(code='TASK_STORE_INVALID'):
+def _fail(code='TASK_STORE_INVALID', *, holder_task_id=None):
     safe_code = code if (type(code) is str and
                          re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', code)) else 'TASK_STORE_INVALID'
     if safe_code == 'TASK_STORE_BUSY':
@@ -521,7 +521,10 @@ def _fail(code='TASK_STORE_INVALID'):
         category = 'UNAVAILABLE'
     else:
         category = 'INVALID'
-    error = LLMToolError('task store unavailable; details omitted')
+    message = 'task store unavailable; details omitted'
+    if safe_code == 'TASK_D6_ALREADY_BOUND' and _safe_identifier(holder_task_id, TASK_ID):
+        message = f'{safe_code}: D6 is held by Task {holder_task_id}'
+    error = LLMToolError(message)
     error.task_store_code = category
     error.task_store_error_code = safe_code
     raise error from None
@@ -2616,7 +2619,7 @@ class TaskStore:
             except Exception:
                 _fail('TASK_D6_BINDING_SCAN_FAILED')
             if any(holds(other, claim) for claim in claims):
-                _fail('TASK_D6_ALREADY_BOUND')
+                _fail('TASK_D6_ALREADY_BOUND', holder_task_id=other_id)
 
     def _d6_commit(self, task_id, claims, holds, commit):
         """Run ``commit`` as the one writer gaining ``claims``, or refuse.
