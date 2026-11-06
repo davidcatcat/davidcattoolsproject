@@ -1,5 +1,6 @@
 """Deterministic C1 evidence fixtures; no provider or live-runtime checks."""
 
+import base64
 import hashlib
 import io
 import json
@@ -414,28 +415,57 @@ class TestOutputExcerptsTests(unittest.TestCase):
         self.assert_emitted_excerpt_rejected(
             raw, max_excerpt_bytes=self.excerpt_bound(raw, SYNTHETIC_AWS_KEY))
 
-    def test_utf8_cut_cannot_emit_aws_like_or_jwt_indicator(self):
+    def test_excerpt_cut_cannot_emit_aws_like_indicator(self):
+        # synthetic-fixture: screen-tool test
+        raw = unittest_capture([
+            ('FAIL', FAIL_ID, FAIL_BODY + '\n' + SYNTHETIC_AWS_KEY + 'MORE測試')
+        ])
+        self.assertEqual(self.select(raw)['status'], 'COMPLETE')
+        self.assert_emitted_excerpt_rejected(
+            raw, max_excerpt_bytes=self.excerpt_bound(raw, SYNTHETIC_AWS_KEY))
+
+    def test_jwt_ascii_continuation_is_rejected_before_excerpt_cut(self):
+        # synthetic-fixture: screen-tool test
         jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
-        for value in (SYNTHETIC_AWS_KEY, jwt):
-            with self.subTest(value=value[:3]):
-                # A Unicode word character continues the word until a cut inside it is dropped.
-                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + value + '測試')])
-                self.assert_emitted_excerpt_rejected(
-                    raw, max_excerpt_bytes=self.excerpt_bound(raw, value, extra=1))
+        # MORE extends the JWT tail; the CJK boundary triggers source refusal.
+        # synthetic-fixture: screen-tool test
+        raw = unittest_capture([
+            ('FAIL', FAIL_ID, FAIL_BODY + '\n' + jwt + 'MORE測試')
+        ])
+        self.path.write_bytes(raw)
+        for bound in (MAX_EXCERPT_BYTES, self.excerpt_bound(raw, jwt)):
+            with self.subTest(max_excerpt_bytes=bound):
+                with self.assertRaises(LLMToolError) as caught:
+                    select_test_excerpts(self.path, 1, max_excerpt_bytes=bound)
+                self.assertEqual(
+                    str(caught.exception),
+                    'test-excerpts: source contains sensitive-content '
+                    'indicators; details omitted')
+                self.assertNotIn(str(self.path), str(caught.exception))
+                self.assertEqual(self.path.read_bytes(), raw)
 
     def test_ascii_escaped_json_cannot_emit_aws_like_or_jwt_indicator(self):
-        # The source scan passes (no source-level error), but CLI JSON's \uXXXX
-        # escape after the value adds a boundary, so uncut output is rejected too.
+        # A non-ASCII word suffix now triggers the intended source refusal before JSON emission.
         jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
         for value in (SYNTHETIC_AWS_KEY, jwt):
             with self.subTest(value=value[:3]):
                 raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + value + '測試')])
-                self.assert_emitted_excerpt_rejected(raw)
+                self.path.write_bytes(raw)
+                with self.assertRaises(LLMToolError) as caught:
+                    select_test_excerpts(self.path, 1)
+                self.assertEqual(str(caught.exception),
+                                 'test-excerpts: source contains sensitive-content indicators; details omitted')
+                self.assertEqual(self.path.read_bytes(), raw)
 
     def test_ascii_escaped_failure_id_without_excerpt_is_rejected(self):
         hidden = 'test_k (sample.' + SYNTHETIC_AWS_KEY + '測.test_k)'
         raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY), ('FAIL', hidden, FAIL_BODY)])
-        self.assert_emitted_excerpt_rejected(raw, max_excerpts=1)
+        self.path.write_bytes(raw)
+        with self.assertRaises(LLMToolError) as caught:
+            select_test_excerpts(self.path, 1, max_excerpts=1)
+        self.assertEqual(str(caught.exception),
+                         'test-excerpts: source contains sensitive-content indicators; details omitted')
+        self.assertEqual(self.path.read_bytes(), raw)
 
     def test_near_miss_indicator_shapes_are_still_emitted(self):
         for value, extra in (('AKIA' + 'SYNTHETIC0TEST1', 0), ('AKIB' + 'SYNTHETIC0TEST16', 0),
@@ -469,11 +499,15 @@ class TestOutputExcerptsTests(unittest.TestCase):
         self.assertTrue(result['excerpts'][0]['text'].endswith(control))
 
     def test_jwt_shapes_preserve_case_segments_and_word_boundaries(self):
+        # Covers ASCII and Unicode JWT boundary behavior.
+        # synthetic-fixture: screen-tool test
         jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
+        # synthetic-fixture: screen-tool test
         tokens = (jwt, jwt.upper(), 'prefix-' + jwt, 'prefix.' + jwt,
                   'eyJ-' * 6 + jwt, jwt + '-trailer', jwt + '.extra',
                   'eyJ' + '_' * 8 + '.' + '-' * 8 + '.' + '_' * 8,
                   'eyJ' + '\u0130' * 8 + '.' + '\u017f' * 8 + '.' + '\u212a' * 8,
+                  'eyJ' + '\u0130' * 8 + '.' + '\u0131' * 8 + '.' + '\u017f' * 8 + '\u212a' * 8,
                   'eyJaaaaaaaa.bbbbbbbb.-------a',
                   'eyJaaaaaaaa.bbbbbbbb.aaaaaaa-測')
         for token in tokens:
@@ -482,6 +516,7 @@ class TestOutputExcerptsTests(unittest.TestCase):
                 self.assert_sensitive_with_deadline(raw)
 
     def test_non_jwt_shapes_preserve_supported_report_coverage(self):
+        # synthetic-fixture: screen-tool test
         tokens = ('eyJaaaaaaa.bbbbbbbb.cccccccc',
                   'eyJaaaaaaaa.bbbbbbb.cccccccc',
                   'eyJaaaaaaaa.bbbbbbbb.ccccccc',
@@ -490,10 +525,10 @@ class TestOutputExcerptsTests(unittest.TestCase):
                   'eyJaaaaaaaa..bbbbbbbb.cccccccc',
                   'eyJaaaaaaaa.bbbbbbbb',
                   'eyJaaaaaaaa/bbbbbbbb.cccccccc',
-                  'a' + 'ey' + 'J' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8,  # synthetic-fixture: screen-tool test
+                  'a' + 'ey' + 'J' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8,
                   )
         # synthetic-fixture: screen-tool test
-        cjk_jwt = '\u6e2c' + 'ey' + 'J' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8  # synthetic-fixture: screen-tool test
+        cjk_jwt = '\u6e2c' + 'ey' + 'J' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
         self.assert_rejected(cjk_jwt.encode() + b'\n' + UNIT_FAILURE)
         for token in tokens:
             with self.subTest(token=token):
@@ -506,16 +541,83 @@ class TestOutputExcerptsTests(unittest.TestCase):
     def test_sensitive_values_directly_after_cjk_text_are_rejected(self):
         # synthetic-fixture: screen-tool test
         values = (
-            'AK' + 'IA' + 'SYNTHETIC0TEST16',  # synthetic-fixture: screen-tool test
-            'sk' + '-' + 'a' * 24,  # synthetic-fixture: screen-tool test
-            'github' + '_pat_' + 'a' * 24,  # synthetic-fixture: screen-tool test
-            'xox' + 'b-' + 'a' * 20,  # synthetic-fixture: screen-tool test
-            'bear' + 'er' + ' ' + 'SYNTHETIC' + 'VALUE',  # synthetic-fixture: screen-tool test
-            'to' + 'ken' + '=' + 'SYNTHETIC' + 'VALUE',  # synthetic-fixture: screen-tool test
+            'AK' + 'IA' + 'SYNTHETIC0TEST16',
+            'sk' + '-' + 'a' * 24,
+            'github' + '_pat_' + 'a' * 24,
+            'xox' + 'b-' + 'a' * 20,
+            'bear' + 'er' + ' ' + 'SYNTHETIC' + 'VALUE',
+            'to' + 'ken' + '=' + 'SYNTHETIC' + 'VALUE',
         )
         for value in values:
             with self.subTest(shape=value[:3]):
-                self.assert_rejected(('\u6e2c' + value).encode() + b'\n' + UNIT_FAILURE)  # synthetic-fixture: screen-tool test
+                # synthetic-fixture: screen-tool test
+                self.assert_rejected(('\u6e2c' + value).encode() + b'\n' + UNIT_FAILURE)
+
+    def test_cloud_keys_and_jwts_between_cjk_letters_are_rejected(self):
+        from llmtool.test_output_excerpts import (
+            _emitted_json_sensitive, _emitted_sensitive, _sensitive,
+            _sensitive_jwt,
+        )
+        from llmtool.high_debug import _screen_hits
+
+        # This is a base64url encoded synthetic JWT shape.
+        # synthetic-fixture: screen-tool test
+        encode = lambda value: base64.urlsafe_b64encode(value).rstrip(b'=').decode()
+        # synthetic-fixture: screen-tool test
+        jwt = (encode(b'{"alg":"HS256"}') + '.' +
+               encode(b'{"sub":"1234567890"}') + '.signature123456')
+        left_sides = ('\uff1a', '\u300c', '\uff0c', '\uff08', '\u3000',
+                      '\u00a0', '\u0301', '', '\u0130', '\u0131', '\u017f',
+                      '\u212a', '-', 'prefix-', 'x-')
+        right_sides = ('\u6e2c', '\u3042', '\u00e9', '\u212a')
+        # synthetic-fixture: screen-tool test
+        side_pairs = (('\u6e2c', '\u3042'), ('\u3131', '\u3131'),
+                      ('\uff71', '\uff71'), ('\u3005', '\u3005'),
+                      ('\u6e2c', '\u00e9'), ('\u00e9', '\u6e2c'),
+                      ('\u6e2c', '\u03b1'), ('\u03b1', '\u6e2c'),
+                      ('\u6e2c', '\u0130'), ('\u6e2c', '\u0131'),
+                      ('\u6e2c', '\u017f'), ('\u6e2c', '\u212a')) + tuple(
+                      (left, right) for left in left_sides for right in right_sides)
+        # synthetic-fixture: screen-tool test
+        for value in (SYNTHETIC_AWS_KEY, 'ASIA' + 'SYNTHETIC0TEST16', jwt):
+            for left, right in side_pairs:
+                text = left + value + right
+                with self.subTest(shape=value[:4], left=left, right=right):
+                    self.assertTrue(_sensitive(text))
+                    self.assertTrue(_emitted_sensitive(text))
+                    self.assertTrue(_emitted_json_sensitive(text))
+                    if value == jwt:
+                        self.assertTrue(_sensitive_jwt(text))
+                    self.assertTrue(_screen_hits(text))
+                    self.assert_rejected(text.encode() + b'\n' + UNIT_FAILURE)
+
+    def test_ascii_identifier_controls_remain_unchanged_for_screen_guards(self):
+        from llmtool.test_output_excerpts import (
+            _emitted_json_sensitive, _emitted_sensitive, _sensitive,
+            _sensitive_jwt,
+        )
+        from llmtool.high_debug import _screen_hits
+
+        # synthetic-fixture: screen-tool test
+        jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
+        # synthetic-fixture: screen-tool test
+        for value in (SYNTHETIC_AWS_KEY, 'ASIA' + 'SYNTHETIC0TEST16'):
+            for text in ('x' + value, value + 'x', 'x' + value + '\u6e2c'):
+                with self.subTest(shape=value[:4], text=text[:1]):
+                    self.assertFalse(_sensitive(text))
+                    self.assertFalse(_emitted_sensitive(text))
+                    self.assertFalse(_emitted_json_sensitive(text))
+                    self.assertFalse(_screen_hits(text))
+        for text in ('x' + jwt, 'x' + jwt + '\u6e2c'):
+            self.assertFalse(_sensitive(text))
+            self.assertFalse(_sensitive_jwt(text))
+            self.assertFalse(_emitted_sensitive(text))
+            self.assertFalse(_emitted_json_sensitive(text))
+            self.assertFalse(_screen_hits(text))
+        # The existing ASCII suffix rule still recognizes a word boundary
+        # inside a longer identifier as a JWT candidate.
+        self.assertTrue(_sensitive(jwt + 'x'))
+        self.assertTrue(_sensitive_jwt(jwt + 'x'))
 
     def test_near_limit_jwt_scan_completes_without_false_success(self):
         # Repeated boundary-bearing prefixes, missing dots, and short or
@@ -958,13 +1060,17 @@ sys.exit(0 if result.wasSuccessful() else 1)
 
     def test_root_logging_does_not_hide_sensitive_original_or_emitted_forms(self):
         prefix = b'ERROR:root:synthetic observation\n'
+        # synthetic-fixture: screen-tool test
         for tail, expected in ((SYNTHETIC_AWS_KEY, 'source'),
-                               (SYNTHETIC_AWS_KEY + '測', 'emitted excerpt')):
+                               (SYNTHETIC_AWS_KEY + 'MORE測', 'emitted excerpt')):
             raw = prefix + unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + tail)])
             with self.subTest(form=expected):
                 self.path.write_bytes(raw)
                 with self.assertRaises(LLMToolError) as error:
-                    select_test_excerpts(self.path, 1)
+                    select_test_excerpts(
+                        self.path, 1,
+                        **({'max_excerpt_bytes': self.excerpt_bound(raw, SYNTHETIC_AWS_KEY)}
+                           if expected == 'emitted excerpt' else {}))
                 self.assertEqual(str(error.exception), 'test-excerpts: ' + expected +
                                  ' contains sensitive-content indicators; details omitted')
                 self.assertNotIn(SYNTHETIC_AWS_KEY, str(error.exception))
@@ -1005,7 +1111,7 @@ sys.exit(0 if result.wasSuccessful() else 1)
 
     def test_root_logging_cli_rejections_have_no_partial_json_or_private_echo(self):
         for tail, category in ((SYNTHETIC_AWS_KEY, 'source'),
-                               (SYNTHETIC_AWS_KEY + '測', 'emitted excerpt')):
+                               (SYNTHETIC_AWS_KEY + '測', 'source')):
             raw = b'ERROR:root:synthetic observation\n' + unittest_capture([
                 ('FAIL', FAIL_ID, FAIL_BODY + '\n' + tail)])
             self.path.write_bytes(raw)

@@ -379,6 +379,7 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
     deadline = started + timeout
     output, errors = bytearray(), bytearray()
     process = None
+    collection_error = None
     lifecycle = CLIProcessLifecycle('codex-direct-developer', deadline=deadline + 5)
     lifecycle.__enter__()
     lifecycle_closed = False
@@ -482,6 +483,11 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
                         except OSError:
                             pass
             except BaseException as exc:
+                # Keep the first collection failure across process cleanup.
+                # Cleanup can terminate the child with a signal; that signal
+                # is an observed cleanup result, not a replacement for the
+                # cap or adapter error that caused cleanup to start.
+                collection_error = exc
                 # Keep TMPDIR alive until the owned child has stopped using it.
                 close_lifecycle(type(exc), exc, exc.__traceback__)
                 raise
@@ -513,27 +519,29 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
             raise
         # An unexpected exception still becomes a typed, fail-closed result
         # with the observed process facts, never a bare adapter UNKNOWN.
-        error = (exc if isinstance(exc, DirectCodexError) else
-                 DirectCodexError(adapter_error_code(exc)))
+        original_error = collection_error or exc
+        error = (original_error if isinstance(original_error, DirectCodexError) else
+                 DirectCodexError(adapter_error_code(original_error)))
         if (error.direct_codex_code in ('CODEX_FINAL_JSON_INVALID',
                                         'CODEX_FINAL_MESSAGE_INVALID',
                                         'CODEX_FINAL_MESSAGE_MISSING') and
                 process is not None and process.returncode == 0 and
                 _d6_has_changes(root)):
             error.direct_codex_code = 'CODEX_FINAL_INVALID_WITH_CHANGES'
-        if (process is not None and process.returncode is not None and
-                process.returncode < 0 and
-                error.direct_codex_code != 'CODEX_TIMEOUT' and
-                not _has_valid_final_result(bytes(output))):
-            error.direct_codex_code = 'CODEX_INTERRUPTED'
         error.attempted = process is not None
         error.process_exit_code = process.returncode if process is not None else None
-        error.stdout_sha256 = hashlib.sha256(output).hexdigest() if output else None
+        error.stdout_sha256 = (hashlib.sha256(output).hexdigest()
+                               if process is not None else None)
         error.elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
         error.cleanup_status = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'
         error.native_session_id = _thread_from_events(bytes(output))
         if error.usage is None:
-            error.usage = _usage_from_events(bytes(output))
+            # Usage is optional evidence. A malformed or truncated JSONL
+            # record must never replace the error that caused cleanup.
+            try:
+                error.usage = _usage_from_events(bytes(output))
+            except Exception:
+                error.usage = None
         if error is exc:
             raise
         raise error from None

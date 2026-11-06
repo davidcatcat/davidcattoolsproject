@@ -35,9 +35,16 @@ _UNIT_OK = re.compile(r'OK(?: \(([^\n]+)\))?')
 _NODE_ID = re.compile(r'(?:[\w.-]+/)*[\w.-]+\.py(?:::[\w.]+)*(?:\[[^\n]*\])?')
 _PYTEST_STATS = re.compile(
     r'([0-9][^\n]*?) in [0-9]+(?:\.[0-9]+)?s(?: \([0-9:]+\))?')
+# Disable IGNORECASE for this boundary class: otherwise its negated ASCII range
+# also excludes İ, ı, ſ, and K when used inside the credential patterns.
+_NON_ASCII_WORD = r'(?-i:[^\W\x00-\x7f])'
+_CLOUD_KEY = (
+    r'(?:(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b|'
+    r'(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]{16}(?=' + _NON_ASCII_WORD + r'))'
+)
 _SENSITIVE_PREFIX = (
     r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
-    r'(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b|'
+    + _CLOUD_KEY + r'|'
     r'(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|'
     r'(?<![A-Za-z0-9_])(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
     r'(?<![A-Za-z0-9_])xox[abprs]-[A-Za-z0-9-]{20,}|'
@@ -59,8 +66,9 @@ _SENSITIVE_JSON = re.compile(
 _LOG_ERROR = re.compile(r'ERROR:[\w.-]+:')
 _PYTEST_LOG_ERROR = re.compile(r'ERROR(?::[\w.-]+:| {4}\S)')
 _JWT_SEGMENT = re.compile(r'[A-Za-z0-9_-]+', re.IGNORECASE)
-_JWT_START = re.compile(r'(?<![A-Za-z0-9_])eyJ', re.IGNORECASE)
+_JWT_START = re.compile(r'(?<!(?-i:[A-Za-z0-9_]))eyJ', re.IGNORECASE)
 _JWT_END = re.compile(r'[A-Za-z0-9_-]{8,}\b', re.IGNORECASE)
+_JWT_END_NON_ASCII = re.compile(r'[A-Za-z0-9_-]{8,}(?=' + _NON_ASCII_WORD + r')', re.IGNORECASE)
 _URL_SCHEME = re.compile(r'[a-z][a-z0-9+.-]*', re.IGNORECASE)
 _URL_AUTHORITY = re.compile(r'[^\s/]+')
 
@@ -70,14 +78,16 @@ def _sensitive_jwt(text):
     # segments must end at dots; its last may end at an internal word boundary.
     # Each bounded prefix search / anchored tail match scans at most one
     # segment, never the remaining source from every overlapping eyJ start.
-    # Retain re.IGNORECASE's Unicode letters and the original word boundaries.
+    # _JWT_START enforces the header boundary; the fallback tail boundary
+    # requires an adjacent non-ASCII word character at the final segment end.
     previous_end, first, second = None, False, False
     for segment in _JWT_SEGMENT.finditer(text):
         start, end = segment.span()
         adjacent = (previous_end is not None and start == previous_end + 1
                     and text[previous_end] == '.')
-        if adjacent and second and _JWT_END.match(text, start):
-            return True
+        if adjacent and second:
+            if _JWT_END.match(text, start) or _JWT_END_NON_ASCII.match(text, start):
+                return True
         second = adjacent and first and end - start >= 8
         first = (end - start >= 11
                  and _JWT_START.search(text, start, end - 8) is not None)
