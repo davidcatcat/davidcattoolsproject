@@ -89,6 +89,13 @@ class JobAdmissionTests(unittest.TestCase):
         self.assertIn('EC2_HOST_ADMISSION_PASS runner=ec2-self-runner-3 event=push', out)
         self.refused('service account', account='ghrunner2', RUNNER_NAME='ec2-self-runner-3')
 
+    def test_fourth_runner_is_admitted_only_under_its_own_account(self):
+        code, out = self.run_hook(account='ghrunner4', RUNNER_NAME='ec2-self-runner-4')
+        self.assertEqual(code, 0, out)
+        self.assertIn('EC2_HOST_ADMISSION_PASS runner=ec2-self-runner-4 event=push', out)
+        self.refused('service account', account='ghrunner3', RUNNER_NAME='ec2-self-runner-4')
+        self.refused('service account', account='ghrunner4', RUNNER_NAME='ec2-self-runner-3')
+
     def test_other_workflows_actors_and_repositories_are_refused(self):
         self.refused('workflow', GITHUB_WORKFLOW_REF=REPO + '/.github/workflows/evil.yml@refs/heads/main')
         self.refused('actor', GITHUB_ACTOR='someone')
