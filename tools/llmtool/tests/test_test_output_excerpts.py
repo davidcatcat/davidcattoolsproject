@@ -733,12 +733,37 @@ class TestOutputExcerptsTests(unittest.TestCase):
         # synthetic-fixture: screen-tool test
         cjk_wrapped = '北' + cloud_key + '京'
         ascii_identifier = 'prefix_' + cloud_key + '_suffix'
+        suffix_identifier = cloud_key + '_suffix'
         self.assertIsNotNone(pm_runtime._STREAM_SECRET_START.search(cjk_wrapped))
         self.assertEqual(pm_runtime._stream_safe_end(cjk_wrapped), 1)
         self.assertEqual(pm_runtime._screen_stream_text(cjk_wrapped), '北[REDACTED]京')
         self.assertIsNone(pm_runtime._STREAM_SECRET_START.search(ascii_identifier))
         self.assertEqual(pm_runtime._stream_safe_end(ascii_identifier), len(ascii_identifier))
         self.assertEqual(pm_runtime._screen_stream_text(ascii_identifier), ascii_identifier)
+        self.assertIsNotNone(pm_runtime._STREAM_SECRET_START.search(suffix_identifier))
+        self.assertEqual(pm_runtime._stream_safe_end(suffix_identifier), 0)
+        self.assertEqual(pm_runtime._screen_stream_text(suffix_identifier), suffix_identifier)
+        self.assertEqual(pm_runtime._stream_safe_end('北' + cloud_key[:8]), 1)
+        self.assertEqual(pm_runtime._stream_safe_end('北' + cloud_key[:2]), 1)
+        self.assertEqual(pm_runtime._stream_safe_end('prefix_' + cloud_key[:2]),
+                         len('prefix_' + cloud_key[:2]))
+        for deltas in (('北' + cloud_key[:8], cloud_key[8:] + '京'),
+                       ('北' + cloud_key[:2], cloud_key[2:] + '京')):
+            with self.subTest(first_delta=deltas[0]):
+                record = {'turn_id': 'turn-1', 'result_text': '', 'tool_names': []}
+                parser = pm_runtime._TurnParser(None, record, lambda: False)
+                events = []
+                for index, delta in enumerate(deltas):
+                    parser.blocks[0] = parser.blocks.get(0, '') + delta
+                    event = parser._flush_block(0, force=(index == len(deltas) - 1))
+                    if event is not None:
+                        events.append(event)
+                self.assertEqual([event['type'] for event in events], ['TEXT_DELTA', 'TEXT_DELTA'])
+                self.assertEqual([event['text'] for event in events], ['北', '[REDACTED]京'])
+                for event in events:
+                    self.assertNotIn('AK', event['text'])
+                    self.assertNotIn('0', event['text'])
+                self.assertEqual(record['result_text'], '北[REDACTED]京')
 
     def test_feedback_cloud_key_screen_detects_cjk_neighbors_and_allows_longer_ascii_identifier(self):
         from llmtool import feedback

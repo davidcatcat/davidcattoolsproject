@@ -295,7 +295,7 @@ def _tool_description(name, tool_input, cwd=None):
 _STREAM_SECRET_START = re.compile(
     r'-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----|'
     + _CLOUD_KEY + r'|'
-    r'\b(?:AKIA|ASIA)[A-Z0-9]*|\bsk-[A-Za-z0-9_-]*|'
+    r'(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]*|\bsk-[A-Za-z0-9_-]*|'
     r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]*|'
     r'\bxox[abprs]-[A-Za-z0-9-]*|\b(?:bearer|basic)\s+\S*|'
     r'\beyJ[A-Za-z0-9_.-]*', re.IGNORECASE)
@@ -324,7 +324,9 @@ def _stream_safe_end(value):
         for size in range(1, len(marker)):
             start = len(value) - size
             if lowered.endswith(marker[:size]) and (
-                    start == 0 or not (value[start - 1].isalnum() or value[start - 1] == '_')):
+                    start == 0 or not (
+                        value[start - 1].isascii()
+                        and (value[start - 1].isalnum() or value[start - 1] == '_'))):
                 safe_end = min(safe_end, start)
     token_start = max((index for index, char in enumerate(value) if char.isspace()),
                       default=-1) + 1
