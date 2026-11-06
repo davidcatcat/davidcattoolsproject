@@ -310,43 +310,40 @@ class TaskCompletionTests(unittest.TestCase):
         return result, root_commit, developer_commit
 
     def _modify_delete_conflict_head(self, conflict_path):
-        """Create a trusted-main modify/delete conflict resolved as deletion."""
+        """Create a trusted-main deletion/developer modification; keep ours."""
         self._git('config', 'merge.renames', 'false')
         self._git('checkout', '-b', 'main-conflict', self.source_sha)
         conflict_file = self.root / conflict_path
-        conflict_file.write_text('Trusted main modification.\n')
+        conflict_file.unlink()
         self._git('add', conflict_path)
-        self._git('commit', '-m', 'trusted main modifies conflict path')
+        self._git('commit', '-m', 'trusted main deletes conflict path')
         trusted_base = self._git('rev-parse', 'HEAD')
 
         self._git('checkout', 'feat/executor')
         self._git('reset', '--hard', self.source_sha)
         source_file = self.root / self.source_path
-        if conflict_path == self.source_path:
-            source_file.write_text('Developer in-scope conflict modification.\n')
-            self._git('add', self.source_path)
-        else:
-            source_file.write_text(source_file.read_text() + '\n# scoped developer change\n')
-            conflict_file.unlink()
-            self._git('add', self.source_path, conflict_path)
-        self._git('commit', '-m', 'scoped developer change')
+        if conflict_path != self.source_path:
+            source_file.write_text(
+                source_file.read_text() + '\n# scoped developer change\n')
+        conflict_content = 'Developer conflict modification.\n'
+        conflict_file.write_text(conflict_content)
+        self._git('add', self.source_path)
+        if conflict_path != self.source_path:
+            self._git('add', conflict_path)
+        self._git('commit', '-m', 'developer modifies conflict path')
         segment_start = self._git('rev-parse', 'HEAD')
         initial_merge = subprocess.run(
             ['/usr/bin/git', '-c', 'merge.renames=false', '-c', 'diff.renames=false',
              'merge', '--no-ff', 'main-conflict', '-m', 'merge trusted main'],
             cwd=self.root, text=True, capture_output=True)
-        if conflict_path != self.source_path:
-            unmerged = self._git('ls-files', '-u', '--', conflict_path)
-            self.assertTrue(unmerged, initial_merge.stderr)
-        if conflict_path == self.source_path:
-            self.assertNotEqual(initial_merge.returncode, 0)
-            source_file.write_text('Resolved in-scope conflict.\n')
-            self._git('add', self.source_path)
-            self._git('commit', '-m', 'resolve initial in-scope conflict')
-        else:
-            self.assertNotEqual(initial_merge.returncode, 0, initial_merge.stderr)
-            self._git('add', '-A', conflict_path)
-            self._git('commit', '-m', 'resolve modify/delete as deletion')
+        self.assertNotEqual(initial_merge.returncode, 0, initial_merge.stderr)
+        stages = self._git('ls-files', '-u', '--', conflict_path)
+        self.assertEqual(
+            {line.split('\t', 1)[0].split()[2] for line in stages.splitlines()},
+            {'1', '2'})
+        self.assertEqual(conflict_file.read_text(), conflict_content)
+        self._git('add', conflict_path)
+        self._git('commit', '-m', 'resolve modify/delete by keeping developer file')
         result = self._git('rev-parse', 'HEAD')
         registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
         record = json.loads(registry_path.read_text())
