@@ -4058,6 +4058,7 @@ class PmBoardItem:
     what: str
     next: str
     reason: str = ""
+    current: str = ""
 
 
 @dataclass(frozen=True)
@@ -4079,6 +4080,7 @@ class BoardPull:
     updated_at: float
     head: str
     draft: bool
+    closes: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -4198,9 +4200,13 @@ def board_pulls(pulls, repo: str) -> list[BoardPull]:
         sha = head_data.get("sha")
         head = sha[:7].lower() if type(sha) is str and re.fullmatch(r"[0-9a-fA-F]+", sha) else ""
         title = re.sub(r"#(?=[0-9])", "", title)
+        body = pull.get("body")
+        closes = tuple(sorted({int(match.group(1)) for match in re.finditer(
+            r"(?im)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+#([0-9]{1,7})\b",
+            body if type(body) is str else "")}))
         out.append(BoardPull(pull["number"], _label(title, 60), state,
                              _github_time(pull.get("merged_at")), _github_time(pull.get("updated_at")),
-                             head, pull.get("draft") is True))
+                             head, pull.get("draft") is True, closes))
     return out
 
 
@@ -4214,6 +4220,7 @@ class PrRow:
     mac: str
     next: str
     owner: str
+    current: str = "未確認"
 
 
 def pr_reviewing(office) -> set[tuple[str, str]]:
@@ -4237,7 +4244,34 @@ def _ci_word(entry, known: bool) -> str:
     return "?"
 
 
-def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending) -> list[PrRow]:
+def _work_names(row: OfficeRow) -> str:
+    return " ".join((row.task, row.work, row.detail, row.codex_title))
+
+
+def _names_pr(row: OfficeRow, number: int, head: str) -> bool:
+    text = _work_names(row)
+    commit = re.search(r"@([0-9a-f]{7,40})(?![0-9a-f])", text, re.IGNORECASE)
+    return (re.search(rf"\bPR\s*#?{number}\b", text, re.IGNORECASE) is not None
+            and bool(head) and commit is not None
+            and commit.group(1).casefold().startswith(head.casefold()))
+
+
+def _names_issue(row: OfficeRow, number: int) -> bool:
+    return re.search(rf"\bIssue\s*#?{number}\b", _work_names(row), re.IGNORECASE) is not None
+
+
+def _current_person(rows, predicate, *, readable=True) -> str:
+    if not readable:
+        return "未確認"
+    matching = [row for row in rows if row.state == WORKING and predicate(row)]
+    if any("codex" in row.name.casefold() for row in matching):
+        return "Codex"
+    if any(row.role == "reviewer" or "reviewer" in row.name.casefold() for row in matching):
+        return "Reviewer"
+    return "沒人"
+
+
+def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending, office=(), *, github_known=True) -> list[PrRow]:
     """Build the read-only PR status table from already-read local/GitHub data."""
     rows = []
     for pull in sorted((item for item in pulls or []
@@ -4287,7 +4321,13 @@ def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending) -> list[Pr
                 next_step, owner = "加 mac-ci", "PM"
         elif review == "未審":
             next_step, owner = "派審查", "PM"
-        rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, next_step, owner))
+        current = _current_person(office, lambda row: _names_pr(row, pull.number, head),
+                                  readable=github_known)
+        if current == "沒人" and (linux in ("執行中", "排隊") or mac in ("執行中", "排隊")):
+            current = "CI"
+        elif current == "沒人" and ci_heads is None:
+            current = "未確認"
+        rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, next_step, owner, current))
     return rows
 
 
@@ -4296,7 +4336,7 @@ def _board_ref_number(ref):
     return int(match.group(1)) if match else None
 
 
-def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None) -> WorkBoard:
+def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=(), office_known=True) -> WorkBoard:
     pulls = github.board_pulls if github is not None else None
     github_known = bool(github is not None and github.successful_read)
     board_known = board.status in ("ok", "stale")
@@ -4328,6 +4368,55 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None) -> Work
                 next_step = "未確認"
                 what += "「未見審查結論」"
             running.append(PmBoardItem(f"PR #{pull.number}", what, next_step))
+    # The current owner is derived from the live office rows and the already-read
+    # PR page. An issue may be worked through an open PR whose body closes it.
+    pulls_by_number = {pull.number: pull for pull in (pulls or [])}
+    issue_prs = {}
+    if github_known:
+        for pull in pulls or []:
+            for issue in pull.closes:
+                issue_prs.setdefault(issue, set()).add(pull.number)
+    resolved = []
+    for item in running:
+        number = _board_ref_number(item.ref)
+        is_pr = bool(re.match(r"PR\s", item.ref))
+        if not office_known or (is_pr and not github_known):
+            current = "未確認"
+        elif is_pr:
+            pull = pulls_by_number.get(number)
+            head = pull.head if pull else ""
+            current = _current_person(office, lambda row: _names_pr(row, number, head))
+            if current == "沒人" and pull and pull.state == "OPEN" and head:
+                ci_heads = getattr(github, "ci_heads", None) if github_known else None
+                if ci_heads is None:
+                    current = "未確認"
+                else:
+                    ci = ci_heads.get(head, {})
+                    if any(_ci_word(ci.get(key), True) in ("執行中", "排隊") for key in ("linux", "mac")):
+                        current = "CI"
+            if current == "沒人" and pull and pull.state == "OPEN" and not head:
+                current = "未確認"
+        else:
+            issue = number
+            related_prs = issue_prs.get(issue, set())
+            current = _current_person(office, lambda row: _names_issue(row, issue))
+            if current == "沒人" and related_prs:
+                current = _current_person(office, lambda row: any(
+                    _names_pr(row, pr, pulls_by_number.get(pr).head if pulls_by_number.get(pr) else "")
+                    for pr in related_prs))
+                if current == "沒人":
+                    related = [pulls_by_number.get(pr) for pr in related_prs]
+                    if any(pull and pull.state == "OPEN" and not pull.head for pull in related):
+                        current = "未確認"
+                    elif any(pull and pull.state == "OPEN" and getattr(github, "ci_heads", None) is None
+                             for pull in related):
+                        current = "未確認"
+                    elif any(pull and pull.state == "OPEN" and any(
+                            _ci_word((getattr(github, "ci_heads", {}) or {}).get(pull.head, {}).get(key), True)
+                            in ("執行中", "排隊") for key in ("linux", "mac")) for pull in related):
+                        current = "CI"
+        resolved.append(replace(item, current=current))
+    running = resolved
     running.sort(key=lambda item: (_board_ref_number(item.ref) or 0, item.ref))
     queue.sort(key=lambda item: (_board_ref_number(item.ref) or 0, item.ref))
     blocked.sort(key=lambda item: (_board_ref_number(item.ref) or 0, item.ref))
@@ -4356,7 +4445,7 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None) -> Work
         github_status = "；".join(
             part for part in (github_status, GITHUB_IDENTITY_STATUS) if part)
     prs = (pr_board_rows(pulls, github.verdicts, getattr(github, "ci_heads", None),
-                         ec2, reviewing, github.pending) if github_known else [])
+                         ec2, reviewing, github.pending, office, github_known=github_known) if github_known else [])
     return WorkBoard(owner, running, queue, blocked, done, github_known, board_known,
                      github_status, board.status, board.age, board.skipped, note,
                      int(github.window // 3600) if github is not None else 12, prs, owner_cut)
@@ -4422,13 +4511,14 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
             elif isinstance(item, PrRow):
                 ref = f"PR #{item.number}"
                 rest = (f"審查 {item.review} · EC2 {item.ec2} · Linux {item.linux} · "
-                        f"macOS {item.mac}  → {item.next}（{item.owner}）")
+                        f"macOS {item.mac}  → {item.next}（{item.owner}） · 現在：{item.current}")
             elif isinstance(item, OwnerPending):
                 ref = item.reference
                 rest = f"{item.summary or item.status}  → 你"
             else:
                 ref = item.ref
-                rest = f"{item.what}  → {item.next}"
+                current = f" · 現在：{item.current}" if item.current else ""
+                rest = f"{item.what}  → {item.next}{current}"
             if width:
                 first_width = max(1, width - _width(ref) - 2)
                 if first_width < 12:
@@ -7754,7 +7844,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
                                                 install=rule_alert_lines() + install_lines(github)))))
     print("\n".join(line for line, _ in board_view(
         work_board(github, mon.pm_board, time.time(), ec2=mon.ec2_heads,
-                   reviewing=pr_reviewing(mon.office)))))
+                   reviewing=pr_reviewing(mon.office), office=mon.office,
+                   office_known=not bool(mon.office_error)))))
     print()
     print("\n".join(table_lines(mon.processes)))
     print("\n".join(["", *d6_lines(mon.d6), "", *record_lines(mon.records), "",
@@ -7954,7 +8045,9 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
     elif view == "board":
         lines = board_view(work_board(mon.github, mon.pm_board, time.time(),
                                       ec2=mon.ec2_heads,
-                                      reviewing=pr_reviewing(mon.office)), w - 1)
+                                      reviewing=pr_reviewing(mon.office),
+                                      office=mon.office,
+                                      office_known=not bool(mon.office_error)), w - 1)
         offset = max(0, min(offset, len(lines) - body))
         styles = {"title": colors.get("title", 0) | curses.A_BOLD,
                   "!": colors.get("!", 0) | curses.A_BOLD,

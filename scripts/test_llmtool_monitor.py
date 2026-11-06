@@ -8438,6 +8438,18 @@ class PrBoardTests(unittest.TestCase):
     SHA = "abcdef0" + "1" * 33
 
     @staticmethod
+    def _github(pulls, ci_heads=None):
+        from types import SimpleNamespace
+        return SimpleNamespace(successful_read=True, board_pulls=pulls, verdicts={},
+                               ci_heads=ci_heads or {}, pending=[], window=43200,
+                               read_failed=False, board_page_count=len(pulls),
+                               board_oldest_updated=0)
+
+    @staticmethod
+    def _board(running=()):
+        return mon.PmBoard("ok", 0, list(running), [], [])
+
+    @staticmethod
     def _pull(number, *, head="abcdef0", draft=False, state="OPEN"):
         return mon.BoardPull(number, f"Work {number}", state, 0, 0, head, draft)
 
@@ -8770,6 +8782,44 @@ class PrBoardTests(unittest.TestCase):
         self.assertIn("審查 通過", " ".join(rows))
         self.assertIn("macOS 成功", " ".join(rows))
         self.assertTrue(all(mon._width(line) <= 40 for line in lines))
+
+    def test_running_pr_shows_live_reviewer(self):
+        pull = self._pull(978)
+        office = [mon.OfficeRow("Claude reviewer", mon.WORKING, "", 0, 0,
+                                role="reviewer", task="PR #978 @abcdef0")]
+        work = mon.work_board(self._github([pull]), self._board(), NOW, office=office)
+        row = next(item for item in work.running if item.ref == "PR #978")
+        self.assertEqual(row.current, "Reviewer")
+        self.assertIn("現在：Reviewer", "\n".join(line for line, _ in mon.board_view(work)))
+
+    def test_running_pr_shows_exact_head_checks_without_session(self):
+        pull = self._pull(978)
+        github = self._github([pull], ci_heads={"abcdef0": {
+            "linux": ("in_progress", "")}})
+        work = mon.work_board(github, self._board(), NOW)
+        row = next(item for item in work.running if item.ref == "PR #978")
+        self.assertEqual(row.current, "CI")
+
+    def test_running_issue_shows_codex_session_naming_issue(self):
+        board = self._board(running=[mon.PmBoardItem("#55", "Issue work", "PM")])
+        office = [mon.OfficeRow("Codex CLI", mon.WORKING, "", 0, 0,
+                                role="developer", task="Issue #55")]
+        work = mon.work_board(self._github([]), board, NOW, office=office)
+        self.assertEqual(work.running[0].current, "Codex")
+
+    def test_idle_session_does_not_count_as_current_worker(self):
+        board = self._board(running=[mon.PmBoardItem("#55", "Issue work", "PM")])
+        office = [mon.OfficeRow("Codex CLI", mon.IDLE, "", 0, 0,
+                                role="developer", task="Issue #55")]
+        work = mon.work_board(self._github([]), board, NOW, office=office)
+        self.assertEqual(work.running[0].current, "沒人")
+
+    def test_unreadable_github_source_shows_unknown_current_not_idle(self):
+        board = self._board(running=[mon.PmBoardItem("PR #978", "PR work", "PM")])
+        work = mon.work_board(None, board, NOW,
+                              office=[mon.OfficeRow("Codex CLI", mon.WORKING, "", 0, 0,
+                                                    task="PR #978 @abcdef0")])
+        self.assertEqual(work.running[0].current, "未確認")
 
 
 class StuckAlertTests(unittest.TestCase):
