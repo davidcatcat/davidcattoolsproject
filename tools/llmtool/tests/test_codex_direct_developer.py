@@ -103,6 +103,18 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.fake.write_text(script, encoding='utf-8')
         self.fake.chmod(0o700)
 
+    def write_fake_script(self, body):
+        """Write body as executable fake-process source instead of stdout text."""
+        script = "#!/usr/bin/env python3\nimport json,os,sys,time\n"
+        script += f"open({str(self.invoked)!r},'w').write('yes')\n"
+        script += (
+            'expected_cache = "shell_environment_policy.set.PYTHONPYCACHEPREFIX=" + '
+            'json.dumps(os.environ["TMPDIR"])\n'
+            'assert expected_cache in sys.argv\n')
+        script += body if body.endswith('\n') else body + '\n'
+        self.fake.write_text(script, encoding='utf-8')
+        self.fake.chmod(0o700)
+
     def run_fake(self, **kwargs):
         timeout = kwargs.pop('timeout', 10)
         prompt = kwargs.pop('prompt', 'bounded prompt')
@@ -308,9 +320,9 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(caught.exception.process_exit_code, -15)
 
     def test_stdout_cap_error_survives_cleanup_signal_with_observed_facts(self):
-        self.write_fake("import signal;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
-                        "sys.stdout.write('x' * (1024 * 1024 + 1));"
-                        "sys.stdout.flush();time.sleep(10)\n")
+        self.write_fake_script("import signal;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                               "sys.stdout.write('x' * (1024 * 1024 + 1));"
+                               "sys.stdout.flush();time.sleep(10)\n")
 
         with self.assertRaises(direct.DirectCodexError) as caught:
             self.run_fake()
@@ -325,9 +337,9 @@ class CodexDirectDeveloperTests(unittest.TestCase):
                          hashlib.sha256(b'x' * direct.MAX_OUTPUT_BYTES).hexdigest())
 
     def test_stderr_cap_error_survives_cleanup_signal_with_observed_facts(self):
-        self.write_fake("import signal;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
-                        "sys.stderr.write('e' * (64 * 1024 + 1));"
-                        "sys.stderr.flush();time.sleep(10)\n")
+        self.write_fake_script("import signal;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                               "sys.stderr.write('e' * (64 * 1024 + 1));"
+                               "sys.stderr.flush();time.sleep(10)\n")
 
         with self.assertRaises(direct.DirectCodexError) as caught:
             self.run_fake()
@@ -369,9 +381,9 @@ class CodexDirectDeveloperTests(unittest.TestCase):
     def test_partial_jsonl_usage_error_does_not_replace_collection_error(self):
         partial_line = (json.dumps({'type': 'thread.started', 'thread_id': self.THREAD}) +
                         '\n{"type":"turn.completed"').encode('utf-8')
-        self.write_fake('import signal;signal.signal(signal.SIGTERM,signal.SIG_IGN)\n' +
-                        f"sys.stdout.write({partial_line.decode()!r});sys.stdout.flush();" +
-                        'time.sleep(10)\n')
+        self.write_fake_script('import signal;signal.signal(signal.SIGTERM,signal.SIG_IGN)\n' +
+                               f"sys.stdout.write({partial_line.decode()!r});sys.stdout.flush();" +
+                               'time.sleep(10)\n')
         original_selector = direct.selectors.DefaultSelector
 
         class FailingAfterOutputSelector:
