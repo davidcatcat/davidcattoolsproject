@@ -4508,6 +4508,38 @@ _PRELAUNCH_REPAIR_REFUSALS = frozenset((
 ))
 
 
+def _launched_run_did_no_work(developer):
+    """True only when a launched run's record proves it did no work.
+
+    It must have ended blocked or interrupted, with no artifact, an explicit
+    empty changed-file list and confirmed cleanup. Anything missing, malformed
+    or unknown does not prove that, so the run still counts.
+    """
+    if type(developer) is not dict:
+        return False
+    state = developer.get('state')
+    error_code = developer.get('error_code')
+    if state == 'BLOCKED':
+        ended = True
+    elif state == 'DEVELOPER_OUTCOME_UNKNOWN':
+        ended = (type(error_code) is str and
+                 re.fullmatch(r'[A-Z0-9]+(?:_[A-Z0-9]+)*_(?:BLOCKED|INTERRUPTED)',
+                              error_code) is not None)
+    else:
+        ended = False
+    if not ended:
+        return False
+    if not all(key in developer and developer[key] is None
+               for key in ('artifact', 'artifact_sha256')):
+        return False
+    changed_files = developer.get('changed_files')
+    if type(changed_files) is not list or changed_files:
+        return False
+    execution = developer.get('execution')
+    return (type(execution) is dict and
+            execution.get('cleanup_status') == 'CONFIRMED')
+
+
 def _check_delegate_repair_cap(args, store, d6_binding=None):
     """Fail closed before dispatch when this D6 has exhausted its repair rounds."""
     executor_task = getattr(args, 'executor_task', None)
@@ -4557,6 +4589,8 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             )
             if (known_prelaunch_refusal and known_empty and
                     changed_files_empty and 'progress' not in developer):
+                continue
+            if _launched_run_did_no_work(developer):
                 continue
             created_at = developer.get('created_at')
             try:

@@ -232,5 +232,155 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertEqual(store.recorded, [])
 
 
+def _no_work(**overrides):
+    developer = {
+        'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+        'provider_profile': 'codex',
+        'error_code': 'CODEX_BLOCKED',
+        'created_at': '2026-11-04T00:00:02Z',
+        'artifact': None,
+        'artifact_sha256': None,
+        'changed_files': [],
+        'execution': {'status': 'BLOCKED', 'cleanup_status': 'CONFIRMED'},
+        'usage': None,
+    }
+    developer.update(overrides)
+    return developer
+
+
+class LaunchedNoWorkRepairCountTests(unittest.TestCase):
+    _NEWEST = '00000000000000000000000000000000'
+
+    def setUp(self):
+        for name, target, kwargs in (
+                ('trust_patch', (task_submission_cli.trust, 'load_trust'),
+                 {'return_value': SimpleNamespace(
+                     repository={'slug': 'example/project'})}),
+                ('binding_patch', (task_submission_cli, '_delegate_d6_binding'),
+                 {'return_value': (None, SimpleNamespace(head=_HEAD))})):
+            started = patch.object(*target, **kwargs)
+            started.start()
+            self.addCleanup(started.stop)
+
+    def _store(self, developer):
+        # One extra record so the cap is still reached after one is skipped.
+        store = _Store(count=2 + MAX_REPAIR_ATTEMPTS,
+                       diagnosis=_diagnosis([_entry()]))
+        store.records[self._NEWEST]['developer'] = developer
+        return store
+
+    def _assert_skipped(self, developer):
+        store = self._store(developer)
+        task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [(
+            _CURRENT_TASK, _HIGH_DEBUG_REF, 2 + MAX_REPAIR_ATTEMPTS)])
+
+    def _assert_counted(self, developer):
+        store = self._store(developer)
+        # The newer counted record becomes the newest assignment, so the
+        # earlier High Debug diagnosis is stale.
+        with self.assertRaisesRegex(
+                LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_blocked_run_with_no_work_is_skipped(self):
+        self._assert_skipped(_no_work())
+
+    def test_blocked_state_with_no_work_is_skipped(self):
+        self._assert_skipped(_no_work(
+            state='BLOCKED', error_code='AGY_BLOCKED'))
+
+    def test_interrupted_run_with_no_work_is_skipped(self):
+        self._assert_skipped(_no_work(
+            error_code='CODEX_INTERRUPTED',
+            execution={'status': 'UNKNOWN', 'cleanup_status': 'CONFIRMED'}))
+
+    def test_skipped_record_is_not_the_newest_assignment(self):
+        store = self._store(_no_work(created_at='2026-11-05T00:00:00Z'))
+        task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(len(store.recorded), 1)
+
+    def test_skipped_record_needs_no_valid_timestamp(self):
+        self._assert_skipped(_no_work(created_at='bad'))
+
+    def test_artifact_counts(self):
+        self._assert_counted(_no_work(artifact='diff', artifact_sha256='0' * 64))
+
+    def test_artifact_sha_alone_counts(self):
+        self._assert_counted(_no_work(artifact_sha256='0' * 64))
+
+    def test_changed_files_count(self):
+        self._assert_counted(_no_work(changed_files=['a.py']))
+
+    def test_missing_or_malformed_changed_files_count(self):
+        for value in (None, 'a.py', {}):
+            with self.subTest(value=value):
+                self._assert_counted(_no_work(changed_files=value))
+        developer = _no_work()
+        del developer['changed_files']
+        self._assert_counted(developer)
+
+    def test_unknown_or_missing_cleanup_counts(self):
+        for execution in (
+                {'status': 'BLOCKED', 'cleanup_status': 'UNKNOWN'},
+                {'status': 'BLOCKED'},
+                {'status': 'BLOCKED', 'cleanup_status': None},
+                None, 'CONFIRMED', []):
+            with self.subTest(execution=execution):
+                self._assert_counted(_no_work(execution=execution))
+        developer = _no_work()
+        del developer['execution']
+        self._assert_counted(developer)
+
+    def test_missing_artifact_fields_count(self):
+        for key in ('artifact', 'artifact_sha256'):
+            developer = _no_work()
+            del developer[key]
+            with self.subTest(key=key):
+                self._assert_counted(developer)
+
+    def test_other_outcomes_count(self):
+        for overrides in (
+                {'state': 'DEVELOPER_RESPONDED', 'error_code': None},
+                {'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                 'error_code': 'CODEX_TIMEOUT'},
+                {'state': 'DEVELOPER_OUTCOME_UNKNOWN', 'error_code': None},
+                {'state': 'DEVELOPER_OUTPUT_REJECTED',
+                 'error_code': 'CODEX_BLOCKED'},
+                {'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                 'error_code': 'CODEX_NOT_BLOCKED_X'}):
+            with self.subTest(overrides=overrides):
+                self._assert_counted(_no_work(**overrides))
+
+    def test_unreadable_record_still_fails_closed(self):
+        store = self._store(_no_work())
+        store.records[self._NEWEST]['developer'] = 'unreadable'
+        with self.assertRaisesRegex(
+                LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+
+    def test_counted_record_without_valid_timestamp_is_unavailable(self):
+        store = self._store(_no_work(changed_files=['a.py'], created_at='bad'))
+        with self.assertRaisesRegex(
+                LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+
+    def test_skip_does_not_hide_a_reached_cap(self):
+        store = self._store(_no_work())
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
+            task_submission_cli._check_delegate_repair_cap(
+                _args(high_debug_ref=None, high_debug_task=None), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_skip_can_bring_count_below_cap(self):
+        store = _Store(count=1 + MAX_REPAIR_ATTEMPTS)
+        store.records[self._NEWEST]['developer'] = _no_work()
+        task_submission_cli._check_delegate_repair_cap(
+            _args(high_debug_ref=None, high_debug_task=None), store)
+        self.assertEqual(store.recorded, [])
+
+
 if __name__ == '__main__':
     unittest.main()
+
