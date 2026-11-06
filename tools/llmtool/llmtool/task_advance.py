@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from argparse import Namespace
 
@@ -37,6 +38,10 @@ def _publish_run_gh(root, args):
                           check=False, timeout=30)
 
 
+def _publish_pause(seconds):
+    time.sleep(seconds)
+
+
 def _publish_output(result):
     if type(getattr(result, 'stdout', None)) is bytes:
         try:
@@ -58,7 +63,65 @@ def _publish_command(runner, root, args, *, code='PUBLISH_COMMAND_FAILED'):
     return _publish_output(result)
 
 
-def _publish_pr(gh_runner, root, branch, task_id, expected_head):
+def _publication_text(record, executor_task, branch):
+    """Build publication title/body from the screened PM intake when readable."""
+    task_id = record.get('task_id') if type(record) is dict else None
+    old_title = f'llmtool Task {task_id}'
+    old_body = f'Automated publication for llmtool Task {task_id}.'
+    response = record.get('response') if type(record) is dict else None
+    assignment = record.get('pm_assignment') if type(record) is dict else None
+    summary = None
+    try:
+        response = json.loads(response)
+        if type(response) is dict and type(response.get('summary')) is str:
+            summary = response['summary'].strip()
+    except (TypeError, ValueError):
+        pass
+    title = re.sub(r'\s+', ' ', summary).strip()[:120] if summary else old_title
+    if not summary:
+        return title, old_body
+
+    try:
+        if type(assignment) is not dict:
+            return title, old_body
+        goal = assignment.get('goal')
+        acceptance = assignment.get('acceptance')
+        if (type(goal) is not str or not goal.strip() or type(acceptance) is not list or
+                any(type(item) is not str or not item.strip() for item in acceptance) or
+                type(task_id) is not str or type(executor_task) is not str or
+                type(branch) is not str):
+            return title, old_body
+        body = '\n'.join([
+            summary, '', goal.strip(), '', 'Acceptance:',
+            *[f'- {item.strip()}' for item in acceptance], '',
+            f'Task ID: {task_id}', f'D6 executor: {executor_task}',
+            f'Branch: {branch}',
+        ])
+        return title, body
+    except (TypeError, ValueError, IndexError):
+        return title, old_body
+
+
+def _find_published_pr(gh_runner, root, branch, expected_head):
+    """Find one PR for an exact published D6 head, without changing GitHub."""
+    try:
+        output = _publish_command(gh_runner, root,
+            ['pr', 'list', '--head', branch, '--state', 'all',
+             '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
+        pulls = json.loads(output)
+    except Exception:
+        return None
+    if type(pulls) is not list:
+        return None
+    matches = [pull for pull in pulls if type(pull) is dict and
+               pull.get('headRefOid') == expected_head]
+    if len(matches) != 1:
+        return None
+    number = matches[0].get('number')
+    return number if type(number) is int and number > 0 else None
+
+
+def _publish_pr(gh_runner, root, branch, task_id, expected_head, title, body):
     output = _publish_command(gh_runner, root,
         ['pr', 'list', '--head', branch, '--state', 'open',
          '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
@@ -71,8 +134,7 @@ def _publish_pr(gh_runner, root, branch, task_id, expected_head):
     if not pulls:
         _publish_command(gh_runner, root,
             ['pr', 'create', '--head', branch,
-             '--title', f'llmtool Task {task_id}',
-             '--body', f'Automated publication for llmtool Task {task_id}.'],
+             '--base', 'main', '--title', title, '--body', body],
             code='PUBLISH_GITHUB_FAILED')
         output = _publish_command(gh_runner, root,
             ['pr', 'list', '--head', branch, '--state', 'open',
@@ -81,15 +143,26 @@ def _publish_pr(gh_runner, root, branch, task_id, expected_head):
             pulls = json.loads(output)
         except (ValueError, TypeError):
             raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
-    if type(pulls) is not list or not pulls:
-        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
-    pull = pulls[0]
-    number = pull.get('number') if type(pull) is dict else None
-    head = pull.get('headRefOid') if type(pull) is dict else None
-    if (type(number) is not int or number < 1 or type(head) is not str or
-            head != expected_head):
-        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
-    return number
+    for attempt in range(4):
+        if type(pulls) is not list or not pulls:
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+        pull = pulls[0]
+        number = pull.get('number') if type(pull) is dict else None
+        head = pull.get('headRefOid') if type(pull) is dict else None
+        if type(number) is not int or number < 1 or type(head) is not str:
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+        if head == expected_head:
+            return number
+        if attempt == 3:
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+        _publish_pause(2)
+        output = _publish_command(gh_runner, root,
+            ['pr', 'list', '--head', branch, '--state', 'open',
+             '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
+        try:
+            pulls = json.loads(output)
+        except (ValueError, TypeError):
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
 
 
 def _merge_refusal(code):
@@ -613,8 +686,40 @@ def _publish_task(record, d6, executor_task, *, git_runner=None, gh_runner=None,
         staged_paths = [path for path in staged.split('\0') if path]
         if not staged_paths or any(path not in write_paths for path in staged_paths):
             raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
+        title, _ = _publication_text(record, executor_task, branch)
         _publish_command(git_runner, root,
-            ['commit', '-m', f'llmtool Task {task_id}'])
+            ['commit', '-m', title, '-m', f'llmtool Task {task_id}'])
+        local_head = _publish_command(git_runner, root,
+            ['rev-parse', '--verify', 'HEAD']).strip()
+    # Bring the publication head up to date with main before recording it or
+    # pushing it, so the published PR and its checks bind the merged result.
+    _publish_command(git_runner, root, ['fetch', 'origin', 'main'])
+    try:
+        main_is_ancestor = git_runner(root, ['merge-base', '--is-ancestor', 'origin/main', 'HEAD'])
+    except Exception:
+        raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
+    ancestry_status = getattr(main_is_ancestor, 'returncode', 1)
+    if ancestry_status not in (0, 1):
+        raise _PublishRefusal('PUBLISH_COMMAND_FAILED')
+    if ancestry_status == 1:
+        try:
+            merged = git_runner(root, ['merge', '--no-edit', 'origin/main'])
+        except Exception:
+            raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
+        if getattr(merged, 'returncode', 1) != 0:
+            try:
+                conflicts = git_runner(root, ['ls-files', '--unmerged', '-z'])
+            except Exception:
+                conflicts = None
+            is_conflict = (getattr(conflicts, 'returncode', 1) == 0 and
+                           type(getattr(conflicts, 'stdout', None)) in (bytes, str) and
+                           bool(conflicts.stdout))
+            try:
+                git_runner(root, ['merge', '--abort'])
+            except Exception:
+                pass
+            raise _PublishRefusal('PUBLISH_MERGE_CONFLICT' if is_conflict else
+                                  'PUBLISH_COMMAND_FAILED')
         local_head = _publish_command(git_runner, root,
             ['rev-parse', '--verify', 'HEAD']).strip()
     if changed or d6.get('recorded_result_head') != local_head:
@@ -631,7 +736,8 @@ def _publish_task(record, d6, executor_task, *, git_runner=None, gh_runner=None,
         _publish_command(git_runner, root,
             ['push', 'origin', f'HEAD:refs/heads/{branch}'],
             code='PUBLISH_PUSH_FAILED')
-    number = _publish_pr(gh_runner, root, branch, task_id, local_head)
+    title, body = _publication_text(record, executor_task, branch)
+    number = _publish_pr(gh_runner, root, branch, task_id, local_head, title, body)
     return {'pr': number, 'head': local_head}
 
 
@@ -1051,6 +1157,14 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     number = _pr_number(record, pr_number)
     get = task_completion._github_get if github_get is None else github_get
     d6 = _d6_snapshot(record, executor_task) if type(executor_task) is str else None
+    if (number is None and type(d6) is dict and d6.get('dirty') is False and
+            type(d6.get('root')) is str and d6.get('root') and
+            type(d6.get('branch')) is str and d6.get('branch') and
+            type(d6.get('result_head')) is str and
+            d6.get('recorded_result_head') == d6.get('result_head')):
+        number = _find_published_pr(
+            _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
+            d6['root'], d6['branch'], d6['result_head'])
     try:
         pr = _pr_snapshot(number, get) if number is not None else None
     except Exception:

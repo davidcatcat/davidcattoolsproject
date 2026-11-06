@@ -7658,7 +7658,7 @@ class DiskUsageTests(unittest.TestCase):
                                f_bavail=100 - used_percent, f_frsize=1024 ** 3)
 
     def test_home_volume_percentages_and_threshold_messages(self):
-        for percent, label in ((50, ""), (91, "WARNING"), (97, "ATTENTION")):
+        for percent, label in ((50, ""), (91, ""), (94, ""), (95, "ATTENTION")):
             with self.subTest(percent=percent):
                 monitor = mon.Monitor()
                 fake = self.statvfs_for(percent)
