@@ -911,6 +911,56 @@ class ActivePMInboxTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(record['task_id'], task['task_id'])
 
+        # Also cover replacement between os.open() and the initial before = os.fstat(fd).
+        target_ino = path.stat().st_ino
+        before_calls = []
+
+        def replace_before_initial_fstat(fd):
+            info = original_fstat(fd)
+            if info.st_ino == target_ino:
+                before_calls.append(fd)
+                if len(before_calls) == 1:
+                    self.store._write(current, create=False)
+                    return original_fstat(fd)
+            return info
+
+        with patch('llmtool.task_store.os.fstat', side_effect=replace_before_initial_fstat):
+            record = self.store.get(task['task_id'])
+        self.assertEqual(len(before_calls), 1)
+        self.assertEqual(record['task_id'], task['task_id'])
+
+    def test_read_still_refuses_hard_linked_and_swapped_records(self):
+        task = self._record_pm()
+        path = self.store.root / (task['task_id'] + '.json')
+        hard_link = self.store.root / 'hard-link-copy'
+        os.link(path, hard_link)
+        try:
+            with self.assertRaises(LLMToolError) as linked:
+                self.store.get(task['task_id'])
+            self.assertEqual(linked.exception.task_store_error_code, 'TASK_STORE_INVALID')
+        finally:
+            hard_link.unlink()
+
+        # If a directory entry is swapped and no retry converges within the
+        # bounded window, read fails closed with TASK_STORE_BUSY; if the same
+        # inode is mutated in place (size/mtime/nlink mismatch), it fails closed
+        # with TASK_STORE_INVALID.
+        current = json.loads(path.read_text())
+        target_ino = path.stat().st_ino
+        original_stat = os.stat
+
+        def mutate_same_inode_on_current_stat(name, *, dir_fd=None, follow_symlinks=True):
+            info = original_stat(name, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+            if name == task['task_id'] + '.json' and info.st_ino == target_ino:
+                os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
+                return original_stat(name, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+            return info
+
+        with patch('llmtool.task_store.os.stat', side_effect=mutate_same_inode_on_current_stat):
+            with self.assertRaises(LLMToolError) as mutated:
+                self.store.get(task['task_id'])
+        self.assertEqual(mutated.exception.task_store_error_code, 'TASK_STORE_INVALID')
+
     # Session-file checks ----------------------------------------------------
 
     def test_session_file_must_be_a_regular_file_owned_by_the_user(self):

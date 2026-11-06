@@ -2227,17 +2227,22 @@ class TaskStore:
 
     def _read_at(self, directory, task_id):
         name = self._name(task_id)
-        for attempt in range(3):
+        deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+        while True:
+            fd = None
             try:
                 fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                              dir_fd=directory)
                 before = os.fstat(fd)
                 if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or
-                        stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or
+                        stat.S_IMODE(before.st_mode) != 0o600 or
+                        before.st_nlink not in (0, 1) or
                         before.st_size > MAX_RECORD_BYTES):
                     os.close(fd)
+                    fd = None
                     _fail()
                 with os.fdopen(fd, 'rb') as stream:
+                    fd = None
                     raw = stream.read(MAX_RECORD_BYTES + 1)
                     stream.seek(0)
                     repeated = stream.read(MAX_RECORD_BYTES + 1)
@@ -2248,10 +2253,14 @@ class TaskStore:
                         after.st_nlink not in (0, 1)):
                     _fail()
                 if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
-                    if attempt < 2:
+                    if time.monotonic() < deadline:
                         continue
                     _fail('TASK_STORE_BUSY')
-                if _identity(before) != _identity(after) or _identity(before) != _identity(current):
+                # Opened fd and current directory entry are the same inode; it
+                # must still be a single-link live entry with identical metadata.
+                if (_identity(before) != _identity(after) or
+                        _identity(before) != _identity(current) or
+                        current.st_nlink != 1):
                     _fail()
                 value = json.loads(raw.decode('utf-8'), object_pairs_hook=self._unique_pairs,
                                    parse_constant=lambda _: _fail())
@@ -2262,8 +2271,18 @@ class TaskStore:
                 raise
             except FileNotFoundError:
                 raise LLMToolError('task not found') from None
+            except OSError as exc:
+                if _is_contention_error(exc):
+                    if time.monotonic() < deadline:
+                        time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
+                        continue
+                    _fail('TASK_STORE_BUSY')
+                _fail()
             except Exception:
                 _fail()
+            finally:
+                if fd is not None:
+                    os.close(fd)
 
     @staticmethod
     def _unique_pairs(pairs):
