@@ -41,7 +41,10 @@ from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, 
                                UnsupportedBoundary, for_platform, load_route_config, run_route)
 from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent_usage,
                                         cleanup_audit_copies)
-from .developer_routes.agy import MAX_PROMPT_BYTES as AGY_MAX_PROMPT_BYTES
+from .developer_routes.agy import (
+    MAX_PROMPT_BYTES as AGY_MAX_PROMPT_BYTES,
+    _CONVERSATION as AGY_CONVERSATION,
+)
 from .developer_routes.claude import MAX_PROMPT_BYTES as CLAUDE_MAX_PROMPT_BYTES
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_output_excerpts import _emitted_sensitive
@@ -3273,6 +3276,21 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None}, usage=usage)
+        if (type(result.session_id) is str and
+                AGY_CONVERSATION.fullmatch(result.session_id)):
+            binding = _bind_codex_native_session(registration, result.session_id)
+            developer['execution']['native_session_binding'] = binding
+            if binding == 'BOUND':
+                bound_registration = task_completion.read_d6_registration(
+                    registration.task_id, registration.common_dir)
+                if bound_registration != dataclasses.replace(
+                        registration, native_session_id=result.session_id):
+                    raise RouteError('AGY_D6_BINDING_CHANGED')
+                registration = bound_registration
+                for evidence in (completion['evidence'],
+                                 developer['direct_result_callback']['evidence']):
+                    evidence['executor_native_session_id'] = registration.native_session_id
+                    evidence['executor_native_session'] = 'VERIFIED'
     except RouteError as exc:
         error_code = ('AGY_DISPATCH_DENIED' if owner_gate_denied else exc.code)
         developer.update(state='BLOCKED', provider_type='agy-cli', model=model,
