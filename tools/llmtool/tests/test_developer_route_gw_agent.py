@@ -10,10 +10,12 @@ import tempfile
 import unittest
 from unittest import mock
 
-from llmtool.developer_routes import GwAgentRoute, RouteError, load_route_config
+from llmtool import task_store
+from llmtool.developer_routes import GwAgentRoute, RouteError, for_platform, load_route_config
 from llmtool.developer_routes import gw_agent
 from llmtool.developer_routes.gw_agent import _scope_digest
 from llmtool.developer_routes.base import capture_snapshot, run_route
+from llmtool.developer_routes.write_boundary import SandboxExecBoundary, UnsupportedBoundary
 
 
 class Boundary:
@@ -435,14 +437,105 @@ class GwAgentRouteTests(unittest.TestCase):
         self.assertLessEqual(len(caught.exception.code), 64)
         self.assertEqual(caught.exception.facts['gateway_code'], gateway_code)
 
-    def test_gateway_usage_keeps_unknown_and_partial_values(self):
-        self.assertEqual(gw_agent._normalize_gw_agent_usage(None), {
-            'status': 'UNKNOWN', 'calls': 0, 'calls_without_usage': 0,
-            'input_tokens': None, 'output_tokens': None})
-        self.assertEqual(gw_agent._normalize_gw_agent_usage({
-            'status': 'PARTIAL', 'input_tokens': 12, 'output_tokens': None,
-            'provider_private_field': 'discarded'}), {
-                'status': 'PARTIAL', 'input_tokens': 12, 'output_tokens': None})
+    def test_reported_usage_becomes_the_triplet_the_real_task_store_accepts(self):
+        usage = gw_agent._normalize_gw_agent_usage({
+            'status': 'REPORTED', 'calls': 7, 'calls_without_usage': 0,
+            'input_tokens': 8813, 'output_tokens': 908,
+            'provider_private_field': 'discarded'})
+        self.assertEqual(usage, {'prompt_tokens': 8813, 'completion_tokens': 908,
+                                 'total_tokens': 9721})
+        # The CLI normalizes the parsed value a second time.
+        self.assertEqual(gw_agent._normalize_gw_agent_usage(dict(usage)), usage)
+        usage['served_model'] = 'qwen3.8-27b'
+        task_store._validate_usage(usage)
+
+    def test_incomplete_usage_is_unknown_and_never_estimated(self):
+        for value in (None, 'bad', {}, {'status': 'UNKNOWN', 'input_tokens': None},
+                      {'status': 'PARTIAL', 'input_tokens': 12, 'output_tokens': 3},
+                      {'status': 'REPORTED', 'input_tokens': 12, 'output_tokens': None},
+                      {'status': 'REPORTED', 'input_tokens': True, 'output_tokens': 1},
+                      {'status': 'REPORTED', 'input_tokens': -1, 'output_tokens': 1},
+                      {'status': 'REPORTED', 'input_tokens': 50_000_001, 'output_tokens': 1}):
+            with self.subTest(value=value):
+                self.assertIsNone(gw_agent._normalize_gw_agent_usage(value))
+
+    def test_parse_output_hands_the_store_shape_to_the_cli(self):
+        self.route.validate_request(self.request())
+        result = {'schema_version': 1, 'status': 'DONE', 'code': None,
+                  'run_id': 'a' * 24, 'session_id': None, 'task_id': 'task-001',
+                  'changed_paths': [], 'summary': 'done', 'served_model': 'fake-model',
+                  'turns': 1, 'budget_used': {}, 'audit_sha256': 'b' * 64,
+                  'usage': {'status': 'REPORTED', 'input_tokens': 2, 'output_tokens': 3}}
+        self.route._result = result
+        self.assertEqual(self.route.parse_output(b'', b'', '')['usage'], {
+            'prompt_tokens': 2, 'completion_tokens': 3, 'total_tokens': 5})
+        # The CLI must see None here: a dict would claim CLI_REPORTED usage.
+        self.route._result = dict(result, usage={'status': 'UNKNOWN', 'input_tokens': None})
+        self.assertIsNone(self.route.parse_output(b'', b'', '')['usage'])
+
+    def test_last_tool_failure_prefers_the_failed_write_over_later_probing(self):
+        def tool(name, code, ok=False):
+            return json.dumps({'type': 'tool', 'tool': name, 'ok': ok, 'code': code}).encode()
+
+        # The tool order of live Task 111797e9: a failed write, then read probes.
+        live = [b'{"type":"header"}', tool('read_file', 'NOT_FOUND'),
+                tool('apply_edit', 'OS_ERROR'), tool('list_dir', None, ok=True),
+                tool('apply_edit', 'PERMISSION_DENIED'), tool('list_dir', 'NOT_FOUND'),
+                tool('grep', None, ok=True), tool('finish', None, ok=True)]
+        self.assertEqual(gw_agent._last_tool_failure(live), 'APPLY_EDIT_PERMISSION_DENIED')
+        self.assertEqual(gw_agent._last_tool_failure(
+            [tool('read_file', 'NOT_FOUND'), tool('grep', 'BAD_ARGUMENTS')]),
+            'GREP_BAD_ARGUMENTS')
+
+    def test_last_tool_failure_keeps_only_bounded_known_values(self):
+        for line in (b'not json', b'[]',
+                     json.dumps({'type': 'tool', 'tool': 'not_executed', 'ok': False,
+                                 'code': 'NOT_EXECUTED'}).encode(),
+                     json.dumps({'type': 'tool', 'tool': 'grep', 'ok': False,
+                                 'code': 'raw provider text'}).encode(),
+                     json.dumps({'type': 'tool', 'tool': 'grep', 'ok': False,
+                                 'code': 'A' * 40}).encode(),
+                     json.dumps({'type': 'tool', 'tool': 'grep', 'ok': False,
+                                 'code': None}).encode()):
+            with self.subTest(line=line):
+                self.assertIsNone(gw_agent._last_tool_failure([line]))
+
+    def test_every_tool_failure_fits_the_task_error_code_uncut(self):
+        prefix = 'DEVELOPER_GW_AGENT_BLOCKED_'
+        longest = 'A' * (37 - len('APPLY_EDIT_'))
+        reason = gw_agent._last_tool_failure([json.dumps(
+            {'type': 'tool', 'tool': 'apply_edit', 'ok': False, 'code': longest}).encode()])
+        self.assertLessEqual(len(prefix + reason), 64)
+
+    def test_model_blocked_status_reports_the_tool_failure_not_its_text(self):
+        self.route._status, self.route._gateway_code = 'BLOCKED', 'MODEL_REPORTED_BLOCKED'
+        with self.assertRaises(RouteError) as caught:
+            self.route.validate_status({})
+        self.assertEqual(caught.exception.facts['gateway_code'], 'MODEL_REPORTED_BLOCKED')
+        self.route._tool_failure = 'APPLY_EDIT_PERMISSION_DENIED'
+        with self.assertRaises(RouteError) as caught:
+            self.route.validate_status({})
+        self.assertEqual(caught.exception.code, 'GW_AGENT_BLOCKED')
+        self.assertEqual(caught.exception.facts['gateway_code'],
+                         'APPLY_EDIT_PERMISSION_DENIED')
+        # Other gateway outcomes already name their cause.
+        self.route._gateway_code = 'NO_TOOL_CALL'
+        with self.assertRaises(RouteError) as caught:
+            self.route.validate_status({})
+        self.assertEqual(caught.exception.facts['gateway_code'], 'NO_TOOL_CALL')
+
+    def test_route_requests_the_gateway_temp_allowance_from_the_sandbox(self):
+        plain = SandboxExecBoundary(executable='/bin/true', denied_dirs=('blocked',),
+                                    tmpdir='/tmp')
+        configured = self.route.configure_boundary(plain)
+        self.assertIsInstance(configured, SandboxExecBoundary)
+        self.assertTrue(configured.allow_gw_agent_tmp)
+        self.assertEqual((configured.executable, configured.denied_dirs, configured.tmpdir),
+                         ('/bin/true', ('blocked',), '/tmp'))
+        self.assertFalse(plain.allow_gw_agent_tmp)
+        unsupported = UnsupportedBoundary()
+        self.assertIs(self.route.configure_boundary(unsupported), unsupported)
+        self.assertIsNone(self.route.configure_boundary(None))
 
     def test_status_exit_model_and_quota_mapping(self):
         for status, code, exit_code in (
@@ -615,6 +708,108 @@ class GwAgentRouteTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'GW_AGENT_MODEL_MISMATCH')
         self.assertEqual((self.root / 'source.py').read_text(), 'original\n')
         self.assertEqual(len(server.requests), 1)
+
+    def _alias_route(self, port):
+        config = dict(self.route.config, default_model='gw', expected_served_model='gw')
+        config['profile'] = dict(config['profile'], model='gw',
+                                 base_url=f'http://127.0.0.1:{port}/v1')
+        return GwAgentRoute(config)
+
+    def _fake_server(self):
+        gateway_tests = Path(self.route.package_path) / 'tests'
+        sys.path.insert(0, str(gateway_tests))
+        try:
+            from helpers import FakeServer, reply, tool_call
+        finally:
+            sys.path.remove(str(gateway_tests))
+        server = FakeServer()
+        self.addCleanup(server.close)
+        return server, reply, tool_call
+
+    def test_routing_alias_records_the_model_the_provider_really_served(self):
+        server, reply, tool_call = self._fake_server()
+        route = self._alias_route(server.port)
+        server.script.append(reply(tool_call('finish', summary='done'), model='qwen3.8-27b'))
+        request = dict(self.request(), model='gw')
+
+        result = self.run_route_with_credential(
+            route, request, gate=lambda: True, boundary=DirectBoundary(),
+            snapshot=capture_snapshot)
+
+        self.assertEqual(result.model, 'qwen3.8-27b')
+
+    def test_routing_alias_still_refuses_an_unknown_served_model(self):
+        server, reply, tool_call = self._fake_server()
+        route = self._alias_route(server.port)
+        unknown = reply(tool_call('finish', summary='done'))
+        del unknown['model']
+        server.script.append(unknown)
+
+        with self.assertRaises(RouteError) as caught:
+            self.run_route_with_credential(
+                route, dict(self.request(), model='gw'), gate=lambda: True,
+                boundary=DirectBoundary(), snapshot=capture_snapshot)
+
+        self.assertEqual(caught.exception.code, 'GW_AGENT_MODEL_UNVERIFIED')
+
+    def test_routing_alias_served_model_is_refused_as_unverified(self):
+        server, reply, tool_call = self._fake_server()
+        route = self._alias_route(server.port)
+        server.script.append(reply(tool_call('finish', summary='done'), model='gw'))
+
+        with self.assertRaises(RouteError) as caught:
+            self.run_route_with_credential(
+                route, dict(self.request(), model='gw'), gate=lambda: True,
+                boundary=DirectBoundary(), snapshot=capture_snapshot)
+
+        self.assertEqual(caught.exception.code, 'GW_AGENT_MODEL_UNVERIFIED')
+        route._result = {'served_model': 'gw'}
+        self.assertIsNone(route.verified_model('', 'gw'))
+
+    def test_blocked_run_keeps_the_tool_code_and_drops_the_model_summary(self):
+        server, reply, tool_call = self._fake_server()
+        self.route.profile['base_url'] = f'http://127.0.0.1:{server.port}/v1'
+        server.script.extend((
+            reply(tool_call('apply_edit', path='other.py', new='x', create=True),
+                  model='fake-model'),
+            reply(tool_call('finish', summary='raw provider words', status='blocked'),
+                  model='fake-model')))
+
+        with self.assertRaises(RouteError) as caught:
+            self.run_route_with_credential(
+                self.route, self.request(), gate=lambda: True,
+                boundary=DirectBoundary(), snapshot=capture_snapshot)
+
+        self.assertEqual(caught.exception.code, 'GW_AGENT_BLOCKED')
+        self.assertEqual(caught.exception.facts,
+                         {'gateway_code': 'APPLY_EDIT_OUT_OF_SCOPE_WRITE'})
+        self.assertNotIn('raw provider words', repr(caught.exception.facts))
+        self.assertFalse((self.root / 'other.py').exists())
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'requires real macOS sandbox-exec')
+    def test_real_sandbox_creates_only_the_allowed_file_through_the_default_boundary(self):
+        """The CLI passes a plain for_platform(); the route must still be able to write."""
+        server, reply, tool_call = self._fake_server()
+        route = self._alias_route(server.port)
+        target = 'gw-agent-synthetic.txt'
+        server.script.extend((
+            reply(tool_call('apply_edit', path=target, new='hello synthetic\n', create=True),
+                  model='qwen3.8-27b'),
+            reply(tool_call('finish', summary='done'), model='qwen3.8-27b')))
+        request = dict(self.request(), model='gw', write_paths=[target])
+        request['task'] = dict(request['task'], read_paths=[target], write_paths=[target])
+
+        result = self.run_route_with_credential(
+            route, request, gate=lambda: True, boundary=for_platform(),
+            snapshot=capture_snapshot)
+
+        self.assertEqual(result.status, 'DONE')
+        self.assertEqual(result.model, 'qwen3.8-27b')
+        self.assertEqual(result.changed_files, (target,))
+        self.assertEqual((self.root / target).read_text(), 'hello synthetic\n')
+        status = subprocess.check_output(
+            ['/usr/bin/git', '-C', str(self.root), 'status', '--porcelain'], text=True)
+        self.assertEqual(status, f'?? {target}\n')
 
 
 if __name__ == '__main__':
