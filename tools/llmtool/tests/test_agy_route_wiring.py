@@ -27,7 +27,7 @@ class AgyRouteWiringTests(unittest.TestCase):
                           decisions=None, repair_packet=None, usage=None,
                           binding_changes=False, fail_success_persist=False,
                           read_paths=None, changed_paths=None, request='AGY goal',
-                          goal='AGY goal'):
+                          goal='AGY goal', session_id='conversation_12345678'):
         task_id = 'a' * 32
         task = {
             'schema_version': 2, 'task_id': task_id, 'run_id': 'b' * 32,
@@ -67,8 +67,9 @@ class AgyRouteWiringTests(unittest.TestCase):
         callback = {'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id}
         usage = ({'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
                  if usage is None else usage)
-        result = SimpleNamespace(session_id='conversation_12345678', exit_code=0,
+        result = SimpleNamespace(session_id=session_id, exit_code=0,
             stdout_sha256='e' * 64, elapsed_ms=42, cleanup_status='CONFIRMED', usage=usage)
+        bound_registration = [registration]
         allowed = SimpleNamespace(allowed=True, reason_code='OWNER_ASSIGNMENT_MATCHED')
         denied = SimpleNamespace(allowed=False, reason_code='OWNER_ASSIGNMENT_MISMATCH')
         gate_decisions = iter(decisions or (allowed, allowed))
@@ -112,7 +113,12 @@ class AgyRouteWiringTests(unittest.TestCase):
                               next(binding_results) if binding_changes else
                               (registration, snapshot))), \
              patch.object(task_submission_cli.task_completion, 'read_d6_registration',
-                          return_value=registration), \
+                          side_effect=lambda *_args, **_kwargs: bound_registration[0]), \
+             patch.object(task_submission_cli, '_bind_codex_native_session',
+                          side_effect=lambda _registration, native: (
+                              bound_registration.__setitem__(0, SimpleNamespace(
+                                  **{**registration.__dict__,
+                                     'native_session_id': native})) or 'BOUND')) , \
              patch.object(task_submission_cli.task_completion, '_worktree_diff',
                           return_value=(changed_paths or ['src.py'], diff_bytes)), \
              patch.object(task_submission_cli, '_assignment_paths',
@@ -182,8 +188,25 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
         self.assertEqual(task['developer']['provider_profile'], 'agy')
         self.assertEqual(task['developer']['direct_result_callback']['state'], 'WAITING_EXECUTOR')
+        for evidence in (task['completion']['evidence'],
+                        task['developer']['direct_result_callback']['evidence']):
+            self.assertEqual(evidence['executor_native_session_id'], 'conversation_12345678')
+            self.assertEqual(evidence['executor_native_session'], 'VERIFIED')
         self.assertEqual(inbox_events, [{'task_id': 'a' * 32,
                                          'executor_task_id': 'executor-d6'}])
+
+    def test_agy_done_without_session_id_keeps_native_session_unverified(self):
+        status, task, _inbox_events, _prompts = self._run_agy_delegate(session_id=None)
+        self.assertEqual(status, 0)
+        self.assertEqual(task['developer']['execution']['status'], 'DONE')
+        for evidence in (task['completion']['evidence'],
+                        task['developer']['direct_result_callback']['evidence']):
+            self.assertIsNone(evidence['executor_native_session_id'])
+            self.assertEqual(evidence['executor_native_session'], 'UNKNOWN')
+
+    def test_reviewer_with_executor_native_session_is_not_independent(self):
+        self.assertFalse(task_submission_cli._reviewer_native_session_independent(
+            'same-session', 'same-session', 'codex-session'))
 
     def test_agy_prompt_contains_scope_but_no_source_file_payload(self):
         _status, _task, _inbox_events, prompts = self._run_agy_delegate()

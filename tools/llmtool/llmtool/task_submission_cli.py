@@ -3264,15 +3264,37 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             raise RouteError('AGY_WRITE_SCOPE_VIOLATION')
         artifact = raw.decode('utf-8', 'strict')
         usage = _normalize_agy_usage(result.usage)
+        native_session_id = result.session_id
+        if (type(native_session_id) is not str or
+                re.fullmatch(r'[A-Za-z0-9_-]{8,128}', native_session_id) is None):
+            native_session_id = None
+        for evidence in (completion['evidence'],
+                         developer['direct_result_callback']['evidence']):
+            evidence['executor_native_session_id'] = None
+            evidence['executor_native_session'] = 'UNKNOWN'
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
             error_code=None, execution={
-                'status': 'DONE', 'native_session_id': result.session_id,
+                'status': 'DONE', 'native_session_id': native_session_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
                 'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None}, usage=usage)
+        if native_session_id is not None:
+            binding = _bind_codex_native_session(registration, native_session_id)
+            developer['execution']['native_session_binding'] = binding
+            if binding == 'BOUND':
+                bound_registration = task_completion.read_d6_registration(
+                    registration.task_id, registration.common_dir)
+                if bound_registration != dataclasses.replace(
+                        registration, native_session_id=native_session_id):
+                    raise RouteError('AGY_D6_BINDING_CHANGED')
+                registration = bound_registration
+                for evidence in (completion['evidence'],
+                                 developer['direct_result_callback']['evidence']):
+                    evidence['executor_native_session_id'] = registration.native_session_id
+                    evidence['executor_native_session'] = 'VERIFIED'
     except RouteError as exc:
         error_code = ('AGY_DISPATCH_DENIED' if owner_gate_denied else exc.code)
         developer.update(state='BLOCKED', provider_type='agy-cli', model=model,
