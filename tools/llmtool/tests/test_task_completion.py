@@ -311,11 +311,13 @@ class TaskCompletionTests(unittest.TestCase):
 
     def _modify_delete_conflict_head(self, conflict_path):
         """Create a trusted-main modify/delete conflict resolved as deletion."""
+        self._git('config', 'merge.renames', 'false')
         self._git('checkout', '-b', 'main-conflict', self.source_sha)
         conflict_file = self.root / conflict_path
         conflict_file.write_text('Trusted main modification.\n')
         self._git('add', conflict_path)
         self._git('commit', '-m', 'trusted main modifies conflict path')
+        trusted_base = self._git('rev-parse', 'HEAD')
 
         self._git('checkout', 'feat/executor')
         self._git('reset', '--hard', self.source_sha)
@@ -325,8 +327,10 @@ class TaskCompletionTests(unittest.TestCase):
             self._git('add', self.source_path)
         else:
             source_file.write_text(source_file.read_text() + '\n# scoped developer change\n')
-            self._git('add', self.source_path)
+            conflict_file.unlink()
+            self._git('add', self.source_path, conflict_path)
         self._git('commit', '-m', 'scoped developer change')
+        segment_start = self._git('rev-parse', 'HEAD')
         initial_merge = subprocess.run(
             ['/usr/bin/git', 'merge', '--no-ff', 'main-conflict', '-m', 'merge trusted main'],
             cwd=self.root, text=True, capture_output=True)
@@ -336,23 +340,9 @@ class TaskCompletionTests(unittest.TestCase):
             self._git('add', self.source_path)
             self._git('commit', '-m', 'resolve initial in-scope conflict')
         else:
-            self.assertEqual(initial_merge.returncode, 0, initial_merge.stderr)
-        segment_start = self._git('rev-parse', 'HEAD')
-
-        self._git('checkout', 'main-conflict')
-        conflict_file.unlink()
-        self._git('add', conflict_path)
-        self._git('commit', '-m', 'trusted main deletes conflict path')
-        trusted_base = self._git('rev-parse', 'HEAD')
-
-        self._git('checkout', 'feat/executor')
-        merge = subprocess.run(['/usr/bin/git', 'merge', '--no-ff', 'main-conflict',
-                                '-m', 'merge trusted deletion'], cwd=self.root,
-                               text=True, capture_output=True)
-        self.assertNotEqual(merge.returncode, 0)
-        conflict_file.unlink(missing_ok=True)
-        self._git('add', '-A', conflict_path)
-        self._git('commit', '-m', 'resolve modify/delete as deletion')
+            self.assertNotEqual(initial_merge.returncode, 0, initial_merge.stderr)
+            self._git('add', '-A', conflict_path)
+            self._git('commit', '-m', 'resolve modify/delete as deletion')
         result = self._git('rev-parse', 'HEAD')
         registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
         record = json.loads(registry_path.read_text())
