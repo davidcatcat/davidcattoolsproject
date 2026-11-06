@@ -1,16 +1,20 @@
 """Adversarial confinement tests against the Workspace directly."""
 from __future__ import annotations
 
+import errno
+import json
 import os
 import shutil
 import socket
 import stat
 import tempfile
 import unittest
+from unittest import mock
 
 import helpers  # noqa: F401  (sets sys.path)
 from api_agent_gateway.confine import (TEMP_PREFIX, ConfinementError, ConfinementViolation, Scope, Workspace,
                                        normalize)
+from api_agent_gateway.tools import ToolExecutor
 
 
 class Base(unittest.TestCase):
@@ -259,6 +263,22 @@ class WriteTests(Base):
     def test_fifo_write_refused(self):
         os.mkfifo(os.path.join(self.root, 'src', 'pkg', 'p.py'))
         self.assertEqual(self.code(self.ws.apply_edit, 'src/pkg/p.py', 'a', 'b', False), 'SPECIAL_FILE')
+
+
+
+class ToolOsErrorTests(Base):
+    def test_operating_system_refusal_reaches_the_model_as_a_stable_code(self):
+        # sandbox-exec refuses the temp file with EPERM, outside any path check.
+        executor = ToolExecutor(self.ws, 4096)
+        args = json.dumps({'path': 'src/new.py', 'new': 'x', 'create': True})
+        with mock.patch.object(self.ws, 'apply_edit',
+                               side_effect=PermissionError(errno.EPERM, 'denied', '/private/path')):
+            outcome = executor.execute('apply_edit', args)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.code, 'PERMISSION_DENIED')
+        self.assertNotIn('/private/path', outcome.content)
+        with mock.patch.object(self.ws, 'apply_edit', side_effect=OSError(errno.EIO, 'io')):
+            self.assertEqual(executor.execute('apply_edit', args).code, 'OS_ERROR')
 
 
 if __name__ == '__main__':

@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .confine import ConfinementError, ConfinementViolation, Workspace
+from .confine import ConfinementError, ConfinementViolation, Workspace, _oserror
 
 TOOL_SCHEMAS = [
     {'type': 'function', 'function': {
@@ -117,9 +117,12 @@ class ToolExecutor:
             raise
         except ConfinementError as exc:
             return _error(name, exc.code, exc.message, path if isinstance(path, str) else None)
-        except (OSError, ValueError) as exc:  # includes UnicodeError
-            code = 'OS_ERROR' if isinstance(exc, OSError) else 'INVALID_INPUT'
-            return _error(name, code, code.lower().replace('_', ' '), None)
+        except OSError as exc:
+            # A sandbox refusal must stay distinguishable from other OS failures.
+            mapped = _oserror(exc)
+            return _error(name, mapped.code, mapped.message, None)
+        except ValueError:  # includes UnicodeError
+            return _error(name, 'INVALID_INPUT', 'invalid input', None)
 
     def _list_dir(self, args: dict) -> ToolOutcome:
         rel, entries, truncated = self.ws.list_dir(args['path'])
