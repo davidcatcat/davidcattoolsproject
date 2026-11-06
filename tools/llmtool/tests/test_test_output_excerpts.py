@@ -492,6 +492,7 @@ class TestOutputExcerptsTests(unittest.TestCase):
                   'eyJaaaaaaaa/bbbbbbbb.cccccccc',
                   'a' + 'ey' + 'J' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8,  # synthetic-fixture: screen-tool test
                   )
+        # synthetic-fixture: screen-tool test
         cjk_jwt = '\u6e2c' + 'ey' + 'J' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8  # synthetic-fixture: screen-tool test
         self.assert_rejected(cjk_jwt.encode() + b'\n' + UNIT_FAILURE)
         for token in tokens:
@@ -502,6 +503,7 @@ class TestOutputExcerptsTests(unittest.TestCase):
                 self.assertEqual(result['test_status'], 'FAILED')
                 self.assertEqual(result['failure_ids'], [FAIL_ID])
 
+        # synthetic-fixture: screen-tool test
     def test_sensitive_values_directly_after_cjk_text_are_rejected(self):
         values = (
             'AK' + 'IA' + 'SYNTHETIC0TEST16',  # synthetic-fixture: screen-tool test
