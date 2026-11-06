@@ -3827,7 +3827,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             usage=usage, error_code=None,
             audit_sha256=audit_sha,
             audit_copy_path_sha256=hashlib.sha256(os.fsencode(route.audit_copy_path)).hexdigest(),
-            changed_files=changed_paths,
+            changed_files=list(changed_paths),
             execution={'status': 'DONE', 'native_session_id': result.session_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
                 'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
@@ -6120,7 +6120,11 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
     task = store.get(task_id)
     developer = task.get('developer')
     if (task['schema_version'] != 2 or task['state'] != 'PM_RESPONDED' or
+<<<<<<< ours
             type(developer) is not dict or developer.get('provider_profile') not in ('opencode', 'codex', 'agy', 'claude') or
+=======
+            type(developer) is not dict or developer.get('provider_profile') not in ('opencode', 'codex', 'agy', 'gw-agent') or
+>>>>>>> theirs
             developer.get('state') != 'DEVELOPER_RESPONDED' or
             developer.get('artifact') is None or developer.get('execution') is None or
             developer['execution'].get('status') not in ('SUCCEEDED', 'DONE') or
