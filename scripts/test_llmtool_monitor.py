@@ -1480,9 +1480,19 @@ class GitHubActivityTests(unittest.TestCase):
                     self.assertEqual(mon.owner_count_line(successful_source), expected_warning)
                     self.assertIn(expected_warning, mon.office_top(
                         successful_source, [], NOW))
-                    work = mon.work_board(
-                        successful_source, mon.PmBoard("ok", 0, [], [], []), NOW)
-                    self.assertIn((status, "!"), mon.board_view(work))
+                    for cut in (False, True):
+                        with self.subTest(comments_cut=cut):
+                            successful_source.comments_cut = cut
+                            work = mon.work_board(
+                                successful_source,
+                                mon.PmBoard("ok", 0, [], [], []), NOW)
+                            view = mon.board_view(work)
+                            lines = [text for text, _ in view]
+                            self.assertIn((status, "!"), view)
+                            self.assertEqual(
+                                lines[1].split(" · ")[3], "等你 ?")
+                            owner_index = lines.index("── 等你 ──")
+                            self.assertEqual(lines[owner_index + 1], "未知")
                 with self.assertRaises(SystemExit) as raised:
                     mon.main(["--help"])
                 self.assertEqual(raised.exception.code, 0)

@@ -4368,6 +4368,7 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
         out.extend((line, style) for line in lines)
 
     today = len(work.done) if work.github_known else "?"
+    owner_known = work.github_known and not GITHUB_IDENTITY_STATUS
     known_running = len(work.running)
     waiting_owner = sum(item.kind == "waiting_owner" for item in work.owner)
     other_owner = len(work.owner) - waiting_owner
@@ -4375,9 +4376,8 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
                      f"{waiting_owner}{'+' if work.owner_cut else ''}")
     other_count = ("?" if work.owner_cut and not other_owner else
                    f"{other_owner}{'+' if work.owner_cut else ''}")
-    owner_count = ("?" if work.github_known and work.owner_cut and not work.owner else
-                   f"{len(work.owner)}{'+' if work.owner_cut else ''}（等你決定 {waiting_count}，其他 Owner 請求 {other_count}）"
-                   if work.github_known else "?")
+    owner_count = ("?" if not owner_known or (work.owner_cut and not work.owner) else
+                   f"{len(work.owner)}{'+' if work.owner_cut else ''}（等你決定 {waiting_count}，其他 Owner 請求 {other_count}）")
     counts = (f"今天合併 {today} · 進行中 {known_running if work.github_known else '?'} · "
               f"等 PM {sum(item.next == 'PM' for item in work.running + work.queue + work.blocked) if work.github_known and work.board_known else '?'} · "
               f"等你 {owner_count} · 排隊 {len(work.queue) if work.board_known else '?'} · "
@@ -4402,7 +4402,7 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
         append_header(f"白板檔有 {work.skipped} 筆略過", "!")
     if work.note:
         append_header(work.note, "!")
-    sections = (("等你", work.owner, work.github_known), ("進行中", work.running, work.github_known),
+    sections = (("等你", work.owner, owner_known), ("進行中", work.running, work.github_known),
                 ("排隊", work.queue, work.board_known), ("卡住", work.blocked, work.board_known),
                 (f"今天完成（累計 {today}）", work.done, work.github_known),
                 ("PR 看板", work.prs, work.github_known))
