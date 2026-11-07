@@ -68,6 +68,16 @@ Before Mode B starts, post a `subpm-lease` claim comment on the WP Issue with `w
 
 Only the main PM merges, adopts Tasks, edits the #763 inventory or asks the Owner. A Mode B hand-back records: WP; Task IDs; D6 and lease-ref; Developer route and start receipt; PR; HEAD SHA; verdict comment URL; CI conclusion; open findings; lease state.
 
+### Large work packages (Owner 2026-11-07)
+
+The PM plans work as packages of 3 to 6 related items with one shared goal, known dependencies and shared acceptance ([Owner instruction, relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6704957386)). A package may hold several bounded PRs. Each PR keeps its own Task scope, acceptance and D6, with one writer per D6 and no conflicting writers.
+
+Packaging changes no gate. The per-D6 cap of three Developer runs (one run plus two repairs), the [High Debug rule](pm-continuation-reference.md#high-debug), safety, authorization, formal review, EC2 and exact-head CI apply to each PR as before. Splitting or merging work to get around them is not allowed.
+
+Independent packages run in parallel through Mode B sub-agent PMs with non-overlapping leases. Request formal review only for a finished PR head. On unfinished work, run only the checks that [Validate a Developer result before review](#validate-a-developer-result-before-review-owner-2026-11-02) allows, never tests inside a D6; final EC2, formal review and exact-head CI still decide.
+
+Owner-reserved decisions, new permissions and security boundaries still stop the dependent work for the Owner.
+
 ## BLOCKED: diagnose, then retry, reassign or isolate
 
 1. **Confirm the cause with evidence:** the exact error code, run/Task ID, observed time and the check that produced it. A stale comment, an assumption or a single indirect signal does not confirm a cause.
