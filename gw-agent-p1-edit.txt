@@ -4,7 +4,7 @@ synthetic-row-03 value=33
 synthetic-row-04 value=44
 synthetic-row-05 value=55
 synthetic-row-06 value=66
-synthetic-row-07 status=draft owner=nobody
+synthetic-row-07 status=final owner=nobody
 synthetic-row-08 value=88
 synthetic-row-09 value=99
 synthetic-row-10 value=110
