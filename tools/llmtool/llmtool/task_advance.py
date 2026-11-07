@@ -1041,6 +1041,21 @@ def _failure_reason(value):
     return None
 
 
+def _review_refusal(value):
+    """Return a well-formed refused-review dict for the advance result, else None."""
+    if type(value) is not dict:
+        return None
+    reason = _failure_reason(value.get('failure_reason'))
+    output = review_dispatch._refusal_output(
+        {key: item for key, item in value.items() if key in ('excerpt', 'label')})
+    receipt = value.get('receipt_path')
+    if (reason is None or output is None or
+            set(value) != {'failure_reason', 'receipt_path'} | set(output) or
+            (receipt is not None and type(receipt) is not str)):
+        return None
+    return dict(output, failure_reason=reason, receipt_path=receipt)
+
+
 def _head_review_claim(record, number, head):
     """Return the highest-version claim for one PR and head, if any."""
     matching = [claim for claim in _claims(record) if type(claim) is dict and
@@ -1728,6 +1743,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     step = decide(record, d6, pr, related)
     result, codes = None, []
     redispatch_reason = None
+    review_refusal = None
     if step == 'REVIEW_REDISPATCH':
         unusable = _head_review_claim(record, number, d6['result_head'])
         if unusable is not None and _review_verdict_absent(unusable, get):
@@ -1783,6 +1799,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             failure = _failure_reason(getattr(exc, 'review_failure_reason', None))
             if failure is not None:
                 codes.append(failure)
+            review_refusal = _review_refusal(getattr(exc, 'review_refusal', None))
         if type(result) is dict:
             review_text = result.get('review_text')
             if (result.get('state') == 'COMPLETED' and
@@ -2014,7 +2031,10 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         codes.append(step)
     next_action =('resume the reviewer to post its verdict' if step == 'REVIEW_NOT_POSTED'
                    else step)
-    return _ack_consumed_events(
-        {'task_id': task_id, 'step': step, 'result': result,
-         'next': next_action, 'codes': codes}, record, store,
-        d6.get('result_head') if type(d6) is dict else None)
+    output = {'task_id': task_id, 'step': step, 'result': result,
+              'next': next_action, 'codes': codes}
+    if review_refusal is not None and step == 'DISPATCH_REVIEW':
+        # Local refusal context for the PM only; it is never a verdict.
+        output['review_refusal'] = review_refusal
+    return _ack_consumed_events(output, record, store,
+                                d6.get('result_head') if type(d6) is dict else None)

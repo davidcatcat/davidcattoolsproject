@@ -40,12 +40,86 @@ def _unique_json_object(pairs):
     return result
 
 
-def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reason=None):
+def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reason=None,
+            output=None):
     error = LLMToolError(message)
     error.review_dispatch_code = code
     if reason is not None:
         error.review_failure_reason = reason
+    if output is not None:
+        # Exactly one of {'excerpt': text} or {'label': fixed label}. It is
+        # local-only refusal context and never a verdict.
+        error.review_refusal_output = output
     raise error from None
+
+
+# Fixed labels kept in place of a refused Codex final message.
+REVIEW_OUTPUT_WITHHELD = 'REVIEW_OUTPUT_WITHHELD'
+REVIEW_OUTPUT_ABSENT = 'REVIEW_OUTPUT_ABSENT'
+_REVIEW_EXCERPT_MAX_LINES = 40
+_REVIEW_EXCERPT_MAX_BYTES = 2048
+_REFUSAL_RECEIPT_KEEP = 64
+_REFUSAL_RECEIPT_NAME = re.compile(
+    r'review-refusal-[A-Za-z0-9_-]{1,128}-[0-9a-f]{40}-v[0-9]{1,4}\.json')
+
+
+def _refusal_output(value):
+    """Return a well-formed excerpt-or-label dict, else None."""
+    if type(value) is not dict or len(value) != 1:
+        return None
+    if 'label' in value:
+        return (dict(value) if value['label'] in
+                (REVIEW_OUTPUT_WITHHELD, REVIEW_OUTPUT_ABSENT) else None)
+    excerpt = value.get('excerpt')
+    if (type(excerpt) is not str or not excerpt.strip() or
+            len(excerpt.encode('utf-8', 'replace')) > _REVIEW_EXCERPT_MAX_BYTES):
+        return None
+    return {'excerpt': excerpt}
+
+
+def _write_refusal_receipt(store, *, task_id, pr, head, version, reviewer_task,
+                           failure_reason, output):
+    """Write one private local refusal receipt; return its path or None.
+
+    The receipt is local evidence only. Nothing reads it back as a verdict.
+    """
+    try:
+        root = getattr(store, 'root', None)
+        if not isinstance(root, Path):
+            return None
+        name = f'review-refusal-{task_id}-{head}-v{version}.json'
+        if (type(task_id) is not str or type(head) is not str or
+                type(version) is not int or _REFUSAL_RECEIPT_NAME.fullmatch(name) is None):
+            return None
+        from .high_debug import _create_private, _private_directory
+        directory = root.parent / 'review-refusals'
+        _private_directory(directory)
+        record = {'task_id': task_id, 'pr': pr, 'head': head, 'version': version,
+                  'reviewer_task': reviewer_task, 'failure_reason': failure_reason,
+                  'recorded_at': _now(), 'not_a_verdict': True}
+        record.update(output)
+        path = directory / name
+        _create_private(path, (json.dumps(record, sort_keys=True) + '\n').encode('utf-8'))
+        _prune_refusal_receipts(directory)
+        return str(path)
+    except Exception:
+        return None
+
+
+def _prune_refusal_receipts(directory):
+    """Keep only the newest receipts; other files are left alone."""
+    import stat
+    receipts = []
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if _REFUSAL_RECEIPT_NAME.fullmatch(entry.name) is None:
+                continue
+            info = entry.stat(follow_symlinks=False)
+            if stat.S_ISREG(info.st_mode):
+                receipts.append((info.st_mtime_ns, entry.name))
+    receipts.sort()
+    for _mtime, name in receipts[:-_REFUSAL_RECEIPT_KEEP]:
+        os.unlink(directory / name)
 
 
 def _now():
@@ -303,17 +377,23 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
             raise
         reason = getattr(exc, 'review_failure_reason', None)
         final = _codex_final_message(raw)
-        if final is not None and final.strip():
-            excerpt = final.encode('utf-8')[:2048].decode('utf-8', 'ignore')
-            try:
-                from .task_submission_cli import _screen_text
-                excerpt = _screen_text(excerpt, 2048)
-            except LLMToolError:
-                excerpt = ''
-            if excerpt:
-                _refuse('REVIEW_NOT_POSTED', 'Reviewer dispatch refused: ' + excerpt,
-                        reason=reason)
-        _refuse('REVIEW_NOT_POSTED', reason=reason)
+        if final is None or not final.strip():
+            _refuse('REVIEW_NOT_POSTED', reason=reason,
+                    output={'label': REVIEW_OUTPUT_ABSENT})
+        from .task_submission_cli import _screen_text
+        try:
+            # Screen the whole message first: a sensitive part past the cut
+            # still withholds every part of it, including earlier text.
+            _screen_text(final, _CODEX_REVIEW_MAX_OUTPUT)
+            lines = final.splitlines(keepends=True)[:_REVIEW_EXCERPT_MAX_LINES]
+            excerpt = ''.join(lines).encode('utf-8')[:_REVIEW_EXCERPT_MAX_BYTES]
+            excerpt = _screen_text(excerpt.decode('utf-8', 'ignore'),
+                                   _REVIEW_EXCERPT_MAX_BYTES)
+        except LLMToolError:
+            _refuse('REVIEW_NOT_POSTED', reason=reason,
+                    output={'label': REVIEW_OUTPUT_WITHHELD})
+        _refuse('REVIEW_NOT_POSTED', 'Reviewer dispatch refused: ' + excerpt,
+                reason=reason, output={'excerpt': excerpt})
 
 
 def _review_return(claim, result):
@@ -567,13 +647,30 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         reason = getattr(exc, 'review_failure_reason', None)
         if reason in REVIEW_FAILURE_REASONS:
             unknown['failure_reason'] = reason
+        claim_saved = False
         try:
             claimed = claims + [claim]
             updated_claims = [unknown if item is claim else item for item in claimed]
             store.compare_and_update(task_id, expected={'review_dispatch_claim': claimed},
                                      review_dispatch_claim=updated_claims)
+            claim_saved = True
         except Exception:
             pass
+        output = (_refusal_output(getattr(exc, 'review_refusal_output', None))
+                  if reason in REVIEW_FAILURE_REASONS else None)
+        if output is not None:
+            # The claim keeps only the fixed reason; the output stays in a
+            # private local receipt written after the UNKNOWN claim update.
+            receipt_path = None
+            if claim_saved:
+                receipt_path = _write_refusal_receipt(
+                    store, task_id=task_id, pr=pr_number, head=head, version=version,
+                    reviewer_task=reviewer_task, failure_reason=reason, output=output)
+            try:
+                exc.review_refusal = dict(output, failure_reason=reason,
+                                          receipt_path=receipt_path)
+            except Exception:
+                pass
         if getattr(exc, 'review_dispatch_code', None):
             raise
         _refuse('REVIEW_DISPATCH_OUTCOME_UNKNOWN')
