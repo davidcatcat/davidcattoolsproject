@@ -3,7 +3,8 @@
 Owner tests covered: (1) actionable work with no dispatch is flagged; (2) a Task
 done with no Reviewer is flagged; (4) changing only row text or time does not
 change a state; (5) a fake or stale Task ID is not RUNNING; (7) every Developer
-busy or waiting a legal authorization is not a PM fault.
+busy or waiting a legal authorization is not a PM fault. High Debug liveness
+defects F1-F9 (PR 1113) have permanent regressions, named in their class docstrings.
 """
 
 import contextlib
@@ -34,9 +35,13 @@ TASK_RUNNING = '1' * 32
 TASK_PENDING = '2' * 32
 TASK_REVIEW = '3' * 32
 TASK_UNKNOWN = '4' * 32
+TASK_CHILD = '5' * 32
+SESSION = '11111111-2222-3333-4444-555555555555'
+OTHER_SESSION = '66666666-7777-8888-9999-000000000000'
 ROOT = '/nonexistent-board-check'
 OPEN_PRS = 'pulls?state=open&per_page=100&page=1'
 CHECKS = f'commits/{HEAD}/check-runs?per_page=100'
+REVIEW_COMMENTS = 'issues/41/comments?per_page=100'
 ALLOWED_CODES = ('OWNER_POLICY_ALLOWED', 'OWNER_ASSIGNMENT_MATCHED')
 
 
@@ -47,8 +52,9 @@ def at(hour, minute=0, second=0):
 class FakeStore:
     """Read-only TaskStore stand-in; any write fails the test."""
 
-    def __init__(self, *records):
+    def __init__(self, *records, assignments=()):
         self.records = {item['task_id']: copy.deepcopy(item) for item in records}
+        self.assignments = list(assignments)
         self.writes = []
 
     def task_ids(self):
@@ -56,6 +62,9 @@ class FakeStore:
 
     def get(self, task_id):
         return copy.deepcopy(self.records[task_id])
+
+    def get_developer_assignments(self):
+        return copy.deepcopy(self.assignments)
 
     def _write(self, *args, **kwargs):
         self.writes.append((args, kwargs))
@@ -94,8 +103,16 @@ def policy(**codes):
     return evaluate
 
 
-def process(pid, d6_task, started_at):
-    return {'pid': pid, 'cwd': f'{ROOT}/{d6_task}', 'started_at': started_at}
+def process(pid, d6_task, started_at, *, sessions=()):
+    start_time = f'{started_at:%a %b} {started_at.day} {started_at:%H:%M:%S %Y}'
+    return {'pid': pid, 'cwd': f'{ROOT}/{d6_task}', 'started_at': started_at,
+            'start_time': start_time, 'native_session_ids': list(sessions)}
+
+
+def reads(*snapshots):
+    """A process adapter returning one snapshot per read, in order."""
+    remaining = iter(snapshots)
+    return lambda: [dict(item) for item in next(remaining)]
 
 
 def d6_reader(**snapshots):
@@ -123,13 +140,37 @@ def audit(when, *, worker='claude-developer', decision='ALLOWED', action='DISPAT
             'source_sha': 'f' * 40, 'contract_digest': 'f' * 64}
 
 
-def dispatching(task_id, d6_task='d6-run', *, profile='claude',
-                audits=('2026-11-07T11:00:00Z',)):
+def launch(pid=101, started_at=at(11, 30), *, start_time=None):
+    """The execution record TaskStore writes through its trusted launch path."""
+    # Raw ``ps -o lstart`` text pads the day, which the adapter normalizes.
+    raw = f'{started_at:%a %b} {started_at.day:>2} {started_at:%H:%M:%S %Y}'
+    return {'status': 'RUNNING', 'native_session_id': None, 'process_exit_code': None,
+            'stdout_sha256': None, 'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+            'usage_source': 'UNKNOWN', 'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None, 'child_pid': pid,
+            'child_start_time': raw if start_time is None else start_time, 'child_pgid': pid}
+
+
+def dispatching(task_id, d6_task='d6-run', *, profile='opencode',
+                audits=('2026-11-07T11:00:00Z',), execution=launch()):
     worker = worker_dispatch.worker_key_for(profile)
     return {'task_id': task_id, 'run_id': RUN, 'state': 'PM_RESPONDED',
             'developer': {'state': 'DEVELOPER_DISPATCHING', 'provider_profile': profile,
-                          'assignment_id': ASSIGNMENT, 'executor_task_id': d6_task},
+                          'assignment_id': ASSIGNMENT, 'executor_task_id': d6_task,
+                          'execution': execution},
             'dispatch_audit': [audit(item, worker=worker) for item in audits]}
+
+
+def claude_dispatching(task_id, d6_task='d6-run', **kwargs):
+    """Claude has no launch record; its attempt is proven by a claimed native session."""
+    return dispatching(task_id, d6_task, profile='claude', execution=None, **kwargs)
+
+
+def assignment(task_id, d6_task='d6-run', *, worker='claude-developer', session=SESSION):
+    return {'assignment_id': 'e' * 32, 'worker': worker, 'd6_task_id': d6_task,
+            'task_id': task_id, 'state': 'CLAIMED',
+            'claim': {'session_id': session, 'claimed_at': '2026-11-07T11:00:30Z',
+                      'account_dir_label': '0' * 16}}
 
 
 def pending(task_id):
@@ -172,9 +213,28 @@ def responded(task_id, d6_task='d6-dev', *, pr=41, claims=None, returned=False):
     return record
 
 
-def claim(*, head=HEAD, state='DISPATCHED', claimed_at='2026-11-07T11:30:00.000000Z'):
-    return {'pr': 41, 'head_sha': head, 'version': 1, 'state': state,
-            'reviewer_task': 'd6-rev', 'claimed_at': claimed_at}
+def claim(*, head=HEAD, state='DISPATCHED', claimed_at='2026-11-07T11:30:00.000000Z',
+          executor='d6-dev', session=SESSION):
+    return {'executor_task': executor, 'pr': 41, 'head_sha': head, 'version': 1,
+            'state': state, 'reviewer_task': 'd6-rev', 'native_session_id': session,
+            'claimed_at': claimed_at}
+
+
+def repairing(task_id, child_id=TASK_CHILD, *, executor='d6-dev'):
+    """A Task whose review failed, with one DISPATCHED repair claim on the head."""
+    record = responded(task_id, claims=[claim()])
+    record['completion_events'] = [{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                                    'outcome': 'REVIEW_FAIL'}]
+    record['review_repair_claims'] = [
+        {'executor_task': executor, 'pr': 41, 'head_sha': HEAD, 'version': 1, 'attempt': 1,
+         'state': 'DISPATCHED', 'comment_id': None, 'packet_sha256': 'f' * 64,
+         'claimed_at': '2026-11-07T11:40:00Z', 'repair_task_id': child_id}]
+    return record
+
+
+def repair_child(task_id=TASK_CHILD, d6_task='d6-dev'):
+    return dispatching(task_id, d6_task, audits=('2026-11-07T11:45:00Z',),
+                       execution=launch(301, at(11, 50)))
 
 
 def pull(number=41, *, state='open', merged=False, head=HEAD):
@@ -187,10 +247,11 @@ def checks(*statuses, head=HEAD):
     return {'total_count': len(runs), 'check_runs': runs}
 
 
-def run(rows, *, store=None, github=None, processes=(), d6=None, evaluate=None, now=NOW):
+def run(rows, *, store=None, github=None, processes=(), listing=None, d6=None,
+        evaluate=None, now=NOW):
     return board_check.check_board(
         rows, store=store or FakeStore(), github_get=github or FakeGitHub(),
-        list_processes=lambda: [dict(item) for item in processes],
+        list_processes=listing or (lambda: [dict(item) for item in processes]),
         read_d6=d6 or d6_reader(), evaluate=evaluate or policy(), now=now)
 
 
@@ -287,7 +348,7 @@ class DoneWithoutReviewerTests(BoardCheckCase):
 
     def test_head_bound_claim_with_live_reviewer_is_waiting_review(self):
         result = self.check(responded(TASK_REVIEW, claims=[claim()]),
-                            processes=[process(9, 'd6-rev', at(11, 31))])
+                            processes=[process(9, 'd6-rev', at(11, 31), sessions=[SESSION])])
         self.assertRow(result, 'task', board_check.WAITING_REVIEW, 'Reviewer process 9')
         self.assertEqual((result['result'], result['exit_code']), ('CLEAN', 0))
 
@@ -432,9 +493,9 @@ class FakeOrStaleTaskTests(BoardCheckCase):
         return run([{'id': 'task', 'task_id': task_id}], store=store, processes=processes,
                    d6=d6_reader(d6_run=d6_root('d6-run')))
 
-    def test_live_process_in_d6_root_after_dispatch_is_running(self):
+    def test_launched_process_in_d6_root_after_dispatch_is_running(self):
         result = self.check(dispatching(TASK_RUNNING),
-                            [process(101, 'd6-run', at(11, 0, 5))])
+                            [process(101, 'd6-run', at(11, 30))])
         self.assertRow(result, 'task', board_check.RUNNING, 'process 101')
         self.assertEqual((result['result'], result['exit_code']), ('CLEAN', 0))
 
@@ -452,19 +513,19 @@ class FakeOrStaleTaskTests(BoardCheckCase):
         self.assertRow(result, 'task', board_check.ANOMALY, 'dead Task')
 
     def test_process_started_before_dispatch_is_stale(self):
-        result = self.check(dispatching(TASK_RUNNING),
-                            [process(101, 'd6-run', at(10, 59, 59))])
+        record = dispatching(TASK_RUNNING, execution=launch(101, at(10, 59, 59)))
+        result = self.check(record, [process(101, 'd6-run', at(10, 59, 59))])
         self.assertRow(result, 'task', board_check.ANOMALY, 'dead Task')
 
     def test_process_from_an_earlier_dispatch_is_stale(self):
-        record = dispatching(TASK_RUNNING,
+        record = dispatching(TASK_RUNNING, execution=launch(101, at(10, 30)),
                              audits=('2026-11-07T10:00:00Z', '2026-11-07T11:00:00Z'))
         result = self.check(record, [process(101, 'd6-run', at(10, 30))])
         self.assertRow(result, 'task', board_check.ANOMALY, 'dead Task')
 
     def test_process_in_another_directory_is_not_this_task(self):
         result = self.check(dispatching(TASK_RUNNING),
-                            [process(101, 'd6-other', at(11, 30))])
+                            [process(202, 'd6-other', at(11, 30))])
         self.assertRow(result, 'task', board_check.ANOMALY, 'dead Task')
 
     def test_denied_dispatch_audit_is_not_a_dispatch(self):
@@ -511,17 +572,292 @@ class FakeOrStaleTaskTests(BoardCheckCase):
         self.assertEqual(result['exit_code'], 1)
 
 
+class ProcessIdentityTests(BoardCheckCase):
+    """F1-F3: only attempt-bound identity is live; doubt is UNKNOWN, not RUNNING."""
+
+    def check(self, record, processes=(), *, assignments=(), listing=None):
+        return run([{'id': 'task', 'task_id': record['task_id']}],
+                   store=FakeStore(record, assignments=assignments), processes=processes,
+                   listing=listing, d6=d6_reader(d6_run=d6_root('d6-run')))
+
+    def assertUnknown(self, result, code):
+        self.assertRow(result, 'task', board_check.UNKNOWN, code)
+        self.assertEqual((result['result'], result['exit_code']), ('UNKNOWN', 1))
+
+    def test_cwd_and_time_alone_are_not_running(self):
+        result = self.check(claude_dispatching(TASK_RUNNING),
+                            [process(202, 'd6-run', at(11, 30))])
+        self.assertUnknown(result, 'PROCESS_IDENTITY_UNPROVEN')
+
+    def test_other_process_in_the_root_is_not_the_launched_attempt(self):
+        result = self.check(dispatching(TASK_RUNNING), [process(202, 'd6-run', at(11, 31))])
+        self.assertRow(result, 'task', board_check.ANOMALY, 'dead Task')
+
+    def test_reused_pid_is_not_the_launched_attempt(self):
+        result = self.check(dispatching(TASK_RUNNING), [process(101, 'd6-run', at(11, 45))])
+        self.assertRow(result, 'task', board_check.ANOMALY, 'dead Task')
+
+    def test_recorded_start_that_cannot_be_compared_is_unknown(self):
+        record = dispatching(TASK_RUNNING, execution=launch(start_time='boot-1234'))
+        self.assertUnknown(self.check(record, [process(101, 'd6-run', at(11, 30))]),
+                           'PROCESS_START_UNCOMPARABLE')
+
+    def test_launched_process_outside_the_root_is_unknown(self):
+        result = self.check(dispatching(TASK_RUNNING), [process(101, 'd6-other', at(11, 30))])
+        self.assertUnknown(result, 'PROCESS_CWD_UNPROVEN')
+
+    def test_claimed_native_session_on_the_process_is_running(self):
+        result = self.check(claude_dispatching(TASK_RUNNING),
+                            [process(202, 'd6-run', at(11, 30), sessions=[SESSION])],
+                            assignments=[assignment(TASK_RUNNING)])
+        self.assertRow(result, 'task', board_check.RUNNING, 'process 202')
+
+    def test_process_with_another_session_is_not_running(self):
+        result = self.check(claude_dispatching(TASK_RUNNING),
+                            [process(202, 'd6-run', at(11, 30), sessions=[OTHER_SESSION])],
+                            assignments=[assignment(TASK_RUNNING)])
+        self.assertUnknown(result, 'PROCESS_IDENTITY_UNPROVEN')
+
+    def test_session_claimed_for_another_task_or_d6_is_not_evidence(self):
+        for item in (assignment(TASK_PENDING), assignment(TASK_RUNNING, 'd6-other'),
+                     assignment(TASK_RUNNING, worker='agy'),
+                     dict(assignment(TASK_RUNNING), state='EXPIRED')):
+            result = self.check(claude_dispatching(TASK_RUNNING),
+                                [process(202, 'd6-run', at(11, 30), sessions=[SESSION])],
+                                assignments=[item])
+            self.assertUnknown(result, 'PROCESS_IDENTITY_UNPROVEN')
+
+    def test_unreadable_assignments_are_unknown(self):
+        store = FakeStore(claude_dispatching(TASK_RUNNING))
+        store.get_developer_assignments = mock.Mock(side_effect=OSError('locked'))
+        result = run([{'id': 'task', 'task_id': TASK_RUNNING}], store=store,
+                     d6=d6_reader(d6_run=d6_root('d6-run')))
+        self.assertUnknown(result, 'ASSIGNMENTS_UNAVAILABLE')
+
+    def test_start_in_the_dispatch_second_is_unknown(self):
+        record = dispatching(TASK_RUNNING, execution=launch(101, at(11)))
+        self.assertUnknown(self.check(record, [process(101, 'd6-run', at(11))]),
+                           'PROCESS_START_AMBIGUOUS')
+
+    def test_start_in_the_next_second_is_ordered(self):
+        record = dispatching(TASK_RUNNING, execution=launch(101, at(11, 0, 1)))
+        result = self.check(record, [process(101, 'd6-run', at(11, 0, 1))])
+        self.assertRow(result, 'task', board_check.RUNNING, 'process 101')
+
+    def test_finer_stamp_inside_the_process_second_is_unknown(self):
+        github = FakeGitHub({'pulls/41': pull(), OPEN_PRS: [{'number': 41}],
+                             CHECKS: checks('completed')})
+        record = responded(TASK_REVIEW, claims=[claim(
+            claimed_at='2026-11-07T11:31:00.500000Z')])
+        result = run([{'id': 'task', 'task_id': TASK_REVIEW}], store=FakeStore(record),
+                     github=github, d6=d6_reader(d6_dev=d6_result('d6-dev'),
+                                                 d6_rev=d6_root('d6-rev')),
+                     processes=[process(9, 'd6-rev', at(11, 31), sessions=[SESSION])])
+        self.assertUnknown(result, 'PROCESS_START_AMBIGUOUS')
+
+    def test_identity_that_appears_between_reads_is_unknown(self):
+        ours = process(101, 'd6-run', at(11, 30))
+        for first in ([], [process(101, 'd6-run', at(11, 29))]):
+            result = self.check(dispatching(TASK_RUNNING), listing=reads(first, [ours]))
+            self.assertUnknown(result, 'PROCESS_IDENTITY_UNSTABLE')
+
+    def test_cwd_change_between_reads_is_unknown(self):
+        ours = process(101, 'd6-run', at(11, 30))
+        moved = dict(ours, cwd=f'{ROOT}/d6-other')
+        result = self.check(dispatching(TASK_RUNNING), listing=reads(moved, ) if False else
+                            reads([moved], [ours]))
+        self.assertUnknown(result, 'PROCESS_IDENTITY_UNSTABLE')
+
+    def test_process_gone_by_the_second_read_is_dead(self):
+        ours = process(101, 'd6-run', at(11, 30))
+        result = self.check(dispatching(TASK_RUNNING), listing=reads([ours], []))
+        self.assertRow(result, 'task', board_check.ANOMALY, 'dead Task')
+
+    def test_process_without_identity_fields_is_an_invalid_list(self):
+        item = process(101, 'd6-run', at(11, 30))
+        del item['start_time']
+        self.assertUnknown(self.check(dispatching(TASK_RUNNING), [item]),
+                           'PROCESS_LIST_INVALID')
+
+
+class DispatchAuditBindingTests(BoardCheckCase):
+    """F4: only an audit entry for the current assignment is launch evidence."""
+
+    def check(self, record):
+        return run([{'id': 'task', 'task_id': TASK_RUNNING}], store=FakeStore(record),
+                   processes=[process(101, 'd6-run', at(11, 30))],
+                   d6=d6_reader(d6_run=d6_root('d6-run')))
+
+    def assertNoLaunchEvidence(self, record):
+        self.assertRow(self.check(record), 'task', board_check.ANOMALY,
+                       'no ALLOWED dispatch audit')
+
+    def test_legacy_entry_without_assignment_is_not_launch_evidence(self):
+        record = dispatching(TASK_RUNNING)
+        for field in ('assignment_id', 'source_sha', 'contract_digest'):
+            del record['dispatch_audit'][0][field]
+        self.assertNoLaunchEvidence(record)
+
+    def test_entry_for_another_assignment_is_not_launch_evidence(self):
+        record = dispatching(TASK_RUNNING)
+        record['dispatch_audit'][0]['assignment_id'] = 'e' * 32
+        self.assertNoLaunchEvidence(record)
+
+    def test_empty_current_assignment_matches_nothing(self):
+        for value in ('', None):
+            record = dispatching(TASK_RUNNING)
+            record['developer']['assignment_id'] = value
+            record['dispatch_audit'][0]['assignment_id'] = value
+            self.assertNoLaunchEvidence(record)
+
+    def test_bound_entry_is_used_beside_a_legacy_entry(self):
+        record = dispatching(TASK_RUNNING)
+        legacy = dict(record['dispatch_audit'][0], attempt_id='9' * 32,
+                      at='2026-11-07T11:59:00Z')
+        for field in ('assignment_id', 'source_sha', 'contract_digest'):
+            del legacy[field]
+        record['dispatch_audit'].append(legacy)
+        self.assertRow(self.check(record), 'task', board_check.RUNNING, '11:00:00Z')
+
+
+class RepairLivenessTests(BoardCheckCase):
+    """F5: a repair is live only by its own child Task, never by the parent's D6."""
+
+    def check(self, child, processes=(), *, parent=None, d6=None):
+        github = FakeGitHub({'pulls/41': pull(), OPEN_PRS: [{'number': 41}],
+                             REVIEW_COMMENTS: [], CHECKS: checks('completed')})
+        return run([{'id': 'task', 'task_id': TASK_REVIEW}],
+                   store=FakeStore(parent or repairing(TASK_REVIEW), child), github=github,
+                   processes=processes, d6=d6 or d6_reader(d6_dev=d6_result('d6-dev')))
+
+    def test_child_attempt_proven_in_the_claimed_d6_is_running(self):
+        result = self.check(repair_child(), [process(301, 'd6-dev', at(11, 50))])
+        self.assertRow(result, 'task', board_check.RUNNING, f'repair Task {TASK_CHILD}')
+        self.assertEqual(result['exit_code'], 0)
+
+    def test_pending_child_is_not_running(self):
+        result = self.check(pending(TASK_CHILD), [process(301, 'd6-dev', at(11, 50))])
+        self.assertRow(result, 'task', board_check.ACTIONABLE, 'never dispatched')
+        self.assertEqual(result['exit_code'], 2)
+
+    def test_abandoned_child_is_not_running(self):
+        for child in (repair_child(), pending(TASK_CHILD)):
+            child['abandonment'] = {'reason': 'superseded'}
+            result = self.check(child, [process(301, 'd6-dev', at(11, 50))])
+            self.assertRow(result, 'task', board_check.ANOMALY, 'ABANDONED')
+
+    def test_child_of_another_executor_is_not_running(self):
+        result = self.check(repair_child(d6_task='d6-other'),
+                            [process(301, 'd6-dev', at(11, 50))])
+        self.assertRow(result, 'task', board_check.ANOMALY, 'does not match the repair claim')
+
+    def test_child_without_executor_is_unverifiable(self):
+        child = repair_child()
+        del child['developer']['executor_task_id']
+        result = self.check(child, [process(301, 'd6-dev', at(11, 50))])
+        self.assertRow(result, 'task', board_check.UNKNOWN, 'REPAIR_EXECUTOR_UNVERIFIABLE')
+
+    def test_child_without_dispatch_evidence_is_not_running(self):
+        child = repair_child()
+        child['dispatch_audit'] = []
+        result = self.check(child, [process(301, 'd6-dev', at(11, 50))])
+        self.assertRow(result, 'task', board_check.ANOMALY, 'no ALLOWED dispatch audit')
+
+    def test_child_process_gone_is_a_dead_repair(self):
+        result = self.check(repair_child(), [process(202, 'd6-dev', at(11, 50))])
+        self.assertRow(result, 'task', board_check.ANOMALY, 'dead repair')
+
+    def test_child_process_before_its_dispatch_is_a_dead_repair(self):
+        child = dispatching(TASK_CHILD, 'd6-dev', audits=('2026-11-07T11:45:00Z',),
+                            execution=launch(301, at(11, 44)))
+        result = self.check(child, [process(301, 'd6-dev', at(11, 44))])
+        self.assertRow(result, 'task', board_check.ANOMALY, 'dead repair')
+
+    def test_failed_d6_read_is_unknown(self):
+        result = self.check(repair_child(), [process(301, 'd6-dev', at(11, 50))],
+                            d6=lambda record, d6_task: (
+                                d6_result('d6-dev') if record['task_id'] == TASK_CHILD else
+                                {'state': 'D6_BINDING_UNAVAILABLE'}))
+        self.assertRow(result, 'task', board_check.UNKNOWN)
+
+
+class ReviewLivenessTests(BoardCheckCase):
+    """F6: only an active dispatched review with matching identity is WAITING_REVIEW."""
+
+    LIVE = (process(9, 'd6-rev', at(11, 31), sessions=[SESSION]),)
+
+    def check(self, record, processes=LIVE):
+        github = FakeGitHub({'pulls/41': pull(), OPEN_PRS: [{'number': 41}],
+                             CHECKS: checks('completed')})
+        return run([{'id': 'task', 'task_id': TASK_REVIEW}], store=FakeStore(record),
+                   github=github, processes=processes,
+                   d6=d6_reader(d6_dev=d6_result('d6-dev'), d6_rev=d6_root('d6-rev')))
+
+    def test_completed_claim_is_a_result_awaiting_ingestion(self):
+        result = self.check(responded(TASK_REVIEW, claims=[claim(state='COMPLETED')]))
+        self.assertRow(result, 'task', board_check.ACTIONABLE, 'awaiting ingestion')
+        self.assertEqual(result['exit_code'], 2)
+
+    def test_reviewer_in_another_session_is_not_waiting_review(self):
+        result = self.check(responded(TASK_REVIEW, claims=[claim(session=OTHER_SESSION)]))
+        self.assertRow(result, 'task', board_check.UNKNOWN, 'PROCESS_IDENTITY_UNPROVEN')
+
+    def test_claim_for_another_executor_is_not_waiting_review(self):
+        result = self.check(responded(TASK_REVIEW, claims=[claim(executor='d6-other')]))
+        self.assertRow(result, 'task', board_check.ACTIONABLE, 'RECORD_REVIEW_RESULT')
+
+
+class TerminalPrTests(BoardCheckCase):
+    """F7: a terminal PR outranks any review or repair still recorded as live."""
+
+    def setUp(self):
+        self.d6 = d6_reader(d6_dev=d6_result('d6-dev'), d6_rev=d6_root('d6-rev'))
+        self.reviewer = process(9, 'd6-rev', at(11, 31), sessions=[SESSION])
+        self.repairer = process(301, 'd6-dev', at(11, 50))
+
+    def check(self, terminal_pull, *records, processes):
+        return run([{'id': 'task', 'task_id': TASK_REVIEW}], store=FakeStore(*records),
+                   github=FakeGitHub({'pulls/41': terminal_pull}), d6=self.d6,
+                   processes=processes)
+
+    def test_closed_unmerged_pr_is_anomaly_under_a_live_reviewer(self):
+        result = self.check(pull(state='closed'), responded(TASK_REVIEW, claims=[claim()]),
+                            processes=[self.reviewer])
+        self.assertRow(result, 'task', board_check.ANOMALY, 'closed unmerged')
+
+    def test_closed_unmerged_pr_is_anomaly_under_a_live_repair(self):
+        result = self.check(pull(state='closed'), repairing(TASK_REVIEW), repair_child(),
+                            processes=[self.repairer])
+        self.assertRow(result, 'task', board_check.ANOMALY, 'closed unmerged')
+
+    def test_merged_pr_without_a_marker_needs_reconciliation(self):
+        merged = pull(state='closed', merged=True)
+        for records, live in (((responded(TASK_REVIEW, claims=[claim()]),), self.reviewer),
+                              ((repairing(TASK_REVIEW), repair_child()), self.repairer)):
+            result = self.check(merged, *records, processes=[live])
+            self.assertRow(result, 'task', board_check.ACTIONABLE, 'no merge marker')
+            self.assertEqual(result['exit_code'], 2)
+
+    def test_a_held_predicate_does_not_hide_a_merged_pr(self):
+        result = run([{'id': 'task', 'task_id': TASK_REVIEW,
+                       'blocker': 'time:2026-11-08T00:00:00Z'}],
+                     store=FakeStore(responded(TASK_REVIEW)), d6=self.d6,
+                     github=FakeGitHub({'pulls/41': pull(state='closed', merged=True)}))
+        self.assertRow(result, 'task', board_check.ACTIONABLE, 'no merge marker')
+
+
 class CapacityTests(BoardCheckCase):
     """Owner test 7: busy or authorization-waiting Developers are not a PM fault."""
 
     def test_every_developer_busy_or_waiting_authorization_is_blocked(self):
-        store = FakeStore(dispatching(TASK_RUNNING), pending(TASK_PENDING))
+        store = FakeStore(claude_dispatching(TASK_RUNNING), pending(TASK_PENDING),
+                          assignments=[assignment(TASK_RUNNING)])
         evaluate = policy(opencode_developer='OWNER_PAUSED', agy='OWNER_ASSIGNMENT_REQUIRED')
         rows = [{'id': 'running', 'task_id': TASK_RUNNING},
                 {'id': 'pending', 'task_id': TASK_PENDING},
                 {'id': 'work'}]
         result = run(rows, store=store, evaluate=evaluate,
-                     processes=[process(101, 'd6-run', at(11, 30))],
+                     processes=[process(101, 'd6-run', at(11, 30), sessions=[SESSION])],
                      d6=d6_reader(d6_run=d6_root('d6-run')))
         self.assertEqual(states(result), {'running': board_check.RUNNING,
                                           'pending': board_check.BLOCKED,

@@ -7,6 +7,11 @@ state. The check classifies and reports; it never dispatches, writes a Task,
 or changes GitHub. GitHub and process reads go through injected adapters, and
 any failed read yields UNKNOWN, never a clean result.
 
+A live state needs attempt-bound identity: a trusted launch PID and start time,
+or a verified native session seen on the process. A matching cwd only supports
+that identity. Evidence that can neither prove nor rule out the attempt, such as
+a start time inside the same whole second as the dispatch, is UNKNOWN.
+
 Exit status: 0 clean, 2 when any row is ACTIONABLE (idle work with a next step)
 or ANOMALY, 1 when the board is unreadable or any evidence read failed and
 nothing is flagged. A failed read stays UNKNOWN on the row it affects; it does
@@ -18,7 +23,7 @@ import os
 import re
 import stat
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import task_advance, task_status, worker_dispatch
@@ -50,6 +55,11 @@ _DISPATCH_ACTIONS = frozenset((
     'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR', 'TIMEOUT_CONTINUATION'))
 # decide() steps whose remaining gate can be an exact-head check still running.
 _CI_WAIT_STEPS = frozenset(('DISPATCH_REVIEW', 'RUN_TASK_COMPLETE', 'READY_FOR_INTEGRATION'))
+# derive_state values after which a Task can no longer own a live attempt.
+_TERMINAL_TASK_STATES = frozenset(('COMPLETED', 'ABANDONED', 'FAILED'))
+# ``ps -o lstart`` reports whole seconds, so a start is an interval, not an instant.
+_PROCESS_START_RESOLUTION = timedelta(seconds=1)
+_LSTART_FORMAT = '%a %b %d %H:%M:%S %Y'
 
 _TASK_ID = re.compile(r'[0-9a-f]{32}\Z')
 _SHA = re.compile(r'[0-9a-f]{40}\Z')
@@ -59,6 +69,8 @@ _OWNER_REF = re.compile(
     r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues|pull)/'
     r'([1-9][0-9]{0,6})(?:#issuecomment-[1-9][0-9]*)?\Z')
 _ACTIVITY = re.compile(r'<!--\s*activity:([^<>]{0,512}?)-->')
+_ARGV_SESSION = re.compile(
+    r'(?:^|\s)(?:--session-id|--resume|resume)[=\s]+([A-Za-z0-9_-]{8,128})(?=\s|$)')
 
 
 class _Unknown(Exception):
@@ -125,6 +137,45 @@ def _utc(value):
         return None
 
 
+def _interval(value):
+    """Return the [start, end) a recorded UTC stamp covers at its own precision."""
+    parsed = _utc(value)
+    if parsed is None:
+        return None
+    digits = len(re.sub(r'(?:Z|\+00:00)\Z', '', value).partition('.')[2])
+    return parsed, parsed + timedelta(seconds=10 ** -digits)
+
+
+def _start_order(started_at, since):
+    """Place a process start against an event: 'before', 'after' or 'overlap'.
+
+    Equal whole seconds overlap, so they never establish an order.
+    """
+    if started_at + _PROCESS_START_RESOLUTION <= since[0]:
+        return 'before'
+    return 'after' if started_at >= since[1] else 'overlap'
+
+
+def _lstart(text):
+    try:
+        return datetime.strptime(text, _LSTART_FORMAT)
+    except ValueError:
+        return None
+
+
+def _identity_match(item, identity):
+    """True or False for one process; None when its start cannot be compared."""
+    if 'pid' in identity:
+        if item['pid'] != identity['pid']:
+            return False
+        recorded = ' '.join(identity['start'].split())
+        if item['start_time'] == recorded:
+            return True
+        # A comparable different start means the PID was reused.
+        return False if _lstart(recorded) is not None else None
+    return identity.get('session') in item.get('native_session_ids', ())
+
+
 def _stamp(value):
     return value.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
@@ -163,6 +214,7 @@ class _Context:
         self._ids = None
         self._records = {}
         self._processes = None
+        self._assignments = None
         self._issue_markers = {}
         self.covered_prs = set()
         self.covered_tasks = set()
@@ -248,31 +300,84 @@ class _Context:
             raise _Unknown(snapshot.get('code') or 'D6_BINDING_UNAVAILABLE')
         return snapshot
 
+    def _read_processes(self):
+        try:
+            value = list(self._list_processes())
+        except Exception:
+            raise _Unknown('PROCESS_LIST_FAILED') from None
+        for item in value:
+            started = item.get('started_at') if type(item) is dict else None
+            if (type(item) is not dict or type(item.get('pid')) is not int or
+                    item['pid'] < 1 or
+                    (item.get('cwd') is not None and type(item['cwd']) is not str) or
+                    type(item.get('start_time')) is not str or not item['start_time'] or
+                    not isinstance(started, datetime) or started.tzinfo is None):
+                raise _Unknown('PROCESS_LIST_INVALID')
+        return value
+
     def processes(self):
+        """Read twice; only a process unchanged across both reads is stable."""
         if self._processes is None:
-            try:
-                value = list(self._list_processes())
-            except Exception:
-                raise _Unknown('PROCESS_LIST_FAILED') from None
-            for item in value:
-                started = item.get('started_at') if type(item) is dict else None
-                if (type(item) is not dict or type(item.get('pid')) is not int or
-                        item['pid'] < 1 or type(item.get('cwd')) is not str or
-                        not isinstance(started, datetime) or started.tzinfo is None):
-                    raise _Unknown('PROCESS_LIST_INVALID')
-            self._processes = value
+            before = {item['pid']: (item['start_time'], item.get('cwd'))
+                      for item in self._read_processes()}
+            self._processes = [
+                dict(item, stable=before.get(item['pid']) ==
+                     (item['start_time'], item.get('cwd')))
+                for item in self._read_processes()]
         return self._processes
 
-    def live_process(self, root, since):
-        """Return a pid whose cwd is exactly root and that started at or after since."""
+    def live_process(self, root, since, identity):
+        """Return the pid proven to be this attempt, or None when it is proven gone.
+
+        ``identity`` holds a trusted launch (``pid``, ``start``), a verified
+        ``session``, or nothing. A process that may be the attempt but cannot be
+        proven raises _Unknown; it is neither live nor dead.
+        """
         if since is None:
             return None
         target = os.path.realpath(root)
-        floor = since.replace(microsecond=0)
+        doubt = None
         for item in self.processes():
-            if os.path.realpath(item['cwd']) == target and item['started_at'] >= floor:
+            in_root = item.get('cwd') is not None and os.path.realpath(item['cwd']) == target
+            matched = _identity_match(item, identity)
+            # Once a launch PID is known, no other process can be the attempt.
+            if matched is False and ('pid' in identity or not in_root):
+                continue
+            order = _start_order(item['started_at'], since)
+            if order == 'before':
+                continue
+            if matched is None:
+                doubt = 'PROCESS_START_UNCOMPARABLE'
+            elif matched is False:
+                doubt = 'PROCESS_IDENTITY_UNPROVEN'
+            elif not item['stable']:
+                doubt = 'PROCESS_IDENTITY_UNSTABLE'
+            elif order == 'overlap':
+                doubt = 'PROCESS_START_AMBIGUOUS'
+            elif not in_root:
+                doubt = 'PROCESS_CWD_UNPROVEN'
+            else:
                 return item['pid']
+        if doubt is not None:
+            raise _Unknown(doubt)
         return None
+
+    def claimed_session(self, task_id, worker, d6_task):
+        """Return the native session of the latest CLAIMED assignment for this attempt."""
+        if self._assignments is None:
+            try:
+                value = self.store.get_developer_assignments()
+            except Exception:
+                raise _Unknown('ASSIGNMENTS_UNAVAILABLE') from None
+            if type(value) is not list:
+                raise _Unknown('ASSIGNMENTS_UNAVAILABLE')
+            self._assignments = value
+        claims = [item['claim'] for item in self._assignments
+                  if type(item) is dict and item.get('state') == 'CLAIMED' and
+                  item.get('task_id') == task_id and item.get('worker') == worker and
+                  item.get('d6_task_id') == d6_task and type(item.get('claim')) is dict]
+        latest = max(claims, key=lambda claim: str(claim.get('claimed_at')), default=None)
+        return latest.get('session_id') if latest is not None else None
 
 
 def _executor_task(record):
@@ -285,24 +390,58 @@ def _executor_task(record):
 
 
 def _dispatched_at(record):
-    """Return the latest ALLOWED dispatch audit time for the current assignment."""
+    """Return the interval of the latest ALLOWED dispatch of the current assignment.
+
+    Legacy entries carry no assignment_id. They stay readable as audit history,
+    but nothing binds them to this attempt, so they are not launch evidence.
+    """
     developer = record.get('developer')
     if type(developer) is not dict:
         return None
     worker = worker_dispatch.worker_key_for(developer.get('provider_profile'))
     assignment = developer.get('assignment_id')
+    if type(assignment) is not str or not assignment:
+        return None
     latest = None
     audit = record.get('dispatch_audit')
     for entry in audit if type(audit) is list else []:
         if (type(entry) is not dict or entry.get('decision') != 'ALLOWED' or
                 entry.get('worker_key') != worker or
                 entry.get('action') not in _DISPATCH_ACTIONS or
-                entry.get('assignment_id') not in (None, assignment)):
+                entry.get('assignment_id') != assignment):
             continue
-        at = _utc(entry.get('at'))
-        if at is not None and (latest is None or at > latest):
+        at = _interval(entry.get('at'))
+        if at is not None and (latest is None or at[0] > latest[0]):
             latest = at
     return latest
+
+
+def _attempt_identity(ctx, record, d6_task):
+    """Return the trusted launch or verified native session of the current attempt."""
+    developer = record.get('developer')
+    developer = developer if type(developer) is dict else {}
+    execution = developer.get('execution')
+    if type(execution) is dict and execution.get('status') == 'RUNNING':
+        return {'pid': execution.get('child_pid'), 'start': execution.get('child_start_time')}
+    worker = worker_dispatch.worker_key_for(developer.get('provider_profile'))
+    session = ctx.claimed_session(record.get('task_id'), worker, d6_task)
+    return {'session': session} if session is not None else {}
+
+
+def _attempt_process(ctx, record, d6_task, binding=None):
+    """Return (pid or None, dispatch interval) for a Task's current attempt.
+
+    ``binding`` is the record that holds the D6 binding when it is not ``record``.
+    """
+    root = ctx.d6_root(binding or record, d6_task)
+    since = _dispatched_at(record)
+    return ctx.live_process(root, since, _attempt_identity(ctx, record, d6_task)), since
+
+
+def _no_process(since):
+    if since is None:
+        return 'no ALLOWED dispatch audit for the current assignment'
+    return f'no live attempt process started after {_stamp(since[0])}'
 
 
 def _claims(record):
@@ -395,8 +534,12 @@ def _owner_wait(ctx, row, record):
 
 
 def _capacity(ctx):
-    """HOLD when every D6 Developer route is busy or not authorized."""
-    free, waiting = [], []
+    """HOLD when every D6 Developer route is busy or not authorized.
+
+    One proven free route clears capacity. Without one, an uncertain route keeps
+    the answer UNKNOWN, because it may be free.
+    """
+    free, waiting, doubts = [], [], []
     for worker in DEVELOPER_ROUTES:
         decision = ctx.evaluate(worker)
         reason = getattr(decision, 'reason_code', None)
@@ -405,33 +548,44 @@ def _capacity(ctx):
                 waiting.append(f'{worker}={reason}')
                 continue
             raise _Unknown(reason if type(reason) is str else 'DISPATCH_POLICY_UNAVAILABLE')
-        busy = _live_task_for(ctx, worker)
-        if busy is None:
+        occupancy, detail = _route_occupancy(ctx, worker)
+        if occupancy == 'FREE':
             free.append(worker)
+        elif occupancy == 'BUSY':
+            waiting.append(f'{worker}=busy:{detail}')
         else:
-            waiting.append(f'{worker}=busy:{busy}')
+            doubts.append(detail)
     if free:
         return 'CLEARED', 'capacity cleared: free Developer routes ' + ','.join(free)
+    if doubts:
+        raise _Unknown(doubts[0])
     return 'HOLD', 'capacity: every Developer route busy or awaiting authorization (' + \
         ', '.join(waiting) + ')'
 
 
-def _live_task_for(ctx, worker):
-    """Return a Task ID proven busy on this route by a live D6 process."""
+def _route_occupancy(ctx, worker):
+    """Return ('BUSY', Task ID), ('FREE', None) or ('UNKNOWN', code) for one route.
+
+    A Task occupies the route only under the checks that make it RUNNING, so a
+    terminal or unowned Task does not count. Failed evidence is neither busy nor free.
+    """
+    doubt = None
     for task_id in sorted(ctx.task_ids()):
-        record = ctx.record(task_id)
-        developer = record.get('developer')
-        if (type(developer) is not dict or
-                developer.get('state') != 'DEVELOPER_DISPATCHING' or
-                worker_dispatch.worker_key_for(developer.get('provider_profile')) != worker):
-            continue
         try:
-            root = ctx.d6_root(record, _executor_task(record))
-        except _Unknown:
-            continue  # Not proven busy; the route then counts as free.
-        if ctx.live_process(root, _dispatched_at(record)) is not None:
-            return task_id
-    return None
+            record = ctx.record(task_id)
+            developer = record.get('developer')
+            if (type(developer) is not dict or
+                    developer.get('state') != 'DEVELOPER_DISPATCHING' or
+                    worker_dispatch.worker_key_for(developer.get('provider_profile')) != worker or
+                    task_status.derive_state(record) in _TERMINAL_TASK_STATES):
+                continue
+            pid, _ = _attempt_process(ctx, record, _executor_task(record))
+        except _Unknown as exc:
+            doubt = doubt or exc.code
+            continue
+        if pid is not None:
+            return 'BUSY', task_id
+    return ('UNKNOWN', doubt) if doubt is not None else ('FREE', None)
 
 
 def _merged(record):
@@ -597,6 +751,31 @@ def _related(ctx, record):
     return {'events': events + outcomes, 'repair_claims': repairs}
 
 
+def _classify_repair(ctx, row, record, head, gates, rows_by_id):
+    """Classify WAITING_REPAIR from the repair Task itself, never from the parent."""
+    repair = next(item for item in reversed(record['review_repair_claims'])
+                  if type(item) is dict and item.get('head_sha') == head)
+    task_id = repair.get('repair_task_id')
+    child = ctx.record(task_id)
+    derived = task_status.derive_state(child)
+    if derived in _TERMINAL_TASK_STATES:
+        return ANOMALY, [f'repair Task {task_id} {derived}: dead repair']
+    if task_advance.derive_repair_state(child) == 'PENDING':
+        return _finish(ctx, row, record, gates, rows_by_id,
+                       [f'repair Task {task_id} is claimed but was never dispatched'],
+                       needs_developer=True)
+    executor = _executor_task(child)
+    if executor is None:
+        raise _Unknown('REPAIR_EXECUTOR_UNVERIFIABLE')
+    if executor != repair.get('executor_task'):
+        return ANOMALY, [f'repair Task {task_id} executor does not match the repair claim']
+    pid, since = _attempt_process(ctx, child, executor, binding=record)
+    if pid is None:
+        return ANOMALY, [f'repair Task {task_id}: {_no_process(since)}: dead repair']
+    return RUNNING, [f'repair Task {task_id} process {pid} proven in the D6 root, started '
+                     f'after dispatch {_stamp(since[0])}']
+
+
 def _classify_task(ctx, row, task_id, gates, rows_by_id):
     record = ctx.record(task_id)
     if record is None:
@@ -610,15 +789,11 @@ def _classify_task(ctx, row, task_id, gates, rows_by_id):
     developer = record.get('developer')
     developer_state = developer.get('state') if type(developer) is dict else None
     if developer_state == 'DEVELOPER_DISPATCHING':
-        root = ctx.d6_root(record, _executor_task(record))
-        since = _dispatched_at(record)
-        pid = ctx.live_process(root, since)
+        pid, since = _attempt_process(ctx, record, _executor_task(record))
         if pid is not None:
-            return RUNNING, [f'process {pid} cwd is the Task D6 root, started after '
-                             f'dispatch {_stamp(since)}']
-        detail = ('no ALLOWED dispatch audit' if since is None else
-                  f'no live process in the D6 root started after {_stamp(since)}')
-        return ANOMALY, [f'Task DEVELOPER_DISPATCHING but {detail}: dead Task']
+            return RUNNING, [f'process {pid} proven in the Task D6 root, started after '
+                             f'dispatch {_stamp(since[0])}']
+        return ANOMALY, [f'Task DEVELOPER_DISPATCHING but {_no_process(since)}: dead Task']
     if developer_state != 'DEVELOPER_RESPONDED':
         step = task_advance.decide(record, None, None, {})
         label = developer_state if type(developer_state) is str else 'none'
@@ -630,34 +805,37 @@ def _classify_task(ctx, row, task_id, gates, rows_by_id):
     d6 = ctx.d6_snapshot(record, executor) if executor is not None else None
     number = _pr_number(row, record)
     pull = ctx.pull(number) if number is not None else None
+    # A terminal PR outranks any review or repair the Task still records as live.
+    if type(pull) is dict and pull['merged']:
+        return ACTIONABLE, [f'PR #{number} merged but the Task has no merge marker: '
+                            'reconcile through task advance']
+    if type(pull) is dict and pull['state'] == 'closed':
+        return ANOMALY, [f'PR #{number} closed unmerged but the Task is still live']
     step = task_advance.decide(record, d6, pull, _related(ctx, record))
     head = d6.get('result_head') if type(d6) is dict else None
+    idle = f'Task has next step {step} and nothing is running'
     if step == 'WAITING_REPAIR':
-        repair = next((item for item in reversed(record.get('review_repair_claims') or [])
-                       if type(item) is dict and item.get('head_sha') == head), None)
-        since = _utc(repair.get('claimed_at')) if type(repair) is dict else None
-        pid = ctx.live_process(ctx.d6_root(record, executor), since)
-        if pid is not None:
-            return RUNNING, [f'repair process {pid} cwd is the Task D6 root, started after '
-                             f'repair claim {_stamp(since)}']
-        return ANOMALY, ['repair claimed but no live process in the D6 root: dead repair']
+        return _classify_repair(ctx, row, record, head, gates, rows_by_id)
     if step == 'RECORD_REVIEW_RESULT':
         claim = max((item for item in _claims(record)
                      if item.get('pr') == number and item.get('head_sha') == head),
                     key=lambda item: item.get('version', 0))
-        since = _utc(claim.get('claimed_at'))
-        pid = ctx.live_process(ctx.d6_root(record, claim.get('reviewer_task')), since)
-        if pid is not None:
-            return WAITING_REVIEW, [
-                f"review claim v{claim.get('version')} on PR #{number} head {head[:12]}; "
-                f'Reviewer process {pid} live in its D6']
+        if claim.get('state') == 'COMPLETED':
+            idle = (f"review claim v{claim.get('version')} COMPLETED: result awaiting "
+                    f'ingestion, next step {step}')
+        elif claim.get('state') == 'DISPATCHED' and claim.get('executor_task') == executor:
+            pid = ctx.live_process(ctx.d6_root(record, claim.get('reviewer_task')),
+                                   _interval(claim.get('claimed_at')),
+                                   {'session': claim.get('native_session_id')})
+            if pid is not None:
+                return WAITING_REVIEW, [
+                    f"review claim v{claim.get('version')} on PR #{number} head {head[:12]}; "
+                    f'Reviewer process {pid} proven in its D6']
     if step in _CI_WAIT_STEPS and type(pull) is dict and head == pull['head']['sha']:
         pending = _pending_checks(ctx, head)
         if pending:
             return WAITING_CI, [f'PR #{number} head {head[:12]} pending: ' + ','.join(pending)]
-    return _finish(ctx, row, record, gates, rows_by_id,
-                   [f'Task has next step {step} and nothing is running'],
-                   needs_developer=False)
+    return _finish(ctx, row, record, gates, rows_by_id, [idle], needs_developer=False)
 
 
 def _row_problem(row):
@@ -735,7 +913,7 @@ def _unlisted(ctx):
             continue
         developer = record.get('developer')
         if (type(developer) is dict and developer.get('state') == 'DEVELOPER_DISPATCHING' and
-                task_status.derive_state(record) not in ('COMPLETED', 'ABANDONED')):
+                task_status.derive_state(record) not in _TERMINAL_TASK_STATES):
             findings.append({'row': f'task:{task_id}', 'state': ANOMALY,
                              'evidence': ['live Task (DEVELOPER_DISPATCHING) missing from the '
                                           'board']})
@@ -803,15 +981,40 @@ def github_reader(runner=None):
     return get
 
 
+def _ps_snapshot(run, options):
+    """Return {pid: (start text, start time, session IDs)}; argv is not otherwise kept."""
+    # Separate -o options: in one list, some ps builds read 'pid=,...' as header text.
+    result = run(['ps', '-A', '-ww', '-o', 'pid=', '-o', 'lstart=', '-o', 'command='],
+                 **options)
+    if result.returncode != 0:
+        raise _Unknown('PROCESS_LIST_FAILED')
+    rows = {}
+    for line in result.stdout.decode('utf-8', 'surrogateescape').splitlines():
+        parts = line.split(None, 6)
+        if len(parts) < 6 or not parts[0].isdigit():
+            continue
+        text = ' '.join(parts[1:6])
+        started = _lstart(text)
+        if started is not None:
+            sessions = _ARGV_SESSION.findall(parts[6]) if len(parts) > 6 else []
+            rows[int(parts[0])] = (text, started.astimezone(timezone.utc), sessions)
+    return rows
+
+
 def list_processes(run=subprocess.run):
-    """List this user's processes with cwd and start time (lsof and ps, read-only)."""
+    """List processes with start identity and cwd (ps, lsof, ps; read-only).
+
+    lsof and ps are separate reads, so a cwd is kept only for a PID whose start
+    is the same in the ps reads on both sides of lsof. Any other PID has cwd None.
+    """
     env = dict(os.environ, LC_ALL='C', LANG='C')
     options = dict(stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                    stderr=subprocess.DEVNULL, check=False, timeout=30, env=env)
+    before = _ps_snapshot(run, options)
     lsof = run(['lsof', '-w', '-n', '-P', '-a', '-u', str(os.getuid()), '-d', 'cwd',
                 '-F', 'pn'], **options)
-    ps = run(['ps', '-A', '-o', 'pid=,lstart='], **options)
-    if lsof.returncode != 0 or ps.returncode != 0:
+    after = _ps_snapshot(run, options)
+    if lsof.returncode != 0:
         raise _Unknown('PROCESS_LIST_FAILED')
     cwd, pid = {}, None
     for line in lsof.stdout.decode('utf-8', 'surrogateescape').splitlines():
@@ -819,19 +1022,11 @@ def list_processes(run=subprocess.run):
             pid = int(line[1:])
         elif line.startswith('n') and pid is not None:
             cwd[pid] = line[1:]
-    started = {}
-    for line in ps.stdout.decode('utf-8', 'surrogateescape').splitlines():
-        parts = line.split()
-        if len(parts) != 6 or not parts[0].isdigit():
-            continue
-        try:
-            started[int(parts[0])] = datetime.strptime(
-                ' '.join(parts[1:]), '%a %b %d %H:%M:%S %Y').astimezone(timezone.utc)
-        except ValueError:
-            continue
     own = os.getpid()
-    return [{'pid': item, 'cwd': path, 'started_at': started[item]}
-            for item, path in sorted(cwd.items()) if item in started and item != own]
+    return [{'pid': item, 'start_time': text, 'started_at': started,
+             'cwd': cwd.get(item) if before.get(item, (None,))[0] == text else None,
+             'native_session_ids': sessions}
+            for item, (text, started, sessions) in sorted(after.items()) if item != own]
 
 
 def format_result(result):
