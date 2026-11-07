@@ -818,6 +818,46 @@ def _events(related):
     return value if type(value) is list else []
 
 
+def _failure_reason(value):
+    """Return a fixed unusable-review reason; any other value names nothing."""
+    if type(value) is str and value in review_dispatch.REVIEW_FAILURE_REASONS:
+        return value
+    return None
+
+
+def _head_review_claim(record, number, head):
+    """Return the highest-version claim for one PR and head, if any."""
+    matching = [claim for claim in _claims(record) if type(claim) is dict and
+                claim.get('pr') == number and claim.get('head_sha') == head]
+    return max(matching, key=lambda item: item.get('version', 0), default=None)
+
+
+def _may_be_review_verdict(body, head, version):
+    """Treat anything shaped like a verdict for this head and version as posted."""
+    if head not in body or not any(mark in body for mark in (
+            'Verdict:', 'type=review_verdict', 'LLMTOOL-REVIEW-BINDING')):
+        return False
+    versions = re.findall(r'Version: v(\d+)', body)
+    return not versions or str(version) in versions
+
+
+def _review_verdict_absent(claim, github_get):
+    """Return True only when a complete comment read shows no verdict for the claim."""
+    try:
+        comments = github_get(f"issues/{claim.get('pr')}/comments?per_page=100")
+    except Exception:
+        return False
+    # A full page may hide later comments, so it cannot prove absence.
+    if type(comments) is not list or len(comments) >= 100:
+        return False
+    for comment in comments:
+        body = comment.get('body') if type(comment) is dict else None
+        if type(body) is not str or _may_be_review_verdict(
+                body, claim.get('head_sha'), claim.get('version')):
+            return False
+    return True
+
+
 def _remote_test_status(record, d6):
     """Return exact-head remote-test state, bounded excerpt, and validated receipt."""
     head = d6.get('result_head') if type(d6) is dict else None
@@ -1002,6 +1042,21 @@ def derive_repair_state(repair_record):
     return 'UNKNOWN'
 
 
+def _pre_review_action(record, d6, pr, related, result_head):
+    """Return the gate action before a Reviewer may start on this head."""
+    remote_status, _, _ = _remote_test_status(record, d6)
+    if remote_status in ('TIMEOUT', 'SHA_MISMATCH'):
+        return 'NEEDS_ATTENTION'
+    if remote_status == 'FAIL':
+        return _remote_fail_action(related, result_head)
+    if remote_status not in ('PASS', 'ADMISSION_DENIED'):
+        return 'RUN_REMOTE_TEST'
+    if type(pr) is dict and pr.get('merged') is True:
+        # The code is already merged; a Reviewer must never start for it.
+        return 'PR_MERGED_NO_REVIEW'
+    return 'DISPATCH_REVIEW'
+
+
 def decide(record, d6, pr, related):
     """Return the next action name using only supplied snapshots."""
     if type(record) is not dict:
@@ -1038,18 +1093,15 @@ def decide(record, d6, pr, related):
     matching = [claim for claim in claims if type(claim) is dict and
                 claim.get('pr') == chosen_pr and claim.get('head_sha') == result_head]
     if not matching:
-        remote_status, _, _ = _remote_test_status(record, d6)
-        if remote_status in ('TIMEOUT', 'SHA_MISMATCH'):
-            return 'NEEDS_ATTENTION'
-        if remote_status == 'FAIL':
-            return _remote_fail_action(related, result_head)
-        if remote_status not in ('PASS', 'ADMISSION_DENIED'):
-            return 'RUN_REMOTE_TEST'
-        if type(pr) is dict and pr.get('merged') is True:
-            # The code is already merged; a Reviewer must never start for it.
-            return 'PR_MERGED_NO_REVIEW'
-        return 'DISPATCH_REVIEW'
+        return _pre_review_action(record, d6, pr, related, result_head)
     claim = max(matching, key=lambda item: item.get('version', 0))
+    if claim.get('state') == 'UNKNOWN' and _failure_reason(claim.get('failure_reason')):
+        # One head gets one redispatch: any earlier claim on it has spent that.
+        if sum(type(item) is dict and item.get('head_sha') == result_head
+               for item in claims) > 1:
+            return 'REVIEW_UNUSABLE_STOPPED'
+        action = _pre_review_action(record, d6, pr, related, result_head)
+        return 'REVIEW_REDISPATCH' if action == 'DISPATCH_REVIEW' else action
     if claim.get('state') in ('CLAIMED', 'UNKNOWN'):
         return 'REVIEW_OUTCOME_UNKNOWN'
     events = [event for event in _events(related) if type(event) is dict and
@@ -1392,6 +1444,14 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
              'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}, record, store, None)
     step = decide(record, d6, pr, related)
     result, codes = None, []
+    redispatch_reason = None
+    if step == 'REVIEW_REDISPATCH':
+        unusable = _head_review_claim(record, number, d6['result_head'])
+        if unusable is not None and _review_verdict_absent(unusable, get):
+            step = 'DISPATCH_REVIEW'
+            redispatch_reason = _failure_reason(unusable.get('failure_reason'))
+        else:
+            step = 'REVIEW_OUTCOME_UNKNOWN'
     if step == 'RUN_REMOTE_TEST':
         try:
             remote_result = _run_remote_test(store, task_id, executor_task, d6['result_head'],
@@ -1430,11 +1490,16 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                     type(c.get('version')) is int]
         version = max(versions, default=0) + 1
         invoke = dispatch_review_call or review_dispatch.dispatch_review
+        if redispatch_reason is not None:
+            codes.extend(('REVIEW_REDISPATCHED', redispatch_reason))
         try:
             result = invoke(store=store, task_id=task_id, executor_task=executor_task,
                             pr_number=number, version=version)
         except Exception as exc:
             codes.append(_refusal(exc, 'review_dispatch_code'))
+            failure = _failure_reason(getattr(exc, 'review_failure_reason', None))
+            if failure is not None:
+                codes.append(failure)
         if type(result) is dict:
             review_text = result.get('review_text')
             if (result.get('state') == 'COMPLETED' and
@@ -1648,10 +1713,15 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                      ('TIMEOUT', 'SHA_MISMATCH') else 'NEEDS_ATTENTION')
     elif step == 'PR_MERGED_NO_REVIEW':
         codes.append('PR_MERGED_NO_REVIEW')
-    elif step in ('REVIEW_OUTCOME_UNKNOWN', 'WAITING_REPAIR',
-                  'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH'):
+    elif step in ('REVIEW_OUTCOME_UNKNOWN', 'REVIEW_UNUSABLE_STOPPED'):
         codes.append(step)
-    next_action = ('resume the reviewer to post its verdict' if step == 'REVIEW_NOT_POSTED'
+        claim = _head_review_claim(record, number, d6['result_head'])
+        failure = _failure_reason(claim.get('failure_reason')) if claim else None
+        if failure is not None:
+            codes.append(failure)
+    elif step in ('WAITING_REPAIR', 'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH'):
+        codes.append(step)
+    next_action =('resume the reviewer to post its verdict' if step == 'REVIEW_NOT_POSTED'
                    else step)
     return _ack_consumed_events(
         {'task_id': task_id, 'step': step, 'result': result,

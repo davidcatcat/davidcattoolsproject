@@ -852,6 +852,14 @@ def _validate_remote_test_outcomes(record):
             _fail('REMOTE_TEST_OUTCOME_INVALID')
 
 
+def _known_review_failure_reason(value):
+    """Return whether ``value`` is one fixed unusable-review reason name."""
+    # Imported here, like worker_dispatch: the store must not load the
+    # dispatcher at import time. The dispatcher owns the one fixed set.
+    from .review_dispatch import REVIEW_FAILURE_REASONS
+    return type(value) is str and value in REVIEW_FAILURE_REASONS
+
+
 def _validate(record):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
@@ -996,12 +1004,14 @@ def _validate(record):
         identities = set()
         for item in claims:
             if (type(item) is not dict or
-                    set(item) not in (
+                    set(item) - frozenset(('failure_reason',)) not in (
                         _REVIEW_DISPATCH_CLAIM_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS |
                         frozenset(('review_result',))) or
+                    ('failure_reason' in item and
+                     not _known_review_failure_reason(item['failure_reason'])) or
                     ('account' in item and
                      (type(item['account']) is not str or
                       _NAME.fullmatch(item['account']) is None)) or
