@@ -6653,7 +6653,7 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
 # (developer_routes/gw_agent.py, collect). A company gw run is an API call
 # inside llmtool and leaves neither, so it has no row here.
 GW_ROSTER = {"gw-agent developer": "公司 gw agent"}
-GW_AUDIT_ROOT = tempfile.gettempdir()
+GW_AUDIT_ROOT = None   # None: the temp directory, resolved in _gw_finished (it may not exist)
 GW_AUDIT_PREFIX = "llmtool-gw-agent-audit-"
 GW_AUDIT_ID = re.compile(r"[A-Za-z0-9_]{1,16}")   # the random end of a mkdtemp name
 GW_AUTH_MAX = 64 << 10
@@ -6676,16 +6676,18 @@ def _gw_finished(now: float) -> list[tuple[float, str]]:
     OFFICE_DONE_WINDOW. llmtool copies the audit file when a run ends, so the
     copy's time is the end, and its folder's random name tells runs apart. Only
     file times are read, and only the user's own plain files count, as in
-    cleanup_audit_copies (developer_routes/gw_agent.py)."""
+    cleanup_audit_copies (developer_routes/gw_agent.py). Without a temp
+    directory there are no finished runs to show."""
     try:
-        with os.scandir(GW_AUDIT_ROOT) as entries:
+        root = tempfile.gettempdir() if GW_AUDIT_ROOT is None else GW_AUDIT_ROOT
+        with os.scandir(root) as entries:
             names = [entry.name for entry in entries if entry.name.startswith(GW_AUDIT_PREFIX)]
     except OSError:
         return []
     found = []
     for name in names:
         run = name[len(GW_AUDIT_PREFIX):]
-        folder = os.path.join(GW_AUDIT_ROOT, name)
+        folder = os.path.join(root, name)
         try:
             folder_info, info = os.lstat(folder), os.lstat(os.path.join(folder, "audit.jsonl"))
         except OSError:

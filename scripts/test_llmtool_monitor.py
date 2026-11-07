@@ -3525,6 +3525,36 @@ class OfficeViewTests(unittest.TestCase):
         with patch.object(mon, "GW_AUDIT_ROOT", str(root / "missing")):
             self.assertEqual(mon._gw_finished(self.NOW), [])
 
+    def test_gw_audit_root_is_resolved_only_when_finished_runs_are_read(self):
+        root = Path(self.tmp.name) / "audits"
+        self._gw_audit_copy(root, "abcd1234", 120)
+        with patch.object(mon, "GW_AUDIT_ROOT", None), \
+                patch.object(tempfile, "gettempdir", return_value=str(root)):
+            self.assertEqual([run for _, run in mon._gw_finished(self.NOW)], ["abcd1234"])
+        with patch.object(mon, "GW_AUDIT_ROOT", str(root)), \
+                patch.object(tempfile, "gettempdir", side_effect=FileNotFoundError) as temp:
+            self.assertEqual([run for _, run in mon._gw_finished(self.NOW)], ["abcd1234"])
+        temp.assert_not_called()
+
+    def test_no_temp_directory_blocks_neither_import_nor_live_gw_rows(self):
+        audit = self._gw_route("1d091894" + "a" * 24)
+        spec = importlib.util.spec_from_file_location("llmtool_monitor_no_temp", _PATH)
+        fresh = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = fresh
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        with patch.object(tempfile, "gettempdir", side_effect=FileNotFoundError) as temp:
+            spec.loader.exec_module(fresh)
+            temp.assert_not_called()
+            self.assertIsNone(fresh.GW_AUDIT_ROOT)
+            with patch.object(mon, "GW_AUDIT_ROOT", None):
+                self.assertEqual(mon._gw_finished(self.NOW), [])
+                temp.assert_called()
+                rows = self.rows(self._gw_agent_process(self.task, audit))
+        live = [row for row in rows if row.name in mon.GW_ROSTER]
+        self.assertEqual([(row.state, row.sid) for row in live], [(mon.WORKING, "pid 91")])
+        self.assertIn("task 1d091894", mon._row_detail(live[0]))
+        self.assertIn("公司 gw agent", self.by_name(rows))
+
     def test_no_gw_run_keeps_todays_status_rows(self):
         tasks = Path(self.tmp.name) / "tasks"
         tasks.mkdir()
