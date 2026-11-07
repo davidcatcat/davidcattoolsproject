@@ -1862,6 +1862,48 @@ class TaskAdvancePublishTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'PUBLISH_NON_FAST_FORWARD')
         self.assertEqual(self.git(['rev-parse', 'HEAD'], cwd=self.root).strip(), self.initial_head)
 
+    def move_main(self, path, text):
+        """Advance origin/main from a separate clone and return the new main SHA."""
+        peer = os.path.join(self.tmp.name, 'main-peer')
+        self.git(['clone', '--branch', 'main', self.bare, peer], cwd=self.tmp.name)
+        self.git(['config', 'user.name', 'Main Peer'], cwd=peer)
+        self.git(['config', 'user.email', 'main-peer@example.invalid'], cwd=peer)
+        with open(os.path.join(peer, path), 'w', encoding='utf-8') as stream:
+            stream.write(text)
+        self.git(['add', '--', path], cwd=peer)
+        self.git(['commit', '-m', 'main moved'], cwd=peer)
+        self.git(['push', 'origin', 'HEAD:refs/heads/main'], cwd=peer)
+        return self.git(['rev-parse', 'HEAD'], cwd=peer).strip()
+
+    def test_real_moved_main_is_merged_and_the_merge_is_pushed(self):
+        main_head = self.move_main('main-file.txt', 'main\n')
+        self.change_file()
+
+        result = self.publish()
+
+        head = self.head()
+        self.assertEqual(result, {'pr': 23, 'head': head})
+        self.assertEqual(self.pushed_head(), head)
+        self.assertEqual(self.git(['rev-parse', 'HEAD^2'], cwd=self.root).strip(), main_head)
+        self.assertEqual(self.git(['show', 'HEAD^1:allowed.txt'], cwd=self.root), 'published\n')
+        self.assertEqual(self.git(['show', 'HEAD:main-file.txt'], cwd=self.root), 'main\n')
+        self.assertEqual(len(self.recorded), 1)
+
+    def test_real_merge_conflict_aborts_and_pushes_nothing(self):
+        self.move_main('allowed.txt', 'main\n')
+        self.change_file()
+
+        with self.assertRaises(task_advance._PublishRefusal) as caught:
+            self.publish()
+
+        self.assertEqual(caught.exception.code, 'PUBLISH_MERGE_CONFLICT')
+        self.assertNotEqual(self.git_runner(
+            self.root, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']).returncode, 0)
+        self.assertEqual(self.git(['status', '--porcelain'], cwd=self.root), '')
+        self.assertEqual(self.pushed_head(), self.initial_head)
+        self.assertEqual(self.recorded, [])
+        self.assertEqual(self.gh_calls, [])
+
 
 class TaskAdvancePublishLookupTests(unittest.TestCase):
     def setUp(self):

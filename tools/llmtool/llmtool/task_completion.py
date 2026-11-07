@@ -1125,25 +1125,8 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
         inherited.update(inherited_commits)
         if len(fields) > 3:
             continue
-        resolution_raw = _remerge_diff_paths_raw(root, commit)
-        first_parent = fields[1]
-        conflict_raw = _merge_tree_conflict_paths_raw(
-            root, first_parent, second_parent)
-        try:
-            resolution_paths = set(
-                path for path in resolution_raw.decode('utf-8', 'strict').split('\x00')
-                if path)
-            conflict_fields = conflict_raw.decode('utf-8', 'strict').split('\x00')
-            if (len(conflict_fields) < 2 or
-                    re.fullmatch(r'[0-9a-f]{40}', conflict_fields[0]) is None or
-                    conflict_fields[-1] != ''):
-                _stop('GIT_INSPECTION_FAILED')
-            conflict_paths = conflict_fields[1:-1]
-            if any(not path for path in conflict_paths):
-                _stop('GIT_INSPECTION_FAILED')
-            merge_resolution_paths[commit] = resolution_paths | set(conflict_paths)
-        except UnicodeError:
-            _stop('GIT_INSPECTION_FAILED')
+        merge_resolution_paths[commit] = _merge_resolution_paths(
+            root, commit, fields[1], second_parent)
 
     developer_paths = set()
     for commit in commit_ids:
@@ -1173,6 +1156,55 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
         if len(developer_paths) > 128:
             _stop('RESULT_DIFF_INVALID')
     return tuple(sorted(developer_paths))
+
+
+def _merge_resolution_paths(root, commit, first_parent, second_parent):
+    """Return the paths a two-parent merge resolved by hand or conflicted on."""
+    resolution_raw = _remerge_diff_paths_raw(root, commit)
+    conflict_raw = _merge_tree_conflict_paths_raw(root, first_parent, second_parent)
+    try:
+        resolution_paths = set(
+            path for path in resolution_raw.decode('utf-8', 'strict').split('\x00')
+            if path)
+        conflict_fields = conflict_raw.decode('utf-8', 'strict').split('\x00')
+        if (len(conflict_fields) < 2 or
+                re.fullmatch(r'[0-9a-f]{40}', conflict_fields[0]) is None or
+                conflict_fields[-1] != ''):
+            _stop('GIT_INSPECTION_FAILED')
+        conflict_paths = conflict_fields[1:-1]
+        if any(not path for path in conflict_paths):
+            _stop('GIT_INSPECTION_FAILED')
+    except UnicodeError:
+        _stop('GIT_INSPECTION_FAILED')
+    return resolution_paths | set(conflict_paths)
+
+
+def _developer_tip(root, start_sha, head_sha, trusted_base_sha=None):
+    """Return head_sha with its trailing clean trusted-main merges stripped.
+
+    A stripped merge has exactly two parents, a trusted second parent and no
+    resolution or conflict path, so it adds nothing to its first parent except
+    trusted main. The first commit that fails is returned, or else start_sha.
+    """
+    if trusted_base_sha is None:
+        trusted_base_sha = start_sha
+    current = head_sha
+    while current != start_sha:
+        raw = _git(root, ('rev-list', '--parents', '-n', '1', current), limit=4096)
+        parents = raw.decode('ascii').split()[1:]
+        if (len(parents) != 2 or not _is_ancestor(root, parents[1], trusted_base_sha) or
+                _merge_resolution_paths(root, current, parents[0], parents[1])):
+            return current
+        current = parents[0]
+    return start_sha
+
+
+def _diff_paths(root, start_sha, end_sha):
+    """Return the sorted paths that differ between two commits."""
+    changed = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv',
+                          '--no-renames', start_sha, end_sha, '--'), limit=1024 * 1024)
+    return tuple(sorted(set(path for path in changed.decode('utf-8', 'strict').split('\x00')
+                            if path)))
 
 
 def _private_merge_read(root, args, **git_options):
@@ -1273,10 +1305,7 @@ def _collect_registered_result_diff(*, task_id, expected_common_dir, expected_ro
         limit=4096, allow_exit_1=True, return_exit_code=True)
     if ancestor_status != 0:
         _stop('SOURCE_NOT_ANCESTOR')
-    changed = _git(registration.root, ('diff', '--name-only', '-z', '--no-ext-diff',
-                  '--no-textconv', '--no-renames', source_sha, snapshot.head, '--'),
-                   limit=1024*1024)
-    paths = tuple(sorted(set(path for path in changed.decode('utf-8', 'strict').split('\x00') if path)))
+    paths = _diff_paths(registration.root, source_sha, snapshot.head)
     if not paths or len(paths) > 128:
         _stop('RESULT_DIFF_INVALID')
     developer_paths = _developer_changed_paths(
@@ -1305,10 +1334,14 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
         expected_native_session_id=expected_native_session_id,
         write_paths=write_paths, artifact_segments=artifact_segments,
         trusted_base_sha=trusted_base_sha)
+    # An artifact describes the Developer's work, so it is compared with the
+    # Developer tip. Paths, digest and scope above still cover the full head.
     if artifact_segments is None:
+        tip = _developer_tip(registration.root, source_sha, snapshot.head, trusted_base_sha)
         verify_artifact_applied(registration.root, artifact, artifact_sha256,
-                                source_sha, snapshot.head, paths, write_paths,
-                                scope_paths=developer_paths)
+                                source_sha, tip,
+                                _diff_paths(registration.root, source_sha, tip),
+                                write_paths, scope_paths=developer_paths)
     else:
         if (type(artifact_segments) is not list or not artifact_segments or
                 any(type(segment) is not tuple or len(segment) != 4
@@ -1329,19 +1362,18 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
                      limit=4096)
             except LLMToolError:
                 _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
-            changed_segment = _git(registration.root,
-                ('diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv',
-                 '--no-renames', start_sha, end_sha, '--'), limit=1024*1024)
-            segment_paths = tuple(sorted(set(
-                path for path in changed_segment.decode('utf-8', 'strict').split('\x00') if path)))
+            segment_paths = _diff_paths(registration.root, start_sha, end_sha)
             segment_developer_paths = _developer_changed_paths(
                 registration.root, start_sha, end_sha, trusted_base_sha)
             if (not segment_paths or not segment_developer_paths or
                     not set(segment_developer_paths).issubset(set(write_paths))):
                 _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+            segment_tip = _developer_tip(registration.root, start_sha, end_sha,
+                                         trusted_base_sha)
             try:
                 verify_artifact_applied(registration.root, segment_artifact,
-                    segment_digest, start_sha, end_sha, segment_paths, write_paths,
+                    segment_digest, start_sha, segment_tip,
+                    _diff_paths(registration.root, start_sha, segment_tip), write_paths,
                     scope_paths=segment_developer_paths)
             except LLMToolError:
                 _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
