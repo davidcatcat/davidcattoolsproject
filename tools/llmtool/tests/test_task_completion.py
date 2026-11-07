@@ -1284,18 +1284,36 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertIn('main-name.md', expected)
         self.assertEqual(task_completion._developer_changed_paths(*args), expected)
         self._git('config', 'merge.renames', 'false')
-        # Control: with the repository config the merge has no conflict.
-        probe = subprocess.run(
-            ['/usr/bin/git', 'merge-tree', '--write-tree', '--name-only',
-             head['segment_start'], head['trusted_base']],
-            cwd=self.root, text=True, capture_output=True)
-        self.assertEqual(probe.returncode, 0, probe.stdout + probe.stderr)
+        # No in-repository control: whether a merge read there honours
+        # merge.renames depends on the Git version. The private reads must
+        # give the same result either way.
         self.assertEqual(task_completion._developer_changed_paths(*args), expected)
         with self.assertRaises(LLMToolError) as raised:
             task_completion.collect_executor_result(
                 **self._segment_collector_kwargs(head, [self.source_path]),
                 artifact=head['artifact'], artifact_sha256=head['artifact_sha256'])
         self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
+
+    def test_private_merge_read_failure_stops_inspection(self):
+        root, missing = str(self.root), '1' * 40
+        reads = {
+            'remerge': lambda commit: task_completion._remerge_diff_paths_raw(root, commit),
+            'merge-tree': lambda commit: task_completion._merge_tree_conflict_paths_raw(
+                root, commit, self.source_sha),
+        }
+        for name, read in reads.items():
+            with self.subTest(read=name, failure='missing-object'):
+                with self.assertRaises(LLMToolError) as raised:
+                    read(missing)
+                self.assertEqual(raised.exception.completion_code,
+                                 'GIT_INSPECTION_FAILED')
+            with self.subTest(read=name, failure='temporary-repository'):
+                with patch.object(task_completion.tempfile, 'TemporaryDirectory',
+                                  side_effect=OSError('no temporary directory')):
+                    with self.assertRaises(LLMToolError) as raised:
+                        read(self.source_sha)
+                self.assertEqual(raised.exception.completion_code,
+                                 'GIT_INSPECTION_FAILED')
 
     def _assert_rename_conflict_collectors(self, head):
         executor = {'artifact': head['artifact'],
