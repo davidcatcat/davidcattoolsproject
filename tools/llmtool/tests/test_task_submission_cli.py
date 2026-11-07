@@ -4611,20 +4611,33 @@ class DelegateRepairCapTests(unittest.TestCase):
         self._prior_assignments()
         task = self._task()
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123'
-        diagnosis = self._task()
-        from llmtool.high_debug import _d6_name
-        report = 'Confirmed root cause.'
+        # The High Debug Task is the original Task of the D6 being repaired.
+        diagnosis = self._task(executor='executor-task-1', developer=True)
+        from llmtool.high_debug import REPORT_SECTIONS, _d6_name
+        report = ''.join('## ' + section + '\nSynthetic fixture.\n'
+                         for section in REPORT_SECTIONS[:-1])
+        report += '## ' + REPORT_SECTIONS[-1] + '\nRCA_CONFIRMED\nCost: UNKNOWN\n'
+        report_sha256 = hashlib.sha256(report.encode()).hexdigest()
         entry = {
             'family': 'pr-938', 'failed_corrections': 2, 'early_reason': None,
             'examined_sha': 'a' * 40,
             'd6': _d6_name('executor-task-1', 1, 'a' * 40),
             'model_requested': 'gpt-6.1-sol', 'model_observed': 'gpt-6.1-sol',
             'effort_observed': 'high', 'status': 'RCA_CONFIRMED',
-            'report_sha256': hashlib.sha256(report.encode()).hexdigest(),
+            'report_sha256': report_sha256,
             'report': report, 'usage': 'UNKNOWN',
             'recorded_at': '2026-11-04T00:00:01Z',
         }
         self.store.append_high_debug(diagnosis['task_id'], entry)
+        # The HIGH_DEBUG completion event run_high_debug records for the entry.
+        self.store.record_completion_event(
+            diagnosis['task_id'],
+            event_id=hashlib.sha256(
+                ('HIGH_DEBUG\0' + diagnosis['task_id'] + '\0' + 'a' * 40 + '\0' +
+                 report_sha256).encode()).hexdigest()[:32],
+            run_id=diagnosis['run_id'], session_id='high-debug-' + entry['d6'],
+            source='HIGH_DEBUG', source_sha='a' * 40, sequence=0,
+            payload_sha256=hashlib.sha256(report_sha256.encode()).hexdigest())
         args = self._args(task, 'opencode', high_debug_ref=ref,
                           high_debug_task=diagnosis['task_id'],
                           high_debug_family='pr-938')
