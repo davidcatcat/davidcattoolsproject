@@ -457,9 +457,11 @@ class RuleFileTests(_Base):
                              'TRAIN_MEMBER_RULE_FILE')
             self.assertRefused(self.check(), 'TRAIN_MEMBER_RULE_FILE')
 
-    def test_unreadable_pr_file_list_read_is_pr_unavailable(self):
+    def test_unreadable_pr_file_list_read_is_refused_first_by_ci_gate(self):
+        # The CI gate reads the same PR file list before the rule-file check,
+        # so its own refusal code decides, as the check order requires.
         routes = _routes(**{FILES: OSError('down')})
-        self.assertRefused(self.check(routes=routes), 'TRAIN_MEMBER_PR_UNAVAILABLE')
+        self.assertRefused(self.check(routes=routes), 'MERGE_CHECKS_UNAVAILABLE')
 
     def test_unreadable_file_list_is_pr_unavailable(self):
         for files in (None, {}, [None], [{'filename': 3}], [{}] * 100):
