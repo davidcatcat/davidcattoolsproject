@@ -1850,20 +1850,48 @@ def _record_developer_screen_refusal(store, task_id, value):
 
     If it cannot be written (or the store names no root), the delegate gate
     still refuses from the Task record and records the refusal as unlocated.
+    The record keeps a digest of the screened output and the refused Task's
+    D6, never the output, so overflow batch recovery can prove that what it
+    rereads from that D6 is the refused output.
     """
     from . import high_debug
     root = _developer_screen_root(store)
     if root is None:
         return
     try:
-        byte_count = (len(value.encode('utf-8', 'replace'))
-                      if type(value) is str else 0)
+        screened = value.encode('utf-8', 'replace') if type(value) is str else None
+        try:
+            completion = store.get(task_id).get('completion')
+            d6 = completion.get('executor_task_id') if type(completion) is dict else None
+        except Exception:
+            d6 = None
         high_debug._write_screen_record(
             task_id, _DEVELOPER_SCREEN_FAMILY, 'DEVELOPER_OUTPUT_SENSITIVE',
-            _DEVELOPER_SCREEN_SOURCE, _developer_screen_hits(value), byte_count,
-            root=root)
+            _DEVELOPER_SCREEN_SOURCE, _developer_screen_hits(value),
+            0 if screened is None else len(screened), root=root,
+            screened=screened, d6=d6)
     except Exception:
         pass
+
+
+def _developer_screen_source(task_id, d6, root):
+    """Rebuild refused Developer output in memory from its D6, or return None.
+
+    This is the same Task-base diff the D6 routes screen. The caller proves it
+    against the record's digest, so a D6 that moved on refuses. Output that
+    never was a D6 diff (a text route's reply) has no source here: its digest
+    cannot match, and an unchanged D6 gives no diff at all.
+    """
+    try:
+        task = (TaskStore() if root is None else TaskStore(root)).get(task_id)
+        registration = task_completion.read_d6_registration(
+            d6, task['completion']['evidence']['common_dir'],
+            allowed_states=task_completion._D6_EVIDENCE_STATES)
+        _changed_paths, raw = task_completion._worktree_diff(
+            registration.root, task['developer']['source_sha'])
+    except Exception:
+        return None
+    return raw or None
 
 
 def _check_developer_screen_disposition(store, task_id, developer):
@@ -4774,8 +4802,33 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
         return False
 
 
+def _collect_ec2_repair_task_ids(record, new_ids, legacy_ids):
+    """Add the repair Task ids of a record's EC2 repair claims to the two sets.
+
+    New EC2 claims ('-ec2' family, comment_id None) go to ``new_ids``; legacy
+    EC2 claims (base family, comment_id None) go to ``legacy_ids``. A malformed
+    claims list or claim adds nothing, so its run stays on the review count.
+    """
+    from .review_repair import ec2_claim_kind
+
+    claims = record.get('review_repair_claims')
+    if type(claims) is not list:
+        return
+    for claim in claims:
+        kind = ec2_claim_kind(claim)
+        repair_task_id = claim.get('repair_task_id') if kind is not None else None
+        if type(repair_task_id) is not str:
+            continue
+        (new_ids if kind == 'NEW' else legacy_ids).add(repair_task_id)
+
+
 def _check_delegate_repair_cap(args, store, d6_binding=None):
-    """Fail closed before dispatch when this D6 has exhausted its repair rounds."""
+    """Fail closed before dispatch when this D6 has exhausted its repair rounds.
+
+    Review rounds and EC2 remote-test repair rounds are counted separately.
+    A Task that a stored EC2 claim names as its repair Task takes the EC2
+    limit; every other Task takes the review limit.
+    """
     executor_task = getattr(args, 'executor_task', None)
     current_task_id = getattr(args, 'task_id', None)
     try:
@@ -4783,7 +4836,9 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     except Exception:
         raise LLMToolError(
             f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
-    count = 0
+    counted = []
+    new_ec2_ids = set()
+    legacy_ec2_ids = set()
     newest_assignment = None
     high_debug_task = getattr(args, 'high_debug_task', None)
     d6_state = []
@@ -4815,6 +4870,7 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
         completion = record.get('completion')
         if (type(completion) is dict and
                 completion.get('executor_task_id') == executor_task):
+            _collect_ec2_repair_task_ids(record, new_ec2_ids, legacy_ec2_ids)
             developer = record.get('developer')
             # A sensitive output refusal on this D6 blocks every new dispatch
             # until its rules and lines carry a stored disposition (#981).
@@ -4855,9 +4911,19 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             except (TypeError, ValueError):
                 raise LLMToolError(
                     f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
-            count += 1
+            counted.append(task_id)
             newest_assignment = max(newest_assignment, stamp) if newest_assignment else stamp
-    if count < 1 + MAX_REPAIR_ATTEMPTS:
+    if current_task_id in new_ec2_ids or current_task_id in legacy_ec2_ids:
+        # Prior EC2 repair runs on this D6, new and legacy.
+        count = sum(1 for task_id in counted
+                    if task_id in new_ec2_ids or task_id in legacy_ec2_ids)
+        limit = MAX_REPAIR_ATTEMPTS
+    else:
+        # Review rounds: every counted run except new EC2 repair runs; a
+        # legacy EC2 run still counts here.
+        count = sum(1 for task_id in counted if task_id not in new_ec2_ids)
+        limit = 1 + MAX_REPAIR_ATTEMPTS
+    if count < limit:
         return
     ref = getattr(args, 'high_debug_ref', None)
     try:
@@ -5497,10 +5563,20 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
     try:
         if type(claims) is not list or not claims:
             invalid()
-        ordered = sorted(claims, key=lambda claim: claim.get('attempt', 0)
-                         if type(claim) is dict else 0)
-        if [claim.get('attempt') for claim in ordered] != list(range(1, len(ordered) + 1)):
+        # Review and EC2 repairs number their attempts per family, so each
+        # family must hold attempts 1..n in stored order; the chain itself is
+        # walked in stored claim order across families.
+        family_attempts = {}
+        for claim in claims:
+            if type(claim) is not dict:
+                invalid()
+            family_attempts.setdefault(
+                claim.get('family', f"pr-{claim.get('pr')}"), []).append(
+                    claim.get('attempt'))
+        if any(attempts != list(range(1, len(attempts) + 1))
+               for attempts in family_attempts.values()):
             invalid()
+        ordered = claims
         dispatched = [claim for claim in ordered
                       if type(claim) is dict and claim.get('state') == 'DISPATCHED']
         if any(type(claim) is not dict or claim.get('state') not in ('DISPATCHED', 'FAILED')

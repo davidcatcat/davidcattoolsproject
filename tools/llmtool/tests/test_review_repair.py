@@ -89,6 +89,21 @@ def _record():
     return record
 
 
+def _receipt(head=HEAD):
+    receipt = {
+        'task_id': TASK, 'run_id': RUN, 'executor_task': EXECUTOR,
+        'source_sha': head, 'result': 'FAIL', 'modules': ['test_remote'],
+        'failure_excerpt': 'FAIL: test_remote\nAssertionError',
+    }
+    receipt['receipt_digest'] = hashlib.sha256(
+        task_store._json_bytes(receipt)).hexdigest()
+    return receipt
+
+
+MAX = run_budget.MAX_REPAIR_ATTEMPTS
+EC2_FAMILY = f'pr-{PR}-ec2'
+
+
 class ReviewRepairTests(unittest.TestCase):
     def test_repair_limit_uses_run_budget_limit(self):
         self.assertEqual(review_repair.MAX_REPAIR_ATTEMPTS,
@@ -459,6 +474,198 @@ class ReviewRepairTests(unittest.TestCase):
             self.dispatch(github_get=lambda _path: [_comment(version=3)])
         self.assertEqual(raised.exception.review_repair_code,
                          'REPAIR_LIMIT_REACHED')
+
+    # Row 35: review repairs and EC2 remote-test repairs keep separate counts.
+
+    def _seed_repair_claims(self, claims):
+        record = self.store.get(TASK)
+        record['review_repair_claims'] = claims
+        self.store = TempTaskStore(self.temp.name, record)
+
+    @staticmethod
+    def _stored_claim(*, attempt, repair_id, family=f'pr-{PR}', comment_id=9,
+                      head='a' * 40, version=None, state='FAILED',
+                      packet_sha='f' * 64):
+        claim = {'executor_task': EXECUTOR, 'pr': PR, 'head_sha': head,
+                 'version': attempt if version is None else version,
+                 'attempt': attempt, 'state': state, 'repair_task_id': repair_id,
+                 'comment_id': comment_id, 'packet_sha256': packet_sha,
+                 'claimed_at': f'2026-10-27T0{attempt}:00:00Z'}
+        if family is not None:
+            claim['family'] = family
+        return claim
+
+    def _fail_last_claim(self):
+        record = self.store.get(TASK)
+        record['review_repair_claims'][-1]['state'] = 'FAILED'
+        self.store = TempTaskStore(self.temp.name, record)
+
+    def _assert_refused(self, code, **kwargs):
+        before = self.store.get(TASK).get('review_repair_claims')
+        calls = len(self.calls)
+        with self.assertRaises(LLMToolError) as caught:
+            self.dispatch(**kwargs)
+        self.assertEqual(caught.exception.review_repair_code, code)
+        self.assertEqual(self.store.get(TASK).get('review_repair_claims'), before)
+        self.assertEqual(len(self.calls), calls)
+
+    def test_ec2_repair_claim_is_stored_in_ec2_family(self):
+        result = self.dispatch(remote_test_receipt=_receipt())
+        self.assertEqual(result['claim']['family'], EC2_FAMILY)
+        self.assertEqual(result['claim']['attempt'], 1)
+        self.assertIsNone(result['claim']['comment_id'])
+        self.store = TempTaskStore(self.temp.name, _record())
+        result = self.dispatch(remote_test_receipt=_receipt(), family='network')
+        self.assertEqual(result['claim']['family'], 'network-ec2')
+
+    def test_review_repair_claim_stays_in_base_family(self):
+        self.assertEqual(self.dispatch()['claim']['family'], f'pr-{PR}')
+        self.store = TempTaskStore(self.temp.name, _record())
+        self.assertEqual(self.dispatch(family='network')['claim']['family'], 'network')
+
+    def test_ec2_repairs_leave_every_review_repair_available(self):
+        self._seed_repair_claims([
+            self._stored_claim(attempt=n, family=EC2_FAMILY, comment_id=None,
+                               repair_id=f'{n:032x}')
+            for n in range(1, MAX + 1)])
+        for expected in range(1, MAX + 1):
+            result = self.dispatch()
+            self.assertEqual((result['claim']['family'], result['claim']['attempt']),
+                             (f'pr-{PR}', expected))
+            self._fail_last_claim()
+        self._assert_refused('REPAIR_LIMIT_REACHED')
+        self.assertEqual(len(self.calls), MAX)
+
+    def test_review_repairs_leave_every_ec2_repair_available(self):
+        self._seed_repair_claims([
+            self._stored_claim(attempt=n, repair_id=f'{n:032x}')
+            for n in range(1, MAX + 1)])
+        for expected in range(1, MAX + 1):
+            result = self.dispatch(remote_test_receipt=_receipt())
+            self.assertEqual((result['claim']['family'], result['claim']['attempt']),
+                             (EC2_FAMILY, expected))
+            self._fail_last_claim()
+        self._assert_refused('REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
+        self.assertEqual(len(self.calls), MAX)
+
+    def test_legacy_ec2_claim_counts_on_both_counts(self):
+        legacy = self._stored_claim(attempt=1, comment_id=None, repair_id='1' * 32)
+        self._seed_repair_claims([legacy] + [
+            self._stored_claim(attempt=n, repair_id=f'{n:032x}')
+            for n in range(2, MAX + 1)])
+        # Review count: the legacy claim plus the review claims reach the cap.
+        self._assert_refused('REPAIR_LIMIT_REACHED')
+        # EC2 count: the legacy claim uses one EC2 repair; the store numbers
+        # the new '-ec2' claims from 1.
+        for expected in range(1, MAX):
+            result = self.dispatch(remote_test_receipt=_receipt())
+            self.assertEqual((result['claim']['family'], result['claim']['attempt']),
+                             (EC2_FAMILY, expected))
+            self._fail_last_claim()
+        self._assert_refused('REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
+
+    def test_claims_without_family_or_with_comment_id_count_as_review_only(self):
+        self._seed_repair_claims(
+            [self._stored_claim(attempt=1, family=None, comment_id=None,
+                                repair_id='1' * 32)] +
+            [self._stored_claim(attempt=n, comment_id=9, repair_id=f'{n:032x}')
+             for n in range(2, MAX + 1)])
+        self._assert_refused('REPAIR_LIMIT_REACHED')
+        result = self.dispatch(remote_test_receipt=_receipt())
+        self.assertEqual((result['claim']['family'], result['claim']['attempt']),
+                         (EC2_FAMILY, 1))
+
+    def _receipt_packet_sha(self):
+        packet = review_repair._remote_test_failure(
+            self.store.get(TASK), executor_task=EXECUTOR, pr_number=PR,
+            receipt=_receipt())
+        return hashlib.sha256(json.dumps(
+            packet, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':')).encode('utf-8')).hexdigest()
+
+    def test_legacy_in_flight_ec2_claim_replays_then_retries_into_ec2_family(self):
+        legacy = self._stored_claim(
+            attempt=1, comment_id=None, head=HEAD, state='DISPATCHED',
+            repair_id='1' * 32, packet_sha=self._receipt_packet_sha())
+        self._seed_repair_claims([legacy])
+        result = self.dispatch(remote_test_receipt=_receipt())
+        self.assertTrue(result['replayed'])
+        self.assertEqual(result['repair_task_id'], '1' * 32)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.store.get(TASK)['review_repair_claims'], [legacy])
+
+        result = self.dispatch(remote_test_receipt=_receipt(), retry_claim_id='1' * 32)
+        claims = self.store.get(TASK)['review_repair_claims']
+        self.assertEqual([claim['state'] for claim in claims], ['FAILED', 'DISPATCHED'])
+        self.assertEqual((claims[1]['family'], claims[1]['attempt'], claims[1]['version']),
+                         (EC2_FAMILY, 1, 2))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_invalid_repair_families_are_refused_before_any_write(self):
+        for receipt, family in ((None, EC2_FAMILY), (_receipt(), EC2_FAMILY),
+                                (None, 'network-ec2'), (_receipt(), 'x' * 61)):
+            with self.subTest(receipt=receipt is not None, family=family):
+                self._assert_refused('REPAIR_FAMILY_INVALID', family=family,
+                                     remote_test_receipt=receipt)
+                self.assertNotIn('review_repair_claims', self.store.get(TASK))
+        # The 64 character limit applies to the stored family.
+        self.assertEqual(self.dispatch(family='x' * 61)['claim']['family'], 'x' * 61)
+        result = self.dispatch(family='y' * 60, remote_test_receipt=_receipt())
+        self.assertEqual(result['claim']['family'], 'y' * 60 + '-ec2')
+
+    def test_review_and_ec2_claims_with_same_identity_refuse_without_provider_call(self):
+        ec2 = self._stored_claim(attempt=1, family=EC2_FAMILY, comment_id=None,
+                                 head=HEAD, version=1, repair_id='1' * 32)
+        self._seed_repair_claims([ec2])
+        recorded = []
+        self._assert_refused(
+            'REPAIR_CLAIM_UNAVAILABLE',
+            repair_task_recorder=lambda **request: recorded.append(request))
+        self.assertEqual(recorded, [])
+        self.assertEqual(self.calls, [])
+
+    def test_ec2_claim_after_review_claim_on_same_head_takes_next_version(self):
+        self._seed_repair_claims([self._stored_claim(
+            attempt=1, head=HEAD, version=1, repair_id='1' * 32)])
+        result = self.dispatch(remote_test_receipt=_receipt())
+        self.assertEqual((result['claim']['family'], result['claim']['attempt'],
+                          result['claim']['version']), (EC2_FAMILY, 1, 2))
+
+    def test_split_family_claims_pass_real_task_store_validation(self):
+        from test_active_pm_inbox import ActivePMInboxTests, _RESPONSE
+
+        fixture = ActivePMInboxTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.store = TaskStore(Path(self.temp.name).resolve())
+        with redirect_stdout(StringIO()):
+            task = task_submission_cli.run_task_record_pm(
+                Namespace(stdin_json=True, pm_session_id=fixture.session,
+                          pm_runtime='claude-code', pm_cwd=str(fixture.pm_cwd)),
+                store=self.store,
+                input_stream=StringIO(json.dumps({
+                    'request': 'Bounded non-sensitive split repair family fixture.',
+                    'response': _RESPONSE})),
+                return_record=True, task_id=TASK)
+        ec2 = self._stored_claim(attempt=1, family=EC2_FAMILY, comment_id=None,
+                                 head=HEAD, version=1, state='CLAIMED',
+                                 repair_id='1' * 32)
+        saved = self.store.compare_and_update(
+            TASK, expected={'record_sha256': task['record_sha256']},
+            review_repair_claims=[ec2])
+        colliding = self._stored_claim(attempt=1, head=HEAD, version=1,
+                                       state='CLAIMED', repair_id='2' * 32)
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.compare_and_update(
+                TASK, expected={'record_sha256': saved['record_sha256']},
+                review_repair_claims=[ec2, colliding])
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'REVIEW_REPAIR_CLAIM_INVALID')
+        review = dict(colliding, version=2)
+        saved = self.store.compare_and_update(
+            TASK, expected={'record_sha256': saved['record_sha256']},
+            review_repair_claims=[ec2, review])
+        self.assertEqual(saved['review_repair_claims'], [ec2, review])
 
     def test_head_moved(self):
         with self.assertRaisesRegex(Exception, 'refused') as raised:
