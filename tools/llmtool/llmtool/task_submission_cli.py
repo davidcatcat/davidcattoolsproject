@@ -26,7 +26,8 @@ from .config import (CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS, api_key,
 from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
-from .task_store import TaskStore, TaskStoreConflict, new_id, _json_bytes
+from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
+                         _DIRECT_EXECUTION_FIELDS)
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
@@ -2790,6 +2791,56 @@ class _D6SessionRefused(Exception):
     """The D6 did not take, or did not confirm, the session a run reported."""
 
 
+# The accepted execution status TaskStore expects per direct route (#1072).
+_DIRECT_BIND_STATUS = {'opencode': 'SUCCEEDED', 'gw-agent': 'DONE'}
+
+
+def _bounded_int(value, low, high):
+    """None, or an int (never a bool) within the store's bounds."""
+    return value is None or (type(value) is int and low <= value <= high)
+
+
+def _store_accepts_direct_execution(developer):
+    """Whether TaskStore would accept this accepted OpenCode or gw-agent execution.
+
+    Mirrors the task_store execution checks for a SUCCEEDED/DONE run of these
+    routes, so a run the store would refuse never leaves a session on the D6.
+    The session format is checked by the caller.
+    """
+    profile = developer.get('provider_profile')
+    execution = developer.get('execution')
+    status = _DIRECT_BIND_STATUS.get(profile)
+    if status is None or type(execution) is not dict:
+        return False
+    # Exact field set: no Codex binding, launch or diff fields on these routes.
+    if set(execution) != _DIRECT_EXECUTION_FIELDS:
+        return False
+    digest = execution['stdout_sha256']
+    manifest = execution['source_manifest_sha256']
+    source = (execution['source_bytes'], execution['source_file_count'], manifest)
+    if (execution['status'] != status or
+            type(execution['process_exit_code']) is not int or
+            execution['process_exit_code'] != 0 or
+            execution['cleanup_status'] != 'CONFIRMED' or
+            type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None or
+            not _bounded_int(execution['elapsed_ms'], 0, 86_400_000) or
+            not _bounded_int(execution['source_bytes'], 0, 2 * 1024 * 1024) or
+            not _bounded_int(execution['source_file_count'], 1, 32) or
+            (manifest is not None and
+             (type(manifest) is not str or
+              re.fullmatch(r'[0-9a-f]{64}', manifest) is None)) or
+            execution['usage_source'] not in ('CLI_REPORTED', 'UNKNOWN')):
+        return False
+    # A responded OpenCode record reports CLI usage exactly when it holds usage.
+    if profile == 'opencode' and execution['usage_source'] != (
+            'CLI_REPORTED' if developer.get('usage') is not None else 'UNKNOWN'):
+        return False
+    # Source observation: all set or all null; OpenCode must report all of it.
+    if any(value is None for value in source):
+        return profile != 'opencode' and all(value is None for value in source)
+    return True
+
+
 def _bind_direct_native_session(registration, developer, completion, session_format,
                                 *, repair=False):
     """Bind an accepted OpenCode or gw-agent run's session to its D6 (#1072).
@@ -2804,16 +2855,10 @@ def _bind_direct_native_session(registration, developer, completion, session_for
     if developer.get('state') != 'DEVELOPER_RESPONDED':
         return False
     execution = developer.get('execution')
-    if type(execution) is not dict:
+    if not _store_accepts_direct_execution(developer):
         return False
-    session = execution.get('native_session_id')
-    digest = execution.get('stdout_sha256')
-    if (execution.get('status') not in ('SUCCEEDED', 'DONE') or
-            type(execution.get('process_exit_code')) is not int or
-            execution['process_exit_code'] != 0 or
-            execution.get('cleanup_status') != 'CONFIRMED' or
-            type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None or
-            type(session) is not str or session == 'UNKNOWN' or
+    session = execution['native_session_id']
+    if (type(session) is not str or session == 'UNKNOWN' or
             session_format.fullmatch(session) is None):
         return False
     callback = developer.get('direct_result_callback')

@@ -1555,8 +1555,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
 
     def _opencode_bind_run(self, result=None, *, real_bind=True, answer='BOUND',
                            stored=None, held=None, repair=False, rejected=False,
-                           run_error=None):
-        """Run OpenCode once on its own store with a fake D6 lifecycle helper."""
+                           run_error=None, mutate=None):
+        """Run OpenCode once on its own store with a fake D6 lifecycle helper.
+
+        ``mutate`` edits the run's execution evidence just before the bind
+        step, to model evidence the store refuses.
+        """
         self._bind_serial = getattr(self, '_bind_serial', 0) + 1
         store = TaskStore(Path(self.temp.name).resolve() / f'bind-store-{self._bind_serial}')
         self._set_executor_native_session(held)
@@ -1590,8 +1594,14 @@ class TaskSubmissionCLITests(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(patch.dict(os.environ, {'HOME': str(self.home)}))
             if real_bind:
+                def mutating_bind(registration, developer, completion, session_format,
+                                  **kwargs):
+                    mutate(developer['execution'])
+                    return _REAL_DIRECT_BIND(registration, developer, completion,
+                                             session_format, **kwargs)
+                bind = _REAL_DIRECT_BIND if mutate is None else mutating_bind
                 stack.enter_context(patch.object(
-                    submission_cli, '_bind_direct_native_session', _REAL_DIRECT_BIND))
+                    submission_cli, '_bind_direct_native_session', bind))
             stack.enter_context(patch.object(
                 submission_cli, '_bind_codex_native_session', side_effect=lifecycle))
             stack.enter_context(patch(
@@ -1691,6 +1701,70 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     self.assertNotEqual(run['saved']['developer']['state'],
                                         'DEVELOPER_RESPONDED')
                     self.assertEqual(run['event_calls'], 0)
+
+    @staticmethod
+    def _set_execution(**fields):
+        def mutate(execution):
+            execution.update(fields)
+        return mutate
+
+    def test_opencode_bind_refuses_execution_evidence_the_store_rejects(self):
+        # A valid session with execution evidence TaskStore refuses: nothing
+        # is bound, and the store still refuses the result write.
+        def drop(field):
+            return lambda execution: execution.pop(field)
+
+        set_ = self._set_execution
+        for name, mutate in (
+                ('extra-binding-field', set_(native_session_binding='BOUND')),
+                ('extra-launch-field', set_(child_pid=321)),
+                ('missing-field', drop('elapsed_ms')),
+                ('status-done', set_(status='DONE')),
+                ('status-unknown', set_(status='UNKNOWN')),
+                ('elapsed-negative', set_(elapsed_ms=-1)),
+                ('elapsed-too-large', set_(elapsed_ms=86_400_001)),
+                ('elapsed-bool', set_(elapsed_ms=True)),
+                ('elapsed-str', set_(elapsed_ms='32')),
+                ('elapsed-float', set_(elapsed_ms=32.0)),
+                ('source-bytes-negative', set_(source_bytes=-1)),
+                ('source-bytes-too-large', set_(source_bytes=2 * 1024 * 1024 + 1)),
+                ('source-bytes-bool', set_(source_bytes=True)),
+                ('source-files-zero', set_(source_file_count=0)),
+                ('source-files-too-many', set_(source_file_count=33)),
+                ('source-files-bool', set_(source_file_count=True)),
+                ('manifest-uppercase', set_(source_manifest_sha256='B' * 64)),
+                ('manifest-short', set_(source_manifest_sha256='b' * 63)),
+                ('manifest-not-str', set_(source_manifest_sha256=1)),
+                ('usage-source', set_(usage_source='ESTIMATED')),
+                # The fake run reports no usage, so CLI-reported usage is refused.
+                ('usage-source-without-usage', set_(usage_source='CLI_REPORTED')),
+                ('source-partial', set_(source_bytes=None)),
+                ('source-all-null', set_(source_bytes=None, source_file_count=None,
+                                         source_manifest_sha256=None))):
+            with self.subTest(field=name):
+                run = self._opencode_bind_run(self._opencode_result(), mutate=mutate)
+                self.assertEqual(run['calls'], [])
+                self.assertIsNone(run['d6'])
+                self._assert_evidence_names(run['saved'], None)
+                self.assertNotEqual(run['saved']['developer']['state'],
+                                    'DEVELOPER_RESPONDED')
+                self.assertEqual(run['event_calls'], 0)
+
+    def test_opencode_bind_accepts_execution_at_the_store_bounds(self):
+        set_ = self._set_execution
+        for name, mutate in (
+                ('elapsed-zero', set_(elapsed_ms=0)),
+                ('elapsed-max', set_(elapsed_ms=86_400_000)),
+                ('elapsed-none', set_(elapsed_ms=None)),
+                ('source-bytes-zero', set_(source_bytes=0)),
+                ('source-bytes-max', set_(source_bytes=2 * 1024 * 1024)),
+                ('source-files-max', set_(source_file_count=32))):
+            with self.subTest(field=name):
+                run = self._opencode_bind_run(self._opencode_result(), mutate=mutate)
+                self.assertEqual(run['calls'], ['ses_Abc123'])
+                self.assertEqual(run['d6'], 'ses_Abc123')
+                self.assertEqual(run['saved']['developer']['state'], 'DEVELOPER_RESPONDED')
+                self._assert_evidence_names(run['saved'], 'ses_Abc123')
 
     def test_opencode_d6_already_holding_the_run_session_needs_no_helper(self):
         run = self._opencode_bind_run(self._opencode_result(), held='ses_Abc123')

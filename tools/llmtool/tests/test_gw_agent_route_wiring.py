@@ -1424,8 +1424,13 @@ class GwAgentRealStoreTests(unittest.TestCase):
             encoding='utf-8')).get('native_session_id')
 
     def _bind_run(self, target, *, session=_BIND_SESSION, real_bind=True, answer='BOUND',
-                  stored=None, held=None, fault=None, route_runner=None, **options):
-        """Delegate once on a fresh store with a fake D6 lifecycle helper."""
+                  stored=None, held=None, fault=None, route_runner=None, mutate=None,
+                  **options):
+        """Delegate once on a fresh store with a fake D6 lifecycle helper.
+
+        ``mutate`` edits the run's execution evidence just before the bind
+        step, to model evidence the store refuses.
+        """
         self._fresh_store()
         self.server.script.clear()
         self._set_d6_session(held)
@@ -1449,12 +1454,21 @@ class GwAgentRealStoreTests(unittest.TestCase):
 
         if route_runner is None:
             route_runner = self._route_result_with(session_id=session, **(fault or {}))
+        real_bind_step = task_submission_cli._bind_direct_native_session
+
+        def mutating_bind(registration, developer, completion, session_format, **kwargs):
+            mutate(developer['execution'])
+            return real_bind_step(registration, developer, completion, session_format,
+                                  **kwargs)
+
         run = {'calls': calls, 'code': None, 'error': None}
         try:
             with patch.object(task_submission_cli, 'run_task_direct_result_event',
                               wraps=task_submission_cli.run_task_direct_result_event) as event, \
                  patch.object(task_completion, 'collect_executor_worktree_result',
-                              wraps=task_completion.collect_executor_worktree_result) as collect:
+                              wraps=task_completion.collect_executor_worktree_result) as collect, \
+                 patch.object(task_submission_cli, '_bind_direct_native_session',
+                              real_bind_step if mutate is None else mutating_bind):
                 try:
                     run['code'], _ = self._delegate(
                         target, route_runner=route_runner, wrap_store=recording,
@@ -1568,6 +1582,69 @@ class GwAgentRealStoreTests(unittest.TestCase):
                 self.assertEqual(run['event_calls'], 0)
                 if name == 'interrupted':
                     self.assertEqual(run['error'], 'KeyboardInterrupt')
+
+    @staticmethod
+    def _set_execution(**fields):
+        def mutate(execution):
+            execution.update(fields)
+        return mutate
+
+    def test_gw_agent_bind_refuses_execution_evidence_the_store_rejects(self):
+        # A valid session with execution evidence TaskStore refuses: nothing
+        # is bound, and the existing persistence-rejected result stands.
+        def drop(field):
+            return lambda execution: execution.pop(field)
+
+        set_ = self._set_execution
+        source = {'source_bytes': 10, 'source_file_count': 1,
+                  'source_manifest_sha256': 'b' * 64}
+        for name, mutate in (
+                ('extra-binding-field', set_(native_session_binding='BOUND')),
+                ('extra-launch-field', set_(child_pid=321)),
+                ('missing-field', drop('elapsed_ms')),
+                ('status-succeeded', set_(status='SUCCEEDED')),
+                ('elapsed-negative', set_(elapsed_ms=-1)),
+                ('elapsed-too-large', set_(elapsed_ms=86_400_001)),
+                ('elapsed-bool', set_(elapsed_ms=True)),
+                ('elapsed-str', set_(elapsed_ms='32')),
+                ('elapsed-float', set_(elapsed_ms=32.0)),
+                ('source-bytes-negative', set_(**{**source, 'source_bytes': -1})),
+                ('source-bytes-too-large',
+                 set_(**{**source, 'source_bytes': 2 * 1024 * 1024 + 1})),
+                ('source-bytes-bool', set_(**{**source, 'source_bytes': True})),
+                ('source-files-zero', set_(**{**source, 'source_file_count': 0})),
+                ('source-files-too-many', set_(**{**source, 'source_file_count': 33})),
+                ('source-files-bool', set_(**{**source, 'source_file_count': True})),
+                ('manifest-uppercase',
+                 set_(**{**source, 'source_manifest_sha256': 'B' * 64})),
+                ('manifest-short', set_(**{**source, 'source_manifest_sha256': 'b' * 63})),
+                ('manifest-not-str', set_(**{**source, 'source_manifest_sha256': 1})),
+                ('usage-source', set_(usage_source='ESTIMATED')),
+                ('source-partial', set_(source_bytes=10)),
+                ('source-partial-two', set_(source_bytes=10, source_file_count=1))):
+            with self.subTest(field=name):
+                run = self._bind_run(f'gw-agent-refuse-{name}.md', mutate=mutate)
+                developer = run['saved']['developer']
+                self.assertEqual(run['calls'], [])
+                self.assertIsNone(run['d6'])
+                self._assert_gw_evidence_names(run['saved'], None)
+                self.assertEqual(run['code'], 1)
+                self.assertEqual((developer['state'], developer['error_code']),
+                                 ('DEVELOPER_OUTCOME_UNKNOWN',
+                                  'DEVELOPER_RESULT_PERSISTENCE_REJECTED'))
+                self.assertEqual(run['event_calls'], 0)
+
+    def test_gw_agent_bind_accepts_execution_at_the_store_bounds(self):
+        set_ = self._set_execution
+        for name, mutate in (('elapsed-zero', set_(elapsed_ms=0)),
+                             ('elapsed-max', set_(elapsed_ms=86_400_000))):
+            with self.subTest(field=name):
+                run = self._bind_run(f'gw-agent-bounds-{name}.md', mutate=mutate)
+                self.assertEqual(run['code'], 0)
+                self.assertEqual(run['calls'], [_BIND_SESSION])
+                self.assertEqual(run['d6'], _BIND_SESSION)
+                self.assertEqual(run['saved']['developer']['state'], 'DEVELOPER_RESPONDED')
+                self._assert_gw_evidence_names(run['saved'], _BIND_SESSION)
 
     def test_gw_agent_d6_already_holding_the_run_session_needs_no_helper(self):
         run = self._bind_run('gw-agent-bind-held.md', held=_BIND_SESSION)
