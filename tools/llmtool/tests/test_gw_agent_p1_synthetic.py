@@ -3,7 +3,7 @@ import unittest
 
 
 def scale(value):
-    return value
+    return value * 3
 
 
 UNRELATED_CONSTANT = 7
