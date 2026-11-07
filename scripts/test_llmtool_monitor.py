@@ -9347,6 +9347,7 @@ class _StateMonitor:
         self.office, self.office_error, self.github = list(office), None, github
         self.quota, self.pm_board = [], mon.PmBoard("ok", 0, [], [], [])
         self.ec2_heads, self.stuck_records, self.office_built = None, None, None
+        self.stuck, self.progress = [], None   # what poll() stores at an office rebuild
         self.polls = 0
         for name, value in fields.items():
             setattr(self, name, value)
@@ -9417,8 +9418,15 @@ class OfficeStateTests(unittest.TestCase):
         values = {"quota": ["Codex 已到用量上限"], "office_built": self.NOW - 4,
                   "stuck_records": ([mon.StuckRecord("a" * 8, "", False, self.NOW - 60)], "")}
         values.update(fields)
-        return _StateMonitor(self._rows() if rows is None else rows,
-                             self._github() if github is None else github, **values)
+        return self._rebuild(_StateMonitor(self._rows() if rows is None else rows,
+                                           self._github() if github is None else github, **values))
+
+    def _rebuild(self, monitor):
+        """Store the stuck and PM progress lines as poll() does at an office rebuild."""
+        with self._local():
+            monitor.stuck = mon.stuck_lines(monitor, self.NOW)
+            monitor.progress = mon.pm_progress(monitor, self.NOW)
+        return monitor
 
     @contextlib.contextmanager
     def _local(self, alerts=()):
@@ -9573,6 +9581,7 @@ class OfficeStateTests(unittest.TestCase):
         monitor = self._monitor(office_built=None, quota=[])
         monitor.github = None
         monitor.office, monitor.office_error = [], "TypeError"
+        self._rebuild(monitor)
         with self._local():
             state = mon.office_state(monitor, self.NOW)
             text = self._terminal(monitor)
@@ -9658,6 +9667,93 @@ class OfficeStateTests(unittest.TestCase):
         poll(monitor, side_effect=TypeError("boom"))
         self.assertEqual(monitor.office_built, built)   # a failed rebuild keeps the last success
         self.assertEqual(monitor.office_error, "TypeError")
+
+    def test_poll_stores_stuck_and_progress_lines_for_the_state(self):
+        def poll(monitor, stuck, progress):
+            monitor.office_due = 0.0
+            with patch.object(mon, "main_script_blob", return_value=""), \
+                    patch.object(mon, "collect", return_value=mon.Snapshot([], {}, [], frozenset())), \
+                    patch.object(mon, "scan_tasks", return_value=[]), \
+                    patch.object(mon, "llmtool_task_records", return_value=[]), \
+                    patch.object(mon, "llmtool_route_outcomes", return_value={"opencode": None}), \
+                    patch.object(mon, "quota_warnings", return_value=[]), \
+                    patch.object(mon, "d6_task_lines", return_value=[]), \
+                    patch.object(mon, "ec2_head_results", return_value=({}, "")), \
+                    patch.object(mon, "stuck_records", return_value=([], "")), \
+                    patch.object(mon, "office_rows", return_value=[]), \
+                    patch.object(mon, "stuck_lines", return_value=stuck) as stuck_call, \
+                    patch.object(mon, "pm_progress", return_value=progress) as progress_call:
+                monitor.poll()
+            self.assertIs(stuck_call.call_args.args[0], monitor)
+            self.assertIs(progress_call.call_args.args[0], monitor)
+
+        monitor = mon.Monitor()
+        self.assertEqual((monitor.stuck, monitor.progress), ([], None))
+        poll(monitor, ["EC2 忙碌：task aaaaaaaa"], ("PM 進度：上次派工 剛剛 · 排隊 2 · 今天合併 1", "!"))
+        self.assertEqual(monitor.stuck, ["EC2 忙碌：task aaaaaaaa"])
+        self.assertEqual(monitor.progress, ("PM 進度：上次派工 剛剛 · 排隊 2 · 今天合併 1", "!"))
+        poll(monitor, [], ("PM 進度：未確認", ""))   # the next rebuild replaces both
+        self.assertEqual((monitor.stuck, monitor.progress), ([], ("PM 進度：未確認", "")))
+
+    def test_state_uses_stored_lines_when_every_other_reader_fails(self):
+        monitor = self._monitor()
+        monitor.stuck = ["STORED STUCK LINE"]
+        monitor.progress = ("PM 進度：STORED", "!")
+        calls = []
+
+        def fail(name):
+            def reader(*args, **kwargs):
+                calls.append(name)
+                raise OSError(name)
+            return reader
+
+        real_open = open
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "rule-file-alerts.json")
+            Path(path).write_text(json.dumps({
+                "schema_version": 1, "baseline": 0, "checked": [],
+                "alerts": [{"pr": 9, "title": "t", "paths": ["CLAUDE.md"]}]}), encoding="utf-8")
+
+            def guarded_open(file, *args, **kwargs):
+                if os.fspath(file) != path:   # only the rule-alert file may be read
+                    calls.append(f"open {file}")
+                    raise OSError("open")
+                return real_open(file, *args, **kwargs)
+
+            readers = ("registry_details", "pm_last_dispatch", "stuck_lines", "pm_progress",
+                       "stuck_records", "ec2_head_results", "read_pm_board", "canonical_root",
+                       "d6_task_lines", "llmtool_task_records", "llmtool_route_outcomes",
+                       "quota_warnings", "office_rows", "collect", "scan_tasks", "runner_roots",
+                       "claude_config_dirs", "script_digest", "main_script_blob")
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(mon, "RULE_ALERT_FILE", path))
+                for name in readers:
+                    stack.enter_context(patch.object(mon, name, side_effect=fail(name)))
+                stack.enter_context(patch.object(mon.subprocess, "run", side_effect=fail("run")))
+                stack.enter_context(patch.object(mon.subprocess, "Popen", side_effect=fail("Popen")))
+                stack.enter_context(patch.object(mon.http.client, "HTTPSConnection",
+                                                 side_effect=fail("network")))
+                stack.enter_context(patch.object(sqlite3, "connect", side_effect=fail("sqlite")))
+                stack.enter_context(patch.object(os, "scandir", side_effect=fail("scandir")))
+                stack.enter_context(patch.object(os, "listdir", side_effect=fail("listdir")))
+                stack.enter_context(patch("builtins.open", guarded_open))
+                state = mon.office_state(monitor, self.NOW)
+        self.assertEqual(calls, [])
+        self.assertEqual(state["stuck"], ["STORED STUCK LINE"])
+        self.assertEqual(state["top"]["notices"], [
+            {"text": "PM 進度：STORED", "style": "alert"},
+            {"text": "Codex 已到用量上限", "style": "alert"},
+            {"text": "STORED STUCK LINE", "style": "alert"}])
+        self.assertEqual(state["top"]["rule_alerts"], ["規則檔已變更：PR #9，1 個檔（看過後請 PM 清除）"])
+        self.assertEqual(len(state["office"]), 11)
+        self.assertEqual(state["prs"][0]["number"], 5)
+
+    def test_state_before_the_first_rebuild_has_no_progress_notice(self):
+        monitor = _StateMonitor(self._rows(), self._github())
+        with self._local():
+            state = mon.office_state(monitor, self.NOW)
+        self.assertEqual(state["top"]["notices"], [])
+        self.assertEqual(state["stuck"], [])
 
 
 class StateServeTests(unittest.TestCase):

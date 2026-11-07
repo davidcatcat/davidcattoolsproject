@@ -957,6 +957,8 @@ class Monitor:
         self.d6: list = []   # D6 task lines, refreshed with the office view
         self.ec2_heads = None
         self.stuck_records = None
+        self.stuck: list[str] = []   # stuck_lines() at the last office rebuild
+        self.progress: tuple[str, str] | None = None   # pm_progress() at the last office rebuild
         self.version = monitor_version()   # the code this process loaded
         self.digest = script_digest()
         self.stale = False   # the file on disk changed since start: a restart is needed
@@ -1134,6 +1136,13 @@ class Monitor:
                     self.stuck_records = stuck_records()
                 except Exception:  # optional local evidence; preserve the last good snapshot
                     pass
+            # Kept for office_state, which reads no registry or dispatch record itself.
+            built_at = time.time()
+            try:
+                self.stuck = stuck_lines(self, built_at)
+                self.progress = pm_progress(self, built_at)
+            except Exception:  # both catch their own read failures; never break process monitoring
+                self.stuck, self.progress = [], None
         if self.short_lived and now - self.last_summary >= self.summary_every:
             new += self._flush_short_lived(stamp)
             self.last_summary = now
@@ -8397,18 +8406,21 @@ def _state_office(rows: list[OfficeRow], error: str | None) -> list[dict]:
 
 
 def office_state(mon, now: float) -> dict:
-    """The office screen as a dict (schema_version 1), from what mon holds."""
+    """The office screen as a dict (schema_version 1), from what mon holds.
+    The stuck and PM progress lines are the ones poll() stored at its last
+    office rebuild: no registry, dispatch-record, GitHub or process read here."""
     github = mon.github
     error = mon.office_error
     waiting = owner_waiting(github)
     title = office_view(mon.office, error, expand=True, waiting=waiting, now=now)[0][0]
-    stuck = stuck_lines(mon, now)
-    progress = pm_progress(mon, now)
+    stuck = list(getattr(mon, "stuck", None) or [])
+    progress = getattr(mon, "progress", None)   # None until the first office rebuild
     health = None
     if github is not None:
         text, style = main_health_line(github.main_health, github.main_error, now)
         health = {"text": text, "style": _state_style(style)}
-    notices = [{"text": progress[0], "style": _state_style(progress[1])}]
+    notices = ([] if progress is None
+               else [{"text": progress[0], "style": _state_style(progress[1])}])
     notices += [{"text": line, "style": "alert"} for line in (mon.quota or [])]
     notices += [{"text": line, "style": "alert"} for line in stuck]
     pending = list(github.pending if github is not None else [])
