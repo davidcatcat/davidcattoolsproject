@@ -808,6 +808,13 @@ class _NoSandboxBoundary:
         return {'verified': True, 'policy_sha256': 'a' * 64, 'probes': []}
 
 
+# #1072: sessions in the format TaskStore accepts for a DONE gw-agent run.
+_BIND_SESSION = '0123456789abcdef-0123456789abcdef'
+_EARLIER_SESSION = 'fedcba9876543210-fedcba9876543210'
+_OTHER_SESSION = 'abcdefabcdefabcd-0000000000000000'
+_REVIEWER_SESSION = '1111222233334444-5555666677778888'
+
+
 class GwAgentRealStoreTests(unittest.TestCase):
     """Real TaskStore, D6 record, gateway process and result event; fake model only."""
 
@@ -1395,6 +1402,273 @@ class GwAgentRealStoreTests(unittest.TestCase):
         code, task = self._delegate(target)
         self.assertEqual(code, 0)
         self._assert_success_persisted(task, target)
+
+    # #1072: an accepted gw-agent run binds its session to the D6 before the
+    # result is saved. The D6 lifecycle helper is faked; the model is the fake
+    # server, so no gateway or provider call leaves the host.
+
+    def _d6_record_path(self):
+        return Path(self.common) / 'llmtool-worktrees' / 'executor-d6.json'
+
+    def _set_d6_session(self, value):
+        path = self._d6_record_path()
+        record = json.loads(path.read_text(encoding='utf-8'))
+        record.pop('native_session_id', None)
+        if value is not None:
+            record['native_session_id'] = value
+        path.write_text(json.dumps(record), encoding='utf-8')
+        path.chmod(0o600)
+
+    def _d6_session(self):
+        return json.loads(self._d6_record_path().read_text(
+            encoding='utf-8')).get('native_session_id')
+
+    def _bind_run(self, target, *, session=_BIND_SESSION, real_bind=True, answer='BOUND',
+                  stored=None, held=None, fault=None, route_runner=None, **options):
+        """Delegate once on a fresh store with a fake D6 lifecycle helper."""
+        self._fresh_store()
+        self.server.script.clear()
+        self._set_d6_session(held)
+        calls, writes = [], []
+
+        def lifecycle(_registration, value):
+            calls.append(value)
+            if answer == 'BOUND':
+                self._set_d6_session(value if stored is None else stored)
+            return answer
+
+        def recording(base):
+            class RecordingStore:
+                def __getattr__(self, name):
+                    return getattr(base, name)
+
+                def compare_and_update(self, task_id, *, expected, **updates):
+                    writes.append(copy.deepcopy(updates))
+                    return base.compare_and_update(task_id, expected=expected, **updates)
+            return RecordingStore()
+
+        if route_runner is None:
+            route_runner = self._route_result_with(session_id=session, **(fault or {}))
+        run = {'calls': calls, 'code': None, 'error': None}
+        try:
+            with patch.object(task_submission_cli, 'run_task_direct_result_event',
+                              wraps=task_submission_cli.run_task_direct_result_event) as event, \
+                 patch.object(task_completion, 'collect_executor_worktree_result',
+                              wraps=task_completion.collect_executor_worktree_result) as collect:
+                try:
+                    run['code'], _ = self._delegate(
+                        target, route_runner=route_runner, wrap_store=recording,
+                        bind=lifecycle if real_bind else None, **options)
+                except KeyboardInterrupt as exc:
+                    run['error'] = type(exc).__name__
+            run.update(
+                saved=self._reloaded(), d6=self._d6_session(),
+                event_calls=event.call_count,
+                collect_calls=[call.kwargs for call in collect.call_args_list],
+                responded_writes=[write for write in writes
+                                  if (write.get('developer') or {}).get('state') ==
+                                  'DEVELOPER_RESPONDED'])
+        finally:
+            # Each run starts from the clean registered head.
+            if (self.root / target).exists():
+                (self.root / target).unlink()
+        return run
+
+    def _assert_gw_evidence_names(self, saved, session):
+        for evidence in (saved['completion']['evidence'],
+                         saved['developer']['direct_result_callback']['evidence']):
+            self.assertEqual(evidence['executor_native_session_id'], session)
+            self.assertEqual(evidence['executor_native_session'],
+                             'VERIFIED' if session is not None else 'UNKNOWN')
+
+    def test_gw_agent_accepted_run_binds_its_session_in_the_result_write(self):
+        run = self._bind_run('gw-agent-bind.md')
+        saved = run['saved']
+        developer = saved['developer']
+        self.assertEqual(run['code'], 0)
+        self.assertEqual(run['calls'], [_BIND_SESSION])
+        self.assertEqual(run['d6'], _BIND_SESSION)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['execution']['native_session_id'], _BIND_SESSION)
+        self.assertNotIn('native_session_binding', developer['execution'])
+        # Read back from a fresh TaskStore: both evidence blocks name the session.
+        self._assert_gw_evidence_names(saved, _BIND_SESSION)
+        # The existing developer-and-completion write carries the session.
+        result_write = run['responded_writes'][0]
+        self.assertIn('completion', result_write)
+        self.assertEqual(result_write['completion']['evidence']['executor_native_session_id'],
+                         _BIND_SESSION)
+        self.assertEqual(result_write['developer']['direct_result_callback']['evidence']
+                         ['executor_native_session'], 'VERIFIED')
+        # The first evidence collection expects the session the D6 now holds.
+        self.assertEqual(run['event_calls'], 1)
+        self.assertEqual(run['collect_calls'][0]['expected_native_session_id'],
+                         _BIND_SESSION)
+        callback = developer['direct_result_callback']
+        self.assertNotIn('D6_TASK_BINDING_MISMATCH', callback['missing_gates'])
+        self.assertEqual((callback['state'], callback['missing_gates']),
+                         ('PM_EVIDENCE_READY', []))
+
+    def test_gw_agent_run_without_usable_session_binds_nothing(self):
+        def outcome(run):
+            saved = run['saved']
+            developer = saved['developer']
+            execution = developer['execution']
+            if type(execution) is dict:
+                # Timing and gateway output digest differ from run to run.
+                execution = {key: value for key, value in execution.items()
+                             if key not in ('elapsed_ms', 'stdout_sha256')}
+            callback = developer['direct_result_callback']
+            return (run['code'], run['error'], run['event_calls'], developer['state'],
+                    developer['error_code'], execution, developer['artifact'] is None,
+                    saved['completion']['evidence']['executor_native_session_id'],
+                    saved['completion']['evidence']['executor_native_session'],
+                    callback['evidence']['executor_native_session_id'],
+                    callback['evidence']['executor_native_session'],
+                    callback.get('state'), callback.get('missing_gates'))
+
+        for session in (None, '', 'UNKNOWN', 'not a session'):
+            with self.subTest(session=session):
+                target = 'gw-agent-no-usable-session.md'
+                today = self._bind_run(target, session=session, real_bind=False)
+                run = self._bind_run(target, session=session)
+                self.assertEqual(run['calls'], [])
+                self.assertIsNone(run['d6'])
+                self.assertEqual(outcome(run), outcome(today))
+                if session in (None, 'not a session'):
+                    # The existing no-session and bad-session results stand.
+                    developer = run['saved']['developer']
+                    self.assertEqual(run['code'], 1)
+                    self.assertEqual((developer['state'], developer['error_code']),
+                                     ('DEVELOPER_OUTCOME_UNKNOWN',
+                                      'DEVELOPER_RESULT_PERSISTENCE_REJECTED'))
+
+    def test_gw_agent_bind_waits_for_every_store_execution_check(self):
+        def route_error(*_args, **_kwargs):
+            raise RouteError('GW_AGENT_TIMEOUT')
+
+        def interrupted(*_args, **_kwargs):
+            raise KeyboardInterrupt()
+
+        for name, options in (
+                ('cleanup', {'fault': {'cleanup_status': 'UNKNOWN'}}),
+                # The exit code the existing bad-exit-code case shows the store refuses.
+                ('exit-code', {'fault': {'exit_code': 999}}),
+                ('stdout-digest', {'fault': {'stdout_sha256': 'not-a-digest'}}),
+                ('rejected-model', {'served_model': 'gw'}),
+                ('failed', {'route_runner': route_error}),
+                ('interrupted', {'route_runner': interrupted})):
+            with self.subTest(run=name):
+                run = self._bind_run(f'gw-agent-wait-{name}.md', **options)
+                self.assertEqual(run['calls'], [])
+                self.assertIsNone(run['d6'])
+                self._assert_gw_evidence_names(run['saved'], None)
+                self.assertNotEqual(run['saved']['developer']['state'],
+                                    'DEVELOPER_RESPONDED')
+                self.assertEqual(run['event_calls'], 0)
+                if name == 'interrupted':
+                    self.assertEqual(run['error'], 'KeyboardInterrupt')
+
+    def test_gw_agent_d6_already_holding_the_run_session_needs_no_helper(self):
+        run = self._bind_run('gw-agent-bind-held.md', held=_BIND_SESSION)
+        self.assertEqual(run['code'], 0)
+        self.assertEqual(run['calls'], [])
+        self.assertEqual(run['d6'], _BIND_SESSION)
+        self.assertEqual(run['saved']['developer']['state'], 'DEVELOPER_RESPONDED')
+        self._assert_gw_evidence_names(run['saved'], _BIND_SESSION)
+        self.assertEqual(run['event_calls'], 1)
+        self.assertEqual(run['collect_calls'][0]['expected_native_session_id'],
+                         _BIND_SESSION)
+
+    def test_gw_agent_session_the_d6_does_not_take_is_refused(self):
+        for name, options, calls, d6 in (
+                ('d6-holds-another', {'held': _EARLIER_SESSION}, [], _EARLIER_SESSION),
+                ('helper-refused', {'answer': 'D6_BIND_NATIVE_SESSION_REFUSED'},
+                 [_BIND_SESSION], None),
+                ('helper-unavailable', {'answer': 'D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE'},
+                 [_BIND_SESSION], None),
+                ('read-back-differs', {'stored': _OTHER_SESSION},
+                 [_BIND_SESSION], _OTHER_SESSION)):
+            with self.subTest(case=name):
+                run = self._bind_run(f'gw-agent-refused-{name}.md', **options)
+                developer = run['saved']['developer']
+                self.assertEqual(run['calls'], calls)
+                self.assertEqual(run['d6'], d6)
+                self.assertEqual(run['code'], 1)
+                self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                self.assertEqual(developer['error_code'],
+                                 'DEVELOPER_GW_AGENT_D6_SESSION_REFUSED')
+                self.assertIsNone(developer['artifact'])
+                self.assertEqual(run['event_calls'], 0)
+                self.assertEqual(run['collect_calls'], [])
+                # No evidence names the reported session; the D6 value stands.
+                self._assert_gw_evidence_names(
+                    run['saved'], _EARLIER_SESSION if name == 'd6-holds-another' else None)
+
+    def _complete_with_reviewer_session(self, target, reviewer_native):
+        result_sha = '4' * 40
+        git_evidence = {
+            'root': str(self.root), 'common_dir': self.common,
+            'branch': 'task-branch', 'source_sha': self.head,
+            'result_head': result_sha, 'changed_paths': [target],
+            'diff_sha256': '5' * 64, 'executor_identity': 'gw-agent-developer',
+        }
+
+        def github(**_kwargs):
+            return {'evidence': {'pr_number': 10, 'head_sha': result_sha,
+                                 'formal_review_state': 'UNVERIFIED',
+                                 'required_checks': [], 'successful_checks': [],
+                                 'ci_head_sha': result_sha},
+                    'missing_gates': ['CI_REQUIRED_CHECKS_MISSING']}
+
+        real_read = task_completion.read_d6_registration
+
+        def read_registration(task_id, *args, **kwargs):
+            if task_id == 'reviewer-d6':
+                return SimpleNamespace(task_id=task_id, native_session_id=reviewer_native)
+            return real_read(task_id, *args, **kwargs)
+
+        args = Namespace(task_id=self.task_id, executor_task='executor-d6',
+                         reviewer_task='reviewer-d6', pr=10)
+        with patch.object(task_completion, 'collect_executor_result',
+                          return_value=git_evidence) as collect, \
+             patch.object(task_completion, '_github_get', return_value={
+                 'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': '9' * 40}}), \
+             patch.object(task_completion, '_trusted_slug',
+                          return_value='davidcatcat/davidcattoolsproject'), \
+             patch.object(task_completion, 'run_bounded_tests',
+                          return_value=[{'path': target, 'source_sha': result_sha,
+                                         'exit_code': 0, 'output_sha256': '6' * 64}]), \
+             patch.object(task_completion, 'collect_github_evidence', side_effect=github), \
+             patch.object(task_completion, 'read_d6_registration',
+                          side_effect=read_registration), \
+             redirect_stdout(io.StringIO()):
+            task_submission_cli.run_task_complete(args, store=self.store)
+        return collect.call_args.kwargs, self._reloaded()['completion']
+
+    def test_gw_agent_reviewer_session_gate_uses_the_bound_session(self):
+        for name, reviewer, blocked in (
+                ('other-reviewer', _REVIEWER_SESSION, False),
+                ('same-reviewer', _BIND_SESSION, True)):
+            with self.subTest(case=name):
+                target = f'gw-agent-review-{name}.md'
+                run = self._bind_run(target)
+                self.assertEqual(run['saved']['developer']['state'], 'DEVELOPER_RESPONDED')
+                self.assertEqual(run['d6'], _BIND_SESSION)
+                collected, completion = self._complete_with_reviewer_session(target, reviewer)
+                self.assertEqual(collected['expected_native_session_id'], _BIND_SESSION)
+                # The GitHub step ran, so the Reviewer gate was evaluated.
+                self.assertIn('CI_REQUIRED_CHECKS_MISSING', completion['missing_gates'])
+                self.assertNotIn('D6_TASK_BINDING_MISMATCH', completion['missing_gates'])
+                if blocked:
+                    self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                                  completion['missing_gates'])
+                    self.assertEqual(
+                        completion['evidence']['review_pr_ci']['formal_review_state'],
+                        'UNVERIFIED')
+                else:
+                    self.assertNotIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                                     completion['missing_gates'])
 
 
 if __name__ == '__main__':
