@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -8,7 +9,7 @@ import tempfile
 import threading
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -345,6 +346,8 @@ class TaskCompletionTests(unittest.TestCase):
         self._git('add', conflict_path)
         self._git('commit', '-m', 'resolve modify/delete by keeping developer file')
         result = self._git('rev-parse', 'HEAD')
+        self.assertEqual(self._git('rev-parse', result + '^1'), segment_start)
+        self.assertEqual(self._git('rev-parse', result + '^2'), trusted_base)
         registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
         record = json.loads(registry_path.read_text())
         record['head_sha'] = result
@@ -366,6 +369,178 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(self._git(
             'diff', '--name-only', segment_start, result_sha), self.source_path)
         return result_sha, trusted_base, segment_start, artifact
+
+    # shape: (trusted main's README.md rename target, or None to delete it;
+    # the Developer's README.md rename target, or None to delete it; the path
+    # removed when resolving, or None to keep the tree Git left; conflict
+    # paths that the remerge read does not report).
+    _RENAME_CONFLICT_SHAPES = {
+        'rename-delete-main-renames': (
+            'main-name.md', None, None, ('main-name.md',)),
+        'rename-delete-developer-renames': (
+            None, 'developer-name.md', None, ('developer-name.md',)),
+        'rename-rename-keep-both': (
+            'main-name.md', 'developer-name.md', None,
+            ('README.md', 'main-name.md', 'developer-name.md')),
+        'rename-rename-keep-main': (
+            'main-name.md', 'developer-name.md', 'developer-name.md',
+            ('README.md', 'main-name.md')),
+        'rename-rename-keep-developer': (
+            'main-name.md', 'developer-name.md', 'main-name.md',
+            ('README.md', 'developer-name.md')),
+    }
+
+    def _segment_head(self, result_sha, trusted_base, segment_start, attributed):
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', '--no-ext-diff', '--no-textconv',
+             '--no-renames', segment_start, result_sha], cwd=self.root, text=True)
+        return {'result_sha': result_sha, 'trusted_base': trusted_base,
+                'segment_start': segment_start, 'artifact': artifact,
+                'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+                'attributed': sorted(attributed)}
+
+    def _rename_conflict_head(self, shape):
+        """Merge trusted main into the Developer branch with a real rename conflict.
+
+        README.md is the out-of-scope rename source and rename detection is
+        on. The segment starts after the Developer's own rename or deletion,
+        so the conflict paths are attributed only by the merge reads.
+        """
+        main_name, developer_name, dropped, hidden = self._RENAME_CONFLICT_SHAPES[shape]
+        original = 'README.md'
+        self._git('checkout', '-f', 'feat/executor')
+        self._git('reset', '--hard', self.source_sha)
+        self._write_registration(self.task_id, 'executor-agent', 'Executor D6 session',
+                                 self.root, 'feat/executor', self.source_sha, self.source_sha,
+                                 native_session_id='native-executor')
+        main_branch = 'main-' + shape
+        self._git('checkout', '-b', main_branch)
+        if main_name is None:
+            self._git('rm', original)
+        else:
+            self._git('mv', original, main_name)
+        self._git('commit', '-m', 'trusted main moves README')
+        trusted_base = self._git('rev-parse', 'HEAD')
+
+        self._git('checkout', 'feat/executor')
+        source_file = self.root / self.source_path
+        source_file.write_text(source_file.read_text() + '\n# scoped developer change\n')
+        self._git('add', self.source_path)
+        if developer_name is None:
+            self._git('rm', original)
+        else:
+            self._git('mv', original, developer_name)
+        self._git('commit', '-m', 'developer moves README')
+        segment_start = self._git('rev-parse', 'HEAD')
+
+        merge = subprocess.run(
+            ['/usr/bin/git', '-c', 'merge.renames=true', '-c', 'diff.renames=true',
+             'merge', '--no-ff', main_branch, '-m', 'merge trusted main'],
+            cwd=self.root, text=True, capture_output=True)
+        self.assertNotEqual(merge.returncode, 0, merge.stdout + merge.stderr)
+        stages = self._git('ls-files', '-u')
+        conflicts = {line.split('\t', 1)[1] for line in stages.splitlines()}
+        self.assertLessEqual(set(hidden), conflicts, stages)
+        if dropped is not None:
+            (self.root / dropped).unlink()
+        self._git('add', '-A')
+        self._git('commit', '-m', 'resolve ' + shape)
+        merge_sha = self._git('rev-parse', 'HEAD')
+        self.assertEqual(self._git('ls-files', '-u'), '')
+        self.assertEqual(self._git('rev-parse', merge_sha + '^1'), segment_start)
+        self.assertEqual(self._git('rev-parse', merge_sha + '^2'), trusted_base)
+        remerge = task_completion._remerge_diff_paths_raw(
+            str(self.root), merge_sha).decode('utf-8').split('\x00')
+        for path in hidden:
+            self.assertNotIn(path, remerge)
+        result_sha, _ = self._make_result(source_sha=segment_start)
+        return self._segment_head(result_sha, trusted_base, segment_start,
+                                  conflicts | {self.source_path})
+
+    def _trusted_blob_conflict_head(self):
+        """Resolve an out-of-scope README content conflict to trusted main's blob."""
+        readme = self.root / 'README.md'
+        self._git('checkout', '-b', 'main-content', self.source_sha)
+        readme.write_text('Trusted main README.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'trusted main edits README')
+        trusted_base = self._git('rev-parse', 'HEAD')
+
+        self._git('checkout', 'feat/executor')
+        source_file = self.root / self.source_path
+        source_file.write_text(source_file.read_text() + '\n# scoped developer change\n')
+        readme.write_text('Developer README.\n')
+        self._git('add', self.source_path, 'README.md')
+        self._git('commit', '-m', 'developer edits README')
+        segment_start = self._git('rev-parse', 'HEAD')
+
+        merge = subprocess.run(
+            ['/usr/bin/git', 'merge', '--no-ff', 'main-content', '-m', 'merge trusted main'],
+            cwd=self.root, text=True, capture_output=True)
+        self.assertNotEqual(merge.returncode, 0, merge.stdout + merge.stderr)
+        stages = self._git('ls-files', '-u', '--', 'README.md')
+        self.assertEqual(
+            {line.split('\t', 1)[0].split()[2] for line in stages.splitlines()},
+            {'1', '2', '3'})
+        readme.write_text('Trusted main README.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'resolve README to trusted main')
+        merge_sha = self._git('rev-parse', 'HEAD')
+        self.assertEqual(self._git('rev-parse', merge_sha + '^1'), segment_start)
+        self.assertEqual(self._git('rev-parse', merge_sha + '^2'), trusted_base)
+        self.assertEqual(self._git('rev-parse', merge_sha + ':README.md'),
+                         self._git('rev-parse', trusted_base + ':README.md'))
+        result_sha, _ = self._make_result(source_sha=segment_start)
+        return self._segment_head(result_sha, trusted_base, segment_start,
+                                  {'README.md', self.source_path})
+
+    def _segment_collector_kwargs(self, head, write_paths):
+        return {
+            'task_id': self.task_id, 'expected_common_dir': self.common,
+            'expected_root': str(self.root), 'expected_branch': 'feat/executor',
+            'source_sha': head['segment_start'],
+            'task_binding': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                             'contract_digest': '3' * 64},
+            'expected_agent': 'executor-agent',
+            'expected_session_ref': 'Executor D6 session',
+            'expected_native_session_id': 'native-executor',
+            'write_paths': list(write_paths),
+            'trusted_base_sha': head['trusted_base'],
+        }
+
+    def _complete_company_gw_task(self, store, task, *, trusted_base, tested_head):
+        """Run task complete on a bound company-gw Task with the real collector."""
+        real_collector = task_completion.collect_executor_result
+
+        def github_get(path):
+            self.assertEqual(path, 'git/ref/heads/main')
+            return {'ref': 'refs/heads/main',
+                    'object': {'type': 'commit', 'sha': trusted_base}}
+
+        with patch.object(task_completion, '_github_get', side_effect=github_get), \
+             patch.object(task_completion, 'collect_executor_result',
+                          wraps=real_collector) as collect, \
+             patch.object(task_completion, 'run_bounded_tests',
+                          return_value=[{
+                              'path': self.source_path, 'source_sha': tested_head,
+                              'exit_code': 0, 'output_sha256': '6' * 64}]) as tests, \
+             patch('llmtool.task_submission_cli._remote_test_config_state',
+                   return_value='MISSING'), \
+             patch('llmtool.task_submission_cli.resolve_profile_config',
+                   side_effect=AssertionError('unexpected provider')) as resolve, \
+             patch.object(task_completion, 'collect_github_evidence',
+                          side_effect=AssertionError('unexpected review/CI')) as github, \
+             redirect_stdout(StringIO()):
+            code = run_task_complete(Namespace(
+                task_id=task['task_id'], executor_task=self.task_id,
+                reviewer_task=None, pr=None), store=store)
+        collect.assert_called_once()
+        self.assertEqual(collect.call_args.kwargs['trusted_base_sha'], trusted_base)
+        self.assertEqual(collect.call_args.kwargs['expected_native_session_id'],
+                         'native-executor')
+        resolve.assert_not_called()
+        github.assert_not_called()
+        return code, tests, collect, store.get(task['task_id'])['completion']
 
     def _collect_result(self, result_sha, artifact, *, trusted_base_sha=None):
         return task_completion.collect_executor_result(
@@ -1064,6 +1239,218 @@ class TaskCompletionTests(unittest.TestCase):
         result_sha, trusted_base, _ = self._modify_delete_conflict_head(self.source_path)
         result = self._collect_registered_result(result_sha, trusted_base_sha=trusted_base)
         self.assertIn(self.source_path, result['developer_changed_paths'])
+
+    def test_repo_merge_driver_cannot_hide_conflict_or_run(self):
+        head = self._trusted_blob_conflict_head()
+        args = (str(self.root), head['segment_start'], head['result_sha'],
+                head['trusted_base'])
+        marker = self.base / 'merge-driver-ran'
+        self._git('config', 'merge.z.driver',
+                  'touch ' + shlex.quote(str(marker)) + ' && cp %B %A')
+        attributes = Path(self.common) / 'info' / 'attributes'
+        attributes.parent.mkdir(parents=True, exist_ok=True)
+        for route in ('merge.default', 'info/attributes'):
+            with self.subTest(route=route):
+                if route == 'merge.default':
+                    self._git('config', 'merge.default', 'z')
+                else:
+                    self._git('config', '--unset', 'merge.default')
+                    attributes.write_text('README.md merge=z\n')
+                # Control: a merge read in the repository runs the driver and
+                # resolves README.md cleanly to trusted main, hiding it.
+                probe = subprocess.run(
+                    ['/usr/bin/git', 'merge-tree', '--write-tree', '--name-only',
+                     head['segment_start'], head['trusted_base']],
+                    cwd=self.root, text=True, capture_output=True)
+                self.assertEqual(probe.returncode, 0, probe.stdout + probe.stderr)
+                self.assertTrue(marker.exists())
+                marker.unlink()
+
+                self.assertIn('README.md', task_completion._developer_changed_paths(*args))
+                with self.assertRaises(LLMToolError) as raised:
+                    task_completion.collect_executor_result(
+                        **self._segment_collector_kwargs(head, [self.source_path]),
+                        artifact=head['artifact'],
+                        artifact_sha256=head['artifact_sha256'])
+                self.assertEqual(raised.exception.completion_code,
+                                 'RESULT_SCOPE_MISMATCH')
+                self.assertFalse(marker.exists())
+
+    def test_repo_merge_renames_config_does_not_change_rename_delete_result(self):
+        head = self._rename_conflict_head('rename-delete-main-renames')
+        args = (str(self.root), head['segment_start'], head['result_sha'],
+                head['trusted_base'])
+        expected = tuple(head['attributed'])
+        self.assertIn('main-name.md', expected)
+        self.assertEqual(task_completion._developer_changed_paths(*args), expected)
+        self._git('config', 'merge.renames', 'false')
+        # No in-repository control: whether a merge read there honours
+        # merge.renames depends on the Git version. The private reads must
+        # give the same result either way.
+        self.assertEqual(task_completion._developer_changed_paths(*args), expected)
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_executor_result(
+                **self._segment_collector_kwargs(head, [self.source_path]),
+                artifact=head['artifact'], artifact_sha256=head['artifact_sha256'])
+        self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
+
+    def test_private_merge_read_failure_stops_inspection(self):
+        root, missing = str(self.root), '1' * 40
+        reads = {
+            'remerge': lambda commit: task_completion._remerge_diff_paths_raw(root, commit),
+            'merge-tree': lambda commit: task_completion._merge_tree_conflict_paths_raw(
+                root, commit, self.source_sha),
+        }
+        for name, read in reads.items():
+            with self.subTest(read=name, failure='missing-object'):
+                with self.assertRaises(LLMToolError) as raised:
+                    read(missing)
+                self.assertEqual(raised.exception.completion_code,
+                                 'GIT_INSPECTION_FAILED')
+            with self.subTest(read=name, failure='temporary-repository'):
+                with patch.object(task_completion.tempfile, 'TemporaryDirectory',
+                                  side_effect=OSError('no temporary directory')):
+                    with self.assertRaises(LLMToolError) as raised:
+                        read(self.source_sha)
+                self.assertEqual(raised.exception.completion_code,
+                                 'GIT_INSPECTION_FAILED')
+
+    def _classified_git_failure(self, code, stage, seen):
+        """Make the real _git stop with code at one stage, recording what it raised."""
+        real_git = task_completion._git
+
+        def run(root, args, **options):
+            if ('env_overrides' in options) != (stage == 'merge-read'):
+                return real_git(root, args, **options)
+            failure = nullcontext()
+            if code == 'GIT_INSPECTION_TIMEOUT':
+                failure = patch.object(task_completion, '_TIMEOUT', 0)
+            elif code == 'GIT_INSPECTION_UNAVAILABLE':
+                failure = patch.object(task_completion.subprocess, 'Popen',
+                                       side_effect=OSError('no git'))
+            else:
+                options['limit'] = 0
+            try:
+                with failure:
+                    return real_git(root, args, **options)
+            except LLMToolError as error:
+                seen.append(error.completion_code)
+                raise
+
+        return patch.object(task_completion, '_git', run)
+
+    def test_private_merge_read_classified_git_failure_stops_inspection(self):
+        # A non-merge commit, so both reads print output for the size limit.
+        commit, _ = self._make_result()
+        root = str(self.root)
+        reads = {
+            'remerge': lambda: task_completion._remerge_diff_paths_raw(root, commit),
+            'merge-tree': lambda: task_completion._merge_tree_conflict_paths_raw(
+                root, commit, self.source_sha),
+        }
+        for name, read in reads.items():
+            for stage in ('objects-path', 'merge-read'):
+                for code in ('GIT_INSPECTION_TIMEOUT', 'GIT_INSPECTION_UNAVAILABLE',
+                             'GIT_EVIDENCE_TOO_LARGE'):
+                    with self.subTest(read=name, stage=stage, code=code):
+                        seen = []
+                        with self._classified_git_failure(code, stage, seen):
+                            with self.assertRaises(LLMToolError) as raised:
+                                read()
+                        self.assertEqual(seen, [code])
+                        self.assertEqual(raised.exception.completion_code,
+                                         'GIT_INSPECTION_FAILED')
+
+    def _assert_rename_conflict_collectors(self, head):
+        executor = {'artifact': head['artifact'],
+                    'artifact_sha256': head['artifact_sha256']}
+        routes = (
+            ('executor', task_completion.collect_executor_result, executor,
+             'RESULT_SCOPE_MISMATCH'),
+            ('claude', task_completion.collect_claude_result, {
+                'claude_result': {'executor_task_id': self.task_id,
+                                  'head_sha': head['result_sha']}},
+             'RESULT_SCOPE_MISMATCH'),
+            ('repair-segment', task_completion.collect_executor_result, {
+                **executor, 'artifact_segments': [(
+                    head['artifact'], head['artifact_sha256'],
+                    head['segment_start'], head['result_sha'])]},
+             'DEVELOPER_ARTIFACT_CHAIN_INVALID'),
+        )
+        for name, collector, extra, code in routes:
+            with self.subTest(route=name, scope='outside'):
+                with self.assertRaises(LLMToolError) as raised:
+                    collector(**self._segment_collector_kwargs(
+                        head, [self.source_path]), **extra)
+                self.assertEqual(raised.exception.completion_code, code)
+            with self.subTest(route=name, scope='inside'):
+                result = collector(**self._segment_collector_kwargs(
+                    head, head['attributed']), **extra)
+                self.assertEqual(result['result_head'], head['result_sha'])
+                self.assertEqual(result['developer_changed_paths'], head['attributed'])
+
+    def _assert_rename_conflict_task_complete(self, head, shape):
+        store = TaskStore(self.base / ('rename-conflict-task-complete-' + shape))
+        for in_scope in (False, True):
+            with self.subTest(route='task-complete', in_scope=in_scope):
+                task = self._active_pm_task(self._task(), route='company-gw')
+                paths = list(head['attributed']) if in_scope else [self.source_path]
+                task['developer'].update(
+                    source_sha=head['segment_start'], read_paths=paths,
+                    write_paths=paths, artifact=head['artifact'],
+                    artifact_sha256=head['artifact_sha256'])
+                task['completion']['evidence'].update(
+                    source_sha=head['segment_start'],
+                    result_head=head['segment_start'],
+                    executor_native_session_id='native-executor',
+                    executor_native_session='VERIFIED')
+                store.create(task)
+                code, tests, collect, completion = self._complete_company_gw_task(
+                    store, task, trusted_base=head['trusted_base'],
+                    tested_head=head['result_sha'])
+                self.assertEqual(collect.call_args.kwargs['source_sha'],
+                                 head['segment_start'])
+                self.assertEqual(completion['pm_dispatch'], 'NOT_STARTED')
+                if in_scope:
+                    self.assertEqual(code, 0)
+                    tests.assert_called_once()
+                    self.assertEqual(completion['state'], 'PM_EVIDENCE_READY')
+                    self.assertEqual(completion['missing_gates'], [])
+                    result = completion['evidence']['result']
+                    self.assertEqual(result['source_sha'], head['segment_start'])
+                    self.assertEqual(result['result_head'], head['result_sha'])
+                    self.assertEqual(result['developer_changed_paths'],
+                                     head['attributed'])
+                else:
+                    self.assertEqual(code, 1)
+                    tests.assert_not_called()
+                    self.assertEqual(completion['state'], 'WAITING_EXECUTOR')
+                    self.assertEqual(completion['missing_gates'],
+                                     ['RESULT_SCOPE_MISMATCH'])
+
+    def test_rename_conflicts_are_attributed_on_every_completion_route(self):
+        for shape in self._RENAME_CONFLICT_SHAPES:
+            with self.subTest(shape=shape):
+                head = self._rename_conflict_head(shape)
+                self._assert_rename_conflict_collectors(head)
+                self._assert_rename_conflict_task_complete(head, shape)
+
+    def test_task_complete_executor_route_waits_on_head_moved_to_out_of_scope_merge(self):
+        store = TaskStore(self.base / 'moved-head-task-complete')
+        task = self._active_pm_task(self._task(), route='company-gw')
+        task['completion']['evidence'].update(
+            executor_native_session_id='native-executor',
+            executor_native_session='VERIFIED')
+        store.create(task)
+        result_sha, _, _ = self._out_of_scope_merge_head()
+        code, tests, collect, completion = self._complete_company_gw_task(
+            store, task, trusted_base=self.source_sha, tested_head=result_sha)
+        self.assertEqual(collect.call_args.kwargs['source_sha'], self.source_sha)
+        self.assertEqual(code, 1)
+        tests.assert_not_called()
+        self.assertEqual(completion['state'], 'WAITING_EXECUTOR')
+        self.assertEqual(completion['missing_gates'], ['SOURCE_NOT_ANCESTOR'])
+        self.assertEqual(completion['pm_dispatch'], 'NOT_STARTED')
 
     def test_out_of_scope_developer_file_is_refused(self):
         result_sha = self._make_path_result('README.md', 'Developer edit.\n')
