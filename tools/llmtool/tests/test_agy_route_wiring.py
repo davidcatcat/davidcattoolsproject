@@ -1,3 +1,4 @@
+import contextlib
 import io
 import json
 import dataclasses
@@ -7,9 +8,10 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from llmtool import review_dispatch, task_completion, task_submission_cli, worker_dispatch
+from llmtool import (review_dispatch, skill_ledger, skill_manifest, task_completion,
+                     task_submission_cli, worker_dispatch)
 from llmtool.developer_routes import RouteError
 from llmtool.developer_routes.agy import owner_assignment_gate
 from llmtool.errors import LLMToolError
@@ -17,6 +19,12 @@ from llmtool.task_store import TaskStore
 
 
 import review_trust_fixture
+
+
+_SKILL_MANIFEST = {'commit': 'd' * 40, 'role': 'developer', 'gate': 'develop',
+                   'entries': [], 'manifest_sha256': '7' * 64}
+_SKILL_FILES = [('AGENTS.md', 'AGENTS repository rules.\n'),
+                ('skills/ai-team-delivery/SKILL.md', 'Delivery skill rules.\n')]
 
 
 def setUpModule():
@@ -35,7 +43,15 @@ class AgyRouteWiringTests(unittest.TestCase):
                           goal='AGY goal', session_id='conversation_12345678',
                           bind_result='BOUND', initial_native_session_id=None,
                           bound_registration_mutation=False, audit=None,
-                          store=None):
+                          store=None, verified_model='gemini-test', build_manifest=None,
+                          read_manifest_files=None, ledger_record=None):
+        if build_manifest is None:
+            build_manifest = Mock(return_value=_SKILL_MANIFEST)
+        if read_manifest_files is None:
+            read_manifest_files = Mock(return_value=_SKILL_FILES)
+        if ledger_record is None:
+            ledger_record = Mock(return_value='receipt')
+        store_writes = [] if audit is None else audit.setdefault('store_writes', [])
         task_id = 'a' * 32
         task = {
             'schema_version': 2, 'task_id': task_id, 'run_id': 'b' * 32,
@@ -56,6 +72,7 @@ class AgyRouteWiringTests(unittest.TestCase):
                 return dict(self.task)
 
             def compare_and_update(self, _task_id, *, expected, **updates):
+                store_writes.append(updates)
                 self.task.update(updates)
                 return dict(self.task)
 
@@ -67,6 +84,7 @@ class AgyRouteWiringTests(unittest.TestCase):
                 if (fail_success_persist and
                         updates.get('developer', {}).get('state') == 'DEVELOPER_RESPONDED'):
                     raise RuntimeError('simulated persistence rejection')
+                store_writes.append(updates)
                 self.task.update(updates)
                 return dict(self.task)
 
@@ -100,7 +118,7 @@ class AgyRouteWiringTests(unittest.TestCase):
             task, registration, snapshot.head, test_policy='LOCAL')
         usage = ({'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
                  if usage is None else usage)
-        result = SimpleNamespace(session_id=session_id, exit_code=0,
+        result = SimpleNamespace(session_id=session_id, model=verified_model, exit_code=0,
             stdout_sha256='e' * 64, elapsed_ms=42, cleanup_status='CONFIRMED', usage=usage)
         allowed = SimpleNamespace(allowed=True, reason_code='OWNER_ASSIGNMENT_MATCHED')
         denied = SimpleNamespace(allowed=False, reason_code='OWNER_ASSIGNMENT_MISMATCH')
@@ -113,6 +131,8 @@ class AgyRouteWiringTests(unittest.TestCase):
         diff_calls = []
         inbox_events = []
         prompts = []
+        if audit is not None:
+            audit['prompts'] = prompts
         bind_called = False
 
         def read_registration(*_args, **_kwargs):
@@ -193,6 +213,10 @@ class AgyRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli.shutil, 'which', return_value='/usr/bin/agy'), \
              patch.object(task_submission_cli, 'for_platform', return_value=boundary), \
              patch.object(task_submission_cli, '_task_view', return_value={}), \
+             patch.object(task_submission_cli.skill_manifest, 'build_manifest', build_manifest), \
+             patch.object(task_submission_cli.skill_manifest, 'read_manifest_files',
+                          read_manifest_files), \
+             patch.object(task_submission_cli.skill_ledger, 'record', ledger_record), \
              patch.object(task_submission_cli, 'run_task_direct_result_event',
                           side_effect=direct_event):
             status = task_submission_cli.run_task_agy_delegate(
@@ -667,6 +691,168 @@ class AgyRouteWiringTests(unittest.TestCase):
             'reviewer_text_excerpt_untrusted_data': f'Use {fake_pat} here.'}
         with self.assertRaisesRegex(LLMToolError, 'recognizable credential material'):
             self._run_agy_delegate(repair_packet=packet)
+
+    def _assert_skill_refusal(self, message, **kwargs):
+        audit = {}
+        record = Mock()
+        with self.assertRaisesRegex(LLMToolError, message):
+            self._run_agy_delegate(audit=audit, ledger_record=record, **kwargs)
+        self.assertEqual(audit['store_writes'], [])
+        self.assertEqual(audit['prompts'], [])
+        record.assert_not_called()
+
+    def test_agy_provider_selects_agents_file_from_the_manifest(self):
+        commit = 'd' * 40
+        with tempfile.TemporaryDirectory() as root:
+            def git(argv, **_kwargs):
+                return SimpleNamespace(
+                    returncode=0, stdout=root if '--show-toplevel' in argv else commit)
+
+            with patch.object(skill_manifest, '_read_blob', return_value=b'rules\n'):
+                manifest = skill_manifest.build_manifest(
+                    root, commit, 'developer', 'develop', git_runner=git, provider='agy')
+        self.assertEqual([entry['path'] for entry in manifest['entries']],
+                         ['AGENTS.md', 'skills/ai-team-delivery/SKILL.md'])
+
+    def test_success_embeds_manifest_skill_text_and_records_delivery(self):
+        build = Mock(return_value=_SKILL_MANIFEST)
+        read = Mock(return_value=_SKILL_FILES)
+        record = Mock(return_value='receipt')
+        with patch.object(task_submission_cli, '_agy_developer_profile',
+                          return_value=('gemini-requested', 'high')):
+            status, task, _events, prompts = self._run_agy_delegate(
+                verified_model='gemini-verified', build_manifest=build,
+                read_manifest_files=read, ledger_record=record)
+        self.assertEqual(status, 0)
+        build.assert_called_once_with('/registered/root', 'd' * 40, 'developer', 'develop',
+                                      provider='agy')
+        read.assert_called_once_with('/registered/root', _SKILL_MANIFEST)
+        prompt = prompts[0]
+        raw = prompt.encode('utf-8')
+        self.assertIn('these limits override any conflicting skill text', prompt)
+        for path, text in _SKILL_FILES:
+            self.assertIn('REQUIRED_SKILL_BEGIN path=' + path + '\n' + text, prompt)
+            self.assertLess(prompt.index(text), prompt.index('\nTASK_JSON='))
+        self.assertLess(len(raw), 64 * 1024)
+        developer = task['developer']
+        self.assertEqual(developer['model'], 'gemini-requested')
+        self.assertEqual(developer['input_bytes'], len(raw))
+        self.assertEqual(developer['context_sha256'], hashlib.sha256(raw).hexdigest())
+        evidence = task['completion']['evidence']
+        record.assert_called_once_with({
+            'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'session_id': 'conversation_12345678',
+            'agent_id': evidence['executor_identity'], 'role': 'developer',
+            'provider': 'agy', 'model': 'gemini-verified', 'repo': '/repo/.git',
+            'head': 'd' * 40, 'manifest_sha256': '7' * 64,
+            'evidence_level': 'CONTROLLER_DELIVERED',
+        })
+
+    def test_real_ledger_entry_matches_the_run(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        ledger_path = Path(temp.name) / 'ledger.jsonl'
+        with patch.object(skill_ledger, '_path', return_value=ledger_path), \
+                patch.object(task_submission_cli, '_agy_developer_profile',
+                             return_value=('gemini-requested', 'high')):
+            status, task, _events, _prompts = self._run_agy_delegate(
+                verified_model='gemini-verified', ledger_record=skill_ledger.record)
+            evidence = task['completion']['evidence']
+
+            def lookup(model):
+                return skill_ledger.check(
+                    task['task_id'], task['run_id'],
+                    task['developer']['execution']['native_session_id'],
+                    evidence['executor_identity'], 'developer', 'agy', model,
+                    evidence['common_dir'], task['developer']['source_sha'],
+                    _SKILL_MANIFEST['manifest_sha256'])
+
+            verified = lookup('gemini-verified')
+            requested = lookup('gemini-requested')
+            chain = skill_ledger.verify_chain()
+        self.assertEqual(status, 0)
+        self.assertEqual(chain, (True, None))
+        self.assertEqual(verified['status'], 'VERIFIED')
+        self.assertEqual(verified['evidence_level'], 'CONTROLLER_DELIVERED')
+        self.assertEqual(requested, {'status': 'UNVERIFIED', 'reason': 'WRONG_MODEL'})
+        self.assertEqual(len(ledger_path.read_text(encoding='utf-8').splitlines()), 1)
+
+    def test_missing_or_unreadable_skill_refuses_before_provider_call(self):
+        for target, code in (
+                ('build_manifest', skill_manifest.SKILL_MANIFEST_PATH_MISSING),
+                ('build_manifest', skill_manifest.SKILL_MANIFEST_NOT_FILE),
+                ('build_manifest', skill_manifest.SKILL_MANIFEST_NOT_UTF8),
+                ('read_manifest_files', skill_manifest.SKILL_MANIFEST_PATH_MISSING)):
+            with self.subTest(target=target, code=code):
+                failing = Mock(side_effect=skill_manifest.SkillManifestError(code))
+                self._assert_skill_refusal(code, **{target: failing})
+
+    def test_unsafe_skill_text_refuses_before_provider_call(self):
+        for text in (' \n', 'rules\x01\n', 'rules​\n'):
+            with self.subTest(text=text):
+                self._assert_skill_refusal(
+                    'AGY_SKILL_TEXT_REFUSED',
+                    read_manifest_files=Mock(return_value=[('AGENTS.md', text)]))
+
+    def test_sensitive_skill_text_refuses_before_provider_call(self):
+        flagged = 'flagged skill rule\n'
+        with patch.object(task_submission_cli, '_emitted_sensitive',
+                          side_effect=lambda value: flagged in value):
+            self._assert_skill_refusal(
+                'AGY_SKILL_TEXT_REFUSED',
+                read_manifest_files=Mock(return_value=[('AGENTS.md', flagged)]))
+
+    def test_skill_prompt_limit_refuses_and_never_truncates(self):
+        def files(extra):
+            path, text = _SKILL_FILES[1]
+            padding = ('skill rule ' * (extra // 11 + 1))[:extra]
+            return [_SKILL_FILES[0], (path, text + padding)]
+
+        def run(extra):
+            status, _task, _events, prompts = self._run_agy_delegate(
+                read_manifest_files=Mock(return_value=files(extra)))
+            self.assertEqual(status, 0)
+            return prompts[0]
+
+        limit = task_submission_cli._AGY_PROMPT_MAX_BYTES
+        self.assertEqual(limit, 64 * 1024 - 1)
+        room = limit - len(run(0).encode('utf-8'))
+        self.assertGreater(room, 0)
+        fitted = run(room)
+        self.assertEqual(len(fitted.encode('utf-8')), limit)
+        self.assertIn(files(room)[1][1], fitted)
+        self._assert_skill_refusal(
+            'AGY_SKILL_PROMPT_TOO_LARGE',
+            read_manifest_files=Mock(return_value=files(room + 1)))
+
+    def test_ledger_failure_keeps_the_finished_run_and_reports_the_code(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            status, task, inbox_events, _prompts = self._run_agy_delegate(
+                ledger_record=Mock(side_effect=skill_ledger.SkillLedgerError('CHAIN_BROKEN')))
+        self.assertEqual(status, 0)
+        self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(len(inbox_events), 1)
+        self.assertIn('AGY_SKILL_LEDGER_OUTCOME_UNKNOWN: CHAIN_BROKEN', stderr.getvalue())
+
+    def test_route_failure_records_no_delivery(self):
+        record = Mock()
+        status, task, _events, _prompts = self._run_agy_delegate(
+            RouteError('BLOCKED_WRITE_ISOLATION', blocked_reason='BOUNDARY_UNVERIFIED'),
+            ledger_record=record)
+        self.assertEqual(status, 1)
+        self.assertEqual(task['developer']['state'], 'BLOCKED')
+        record.assert_not_called()
+
+    def test_dispatch_denial_records_no_delivery(self):
+        allowed = SimpleNamespace(allowed=True, reason_code='OWNER_ASSIGNMENT_MATCHED')
+        denied = SimpleNamespace(allowed=False, reason_code='OWNER_ASSIGNMENT_MISMATCH')
+        record = Mock()
+        status, task, _events, _prompts = self._run_agy_delegate(
+            decisions=(allowed, denied), ledger_record=record)
+        self.assertEqual(status, 1)
+        self.assertEqual(task['developer']['error_code'], 'AGY_DISPATCH_DENIED')
+        record.assert_not_called()
 
 
 if __name__ == '__main__':
