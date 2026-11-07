@@ -745,13 +745,17 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 store=store, input_stream=io.StringIO(json.dumps({
                     'request': 'Add a focused test.', 'response': response})),
                 return_record=True)
-        old_file.unlink()
+        # The old PM has stopped: its transcript stays and has gone quiet.
+        self._adopt_liveness_evidence_ready(claude_home)
+        os.utime(old_file, (1, 1))
         self.assertEqual(parser_for_cli().parse_args([
             'task', 'adopt', '--from-pm-session', old_native,
             '--to-pm-session', 'pm-' + new_native]).action, 'adopt')
         with patch.dict(os.environ, env), \
                 patch('llmtool.task_submission_cli.os.getcwd', return_value=str(pm_cwd)), \
-                patch('llmtool.task_submission_cli.TaskStore', return_value=store):
+                patch('llmtool.task_submission_cli.TaskStore', return_value=store), \
+                patch('llmtool.pm_session_liveness._list_processes',
+                      return_value='1 /sbin/launchd\n'):
             first_out = io.StringIO()
             with redirect_stdout(first_out):
                 self.assertEqual(main(['task', 'adopt', '--from-pm-session', old_native,
@@ -769,6 +773,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(json.loads(second_out.getvalue()),
                              {'moved': [], 'skipped': []})
             self.assertEqual(store.get(task['task_id']), snapshot)
+        self.assertEqual(old_file.read_text(encoding='utf-8'), '{}\n')
 
     def test_task_adopt_refusals_are_sanitized_and_do_not_change_records(self):
         pm_cwd = Path(self.temp.name).resolve() / 'pm-refusal-cwd'
@@ -794,14 +799,17 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     'request': 'Add a focused test.', 'response': response})),
                 return_record=True)
         before = store.get(task['task_id'])
+        self._adopt_liveness_evidence_ready(claude_home)
         attempts = (
-            (old_native, new_native, 'PM_SESSION_ADOPTION_OLD_SESSION_PRESENT'),
+            (old_native, new_native, 'PM_SESSION_ADOPTION_OLD_PM_ACTIVE'),
             (old_native, old_native, 'PM_SESSION_ADOPTION_KEYS_EQUAL'),
             ('malformed-key', new_native, 'PM_SESSION_ADOPTION_KEY_INVALID'),
         )
         with patch.dict(os.environ, env), \
                 patch('llmtool.task_submission_cli.os.getcwd', return_value=str(pm_cwd)), \
-                patch('llmtool.task_submission_cli.TaskStore', return_value=store):
+                patch('llmtool.task_submission_cli.TaskStore', return_value=store), \
+                patch('llmtool.pm_session_liveness._list_processes',
+                      return_value='77 claude --resume ' + old_native + '\n'):
             for old_key, new_key, code in attempts:
                 out = io.StringIO()
                 with self.subTest(code=code):
@@ -813,6 +821,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     self.assertNotIn(str(pm_cwd), out.getvalue())
                     self.assertNotIn(old_file.name, out.getvalue())
                     self.assertEqual(store.get(task['task_id']), before)
+                    self.assertEqual(old_file.read_text(encoding='utf-8'), '{}\n')
 
     def test_task_adopt_appears_in_help_and_other_task_parser_remains(self):
         parser = parser_for_cli()

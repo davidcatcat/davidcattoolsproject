@@ -3374,7 +3374,9 @@ class TaskStoreTests(unittest.TestCase):
             self.store.adopt_pm_session(
                 value['task_id'], old_session_key=current['pm_session_id'],
                 new_session_key='pm-' + new_id(), at='2026-10-29T00:00:00Z',
-                expected_record_sha256=current['record_sha256'])
+                expected_record_sha256=current['record_sha256'],
+                old_runtime='claude-code', new_runtime='claude-code', new_account=None,
+                liveness=['PROCESS_CLEAN', 'LOCK_FREE', 'REGISTRY_CLEAN'])
         self.assertEqual(caught.exception.task_store_error_code,
                          'PM_SESSION_ADOPTION_ABANDONED')
         self.assertEqual(self.store.get(value['task_id']), current)

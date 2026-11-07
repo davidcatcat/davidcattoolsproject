@@ -336,6 +336,24 @@ class ActivePMInboxTests(unittest.TestCase):
         self.assertNotEqual(self.store.get(conflicted['task_id'])['pm_session_id'], old_key)
         self.assertEqual(self.store.get(movable['task_id'])['pm_session_id'], new_key)
 
+    def test_result_completed_after_adoption_reaches_only_the_new_inbox(self):
+        task = self._ready_task()
+        developer = self.store.get(task['task_id'])['developer']
+        old_key = 'pm-' + self.session
+        self._stop_claude_session(self.session)
+        new_key = 'pm-' + self._claude_session()
+        self.assertEqual(self._adopt(old_key, new_key)['moved'], [task['task_id']])
+        self.assertEqual(self.store.get(task['task_id'])['developer'], developer)
+
+        code, _ = self._complete(task)
+        self.assertEqual(code, 0)
+        (event,) = active_pm_inbox.read_inbox(self.store, new_key)['events']
+        self.assertEqual(event['task_id'], task['task_id'])
+        self.assertEqual(event['pm_session_id'], new_key)
+        self.assertEqual(active_pm_inbox.read_inbox(self.store, old_key)['events'], [])
+        with self.assertRaises(LLMToolError):
+            active_pm_inbox.ack(self.store, event['event_id'], old_key)
+
     def _ack(self, event_id, session=None):
         out = StringIO()
         run_task_ack(Namespace(event_id=event_id,
