@@ -925,6 +925,54 @@ class WidgetTests(Base):
         self.assertIn('unknown chat command', ui.conversation.text.lower())
         self.assertEqual(self.client.complete.call_count, 1)
 
+    def test_picker_highlights_exact_label_so_bare_pm_enter_runs_as_typed(self):
+        # #683 RD4: a draft equal to a command label highlights that entry, so bare /pm
+        # then Enter shows the PM connection instead of filling /pm connect.
+        pm_labels = [c[0] for c in chat_tui.SLASH_COMMANDS if c[0].startswith('/pm')]
+
+        def isolated_pm_api(ui):
+            ui.pm_api = Mock()
+            ui.pm_api.current_binding.return_value = None
+
+        def exact_highlighted(ui):
+            labels = [item[0] for item in ui.menu_items]
+            self.assertEqual(labels, pm_labels)   # slash_matches order is unchanged
+            self.assertEqual(labels[0], '/pm connect')
+            self.assertEqual(labels[ui.menu_index], '/pm')
+            self.assertIn('Show the PM connection',
+                          self.menu_rows(ui)[ui.menu_index - ui.menu_offset])
+
+        ui, _ = self.drive([isolated_pm_api, '/pm', exact_highlighted, '\r', self.idle])
+        self.assertIn('PM: not connected. /pm connect uses the saved dedicated PM binding',
+                      ui.conversation.text)
+        self.assertNotIn('> /pm connect', ui.conversation.text)
+        self.assertEqual(ui.input.text, '')
+        ui.pm_api.runtime.assert_not_called()   # shown, never connected
+
+        # Moving the selection still completes the chosen entry and runs nothing.
+        for key, chosen in (('\x1b[A', '/pm new'), ('\x1b[B', '/pm disconnect')):
+            with self.subTest(key=key):
+                ui, _ = self.drive([isolated_pm_api, '/pm', exact_highlighted, key,
+                                    lambda ui, chosen=chosen: self.assertEqual(
+                                        ui.menu_items[ui.menu_index][0], chosen),
+                                    '\r',
+                                    lambda ui, chosen=chosen: self.assertEqual(
+                                        ui.input.text, chosen)])
+                self.assertNotIn('PM: not connected', ui.conversation.text)
+                ui.pm_api.runtime.assert_not_called()
+
+        # Tab keeps the draft (every /pm command shares only "/pm"); prefix drafts still
+        # start at the first match.
+        ui, _ = self.drive([isolated_pm_api, '/pm', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/pm'),
+                            lambda ui: self.assertEqual(
+                                [item[0] for item in ui.menu_items], pm_labels)])
+        ui, _ = self.drive(['/s', lambda ui: self.assertEqual(ui.menu_index, 0),
+                            lambda ui: self.assertEqual(ui.menu_items[0][0], '/status')])
+        self.assertEqual(chat_tui.slash_matches('/pm'),
+                         [c for c in chat_tui.SLASH_COMMANDS if c[0].startswith('/pm')])
+        self.factory.assert_not_called()
+
     def test_picker_closed_and_esc_timeout_restored_on_ctrl_c_and_signals(self):
         def menu_open(ui):
             self.assertTrue(ui.menu_items)
@@ -3754,6 +3802,167 @@ class AutoResumeWidgetTests(Base):
         self.assertTrue(ui._auto_resume_pending)
         self.assertTrue(ui._auto_resume_unconfirmed)
         ui._pm_start_turn.assert_not_called()
+
+    # -- #683: a Codex PM's Tasks bind to pm-<Codex thread ID> --------------------------
+    SESSION = '11111111-1111-4111-8111-111111111111'
+    THREAD = '33333333-3333-4333-8333-333333333333'
+
+    class TaskKeyDriver:
+        def __init__(self, thread_id):
+            self._thread_id = thread_id
+
+    class TaskKeyRuntime:
+        """A connected PM runtime as the TUI sees it: kind, cwd and the Codex driver."""
+
+        def __init__(self, runtime, thread_id):
+            self.runtime = runtime
+            self.cwd = '.'
+            self._codex_driver = AutoResumeWidgetTests.TaskKeyDriver(thread_id)
+
+        def turn_active(self):
+            return False
+
+        def automatic_sends_blocked(self):
+            return False
+
+        def close(self, timeout=None):
+            pass
+
+    def connect_task_key_ui(self, runtime_name, thread_id):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui.pm_runtime = self.TaskKeyRuntime(runtime_name, thread_id)
+        ui.pm_binding = {'runtime': runtime_name, 'account': 'pm'}
+        ui.pm_target = (self.SESSION, '.')
+        return ui
+
+    def test_codex_task_key_is_runtime_thread_id_and_claude_keeps_session(self):
+        ui = self.connect_task_key_ui('codex', None)
+        driver = ui.pm_runtime._codex_driver
+        forbidden = AssertionError('the Task key reads the runtime object only')
+        with patch('os.open', side_effect=forbidden), \
+                patch('builtins.open', side_effect=forbidden), \
+                patch('subprocess.Popen', side_effect=forbidden):
+            self.assertEqual(ui.pm_task_key(), self.SESSION)   # no thread yet
+            for bad in ('thread-1', '', 42, object(), self.THREAD + '\n', ' ' + self.THREAD):
+                with self.subTest(bad=bad):
+                    driver._thread_id = bad
+                    self.assertEqual(ui.pm_task_key(), self.SESSION)
+            driver._thread_id = self.THREAD
+            self.assertEqual(ui.pm_task_key(), self.THREAD)
+            ui.pm_runtime._codex_driver = None
+            self.assertEqual(ui.pm_task_key(), self.SESSION)
+            ui.pm_runtime._codex_driver = driver
+            self.assertEqual(ui.pm_task_key(), self.THREAD)
+        # The displayed session ID does not change.
+        fields = ui.pm_status_fields(lambda value, _width: value)
+        self.assertEqual(fields['session'], self.SESSION[:8])
+        self.assertEqual(ui.pm_target, (self.SESSION, '.'))
+        # Every Claude PM keeps the session ID, even with a thread-shaped attribute.
+        ui.pm_binding = {'runtime': 'claude-code', 'account': 'pm'}
+        ui.pm_runtime.runtime = 'claude-code'
+        self.assertEqual(ui.pm_task_key(), self.SESSION)
+        ui.pm_target = None
+        self.assertIsNone(ui.pm_task_key())
+
+    def test_codex_background_attention_and_status_read_thread_key_at_once(self):
+        self.background_tick.stop()   # this test exercises the real background read
+        ui = self.connect_task_key_ui('codex', None)
+        items = [{'role': 'Developer', 'task': 'a' * 32, 'state': 'RUNNING'}]
+        empty = {'items': [], 'unread': 0, 'task_unreadable_count': 0,
+                 'inbox_unreadable_count': 0}
+        snapshot = dict(empty, items=[{'label': '卡住', 'task': 'codextask', 'reason': ''}])
+        reads = []
+
+        def read_background(key):
+            reads.append(('background', key))
+            return items if key == self.THREAD else []
+
+        def read_attention(key):
+            reads.append(('attention', key))
+            return snapshot if key == self.THREAD else empty
+
+        async def tick():
+            ui._background_tick()
+            reader = ui.background_reader
+            if reader is not None:
+                reader.join(5)
+                self.assertFalse(reader.is_alive())
+                for _ in range(5):
+                    await asyncio.sleep(0)
+
+        async def flow():
+            await tick()
+            self.assertEqual(reads, [('background', self.SESSION), ('attention', self.SESSION)])
+            self.assertEqual(ui.background_count(), 0)
+            self.assertEqual(ui.attention_lines(), [])
+            # The first Codex turn records the thread ID: the next tick reads it at once,
+            # well inside the refresh interval.
+            ui.pm_runtime._codex_driver._thread_id = self.THREAD
+            self.assertIsNone(ui.background_count())   # old key's result is not shown
+            self.assertTrue(ui.background_loading())
+            await tick()
+            self.assertEqual(reads[2:], [('background', self.THREAD), ('attention', self.THREAD)])
+            await tick()                                  # same key: waits for the interval
+            self.assertEqual(len(reads), 4)
+
+        with patch.object(chat_tui_status, 'read_background', side_effect=read_background), \
+                patch.object(chat_tui_status, 'read_attention', side_effect=read_attention):
+            asyncio.run(flow())
+        self.assertEqual(ui.background_count(), 1)
+        self.assertEqual(ui.background_all(), items)
+        self.assertFalse(ui.background_loading())
+        fields = ui.pm_status_fields(lambda value, _width: value)
+        self.assertIn('背景 1', fields['mode'])
+        self.assertEqual(fields['attention'], '注意 1')
+        self.assertEqual(fields['session'], self.SESSION[:8])
+        self.assertIn('注意事項（1 項）', ui.attention_report())
+        self.assertIn('卡住｜codextas', ui.attention_report())
+
+    def test_claude_background_read_keeps_session_key(self):
+        self.background_tick.stop()
+        ui = self.connect_task_key_ui('claude-code', self.THREAD)
+        read = Mock(return_value=[])
+
+        async def flow():
+            ui._background_tick()
+            ui.background_reader.join(5)
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+        with patch.object(chat_tui_status, 'read_background', read):
+            asyncio.run(flow())
+        read.assert_called_once_with(self.SESSION)
+        self.assertEqual(ui.background_count(), 0)
+
+    def test_connect_auto_resume_reads_codex_thread_key_and_claude_session(self):
+        cases = (('codex', self.THREAD, self.THREAD), ('codex', None, self.SESSION),
+                 ('codex', 'not-a-thread', self.SESSION),
+                 ('claude-code', self.THREAD, self.SESSION))
+        for runtime_name, thread_id, expected in cases:
+            with self.subTest(runtime=runtime_name, thread=thread_id):
+                ui = self.make_ui()
+                runtime = self.TaskKeyRuntime(runtime_name, thread_id)
+                ui._pm_unadopted = runtime
+                ui._loop = Mock()
+                ui._append_account = Mock()
+                ui._append_history = Mock()
+                read = Mock(return_value=[])
+                with patch.object(chat_tui_status, 'read_background', read):
+                    ui.finish_pm_connect({
+                        'runtime': runtime, 'session': self.SESSION, 'cwd': '.',
+                        'binding': {'runtime': runtime_name, 'account': 'pm'},
+                        'history': [], 'history_error': None})
+                    for reader in [thread for thread in threading.enumerate()
+                                   if thread.name == 'llmtool-chat-pm-resume']:
+                        reader.join(5)
+                        self.assertFalse(reader.is_alive())
+                read.assert_called_once_with(expected)
+                self.assertIs(ui.pm_runtime, runtime)
+                self.assertEqual(ui.pm_target, (self.SESSION, '.'))   # display/session check
+                ui._loop.call_soon_threadsafe.assert_called_once_with(
+                    ui.finish_auto_resume_read, ui._auto_resume_connection, runtime,
+                    self.SESSION, [])
 
     def test_background_end_sends_deferred_resume_once(self):
         ui = self.make_ui()

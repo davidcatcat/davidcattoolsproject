@@ -22,8 +22,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import (__version__, chat_tui_events, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_theme,
-               chat_tui_view, pm_runtime)
+from . import (__version__, active_pm_inbox, chat_tui_events, chat_tui_pm, chat_tui_status, chat_tui_task,
+               chat_tui_theme, chat_tui_view, pm_runtime)
 from .chat import HELP, run_chat
 from .config import selected_provider
 from .errors import LLMToolError
@@ -1838,6 +1838,12 @@ class ChatTUI:
         else:
             items = slash_matches(text, self.dev)
         self._set_menu(items)
+        # #683 RD4: a draft that already is a command label highlights that entry, so
+        # Enter runs it as typed (bare /pm shows the connection, never fills /pm connect).
+        # Only a draft change gets here; Up/Down afterwards still choose another entry.
+        exact = [index for index, item in enumerate(items) if item[0] == text]
+        if exact:
+            self.menu_index = exact[0]
 
     def _set_menu(self, items):
         if items != self.menu_items:
@@ -3012,22 +3018,45 @@ class ChatTUI:
         return fields
 
     # -- PM background work (W56d) ---------------------------------------------------
+    def pm_task_key(self):
+        """The PM session the connected PM's Tasks bind to; None when not connected.
+
+        #683: a Codex PM records its Tasks under its Codex thread ID (pm-<thread>), so once
+        the connected runtime object holds one that matches the PM native session UUID
+        shape, that is the key. Before a thread exists, for anything else and for every
+        Claude PM it stays the session ID. Reads the runtime object only (no file, no
+        subprocess); the displayed session ID and connection checks keep pm_target[0].
+        """
+        if not self.pm_target:
+            return None
+        session = self.pm_target[0]
+        if self._pm_runtime_name() != "codex":
+            return session
+        driver = getattr(self.pm_runtime, "_codex_driver", None)
+        thread_id = getattr(driver, "_thread_id", None) if driver is not None else None
+        if (type(thread_id) is str
+                and active_pm_inbox.PM_NATIVE_SESSION_ID.fullmatch(thread_id) is not None):
+            return thread_id
+        return session
+
     def background_all(self):
         """Listed background work of the connected PM: Task items, then #665 turns."""
-        if not self.pm_target or self.background_key != self.pm_target[0]:
+        if not self.pm_target or self.background_key != self.pm_task_key():
             return list(self.pm_background_turns())
         return self.background + list(self.pm_background_turns())
 
     def background_count(self):
         """Items in flight; "?" after a failed read; None before the first read."""
-        if not self.pm_target or self.background_key != self.pm_target[0]:
+        if not self.pm_target or self.background_key != self.pm_task_key():
             return None
         if self.background_error is not None:
             return "?"
         return len(self.background_all())
 
     def _background_tick(self):
-        key = self.pm_target[0] if self.pm_target else None
+        # A new key (a Codex PM's first thread ID) differs from background_key, so it is
+        # read at once instead of after the refresh interval.
+        key = self.pm_task_key()
         if key is None or self.background_reader is not None:
             return
         if (key == self.background_key and self.background_loaded is not None and
@@ -3068,7 +3097,7 @@ class ChatTUI:
             return []
         lines = []
         partial = False
-        snapshot = (self.attention if self.attention_key == self.pm_target[0]
+        snapshot = (self.attention if self.attention_key == self.pm_task_key()
                     and type(self.attention) is dict else None)
         if snapshot is not None:
             task_bad = snapshot.get("task_unreadable_count", 0)
@@ -3100,9 +3129,10 @@ class ChatTUI:
         """Read-only /attention report for this connected PM session."""
         if not self.pm_runtime or not self.pm_target:
             return "注意事項：尚未連線 PM。先 /pm connect。"
-        if self.attention_key != self.pm_target[0]:
+        key = self.pm_task_key()
+        if self.attention_key != key:
             return "注意事項：讀取中，稍後再試。"
-        snapshot = (self.attention if self.attention_key == self.pm_target[0]
+        snapshot = (self.attention if self.attention_key == key
                     and type(self.attention) is dict else None)
         if snapshot is None:
             heading = "注意事項：UNKNOWN（TaskStore 無法讀取）"
@@ -3135,7 +3165,7 @@ class ChatTUI:
 
     def background_loading(self):
         """W60: the connected PM's first background read has not finished yet."""
-        key = self.pm_target[0] if self.pm_target else None
+        key = self.pm_task_key()
         return key is not None and (self.background_key != key or self.background_loaded is None)
 
     def background_open(self):
@@ -3275,7 +3305,7 @@ class ChatTUI:
                 None, time.strftime("%H:%M:%S"), reason))
             return
         tasks = (len(self.background) if self.pm_target and
-                 self.background_key == self.pm_target[0] else 0)
+                 self.background_key == self.pm_task_key() else 0)
         task_id = str(items[index].get("task") or "")
         now = time.strftime("%H:%M:%S")
         if index >= tasks:
@@ -3920,18 +3950,21 @@ class ChatTUI:
         self._append_history(outcome["history"], outcome["history_error"])
         if self._auto_resume_pending:
             session = self.pm_target[0]
+            key = self.pm_task_key()   # #683: a Codex PM's Tasks bind to its thread ID
             runtime = self.pm_runtime
             loop = self._loop
             threading.Thread(
                 target=self._read_auto_resume,
-                args=(connection, runtime, session, loop),
+                args=(connection, runtime, session, loop, key),
                 name="llmtool-chat-pm-resume", daemon=True).start()
         self.app.invalidate()
 
-    def _read_auto_resume(self, connection, runtime, session, loop):
-        """Read resume evidence off the UI thread, bound to one adopted connection."""
+    def _read_auto_resume(self, connection, runtime, session, loop, key=None):
+        """Read resume evidence off the UI thread, bound to one adopted connection.
+
+        ``key`` is the PM's Task key (pm_task_key); without it, the session ID."""
         try:
-            result = chat_tui_status.read_background(session)
+            result = chat_tui_status.read_background(session if key is None else key)
         except Exception:
             result = None
         self._post(loop, self.finish_auto_resume_read, connection, runtime, session, result)
