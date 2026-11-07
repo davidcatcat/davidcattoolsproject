@@ -278,6 +278,79 @@ class RemoteTestTests(unittest.TestCase):
         self.assertNotIn('import llmtool', script)
         self.assertNotIn('sys.path', script)
 
+    def test_remote_script_stays_a_fixed_program_with_no_task_value(self):
+        self.run_it()
+        self.assertIn(remote_test._REMOTE_SCRIPT, [call[1] for call in self.calls])
+        script = remote_test._REMOTE_SCRIPT
+        for value in (SHA, self.store.task['task_id'], self.store.task['run_id'],
+                      'refs/pull/425/head'):
+            self.assertNotIn(value, script)
+
+    def excerpt_with(self, line):
+        return self.failure_excerpt(
+            'FAIL: test_expected (test_remote_test.Case)\n'
+            'Traceback (most recent call last):\n'
+            + line + '\n'
+            'AssertionError: expected value\n'
+            '----------------------------------------------------------------------\n')
+
+    def test_failure_excerpt_drops_values_beside_non_ascii_word_characters(self):
+        # synthetic-fixture: screen-tool test
+        values = (
+            ''.join(('-----BE', 'GIN PRI', 'VATE KEY-----')),
+            ''.join(('AK', 'IA')) + '0' * 16,
+            ''.join(('AS', 'IA')) + '0' * 16,
+            ''.join(('sk', '-')) + 'a' * 16,
+            ''.join(('gh', 'p_')) + 'a' * 24,
+            ''.join(('github', '_pat_')) + 'a' * 24,
+            ''.join(('xox', 'b-')) + 'a' * 24,
+            ''.join(('bear', 'er', ' ')) + 'abcdefghij',
+            ''.join(('ba', 'sic', ' ')) + 'abcdefghij',
+            ''.join(('https', '://', 'alpha', ':', 'beta', '@', 'example.test')),
+            'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8,
+            ''.join(('to', 'ken', '=')) + 'abcdefghij',
+            ''.join(('pass', 'word', ':')) + 'abcdefghij',
+            ''.join(('api', '_key', '=')) + 'abcdefghij',
+        )
+        neighbours = ('測', 'é', 'ſ', 'K', 'ı', 'İ')
+        for value in values:
+            for neighbour in neighbours:
+                for line in (neighbour + value, value + neighbour,
+                             'AssertionError: ' + neighbour + value):
+                    with self.subTest(shape=value[:3], neighbour=neighbour,
+                                      after=line.endswith(value)):
+                        excerpt = self.excerpt_with(line)
+                        self.assertNotIn(value, excerpt)
+                        self.assertIn('AssertionError: expected value', excerpt)
+
+    def test_failure_excerpt_keeps_ordinary_non_ascii_and_ascii_identifier_lines(self):
+        # synthetic-fixture: screen-tool test
+        lines = (
+            '測試失敗',
+            'AssertionError: 預期值不符',
+            '測試 expected value',
+            '測' + ''.join(('sk', '-')) + 'abc',
+            '測' + ''.join(('to', 'ken')),
+            'x' + ''.join(('sk', '-')) + 'a' * 16,
+            'prefix_' + ''.join(('gh', 'p_')) + 'a' * 24,
+            'x' + ''.join(('xox', 'b-')) + 'a' * 24,
+            'x' + ''.join(('bear', 'er', ' ')) + 'abcdefghij',
+            'x' + ''.join(('to', 'ken', '=')) + 'abcdefghij',
+        )
+        for line in lines:
+            with self.subTest(line=line[:6]):
+                self.assertIn(line, self.excerpt_with(line))
+
+    def test_failure_excerpt_keeps_the_unittest_header_exception(self):
+        header = 'FAIL: test_long_case_name (test_remote_test.RemoteCases.test_long_case_name)'
+        excerpt = self.failure_excerpt(
+            header + '\n'
+            'Traceback (most recent call last):\n'
+            '測試失敗\n'
+            '----------------------------------------------------------------------\n')
+        self.assertIn(header, excerpt)
+        self.assertIn('測試失敗', excerpt)
+
     def test_timeout_unavailable_and_unknown_receipts(self):
         timed = self.run_it(error=__import__('subprocess').TimeoutExpired('ssh', 600))
         self.assertEqual(timed['result'], 'TIMEOUT')

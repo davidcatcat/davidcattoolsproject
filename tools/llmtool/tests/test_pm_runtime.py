@@ -239,6 +239,292 @@ class ToolLabelPathTests(unittest.TestCase):
         self.assertIn('[REDACTED]', label)
 
 
+# #1138 fixtures: synthetic, joined at runtime. Their bodies are lowercase so they
+# share no character with the [REDACTED] placeholder: any shared run is a real leak.
+_PLAIN_NON_ASCII = ('測', 'é', 'あ')
+_FOLDING_NON_ASCII = ('ſ', 'K', 'ı', 'İ')
+_NON_ASCII_WORD_PREFIXES = _PLAIN_NON_ASCII + _FOLDING_NON_ASCII
+_URL_SEPARATOR_END = len(_runtime_parts('https', ':', '//'))
+
+
+def _sk_value():
+    return _runtime_parts('s', 'k', '-') + 'a' * 24
+
+
+def _gh_values():
+    return tuple(_runtime_parts('g', 'h', letter, '_') + 'a' * 24 for letter in 'pousr')
+
+
+def _github_pat_value():
+    return _runtime_parts('git', 'hub', '_pat_') + 'a' * 24
+
+
+def _xox_value():
+    return _runtime_parts('xo', 'x', 'b-') + 'a' * 20
+
+
+def _jwt_value():
+    return _runtime_parts('e', 'y', 'J') + 'a' * 12 + '.' + 'b' * 12 + '.' + 'c' * 12
+
+
+def _url_value(authority=None):
+    # The value ends at the at sign: that is where _sensitive_url first matches.
+    return _runtime_parts('https', ':', '//', authority or _runtime_parts('alpha', ':', 'beta'), '@')
+
+
+def _shared_run(text, value):
+    """Length of the longest piece of value that appears in text."""
+    longest = 0
+    for start in range(len(value)):
+        size = longest + 1
+        while start + size <= len(value) and value[start:start + size] in text:
+            longest = size
+            size += 1
+    return longest
+
+
+def _feed_deltas(*deltas):
+    record = {'turn_id': 'turn-1', 'result_text': '', 'tool_names': []}
+    parser = pm_runtime._TurnParser(None, record, lambda: False)
+    events = []
+    for delta in deltas:
+        parser.blocks[0] = parser.blocks.get(0, '') + delta
+        event = parser._flush_block(0)
+        if event is not None:
+            events.append(event)
+    return parser, record, events
+
+
+class StreamBoundaryTests(unittest.TestCase):
+    """#1138: the stream hold follows the same marker boundary as the full screen."""
+
+    def assert_held(self, prefix, value, *, allowed=0, strict_from=None):
+        """Feed prefix + value in two deltas at every offset, then the block-end flush.
+
+        allowed is the longest piece of the value that may appear for a split
+        before strict_from, counted from the start of the value. Later splits
+        may show none of it. The defaults demand none at every split.
+        """
+        text = prefix + value
+        strict_from = len(value) if strict_from is None else strict_from
+        for offset in range(1, len(text)):
+            limit = allowed if offset < len(prefix) + strict_from else 0
+            with self.subTest(prefix=prefix, size=len(value), offset=offset):
+                parser, record, events = _feed_deltas(text[:offset], text[offset:])
+                events.extend(parser.flush_all())
+                shown = ''.join(event['text'] for event in events)
+                self.assertNotIn(value, shown)
+                self.assertNotIn(value, record['result_text'])
+                for output in (shown, record['result_text']):
+                    self.assertLessEqual(
+                        _shared_run(output.replace('[REDACTED]', ''), value), limit)
+                if limit == 0:
+                    self.assertTrue(0 in parser.withheld or '[REDACTED]' in shown)
+
+    def assert_family_held(self, value, *, ascii_allowed=0, ascii_strict_from=None):
+        from llmtool.test_output_excerpts import _sensitive
+
+        for prefix in _NON_ASCII_WORD_PREFIXES:
+            self.assertTrue(_sensitive(prefix + value))
+            self.assert_held(prefix, value)
+        for prefix in (' ', ','):
+            self.assertTrue(_sensitive(prefix + value))
+            self.assert_held(prefix, value, allowed=ascii_allowed,
+                             strict_from=ascii_strict_from)
+
+    def assert_ascii_identifier_flows(self, value):
+        from llmtool.test_output_excerpts import _sensitive
+
+        for prefix in ('x', '0', '_'):
+            text = prefix + value
+            self.assertFalse(_sensitive(text))
+            for offset in range(1, len(text)):
+                with self.subTest(prefix=prefix, size=len(value), offset=offset):
+                    parser, record, events = _feed_deltas(text[:offset], text[offset:])
+                    events.extend(parser.flush_all())
+                    self.assertEqual(parser.withheld, set())
+                    self.assertEqual(''.join(event['text'] for event in events), text)
+                    self.assertEqual(record['result_text'], text)
+
+    def test_sk_value_is_held_at_every_split(self):
+        self.assert_family_held(_sk_value())
+        self.assert_ascii_identifier_flows(_sk_value())
+
+    def test_gh_value_is_held_at_every_split(self):
+        for value in _gh_values():
+            self.assert_family_held(value)
+            self.assert_ascii_identifier_flows(value)
+
+    def test_github_pat_value_is_held_at_every_split(self):
+        self.assert_family_held(_github_pat_value())
+        self.assert_ascii_identifier_flows(_github_pat_value())
+
+    def test_xox_value_is_held_at_every_split(self):
+        # Today the ASCII control shows the marker and type letter (4 characters)
+        # until the dash arrives. That is the most it may show.
+        self.assert_family_held(_xox_value(), ascii_allowed=4, ascii_strict_from=5)
+        self.assert_ascii_identifier_flows(_xox_value())
+
+    def test_jwt_value_is_held_at_every_split(self):
+        self.assert_family_held(_jwt_value())
+        self.assert_ascii_identifier_flows(_jwt_value())
+
+    def test_url_value_is_held_at_every_split(self):
+        from llmtool.test_output_excerpts import _sensitive_url
+
+        value = _url_value()
+        for prefix in _PLAIN_NON_ASCII:
+            self.assertTrue(_sensitive_url(prefix + value))
+            self.assert_held(prefix, value)
+        # These letters case-fold into the scheme alphabet, so _URL_SCHEME starts
+        # on them. Plain ASCII words must keep flowing before a separator exists
+        # (test_stream_metadata_and_text_rebuild_without_duplication), so these
+        # and the ASCII controls are strict from the end of the separator.
+        for prefix in _FOLDING_NON_ASCII:
+            self.assertTrue(_sensitive_url(prefix + value))
+            self.assert_held(prefix, value, allowed=_URL_SEPARATOR_END - 1,
+                             strict_from=_URL_SEPARATOR_END)
+
+    def test_url_scheme_is_not_hidden_by_the_character_before_it(self):
+        from llmtool.test_output_excerpts import _sensitive_url
+
+        value = _url_value()
+        for prefix in (' ', '(', '1', '_'):
+            self.assertTrue(_sensitive_url(prefix + value))
+            self.assert_held(prefix, value, allowed=_URL_SEPARATOR_END - 1,
+                             strict_from=_URL_SEPARATOR_END)
+
+    def test_question_mark_or_hash_does_not_end_the_url_hold(self):
+        from llmtool.test_output_excerpts import _sensitive_url
+
+        authorities = tuple(
+            _runtime_parts(*pieces) for pieces in (
+                ('al', mark, 'pha', ':', 'beta') for mark in '?#'
+            )) + tuple(
+            _runtime_parts(*pieces) for pieces in (
+                ('alpha', ':', 'be', mark, 'ta') for mark in '?#'
+            ))
+        for authority in authorities:
+            value = _url_value(authority)
+            self.assertTrue(_sensitive_url(value))
+            self.assert_held('測', value)
+            self.assert_held(' ', value, allowed=_URL_SEPARATOR_END - 1,
+                             strict_from=_URL_SEPARATOR_END)
+
+    def test_partial_marker_hold_follows_the_marker_boundary(self):
+        partials = ('s', 'sk', 'g', 'gh', 'ghp', 'xo', 'e', 'ey', 'be', 'ak')
+        for partial in partials:
+            for prefix in ('測', 'é'):
+                with self.subTest(prefix=prefix, partial=partial):
+                    self.assertEqual(pm_runtime._stream_safe_end(prefix + partial), 1)
+            for prefix in ('x', '0', '_'):
+                with self.subTest(prefix=prefix, partial=partial):
+                    self.assertEqual(pm_runtime._stream_safe_end(prefix + partial),
+                                     len(prefix + partial))
+
+    def test_marker_is_released_at_the_first_character_outside_its_alphabet(self):
+        cases = (
+            (_runtime_parts('s', 'k', '-', 'abc'), '.'),
+            (_runtime_parts('g', 'h', 'p', '_', 'abc'), '-'),
+            (_runtime_parts('git', 'hub', '_pat_', 'abc'), '.'),
+            (_runtime_parts('xo', 'x', 'b-', 'abc'), '_'),
+            (_runtime_parts('e', 'y', 'J', 'abc'), ','),
+            (_runtime_parts('AK', 'IA', '0'), ''),
+        )
+        words = '文字'
+        for head, ascii_stop in cases:
+            for stop in (words, ascii_stop + words):
+                for prefix in ('測', '測,'):
+                    with self.subTest(head=head[:2], stop=stop, prefix=prefix):
+                        parser, record, events = _feed_deltas(prefix + head, stop)
+                        self.assertEqual(events[0]['text'], prefix)
+                        self.assertEqual(''.join(event['text'] for event in events),
+                                         prefix + head + stop)
+                        self.assertEqual(record['result_text'], prefix + head + stop)
+                        self.assertEqual(parser.withheld, set())
+
+    def test_url_is_released_once_its_authority_cannot_match(self):
+        base = _runtime_parts('https', ':', '//')
+        cases = (
+            (base + 'exam', 'ple.test/path,'),
+            (base + 'example.test', ' next,'),
+            (base + _runtime_parts('alpha', ':', 'be'), 'ta/path,'),
+            (base + _runtime_parts('alpha', ':', 'be'), 'ta next,'),
+        )
+        for first, second in cases:
+            for prefix in ('測', '在 '):
+                with self.subTest(first=first[-2:], second=second[:2], prefix=prefix):
+                    parser, record, events = _feed_deltas(prefix + first, second)
+                    self.assertEqual(events[0]['text'], prefix)
+                    self.assertEqual(''.join(event['text'] for event in events),
+                                     prefix + first + second)
+                    self.assertEqual(record['result_text'], prefix + first + second)
+                    self.assertEqual(parser.withheld, set())
+
+    def test_text_with_no_candidate_flows_delta_by_delta(self):
+        cases = (
+            ('plain', 'text', 'flow'),
+            ('測試', '文字', '內容'),
+            ('台北101', '大樓'),
+            ('測試,', '資料。'),
+        )
+        for deltas in cases:
+            with self.subTest(first=deltas[0]):
+                parser, record, events = _feed_deltas(*deltas)
+                self.assertEqual([event['text'] for event in events], list(deltas))
+                self.assertEqual(record['result_text'], ''.join(deltas))
+                self.assertEqual(parser.withheld, set())
+
+    def test_force_flush_at_block_end_behaves_as_today(self):
+        heads = (
+            _runtime_parts('s', 'k', '-', 'abc'),
+            _runtime_parts('g', 'h', 'p', '_', 'abc'),
+            _runtime_parts('xo', 'x', 'b-', 'abc'),
+            _runtime_parts('e', 'y', 'J', 'abc'),
+            _runtime_parts('https', ':', '//', 'alpha', ':', 'be'),
+        )
+        for head in heads:
+            for prefix in ('測', ' '):
+                with self.subTest(head=head[:2], prefix=prefix):
+                    parser, record, events = _feed_deltas(prefix + head)
+                    events.extend(parser.flush_all())
+                    self.assertEqual(''.join(event['text'] for event in events),
+                                     prefix + head)
+                    self.assertEqual(record['result_text'], prefix + head)
+                    self.assertEqual(parser.withheld, set())
+
+    def test_families_outside_the_six_leak_no_more_than_today(self):
+        body = 'abcdefghij'
+        # Each entry is (value, longest piece of it a split may show today).
+        cases = (
+            (_runtime_parts('AK', 'IA') + '0' * 16, 0),
+            (_runtime_parts('AS', 'IA') + '0' * 16, 0),
+            (_runtime_parts('bear', 'er', ' ') + body, len('bearer ')),
+            (_runtime_parts('ba', 'sic', ' ') + body, len('basic ')),
+            (_runtime_parts('to', 'ken', '=') + body, len('token')),
+            (_runtime_parts('-----BE', 'GIN PRI', 'VATE KEY-----'),
+             len('-----BEGIN PRIVATE KEY-----') - 1),
+        )
+        for value, allowed in cases:
+            for prefix in ('測', 'é', ' '):
+                self.assert_held(prefix, value, allowed=allowed)
+
+    def test_every_completed_value_stays_withheld_by_the_full_screen(self):
+        from llmtool.task_submission_cli import _redact_rejected_output
+
+        values = ((_sk_value(), _github_pat_value(), _xox_value(), _jwt_value(), _url_value())
+                  + _gh_values()
+                  + (_runtime_parts('AK', 'IA') + '0' * 16,
+                     _runtime_parts('bear', 'er', ' ', 'abcdefghij'),
+                     _runtime_parts('to', 'ken', '=', 'abcdefghij')))
+        for value in values:
+            with self.subTest(size=len(value), shape=value[:2]):
+                for prefix in ('測', ' '):
+                    self.assertTrue(pm_runtime._emitted_sensitive(prefix + value))
+                    self.assertNotIn(value, pm_runtime._screen_stream_text(prefix + value))
+                self.assertNotIn(value, _redact_rejected_output('Reply ' + value))
+
+
 class PMRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.original_signal_handlers = {

@@ -421,6 +421,68 @@ class SerializationAndPrivacyTests(unittest.TestCase):
                                  'diagnostic text contains recognizable credential material')
                 self.assertNotIn(MARKER, str(caught.exception))
 
+    def test_credentials_beside_non_ascii_word_characters_are_rejected(self):
+        # synthetic-fixture: screen-tool test
+        values = (
+            ''.join(('AK', 'IA')) + '0' * 16,
+            ''.join(('sk', '-')) + 'a' * 24,
+            ''.join(('gh', 'p_')) + 'a' * 24,
+            ''.join(('github', '_pat_')) + 'a' * 24,
+            ''.join(('xox', 'b-')) + 'a' * 24,
+            ''.join(('ey', 'J')) + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8,
+            ''.join(('Bear', 'er ')) + MARKER,
+            ''.join(('Ba', 'sic ', 'dXNlcjpw', 'YXNzd29yZA==')),
+            ''.join(('to', 'ken=')) + MARKER,
+            ''.join(('pass', 'word: ')) + MARKER,
+            ''.join(('api', '_key="')) + MARKER + '"',
+        )
+        neighbours = ('測', 'é', 'ſ', 'K', 'ı', 'İ')
+        for value in values:
+            for neighbour in neighbours:
+                for text in (neighbour + value, value + neighbour):
+                    with self.subTest(shape=value[:3], neighbour=neighbour,
+                                      after=text.endswith(value)):
+                        with self.assertRaises(ValueError) as caught:
+                            d.safe_diagnostic_text(text)
+                        self.assertEqual(
+                            str(caught.exception),
+                            'diagnostic text contains recognizable credential material')
+
+    def test_status_words_and_ordinary_text_beside_non_ascii_keep_their_result(self):
+        # synthetic-fixture: screen-tool test
+        texts = (
+            '測' + ''.join(('to', 'ken=missing')),
+            '測' + ''.join(('pass', 'word: none')),
+            '測' + ''.join(('sec', 'ret: not configured')),
+            '測' + ''.join(('api', '_key="unset"')),
+            '測' + ''.join(('to', 'ken=***')),
+            '測' + ''.join(('Bear', 'er redacted')),
+            '測' + ''.join(('Ba', 'sic placeholder')),
+            '測' + ''.join(('Ba', 'sic ordinary')),
+            '認證失敗',
+            '測試 provider rejected',
+            '測試' + ''.join(('sk', '-short')),
+        )
+        for text in texts:
+            with self.subTest(text=text):
+                self.assertEqual(d.safe_diagnostic_text(text), text)
+                self.assertEqual(error(message=text).message, text)
+
+    def test_ascii_identifiers_before_credential_shapes_stay_allowed(self):
+        # synthetic-fixture: screen-tool test
+        values = (
+            ''.join(('sk', '-')) + 'a' * 24,
+            ''.join(('gh', 'p_')) + 'a' * 24,
+            ''.join(('xox', 'b-')) + 'a' * 24,
+            ''.join(('ey', 'J')) + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8,
+            ''.join(('Bear', 'er ')) + MARKER,
+            ''.join(('to', 'ken=')) + MARKER,
+        )
+        for value in values:
+            for prefix in ('x', '0', '_'):
+                with self.subTest(shape=value[:3], prefix=prefix):
+                    self.assertEqual(d.safe_diagnostic_text(prefix + value), prefix + value)
+
 
 class EventTests(unittest.TestCase):
     def test_event_exact_schema_and_stable_detached_json(self):

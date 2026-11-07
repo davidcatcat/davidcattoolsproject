@@ -765,6 +765,82 @@ class TestOutputExcerptsTests(unittest.TestCase):
                     self.assertNotIn('0', event['text'])
                 self.assertEqual(record['result_text'], '北[REDACTED]京')
 
+    def test_marker_boundary_constant_is_the_one_shared_rule(self):
+        import ast
+        import re
+        from llmtool import diagnostics, pm_runtime, remote_test
+        from llmtool import test_output_excerpts as excerpts
+
+        boundary = excerpts._MARKER_BOUNDARY
+        marker = re.compile(boundary + 'x', re.IGNORECASE)
+        for before in ('測', 'é', 'ſ', 'K', 'ı', 'İ', '-', ' ', ''):
+            with self.subTest(before=before):
+                self.assertIsNotNone(marker.fullmatch(before + 'x', len(before)))
+        for before in ('a', 'Z', '0', '_'):
+            with self.subTest(before=before):
+                self.assertIsNone(marker.fullmatch(before + 'x', len(before)))
+
+        parsed = ast.parse(remote_test._REMOTE_SCRIPT)
+        sensitive = next(node for node in parsed.body
+                         if isinstance(node, ast.Assign) and
+                         any(isinstance(target, ast.Name) and target.id == 'SENSITIVE'
+                             for target in node.targets))
+        patterns = {
+            '_SENSITIVE_PREFIX': excerpts._SENSITIVE_PREFIX,
+            '_STREAM_SECRET_START': pm_runtime._STREAM_SECRET_START.pattern,
+            'SENSITIVE': sensitive.value.args[0].value,
+            '_CREDENTIAL': diagnostics._CREDENTIAL.pattern,
+            '_AUTH_VALUE': diagnostics._AUTH_VALUE.pattern,
+            '_CREDENTIAL_ASSIGNMENT': diagnostics._CREDENTIAL_ASSIGNMENT.pattern,
+        }
+        # Opening word boundaries that the shared constant replaces.
+        retired = (r'\bsk-', r'\b(?:gh', r'\bxox', r'\b(?:bearer', r'\b(bearer',
+                   r'\beyJ', r'\b(?:api', r'\b[A-Za-z]', r'\b[A-Za-z0-9_-]{8,}\.')
+        for name, pattern in patterns.items():
+            with self.subTest(pattern=name):
+                self.assertIn(boundary, pattern)
+                for opening in retired:
+                    self.assertNotIn(opening, pattern)
+
+    def test_only_ascii_word_characters_before_a_marker_stop_a_match(self):
+        from llmtool.test_output_excerpts import _emitted_sensitive, _sensitive
+
+        # synthetic-fixture: screen-tool test
+        values = (
+            SYNTHETIC_AWS_KEY,
+            'ASIA' + 'SYNTHETIC0TEST16',
+            'sk' + '-' + 'a' * 24,
+            'gh' + 'p_' + 'a' * 24,
+            'github' + '_pat_' + 'a' * 24,
+            'xox' + 'b-' + 'a' * 20,
+            'ey' + 'J' + 'a' * 12 + '.' + 'b' * 12 + '.' + 'c' * 12,
+            'bear' + 'er' + ' ' + 'SYNTHETIC' + 'VALUE',
+            'ba' + 'sic' + ' ' + 'SYNTHETIC' + 'VALUE',
+            'to' + 'ken' + '=' + 'SYNTHETIC' + 'VALUE',
+            'pass' + 'word' + ':' + 'SYNTHETIC' + 'VALUE',
+        )
+        for value in values:
+            for before in ('測', 'é', 'ſ', 'K', 'ı', 'İ'):
+                with self.subTest(shape=value[:3], before=before):
+                    self.assertTrue(_sensitive(before + value))
+                    self.assertTrue(_emitted_sensitive(before + value))
+            for before in ('x', 'Z', '0', '_'):
+                with self.subTest(shape=value[:3], before=before):
+                    self.assertFalse(_sensitive(before + value))
+
+    def test_url_scheme_screen_ignores_the_character_before_the_scheme(self):
+        from llmtool.test_output_excerpts import _sensitive, _sensitive_url
+
+        # synthetic-fixture: screen-tool test
+        value = 'https' + '://' + 'alpha' + ':' + 'beta' + '@'
+        for before in ('測', 'é', 'ſ', 'K', '1', '_', '(', ' ', ''):
+            with self.subTest(before=before):
+                self.assertTrue(_sensitive_url(before + value))
+                self.assertTrue(_sensitive(before + value))
+        for mark in '?#':
+            self.assertTrue(_sensitive_url('https' + '://' + 'al' + mark + 'pha:beta@'))
+            self.assertTrue(_sensitive_url('https' + '://' + 'alpha:be' + mark + 'ta@'))
+
     def test_feedback_cloud_key_screen_detects_cjk_neighbors_and_allows_longer_ascii_identifier(self):
         from llmtool import feedback
 
