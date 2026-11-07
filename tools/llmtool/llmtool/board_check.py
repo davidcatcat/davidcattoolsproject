@@ -429,11 +429,25 @@ def _live_task_for(ctx, worker):
     return None
 
 
+def _merged(record):
+    """True only for a recorded GitHub merge marker.
+
+    ``task_status.derive_state`` also says COMPLETED once a Developer result is
+    returned to the PM (callback or completion PM_RETURNED), before any formal
+    review or merge, so that state alone never makes a row DONE.
+    """
+    events = record.get('completion_events')
+    return task_status.derive_state(record) == 'COMPLETED' and any(
+        type(event) is dict and event.get('source') == 'GITHUB' and
+        event.get('marker_type') == 'merge' and event.get('marker_status') == 'MERGED'
+        for event in (events if type(events) is list else []))
+
+
 def _row_done(ctx, row):
     task_id = row.get('task_id')
     if type(task_id) is str:
         record = ctx.record(task_id)
-        return record is not None and task_status.derive_state(record) == 'COMPLETED'
+        return record is not None and _merged(record)
     if type(row.get('pr')) is int:
         return ctx.pull(row['pr'])['merged']
     return False
@@ -584,7 +598,7 @@ def _classify_task(ctx, row, task_id, gates, rows_by_id):
         return ANOMALY, [f'Task {task_id} not found in TaskStore']
     _cover_record(ctx, record)
     derived = task_status.derive_state(record)
-    if derived == 'COMPLETED':
+    if _merged(record):
         return DONE, ['Task COMPLETED: merge marker recorded']
     if derived in ('ABANDONED', 'FAILED'):
         return ANOMALY, [f'Task {derived}: dead Task still on board']
@@ -665,6 +679,12 @@ def _classify_row(ctx, row, rows_by_id, duplicate_ids):
     problem = _row_problem(row)
     if problem is not None:
         return ANOMALY, [problem]
+    # The row lists this PR and Task whatever its own state turns out to be, so
+    # neither may later be reported as missing from the board.
+    if row.get('pr') is not None:
+        ctx.covered_prs.add(row['pr'])
+    if row.get('task_id') is not None:
+        ctx.covered_tasks.add(row['task_id'])
     if row.get('id') in duplicate_ids:
         return ANOMALY, ['duplicate row id']
     gates, problem = _row_gates(row, rows_by_id)
