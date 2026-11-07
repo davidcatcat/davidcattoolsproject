@@ -24,8 +24,9 @@ cannot read another runner's folder or credentials. Python 3.14 is the distro pa
 
 ## Fresh host
 
-- Install `git`, `tar`, `make`, `python3.14` and the runner's libraries first
-  (a missing `make` failed the first job on runner 4).
+- Install `git`, `tar`, `make`, `python3.14`, `python3.14-pip` and the runner's
+  libraries first (on runner 4 a missing `make` failed the first job and a
+  missing pip failed shard 1).
 - Before `install.sh`, move `bin` and `externals` to `bin.<version>` and
   `externals.<version>` with links, or the installer refuses the node symlinks.
 - With SELinux enforcing, give `runsvc.sh` type `bin_t` with `semanage fcontext`
