@@ -17,6 +17,10 @@ Rules (#1160 WP6; same state-file rules as the WP5 GitHubSync poll ledger):
 - Every write is temp file, fsync, atomic replace and directory fsync, and
   replaces only the file that was loaded (device, inode, size, mtime);
   otherwise ``TELEGRAM_STATE_CHANGED`` and the file is left as it was.
+- Every call that may write waits for one exclusive ``flock`` on the state
+  directory itself (opened read-only; it is never replaced) and holds it from
+  load through the replace and directory fsync, so two writers of this module
+  never interleave: the second one loads the first one's result.
 - A call that changes nothing does not write.
 - Results hold only counts, keys and offsets; an error holds only a fixed
   code, never a path or an input value.
@@ -24,6 +28,7 @@ Rules (#1160 WP6; same state-file rules as the WP5 GitHubSync poll ledger):
 Not wired into any CLI or loop; no network. POSIX only.
 """
 
+import contextlib
 import fcntl
 import json
 import os
@@ -75,6 +80,7 @@ _O_NONBLOCK = getattr(os, 'O_NONBLOCK', 0)
 _O_DIRECTORY = getattr(os, 'O_DIRECTORY', 0)
 _READ_FLAGS = os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC
+_DIR_FLAGS = os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC
 
 
 class TelegramCursorError(LLMToolError):
@@ -139,6 +145,12 @@ def _require_update_id(update_id):
 
 # --- file safety -------------------------------------------------------------
 
+def _check_dir_info(info):
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or
+            info.st_mode & 0o022):
+        raise _fail(STATE_DIR_UNSAFE)
+
+
 def _check_dir(directory, missing_code):
     try:
         info = os.stat(directory, follow_symlinks=False)
@@ -146,9 +158,7 @@ def _check_dir(directory, missing_code):
         raise _fail(missing_code) from None
     except OSError:
         raise _fail(STATE_DIR_UNSAFE) from None
-    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or
-            info.st_mode & 0o022):
-        raise _fail(STATE_DIR_UNSAFE)
+    _check_dir_info(info)
 
 
 def _check_file(info):
@@ -190,7 +200,7 @@ def _fill_temp(descriptor, payload):
 
 
 def _fsync_dir(directory):
-    descriptor = os.open(directory, os.O_RDONLY | _O_DIRECTORY | _O_CLOEXEC)
+    descriptor = os.open(directory, _DIR_FLAGS)
     try:
         os.fsync(descriptor)
     finally:
@@ -313,53 +323,91 @@ def _load(path):
     return _parse(raw), identity
 
 
-def _open_lock(path):
-    """Hold an exclusive, non-blocking lock on the current file's inode."""
-    try:
-        descriptor = os.open(path, _READ_FLAGS)
-    except OSError:
-        raise _fail(STATE_CHANGED) from None
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(descriptor)
-        raise _fail(STATE_CHANGED) from None
-    return descriptor
+def _lock_exclusive(descriptor):
+    """Wait for the exclusive writer lock (a seam for the contention tests)."""
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
 
 
-def _require_unchanged(path, lock, identity):
+@contextlib.contextmanager
+def _writer_lock(path, missing_code):
+    """Hold the exclusive writer lock on the state directory for the block.
+
+    The lock is an flock on the directory itself, opened read-only. The
+    directory is never replaced by this module, so every writer locks the
+    same object for the whole load, check, replace and directory fsync. A
+    second writer waits here and then loads the first writer's result.
+    """
+    directory = os.path.dirname(path)
+    _check_dir(directory, missing_code)
+    try:
+        descriptor = os.open(directory, _DIR_FLAGS)
+    except FileNotFoundError:
+        raise _fail(missing_code) from None
+    except OSError:
+        raise _fail(STATE_DIR_UNSAFE) from None
+    locked = False
+    try:
+        try:
+            _check_dir_info(os.fstat(descriptor))
+            _lock_exclusive(descriptor)
+            locked = True
+        except OSError:
+            raise _fail(STATE_DIR_UNSAFE) from None
+        yield descriptor
+    finally:
+        if locked:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _require_same_dir(directory, lock):
     held = os.fstat(lock)
+    try:
+        current = os.stat(directory, follow_symlinks=False)
+    except OSError:
+        raise _fail(STATE_CHANGED) from None
+    if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+        raise _fail(STATE_CHANGED)
+
+
+def _require_unchanged(path, identity):
     try:
         current = os.stat(path, follow_symlinks=False)
     except OSError:
         raise _fail(STATE_CHANGED) from None
-    if (not stat.S_ISREG(current.st_mode) or
-            (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino) or
-            _identity(current) != identity):
+    if not stat.S_ISREG(current.st_mode) or _identity(current) != identity:
         raise _fail(STATE_CHANGED)
 
 
-def _store(path, identity, state):
+def _store(path, identity, state, lock):
     """Atomically replace the loaded file, only if it is still that file.
 
-    Cooperating writers serialise on an flock of the current inode, so the
-    identity check and the replace cannot interleave with another writer of
-    this module. If the directory fsync fails after the replace, the new
-    state is in place but TELEGRAM_STATE_WRITE_FAILED is raised.
+    The caller holds ``_writer_lock`` (``lock``) from before the load until
+    this returns, so no writer of this module can replace the file between
+    the identity check and the replace. The identity check still refuses a
+    change made outside this module. If the directory fsync fails after the
+    replace, the new state is in place but TELEGRAM_STATE_WRITE_FAILED is
+    raised.
     """
     directory = os.path.dirname(path)
     _check_dir(directory, STATE_CHANGED)
     payload = _encode(state)
     temp = _temp_path(directory)
-    lock = None
     created = False
     try:
-        lock = _open_lock(path)
-        _require_unchanged(path, lock, identity)
+        _require_same_dir(directory, lock)
+        _require_unchanged(path, identity)
         descriptor = _create_temp(temp)
         created = True
         _fill_temp(descriptor, payload)
-        _require_unchanged(path, lock, identity)
+        _require_same_dir(directory, lock)
+        _require_unchanged(path, identity)
         os.replace(temp, path)
         created = False
         _fsync_dir(directory)
@@ -370,11 +418,6 @@ def _store(path, identity, state):
     finally:
         if created:
             _discard(temp)
-        if lock is not None:
-            try:
-                os.close(lock)
-            except OSError:
-                pass
 
 
 # --- public API ----------------------------------------------------------------
@@ -384,11 +427,15 @@ def init_state(path):
 
     The file appears complete and private: a fsynced temp file is hard-linked
     into place (which never overwrites), the temp name is removed, and the
-    directory is fsynced.
+    directory is fsynced, all under the writer lock.
     """
     path = _state_path(path)
+    with _writer_lock(path, STATE_DIR_UNSAFE):
+        _create_state(path)
+
+
+def _create_state(path):
     directory = os.path.dirname(path)
-    _check_dir(directory, STATE_DIR_UNSAFE)
     if os.path.lexists(path):
         raise _fail(STATE_EXISTS)
     payload = _encode(_empty_state())
@@ -423,20 +470,21 @@ def claim(path, alias, keys):
     path = _state_path(path)
     _require_alias(alias)
     wanted = _require_keys(keys)
-    state, identity = _load(path)
-    chats = state['chats']
-    entry = chats.get(alias)
-    present = set(entry['claimed']) if entry is not None else set()
-    fresh = [item for item in wanted if item not in present]
-    if not fresh:
-        return []
-    if entry is None:
-        if len(chats) >= MAX_ALIASES:
-            raise _fail(CHAT_LIMIT)
-        entry = {'update_offset': 0, 'claimed': []}
-        chats[alias] = entry
-    entry['claimed'] = (entry['claimed'] + fresh)[-MAX_KEYS_PER_ALIAS:]
-    _store(path, identity, state)
+    with _writer_lock(path, STATE_MISSING) as lock:
+        state, identity = _load(path)
+        chats = state['chats']
+        entry = chats.get(alias)
+        present = set(entry['claimed']) if entry is not None else set()
+        fresh = [item for item in wanted if item not in present]
+        if not fresh:
+            return []
+        if entry is None:
+            if len(chats) >= MAX_ALIASES:
+                raise _fail(CHAT_LIMIT)
+            entry = {'update_offset': 0, 'claimed': []}
+            chats[alias] = entry
+        entry['claimed'] = (entry['claimed'] + fresh)[-MAX_KEYS_PER_ALIAS:]
+        _store(path, identity, state, lock)
     return fresh
 
 
@@ -448,17 +496,18 @@ def release(path, alias, keys):
     path = _state_path(path)
     _require_alias(alias)
     wanted = _require_keys(keys)
-    state, identity = _load(path)
-    entry = state['chats'].get(alias)
-    if entry is None:
-        return []
-    present = set(entry['claimed'])
-    removed = [item for item in wanted if item in present]
-    if not removed:
-        return []
-    gone = set(removed)
-    entry['claimed'] = [item for item in entry['claimed'] if item not in gone]
-    _store(path, identity, state)
+    with _writer_lock(path, STATE_MISSING) as lock:
+        state, identity = _load(path)
+        entry = state['chats'].get(alias)
+        if entry is None:
+            return []
+        present = set(entry['claimed'])
+        removed = [item for item in wanted if item in present]
+        if not removed:
+            return []
+        gone = set(removed)
+        entry['claimed'] = [item for item in entry['claimed'] if item not in gone]
+        _store(path, identity, state, lock)
     return removed
 
 
@@ -470,19 +519,20 @@ def advance_offset(path, alias, update_id):
     path = _state_path(path)
     _require_alias(alias)
     _require_update_id(update_id)
-    state, identity = _load(path)
-    chats = state['chats']
-    entry = chats.get(alias)
-    current = entry['update_offset'] if entry is not None else 0
-    if update_id <= current:
-        return current
-    if entry is None:
-        if len(chats) >= MAX_ALIASES:
-            raise _fail(CHAT_LIMIT)
-        entry = {'update_offset': 0, 'claimed': []}
-        chats[alias] = entry
-    entry['update_offset'] = update_id
-    _store(path, identity, state)
+    with _writer_lock(path, STATE_MISSING) as lock:
+        state, identity = _load(path)
+        chats = state['chats']
+        entry = chats.get(alias)
+        current = entry['update_offset'] if entry is not None else 0
+        if update_id <= current:
+            return current
+        if entry is None:
+            if len(chats) >= MAX_ALIASES:
+                raise _fail(CHAT_LIMIT)
+            entry = {'update_offset': 0, 'claimed': []}
+            chats[alias] = entry
+        entry['update_offset'] = update_id
+        _store(path, identity, state, lock)
     return update_id
 
 

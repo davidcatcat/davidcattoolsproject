@@ -12,6 +12,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import traceback
 import unittest
 from pathlib import Path
@@ -333,7 +335,7 @@ class CorruptTests(CursorTestCase):
         tc.init_state(self.path)
         before = self.snapshot()
         other = os.getuid() + 1
-        with mock.patch.object(tc, '_check_dir'), \
+        with mock.patch.object(tc, '_check_dir_info'), \
                 mock.patch.object(tc.os, 'getuid', return_value=other):
             self.assertCode(CORRUPT, tc.offset, self.path, 'ops')
             self.assertCode(CORRUPT, tc.claim, self.path, 'ops', [key(1)])
@@ -629,16 +631,227 @@ class ChangedFileTests(CursorTestCase):
             self.assertCode(CHANGED, tc.release, self.path, 'ops', [key(40)])
         self.assertExternalStateKept()
 
-    def test_concurrent_writer_holding_lock(self):
+    def test_other_lock_on_state_file_inode_does_not_matter(self):
         descriptor = os.open(self.path, os.O_RDONLY)
         self.addCleanup(os.close, descriptor)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        before = self.snapshot()
-        self.assertCode(CHANGED, tc.claim, self.path, 'ops', [key(1)])
-        self.assertEqual(self.snapshot(), before)
-        self.assertOnlyStateFile()
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.assertEqual(tc.claim(self.path, 'ops', [key(1)]), [key(1)])
+        self.assertOnlyStateFile()
+
+
+_WAITER = (
+    'import json, sys\n'
+    'sys.path.insert(0, sys.argv[1])\n'
+    'from llmtool import telegram_cursor as tc\n'
+    'path, keys = sys.argv[2], sys.argv[3:]\n'
+    'sys.stdout.write("ready\\n")\n'
+    'sys.stdout.flush()\n'
+    'result = {"new": tc.claim(path, "ops", keys), "offset": tc.offset(path, "ops")}\n'
+    'sys.stdout.write(json.dumps(result) + "\\n")\n'
+)
+
+
+class WriterLockTests(CursorTestCase):
+    """Writers serialise on one flock of the state directory (PR #1165 review)."""
+
+    def setUp(self):
+        super().setUp()
+        tc.init_state(self.path)
+
+    def try_lock(self):
+        descriptor = os.open(self.dir, os.O_RDONLY)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        finally:
+            os.close(descriptor)
+        return True
+
+    def assertDirLocked(self):
+        self.assertFalse(self.try_lock())
+
+    def assertDirUnlocked(self):
+        self.assertTrue(self.try_lock())
+
+    def contend(self, first, second):
+        """Run ``first``; once it has loaded, start ``second`` in a thread.
+
+        ``first`` pauses after its load, while it holds the writer lock, until
+        ``second`` has reached the lock and is still waiting on it. Returns
+        both results.
+        """
+        original_lock = tc._lock_exclusive
+        original_load = tc._load
+        reached = threading.Event()
+        outcome = {}
+
+        def run_second():
+            try:
+                outcome['second'] = second()
+            except BaseException as error:  # re-raised in the test thread
+                outcome['error'] = error
+
+        worker = threading.Thread(target=run_second, daemon=True)
+
+        def lock(descriptor):
+            if threading.current_thread() is worker:
+                reached.set()
+            original_lock(descriptor)
+
+        def load(path):
+            result = original_load(path)
+            if 'started' not in outcome:
+                outcome['started'] = True
+                self.assertDirLocked()
+                worker.start()
+                self.assertTrue(reached.wait(30))
+                worker.join(0.3)
+                outcome['second_waited'] = worker.is_alive()
+                self.assertNotIn('second', outcome)
+            return result
+
+        with mock.patch.object(tc, '_lock_exclusive', lock), \
+                mock.patch.object(tc, '_load', load):
+            try:
+                first_result = first()
+            finally:
+                if 'started' in outcome:
+                    worker.join(30)
+        self.assertIn('started', outcome)
+        self.assertFalse(worker.is_alive())
+        if 'error' in outcome:
+            raise outcome['error']
+        self.assertTrue(outcome['second_waited'])
+        self.assertDirUnlocked()
+        self.assertOnlyStateFile()
+        return first_result, outcome['second']
+
+    def test_second_claim_waits_and_sees_first_claim(self):
+        first, second = self.contend(
+            lambda: tc.claim(self.path, 'ops', [key(1)]),
+            lambda: tc.claim(self.path, 'ops', [key(1), key(2)]))
+        self.assertEqual(first, [key(1)])
+        self.assertEqual(second, [key(2)])
+        self.assertEqual(self.read_doc()['chats']['ops'], chat(0, [key(1), key(2)]))
+
+    def test_second_claim_keeps_first_offset(self):
+        first, second = self.contend(
+            lambda: tc.advance_offset(self.path, 'ops', 10),
+            lambda: tc.claim(self.path, 'ops', [key(1)]))
+        self.assertEqual((first, second), (10, [key(1)]))
+        self.assertEqual(self.read_doc()['chats']['ops'], chat(10, [key(1)]))
+
+    def test_second_offset_keeps_first_keys(self):
+        first, second = self.contend(
+            lambda: tc.claim(self.path, 'ops', [key(1)]),
+            lambda: tc.advance_offset(self.path, 'ops', 20))
+        self.assertEqual((first, second), ([key(1)], 20))
+        self.assertEqual(self.read_doc()['chats']['ops'], chat(20, [key(1)]))
+
+    def test_lower_offset_waits_and_sees_first_offset(self):
+        first, second = self.contend(
+            lambda: tc.advance_offset(self.path, 'ops', 10),
+            lambda: tc.advance_offset(self.path, 'ops', 5))
+        self.assertEqual((first, second), (10, 10))
+        self.assertEqual(tc.offset(self.path, 'ops'), 10)
+
+    def test_release_waits_and_sees_first_claim(self):
+        first, second = self.contend(
+            lambda: tc.claim(self.path, 'ops', [key(1), key(2)]),
+            lambda: tc.release(self.path, 'ops', [key(1)]))
+        self.assertEqual((first, second), ([key(1), key(2)], [key(1)]))
+        self.assertEqual(self.read_doc()['chats']['ops'], chat(0, [key(2)]))
+
+    def test_lock_is_held_from_load_through_replace_and_fsync(self):
+        original_load = tc._load
+        original_replace = tc.os.replace
+        original_fsync = tc._fsync_dir
+        seen = []
+
+        def load(path):
+            self.assertDirLocked()
+            seen.append('load')
+            return original_load(path)
+
+        def replace(source, target):
+            self.assertDirLocked()
+            seen.append('replace')
+            original_replace(source, target)
+
+        def fsync(directory):
+            self.assertDirLocked()
+            seen.append('fsync')
+            original_fsync(directory)
+
+        with mock.patch.object(tc, '_load', load), \
+                mock.patch.object(tc.os, 'replace', replace), \
+                mock.patch.object(tc, '_fsync_dir', fsync):
+            tc.claim(self.path, 'ops', [key(1)])
+            tc.advance_offset(self.path, 'ops', 3)
+            tc.release(self.path, 'ops', [key(1)])
+        self.assertEqual(seen, ['load', 'replace', 'fsync'] * 3)
+        self.assertDirUnlocked()
+        self.assertEqual(self.read_doc()['chats']['ops'], chat(3, []))
+
+    def test_init_holds_the_lock(self):
+        sub = os.path.join(self.dir, 'sub')
+        os.mkdir(sub, 0o700)
+        original_fsync = tc._fsync_dir
+        seen = []
+
+        def fsync(directory):
+            descriptor = os.open(sub, os.O_RDONLY)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(descriptor)
+            seen.append(directory)
+            original_fsync(directory)
+
+        with mock.patch.object(tc, '_fsync_dir', fsync):
+            tc.init_state(os.path.join(sub, 'cursor.json'))
+        self.assertEqual(seen, [sub])
+
+    def test_lock_is_released_after_inert_and_failed_calls(self):
+        tc.claim(self.path, 'ops', [key(1)])
+        self.assertEqual(tc.claim(self.path, 'ops', [key(1)]), [])
+        self.assertDirUnlocked()
+        self.assertEqual(tc.advance_offset(self.path, 'ops', 0), 0)
+        self.assertDirUnlocked()
+        with self.patched_load(lambda: self.replace_externally(document())):
+            self.assertCode(CHANGED, tc.claim, self.path, 'ops', [key(2)])
+        self.assertDirUnlocked()
+        self.assertCode(EXISTS, tc.init_state, self.path)
+        self.assertDirUnlocked()
+        self.write_raw(b'{not json')
+        self.assertCode(CORRUPT, tc.advance_offset, self.path, 'ops', 1)
+        self.assertDirUnlocked()
+
+    def test_writer_in_another_process_waits_for_the_lock(self):
+        holder = os.open(self.dir, os.O_RDONLY)
+        self.addCleanup(os.close, holder)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        child = subprocess.Popen(
+            [sys.executable, '-I', '-c', _WAITER, str(_ROOT), self.path, key(40), key(1)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            self.assertEqual(child.stdout.readline(), b'ready\n')
+            time.sleep(0.3)
+            self.assertIsNone(child.poll())
+            # As a first writer would, the lock holder changes the state.
+            self.replace_externally(document({'ops': chat(7, [key(40)])}))
+            fcntl.flock(holder, fcntl.LOCK_UN)
+            out, err = child.communicate(timeout=120)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.communicate()
+        self.assertEqual(child.returncode, 0, err.decode('utf-8', 'replace'))
+        self.assertEqual(json.loads(out.decode('utf-8')), {'new': [key(1)], 'offset': 7})
+        self.assertEqual(self.read_doc()['chats']['ops'], chat(7, [key(40), key(1)]))
+        self.assertOnlyStateFile()
 
 
 _CHILD = (
@@ -702,12 +915,8 @@ class ErrorHygieneTests(CursorTestCase):
                                          self.path, 'ops', -98765), '98765')
         self.assertClean(self.assertCode(ARGUMENT_INVALID, tc.init_state,
                                          self.dir + '/sub/../x.json'))
-        descriptor = os.open(self.path, os.O_RDONLY)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        with self.patched_load(lambda: self.replace_externally(document())):
             self.assertClean(self.assertCode(CHANGED, tc.claim, self.path, 'ops', [key(1)]))
-        finally:
-            os.close(descriptor)
         for index in range(8):
             tc.claim(self.path, 'chat%d' % index, [key(index)])
         self.assertClean(self.assertCode(CHAT_LIMIT, tc.claim, self.path,
