@@ -27,8 +27,17 @@ _REMOTE_TEST_RETRY_CODES = frozenset((
 
 
 class _PublishRefusal(Exception):
-    def __init__(self, code):
+    def __init__(self, code, operation=None):
         self.code = code
+        # Set only for a refusal after this publish's own gh pr create (#1139).
+        self.operation = operation
+
+
+_ACTIVITY_MARKER = '<!-- activity: type=task actor=PM target=PR status=TRACKING -->'
+_PR_URL = re.compile(
+    r'https://github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100})'
+    r'/pull/([1-9][0-9]{0,6})')
+_HEX40 = re.compile(r'[0-9a-f]{40}')
 
 
 def _publish_run_git(root, args):
@@ -149,28 +158,185 @@ def _require_published_head(git_runner, root, branch, head):
         raise _PublishRefusal('PUBLISH_HEAD_MOVED')
 
 
-def _publish_pr(gh_runner, root, branch, task_id, expected_head, title, body):
+def _read_open_prs(gh_runner, root, branch):
     output = _publish_command(gh_runner, root,
         ['pr', 'list', '--head', branch, '--state', 'open',
          '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
     try:
-        pulls = json.loads(output)
+        return json.loads(output)
     except (ValueError, TypeError):
         raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
+
+
+def _gh_succeeded(gh_runner, root, args):
+    try:
+        return getattr(gh_runner(root, args), 'returncode', 1) == 0
+    except Exception:
+        return False
+
+
+def _creation_evidence(output):
+    """Return (url, repository, number) from gh pr create's last non-empty line."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    match = _PR_URL.fullmatch(lines[-1]) if lines else None
+    if match is None:
+        return None
+    return match.group(0), match.group(1), int(match.group(2))
+
+
+def _listed_pr(pulls, created):
+    """Return (number, head) for the PR this call follows in one listing.
+
+    With creation evidence only the created number is followed; it may be
+    absent (number None). Without it, the listing's first PR is read as today.
+    """
+    if type(pulls) is not list or not pulls:
+        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+    if created is None:
+        pull = pulls[0]
+    else:
+        pull = next((item for item in pulls if type(item) is dict and
+                     type(item.get('number')) is int and
+                     item['number'] == created[2]), None)
+        if pull is None:
+            return None, None
+    number = pull.get('number') if type(pull) is dict else None
+    head = pull.get('headRefOid') if type(pull) is dict else None
+    if type(number) is not int or number < 1 or type(head) is not str:
+        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+    return number, head
+
+
+def _gh_json_value(gh_runner, root, args, key):
+    try:
+        value = json.loads(_publish_command(gh_runner, root, args,
+                                            code='PUBLISH_GITHUB_FAILED'))
+    except Exception:
+        return None
+    value = value.get(key) if type(value) is dict else None
+    return value if type(value) is str and value else None
+
+
+def _recheck_created_pr(gh_runner, root, branch, created, title, body):
+    """Read the created PR once; return (recheck, observed head or None)."""
+    _, repository, number = created
+    try:
+        view = json.loads(_publish_command(gh_runner, root,
+            ['pr', 'view', str(number), '--repo', repository, '--json',
+             'number,url,headRefName,headRefOid,isCrossRepository,state,author,title,body'],
+            code='PUBLISH_GITHUB_FAILED'))
+    except Exception:
+        return 'FAIL:view', None
+    if type(view) is not dict:
+        return 'FAIL:view', None
+    observed = view.get('headRefOid')
+    observed = observed if type(observed) is str and _HEX40.fullmatch(observed) else None
+    url = view.get('url')
+    match = _PR_URL.fullmatch(url) if type(url) is str else None
+    author = view.get('author')
+    login = author.get('login') if type(author) is dict else None
+    if type(view.get('number')) is not int or view['number'] != number:
+        return 'FAIL:number', observed
+    if match is None or match.group(1) != repository or int(match.group(2)) != number:
+        return 'FAIL:url', observed
+    if _gh_json_value(gh_runner, root, ['repo', 'view', '--json', 'nameWithOwner'],
+                      'nameWithOwner') != repository:
+        return 'FAIL:nameWithOwner', observed
+    if view.get('headRefName') != branch:
+        return 'FAIL:headRefName', observed
+    if view.get('isCrossRepository') is not False:
+        return 'FAIL:isCrossRepository', observed
+    if view.get('state') != 'OPEN':
+        return 'FAIL:state', observed
+    if (type(login) is not str or not login or
+            _gh_json_value(gh_runner, root, ['api', 'user'], 'login') != login):
+        return 'FAIL:author', observed
+    if view.get('title') != title:
+        return 'FAIL:title', observed
+    if view.get('body') != body:
+        return 'FAIL:body', observed
+    if observed is None:
+        return 'FAIL:headRefOid', observed
+    return 'PASS', observed
+
+
+def _publish_created_pr(gh_runner, root, branch, task_id, expected_head, title, body):
+    """Open one PR; only a verified PR this call created may be closed (#1139)."""
+    try:
+        result = gh_runner(root, ['pr', 'create', '--head', branch,
+                                  '--base', 'main', '--title', title, '--body', body])
+    except Exception:
+        raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
+    if getattr(result, 'returncode', 1) != 0:
+        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+    try:
+        created = _creation_evidence(_publish_output(result))
+    except _PublishRefusal:
+        created = None
+    operation = {
+        'task_id': task_id if type(task_id) is str else None,
+        'repository': created[1] if created else None,
+        'branch': branch, 'pr': created[2] if created else None,
+        'creation_url': created[0] if created else None,
+        'expected_head': expected_head, 'observed_head': None,
+        'recheck': 'FAIL:creation_url' if created is None else 'FAIL:list',
+        'close_attempted': False, 'record_comment': 'NOT_POSTED',
+        'outcome': 'NOT_VERIFIED_NOT_CLOSED',
+        'next_action': 'inspect the branch PRs; this publish closed nothing',
+    }
+    for attempt in range(4):
+        if attempt:
+            _publish_pause(2)
+        try:
+            number, head = _listed_pr(_read_open_prs(gh_runner, root, branch), created)
+        except _PublishRefusal as exc:
+            operation['recheck'] = 'FAIL:list'
+            raise _PublishRefusal(exc.code, operation) from None
+        if head is not None:
+            operation['observed_head'] = head if _HEX40.fullmatch(head) else None
+        if head == expected_head:
+            return number
+    if created is None:
+        # No creation evidence: nothing may be closed, so refuse as today.
+        operation['recheck'] = 'FAIL:creation_url'
+        raise _PublishRefusal('PUBLISH_GITHUB_FAILED', operation)
+    _, repository, number = created
+    recheck, observed = _recheck_created_pr(gh_runner, root, branch, created, title, body)
+    operation['recheck'] = recheck
+    if observed is not None:
+        operation['observed_head'] = observed
+    if recheck == 'PASS' and observed == expected_head:
+        return number
+    if recheck != 'PASS':
+        operation.update(outcome='LEFT_OPEN', next_action=(
+            f'inspect PR #{number}; it is still open and a later publish treats it as existing'))
+        raise _PublishRefusal('PUBLISH_MOVED_PR_OPEN', operation)
+    operation['close_attempted'] = True
+    if _gh_succeeded(gh_runner, root, ['pr', 'close', str(number), '--repo', repository]):
+        code = 'PUBLISH_HEAD_MOVED'
+        operation.update(outcome='CLOSED', next_action=(
+            'publish again; the branch stays pushed and a later publish may open a new PR'))
+    else:
+        code = 'PUBLISH_MOVED_PR_OPEN'
+        operation.update(outcome='CLOSE_FAILED_LEFT_OPEN', next_action=(
+            f'inspect PR #{number}; it is still open and a later publish treats it as existing'))
+    posted = dict(operation, record_comment='POSTED')
+    record = _ACTIVITY_MARKER + '\n' + json.dumps(posted, sort_keys=True,
+                                                  separators=(',', ':'))
+    operation['record_comment'] = ('POSTED' if _gh_succeeded(gh_runner, root,
+        ['pr', 'comment', str(number), '--repo', repository, '--body', record])
+        else 'FAILED')
+    raise _PublishRefusal(code, operation)
+
+
+def _publish_pr(gh_runner, root, branch, task_id, expected_head, title, body):
+    pulls = _read_open_prs(gh_runner, root, branch)
     if type(pulls) is not list:
         raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
     if not pulls:
-        _publish_command(gh_runner, root,
-            ['pr', 'create', '--head', branch,
-             '--base', 'main', '--title', title, '--body', body],
-            code='PUBLISH_GITHUB_FAILED')
-        output = _publish_command(gh_runner, root,
-            ['pr', 'list', '--head', branch, '--state', 'open',
-             '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
-        try:
-            pulls = json.loads(output)
-        except (ValueError, TypeError):
-            raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
+        return _publish_created_pr(gh_runner, root, branch, task_id, expected_head,
+                                   title, body)
+    # A PR open before this call is never closed; a head mismatch refuses.
     for attempt in range(4):
         if type(pulls) is not list or not pulls:
             raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
@@ -226,6 +392,13 @@ def _owner_acceptance_required(files):
     return False
 
 
+def _scripts_only_ci(paths):
+    """Return whether every changed path is under scripts/ (not docs-only)."""
+    return (type(paths) is list and bool(paths) and
+            all(type(path) is str and path.startswith('scripts/') for path in paths) and
+            not task_completion._docs_only_ci(paths))
+
+
 def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False):
     try:
         checks = github_get(f'commits/{head}/check-runs?per_page=100')
@@ -253,7 +426,13 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     if len(paths) != len(files) or any(type(path) is not str for path in paths):
         return 'MERGE_CHECKS_UNAVAILABLE'
     docs_only = task_completion._docs_only_ci(paths)
-    required_checks = ['check (docs)'] if docs_only else ['check (Linux 3.14)']
+    if docs_only:
+        required_checks = ['check (docs)']
+    elif _scripts_only_ci(paths):
+        # A scripts/-only PR needs no Linux job; macOS and mac-ci stay required.
+        required_checks = []
+    else:
+        required_checks = ['check (Linux 3.14)']
     requires_macos = not docs_only
     if requires_macos:
         required_checks.append('check (macOS 3.13)')
@@ -263,6 +442,13 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
                         if name != 'check (macOS 3.13)')
     if other_missing or (missing_macos and not allow_missing_macos):
         return 'MERGE_REQUIRED_CHECK_MISSING'
+    # #1182: a skipped required check never counts as SUCCESS. Every run is
+    # completed here, so a required name without a success run was skipped.
+    # The macOS check keeps its own skipped and mac-ci rules below.
+    if any(not any(item['name'] == name and item.get('conclusion') == 'success'
+                   for item in check_runs)
+           for name in required_checks if name != 'check (macOS 3.13)'):
+        return 'MERGE_REQUIRED_CHECK_SKIPPED'
     if _owner_acceptance_required(files):
         return 'MERGE_OWNER_ACCEPTANCE_MANUAL'
     if not docs_only:
@@ -320,8 +506,11 @@ def _review_ci_gate(number, head, github_get):
         if type(path) is not str:
             return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
         paths.append(path)
-    required_name = ('check (docs)' if task_completion._docs_only_ci(paths)
-                     else 'check (Linux 3.14)')
+    docs_only = task_completion._docs_only_ci(paths)
+    if not docs_only and _scripts_only_ci(paths):
+        # Review does not wait for a Linux job a scripts/-only PR does not need.
+        return None, None
+    required_name = 'check (docs)' if docs_only else 'check (Linux 3.14)'
     runs = checks['check_runs']
     if any(type(item) is not dict for item in runs):
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
@@ -423,14 +612,28 @@ def _merge_pass_claim(record, number, head, events):
         candidates.append((claim['version'], verdict, outcome))
     if not candidates:
         return None
-    latest = max(candidates, key=lambda item: item[0])
-    if latest[1] != 'PASS' or latest[2] != 'REVIEW_PASS':
+    passes = [item[0] for item in candidates
+              if item[1] == 'PASS' and item[2] == 'REVIEW_PASS']
+    if not passes:
+        return 'MERGE_REVIEW_NOT_PASS'
+    top = max(passes)
+    # Any newer claim on this PR and head, in any state and with or without a
+    # REVIEWER event, vetoes the PASS; so does a claim with no integer version.
+    for claim in _claims(record):
+        if (type(claim) is not dict or claim.get('pr') != number or
+                claim.get('head_sha') != head):
+            continue
+        version = claim.get('version')
+        if type(version) is not int or version > top:
+            return 'MERGE_NEWER_REVIEW_EXISTS'
+    if any(item[0] == top and (item[1] != 'PASS' or item[2] != 'REVIEW_PASS')
+           for item in candidates):
         return 'MERGE_REVIEW_NOT_PASS'
     if any(type(event) is dict and event.get('source') == 'REVIEWER' and
            event.get('source_sha') == head and type(event.get('version')) is int and
-           event['version'] > latest[0] for event in events):
+           event['version'] > top for event in events):
         return 'MERGE_NEWER_REVIEW_EXISTS'
-    return latest[0]
+    return top
 
 
 def _merge_once(*, store, record, number, head, pr, events, github_get,
@@ -803,6 +1006,26 @@ def _publish_task(record, d6, executor_task, *, pre_pr_gate, git_runner=None,
     return {'pr': number, 'head': local_head}
 
 
+def _publish_refusal_result(store, task_id, refusal):
+    """Return a publish refusal; one after this call's create keeps its record."""
+    result = {'task_id': task_id, 'codes': [refusal.code]}
+    operation = refusal.operation
+    if type(operation) is not dict:
+        return result
+    operation = dict(operation)
+    result['publish_operation'] = operation
+    number = operation.get('pr')
+    if refusal.code == 'PUBLISH_MOVED_PR_OPEN' and type(number) is int:
+        result['open_pr'] = {'number': number, 'error': (
+            f'PUBLISH_MOVED_PR_OPEN: PR #{number} is still open; this publish did not '
+            'close it and a later publish treats it as existing.')}
+    try:
+        store.record_publish_operation(task_id, operation)
+    except Exception:
+        result['codes'].append('PUBLISH_OPERATION_RECORD_FAILED')
+    return result
+
+
 def _claims(record):
     value = record.get('review_dispatch_claim')
     if type(value) is dict:
@@ -1023,6 +1246,10 @@ def derive_repair_state(repair_record):
         return 'UNKNOWN'
     developer = repair_record.get('developer')
     state = developer.get('state') if type(developer) is dict else None
+    # This failure updates only the developer field, so check it before the
+    # top-level state, which may still read PM_PENDING.
+    if state == 'BLOCKED' and developer.get('error_code') == 'CLAUDE_NO_CHANGES':
+        return 'BLOCKED'
     if state == 'DEVELOPER_PENDING' or repair_record.get('state') == 'PM_PENDING':
         return 'PENDING'
     if state == 'DEVELOPER_DISPATCHING':
@@ -1134,6 +1361,11 @@ def decide(record, d6, pr, related):
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') == 'RESPONDED'):
                 return 'PUBLISH'
+            # Only a COMPLETED claim's outcome carries a count. Without a code
+            # finding a Developer has nothing to repair, so the PM decides.
+            findings = event.get('findings_count')
+            if claim.get('state') == 'COMPLETED' and type(findings) is int and findings == 0:
+                return 'REVIEW_NO_CODE_FINDING'
             return 'REPAIR_REVIEW'
         if outcome == 'REVIEW_PASS':
             completion = record.get('completion')
@@ -1251,7 +1483,8 @@ def _review_outcomes(record, claims, github_get):
                 continue
             if any(event.get('event_id') == event_id for event in events):
                 outcomes.append({'source': 'REVIEWER', 'source_sha': head,
-                                 'version': version, 'outcome': latest[2]})
+                                 'version': version, 'outcome': latest[2],
+                                 'findings_count': latest[3]})
             continue
         if claim.get('state') != 'DISPATCHED':
             continue
@@ -1294,7 +1527,60 @@ def _review_outcomes(record, claims, github_get):
     return outcomes
 
 
-def _merged_review_target(record, claims, events, pr, integration_pr, github_get):
+def _integration_delta_verified(root, reviewed_head, integration_head, merge_sha, number,
+                                git_runner=None):
+    """Return whether a merged integration head adds only clean merges of main.
+
+    The trusted anchor is the first parent of the integration PR's merge
+    commit: main as it stood before that PR merged. Main after the merge is
+    never used, because it may contain the PR's own commits. A missing commit
+    allows one fetch of main and the PR head; any failure is not verified.
+    """
+    if (type(reviewed_head) is str and integration_head == reviewed_head and
+            _HEX40.fullmatch(reviewed_head)):
+        return True
+    run = _publish_run_git if git_runner is None else git_runner
+    root = root or os.getcwd()
+    try:
+        if (any(type(sha) is not str or _HEX40.fullmatch(sha) is None
+                for sha in (reviewed_head, integration_head, merge_sha)) or
+                type(number) is not int or not 1 <= number <= 9999999):
+            return False
+
+        def present(sha):
+            try:
+                result = run(root, ['cat-file', '-e', f'{sha}^{{commit}}'])
+            except Exception:
+                return False
+            return getattr(result, 'returncode', 1) == 0
+
+        def anchor():
+            if not all(present(sha) for sha in (reviewed_head, integration_head, merge_sha)):
+                return None
+            try:
+                trusted = _publish_command(
+                    run, root, ['rev-parse', '--verify', f'{merge_sha}^1']).strip()
+            except _PublishRefusal:
+                return None
+            return trusted if _HEX40.fullmatch(trusted) and present(trusted) else None
+
+        trusted = anchor()
+        if trusted is None:
+            _publish_command(run, root, ['fetch', 'origin', 'main',
+                                         f'refs/pull/{number}/head'])
+            trusted = anchor()
+            if trusted is None:
+                return False
+        # A graft file could rewrite the parents that the walk trusts.
+        task_completion._reject_legacy_grafts(root)
+        return task_completion._developer_tip(
+            root, reviewed_head, integration_head, trusted) == reviewed_head
+    except Exception:
+        return False
+
+
+def _merged_review_target(record, claims, events, pr, integration_pr, github_get, *,
+                          root=None, git_runner=None):
     """Return a verified merged PR tuple for a completed review, if present."""
     completion = record.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
@@ -1342,7 +1628,9 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
             if type(integration_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', integration_sha) is None:
                 continue
             compare = github_get(f'compare/{head}...{integration_sha}')
-            if type(compare) is dict and compare.get('status') in ('ahead', 'identical'):
+            if (type(compare) is dict and compare.get('status') in ('ahead', 'identical') and
+                    _integration_delta_verified(root, head, integration_sha, merge_sha,
+                                                integration_pr, git_runner)):
                 return integration_pr, merge_sha
         except Exception:
             continue
@@ -1399,8 +1687,10 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     except Exception:
         # Advance may proceed from persisted reviewer events when GitHub is unavailable.
         pass
+    delta_root = (d6.get('root') if type(d6) is dict else None) or cwd or os.getcwd()
     merged = _merged_review_target(record, _claims(record), related['events'], pr,
-                                    integration_pr, get)
+                                    integration_pr, get, root=delta_root,
+                                    git_runner=publish_git_runner)
     if merged is not None:
         merge_number, merge_sha = merged
         import hashlib
@@ -1623,6 +1913,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             integration = _pr_snapshot(integration_pr, get) if integration_pr is not None else pr
             merged = type(integration) is dict and integration.get('merged') is True
             merge_sha = integration.get('merge_commit_sha') if merged else None
+            delta_unverified = False
             if merged:
                 integration_head = integration.get('head')
                 integration_sha = integration_head.get('sha') if type(integration_head) is dict else None
@@ -1633,7 +1924,13 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                                if type(integration_sha) is str and
                                re.fullmatch(r'[0-9a-f]{40}', integration_sha) else None)
                     merged = type(compare) is dict and compare.get('status') in ('ahead', 'identical')
-            if merged and type(merge_sha) is str and re.fullmatch(r'[0-9a-f]{40}', merge_sha):
+                    if merged and not _integration_delta_verified(
+                            delta_root, d6['result_head'], integration_sha, merge_sha,
+                            integration_pr, publish_git_runner):
+                        merged, delta_unverified = False, True
+            if delta_unverified:
+                codes.append('INTEGRATION_DELTA_UNVERIFIED')
+            elif merged and type(merge_sha) is str and re.fullmatch(r'[0-9a-f]{40}', merge_sha):
                 import hashlib
                 event_id = hashlib.sha256(
                     f'GITHUB\0merge\0{integration_pr or number}\0{merge_sha}'.encode()).hexdigest()[:32]
@@ -1693,7 +1990,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             return {'task_id': task_id, 'codes': codes, 'pr': result['pr'],
                     'head': result['head']}
         except _PublishRefusal as exc:
-            return {'task_id': task_id, 'codes': [exc.code]}
+            return _publish_refusal_result(store, task_id, exc)
         except Exception:
             return {'task_id': task_id, 'codes': ['PUBLISH_FAILED']}
     elif step == 'DEVELOPER_ATTENTION':
@@ -1719,7 +2016,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         failure = _failure_reason(claim.get('failure_reason')) if claim else None
         if failure is not None:
             codes.append(failure)
-    elif step in ('WAITING_REPAIR', 'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH'):
+    elif step in ('WAITING_REPAIR', 'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH',
+                  'REVIEW_NO_CODE_FINDING'):
         codes.append(step)
     next_action =('resume the reviewer to post its verdict' if step == 'REVIEW_NOT_POSTED'
                    else step)
