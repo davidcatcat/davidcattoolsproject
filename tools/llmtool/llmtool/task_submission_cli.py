@@ -825,6 +825,9 @@ def add_task_submission_parsers(actions):
                          help='merged integration PR containing the reviewed head')
     advance.add_argument('--reviewer-session-done', action='store_true',
                          help='record REVIEW_BLOCKED when the dispatched Reviewer has ended without a verdict')
+    advance.add_argument('--pm-session',
+                         help=('caller PM session (native UUID or pm- ID); default: '
+                               'CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID'))
     drive = actions.add_parser(
         'drive', help=('Drive Task advancement in the foreground; stops for attention '
                        'without waiting if the initial Developer is unfinished'))
@@ -840,6 +843,9 @@ def add_task_submission_parsers(actions):
                        help='merged integration PR containing the reviewed head')
     drive.add_argument('--reviewer-session-done', action='store_true',
                        help='record REVIEW_BLOCKED when the dispatched Reviewer has ended without a verdict')
+    drive.add_argument('--pm-session',
+                       help=('caller PM session (native UUID or pm- ID); default: '
+                             'CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID'))
     claude_result = actions.add_parser(
         'claude-result', help='Record the original PM-bound Claude Developer result')
     claude_result.add_argument('task_id', help='existing durable Task ID')
@@ -1232,11 +1238,21 @@ def run_task_review_dispatch(args, *, store=None):
 
 
 def run_task_advance(args, *, store=None, **adapters):
-    """Thin CLI adapter for one idempotent Task advancement step."""
+    """Thin CLI adapter for one idempotent Task advancement step.
+
+    #1124: the caller's PM session must own the Task before advance runs.
+    """
     from .task_advance import advance
+    from . import pm_caller
+    store = TaskStore() if store is None else store
+    try:
+        pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
+    except pm_caller.PMCallerRefused as exc:
+        _print(pm_caller.refusal(args.task_id, exc.code))
+        return 1
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured):
-        result = advance(task_id=args.task_id, store=TaskStore() if store is None else store,
+        result = advance(task_id=args.task_id, store=store,
             pr_number=getattr(args, 'pr', None),
             integration_pr=getattr(args, 'integration_pr', None),
             merge=getattr(args, 'merge', False),
@@ -1246,10 +1262,30 @@ def run_task_advance(args, *, store=None, **adapters):
 
 
 def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapters):
-    """Drive Task steps; stop without polling if its initial Developer is unfinished."""
+    """Drive Task steps; stop without polling if its initial Developer is unfinished.
+
+    #1124: the caller's PM session must own the Task before the drive starts,
+    and ownership is re-checked before every advance and Mac CI label call.
+    """
+    from . import task_advance
     from .task_drive import drive
+    from . import pm_caller
+    store = TaskStore() if store is None else store
+    try:
+        caller_key = pm_caller.check_caller(store, args.task_id,
+                                            getattr(args, 'pm_session', None))
+    except pm_caller.PMCallerRefused as exc:
+        _print(pm_caller.refusal(args.task_id, exc.code))
+        return 1
+    label_call = adapters.pop('label_mac_ci_call', None)
+    advance_call = pm_caller.guarded(
+        task_advance.advance if advance_call is None else advance_call,
+        store, args.task_id, caller_key)
+    adapters['label_mac_ci_call'] = pm_caller.guarded(
+        task_advance.label_mac_ci_for_skipped_check if label_call is None else label_call,
+        store, args.task_id, caller_key)
     result = drive(task_id=args.task_id,
-        store=TaskStore() if store is None else store,
+        store=store,
         merge=getattr(args, 'merge', False),
         max_steps=getattr(args, 'max_steps', 100),
         poll_seconds=getattr(args, 'poll_seconds', 5),
