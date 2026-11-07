@@ -9330,3 +9330,464 @@ class StuckAlertTests(unittest.TestCase):
         mon._paint_screen(Screen(), monitor, "office", 0, False, {},
                           lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertNotIn(mon.BEHIND_WARNING, "\n".join(drawn.values()))
+
+
+# ---------------------------------------------------------------- state export (#1164 part 1)
+import contextlib
+import http.client
+import io
+import re
+import socket
+
+
+class _StateMonitor:
+    """A Monitor stand-in holding only what office_state reads."""
+
+    def __init__(self, office=(), github=None, **fields):
+        self.office, self.office_error, self.github = list(office), None, github
+        self.quota, self.pm_board = [], mon.PmBoard("ok", 0, [], [], [])
+        self.ec2_heads, self.stuck_records, self.office_built = None, None, None
+        self.polls = 0
+        for name, value in fields.items():
+            setattr(self, name, value)
+
+    def poll(self):
+        self.polls += 1
+        return []
+
+
+def _state_strings(value, skip=("section", "band", "room", "style")):
+    """Every string value (never a key) except the fixed words."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            yield from _state_strings(item, skip)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if key not in skip:
+                yield from _state_strings(item, skip)
+
+
+class OfficeStateTests(unittest.TestCase):
+    NOW = NOW
+    SID = "ab12cd34"
+    FULL_SESSION = "019a0000-0000-7000-8000-0000ab12cd34"
+
+    def _rows(self, detail="整理白板"):
+        problem = mon.DISPATCH_PROBLEMS["missing"]
+        return [
+            mon.OfficeRow("Codex PM", mon.WORKING, detail, 10, 1, key="codex:PROMPT-SECRET",
+                          role="pm", sid=self.SID, codex_session=self.FULL_SESSION,
+                          codex_title="REASONING-SECRET", task="task TOOL-OUTPUT-SECRET",
+                          evidence="/Users/davidsun/.codex/sessions/x.jsonl",
+                          outcome="MODEL-OUTPUT-SECRET", authority="CREDENTIAL-SECRET"),
+            mon.OfficeRow("Codex subagent", mon.DONE, "跑完測試", 400, 2,
+                          group="codex:PROMPT-SECRET", kind="subagent", evidence="RAW-ARGV-SECRET"),
+            mon.OfficeRow("Claude developer", mon.STALLED, "等回應", 1000, 3, role="developer",
+                          sid="ef56ab78"),
+            mon.OfficeRow("Codex reviewer", mon.WORKING, "審查中", 30, 4, role="reviewer"),
+            mon.OfficeRow("claude 單次呼叫", mon.DONE, "由 Codex 啟動，已結束", 50, 30, kind="subagent"),
+            mon.OfficeRow("agy", mon.UNCHECKED, f"{problem}；App 開著", None, 60, kind="worker",
+                          evidence="派工檔"),
+            mon.OfficeRow("公司 gw", mon.UNCHECKED, problem, None, 70, kind="worker",
+                          evidence="派工檔"),
+            mon.OfficeRow("EC2 遠端測試", mon.IDLE, "最近一次：PASS", 600, 80, kind="worker",
+                          evidence="llmtool 紀錄"),
+            mon.OfficeRow("mac ci runner", mon.IDLE, "閒置，等工作；已隔離", 300, 81,
+                          key="davidproject-self-action", kind="worker", evidence="程序"),
+            mon.ci_queue_row(["llmtool Mac CI（PR #5 @abcdef0）"], 1),
+            mon.OfficeRow("linux ci runner ec2-self-runner", mon.WORKING, "執行中：llmtool Linux CI",
+                          120, 91, key="ec2-self-runner", kind="worker", evidence="GitHub"),
+        ]
+
+    def _github(self, health_title="Fix the board", summary="選 A 或 B"):
+        pending = [mon.OwnerPending(self.NOW - 60 * (i + 1), f"#{960 + i}", "WAITING",
+                                    summary if i == 6 else f"問題 {i}", "waiting_owner")
+                   for i in range(7)]
+        pending.sort(key=lambda item: item.when)
+        health = mon.MainHealth("abc1234", health_title, self.NOW - 120,
+                                linux=("completed", "success", "abc1234" + "0" * 33))
+        return WorkBoardTests._github(
+            pulls=[WorkBoardTests._pull(5, sha="abcdef0" + "1" * 33)], pending=pending,
+            main_health=health, main_error="", scope="只看最近 12 小時", ci_heads={},
+            branch_prs={}, ci_runs=None, comments_cut=False)
+
+    def _monitor(self, rows=None, github=None, **fields):
+        values = {"quota": ["Codex 已到用量上限"], "office_built": self.NOW - 4,
+                  "stuck_records": ([mon.StuckRecord("a" * 8, "", False, self.NOW - 60)], "")}
+        values.update(fields)
+        return _StateMonitor(self._rows() if rows is None else rows,
+                             self._github() if github is None else github, **values)
+
+    @contextlib.contextmanager
+    def _local(self, alerts=()):
+        """Fixed local evidence: a rule-alert file, no registry, one dispatch."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "rule-file-alerts.json")
+            if alerts:
+                Path(path).write_text(json.dumps({
+                    "schema_version": 1, "baseline": 0, "checked": [],
+                    "alerts": [{"pr": pr, "title": "t", "paths": ["CLAUDE.md"]} for pr in alerts]}),
+                    encoding="utf-8")
+            with patch.object(mon, "RULE_ALERT_FILE", path), \
+                    patch.object(mon, "canonical_root", return_value="root"), \
+                    patch.object(mon, "registry_details", return_value={}), \
+                    patch.object(mon, "pm_last_dispatch",
+                                 return_value=(mon.DispatchRecord(self.NOW - 720, "codex-cli", "965"), "")):
+                yield
+
+    def _terminal(self, monitor):
+        """The text office_view (no width, expanded) and board_view give."""
+        github = monitor.github
+        top = mon.office_top(github, monitor.quota, self.NOW,
+                             stuck=mon.stuck_lines(monitor, self.NOW),
+                             progress=mon.pm_progress(monitor, self.NOW),
+                             install=mon.rule_alert_lines())
+        office = mon.office_view(monitor.office, monitor.office_error, expand=True,
+                                 pending=github.pending if github is not None else None,
+                                 now=self.NOW, scope=github.scope if github is not None else "",
+                                 waiting=mon.owner_waiting(github), top=top)
+        board = mon.board_view(mon.work_board(github, monitor.pm_board, self.NOW,
+                                              ec2=monitor.ec2_heads,
+                                              reviewing=mon.pr_reviewing(monitor.office),
+                                              office=monitor.office,
+                                              office_known=not bool(monitor.office_error)))
+        return "\n".join(line for line, _ in office + board)
+
+    def test_shape_and_values(self):
+        monitor = self._monitor()
+        with self._local(alerts=(7,)):
+            state = mon.office_state(monitor, self.NOW)
+            encoded = mon.state_bytes(monitor, self.NOW)
+        self.assertEqual(json.loads(encoded.decode("utf-8")), state)
+        self.assertEqual(set(state), {"schema_version", "generated_at", "data_age", "top",
+                                      "office", "owner", "prs", "stuck"})
+        self.assertEqual(state["schema_version"], 1)
+        self.assertEqual(state["generated_at"], self.NOW)
+        self.assertEqual(state["data_age"], 4.0)
+        top = state["top"]
+        self.assertEqual(set(top), {"title", "working", "waiting", "rule_alerts", "health", "notices"})
+        self.assertEqual(top["working"], 3)
+        self.assertEqual(top["title"], f"辦公室 · 工作中 3 · 等你 "
+                                       f"{'?' if top['waiting'] is None else top['waiting']}")
+        self.assertIn(top["waiting"], (7, None))   # None only when the identity file is unreadable
+        self.assertEqual(top["rule_alerts"], ["規則檔已變更：PR #7，1 個檔（看過後請 PM 清除）"])
+        self.assertTrue(top["health"]["text"].startswith("main abc1234 Fix the board"))
+        self.assertEqual(top["health"]["style"], "")
+        self.assertEqual(top["notices"], [
+            {"text": "PM 進度：上次派工 12 分鐘前 · 排隊 0 · 今天合併 0", "style": ""},
+            {"text": "Codex 已到用量上限", "style": "alert"},
+            {"text": "EC2 忙碌：task aaaaaaaa（REMOTE_BUSY，1 分鐘前）", "style": "alert"}])
+        self.assertEqual(state["stuck"], ["EC2 忙碌：task aaaaaaaa（REMOTE_BUSY，1 分鐘前）"])
+
+        office = {entry["name"]: entry for entry in state["office"]}
+        self.assertEqual(len(state["office"]), 11)   # every row; no section title or fold line
+        for entry in state["office"]:
+            self.assertEqual(set(entry), {"section", "depth", "name", "state", "detail", "age",
+                                          "band", "room"})
+            self.assertIn(entry["section"], ("live", "status"))
+            self.assertIn(entry["band"], ("working", "alert", "idle", "error"))
+            self.assertIn(entry["room"], ("pm", "developer", "reviewer", "machine", "other"))
+            self.assertIs(type(entry["depth"]), int)
+        self.assertEqual(office[f"Codex PM {self.SID}"]["depth"], 0)
+        self.assertEqual(office["Codex subagent"]["depth"], 1)
+        self.assertEqual({name: entry["room"] for name, entry in office.items()}, {
+            f"Codex PM {self.SID}": "pm", "Codex subagent": "pm",
+            "Claude developer ef56ab78": "developer", "Codex reviewer": "reviewer",
+            "claude 單次呼叫": "other", "agy": "developer", "公司 gw": "developer",
+            "EC2 遠端測試": "machine", "mac ci runner": "machine", "mac ci 排隊": "machine",
+            "linux ci runner ec2-self-runner": "machine"})
+        self.assertEqual({name: entry["band"] for name, entry in office.items()}, {
+            f"Codex PM {self.SID}": "working", "Codex subagent": "idle",
+            "Claude developer ef56ab78": "alert", "Codex reviewer": "working",
+            "claude 單次呼叫": "idle", "agy": "idle", "公司 gw": "idle",
+            "EC2 遠端測試": "idle", "mac ci runner": "idle", "mac ci 排隊": "idle",
+            "linux ci runner ec2-self-runner": "working"})
+        self.assertEqual(office[f"Codex PM {self.SID}"]["section"], "live")
+        self.assertEqual(office["agy"]["section"], "status")
+        # The detail is the row's terminal text: a shared dispatch problem is said once above.
+        self.assertEqual(office["agy"]["detail"], "App 開著")
+        self.assertEqual(office["公司 gw"]["detail"], "沒有其他紀錄")
+        self.assertEqual(office["Claude developer ef56ab78"]["age"], "16 分前")
+        self.assertEqual(office["agy"]["age"], "")
+
+        owner = state["owner"]
+        self.assertEqual(owner["older"], 2)
+        self.assertEqual([item["reference"] for item in owner["items"]],
+                         [item.reference for item in monitor.github.pending[-mon.OWNER_SHOWN:]])
+        self.assertEqual(set(owner["items"][0]), {"reference", "summary", "age"})
+        self.assertEqual(owner["items"][-1], {"reference": "#960", "summary": "問題 0", "age": "1 分前"})
+        self.assertEqual(state["prs"], [{"number": 5, "review": "未審", "ec2": "?", "linux": "?",
+                                         "mac": "?", "next": "派審查", "owner": "PM",
+                                         "current": state["prs"][0]["current"]}])
+
+    def test_every_string_is_terminal_text(self):
+        monitor = self._monitor()
+        with self._local(alerts=(7, 8)):
+            state = mon.office_state(monitor, self.NOW)
+            text = self._terminal(monitor)
+        strings = list(_state_strings(state))
+        self.assertGreater(len(strings), 40)
+        for value in strings:
+            self.assertIn(value, text)
+
+    def test_unshown_fields_and_credentials_never_exported(self):
+        credential = "gh" + "p_" + "A" * 24
+        rows = self._rows(detail=f"整理白板 token=abcdef {credential}")
+        github = self._github(health_title="deploy secret=hunter2value",
+                              summary=f"看 {credential}")
+        monitor = self._monitor(rows, github, quota=["Claude 已到用量上限 password=letmein"])
+        with self._local():
+            body = mon.state_bytes(monitor, self.NOW).decode("utf-8")
+            state = mon.office_state(monitor, self.NOW)
+        for secret in SECRETS + (credential, "hunter2value", "letmein", self.FULL_SESSION,
+                                 "codex:", "davidproject-self-action", "ec2-self-runner\"",
+                                 "llmtool 紀錄", "派工檔\""):
+            self.assertNotIn(secret, body)
+        pm = next(entry for entry in state["office"] if entry["room"] == "pm" and entry["depth"] == 0)
+        self.assertEqual(pm["detail"], "整理白板 [已遮蔽] [已遮蔽]")
+        self.assertIn("[已遮蔽]", state["top"]["health"]["text"])
+        self.assertIn({"text": "Claude 已到用量上限 [已遮蔽]", "style": "alert"}, state["top"]["notices"])
+        self.assertEqual(state["owner"]["items"][0]["summary"], "看 [已遮蔽]")
+
+    def test_redaction_reuses_secretish(self):
+        with patch.object(mon, "SECRETISH", re.compile("PLAIN")):
+            self.assertEqual(mon._state_redact({"PLAIN": ["a PLAIN b", 3, None]}),
+                             {"PLAIN": ["a [已遮蔽] b", 3, None]})
+
+    def test_office_error_and_no_github(self):
+        monitor = self._monitor(github=None, office_built=None, quota=[])
+        monitor.office, monitor.office_error = [], "TypeError"
+        with self._local():
+            state = mon.office_state(monitor, self.NOW)
+        self.assertIsNone(state["data_age"])
+        self.assertIsNone(state["top"]["working"])
+        self.assertIsNone(state["top"]["waiting"])
+        self.assertEqual(state["top"]["title"], "辦公室 · 工作中 ? · 等你 ?")
+        self.assertIsNone(state["top"]["health"])
+        self.assertEqual(state["office"], [])
+        self.assertEqual(state["owner"], {"items": [], "older": 0})
+        self.assertEqual(state["prs"], [])
+
+    def test_state_starts_no_github_or_process_call(self):
+        github = self._github()
+        github.refresh = github.refresh_in_background = github._get = \
+            lambda *args, **kwargs: self.fail("GitHub read")
+        monitor = self._monitor(github=github)
+        with self._local(), \
+                patch.object(mon.subprocess, "run", side_effect=AssertionError("process")), \
+                patch.object(mon.subprocess, "Popen", side_effect=AssertionError("process")), \
+                patch.object(mon.http.client, "HTTPSConnection", side_effect=AssertionError("network")):
+            mon.state_bytes(monitor, self.NOW)
+
+    def test_office_view_text_unchanged_by_shared_helper(self):
+        problem = mon.DISPATCH_PROBLEMS["missing"]
+        rows = [mon.OfficeRow("agy", mon.UNCHECKED, f"{problem}；App 開著（本機 main 的派工檔）",
+                              None, 60, kind="worker", evidence="本機 main 的派工檔"),
+                mon.OfficeRow("公司 gw", mon.UNCHECKED, f"{problem}（本機 main 的派工檔）", None, 70,
+                              kind="worker", evidence="本機 main 的派工檔")]
+        lines = [line for line, _ in mon.office_view(rows, expand=True, now=self.NOW)]
+        self.assertIn(f"ℹ {problem}：agy、公司 gw", lines)
+        self.assertTrue(any(line.startswith("agy") and line.endswith("App 開著") for line in lines))
+        self.assertTrue(any(line.startswith("公司 gw") and line.endswith("沒有其他紀錄")
+                            for line in lines))
+        self.assertEqual(lines[-1], "派工狀態讀自本機 main 的派工檔；工作中 = 最近有動作，不代表模型正在產生內容")
+        shown, notes, legend = mon._office_display(rows)
+        self.assertEqual([row.detail for row in shown], ["App 開著", "沒有其他紀錄"])
+        self.assertEqual(notes, [f"ℹ {problem}：agy、公司 gw"])
+        self.assertEqual(legend, ["派工狀態讀自本機 main 的派工檔"])
+
+    def test_monitor_records_last_successful_office_rebuild(self):
+        def poll(monitor, **office):
+            monitor.office_due = 0.0
+            with patch.object(mon, "main_script_blob", return_value=""), \
+                    patch.object(mon, "collect", return_value=mon.Snapshot([], {}, [], frozenset())), \
+                    patch.object(mon, "scan_tasks", return_value=[]), \
+                    patch.object(mon, "llmtool_task_records", return_value=[]), \
+                    patch.object(mon, "llmtool_route_outcomes", return_value={"opencode": None}), \
+                    patch.object(mon, "quota_warnings", return_value=[]), \
+                    patch.object(mon, "d6_task_lines", return_value=[]), \
+                    patch.object(mon, "ec2_head_results", return_value=({}, "")), \
+                    patch.object(mon, "stuck_records", return_value=([], "")), \
+                    patch.object(mon, "office_rows", **office):
+                monitor.poll()
+
+        monitor = mon.Monitor()
+        self.assertIsNone(monitor.office_built)
+        before = time.time()
+        poll(monitor, return_value=[])
+        built = monitor.office_built
+        self.assertTrue(before <= built <= time.time())
+        poll(monitor, side_effect=TypeError("boom"))
+        self.assertEqual(monitor.office_built, built)   # a failed rebuild keeps the last success
+        self.assertEqual(monitor.office_error, "TypeError")
+
+
+class StateServeTests(unittest.TestCase):
+    STATE = b'{"schema_version":1}'
+
+    def setUp(self):
+        self.store = mon.StateStore(self.STATE)
+        self.server, self.token = mon.serve_state(self.store)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever,
+                                       kwargs={"poll_interval": 0.05}, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(5)
+
+    def request(self, method, path, headers=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.request(method, path, headers=headers or {})
+            response = conn.getresponse()
+            body = response.read()
+            return response.status, {name.lower(): value for name, value in response.getheaders()}, body
+        finally:
+            conn.close()
+
+    def assert_headers(self, headers):
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertEqual(headers["x-content-type-options"], "nosniff")
+        self.assertEqual(headers["referrer-policy"], "no-referrer")
+        policy = [part.strip() for part in headers["content-security-policy"].split(";")]
+        for part in ("default-src 'none'", "frame-ancestors 'none'", "form-action 'none'",
+                     "script-src 'self'", "style-src 'self'", "connect-src 'self'"):
+            self.assertIn(part, policy)
+        self.assertFalse([name for name in headers if name.startswith("access-control-")])
+
+    def test_bound_to_loopback_with_a_random_token(self):
+        self.assertEqual(self.server.server_address[0], "127.0.0.1")
+        self.assertNotEqual(self.port, 0)
+        self.assertRegex(self.token, r"^[A-Za-z0-9_-]{43}$")   # 32 random bytes, 256 bits
+        other, token = mon.serve_state(mon.StateStore())
+        other.server_close()
+        self.assertNotEqual(token, self.token)
+
+    def test_page_and_state_get_and_head(self):
+        status, headers, body = self.request("GET", f"/{self.token}/state.json")
+        self.assertEqual((status, body), (200, self.STATE))
+        self.assertEqual(headers["content-type"], "application/json; charset=utf-8")
+        self.assert_headers(headers)
+        status, headers, body = self.request("GET", f"/{self.token}/")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, mon.SERVE_PAGE)
+        self.assertTrue(headers["content-type"].startswith("text/html"))
+        self.assertNotIn(self.token.encode(), body)
+        self.assert_headers(headers)
+        status, headers, body = self.request("HEAD", f"/{self.token}/state.json")
+        self.assertEqual((status, body), (200, b""))
+        self.assertEqual(headers["content-length"], str(len(self.STATE)))
+        self.assert_headers(headers)
+        status, _, body = self.request("GET", f"/{self.token}/state.json?x=1")
+        self.assertEqual((status, body), (200, self.STATE))
+
+    def test_missing_or_wrong_token_is_404(self):
+        wrong = ("x" if self.token[0] != "x" else "y") + self.token[1:]
+        for path in ("/", "/state.json", f"/{wrong}/", f"/{wrong}/state.json", f"/{self.token}",
+                     f"/{self.token}/other", f"/{self.token}/state.json/x", f"/{self.token[:-1]}/",
+                     f"//{self.token}/state.json", f"/x/{self.token}/state.json"):
+            with self.subTest(path=path):
+                status, headers, body = self.request("GET", path)
+                self.assertEqual((status, body), (404, b"not found\n"))
+                self.assertNotIn(self.token.encode(), body)
+                self.assert_headers(headers)
+
+    def test_wrong_host_is_403(self):
+        path = f"/{self.token}/state.json"
+        for host in ("evil.example", f"evil.example:{self.port}", "127.0.0.1", "localhost",
+                     f"127.0.0.1:{self.port + 1}", f"192.168.1.20:{self.port}", f"[::1]:{self.port}"):
+            with self.subTest(host=host):
+                status, headers, body = self.request("GET", path, {"Host": host})
+                self.assertEqual((status, body), (403, b"forbidden\n"))
+                self.assert_headers(headers)
+        self.assertEqual(self.request("GET", path, {"Host": f"localhost:{self.port}"})[0], 200)
+
+    def test_other_methods_are_405(self):
+        for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+            with self.subTest(method=method):
+                status, headers, body = self.request(method, f"/{self.token}/state.json")
+                self.assertEqual((status, body), (405, b"method not allowed\n"))
+                self.assertEqual(headers["allow"], "GET, HEAD")
+                self.assert_headers(headers)
+
+    def test_request_reads_only_the_stored_bytes(self):
+        with patch.object(mon, "office_state", side_effect=AssertionError("built per request")), \
+                patch.object(mon, "state_bytes", side_effect=AssertionError("built per request")):
+            self.assertEqual(self.request("GET", f"/{self.token}/state.json")[2], self.STATE)
+            self.store.put(b'{"schema_version":1,"n":2}')
+            self.assertEqual(self.request("GET", f"/{self.token}/state.json")[2],
+                             b'{"schema_version":1,"n":2}')
+
+    def test_no_token_in_captured_output(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.request("GET", f"/{self.token}/state.json")
+            self.request("GET", f"/{self.token}/nothing")
+            self.request("POST", f"/{self.token}/state.json")
+            self.request("GET", f"/{self.token}/", {"Host": "evil.example"})
+            with socket.create_connection(("127.0.0.1", self.port), timeout=5) as raw:
+                raw.sendall(f"BROKEN /{self.token}/ X\r\n\r\n".encode())
+                raw.recv(4096)
+        self.assertEqual(out.getvalue() + err.getvalue(), "")
+
+    def test_non_loopback_hosts_refused_before_any_socket(self):
+        for host in ("0.0.0.0", "::", "::1", "192.168.1.10", "10.0.0.2", "127.0.0.2",
+                     "localhost", "LOCALHOST", "", " 127.0.0.1"):
+            with self.subTest(host=host), \
+                    patch("socket.socket", side_effect=AssertionError("socket opened")):
+                with self.assertRaises(mon.ServeHostError):
+                    mon.serve_state(mon.StateStore(), 0, host)
+
+
+class ServeMainTests(unittest.TestCase):
+    NOW = NOW
+
+    def test_run_serve_prints_one_url_serves_state_and_stops(self):
+        monitor = _StateMonitor()
+        out, err = io.StringIO(), io.StringIO()
+        seen = []
+
+        def sleep(_seconds):
+            found = re.search(r"http://127\.0\.0\.1:(\d+)(/[A-Za-z0-9_-]{43}/)$",
+                              out.getvalue().splitlines()[0])
+            conn = http.client.HTTPConnection("127.0.0.1", int(found.group(1)), timeout=5)
+            conn.request("GET", found.group(2) + "state.json")
+            seen.append(json.loads(conn.getresponse().read()))
+            conn.close()
+            raise KeyboardInterrupt
+
+        with patch.object(mon, "canonical_root", return_value="root"), \
+                patch.object(mon, "registry_details", return_value={}), \
+                patch.object(mon, "pm_last_dispatch", return_value=(None, "")), \
+                patch.object(mon.time, "sleep", side_effect=sleep), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(mon.run_serve(1.0, monitor), 0)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertRegex(lines[0], r"http://127\.0\.0\.1:\d+/[A-Za-z0-9_-]{43}/$")
+        self.assertEqual(lines[1], "Monitor stopped; no worker was signalled or modified.")
+        self.assertEqual(err.getvalue(), "")
+        self.assertEqual(monitor.polls, 1)
+        self.assertEqual(seen[0]["schema_version"], 1)
+        self.assertEqual(seen[0]["top"]["title"], "辦公室 · 工作中 0 · 等你 ?")
+
+    def test_serve_options(self):
+        for argv in (["--port", "5"], ["--serve", "--port", "70000"], ["--serve", "--port", "-1"],
+                     ["--serve", "--once"], ["--serve", "--plain"], ["--serve", "--host", "0.0.0.0"],
+                     ["--serve", "--bind", "0.0.0.0"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    mon.main(argv)
+                self.assertEqual(raised.exception.code, 2)
+        calls = []
+        with patch.object(mon, "Monitor", _StateMonitor), patch.object(mon, "ClaudeAgents"), \
+                patch.object(mon, "run_serve", side_effect=lambda *args: calls.append(args) or 0):
+            self.assertEqual(mon.main(["--serve", "--no-github"]), 0)
+            self.assertEqual(mon.main(["--serve", "--no-github", "--port", "8765", "--interval", "2"]), 0)
+        self.assertEqual([(interval, port) for interval, _monitor, port in calls], [(1.0, 0), (2.0, 8765)])
+        self.assertIsInstance(calls[0][1], _StateMonitor)

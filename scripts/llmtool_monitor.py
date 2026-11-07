@@ -942,6 +942,7 @@ class Monitor:
         self.office_state: dict = {}
         self.office_error: str | None = None   # why the office view could not be built
         self.office_due = 0.0   # monotonic time of the next office rebuild
+        self.office_built: float | None = None   # time.time() of the last successful office rebuild
         self.pm_board = PmBoard("missing", None, [], [], [])
         self.pm_board_due = 0.0
         self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
@@ -1112,6 +1113,7 @@ class Monitor:
                 state, changes = office_events(self.office_state, office)
                 new += [(stamp, kind, text) for kind, text in changes]
                 self.office, self.office_state, self.office_error = office, state, None
+                self.office_built = time.time()
                 digest = script_digest()
                 if self.digest == "?":
                     self.digest = digest   # unreadable at start: the first real read is the baseline
@@ -7925,29 +7927,7 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     if mains > 1:
         out.append((f"⚠ 有 {mains} 個 Codex 主對話都開在主 repo："
                     "可能同時寫入主 repo（D6 只允許一個 Integrator 寫入）", "!"))
-    # The same dispatch problem on several Workers is said once, not per row.
-    notes = []
-    shared: dict[str, list[OfficeRow]] = {}
-    for row in rows:
-        label = next((text for text in DISPATCH_PROBLEMS.values()
-                      if row.kind == "worker" and row.detail.startswith(text)), None)
-        if label:
-            shared.setdefault(label, []).append(row)
-    shared = {label: items for label, items in shared.items() if len(items) > 1}
-    for label, items in shared.items():
-        notes.append(f"ℹ {label}：" + "、".join(row.name for row in items))
-    trimmed = {id(row): row.detail[len(label):].lstrip("；") or "沒有其他紀錄"
-               for label, items in shared.items() for row in items}
-    rows = [replace(row, detail=trimmed[id(row)]) if id(row) in trimmed else row
-            for row in rows]
-    # Likewise a fallback source of the dispatch file ("本機 origin/main 的派工檔…"),
-    # which goes to the dimmed legend at the bottom.
-    legend = []
-    for source in sorted({row.evidence for row in rows if row.kind == "worker"}):
-        note = f"（{source}）"
-        if source and sum(note in row.detail for row in rows) > 1:
-            legend.append(f"派工狀態讀自{source}")
-            rows = [replace(row, detail=row.detail.replace(note, "", 1)) for row in rows]
+    rows, notes, legend = _office_display(rows)
     alerts = _review_alerts(rows)
     alerts += [f"{_shown(row)}：{row.alert}" for row in rows if row.alert]
     # In full (wrapped, not cut): the session name at the end is how a PM
@@ -7994,6 +7974,35 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     text = "；".join(legend)
     out += [(piece, "dim") for piece in (_wrap(text, width) if width else [text])]
     return out
+
+
+def _office_display(rows: list[OfficeRow]) -> tuple[list[OfficeRow], list[str], list[str]]:
+    """The office screen's row text steps, shared by office_view and the JSON
+    export: (rows as the screen shows them, ℹ notes, legend parts)."""
+    # The same dispatch problem on several Workers is said once, not per row.
+    notes = []
+    shared: dict[str, list[OfficeRow]] = {}
+    for row in rows:
+        label = next((text for text in DISPATCH_PROBLEMS.values()
+                      if row.kind == "worker" and row.detail.startswith(text)), None)
+        if label:
+            shared.setdefault(label, []).append(row)
+    shared = {label: items for label, items in shared.items() if len(items) > 1}
+    for label, items in shared.items():
+        notes.append(f"ℹ {label}：" + "、".join(row.name for row in items))
+    trimmed = {id(row): row.detail[len(label):].lstrip("；") or "沒有其他紀錄"
+               for label, items in shared.items() for row in items}
+    rows = [replace(row, detail=trimmed[id(row)]) if id(row) in trimmed else row
+            for row in rows]
+    # Likewise a fallback source of the dispatch file ("本機 origin/main 的派工檔…"),
+    # which goes to the dimmed legend at the bottom.
+    legend = []
+    for source in sorted({row.evidence for row in rows if row.kind == "worker"}):
+        note = f"（{source}）"
+        if source and sum(note in row.detail for row in rows) > 1:
+            legend.append(f"派工狀態讀自{source}")
+            rows = [replace(row, detail=row.detail.replace(note, "", 1)) for row in rows]
+    return rows, notes, legend
 
 
 def office_lines(rows: list[OfficeRow], error: str | None = None,
@@ -8299,6 +8308,287 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
     return offset
 
 
+# ---------------------------------------------------------------- state export
+# #1164 part 1: the office screen as versioned JSON, served read-only on this
+# Mac. office_state() takes only what the Monitor already holds and the same
+# screen functions the office and board views call; it starts no GitHub,
+# provider or process call. Every exported string is text those views show,
+# passed through SECRETISH once more. The server binds 127.0.0.1 only, serves
+# GET/HEAD under a per-start random path token, checks Host, and answers each
+# request from the bytes the poll loop last stored.
+import hmac
+import http.server
+import secrets
+
+STATE_SCHEMA_VERSION = 1
+STATE_REDACTED = "[已遮蔽]"   # the fixed text _headline puts in place of a SECRETISH match
+STATE_BANDS = {"+": "working", "!": "alert", "dim": "idle", "?": "error"}
+STATE_STYLES = {"!": "alert"}   # a line's style: "alert" or "" (plain)
+STATE_ROLE_ROOMS = {"pm": "pm", "developer": "developer", "reviewer": "reviewer",
+                    "debug reviewer": "reviewer"}
+STATE_DISPATCH_ROWS = frozenset(name for name, _key, _order in WORKER_ROSTER)
+STATE_REMOTE_TEST_ROW = "EC2 遠端測試"   # remote_test_row's name
+SERVE_HOST = "127.0.0.1"   # the only address --serve binds; no option changes it
+SERVE_TOKEN_BYTES = 32     # secrets.token_urlsafe: 256 random bits per start
+SERVE_TIMEOUT = 10.0       # seconds a connection may stay silent
+SERVE_METHODS = "GET, HEAD"
+SERVE_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+             "img-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
+SERVE_HEADERS = (("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"),
+                 ("Referrer-Policy", "no-referrer"), ("Content-Security-Policy", SERVE_CSP))
+SERVE_BODIES = {403: b"forbidden\n", 404: b"not found\n", 405: b"method not allowed\n"}
+SERVE_ERROR_BODY = b"bad request\n"
+# Part 1 placeholder; part 2 replaces it with the drawn office page.
+SERVE_PAGE = ("<!doctype html>\n<html lang=\"zh-Hant\"><head><meta charset=\"utf-8\">"
+              "<title>llmtool 辦公室</title></head><body>"
+              "<p>辦公室網頁尚未完成；目前只提供 <a href=\"state.json\">state.json</a>。</p>"
+              "</body></html>\n").encode("utf-8")
+
+
+class ServeHostError(ValueError):
+    """--serve refuses every bind address except 127.0.0.1."""
+
+
+def _state_redact(value):
+    """Every string value, never a key, through the screen's SECRETISH pattern."""
+    if isinstance(value, str):
+        return SECRETISH.sub(STATE_REDACTED, value)
+    if isinstance(value, list):
+        return [_state_redact(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _state_redact(item) for key, item in value.items()}
+    return value
+
+
+def _state_style(style: str) -> str:
+    return STATE_STYLES.get(style, "")
+
+
+def _state_room(row: OfficeRow) -> str:
+    """A top-level row's room: its bound role, else what kind of row it is."""
+    if row.role in STATE_ROLE_ROOMS:
+        return STATE_ROLE_ROOMS[row.role]
+    if row.kind == "shared" or _is_runner_row(row) or (
+            row.kind == "worker" and row.name == STATE_REMOTE_TEST_ROW):
+        return "machine"
+    if row.kind == "worker" and row.name in STATE_DISPATCH_ROWS:
+        return "developer"
+    return "other"
+
+
+def _state_office(rows: list[OfficeRow], error: str | None) -> list[dict]:
+    """One entry per terminal row of the expanded office tree, as it is shown."""
+    if error or not rows:
+        return []   # the screen shows no rows then
+    rows, _notes, _legend = _office_display(rows)
+    out, section, room = [], "live", "other"
+    for prefix, row in _tree(rows, fold=False):
+        if prefix == "—":
+            section = "status" if row.name == STATUS_SECTION else "live"
+            continue
+        depth = len(prefix) // 2   # "" at the top, "  " * (depth - 1) + "└ " below
+        if depth == 0:
+            room = _state_room(row)
+        out.append({"section": section, "depth": depth, "name": _shown(row),
+                    "state": row.state, "detail": _row_detail(row),
+                    "age": _short_ago(row.age),
+                    "band": STATE_BANDS.get(_line_style(row, rows), "idle"), "room": room})
+    return out
+
+
+def office_state(mon, now: float) -> dict:
+    """The office screen as a dict (schema_version 1), from what mon holds."""
+    github = mon.github
+    error = mon.office_error
+    waiting = owner_waiting(github)
+    title = office_view(mon.office, error, expand=True, waiting=waiting, now=now)[0][0]
+    stuck = stuck_lines(mon, now)
+    progress = pm_progress(mon, now)
+    health = None
+    if github is not None:
+        text, style = main_health_line(github.main_health, github.main_error, now)
+        health = {"text": text, "style": _state_style(style)}
+    notices = [{"text": progress[0], "style": _state_style(progress[1])}]
+    notices += [{"text": line, "style": "alert"} for line in (mon.quota or [])]
+    notices += [{"text": line, "style": "alert"} for line in stuck]
+    pending = list(github.pending if github is not None else [])
+    owner = {"items": [{"reference": item.reference, "summary": item.summary,
+                        "age": _short_ago(max(0.0, now - item.when))}
+                       for item in pending[-OWNER_SHOWN:]],
+             "older": max(0, len(pending) - OWNER_SHOWN)}
+    try:
+        work = work_board(github, mon.pm_board, now, ec2=mon.ec2_heads,
+                          reviewing=pr_reviewing(mon.office), office=mon.office,
+                          office_known=not bool(error))
+        prs = [{"number": row.number, "review": row.review, "ec2": row.ec2,
+                "linux": row.linux, "mac": row.mac, "next": row.next,
+                "owner": row.owner, "current": row.current} for row in work.prs]
+    except Exception:   # the board cannot be built: unknown, never an empty board
+        prs = None
+    built = getattr(mon, "office_built", None)
+    state = {
+        "schema_version": STATE_SCHEMA_VERSION,
+        "generated_at": round(float(now), 3),
+        "data_age": None if built is None else round(max(0.0, now - built), 1),
+        "top": {"title": title,
+                "working": None if error else sum(row.state == WORKING for row in mon.office),
+                "waiting": waiting,
+                "rule_alerts": [text for text, _style in rule_alert_lines()],
+                "health": health, "notices": notices},
+        "office": _state_office(mon.office, error),
+        "owner": owner,
+        "prs": prs,
+        "stuck": stuck,
+    }
+    return _state_redact(state)
+
+
+def state_bytes(mon, now: float) -> bytes:
+    return json.dumps(office_state(mon, now), ensure_ascii=False, allow_nan=False,
+                      separators=(",", ":")).encode("utf-8")
+
+
+class StateStore:
+    """The last JSON bytes the poll loop built; requests only read them."""
+
+    def __init__(self, body: bytes = b"{}") -> None:
+        self._lock = threading.Lock()
+        self._body = body
+
+    def put(self, body: bytes) -> None:
+        with self._lock:
+            self._body = body
+
+    def get(self) -> bytes:
+        with self._lock:
+            return self._body
+
+
+class _StateHandler(http.server.BaseHTTPRequestHandler):
+    """GET/HEAD of /<token>/ and /<token>/state.json; nothing else, no log."""
+
+    server_version = "llmtool-monitor"
+    sys_version = ""
+    timeout = SERVE_TIMEOUT
+
+    def version_string(self) -> str:
+        return self.server_version
+
+    def log_message(self, format, *args) -> None:   # no request log: paths hold the token
+        pass
+
+    def end_headers(self) -> None:
+        for name, value in SERVE_HEADERS:
+            self.send_header(name, value)
+        super().end_headers()
+
+    def send_error(self, code, message=None, explain=None) -> None:
+        """A fixed body; the default page would echo the request line."""
+        self.close_connection = True
+        self._reply(code, SERVE_BODIES.get(code, SERVE_ERROR_BODY))
+
+    def _reply(self, code: int, body: bytes, kind: str = "text/plain; charset=utf-8",
+               extra=()) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(body)))
+        for name, value in extra:
+            self.send_header(name, value)
+        self.end_headers()
+        if getattr(self, "command", "") != "HEAD":
+            self.wfile.write(body)
+
+    def _host_ok(self) -> bool:
+        hosts = self.headers.get_all("Host") or []
+        port = self.server.server_address[1]
+        return (len(hosts) == 1
+                and hosts[0].strip().lower() in (f"127.0.0.1:{port}", f"localhost:{port}"))
+
+    def _target(self) -> str | None:
+        """The page or the state for a path under the right token, else None."""
+        parts = self.path.partition("?")[0].split("/")
+        if len(parts) != 3 or parts[0] or parts[2] not in ("", "state.json"):
+            return None
+        given = parts[1].encode("latin-1", "replace")
+        if not hmac.compare_digest(given, self.server.state_token):
+            return None
+        return "page" if parts[2] == "" else "state"
+
+    def _serve(self) -> None:
+        if not self._host_ok():
+            self._reply(403, SERVE_BODIES[403])
+            return
+        target = self._target()
+        if target is None:
+            self._reply(404, SERVE_BODIES[404])
+        elif target == "page":
+            self._reply(200, SERVE_PAGE, "text/html; charset=utf-8")
+        else:
+            self._reply(200, self.server.state_store.get(), "application/json; charset=utf-8")
+
+    def _refuse(self) -> None:
+        self._reply(405, SERVE_BODIES[405], extra=(("Allow", SERVE_METHODS),))
+
+    do_GET = do_HEAD = _serve
+    do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = do_TRACE = do_CONNECT = _refuse
+
+
+class _StateServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:   # no traceback on stderr
+        pass
+
+
+def serve_state(store: StateStore, port: int = 0, host: str = SERVE_HOST):
+    """(server, token): bound to 127.0.0.1:port, not yet serving. Any other
+    host is refused before a socket opens."""
+    if host != SERVE_HOST:
+        raise ServeHostError("--serve binds 127.0.0.1 only")
+    if type(port) is not int or not 0 <= port <= 65535:
+        raise ValueError("--port must be between 0 and 65535")
+    token = secrets.token_urlsafe(SERVE_TOKEN_BYTES)
+    server = _StateServer((SERVE_HOST, port), _StateHandler)
+    server.state_token = token.encode("ascii")
+    server.state_store = store
+    return server, token
+
+
+def run_serve(interval: float, mon: "Monitor", port: int = 0) -> int:
+    """Poll as the screen does, without curses, and serve the office JSON."""
+    store = StateStore()
+    try:
+        server, token = serve_state(store, port)
+    except OSError as exc:
+        print(f"無法開啟本機網頁：{type(exc).__name__}", file=sys.stderr)
+        return 1
+    thread = None
+    try:
+        while True:
+            mon.poll()
+            if mon.github is not None:
+                mon.github.refresh_in_background()
+            try:
+                store.put(state_bytes(mon, time.time()))
+            except Exception:   # keep the last bytes; their generated_at shows how old they are
+                pass
+            if thread is None:   # the first state is stored before anything is served
+                thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.5},
+                                          name="monitor-serve", daemon=True)
+                thread.start()
+                print(f"辦公室網頁（只在這台電腦，Ctrl+C 停止）：http://{SERVE_HOST}:"
+                      f"{server.server_address[1]}/{token}/", flush=True)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if thread is not None:
+            server.shutdown()
+        server.server_close()
+    print("Monitor stopped; no worker was signalled or modified.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interval", type=float, default=1.0,
@@ -8320,7 +8610,18 @@ def main(argv: list[str] | None = None) -> int:
                         help="read GitHub only through `gh api` processes (never holds gh's token; more CPU)")
     parser.add_argument("--clear-rule-alert", type=int, metavar="PR",
                         help="clear one local sensitive-path alert by PR number")
+    parser.add_argument("--serve", action="store_true",
+                        help="no screen: serve the office view as read-only JSON on 127.0.0.1 "
+                             "under a random per-start path; prints the page URL")
+    parser.add_argument("--port", type=int, default=None, metavar="N",
+                        help="--serve port (default 0: the system picks a free port)")
     args = parser.parse_args(argv)
+    if args.port is not None and not args.serve:
+        parser.error("--port needs --serve")
+    if args.port is not None and not 0 <= args.port <= 65535:
+        parser.error("--port must be between 0 and 65535")
+    if args.serve and (args.once or args.plain):
+        parser.error("--serve cannot be combined with --once or --plain")
     if args.clear_rule_alert is not None:
         try:
             state = _load_rule_alerts(RULE_ALERT_FILE)
@@ -8352,6 +8653,8 @@ def main(argv: list[str] | None = None) -> int:
     mon = Monitor(min_age=max(0.0, args.min_age), show_all=args.all)
     mon.agents = ClaudeAgents()
     mon.github = github
+    if args.serve:
+        return run_serve(args.interval, mon, args.port or 0)
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "dumb") != "dumb"
     if args.plain or not interactive:
         return run_plain(args.interval, mon)
