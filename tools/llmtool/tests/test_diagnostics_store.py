@@ -944,15 +944,17 @@ from llmtool.diagnostics_store import DiagnosticsStore
 from llmtool.diagnostics_settings import DiagnosticsSettings
 from llmtool.diagnostics_summary import RunSummary
 resource.setrlimit(resource.RLIMIT_NOFILE, (64, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
-def descriptors():
-    result = set()
-    for fd in range(64):
-        try: fcntl.fcntl(fd, fcntl.F_GETFD); result.add(fd)
-        except OSError: pass
-    return result
 def fd_target(fd):
     try: return os.readlink('/proc/self/fd/%d' % fd)
     except OSError: return 'unavailable'
+def descriptors():
+    result = set()
+    for fd in range(64):
+        try: fcntl.fcntl(fd, fcntl.F_GETFD)
+        except OSError: continue
+        # libffi keeps a memfd for closures on SELinux hosts; it is not a store descriptor (#1093).
+        if not fd_target(fd).startswith('/memfd:libffi'): result.add(fd)
+    return result
 def fd_report(number, current):
     added = ['%d -> %s' % (fd, fd_target(fd)) for fd in sorted(current - baseline)]
     removed = ['%d -> %s' % (fd, baseline_targets[fd]) for fd in sorted(baseline - current)]
