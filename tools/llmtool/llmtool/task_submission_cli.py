@@ -1043,6 +1043,37 @@ def _review_ci_lines(head):
     return lines or [_REVIEW_CI_NONE]
 
 
+def _review_original_task(store, task, task_id, executor_task):
+    """Return (task_id, record) of the original Task on this D6, or None.
+
+    The original is the earliest non-abandoned other Task whose completion
+    names the same executor D6, created before the reviewed Task; ties go to
+    the lower task_id. This is the D6 rule of _check_delegate_repair_cap.
+    A store without task_ids has no original. A failing read raises.
+    """
+    list_ids = getattr(store, 'task_ids', None)
+    if list_ids is None:
+        return None
+    reviewed_at = task.get('created_at')
+    candidates = []
+    for other_id in list_ids():
+        if other_id == task_id:
+            continue
+        record = store.get(other_id)
+        completion = record.get('completion')
+        created_at = record.get('created_at')
+        if (type(completion) is dict and
+                completion.get('executor_task_id') == executor_task and
+                record.get('abandonment') is None and
+                type(reviewed_at) is str and type(created_at) is str and
+                created_at < reviewed_at):
+            candidates.append((created_at, other_id, record))
+    if not candidates:
+        return None
+    _, original_id, record = min(candidates, key=lambda item: (item[0], item[1]))
+    return original_id, record
+
+
 def run_task_review_prompt(args, *, store=None):
     """Print a read-only Reviewer prompt only for one exact, mutually bound HEAD."""
     store = TaskStore() if store is None else store
@@ -1052,25 +1083,52 @@ def run_task_review_prompt(args, *, store=None):
         error.completion_code = code
         raise error from None
 
+    def checked_contract(pm_assignment):
+        if (type(pm_assignment) is not dict or
+                set(pm_assignment) != {'schema_version', 'route', 'risk', 'goal', 'acceptance'} or
+                type(pm_assignment.get('schema_version')) is not int or
+                pm_assignment['schema_version'] != 1 or
+                pm_assignment.get('route') not in ('company-gw', 'gw-agent', 'codex',
+                                                    'opencode', 'agy', 'claude', 'none') or
+                pm_assignment.get('risk') not in ('LOW', 'OTHER') or
+                type(pm_assignment.get('goal')) is not str or
+                type(pm_assignment.get('acceptance')) is not list or
+                not 1 <= len(pm_assignment['acceptance']) <= 16):
+            refuse('REVIEW_PROMPT_CONTRACT_MISSING')
+        try:
+            _screen_text(pm_assignment['goal'], 512)
+            for item in pm_assignment['acceptance']:
+                _screen_text(item, 512)
+        except LLMToolError:
+            refuse('REVIEW_PROMPT_CONTRACT_MISSING')
+        return pm_assignment
+
     task = store.get(args.task_id)
-    pm_assignment = task.get('pm_assignment')
-    if (type(pm_assignment) is not dict or
-            set(pm_assignment) != {'schema_version', 'route', 'risk', 'goal', 'acceptance'} or
-            type(pm_assignment.get('schema_version')) is not int or
-            pm_assignment['schema_version'] != 1 or
-            pm_assignment.get('route') not in ('company-gw', 'gw-agent', 'codex',
-                                                'opencode', 'agy', 'claude', 'none') or
-            pm_assignment.get('risk') not in ('LOW', 'OTHER') or
-            type(pm_assignment.get('goal')) is not str or
-            type(pm_assignment.get('acceptance')) is not list or
-            not 1 <= len(pm_assignment['acceptance']) <= 16):
-        refuse('REVIEW_PROMPT_CONTRACT_MISSING')
+    pm_assignment = checked_contract(task.get('pm_assignment'))
     try:
-        _screen_text(pm_assignment['goal'], 512)
-        for item in pm_assignment['acceptance']:
-            _screen_text(item, 512)
-    except LLMToolError:
+        original = _review_original_task(store, task, args.task_id, args.executor_task)
+    except Exception:
         refuse('REVIEW_PROMPT_CONTRACT_MISSING')
+    original_lines = []
+    if original is not None:
+        original_id, original_record = original
+        if type(original_id) is not str:
+            refuse('REVIEW_PROMPT_CONTRACT_MISSING')
+        original_assignment = checked_contract(original_record.get('pm_assignment'))
+        delta = [str(index) for index, item in enumerate(pm_assignment['acceptance'], 1)
+                 if item not in original_assignment['acceptance']]
+        original_lines = [
+            '<<< BEGIN ORIGINAL TASK CONTRACT DATA >>>',
+            'Original Task id: ' + json.dumps(original_id, ensure_ascii=True),
+            'Original Task goal: ' + json.dumps(original_assignment['goal'], ensure_ascii=True),
+            *(f'{index}. {json.dumps(item, ensure_ascii=True)}'
+              for index, item in enumerate(original_assignment['acceptance'], 1)),
+            '<<< END ORIGINAL TASK CONTRACT DATA >>>',
+            'Repair delta: current acceptance items not in the original contract: '
+            + (', '.join(delta) if delta else 'none') + '.',
+            'Judge the PR against both contracts; where a current item replaces an original '
+            'one, the current item governs; an original item not replaced still applies.',
+        ]
     completion = task.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
     binding = task.get('task_binding')
@@ -1180,6 +1238,7 @@ def run_task_review_prompt(args, *, store=None):
     if reviewer_actor == 'Codex':
         lines.extend((
             '<<< END PM TASK CONTRACT DATA >>>',
+            *original_lines,
             '',
             'Test evidence: EC2 and CI below are the test evidence for this HEAD. '
             'The PM enforces them as separate gates.',
@@ -1215,6 +1274,7 @@ def run_task_review_prompt(args, *, store=None):
         lines.extend((
             'Verdict FAIL if any acceptance item is unmet; a missing required test is unmet.',
             '<<< END PM TASK CONTRACT DATA >>>',
+            *original_lines,
             '',
             'Post these exact lines in your review:',
             verdict_line,
