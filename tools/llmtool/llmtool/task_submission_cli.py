@@ -4917,6 +4917,64 @@ def _collect_ec2_repair_task_ids(record, new_ids, legacy_ids):
         (new_ids if kind == 'NEW' else legacy_ids).add(repair_task_id)
 
 
+_HIGH_DEBUG_MODEL = 'gpt-6.1-sol'
+
+
+def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
+                                  executor_task):
+    """Raise ValueError unless ``entry`` is bound to the run behind it (#914).
+
+    The High Debug Task must be the original Task of the executor D6 being
+    repaired; the stored report must match its digest, carry every required
+    section and itself say RCA_CONFIRMED; the observed model must be the
+    High Debug model; and the Task must hold the HIGH_DEBUG completion event
+    run_high_debug records for this entry, live or compacted to a tombstone.
+    """
+    from .high_debug import REPORT_SECTIONS, _has_report_section, _outcome_status
+
+    completion = diagnosis_task.get('completion')
+    if (type(completion) is not dict or type(executor_task) is not str or
+            completion.get('executor_task_id') != executor_task):
+        raise ValueError
+    if entry.get('model_observed') != _HIGH_DEBUG_MODEL:
+        raise ValueError
+    report = entry.get('report')
+    report_sha256 = entry.get('report_sha256')
+    if (type(report) is not str or type(report_sha256) is not str or
+            hashlib.sha256(report.encode('utf-8')).hexdigest() != report_sha256):
+        raise ValueError
+    if (any(not _has_report_section(report, heading) for heading in REPORT_SECTIONS) or
+            _outcome_status(report) != 'RCA_CONFIRMED'):
+        raise ValueError
+    # The same derivation run_high_debug uses when it records the event.
+    examined_sha = entry['examined_sha']
+    event_id = hashlib.sha256(
+        ('HIGH_DEBUG\0' + high_debug_task + '\0' + examined_sha + '\0' +
+         report_sha256).encode()).hexdigest()[:32]
+    session_id = 'high-debug-' + entry['d6']
+    payload_sha256 = hashlib.sha256(report_sha256.encode()).hexdigest()
+    events = diagnosis_task.get('completion_events', [])
+    tombstones = diagnosis_task.get('completion_event_tombstones', [])
+    if type(events) is not list or type(tombstones) is not list:
+        raise ValueError
+    live = [event for event in events
+            if type(event) is dict and event.get('event_id') == event_id]
+    if live:
+        if not all(event.get('source') == 'HIGH_DEBUG' and
+                   event.get('session_id') == session_id and
+                   event.get('source_sha') == examined_sha and
+                   event.get('payload_sha256') == payload_sha256
+                   for event in live):
+            raise ValueError
+        return
+    compacted = [tombstone for tombstone in tombstones
+                 if type(tombstone) is dict and tombstone.get('event_id') == event_id]
+    if not compacted or not all(tombstone.get('source') == 'HIGH_DEBUG' and
+                                tombstone.get('session_id') == session_id
+                                for tombstone in compacted):
+        raise ValueError
+
+
 def _check_delegate_repair_cap(args, store, d6_binding=None):
     """Fail closed before dispatch when this D6 has exhausted its repair rounds.
 
@@ -5080,6 +5138,8 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
                 attempt_match is None or
                 d6 != _d6_name(executor_task, int(attempt_match.group(1)), examined_sha)):
             raise ValueError
+        _require_bound_high_debug_run(
+            diagnosis_task, high_debug_task, entry, executor_task)
     except Exception:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
     if d6_binding is None:
