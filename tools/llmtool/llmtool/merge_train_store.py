@@ -534,3 +534,52 @@ def find_by_pr(train_pr, root=None):
         return found[0] if found else None
     finally:
         os.close(directory)
+
+
+def list_records(root=None):
+    """Return every record, validated as ``get`` does, sorted by train_id.
+
+    Read-only: a missing directory returns [] and is not created. Any
+    unreadable or invalid record, or an unsafe directory, refuses INVALID.
+    """
+    if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_DIRECTORY'):
+        _refuse(TRAIN_RECORD_UNAVAILABLE)
+    path = _directory_path(root)
+    try:
+        named = os.lstat(path)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        _refuse(TRAIN_RECORD_UNAVAILABLE)
+    if (stat.S_ISLNK(named.st_mode) or not stat.S_ISDIR(named.st_mode) or
+            named.st_uid != os.getuid()):
+        _refuse(TRAIN_RECORD_INVALID)
+    try:
+        directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        _refuse(TRAIN_RECORD_INVALID)
+    try:
+        try:
+            opened = os.fstat(directory)
+            names = sorted(os.listdir(directory))
+        except OSError:
+            _refuse(TRAIN_RECORD_UNAVAILABLE)
+        if (not stat.S_ISDIR(opened.st_mode) or opened.st_uid != os.getuid() or
+                (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) or
+                stat.S_IMODE(opened.st_mode) != 0o700):
+            _refuse(TRAIN_RECORD_INVALID)
+        records = []
+        for name in names:
+            if name.startswith('.'):
+                continue  # lock files and in-flight temporaries
+            match = _RECORD_NAME.fullmatch(name)
+            if match is None:
+                _refuse(TRAIN_RECORD_INVALID)
+            train_id = match.group(1)
+            try:
+                records.append(_read_at(directory, train_id))
+            except LLMToolError:
+                _refuse(TRAIN_RECORD_INVALID, train_id)
+        return sorted(records, key=lambda record: record['train_id'])
+    finally:
+        os.close(directory)
