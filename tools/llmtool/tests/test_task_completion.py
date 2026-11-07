@@ -1452,6 +1452,227 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(completion['missing_gates'], ['SOURCE_NOT_ANCESTOR'])
         self.assertEqual(completion['pm_dispatch'], 'NOT_STARTED')
 
+    def _register_head(self, head):
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = head
+        self._write_env2_marker(record, self.root, submitted_head=head, current_head=head)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+        return head
+
+    def _move_main(self, path, text):
+        """Commit one trusted-main change, then return to the Developer branch."""
+        if not self._git('branch', '--list', 'main'):
+            self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        (self.root / path).write_text(text)
+        self._git('add', path)
+        self._git('commit', '-m', 'trusted main changes ' + path)
+        trusted = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        return trusted
+
+    def _developer_commit(self, path=None, text='# developer change\n'):
+        path = self.source_path if path is None else path
+        target = self.root / path
+        target.write_text((target.read_text() if target.exists() else '') + text)
+        self._git('add', path)
+        self._git('commit', '-m', 'developer changes ' + path)
+        return self._git('rev-parse', 'HEAD')
+
+    def _merge_main(self, *options):
+        self._git('merge', '--no-ff', *options, '-m', 'merge main', 'main')
+        return self._register_head(self._git('rev-parse', 'HEAD'))
+
+    def _merge_main_with_change(self, path):
+        """Merge main cleanly, then hide one more change inside the merge commit."""
+        self._git('merge', '--no-ff', '--no-commit', 'main')
+        (self.root / path).write_text('Hidden in the merge.\n')
+        self._git('add', path)
+        self._git('commit', '-m', 'merge main with a hidden change')
+        return self._register_head(self._git('rev-parse', 'HEAD'))
+
+    def _artifact(self, start, end):
+        return subprocess.check_output(['/usr/bin/git', 'diff', '--binary', start, end],
+                                       cwd=self.root, text=True)
+
+    def _artifact_segment(self, start, tip, end):
+        artifact = self._artifact(start, tip)
+        return (artifact, hashlib.sha256(artifact.encode()).hexdigest(), start, end)
+
+    def _collect_with_artifact(self, trusted, artifact, write_paths=None, **extra):
+        return task_completion.collect_executor_result(
+            **self._segment_collector_kwargs(
+                {'segment_start': self.source_sha, 'trusted_base': trusted},
+                write_paths or [self.source_path]),
+            artifact=artifact,
+            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest(), **extra)
+
+    def _assert_artifact_refused(self, trusted, artifact, code, write_paths=None, **extra):
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_with_artifact(trusted, artifact, write_paths, **extra)
+        self.assertEqual(raised.exception.completion_code, code)
+
+    def _assert_tip_is(self, tip, head, trusted):
+        self.assertEqual(task_completion._developer_tip(
+            str(self.root), self.source_sha, head, trusted), tip)
+
+    def _assert_artifact_matches_tip(self, head, tip, trusted):
+        """The artifact binds the tip; the recorded evidence still binds the full head."""
+        self._assert_tip_is(tip, head, trusted)
+        artifact = self._artifact(self.source_sha, tip)
+        result = self._collect_with_artifact(trusted, artifact)
+        self.assertEqual(result['result_head'], head)
+        self.assertEqual(result['changed_paths'], sorted(self._git(
+            'diff', '--name-only', '--no-renames', self.source_sha, head).splitlines()))
+        self.assertEqual(result['developer_changed_paths'], [self.source_path])
+        full_diff = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', '--no-ext-diff', '--no-textconv',
+             '--no-renames', self.source_sha, head, '--'], cwd=self.root)
+        self.assertEqual(result['diff_sha256'], hashlib.sha256(full_diff).hexdigest())
+
+        store = TaskStore(self.base / 'clean-main-merge-task-complete')
+        task = self._active_pm_task(self._task(), route='company-gw')
+        task['developer'].update(
+            artifact=artifact,
+            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        task['completion']['evidence'].update(
+            executor_native_session_id='native-executor',
+            executor_native_session='VERIFIED')
+        store.create(task)
+        _, tests, _, completion = self._complete_company_gw_task(
+            store, task, trusted_base=trusted, tested_head=head)
+        self.assertNotIn('DEVELOPER_ARTIFACT_RESULT_MISMATCH', completion['missing_gates'])
+        tests.assert_called_once()
+
+    def test_clean_main_merge_of_other_files_is_not_developer_change(self):
+        tip = self._developer_commit()
+        trusted = self._move_main('README.md', 'Main moved.\n')
+        head = self._merge_main()
+        self.assertIn('README.md', self._git('diff', '--name-only', self.source_sha, head))
+        self._assert_artifact_matches_tip(head, tip, trusted)
+
+    def test_clean_main_merge_of_other_lines_in_the_same_file(self):
+        original = (self.root / self.source_path).read_text()
+        tip = self._developer_commit()
+        trusted = self._move_main(self.source_path, '# main header\n' + original)
+        head = self._merge_main()
+        merged = self._git('show', head + ':' + self.source_path)
+        self.assertIn('# main header', merged)
+        self.assertIn('# developer change', merged)
+        self._assert_artifact_matches_tip(head, tip, trusted)
+
+    def test_second_trailing_clean_main_merge_is_stripped(self):
+        tip = self._developer_commit()
+        self._move_main('README.md', 'Main moved.\n')
+        self._merge_main()
+        trusted = self._move_main('main-two.txt', 'Main moved again.\n')
+        head = self._merge_main()
+        self._assert_artifact_matches_tip(head, tip, trusted)
+
+    def test_repair_segments_ending_in_clean_main_merges_bind_each_tip(self):
+        first_tip = self._developer_commit()
+        self._move_main('README.md', 'Main moved.\n')
+        first_end = self._merge_main()
+        second_tip = self._developer_commit(text='# repair change\n')
+        trusted = self._move_main('main-two.txt', 'Main moved again.\n')
+        head = self._merge_main()
+        segments = [self._artifact_segment(self.source_sha, first_tip, first_end),
+                    self._artifact_segment(first_end, second_tip, head)]
+        result = self._collect_with_artifact(trusted, segments[0][0],
+                                             artifact_segments=segments)
+        self.assertEqual(result['result_head'], head)
+        self.assertEqual(result['developer_changed_paths'], [self.source_path])
+
+    def test_repair_segment_with_a_change_inside_its_main_merge_is_refused(self):
+        tip = self._developer_commit()
+        trusted = self._move_main('README.md', 'Main moved.\n')
+        head = self._merge_main_with_change('extra.txt')
+        segment = self._artifact_segment(self.source_sha, tip, head)
+        self._assert_artifact_refused(
+            trusted, segment[0], 'DEVELOPER_ARTIFACT_CHAIN_INVALID',
+            [self.source_path, 'extra.txt'], artifact_segments=[segment])
+
+    def test_change_around_a_main_merge_is_refused_with_its_existing_code(self):
+        cases = (('outside.txt', [self.source_path], 'RESULT_SCOPE_MISMATCH'),
+                 ('extra.txt', [self.source_path, 'extra.txt'],
+                  'DEVELOPER_ARTIFACT_RESULT_MISMATCH'))
+        for where in ('before', 'inside', 'after'):
+            for path, write_paths, code in cases:
+                with self.subTest(where=where, path=path):
+                    self._git('reset', '--hard', self.source_sha)
+                    self._git('branch', '-f', 'main', self.source_sha)
+                    tip = self._developer_commit()
+                    if where == 'before':
+                        self._developer_commit(path)
+                    trusted = self._move_main('README.md', 'Main moved.\n')
+                    if where == 'inside':
+                        self._merge_main_with_change(path)
+                    else:
+                        self._merge_main()
+                    if where == 'after':
+                        self._register_head(self._developer_commit(path))
+                    self._assert_artifact_refused(
+                        trusted, self._artifact(self.source_sha, tip), code, write_paths)
+
+    def test_merge_with_an_untrusted_second_parent_is_refused(self):
+        tip = self._developer_commit()
+        trusted = self._move_main('README.md', 'Main moved.\n')
+        self._git('checkout', '-b', 'untrusted', 'main')
+        self._developer_commit('side.txt')
+        self._git('checkout', 'feat/executor')
+        self._git('merge', '--no-ff', '-m', 'merge untrusted branch', 'untrusted')
+        head = self._register_head(self._git('rev-parse', 'HEAD'))
+        self._assert_tip_is(head, head, trusted)
+        artifact = self._artifact(self.source_sha, tip)
+        self._assert_artifact_refused(trusted, artifact, 'RESULT_SCOPE_MISMATCH')
+        self._assert_artifact_refused(
+            trusted, artifact, 'DEVELOPER_ARTIFACT_RESULT_MISMATCH',
+            [self.source_path, 'README.md', 'side.txt'])
+
+    def test_octopus_merge_of_trusted_branches_is_refused(self):
+        tip = self._developer_commit()
+        self._git('branch', 'main', self.source_sha)
+        for branch in ('main-one', 'main-two'):
+            self._git('checkout', '-b', branch, self.source_sha)
+            self._developer_commit(branch + '.txt')
+        self._git('checkout', 'main')
+        self._git('merge', '--no-ff', '-m', 'main octopus', 'main-one', 'main-two')
+        trusted = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        self._git('merge', '--no-ff', '-m', 'developer octopus', 'main-one', 'main-two')
+        head = self._register_head(self._git('rev-parse', 'HEAD'))
+        self.assertEqual(len(self._git('rev-list', '--parents', '-n', '1', head).split()), 4)
+        self._assert_tip_is(head, head, trusted)
+        self._assert_artifact_refused(
+            trusted, self._artifact(self.source_sha, tip), 'RESULT_DIFF_INVALID')
+
+    def test_main_conflict_resolved_by_hand_is_refused(self):
+        original = (self.root / self.source_path).read_text()
+        tip = self._developer_commit()
+        trusted = self._move_main(self.source_path, original + '# main change\n')
+        merge = subprocess.run(['/usr/bin/git', 'merge', '--no-ff', '-m', 'merge main', 'main'],
+                               cwd=self.root, text=True, capture_output=True)
+        self.assertNotEqual(merge.returncode, 0, merge.stdout + merge.stderr)
+        (self.root / self.source_path).write_text(original + '# resolved by hand\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'resolve main conflict by hand')
+        head = self._register_head(self._git('rev-parse', 'HEAD'))
+        self._assert_tip_is(head, head, trusted)
+        self._assert_artifact_refused(trusted, self._artifact(self.source_sha, tip),
+                                      'DEVELOPER_ARTIFACT_RESULT_TREE_MISMATCH')
+
+    def test_main_merge_made_with_strategy_ours_is_refused(self):
+        tip = self._developer_commit()
+        trusted = self._move_main('README.md', 'Main moved.\n')
+        head = self._merge_main('-s', 'ours')
+        self.assertEqual(self._git('rev-parse', head + '^{tree}'),
+                         self._git('rev-parse', tip + '^{tree}'))
+        self._assert_tip_is(head, head, trusted)
+        self._assert_artifact_refused(trusted, self._artifact(self.source_sha, tip),
+                                      'RESULT_SCOPE_MISMATCH')
+
     def test_out_of_scope_developer_file_is_refused(self):
         result_sha = self._make_path_result('README.md', 'Developer edit.\n')
         artifact = subprocess.check_output(
