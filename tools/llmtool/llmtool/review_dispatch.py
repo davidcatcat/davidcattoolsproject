@@ -137,9 +137,14 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None,
             _refuse('REVIEW_PROMPT_EXECUTOR_DIRTY')
         recorded = evidence.get('result')
         if (type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None or
-                type(recorded) is dict and recorded.get('result_head') not in (None, head) or
                 snap.head != head or snap.root != executor.root or
                 snap.common_dir != executor.common_dir or snap.branch != executor.branch):
+            _refuse('REVIEW_PROMPT_EXECUTOR_HEAD_MISMATCH')
+        # task_submission_cli loads this module lazily and owns the repair chain.
+        from .task_submission_cli import result_head_admitted
+        if type(recorded) is dict and not result_head_admitted(
+                task, store, evidence, executor_task=executor_task, root=executor.root,
+                recorded_head=recorded.get('result_head'), head=head):
             _refuse('REVIEW_PROMPT_EXECUTOR_HEAD_MISMATCH')
     except LLMToolError as exc:
         if getattr(exc, 'review_dispatch_code', None):

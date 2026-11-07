@@ -11,7 +11,9 @@ from unittest.mock import call, patch
 from pathlib import Path
 
 from llmtool import review_dispatch
+from llmtool import review_result
 from llmtool import task_advance
+from llmtool import task_drive
 from llmtool import task_submission_cli
 from llmtool.errors import LLMToolError
 from llmtool.task_store import _json_bytes
@@ -120,7 +122,7 @@ class TaskAdvanceMergeDocsRuleTests(unittest.TestCase):
 
 
 class TaskAdvanceTests(unittest.TestCase):
-    def _completed_codex_review(self, verdict, *, recorded=True):
+    def _completed_codex_review(self, verdict, *, recorded=True, finding=True):
         task_id, run_id, contract_digest = '1' * 32, '2' * 32, 'd' * 64
         body = (f'<!-- activity: type=review_verdict actor=Codex target=PM status={verdict} -->\n'
                 f'Verdict: {verdict} | Version: v1 | HEAD: {HEAD}\n')
@@ -128,6 +130,8 @@ class TaskAdvanceTests(unittest.TestCase):
             body += 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
         body += (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
                  f'contract={contract_digest} head={HEAD}\n')
+        if verdict != 'PASS' and finding:
+            body += 'Finding: the changed branch loses the retry count.\n'
         claim = {
             'executor_task': 'executor-1', 'pr': 17, 'head_sha': HEAD,
             'version': 1, 'state': 'COMPLETED', 'updated_at': '2026-10-28T00:00:00Z',
@@ -490,7 +494,8 @@ class TaskAdvanceTests(unittest.TestCase):
         outcomes = task_advance._review_outcomes(
             record, [claim], lambda _path: self.fail('completed review must not fetch GitHub'))
         self.assertEqual(outcomes, [{'source': 'REVIEWER', 'source_sha': HEAD,
-                                     'version': 1, 'outcome': 'REVIEW_PASS'}])
+                                     'version': 1, 'outcome': 'REVIEW_PASS',
+                                     'findings_count': 0}])
         record['completion'] = {'state': 'PM_EVIDENCE_READY', 'evidence': {
             'result': {'result_head': HEAD}, 'review_pr_ci': {'stage': 'READY'}}}
         self.assertEqual(task_advance.decide(record, d6(), PR, {'events': outcomes}),
@@ -501,9 +506,118 @@ class TaskAdvanceTests(unittest.TestCase):
         outcomes = task_advance._review_outcomes(
             record, [claim], lambda _path: self.fail('completed review must not fetch GitHub'))
         self.assertEqual(outcomes, [{'source': 'REVIEWER', 'source_sha': HEAD,
-                                     'version': 1, 'outcome': 'REVIEW_FAIL'}])
+                                     'version': 1, 'outcome': 'REVIEW_FAIL',
+                                     'findings_count': 1}])
         self.assertEqual(task_advance.decide(record, d6(), PR, {'events': outcomes}),
                          'REPAIR_REVIEW')
+
+    def test_completed_fail_without_finding_stops_with_no_repair_claim(self):
+        record, claim = self._completed_codex_review('FAIL', finding=False)
+        outcomes = task_advance._review_outcomes(
+            record, [claim], lambda _path: self.fail('completed review must not fetch GitHub'))
+        self.assertEqual(outcomes[0]['findings_count'], 0)
+        self.assertEqual(task_advance.decide(record, d6(), PR, {'events': outcomes}),
+                         'REVIEW_NO_CODE_FINDING')
+
+        class Store:
+            writes = 0
+
+            def get(self, _task_id):
+                return record
+
+            def compare_and_update(self, *_args, **_kwargs):
+                Store.writes += 1
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch('llmtool.task_advance.shutil.which', return_value='/bin/claude'):
+            result = task_advance.advance(
+                task_id=record['task_id'], store=Store(), pr_number=17, cwd='/repo/task',
+                repair_review_call=lambda **_kwargs: self.fail('no repair may start'),
+                github_get=lambda _path: [])
+        self.assertEqual(result['step'], 'REVIEW_NO_CODE_FINDING')
+        self.assertEqual(result['codes'], ['REVIEW_NO_CODE_FINDING'])
+        self.assertEqual(Store.writes, 0)
+        self.assertEqual(record['review_repair_claims'], [])
+
+        calls = []
+
+        def one_advance(**_kwargs):
+            calls.append(_kwargs)
+            return result
+
+        driven = task_drive.drive(task_id=record['task_id'], advance_call=one_advance,
+                                  sleep=lambda _seconds: self.fail('drive must not poll'))
+        self.assertEqual(driven['step'], 'REVIEW_NO_CODE_FINDING')
+        self.assertEqual(len(calls), 1)
+
+    def test_no_finding_stop_runs_after_active_repair_branches(self):
+        record, claim = self._completed_codex_review('FAIL', finding=False)
+        outcomes = task_advance._review_outcomes(record, [claim], lambda _path: [])
+        for repair_state, action in (('BLOCKED', 'REPAIR_RETRY'), ('RUNNING', 'WAITING_REPAIR'),
+                                     ('UNKNOWN', 'REPAIR_OUTCOME_UNKNOWN'),
+                                     ('RECORD_UNAVAILABLE', 'DEVELOPER_ATTENTION'),
+                                     ('RESPONDED', 'PUBLISH')):
+            with self.subTest(repair_state=repair_state):
+                related = {'events': outcomes, 'repair_claims': [
+                    {'head_sha': HEAD, 'state': 'DISPATCHED', 'repair_state': repair_state}]}
+                self.assertEqual(task_advance.decide(record, d6(), PR, related), action)
+
+    def test_completed_fail_with_finding_goes_to_repair(self):
+        record, _claim = self._completed_codex_review('FAIL')
+        repairs = []
+
+        class Store:
+            def get(self, _task_id):
+                return record
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch('llmtool.task_advance.shutil.which', return_value='/bin/claude'):
+            result = task_advance.advance(
+                task_id=record['task_id'], store=Store(), pr_number=17, cwd='/repo/task',
+                repair_review_call=lambda **kwargs: repairs.append(kwargs) or {'state': 'OK'},
+                github_get=lambda _path: [])
+        self.assertEqual(result['step'], 'REPAIR_REVIEW')
+        self.assertEqual(len(repairs), 1)
+
+    def test_dispatched_claim_comment_fail_goes_to_repair(self):
+        record = base_record(review_dispatch_claim=[
+            {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}])
+        for event in ({}, {'findings_count': 0}):
+            with self.subTest(event=event):
+                related = {'events': [dict(event, source='REVIEWER', source_sha=HEAD,
+                                           version=1, outcome='REVIEW_FAIL')]}
+                self.assertEqual(task_advance.decide(record, d6(), PR, related),
+                                 'REPAIR_REVIEW')
+
+    def test_codex_fix_verdict_with_finding_parses_and_classifies_as_fail(self):
+        review = '\n'.join((MARKER, STATUS, BINDING, 'Finding: the retry count is lost.'))
+        raw = codex_jsonl(thread_started(), agent_message(bound_verdict(
+            verdict='FIX', review=review)))
+        parsed = review_dispatch._parse_codex_review_inner(
+            raw, task_id=TASK, run_id=RUN, contract_digest=DIGEST, head=HEAD)
+        self.assertEqual(parsed['verdict'], 'FIX')
+        record, claim = self._completed_codex_review('FAIL')
+        claim['review_result'].update(verdict='FIX', review_text=parsed['review_text'])
+        latest, _event_id = review_result._completed_claim_result(record, claim, version=1)
+        self.assertEqual(latest[2:], ('REVIEW_FAIL', 1))
+
+    def test_claude_no_changes_repair_is_blocked_and_other_blocked_stays_unknown(self):
+        blocked = {'developer': {'state': 'BLOCKED', 'error_code': 'CLAUDE_NO_CHANGES'}}
+        for repair_record in (blocked, dict(blocked, state='PM_PENDING')):
+            with self.subTest(repair_record=repair_record):
+                self.assertEqual(task_advance.derive_repair_state(repair_record), 'BLOCKED')
+        for code in ('CLAUDE_RESULT_UNKNOWN', 'CLAUDE_WRITE_SCOPE_VIOLATION', None):
+            with self.subTest(code=code):
+                self.assertEqual(task_advance.derive_repair_state(
+                    {'developer': {'state': 'BLOCKED', 'error_code': code}}), 'UNKNOWN')
+        record, _claim = self._completed_codex_review('FAIL')
+        related = {'events': [{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                               'outcome': 'REVIEW_FAIL', 'findings_count': 1}],
+                   'repair_claims': [{'head_sha': HEAD, 'state': 'DISPATCHED',
+                                      'repair_state': task_advance.derive_repair_state(blocked)}]}
+        self.assertEqual(task_advance.decide(record, d6(), PR, related), 'REPAIR_RETRY')
 
     def test_completed_codex_review_without_event_requests_recording(self):
         record, claim = self._completed_codex_review('FAIL', recorded=False)

@@ -31,6 +31,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
+from . import source_freshness
 from . import trust
 from .errors import LLMToolError
 from .test_output_excerpts import select_test_excerpts
@@ -1199,6 +1200,61 @@ def _developer_tip(root, start_sha, head_sha, trusted_base_sha=None):
     return start_sha
 
 
+def read_authenticated_main_sha():
+    """Return the commit of main read from GitHub for the trusted repository.
+
+    This is the only anchor for "trusted main": a PR base.sha, origin/main or any
+    local ref can be stale or Developer-controlled. Every failure stops as
+    MAIN_REF_PIN_INVALID.
+    """
+    try:
+        response = _github_get('git/ref/heads/main')
+    except Exception:
+        _stop('MAIN_REF_PIN_INVALID')
+    if (type(response) is not dict or response.get('ref') != 'refs/heads/main' or
+            type(response.get('object')) is not dict or
+            response['object'].get('type') != 'commit' or
+            type(response['object'].get('sha')) is not str or
+            _HEX40.fullmatch(response['object']['sha']) is None):
+        _stop('MAIN_REF_PIN_INVALID')
+    return response['object']['sha']
+
+
+def _commit_present(root, sha):
+    try:
+        _git(root, ('cat-file', '-e', sha + '^{commit}'), limit=4096)
+    except LLMToolError:
+        return False
+    return True
+
+
+def ensure_main_commit(root, main_sha):
+    """Return whether main_sha is local, fetching origin/main at most once."""
+    if _commit_present(root, main_sha):
+        return True
+    source_freshness._fetch_origin_main(root)
+    return _commit_present(root, main_sha)
+
+
+def head_adds_only_main(root, recorded_head, head):
+    """Return whether head is recorded_head plus only clean merges of fresh main.
+
+    Main is read afresh for each decision. Anything unreadable is not admitted.
+    """
+    if any(type(sha) is not str or _HEX40.fullmatch(sha) is None
+           for sha in (recorded_head, head)):
+        return False
+    try:
+        main_sha = read_authenticated_main_sha()
+        if not ensure_main_commit(root, main_sha):
+            return False
+        # A graft file could rewrite the parents that the walk below trusts.
+        _reject_legacy_grafts(root)
+        return _developer_tip(root, recorded_head, head, main_sha) == recorded_head
+    except Exception:
+        return False
+
+
 def _diff_paths(root, start_sha, end_sha):
     """Return the sorted paths that differ between two commits."""
     changed = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv',
@@ -1305,8 +1361,10 @@ def _collect_registered_result_diff(*, task_id, expected_common_dir, expected_ro
         limit=4096, allow_exit_1=True, return_exit_code=True)
     if ancestor_status != 0:
         _stop('SOURCE_NOT_ANCESTOR')
+    # The 128-path limit counts Developer paths only: a merged main can bring in
+    # any number of its own files.
     paths = _diff_paths(registration.root, source_sha, snapshot.head)
-    if not paths or len(paths) > 128:
+    if not paths:
         _stop('RESULT_DIFF_INVALID')
     developer_paths = _developer_changed_paths(
         registration.root, source_sha, snapshot.head, trusted_base_sha)
@@ -1409,10 +1467,16 @@ def collect_claude_result(*, task_id, expected_common_dir, expected_root,
         expected_native_session_id=expected_native_session_id,
         write_paths=write_paths, trusted_base_sha=trusted_base_sha)
     if (type(claude_result) is not dict or
-            claude_result.get('executor_task_id') != registration.task_id or
-            claude_result.get('head_sha') != registration.result_sha):
+            claude_result.get('executor_task_id') != registration.task_id):
         _stop('CLAUDE_RESULT_BINDING_INVALID')
-    if claude_result.get('head_sha') != snapshot.head:
+    claimed_head = claude_result.get('head_sha')
+    if claimed_head != registration.result_sha:
+        # The bound result stays valid when the head only adds clean main merges.
+        if (type(claimed_head) is not str or _HEX40.fullmatch(claimed_head) is None or
+                _developer_tip(registration.root, claimed_head, snapshot.head,
+                               trusted_base_sha) != claimed_head):
+            _stop('CLAUDE_RESULT_BINDING_INVALID')
+    elif claimed_head != snapshot.head:
         _stop('RESULT_HEAD_MISMATCH')
     _reject_legacy_grafts(registration.root, registration.common_dir)
     return {
