@@ -14,6 +14,19 @@ The cursor and ledger are committed in one write after the whole batch is
 handled. A crash before that write replays the same comments next time, and
 the ledger rules make the replayed result identical.
 
+Every call holds ``flock`` on the validated state-directory descriptor:
+exclusive in ``init_state``, ``poll_once`` and ``link_task`` from before the
+load (or existence check) through the write and directory fsync, shared around
+the load in ``pending``. A competing call waits, so no update is lost and no
+reader sees a replace or the two-name window of ``init_state`` as corruption.
+A poll holds the lock across its GitHub reads, so a slow read delays a
+competing link; ``github_get`` and ``parse`` must not call back into this
+module for the same directory, or they wait on their own lock. The lock is
+advisory among callers of this module. A lock
+that cannot be taken fails closed with SYNC_STATE_LOCK_FAILED; nothing runs
+unlocked. Closing the descriptor releases the lock on every return and
+exception.
+
 Page-number pagination is not a snapshot. One page is one response and has no
 gap, but a comment deleted between two page reads shifts later pages up, so
 the walk skips the comment that moved across the page boundary. A walk that
@@ -29,11 +42,17 @@ Failures raise ``LLMToolError`` with a fixed ``sync_code``; a GitHub read
 failure is not raised but returned as ``OFFLINE`` with a backoff.
 """
 
+import contextlib
 import json
 import os
 import re
 import stat
 import tempfile
+
+try:
+    import fcntl
+except ImportError:  # No flock on this platform: every call fails closed.
+    fcntl = None
 
 from .errors import LLMToolError
 
@@ -99,11 +118,67 @@ def _split_path(path):
     return parent, name
 
 
-def _dir_safe(parent):
-    """Owner's directory, not writable by group or other. Raises OSError."""
-    info = os.stat(parent)
+def _safe_dir_info(info):
     return (stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and
             stat.S_IMODE(info.st_mode) & 0o022 == 0)
+
+
+def _dir_safe(parent):
+    """Owner's directory, not writable by group or other. Raises OSError."""
+    return _safe_dir_info(os.stat(parent))
+
+
+@contextlib.contextmanager
+def _state_lock(parent, exclusive, missing_code, unsafe_code):
+    """Hold flock on the validated state directory for the whole block.
+
+    The descriptor is checked to be a safe directory before the lock, and the
+    path is checked to still name it after the lock. A lock that cannot be
+    taken raises SYNC_STATE_LOCK_FAILED. The finally clause unlocks and closes
+    on every return and exception.
+    """
+    if fcntl is None:
+        _fail('SYNC_STATE_LOCK_FAILED')
+    try:
+        fd = os.open(parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) |
+                     getattr(os, 'O_CLOEXEC', 0))
+    except FileNotFoundError:
+        _fail(missing_code)
+    except OSError:
+        _fail(unsafe_code)
+    locked = False
+    try:
+        try:
+            opened = os.fstat(fd)
+        except OSError:
+            _fail(unsafe_code)
+        if not _safe_dir_info(opened):
+            _fail(unsafe_code)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        except OSError:
+            _fail('SYNC_STATE_LOCK_FAILED')
+        locked = True
+        try:
+            named = os.stat(parent)
+        except FileNotFoundError:
+            _fail(missing_code)
+        except OSError:
+            _fail(unsafe_code)
+        if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+            # The path no longer names the locked directory.
+            _fail(unsafe_code)
+        yield
+    finally:
+        if locked:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass  # Closing the only descriptor below releases it as well.
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _unique_pairs(pairs):
@@ -224,6 +299,7 @@ def _write(path, state, identity):
 
     identity None: create the file; never replaces an existing path.
     Otherwise replace the file only if it is still the one that was loaded.
+    The caller holds the exclusive state lock; this never takes it again.
     """
     parent, name = _split_path(path)
     data = _serialize(state)
@@ -277,23 +353,18 @@ def init_state(path, start_after_comment_id):
     parent, _ = _split_path(path)
     if not _is_int(start_after_comment_id, 0, _MAX_ID):
         _fail('SYNC_ARGUMENT_INVALID')
-    try:
-        safe = _dir_safe(parent)
-    except OSError:
-        safe = False
-    if not safe:
-        _fail('SYNC_STATE_DIR_UNSAFE')
-    try:
-        os.lstat(path)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        _fail('SYNC_STATE_DIR_UNSAFE')
-    else:
-        _fail('SYNC_STATE_EXISTS')
-    state = {'schema_version': SCHEMA_VERSION, 'cursor': start_after_comment_id,
-             'failure_count': 0, 'requests': {}}
-    _write(path, state, None)
+    with _state_lock(parent, True, 'SYNC_STATE_DIR_UNSAFE', 'SYNC_STATE_DIR_UNSAFE'):
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            _fail('SYNC_STATE_DIR_UNSAFE')
+        else:
+            _fail('SYNC_STATE_EXISTS')
+        state = {'schema_version': SCHEMA_VERSION, 'cursor': start_after_comment_id,
+                 'failure_count': 0, 'requests': {}}
+        _write(path, state, None)
     return {'status': 'INITIALIZED', 'cursor': start_after_comment_id}
 
 
@@ -402,10 +473,17 @@ def poll_once(path, github_get, parse, max_pages=10):
     """Run one poll step: read new comments, update the ledger, commit once.
 
     At most ``max_pages`` pages are read in this call, confirmation walks included.
+    The exclusive state lock is held from before the load through the write.
     """
     if (not callable(github_get) or not callable(parse) or
             not _is_int(max_pages, 1, MAX_PAGES_LIMIT)):
         _fail('SYNC_ARGUMENT_INVALID')
+    parent, _ = _split_path(path)
+    with _state_lock(parent, True, 'SYNC_STATE_MISSING', 'SYNC_STATE_CORRUPT'):
+        return _poll_locked(path, github_get, parse, max_pages)
+
+
+def _poll_locked(path, github_get, parse, max_pages):
     state, identity = _load(path)
     previous = state['cursor']
     try:
@@ -476,6 +554,12 @@ def link_task(path, request_key, task_id):
     """Bind an unlinked request to one 32-hex Task id, once."""
     if not _is_text(request_key, _KEY) or not _is_text(task_id, _TASK_ID):
         _fail('SYNC_ARGUMENT_INVALID')
+    parent, _ = _split_path(path)
+    with _state_lock(parent, True, 'SYNC_STATE_MISSING', 'SYNC_STATE_CORRUPT'):
+        return _link_locked(path, request_key, task_id)
+
+
+def _link_locked(path, request_key, task_id):
     state, identity = _load(path)
     entry = state['requests'].get(request_key)
     if entry is None:
@@ -492,8 +576,10 @@ def link_task(path, request_key, task_id):
 
 
 def pending(path):
-    """List unlinked requests, oldest first, without writing."""
-    state, _ = _load(path)
+    """List unlinked requests, oldest first, without writing (shared lock)."""
+    parent, _ = _split_path(path)
+    with _state_lock(parent, False, 'SYNC_STATE_MISSING', 'SYNC_STATE_CORRUPT'):
+        state, _ = _load(path)
     items = [{'request_key': key, 'kind': entry['kind'], 'revision': entry['revision'],
               'first_comment_id': entry['first_comment_id'],
               'comment_id': entry['comment_id']}

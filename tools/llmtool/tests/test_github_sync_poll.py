@@ -1,10 +1,14 @@
 """Tests for the bounded GitHub sync poll step (#1144 WP5).
 
 A fake GitHub GET and a fake parser stand in for the network and the message
-format. Nothing here calls gh, the network or a model.
+format. Nothing here calls gh, the network or a model. Contention tests run
+each competing call in a separate spawned process and order them with events
+and bounded waits, never sleeps.
 """
 
+import contextlib
 import json
+import multiprocessing
 import os
 import stat
 import sys
@@ -12,6 +16,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+try:
+    import fcntl
+except ImportError:  # Non-POSIX: the module fails closed; contention tests skip.
+    fcntl = None
 
 _ROOT = str(Path(__file__).resolve().parents[1])
 if _ROOT not in sys.path:
@@ -24,6 +33,7 @@ TASK_A = 'a' * 32
 TASK_B = 'b' * 32
 QUERY = 'issues/comments?sort=created&direction=desc&per_page=100&page='
 STATE_NAME = 'sync-state.json'
+WAIT = 60.0  # Upper bound for every cross-process wait; no test sleeps.
 
 
 def comment(comment_id, body='plain chat secret-body-text'):
@@ -98,6 +108,97 @@ class FakeParser:
         return None
 
 
+def _contending_flock(real, report):
+    """Wrap flock: the first acquire tries nonblocking and reports whether it had to wait.
+
+    CONTENDED proves another holder had the lock at that moment; the call then
+    blocks on the real lock exactly as the module would.
+    """
+    done = []
+
+    def flock(fd, operation):
+        if operation & fcntl.LOCK_UN or done:
+            return real(fd, operation)
+        done.append(operation)
+        try:
+            real(fd, operation | fcntl.LOCK_NB)
+        except BlockingIOError:
+            report.put(('CONTENDED',))
+            return real(fd, operation)
+        report.put(('FREE',))
+        return None
+    return flock
+
+
+def _child(spec, path, report, release):
+    """Run one sync call in this separate process and report each step on the queue.
+
+    ``pause`` holds the call at one point while it owns the lock: ``github`` (the
+    first GitHub read of a poll), ``replace`` (just before os.replace publishes
+    a write), ``init_link`` (after os.link, while the new file still has two
+    names) or ``load`` (inside the JSON load of pending). The hold ends when the
+    parent sets ``release`` or after WAIT seconds.
+    """
+    def hold():
+        report.put(('HOLDING',))
+        release.wait(WAIT)
+
+    action, pause = spec['action'], spec.get('pause')
+    with contextlib.ExitStack() as stack:
+        if spec.get('contend'):
+            stack.enter_context(mock.patch.object(
+                sync.fcntl, 'flock', new=_contending_flock(sync.fcntl.flock, report)))
+        if pause == 'replace':
+            real_replace = os.replace
+
+            def replace(source, target, **kwargs):
+                hold()
+                return real_replace(source, target, **kwargs)
+            stack.enter_context(mock.patch.object(sync.os, 'replace', new=replace))
+        elif pause == 'init_link':
+            real_unlink = os.unlink
+
+            def unlink(target, **kwargs):
+                if str(target).endswith('.tmp'):
+                    hold()
+                return real_unlink(target, **kwargs)
+            stack.enter_context(mock.patch.object(sync.os, 'unlink', new=unlink))
+        elif pause == 'load':
+            real_loads = json.loads
+
+            def loads(*args, **kwargs):
+                hold()
+                return real_loads(*args, **kwargs)
+            stack.enter_context(mock.patch.object(sync.json, 'loads', new=loads))
+        try:
+            if action == 'poll':
+                github = FakeGitHub(spec.get('comments', ()))
+                github.fault = spec.get('fault')
+                if pause == 'github':
+                    held = []
+
+                    def after_call(page):
+                        if not held:
+                            held.append(page)
+                            hold()
+                    github.after_call = after_call
+                result = sync.poll_once(path, github, FakeParser())
+            elif action == 'link':
+                result = sync.link_task(path, spec['request_key'], spec['task_id'])
+            elif action == 'pending':
+                result = sync.pending(path)
+            elif action == 'init':
+                result = sync.init_state(path, spec['start'])
+            else:
+                raise ValueError('unknown child action')
+        except LLMToolError as error:
+            report.put(('ERROR', getattr(error, 'sync_code', None)))
+        except Exception as error:
+            report.put(('CRASH', type(error).__name__))
+        else:
+            report.put(('RESULT', result))
+
+
 class SyncTestCase(unittest.TestCase):
     def setUp(self):
         holder = tempfile.TemporaryDirectory()
@@ -137,6 +238,23 @@ class SyncTestCase(unittest.TestCase):
     def assertNoTempFiles(self, directory=None):
         names = os.listdir(directory or self.dir)
         self.assertEqual([name for name in names if name.endswith('.tmp')], [])
+
+    def can_lock(self, operation):
+        """Try a nonblocking flock on the state directory from a new descriptor."""
+        fd = os.open(self.dir, os.O_RDONLY)
+        try:
+            try:
+                fcntl.flock(fd, operation | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return True
+        finally:
+            os.close(fd)
+
+    def assertUnlocked(self):
+        self.assertTrue(self.can_lock(fcntl.LOCK_EX))
+        self.assertNoTempFiles()
 
 
 class InitStateTests(SyncTestCase):
@@ -804,6 +922,353 @@ class OfflineTests(SyncTestCase):
         with self.assertRaises(RuntimeError):
             sync.poll_once(self.path, broken, self.parser)
         self.assertEqual(self.snapshot(), before)
+
+
+@unittest.skipIf(fcntl is None, 'flock is POSIX only; the module fails closed without it')
+class LockTests(SyncTestCase):
+    def test_each_call_takes_one_lock_of_its_kind(self):
+        exclusive, shared, unlock = fcntl.LOCK_EX, fcntl.LOCK_SH, fcntl.LOCK_UN
+        calls = []
+        real = fcntl.flock
+
+        def flock(fd, operation):
+            calls.append(operation)
+            return real(fd, operation)
+        self.github.add(sync_comment(1, 'req-1', 1, 'd1'))
+
+        def offline():
+            self.github.fault = 'raise'
+            try:
+                return self.poll()
+            finally:
+                self.github.fault = None
+        steps = (('init', lambda: sync.init_state(self.path, 0), exclusive, 'INITIALIZED'),
+                 ('synced', self.poll, exclusive, 'SYNCED'),
+                 ('idle', self.poll, exclusive, 'IDLE'),
+                 ('offline', offline, exclusive, 'OFFLINE'),
+                 ('reset', self.poll, exclusive, 'IDLE'),
+                 ('link', lambda: sync.link_task(self.path, 'req-1', TASK_A), exclusive, 'LINKED'),
+                 ('inert', lambda: sync.link_task(self.path, 'req-1', TASK_A), exclusive, 'INERT'),
+                 ('pending', lambda: sync.pending(self.path), shared, None))
+        with mock.patch.object(sync.fcntl, 'flock', new=flock):
+            for name, func, operation, status in steps:
+                with self.subTest(step=name):
+                    calls.clear()
+                    result = func()
+                    if status is not None:
+                        self.assertEqual(result['status'], status)
+                    # One acquire and one release: _write never locks again.
+                    self.assertEqual(calls, [operation, unlock])
+        self.assertUnlocked()
+
+    def test_lock_failure_fails_closed_and_nothing_runs_unlocked(self):
+        sync.init_state(self.path, 0)
+        self.github.add(sync_comment(1, 'req-1', 1, 'd1'))
+        self.poll()
+        self.github.calls.clear()
+        self.parser.seen.clear()
+        self.github.add(sync_comment(2, 'req-2', 1, 'd2'))
+        before = self.snapshot()
+        other = os.path.join(self.dir, 'other-state.json')
+        failures = (('flock-error',
+                     lambda: mock.patch.object(sync.fcntl, 'flock', side_effect=OSError('no lock'))),
+                    ('no-fcntl', lambda: mock.patch.object(sync, 'fcntl', None)))
+        for name, make_patch in failures:
+            with self.subTest(failure=name):
+                with make_patch():
+                    self.assertCode('SYNC_STATE_LOCK_FAILED', self.poll)
+                    # A lock failure is never reported as OFFLINE, even when GitHub is down.
+                    self.github.fault = 'raise'
+                    self.assertCode('SYNC_STATE_LOCK_FAILED', self.poll)
+                    self.github.fault = None
+                    self.assertCode('SYNC_STATE_LOCK_FAILED', sync.link_task,
+                                    self.path, 'req-1', TASK_A)
+                    self.assertCode('SYNC_STATE_LOCK_FAILED', sync.pending, self.path)
+                    self.assertCode('SYNC_STATE_LOCK_FAILED', sync.init_state, other, 0)
+                self.assertEqual(self.github.calls, [])
+                self.assertEqual(self.parser.seen, [])
+                self.assertEqual(self.snapshot(), before)
+                self.assertFalse(os.path.lexists(other))
+                self.assertUnlocked()
+        self.assertEqual(self.poll()['status'], 'SYNCED')
+        self.assertEqual(self.state()['failure_count'], 0)
+
+    def test_lock_is_released_after_every_return_and_exception(self):
+        self.assertCode('SYNC_STATE_MISSING', self.poll)
+        self.assertCode('SYNC_STATE_MISSING', sync.pending, self.path)
+        self.assertUnlocked()
+        self.assertEqual(sync.init_state(self.path, 0)['status'], 'INITIALIZED')
+        self.assertUnlocked()
+        self.assertCode('SYNC_STATE_EXISTS', sync.init_state, self.path, 0)
+        self.assertUnlocked()
+        self.github.add(sync_comment(1, 'req-1', 1, 'd1'))
+        self.assertEqual(self.poll()['status'], 'SYNCED')
+        self.assertUnlocked()
+        self.assertEqual(self.poll()['status'], 'IDLE')
+        self.assertUnlocked()
+        self.assertEqual(sync.link_task(self.path, 'req-1', TASK_A)['status'], 'LINKED')
+        self.assertUnlocked()
+        self.assertEqual(sync.link_task(self.path, 'req-1', TASK_A)['status'], 'INERT')
+        self.assertUnlocked()
+        self.assertCode('SYNC_REQUEST_ALREADY_LINKED', sync.link_task, self.path, 'req-1', TASK_B)
+        self.assertUnlocked()
+        self.assertCode('SYNC_REQUEST_UNKNOWN', sync.link_task, self.path, 'req-9', TASK_A)
+        self.assertUnlocked()
+        self.assertEqual(sync.pending(self.path)['requests'], [])
+        self.assertUnlocked()
+        self.github.fault = 'raise'
+        self.assertEqual(self.poll()['status'], 'OFFLINE')
+        self.assertUnlocked()
+        self.github.fault = None
+        self.github.add(*(comment(i) for i in range(2, 252)))
+        self.assertCode('SYNC_CATCHUP_LIMIT', self.poll, max_pages=2)
+        self.assertUnlocked()
+
+        def broken(path):
+            raise RuntimeError('programming error')
+        with self.assertRaises(RuntimeError):
+            sync.poll_once(self.path, broken, self.parser)
+        self.assertUnlocked()
+        with mock.patch.object(sync.os, 'replace', side_effect=OSError('crash')):
+            self.assertCode('SYNC_STATE_WRITE_FAILED', self.poll)
+        self.assertUnlocked()
+        with mock.patch.object(sync, 'MAX_REQUESTS', 1):
+            self.github.add(sync_comment(252, 'req-2', 1, 'd2'))
+            self.assertCode('SYNC_LEDGER_FULL', self.poll)
+        self.assertUnlocked()
+        os.chmod(self.path, 0o644)
+        try:
+            self.assertCode('SYNC_STATE_CORRUPT', self.poll)
+            self.assertCode('SYNC_STATE_CORRUPT', sync.link_task, self.path, 'req-1', TASK_A)
+            self.assertCode('SYNC_STATE_CORRUPT', sync.pending, self.path)
+            self.assertUnlocked()
+        finally:
+            os.chmod(self.path, 0o600)
+        self.assertEqual(self.poll()['status'], 'SYNCED')
+        self.assertUnlocked()
+
+
+@unittest.skipIf(fcntl is None, 'flock is POSIX only; the module fails closed without it')
+class ContentionTests(SyncTestCase):
+    """Competing calls in separate spawned processes, ordered by events, never sleeps."""
+
+    def setUp(self):
+        super().setUp()
+        self.ctx = multiprocessing.get_context('spawn')
+        self.release = self.ctx.Event()
+
+    def seed(self):
+        sync.init_state(self.path, 0)
+        self.github.add(sync_comment(1, 'req-1', 1, 'd1'))
+        self.assertEqual(self.poll()['status'], 'SYNCED')
+
+    def start(self, **spec):
+        report = self.ctx.Queue()
+        process = self.ctx.Process(target=_child, args=(spec, self.path, report, self.release))
+        process.start()
+        self.addCleanup(self.stop, process)
+        return process, report
+
+    def stop(self, process):
+        self.release.set()
+        process.join(WAIT)
+        if process.is_alive():
+            process.kill()
+            process.join(WAIT)
+
+    def expect(self, child, tag):
+        message = child[1].get(timeout=WAIT)
+        self.assertEqual(message[0], tag, message)
+
+    def finish(self, child):
+        process, report = child
+        message = report.get(timeout=WAIT)
+        process.join(WAIT)
+        self.assertEqual(process.exitcode, 0)
+        return message
+
+    @contextlib.contextmanager
+    def held(self):
+        """Hold the exclusive state lock from this test process."""
+        fd = os.open(self.dir, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    def assertExcluded(self):
+        # A nonblocking competing attempt fails while the child holds the lock.
+        self.assertFalse(self.can_lock(fcntl.LOCK_EX))
+        self.assertFalse(self.can_lock(fcntl.LOCK_SH))
+
+    def assertPollAndLinkBothKept(self, polled, linked):
+        self.assertEqual(polled[0], 'RESULT', polled)
+        self.assertEqual(polled[1]['status'], 'SYNCED')
+        self.assertEqual(polled[1]['new_request_keys'], ['req-2'])
+        self.assertEqual(linked, ('RESULT', {'status': 'LINKED', 'request_key': 'req-1',
+                                             'task_id': TASK_A, 'state': 'LINKED'}))
+        state = self.state()
+        self.assertEqual(state['cursor'], 2)
+        self.assertEqual((state['requests']['req-1']['state'],
+                          state['requests']['req-1']['task_id']), ('LINKED', TASK_A))
+        self.assertEqual(state['requests']['req-2']['state'], 'PENDING_PM')
+        self.assertPrivate()
+        self.assertUnlocked()
+
+    def test_link_during_a_poll_keeps_both_updates(self):
+        self.seed()
+        comments = [sync_comment(1, 'req-1', 1, 'd1'), sync_comment(2, 'req-2', 1, 'd2')]
+        poller = self.start(action='poll', comments=comments, pause='github')
+        self.expect(poller, 'HOLDING')
+        self.assertExcluded()
+        linker = self.start(action='link', request_key='req-1', task_id=TASK_A, contend=True)
+        self.expect(linker, 'CONTENDED')
+        self.release.set()
+        self.assertPollAndLinkBothKept(self.finish(poller), self.finish(linker))
+
+    def test_poll_during_a_link_publish_keeps_both_updates(self):
+        # The RCA window: the link passed its identity check and is about to replace.
+        self.seed()
+        comments = [sync_comment(1, 'req-1', 1, 'd1'), sync_comment(2, 'req-2', 1, 'd2')]
+        linker = self.start(action='link', request_key='req-1', task_id=TASK_A, pause='replace')
+        self.expect(linker, 'HOLDING')
+        self.assertExcluded()
+        poller = self.start(action='poll', comments=comments, contend=True)
+        self.expect(poller, 'CONTENDED')
+        self.release.set()
+        linked = self.finish(linker)
+        self.assertPollAndLinkBothKept(self.finish(poller), linked)
+
+    def test_two_links_to_one_request_link_once(self):
+        self.seed()
+        with self.held():
+            first = self.start(action='link', request_key='req-1', task_id=TASK_A, contend=True)
+            second = self.start(action='link', request_key='req-1', task_id=TASK_B, contend=True)
+            self.expect(first, 'CONTENDED')
+            self.expect(second, 'CONTENDED')
+        outcomes = [self.finish(first), self.finish(second)]
+        self.assertIn(('ERROR', 'SYNC_REQUEST_ALREADY_LINKED'), outcomes)
+        won = [value for tag, value in outcomes if tag == 'RESULT']
+        self.assertEqual(len(won), 1, outcomes)
+        self.assertEqual(won[0]['status'], 'LINKED')
+        entry = self.state()['requests']['req-1']
+        self.assertEqual((entry['state'], entry['task_id'], entry['linked_revision']),
+                         ('LINKED', won[0]['task_id'], 1))
+        self.assertUnlocked()
+
+    def test_two_polls_are_serialized(self):
+        self.seed()
+        comments = [sync_comment(i, f'req-{i}', 1, f'd{i}') for i in (1, 2, 3)]
+        with self.held():
+            first = self.start(action='poll', comments=comments, contend=True)
+            second = self.start(action='poll', comments=comments, contend=True)
+            self.expect(first, 'CONTENDED')
+            self.expect(second, 'CONTENDED')
+        outcomes = [self.finish(first), self.finish(second)]
+        self.assertEqual([tag for tag, _ in outcomes], ['RESULT', 'RESULT'], outcomes)
+        results = sorted((value for _, value in outcomes), key=lambda item: item['status'])
+        self.assertEqual([item['status'] for item in results], ['IDLE', 'SYNCED'])
+        idle, synced = results
+        self.assertEqual((synced['previous_cursor'], synced['cursor']), (1, 3))
+        self.assertEqual(synced['new_request_keys'], ['req-2', 'req-3'])
+        self.assertEqual((idle['previous_cursor'], idle['cursor']), (3, 3))
+        state = self.state()
+        self.assertEqual(state['cursor'], 3)
+        self.assertEqual(sorted(state['requests']), ['req-1', 'req-2', 'req-3'])
+        self.assertEqual(state['failure_count'], 0)
+        self.assertUnlocked()
+
+    def test_offline_and_reset_are_serialized(self):
+        self.seed()
+        self.github.fault = 'raise'
+        self.poll()
+        self.poll()
+        before = self.state()
+        self.assertEqual(before['failure_count'], 2)
+        comments = [sync_comment(1, 'req-1', 1, 'd1')]
+        with self.held():
+            offline = self.start(action='poll', comments=comments, fault='raise', contend=True)
+            reset = self.start(action='poll', comments=comments, contend=True)
+            self.expect(offline, 'CONTENDED')
+            self.expect(reset, 'CONTENDED')
+        failed, idle = self.finish(offline), self.finish(reset)
+        self.assertEqual((failed[0], failed[1]['status']), ('RESULT', 'OFFLINE'), failed)
+        self.assertEqual((idle[0], idle[1]['status'], idle[1]['failure_count']),
+                         ('RESULT', 'IDLE', 0), idle)
+        final = self.state()
+        # Either order is valid; neither update may be lost.
+        pair = (failed[1]['failure_count'], final['failure_count'])
+        self.assertIn(pair, ((3, 0), (1, 1)))
+        self.assertEqual(failed[1]['backoff_seconds'], {3: 120, 1: 30}[pair[0]])
+        final['failure_count'] = before['failure_count']
+        self.assertEqual(final, before)
+        self.assertUnlocked()
+
+    def test_pending_never_sees_a_replace_window(self):
+        self.seed()
+        linker = self.start(action='link', request_key='req-1', task_id=TASK_A, pause='replace')
+        self.expect(linker, 'HOLDING')
+        self.assertExcluded()
+        reader = self.start(action='pending', contend=True)
+        self.expect(reader, 'CONTENDED')
+        self.release.set()
+        self.assertEqual(self.finish(linker)[1]['status'], 'LINKED')
+        self.assertEqual(self.finish(reader), ('RESULT', {'cursor': 1, 'requests': []}))
+        self.assertUnlocked()
+
+    def test_pending_never_sees_the_init_link_window(self):
+        initializer = self.start(action='init', start=7, pause='init_link')
+        self.expect(initializer, 'HOLDING')
+        # The new file has two names now; an unlocked reader would call it corrupt.
+        self.assertEqual(os.lstat(self.path).st_nlink, 2)
+        self.assertExcluded()
+        reader = self.start(action='pending', contend=True)
+        self.expect(reader, 'CONTENDED')
+        self.release.set()
+        self.assertEqual(self.finish(initializer),
+                         ('RESULT', {'status': 'INITIALIZED', 'cursor': 7}))
+        self.assertEqual(self.finish(reader), ('RESULT', {'cursor': 7, 'requests': []}))
+        self.assertPrivate()
+        self.assertUnlocked()
+
+    def test_two_initializers_give_one_state(self):
+        with self.held():
+            first = self.start(action='init', start=5, contend=True)
+            second = self.start(action='init', start=9, contend=True)
+            self.expect(first, 'CONTENDED')
+            self.expect(second, 'CONTENDED')
+        outcomes = [self.finish(first), self.finish(second)]
+        self.assertIn(('ERROR', 'SYNC_STATE_EXISTS'), outcomes)
+        won = [value for tag, value in outcomes if tag == 'RESULT']
+        self.assertEqual(len(won), 1, outcomes)
+        self.assertIn(won[0], ({'status': 'INITIALIZED', 'cursor': 5},
+                               {'status': 'INITIALIZED', 'cursor': 9}))
+        self.assertEqual(self.state()['cursor'], won[0]['cursor'])
+        self.assertPrivate()
+        self.assertEqual(os.listdir(self.dir), [STATE_NAME])
+        self.assertUnlocked()
+
+    def test_pending_shares_its_lock_with_readers_only(self):
+        self.seed()
+        listed = {'cursor': 1, 'requests': [{'request_key': 'req-1', 'kind': 'request',
+                                             'revision': 1, 'first_comment_id': 1,
+                                             'comment_id': 1}]}
+        reader = self.start(action='pending', pause='load')
+        self.expect(reader, 'HOLDING')
+        self.assertTrue(self.can_lock(fcntl.LOCK_SH))
+        self.assertFalse(self.can_lock(fcntl.LOCK_EX))
+        second = self.start(action='pending', contend=True)
+        self.expect(second, 'FREE')
+        # The second reader finishes while the first still holds its shared lock.
+        self.assertEqual(self.finish(second), ('RESULT', listed))
+        linker = self.start(action='link', request_key='req-1', task_id=TASK_A, contend=True)
+        self.expect(linker, 'CONTENDED')
+        self.release.set()
+        self.assertEqual(self.finish(reader), ('RESULT', listed))
+        self.assertEqual(self.finish(linker)[1]['status'], 'LINKED')
+        self.assertEqual(sync.pending(self.path)['requests'], [])
+        self.assertUnlocked()
 
 
 if __name__ == '__main__':
