@@ -20,6 +20,16 @@ _CODEX_REVIEW_EFFORT = 'high'
 _CODEX_REVIEW_TIMEOUT = 600
 _CODEX_REVIEW_MAX_OUTPUT = 1024 * 1024
 
+# Fixed names of the check that refused a finished Codex run's output. They are
+# the only failure text a claim stores: never review text, model output or a path.
+# A claim holds one only when the read-only run ended and nothing was posted for it.
+REVIEW_FAILURE_REASONS = frozenset((
+    'OUTPUT_UNREADABLE', 'OUTPUT_NOT_JSONL', 'THREAD_ID_INVALID', 'MESSAGE_NOT_TEXT',
+    'NO_FINAL_MESSAGE', 'NO_THREAD_ID', 'VERDICT_NOT_JSON', 'VERDICT_WRONG_FIELDS',
+    'VERDICT_BINDING_MISMATCH', 'VERDICT_STATUS_INVALID', 'VERDICT_TEXT_INVALID',
+    'REVIEW_HEADER_MISMATCH', 'REVIEW_BINDING_LINE_MISSING',
+    'REVIEW_CLASSIFIER_REJECTED'))
+
 
 def _unique_json_object(pairs):
     result = {}
@@ -30,9 +40,11 @@ def _unique_json_object(pairs):
     return result
 
 
-def _refuse(code, message='Reviewer dispatch refused; details omitted'):
+def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reason=None):
     error = LLMToolError(message)
     error.review_dispatch_code = code
+    if reason is not None:
+        error.review_failure_reason = reason
     raise error from None
 
 
@@ -180,7 +192,7 @@ def _codex_argv(executable, reviewer_root, *, model=_CODEX_REVIEW_MODEL,
 def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, version=1):
     """Accept one exact, binding-complete Codex review object from JSONL."""
     if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_MAX_OUTPUT:
-        _refuse('REVIEW_NOT_POSTED')
+        _refuse('REVIEW_NOT_POSTED', reason='OUTPUT_UNREADABLE')
     final = None
     thread_id = None
     try:
@@ -192,31 +204,39 @@ def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, ve
                 current = event.get('thread_id')
                 if (thread_id is not None or type(current) is not str or
                         re.fullmatch(r'[0-9a-fA-F-]{16,64}', current) is None):
-                    _refuse('REVIEW_NOT_POSTED')
+                    _refuse('REVIEW_NOT_POSTED', reason='THREAD_ID_INVALID')
                 thread_id = current
             elif type(event) is dict and event.get('type') == 'item.completed':
                 item = event.get('item')
                 if type(item) is dict and item.get('type') == 'agent_message':
                     if type(item.get('text')) is not str:
-                        _refuse('REVIEW_NOT_POSTED')
+                        _refuse('REVIEW_NOT_POSTED', reason='MESSAGE_NOT_TEXT')
                     final = item['text']
+    except LLMToolError:
+        raise
     except (UnicodeError, ValueError, RecursionError):
-        _refuse('REVIEW_NOT_POSTED')
-    if final is None or thread_id is None:
-        _refuse('REVIEW_NOT_POSTED')
+        _refuse('REVIEW_NOT_POSTED', reason='OUTPUT_NOT_JSONL')
+    if final is None:
+        _refuse('REVIEW_NOT_POSTED', reason='NO_FINAL_MESSAGE')
+    if thread_id is None:
+        _refuse('REVIEW_NOT_POSTED', reason='NO_THREAD_ID')
     try:
         verdict = json.loads(final, object_pairs_hook=_unique_json_object)
     except (ValueError, TypeError, RecursionError):
-        _refuse('REVIEW_NOT_POSTED')
+        _refuse('REVIEW_NOT_POSTED', reason='VERDICT_NOT_JSON')
     expected = {'task_id', 'run_id', 'contract_digest', 'head', 'verdict', 'review'}
-    if (type(verdict) is not dict or set(verdict) != expected or
-            verdict.get('task_id') != task_id or verdict.get('run_id') != run_id or
+    if type(verdict) is not dict or set(verdict) != expected:
+        _refuse('REVIEW_NOT_POSTED', reason='VERDICT_WRONG_FIELDS')
+    if (verdict.get('task_id') != task_id or verdict.get('run_id') != run_id or
             verdict.get('contract_digest') != contract_digest or
-            verdict.get('head') != head or
-            verdict.get('verdict') not in ('PASS', 'FIX', 'FAIL', 'BLOCKED') or
-            type(verdict.get('review')) is not str or
+            verdict.get('head') != head):
+        _refuse('REVIEW_NOT_POSTED', reason='VERDICT_BINDING_MISMATCH')
+    if (type(verdict.get('verdict')) is not str or
+            verdict['verdict'] not in ('PASS', 'FIX', 'FAIL', 'BLOCKED')):
+        _refuse('REVIEW_NOT_POSTED', reason='VERDICT_STATUS_INVALID')
+    if (type(verdict.get('review')) is not str or
             len(verdict['review'].encode('utf-8', 'replace')) > 65536):
-        _refuse('REVIEW_NOT_POSTED')
+        _refuse('REVIEW_NOT_POSTED', reason='VERDICT_TEXT_INVALID')
     lines = [line for line in verdict['review'].splitlines() if line.strip()]
     status = verdict['verdict']
     displayed_status = 'PASS' if status == 'PASS' else 'FAIL'
@@ -226,9 +246,10 @@ def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, ve
     expected_status = (f'Verdict: {displayed_status} | Version: v{version} | HEAD: {head}')
     binding_line = (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
                     f'contract={contract_digest} head={head}')
-    if (len(lines) < 3 or lines[0] != expected_marker or lines[1] != expected_status or
-            binding_line not in lines):
-        _refuse('REVIEW_NOT_POSTED')
+    if len(lines) < 3 or lines[0] != expected_marker or lines[1] != expected_status:
+        _refuse('REVIEW_NOT_POSTED', reason='REVIEW_HEADER_MISMATCH')
+    if binding_line not in lines:
+        _refuse('REVIEW_NOT_POSTED', reason='REVIEW_BINDING_LINE_MISSING')
     # Use the persisted-result classifier as the authority for the body shape.
     # This keeps direct Codex results and later comment classification in parity.
     from . import review_result
@@ -242,7 +263,7 @@ def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, ve
               'developer': {'provider_profile': 'claude'}})
     expected_outcome = 'REVIEW_PASS' if status == 'PASS' else 'REVIEW_FAIL'
     if classified is None or classified[2] != expected_outcome:
-        _refuse('REVIEW_NOT_POSTED')
+        _refuse('REVIEW_NOT_POSTED', reason='REVIEW_CLASSIFIER_REJECTED')
     return {'thread_id': thread_id, 'review_text': verdict['review'], 'verdict': status}
 
 
@@ -275,6 +296,7 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
     except LLMToolError as exc:
         if getattr(exc, 'review_dispatch_code', None) != 'REVIEW_NOT_POSTED':
             raise
+        reason = getattr(exc, 'review_failure_reason', None)
         final = _codex_final_message(raw)
         if final is not None and final.strip():
             excerpt = final.encode('utf-8')[:2048].decode('utf-8', 'ignore')
@@ -284,8 +306,9 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
             except LLMToolError:
                 excerpt = ''
             if excerpt:
-                _refuse('REVIEW_NOT_POSTED', 'Reviewer dispatch refused: ' + excerpt)
-        _refuse('REVIEW_NOT_POSTED')
+                _refuse('REVIEW_NOT_POSTED', 'Reviewer dispatch refused: ' + excerpt,
+                        reason=reason)
+        _refuse('REVIEW_NOT_POSTED', reason=reason)
 
 
 def _review_return(claim, result):
@@ -536,6 +559,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         unknown = dict(claim, state='UNKNOWN', updated_at=_now())
         if session_id is not None:
             unknown['native_session_id'] = session_id
+        reason = getattr(exc, 'review_failure_reason', None)
+        if reason in REVIEW_FAILURE_REASONS:
+            unknown['failure_reason'] = reason
         try:
             claimed = claims + [claim]
             updated_claims = [unknown if item is claim else item for item in claimed]

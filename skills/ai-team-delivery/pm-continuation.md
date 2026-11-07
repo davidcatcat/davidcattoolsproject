@@ -135,6 +135,8 @@ This single recurring schedule (about every 5 minutes in the PM session, for exa
 
 **Board:** every sweep writes `~/.local/state/llmtool/pm-board.json`. Check each row against its real Issue, PR or Task and update its text, not only `updated_at`. A closed Issue leaves the board. A row nobody works on is not `running`: find its next step, dispatch it or move it (Owner 2026-11-07, #763).
 
+**Row audit:** each sweep record lists every running and queue row as ref, who is on it now (Task, PR check or sub-agent, with ID) and next step. Nobody is allowed for one sweep only: by the next sweep the row is dispatched, moved to queue or blocked with a real reason, or raised to the Owner. A short no-change record is not allowed while any row says Nobody (Owner 2026-11-07, #763).
+
 **Sweep record:** post one short comment per sweep on tracking Issue #763 (no new Issue, no raw logs) starting with the exact whole-line marker:
 
 `<!-- activity: type=pm_progress actor=PM target=PM status=SWEEP -->`
