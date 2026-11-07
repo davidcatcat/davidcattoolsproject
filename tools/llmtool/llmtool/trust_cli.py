@@ -91,8 +91,12 @@ def _git(*args, cwd=None):
     return result.stdout.strip()
 
 
+def _checkout_top():
+    return Path(_git("rev-parse", "--show-toplevel")).resolve(strict=True)
+
+
 def _checkout_values(home):
-    top = Path(_git("rev-parse", "--show-toplevel")).resolve(strict=True)
+    top = _checkout_top()
     common = Path(_git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=top)).resolve(strict=True)
     git_dir = Path(_git("rev-parse", "--path-format=absolute", "--absolute-git-dir", cwd=top)).resolve(strict=True)
     if common != top / ".git" or git_dir != common:
@@ -233,12 +237,10 @@ def _binding_sha256(document):
     return _binding(document)
 
 
-def _affected_active_records(home, new_binding):
-    """Count active D6 registrations whose trust binding would rotate."""
+def _affected_active_records(root, new_binding):
+    """Count active D6 registrations under root whose trust binding would rotate."""
     try:
-        from . import review_bundle
-        root = Path(review_bundle.LEGACY_PROTECTED[0])
-        common = Path(_git("-C", str(root), "rev-parse", "--path-format=absolute",
+        common = Path(_git("-C", root, "rev-parse", "--path-format=absolute",
                            "--git-common-dir", cwd=root))
         registry_dir = common / "llmtool-worktrees"
     except (OSError, TrustError):
@@ -322,6 +324,9 @@ def _init(args):
             raise TrustError("TRUST_ROTATION_UNCONFIRMED") from None
         if hashlib.sha256(previous_raw).hexdigest() != current.sha256:
             raise TrustError("TRUST_ROTATION_UNCONFIRMED")
+        # Only the trusted checkout may rotate trust; refuse before any draft read or write.
+        if str(_checkout_top()) != current.canonical_root:
+            raise TrustError("TRUST_ROTATION_ROOT_UNTRUSTED")
     elif confirm is not None:
         raise TrustError("TRUST_ROTATION_UNCONFIRMED")
     if not replacing and (target.exists() or target.is_symlink()):
@@ -385,7 +390,8 @@ def _init(args):
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
             os.chmod(root, 0o700)
     raw = (json.dumps(document, sort_keys=True, indent=2) + "\n").encode("utf-8")
-    affected = _affected_active_records(home, _binding_sha256(document)) if replacing else 0
+    affected = (_affected_active_records(current.canonical_root, _binding_sha256(document))
+                if replacing else 0)
     if replacing:
         _atomic_replace(target, raw)
     else:
