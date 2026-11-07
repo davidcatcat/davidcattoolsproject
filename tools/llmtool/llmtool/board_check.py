@@ -16,13 +16,28 @@ Exit status: 0 clean, 2 when any row is ACTIONABLE (idle work with a next step)
 or ANOMALY, 1 when the board is unreadable or any evidence read failed and
 nothing is flagged. A failed read stays UNKNOWN on the row it affects; it does
 not weaken a finding proven by other evidence.
+
+Dispatch ledger (#763 T2): ``board-check --claim ROW --holder H`` reserves a
+board row in one private ledger file, and ``--task TASK`` binds a TaskStore
+Task to H's reservation. A claim only records the reservation or binding; it
+never dispatches, creates a Task or writes GitHub. A claim is live while it is
+a reservation under 15 minutes old, or while its bound Task exists and is not
+ABANDONED, FAILED or merged. A dead claim stays in the ledger as history and
+the row can be claimed again. A refused claim names its code and exits 3.
+
+A Task counts as RUNNING only when a live ledger claim binds it or its
+Developer worker is a worker-dispatch.json Worker.
 """
 
+import contextlib
+import fcntl
 import json
 import os
 import re
 import stat
 import subprocess
+import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -42,7 +57,24 @@ ACTIONABLE = 'ACTIONABLE'
 ANOMALY = 'ANOMALY'
 UNKNOWN = 'UNKNOWN'
 DONE = 'DONE'
+CLAIMED = 'CLAIMED'
 FLAGGED_STATES = frozenset((ACTIONABLE, ANOMALY))
+
+LEDGER_SCHEMA_VERSION = 1
+MAX_LEDGER_BYTES = 256 * 1024
+MAX_LEDGER_CLAIMS = 512
+RESERVATION_TTL = timedelta(minutes=15)
+# Tolerated clock skew for a reservation stamped slightly in the future.
+_RESERVATION_SKEW = timedelta(minutes=1)
+LEDGER_LOCK_TIMEOUT_SECONDS = 10.0
+_LEDGER_LOCK_POLL_SECONDS = 0.05
+CLAIM_REFUSED_EXIT = 3
+_LEDGER_FIELDS = frozenset(('schema_version', 'claims'))
+_CLAIM_FIELDS = frozenset(('claim_id', 'row', 'holder', 'reserved_at', 'task_id', 'bound_at'))
+_HOLDER = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}\Z')
+_SECONDS = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z')
+# Ledger claim liveness.
+_LIVE, _EXPIRED, _DEAD, _MERGED = 'LIVE', 'EXPIRED', 'DEAD', 'MERGED'
 
 # Developer routes that take a registered D6 writer. Company gw only proposes
 # patches without file or Git authority, so it never counts as free capacity
@@ -128,6 +160,179 @@ def read_board(path):
     return value['rows']
 
 
+class LedgerUnreadable(Exception):
+    """The ledger exists but is not a private, bounded schema_version 1 file."""
+
+
+class ClaimRefused(Exception):
+    """A ledger claim was refused; ``code`` names the reason."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+def default_ledger_path():
+    return Path.home() / '.local' / 'state' / 'llmtool' / 'board-ledger.json'
+
+
+def _valid_row_id(value):
+    return type(value) is str and 1 <= len(value) <= 128
+
+
+def _seconds(value):
+    """Parse a whole-second UTC stamp as the ledger writes it; anything else is None."""
+    if type(value) is not str or _SECONDS.fullmatch(value) is None:
+        return None
+    return _utc(value)
+
+
+def _valid_claim(item):
+    return (type(item) is dict and set(item) == _CLAIM_FIELDS and
+            type(item['claim_id']) is str and _TASK_ID.fullmatch(item['claim_id']) is not None and
+            _valid_row_id(item['row']) and
+            type(item['holder']) is str and _HOLDER.fullmatch(item['holder']) is not None and
+            _seconds(item['reserved_at']) is not None and
+            ((item['task_id'] is None and item['bound_at'] is None) or
+             (type(item['task_id']) is str and _TASK_ID.fullmatch(item['task_id']) is not None and
+              _seconds(item['bound_at']) is not None)))
+
+
+def read_ledger(path, *, directory=None):
+    """Return the ledger claims in append order; a missing ledger is empty.
+
+    Any doubt about an existing file (symlink, owner, mode other than 0600, extra
+    links, size, JSON or schema) raises LedgerUnreadable.
+    """
+    path = Path(path)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        if directory is None:
+            fd = os.open(path, flags)
+        else:
+            fd = os.open(path.name, flags, dir_fd=directory)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        raise LedgerUnreadable('ledger unreadable') from None
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or
+                info.st_size > MAX_LEDGER_BYTES):
+            raise LedgerUnreadable('ledger is not a private bounded regular file')
+        chunks, remaining = [], MAX_LEDGER_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b''.join(chunks)
+        if len(raw) > MAX_LEDGER_BYTES:
+            raise LedgerUnreadable('ledger exceeds size limit')
+        value = json.loads(raw.decode('utf-8'),
+                           object_pairs_hook=worker_dispatch._unique_pairs,
+                           parse_constant=_reject_constant)
+    except LedgerUnreadable:
+        raise
+    except (OSError, UnicodeError, ValueError, TypeError):
+        raise LedgerUnreadable('ledger unreadable') from None
+    finally:
+        os.close(fd)
+    claims = value.get('claims') if type(value) is dict else None
+    if (type(value) is not dict or set(value) != _LEDGER_FIELDS or
+            type(value['schema_version']) is not int or
+            value['schema_version'] != LEDGER_SCHEMA_VERSION or
+            type(claims) is not list or len(claims) > MAX_LEDGER_CLAIMS or
+            not all(_valid_claim(item) for item in claims) or
+            len({item['claim_id'] for item in claims}) != len(claims)):
+        raise LedgerUnreadable('ledger is not schema_version 1 with valid claims')
+    return [dict(item) for item in claims]
+
+
+def _ledger_directory(path):
+    """Open the ledger's own directory: owned by this user, not group or world writable."""
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        raise ClaimRefused('LEDGER_UNAVAILABLE') from None
+    info = os.fstat(fd)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or
+            info.st_mode & 0o022):
+        os.close(fd)
+        raise ClaimRefused('LEDGER_UNAVAILABLE')
+    return fd
+
+
+@contextlib.contextmanager
+def _ledger_lock(path):
+    """Hold the exclusive ledger lock; yield the ledger directory fd."""
+    path = Path(path)
+    directory = _ledger_directory(path)
+    lock_fd = None
+    try:
+        try:
+            lock_fd = os.open(path.name + '.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                              0o600, dir_fd=directory)
+            info = os.fstat(lock_fd)
+        except OSError:
+            raise ClaimRefused('LEDGER_UNAVAILABLE') from None
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ClaimRefused('LEDGER_UNAVAILABLE')
+        deadline = time.monotonic() + LEDGER_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ClaimRefused('LEDGER_BUSY') from None
+                time.sleep(_LEDGER_LOCK_POLL_SECONDS)
+            except OSError:
+                raise ClaimRefused('LEDGER_UNAVAILABLE') from None
+        yield directory
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)  # Closing the descriptor releases the flock.
+        os.close(directory)
+
+
+def _write_ledger(directory, name, claims):
+    """Replace the ledger atomically with a fsynced private temporary file."""
+    raw = json.dumps({'schema_version': LEDGER_SCHEMA_VERSION, 'claims': claims},
+                     ensure_ascii=True, sort_keys=True,
+                     separators=(',', ':')).encode('ascii') + b'\n'
+    if len(raw) > MAX_LEDGER_BYTES:
+        raise ClaimRefused('LEDGER_FULL')
+    temporary = f'.{name}.{uuid.uuid4().hex}.tmp'
+    replaced = False
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=directory)
+        try:
+            os.fchmod(fd, 0o600)
+            view = memoryview(raw)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+        replaced = True
+        os.fsync(directory)
+    except OSError:
+        raise ClaimRefused('LEDGER_WRITE_UNCONFIRMED' if replaced
+                           else 'LEDGER_WRITE_FAILED') from None
+    finally:
+        if not replaced:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except OSError:
+                pass
+
+
 def _utc(value):
     if type(value) is not str or _UTC.fullmatch(value) is None:
         return None
@@ -204,13 +409,17 @@ def parse_predicate(text):
 class _Context:
     """Cached, read-only evidence for one board check."""
 
-    def __init__(self, *, store, github_get, list_processes, read_d6, evaluate, now):
+    def __init__(self, *, store, github_get, list_processes, read_d6, evaluate, now,
+                 ledger=(), ledger_error=None):
         self.store = store
         self._github_get = github_get
         self._list_processes = list_processes
         self._read_d6 = read_d6
         self._evaluate = evaluate
         self.now = now
+        # Validated ledger claims, or ledger_error naming why the ledger is unreadable.
+        self.ledger = list(ledger)
+        self.ledger_error = ledger_error
         self._ids = None
         self._records = {}
         self._processes = None
@@ -568,6 +777,9 @@ def _route_occupancy(ctx, worker):
 
     A Task occupies the route only under the checks that make it RUNNING, so a
     terminal or unowned Task does not count. Failed evidence is neither busy nor free.
+    Only Tasks whose Developer worker is ``worker`` are counted, and _capacity
+    calls this only after the policy allowed ``worker``, so every busy Task here
+    has a worker-dispatch.json Worker, as RUNNING requires.
     """
     doubt = None
     for task_id in sorted(ctx.task_ids()):
@@ -602,13 +814,82 @@ def _merged(record):
         for event in (events if type(events) is list else []))
 
 
+def _task_liveness(ctx, task_id):
+    """LIVE, DEAD (missing, ABANDONED or FAILED) or MERGED for a bound Task."""
+    record = ctx.record(task_id)
+    if record is None:
+        return _DEAD
+    if _merged(record):
+        return _MERGED
+    if task_status.derive_state(record) in ('ABANDONED', 'FAILED'):
+        return _DEAD
+    return _LIVE
+
+
+def _claim_status(ctx, claim):
+    """Return LIVE, EXPIRED, DEAD or MERGED for one ledger claim.
+
+    A reservation is live under 15 minutes old; a bound claim is live only by
+    its Task in TaskStore, so a fake, missing or terminal Task never is.
+    """
+    if claim['task_id'] is None:
+        age = ctx.now - _utc(claim['reserved_at'])
+        return _LIVE if -_RESERVATION_SKEW <= age < RESERVATION_TTL else _EXPIRED
+    return _task_liveness(ctx, claim['task_id'])
+
+
+def _row_claims(ctx, row):
+    """This row's ledger claims in append order; none when the ledger is unreadable."""
+    if ctx.ledger_error is not None or type(row.get('id')) is not str:
+        return []
+    return [claim for claim in ctx.ledger if claim['row'] == row['id']]
+
+
+def _ledger_binds(ctx, task_id):
+    return any(claim['task_id'] == task_id and _claim_status(ctx, claim) == _LIVE
+               for claim in ctx.ledger)
+
+
+def _unauthorized_running(ctx, record):
+    """Return ANOMALY evidence when a proven live attempt is not authorized, else None.
+
+    A Task counts as RUNNING only when a live ledger claim binds it or its
+    Developer worker is a worker-dispatch.json Worker. An unreadable policy or
+    ledger that leaves the answer open is UNKNOWN.
+    """
+    task_id = record.get('task_id')
+    if ctx.ledger_error is None and _ledger_binds(ctx, task_id):
+        return None
+    developer = record.get('developer')
+    profile = developer.get('provider_profile') if type(developer) is dict else None
+    worker = worker_dispatch.worker_key_for(profile)
+    if worker is not None:
+        decision = ctx.evaluate(worker)
+        reason = getattr(decision, 'reason_code', None)
+        if getattr(decision, 'allowed', None) is True or reason in _AUTHORIZATION_WAIT_CODES:
+            return None
+        if reason not in _UNCHECKABLE_WORKER_CODES:
+            raise _Unknown(reason if type(reason) is str else 'DISPATCH_POLICY_UNAVAILABLE')
+    if ctx.ledger_error is not None:
+        raise _Unknown(ctx.ledger_error)
+    return (f"Task {task_id} Developer worker {_label(worker or 'none')} is not a "
+            'worker-dispatch.json Worker and no live ledger claim binds it')
+
+
 def _row_done(ctx, row):
     task_id = row.get('task_id')
     if type(task_id) is str:
         record = ctx.record(task_id)
         return record is not None and _merged(record)
+    bound = [claim['task_id'] for claim in _row_claims(ctx, row) if claim['task_id'] is not None]
+    if bound:
+        record = ctx.record(bound[-1])
+        if record is not None and _merged(record):
+            return True
     if type(row.get('pr')) is int:
         return ctx.pull(row['pr'])['merged']
+    if ctx.ledger_error is not None and type(row.get('id')) is str:
+        raise _Unknown(ctx.ledger_error)
     return False
 
 
@@ -772,6 +1053,9 @@ def _classify_repair(ctx, row, record, head, gates, rows_by_id):
     pid, since = _attempt_process(ctx, child, executor, binding=record)
     if pid is None:
         return ANOMALY, [f'repair Task {task_id}: {_no_process(since)}: dead repair']
+    unauthorized = _unauthorized_running(ctx, child)
+    if unauthorized is not None:
+        return ANOMALY, [f'repair {unauthorized}']
     return RUNNING, [f'repair Task {task_id} process {pid} proven in the D6 root, started '
                      f'after dispatch {_stamp(since[0])}']
 
@@ -800,6 +1084,9 @@ def _classify_task(ctx, row, task_id, gates, rows_by_id):
     if developer_state == 'DEVELOPER_DISPATCHING':
         pid, since = _attempt_process(ctx, record, _executor_task(record))
         if pid is not None:
+            unauthorized = _unauthorized_running(ctx, record)
+            if unauthorized is not None:
+                return ANOMALY, [unauthorized]
             return RUNNING, [f'process {pid} proven in the Task D6 root, started after '
                              f'dispatch {_stamp(since[0])}']
         return ANOMALY, [f'Task DEVELOPER_DISPATCHING but {_no_process(since)}: dead Task']
@@ -853,7 +1140,62 @@ def _row_problem(row):
     for field in ('owner_ref', 'after', 'blocker'):
         if row.get(field) is not None and (type(row[field]) is not str or len(row[field]) > 512):
             return f'{field} is not a short string'
+    following = row.get('next')
+    if following is not None and (type(following) is not list or len(following) > 32 or
+                                  not all(_valid_row_id(item) for item in following)):
+        return 'next is not a list of row ids'
     return None
+
+
+def _live_claims(ctx, claims):
+    return [claim for claim in claims if _claim_status(ctx, claim) == _LIVE]
+
+
+def _classify_listed_task(ctx, row, claims, gates, rows_by_id):
+    """Classify a row's own task_id; a different live ledger Task is ANOMALY."""
+    task_id = row['task_id']
+    doubt = None
+    try:
+        live = _live_claims(ctx, claims)
+    except _Unknown as exc:
+        live, doubt = [], exc
+    if len(live) > 1:
+        return ANOMALY, [f'row has {len(live)} live ledger claims']
+    if live and live[0]['task_id'] not in (None, task_id):
+        ctx.covered_tasks.add(live[0]['task_id'])
+        return ANOMALY, [f"board task_id {task_id} differs from live ledger Task "
+                         f"{live[0]['task_id']} claimed by {_label(live[0]['holder'])}"]
+    state, evidence = _classify_task(ctx, row, task_id, gates, rows_by_id)
+    # An unreadable ledger Task leaves the comparison open; it never hides a proven ANOMALY.
+    if doubt is not None and state != ANOMALY:
+        raise doubt
+    return state, evidence
+
+
+def _classify_ledger_row(ctx, row, claims, gates, rows_by_id):
+    """Classify a row without task_id by its live, else latest, ledger claim."""
+    statuses = [(claim, _claim_status(ctx, claim)) for claim in claims]
+    live = [claim for claim, status in statuses if status == _LIVE]
+    if len(live) > 1:
+        return ANOMALY, [f'row has {len(live)} live ledger claims']
+    claim, status = (live[0], _LIVE) if live else statuses[-1]
+    holder = _label(claim['holder'])
+    task_id = claim['task_id']
+    if task_id is None:
+        if status == _LIVE:
+            return CLAIMED, [f"ledger reservation by {holder} at {claim['reserved_at']}; "
+                             'no Task bound yet']
+        return ANOMALY, [f"ledger reservation by {holder} at {claim['reserved_at']} expired "
+                         'with no Task bound']
+    ctx.covered_tasks.add(task_id)
+    if status == _DEAD:
+        record = ctx.record(task_id)
+        detail = ('not found in TaskStore' if record is None
+                  else task_status.derive_state(record))
+        return ANOMALY, [f'ledger claim by {holder} binds Task {task_id}, which is {detail}: '
+                         'dead claim']
+    state, evidence = _classify_task(ctx, row, task_id, gates, rows_by_id)
+    return state, [f'ledger claim by {holder} binds Task {task_id}'] + evidence
 
 
 def _classify_row(ctx, row, rows_by_id, duplicate_ids):
@@ -871,8 +1213,11 @@ def _classify_row(ctx, row, rows_by_id, duplicate_ids):
     gates, problem = _row_gates(row, rows_by_id)
     if problem is not None:
         return ANOMALY, [problem]
+    claims = _row_claims(ctx, row)
     if row.get('task_id') is not None:
-        return _classify_task(ctx, row, row['task_id'], gates, rows_by_id)
+        return _classify_listed_task(ctx, row, claims, gates, rows_by_id)
+    if claims:
+        return _classify_ledger_row(ctx, row, claims, gates, rows_by_id)
     if row.get('pr') is not None:
         return _classify_pr(ctx, row, row['pr'], gates, rows_by_id)
     return _finish(ctx, row, None, gates, rows_by_id,
@@ -915,6 +1260,11 @@ def _unlisted(ctx):
         developer = record.get('developer')
         if (type(developer) is dict and developer.get('state') == 'DEVELOPER_DISPATCHING' and
                 task_status.derive_state(record) not in _TERMINAL_TASK_STATES):
+            if ctx.ledger_error is not None:
+                # An unreadable ledger may still bind this Task to a board row.
+                findings.append({'row': f'task:{task_id}', 'state': UNKNOWN,
+                                 'evidence': [ctx.ledger_error]})
+                continue
             findings.append({'row': f'task:{task_id}', 'state': ANOMALY,
                              'evidence': ['live Task (DEVELOPER_DISPATCHING) missing from the '
                                           'board']})
@@ -932,12 +1282,18 @@ def _row_label(row, index):
 
 
 def check_board(rows, *, store, github_get, list_processes, read_d6=None,
-                evaluate=None, now=None):
-    """Classify every row and return {'result', 'exit_code', 'rows'}."""
+                evaluate=None, now=None, ledger=None, ledger_error=None):
+    """Classify every row and return {'result', 'exit_code', 'rows'}.
+
+    ``ledger`` holds validated ledger claims (none by default). ``ledger_error``
+    names why the ledger could not be read; every row with an id is then
+    UNKNOWN unless other evidence proves it ANOMALY.
+    """
     ctx = _Context(store=store, github_get=github_get, list_processes=list_processes,
                    read_d6=read_d6 or task_advance._d6_snapshot,
                    evaluate=evaluate or worker_dispatch.evaluate,
-                   now=now or datetime.now(timezone.utc))
+                   now=now or datetime.now(timezone.utc),
+                   ledger=ledger or (), ledger_error=ledger_error)
     rows_by_id, duplicate_ids = {}, set()
     for row in rows:
         if type(row) is dict and type(row.get('id')) is str:
@@ -952,6 +1308,10 @@ def check_board(rows, *, store, github_get, list_processes, read_d6=None,
             state, evidence = UNKNOWN, [exc.code]
         except Exception:
             state, evidence = UNKNOWN, ['BOARD_CHECK_INTERNAL_ERROR']
+        if (ctx.ledger_error is not None and state not in (ANOMALY, UNKNOWN) and
+                type(row) is dict and type(row.get('id')) is str):
+            # The row may hold a ledger claim that would change its state.
+            state, evidence = UNKNOWN, [ctx.ledger_error]
         findings.append({'row': _row_label(row, index), 'state': state, 'evidence': evidence})
     findings.extend(_unlisted(ctx))
     if any(item['state'] in FLAGGED_STATES for item in findings):
@@ -1037,14 +1397,140 @@ def format_result(result):
     return '\n'.join(lines)
 
 
+def _claim_change(ctx, claims, row_id, holder, task_id):
+    """Apply one reservation or binding to ``claims`` in place; refusals raise ClaimRefused."""
+    row_claims = [claim for claim in claims if claim['row'] == row_id]
+    statuses = [(claim, _claim_status(ctx, claim)) for claim in row_claims]
+    live = [claim for claim, status in statuses if status == _LIVE]
+    stamp = _stamp(ctx.now)
+    if task_id is None:
+        if live:
+            raise ClaimRefused('ROW_ALREADY_CLAIMED')
+        if len(claims) >= MAX_LEDGER_CLAIMS:
+            raise ClaimRefused('LEDGER_FULL')
+        claim = {'claim_id': uuid.uuid4().hex, 'row': row_id, 'holder': holder,
+                 'reserved_at': stamp, 'task_id': None, 'bound_at': None}
+        claims.append(claim)
+        return 'RESERVED', dict(claim)
+    if task_id not in ctx.task_ids():
+        raise ClaimRefused('TASK_NOT_FOUND')
+    if not live:
+        expired = bool(statuses) and statuses[-1][1] == _EXPIRED
+        raise ClaimRefused('RESERVATION_EXPIRED' if expired else 'RESERVATION_REQUIRED')
+    current = live[0]
+    if len(live) > 1 or current['task_id'] is not None:
+        raise ClaimRefused('ROW_ALREADY_CLAIMED')
+    if current['holder'] != holder:
+        raise ClaimRefused('HOLDER_MISMATCH')
+    if any(claim['task_id'] == task_id and _claim_status(ctx, claim) == _LIVE
+           for claim in claims):
+        raise ClaimRefused('TASK_ALREADY_BOUND')
+    if _task_liveness(ctx, task_id) != _LIVE:
+        raise ClaimRefused('TASK_NOT_LIVE')
+    current['task_id'] = task_id
+    current['bound_at'] = stamp
+    return 'BOUND', dict(current)
+
+
+def claim_row(row_id, holder, task_id=None, *, board_path, ledger_path, store, now):
+    """Reserve a board row for ``holder``, or bind a Task to holder's reservation.
+
+    The board row must exist; the check, decision and ledger replacement run
+    under one exclusive ledger lock, so concurrent claims have one winner. The
+    claim only writes the ledger. Return (result, claim); refusals raise ClaimRefused.
+    """
+    if not _valid_row_id(row_id):
+        raise ClaimRefused('ROW_INVALID')
+    if type(holder) is not str or _HOLDER.fullmatch(holder) is None:
+        raise ClaimRefused('HOLDER_INVALID')
+    if task_id is not None and (type(task_id) is not str or _TASK_ID.fullmatch(task_id) is None):
+        raise ClaimRefused('TASK_NOT_FOUND')
+    try:
+        rows = read_board(board_path)
+    except BoardUnreadable:
+        raise ClaimRefused('BOARD_UNREADABLE') from None
+    matches = [row for row in rows if type(row) is dict and row.get('id') == row_id]
+    if not matches:
+        raise ClaimRefused('ROW_NOT_ON_BOARD')
+    if len(matches) > 1:
+        raise ClaimRefused('ROW_ID_DUPLICATE')
+    ledger_path = Path(ledger_path)
+    with _ledger_lock(ledger_path) as directory:
+        try:
+            claims = read_ledger(ledger_path, directory=directory)
+        except LedgerUnreadable:
+            raise ClaimRefused('LEDGER_UNREADABLE') from None
+        ctx = _Context(store=store, github_get=None, list_processes=None, read_d6=None,
+                       evaluate=None, now=now, ledger=claims)
+        try:
+            result, claim = _claim_change(ctx, claims, row_id, holder, task_id)
+        except _Unknown as exc:
+            raise ClaimRefused(exc.code) from None
+        _write_ledger(directory, ledger_path.name, claims)
+    return result, claim
+
+
 def add_board_check_parser(sub):
     parser = sub.add_parser(
         'board-check',
-        help='Reconcile pm-board.json rows with Task, GitHub and Worker evidence; read-only')
+        help='Reconcile pm-board.json rows with Task, GitHub and Worker evidence; '
+             '--claim records a dispatch-ledger claim')
     parser.add_argument('--board', help='pm-board.json path '
                         '(default: ~/.local/state/llmtool/pm-board.json)')
+    parser.add_argument('--ledger', help='board-ledger.json path '
+                        '(default: ~/.local/state/llmtool/board-ledger.json)')
+    parser.add_argument('--claim', metavar='ROW',
+                        help='reserve this board row for --holder; never dispatches')
+    parser.add_argument('--holder', help='claim holder, required with --claim')
+    parser.add_argument('--task', metavar='TASK_ID',
+                        help="with --claim, bind this TaskStore Task to the holder's reservation")
     parser.add_argument('--json', action='store_true', help='output JSON')
     return parser
+
+
+def claim_requested(args):
+    return any(getattr(args, name, None) is not None for name in ('claim', 'holder', 'task'))
+
+
+def run_board_claim(args, *, store=None, now=None):
+    """Run one --claim; exit 0 on success and CLAIM_REFUSED_EXIT on any refusal."""
+    row_id = getattr(args, 'claim', None)
+    holder = getattr(args, 'holder', None)
+    task_id = getattr(args, 'task', None)
+    as_json = bool(getattr(args, 'json', False))
+    claim, code = None, None
+    try:
+        if row_id is None or holder is None:
+            raise ClaimRefused('CLAIM_ARGUMENTS_INVALID')
+        result, claim = claim_row(
+            row_id, holder, task_id,
+            board_path=getattr(args, 'board', None) or default_board_path(),
+            ledger_path=getattr(args, 'ledger', None) or default_ledger_path(),
+            store=store or TaskStore(), now=now or datetime.now(timezone.utc))
+    except ClaimRefused as exc:
+        result, code = 'REFUSED', exc.code if _CODE.fullmatch(str(exc.code)) else 'CLAIM_REFUSED'
+    except Exception:
+        result, code = 'REFUSED', 'CLAIM_INTERNAL_ERROR'
+    output = {'result': result, 'code': code,
+              'row': row_id if _valid_row_id(row_id) else None,
+              'holder': holder if type(holder) is str and _HOLDER.fullmatch(holder) else None,
+              'task_id': (task_id if type(task_id) is str and _TASK_ID.fullmatch(task_id)
+                          else None),
+              'claim': claim}
+    if as_json:
+        print(json.dumps(output, ensure_ascii=True, sort_keys=True))
+    else:
+        line = f'board-check claim: {result}'
+        if code is not None:
+            line += f' {code}'
+        if output['row'] is not None:
+            line += f" row {_label(output['row'])}"
+        if output['holder'] is not None:
+            line += f" holder {output['holder']}"
+        if claim is not None and claim['task_id'] is not None:
+            line += f" Task {claim['task_id']}"
+        print(line)
+    return 0 if code is None else CLAIM_REFUSED_EXIT
 
 
 def run_board_check(args, *, store=None, github_get=None, list_processes_call=None,
@@ -1060,10 +1546,16 @@ def run_board_check(args, *, store=None, github_get=None, list_processes_call=No
         else:
             print('board-check: UNREADABLE board file')
         return 1
+    ledger, ledger_error = (), None
+    try:
+        ledger = read_ledger(getattr(args, 'ledger', None) or default_ledger_path())
+    except LedgerUnreadable:
+        ledger_error = 'LEDGER_UNREADABLE'
     result = check_board(rows, store=store or TaskStore(),
                          github_get=github_get or github_reader(),
                          list_processes=list_processes_call or list_processes,
-                         read_d6=read_d6, evaluate=evaluate, now=now)
+                         read_d6=read_d6, evaluate=evaluate, now=now,
+                         ledger=ledger, ledger_error=ledger_error)
     if as_json:
         print(json.dumps(result, ensure_ascii=True, sort_keys=True))
     else:

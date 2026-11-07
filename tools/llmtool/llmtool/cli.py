@@ -35,7 +35,8 @@ from . import task_submission_cli
 from .task_review_cli import add_review_parser, run_task_review
 from .review_authority_cli import add_review_authority_parser, run_review_authority_check
 from .dispatch_check import add_dispatch_check_parser, run_dispatch_check
-from .board_check import add_board_check_parser, run_board_check
+from .board_check import (add_board_check_parser, claim_requested, run_board_check,
+                          run_board_claim)
 from .trust_cli import add_trust_parser, run_trust
 
 
@@ -538,6 +539,9 @@ def main(argv=None):
         if args.command == 'dispatch-check':
             return run_dispatch_check(args)
         if args.command == 'board-check':
+            # --claim, --holder or --task writes only the dispatch ledger; a plain check only reads.
+            if claim_requested(args):
+                return run_board_claim(args)
             return run_board_check(args)
         if args.command == 'trust':
             return run_trust(args)
