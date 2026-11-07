@@ -3393,8 +3393,9 @@ class CodexReviewFailureReasonTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             store = TaskStore(Path(temp).resolve() / 'tasks')
             store.create(task)
-            # The first write checks the plain claim shape, the second the new field.
-            plain = unusable_claim(reason=None)
+            # The first write checks the plain claim shape, the second the new
+            # field, on the store's one allowed path: CLAIMED, then UNKNOWN.
+            plain = dict(unusable_claim(reason=None), state='CLAIMED')
             store.compare_and_update(task_id, expected={
                 'record_sha256': store.get(task_id)['record_sha256']},
                 review_dispatch_claim=[plain])
