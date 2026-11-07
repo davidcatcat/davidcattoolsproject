@@ -916,7 +916,9 @@ class GwAgentRealStoreTests(unittest.TestCase):
     def _delegate(self, target, *, usage=(1026, 49), served_model='qwen3.8-27b',
                   provider_model='gw', reject_responded=False, route_runner=None,
                   wrap_store=None, gate=None, authorize=None, route_factory=None,
-                  content='hello synthetic\n'):
+                  content='hello synthetic\n', bind=None):
+        # #1072: without ``bind`` the D6 session step keeps today's unbound
+        # result; with it the real step runs against that fake lifecycle helper.
         task_id = self.task_id = self._active_pm_task(target)
         if provider_model != 'gw':
             config = self.base / '.config' / 'llmtool' / 'config.yaml'
@@ -970,6 +972,10 @@ class GwAgentRealStoreTests(unittest.TestCase):
              patch.object(worker_dispatch, 'evaluate', return_value=gate or decision), \
              patch.object(task_submission_cli, 'GwAgentRoute',
                           route_factory or task_submission_cli.GwAgentRoute), \
+             (patch.object(task_submission_cli, '_bind_direct_native_session',
+                           return_value=False) if bind is None else
+              patch.object(task_submission_cli, '_bind_codex_native_session',
+                           side_effect=bind)), \
              redirect_stdout(io.StringIO()):
             code = task_submission_cli.run_task_gw_agent_delegate(
                 args, store=store, route_runner=route_runner)
