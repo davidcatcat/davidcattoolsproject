@@ -2426,8 +2426,6 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 registry_code='D6_REGISTRY_INVALID')
         self.assertNotEqual(result['step'], 'CLOSED')
         self.assertEqual(saved, [])
-        self.assertEqual(saved[0][4], 541)
-        self.assertEqual(saved[0][-2:], ('MERGED', 'e' * 40))
 
     def test_without_merge_proof_the_retired_d6_still_refuses(self):
         other_head = dict(self.MERGED_PR, head={'sha': 'f' * 40})
@@ -4236,8 +4234,9 @@ class IntegrationDeltaRealGitTests(unittest.TestCase):
     def test_ready_for_integration_unverified_delta_does_not_close(self):
         ready = base_record(review_dispatch_claim=[{
             'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}],
-            completion={'state': 'PM_EVIDENCE_READY', 'evidence': {
-                'result': {'result_head': HEAD}, 'review_pr_ci': {'stage': 'READY'}}})
+            completion={'executor_task_id': 'executor-1', 'state': 'PM_EVIDENCE_READY',
+                        'evidence': {'result': {'result_head': HEAD},
+                                     'review_pr_ci': {'stage': 'READY'}}})
         integration = {'number': 27, 'merged': True,
                        'head': {'sha': 'c' * 40}, 'merge_commit_sha': 'd' * 40}
         saved = []
