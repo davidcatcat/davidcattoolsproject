@@ -468,29 +468,75 @@ class HistoryTests(AdoptionCase):
         self.assert_refused('PM_SESSION_ADOPTION_LIMIT', old, self.new_claude(), task)
         self.assertIsNone(self.fence(old))
 
-    def test_the_validator_accepts_both_entry_shapes_and_nothing_else(self):
+    def history_entries(self):
+        """(Task, legacy entry, Claude-to-Codex entry, Codex-to-Claude entry)."""
         old, _, task = self.stopped_claude()
         legacy = {'old_session_key': 'pm-' + str(uuid.uuid4()),
                   'new_session_key': 'pm-' + old, 'at': AT}
-        audited = {**legacy, 'old_runtime': 'claude-code', 'new_runtime': 'codex',
-                   'new_account': None, 'liveness': CODEX_STOPPED}
-        for entry in (legacy, audited, {**audited, 'new_account': 'codex-pm'}):
-            with self.subTest(entry=entry):
-                self.store_adoptions(task, [entry])
-                self.assertEqual(self.store.get(task['task_id'])['pm_session_adoptions'], [entry])
-        for entry in ({**legacy, 'old_runtime': 'claude-code'},
-                      {**audited, 'extra': True},
-                      {**audited, 'new_runtime': 'other-runtime'},
-                      {**audited, 'old_runtime': None},
-                      {**audited, 'new_account': '/private/account'},
-                      {**audited, 'liveness': 'PROCESS_CLEAN'},
-                      {**audited, 'liveness': ['PROCESS_CLEAN']},
-                      {**audited, 'liveness': CODEX_STOPPED + ['LOCK_BUSY']},
-                      {**audited, 'liveness': CODEX_STOPPED + ['LOCK_FREE']}):
-            with self.subTest(entry=entry), self.assertRaises(LLMToolError) as caught:
+        from_claude = {**legacy, 'old_runtime': 'claude-code', 'new_runtime': 'codex',
+                       'new_account': None, 'liveness': CLAUDE_STOPPED}
+        from_codex = {**legacy, 'old_runtime': 'codex', 'new_runtime': 'claude-code',
+                      'new_account': None, 'liveness': CODEX_STOPPED}
+        return task, legacy, from_claude, from_codex
+
+    def assert_entry_accepted(self, task, entry):
+        with self.subTest(entry=entry):
+            self.store_adoptions(task, [entry])
+            self.assertEqual(self.store.get(task['task_id'])['pm_session_adoptions'], [entry])
+
+    def assert_entry_rejected(self, task, entry):
+        before = self.store.get(task['task_id'])
+        with self.subTest(entry=entry):
+            with self.assertRaises(LLMToolError) as caught:
                 self.store_adoptions(task, [entry])
             self.assertEqual(caught.exception.task_store_error_code,
                              'PM_SESSION_ADOPTION_INVALID')
+            self.assertEqual(self.store.get(task['task_id']), before)
+
+    def test_the_validator_accepts_legacy_entries_and_each_runtime_stopped_set(self):
+        task, legacy, from_claude, from_codex = self.history_entries()
+        for entry in (legacy,
+                      from_claude,
+                      {**from_claude, 'liveness': ['PROCESS_CLEAN', 'LOCK_FREE',
+                                                   'REGISTRY_CLEAN']},
+                      {**from_claude, 'liveness': ['TRANSCRIPT_QUIET', 'REGISTRY_CLEAN',
+                                                   'LOCK_FREE', 'PROCESS_CLEAN']},
+                      {**from_claude, 'new_account': 'codex-pm'},
+                      from_codex,
+                      {**from_codex, 'liveness': ['LOCK_FREE', 'PROCESS_CLEAN']},
+                      {**from_codex, 'new_account': 'claude-two'}):
+            self.assert_entry_accepted(task, entry)
+
+    def test_the_validator_checks_liveness_against_the_old_runtime(self):
+        task, _, from_claude, from_codex = self.history_entries()
+        for entry in (
+                # A Claude session is STOPPED only with a clean registry.
+                {**from_claude, 'liveness': CODEX_STOPPED},
+                {**from_claude, 'liveness': ['PROCESS_CLEAN', 'REGISTRY_CLEAN',
+                                             'TRANSCRIPT_QUIET']},
+                {**from_claude, 'liveness': ['LOCK_FREE', 'REGISTRY_CLEAN',
+                                             'TRANSCRIPT_QUIET']},
+                # Codex evidence is exactly a clean process list and a free lock.
+                {**from_codex, 'liveness': CODEX_STOPPED + ['REGISTRY_CLEAN']},
+                {**from_codex, 'liveness': CODEX_STOPPED + ['TRANSCRIPT_QUIET']},
+                {**from_codex, 'liveness': CLAUDE_STOPPED}):
+            self.assert_entry_rejected(task, entry)
+
+    def test_the_validator_rejects_every_other_malformed_entry(self):
+        task, legacy, from_claude, _ = self.history_entries()
+        for entry in ({**legacy, 'old_runtime': 'claude-code'},
+                      {**from_claude, 'extra': True},
+                      {**from_claude, 'new_runtime': 'other-runtime'},
+                      {**from_claude, 'old_runtime': None},
+                      {**from_claude, 'old_runtime': 'other-runtime'},
+                      {**from_claude, 'old_runtime': ['codex']},
+                      {**from_claude, 'new_account': '/private/account'},
+                      {**from_claude, 'liveness': 'PROCESS_CLEAN'},
+                      {**from_claude, 'liveness': ['PROCESS_CLEAN']},
+                      {**from_claude, 'liveness': [['PROCESS_CLEAN']]},
+                      {**from_claude, 'liveness': CLAUDE_STOPPED + ['LOCK_BUSY']},
+                      {**from_claude, 'liveness': CLAUDE_STOPPED + ['LOCK_FREE']}):
+            self.assert_entry_rejected(task, entry)
 
 
 class MidFlightWorkerTests(AdoptionCase):

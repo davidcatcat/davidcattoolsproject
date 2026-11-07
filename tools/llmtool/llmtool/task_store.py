@@ -324,22 +324,29 @@ def _valid_pm_session_binding(record, provenance):
 _PM_ADOPTION_FIELDS = frozenset(('old_session_key', 'new_session_key', 'at'))
 _PM_ADOPTION_AUDIT_FIELDS = _PM_ADOPTION_FIELDS | frozenset((
     'old_runtime', 'new_runtime', 'new_account', 'liveness'))
-# Every code a STOPPED result can carry (pm_session_liveness).
-_PM_STOPPED_EVIDENCE = frozenset(('PROCESS_CLEAN', 'LOCK_FREE', 'REGISTRY_CLEAN',
-                                  'TRANSCRIPT_QUIET'))
+# The STOPPED evidence pm_session_liveness gives the old session under the
+# adoption lock, by old runtime: (required codes, optional codes).
+_PM_STOPPED_EVIDENCE = {
+    'claude-code': (frozenset(('PROCESS_CLEAN', 'LOCK_FREE', 'REGISTRY_CLEAN')),
+                    frozenset(('TRANSCRIPT_QUIET',))),
+    'codex': (frozenset(('PROCESS_CLEAN', 'LOCK_FREE')), frozenset()),
+}
 
 
 def _valid_pm_adoption_audit(item):
-    """The fields added to an adoption entry name real runtimes and STOPPED evidence."""
+    """The added fields name real runtimes and the old runtime's STOPPED evidence."""
     account = item['new_account']
     liveness = item['liveness']
-    return (item['old_runtime'] in ('claude-code', 'codex') and
-            item['new_runtime'] in ('claude-code', 'codex') and
+    old_runtime = item['old_runtime']
+    if (type(old_runtime) is not str or old_runtime not in _PM_STOPPED_EVIDENCE or
+            type(liveness) is not list or
+            not all(type(code) is str for code in liveness) or
+            len(liveness) != len(set(liveness))):
+        return False
+    required, optional = _PM_STOPPED_EVIDENCE[old_runtime]
+    return (item['new_runtime'] in ('claude-code', 'codex') and
             (account is None or (type(account) is str and _NAME.fullmatch(account) is not None)) and
-            type(liveness) is list and
-            all(type(code) is str and code in _PM_STOPPED_EVIDENCE for code in liveness) and
-            len(liveness) == len(set(liveness)) and
-            {'PROCESS_CLEAN', 'LOCK_FREE'}.issubset(liveness))
+            required <= set(liveness) <= required | optional)
 
 
 # R5 technical observations live inside the existing TaskStore root. They are
