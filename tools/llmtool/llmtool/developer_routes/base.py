@@ -267,6 +267,12 @@ def capture_snapshot(root):
         name, object_id, peeled_id, object_type = line.split(' ', 3)
         commit_id = peeled_id or (object_id if object_type == 'commit' else '')
         refs[name] = (object_id, commit_id)
+    # Read after refs: a list older than refs could miss a new worktree's branch.
+    branch_line = b'branch refs/heads/'
+    worktree_branches = frozenset(
+        os.fsdecode(line[len(branch_line):])
+        for line in git('worktree', 'list', '--porcelain', limit=1024 * 1024).split(b'\n')
+        if line.startswith(branch_line)) - {branch}
     head = git('rev-parse', '--verify', 'HEAD', limit=4096).decode().strip()
     head_commits = frozenset(git(
         'rev-list', '--topo-order', 'HEAD', limit=1024 * 1024).decode().splitlines())
@@ -351,6 +357,7 @@ def capture_snapshot(root):
         'stash': git('for-each-ref', '--format=%(objectname)',
                      'refs/stash', limit=4096).strip(),
         'refs': refs,
+        'worktree_branches': worktree_branches,
         'head_commits': head_commits,
         'config_worktree': file_digest(git_dir / 'config.worktree'),
         'config_common': common_config_digest(
@@ -392,33 +399,60 @@ def _git_signature(snapshot):
     return tuple(state.get(key) for key in ('root', 'common_dir', 'branch', 'head'))
 
 
-def _git_state_changed(before, after):
-    """Detect owned Git changes while tolerating unrelated shared refs."""
+def _other_worktree_ref(name, worktree_branches):
+    """Return whether ``name`` is a branch, or its tracking ref, of another worktree."""
+    if name.startswith('refs/heads/'):
+        return name[len('refs/heads/'):] in worktree_branches
+    if name.startswith('refs/remotes/'):
+        _remote, _separator, branch = name[len('refs/remotes/'):].partition('/')
+        return branch in worktree_branches
+    return False
+
+
+def _git_state_difference(before, after):
+    """Return the first differing fixed state label, or None.
+
+    Labels are a closed set and carry no ref name, SHA, path or config value.
+    Unrelated shared refs and other worktrees' branches are tolerated.
+    """
     left, right = _snapshot_value(before), _snapshot_value(after)
     a, b = left.get('git_state'), right.get('git_state')
     if not isinstance(a, Mapping) or not isinstance(b, Mapping):
-        return _git_signature(before) != _git_signature(after)
+        return 'IDENTITY' if _git_signature(before) != _git_signature(after) else None
     for key in ('head', 'branch', 'branch_ref', 'git_dir', 'index', 'stash',
                 'pointer', 'config_worktree', 'config_common'):
         if (key == 'config_common' and
                 (str(a.get(key, '')).startswith('INVALID:') or
                  str(b.get(key, '')).startswith('INVALID:'))):
-            return True
+            return key.upper()
         if a.get(key) != b.get(key):
-            return True
+            return key.upper()
     before_refs, after_refs = a.get('refs', {}), b.get('refs', {})
     before_head_commits = a.get('head_commits', frozenset())
     d6_new_commits = b.get('head_commits', frozenset()) - before_head_commits
+    worktree_branches = b.get('worktree_branches', frozenset())
     for name in set(before_refs) | set(after_refs):
         before_ref, after_ref = before_refs.get(name), after_refs.get(name)
         if before_ref == after_ref:
             continue
         if name == 'refs/stash' or name.startswith('refs/notes/'):
-            return True
+            return 'REFS'
+        if _other_worktree_ref(name, worktree_branches):
+            continue
         if after_ref and (after_ref[1] == b.get('head') or
                           after_ref[1] in d6_new_commits):
-            return True
-    return False
+            return 'REFS'
+    return None
+
+
+def _git_state_changed(before, after):
+    """Detect owned Git changes while tolerating unrelated shared refs."""
+    return _git_state_difference(before, after) is not None
+
+
+def _git_state_refusal(route, label):
+    return RouteError(_route_code(route, f'GIT_STATE_CHANGED_{label}'),
+                      facts={'git_state_label': label})
 
 
 def _git_status_paths(root):
@@ -479,7 +513,7 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     try:
         before_status_paths = set(_git_status_paths(value['root']))
     except Exception:
-        raise RouteError(_route_code(route, 'GIT_STATE_CHANGED')) from None
+        raise _git_state_refusal(route, 'SNAPSHOT') from None
     try:
         boundary = route.configure_boundary(boundary)
     except Exception:
@@ -582,19 +616,22 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         after = snapshot(value['root'])
         after_git = task_completion.collect_git_snapshot(value['root'])
     except Exception:
-        raise RouteError(_route_code(route, 'GIT_STATE_CHANGED')) from None
+        raise _git_state_refusal(route, 'SNAPSHOT') from None
     changed_paths = _changed_files(before, after)
     changed = changed_paths[:200]
     # Git identity/state changes must be classified before cleanliness so a
-    # newly-created commit is not mislabeled as ordinary D6 dirtiness.
-    if (_git_signature(before_git) != _git_signature(after_git) or
-            _git_state_changed(before, after)):
-        raise RouteError(_route_code(route, 'GIT_STATE_CHANGED'), facts={'changed_files': changed})
+    # newly-created commit is not mislabeled as ordinary D6 dirtiness. The
+    # specific label goes first: a new commit also changes the identity.
+    label = _git_state_difference(before, after)
+    if label is None and _git_signature(before_git) != _git_signature(after_git):
+        label = 'IDENTITY'
+    if label is not None:
+        raise _git_state_refusal(route, label)
     allowed = set(value['write_paths'])
     try:
         after_status_paths = set(_git_status_paths(value['root']))
     except Exception:
-        raise RouteError(_route_code(route, 'GIT_STATE_CHANGED'), facts={'changed_files': changed}) from None
+        raise _git_state_refusal(route, 'SNAPSHOT') from None
     new_status_paths = after_status_paths - before_status_paths
     scope_violation = (any(path not in allowed for path in new_status_paths) or
                        any(path not in allowed for path in changed_paths) or
