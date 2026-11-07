@@ -509,7 +509,7 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     try:
         before = snapshot(value['root'])
     except Exception:
-        raise RouteError(_route_code(route, 'SNAPSHOT_FAILED')) from None
+        raise _git_state_refusal(route, 'SNAPSHOT') from None
     try:
         before_status_paths = set(_git_status_paths(value['root']))
     except Exception:

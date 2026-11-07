@@ -159,6 +159,18 @@ class DeveloperRouteContractTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED_SNAPSHOT')
                 self.assertEqual(caught.exception.facts, {'git_state_label': 'SNAPSHOT'})
 
+    def test_baseline_snapshot_failure_uses_snapshot_label_and_starts_no_runner(self):
+        calls = []
+        with mock.patch('llmtool.developer_routes.base.task_completion.collect_git_snapshot',
+                        return_value=self.git):
+            with self.assertRaises(RouteError) as caught:
+                run_route(self.route, self.request, gate=lambda: True,
+                          runner=lambda *args: calls.append(args), boundary=FakeBoundary(),
+                          snapshot=mock.Mock(side_effect=OSError('private detail')))
+        self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED_SNAPSHOT')
+        self.assertEqual(caught.exception.facts, {'git_state_label': 'SNAPSHOT'})
+        self.assertEqual(calls, [])
+
     def test_git_state_difference_returns_fixed_labels(self):
         for key, label in (('head', 'HEAD'), ('branch', 'BRANCH'),
                            ('branch_ref', 'BRANCH_REF'), ('git_dir', 'GIT_DIR'),
