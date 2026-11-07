@@ -206,6 +206,32 @@ class TaskReviewPromptTests(unittest.TestCase):
         self.assertIn(actor, output)
         self.assertIn('contract_digest, head, verdict, review.', output)
 
+    def test_head_the_shared_check_admits_gets_the_unchanged_prompt_at_that_head(self):
+        _, expected = self.invoke(version=2)
+        store = FakeStore()
+        store.task['completion']['evidence']['result']['result_head'] = SOURCE
+        with patch.object(task_submission_cli, 'result_head_admitted',
+                          return_value=True) as check:
+            code, output = self.invoke(store=store, version=2)
+        self.assertEqual(code, 0)
+        self.assertEqual(output, expected)
+        self.assertNotIn(SOURCE, output)
+        self.assertEqual(check.call_args.kwargs['recorded_head'], SOURCE)
+        self.assertEqual(check.call_args.kwargs['head'], HEAD)
+        self.assertEqual(check.call_args.kwargs['root'], '/repo')
+
+    def test_head_the_shared_check_refuses_gets_no_prompt(self):
+        store = FakeStore()
+        store.task['completion']['evidence']['result']['result_head'] = SOURCE
+        output = io.StringIO()
+        with patch.object(task_submission_cli, 'result_head_admitted',
+                          return_value=False) as check, \
+                redirect_stdout(output), self.assertRaises(LLMToolError) as raised:
+            self.invoke(store=store)
+        check.assert_called_once()
+        self.assertEqual(raised.exception.completion_code, 'REVIEW_PROMPT_D6_UNAVAILABLE')
+        self.assertEqual(output.getvalue(), '')
+
     def test_refuses_unrecorded_executor_head_without_prompt(self):
         with self.assertRaises(LLMToolError) as raised:
             self.invoke(snapshots=[snapshot('f' * 40), snapshot()])
