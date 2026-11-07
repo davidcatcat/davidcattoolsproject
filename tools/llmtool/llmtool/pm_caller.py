@@ -116,11 +116,15 @@ def refusal(task_id, code):
 def guarded(call, store, task_id, caller_key):
     """Wrap ``call`` so every invocation re-checks Task ownership first.
 
-    A refused invocation does not call ``call`` and returns ``refusal``.
+    A refused invocation does not call ``call`` and raises ``PMCallerRefused``.
+    Raising, rather than returning a refusal result, stops the whole drive at
+    once: ``task_drive.drive`` does not treat a label-helper result as
+    terminal, and a refusal on the last allowed step would otherwise be
+    reported as ``MAX_STEPS`` with an earlier step's codes.
     """
     def invoke(**kwargs):
         code = owner_refusal_code(store, task_id, caller_key)
         if code is not None:
-            return refusal(task_id, code)
+            raise PMCallerRefused(code)
         return call(**kwargs)
     return invoke

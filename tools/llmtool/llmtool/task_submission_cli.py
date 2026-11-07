@@ -1284,16 +1284,22 @@ def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapter
     adapters['label_mac_ci_call'] = pm_caller.guarded(
         task_advance.label_mac_ci_for_skipped_check if label_call is None else label_call,
         store, args.task_id, caller_key)
-    result = drive(task_id=args.task_id,
-        store=store,
-        merge=getattr(args, 'merge', False),
-        max_steps=getattr(args, 'max_steps', 100),
-        poll_seconds=getattr(args, 'poll_seconds', 5),
-        sleep=sleep, advance_call=advance_call,
-        pr_number=getattr(args, 'pr', None),
-        integration_pr=getattr(args, 'integration_pr', None),
-        reviewer_session_done=getattr(args, 'reviewer_session_done', False),
-        **adapters)
+    try:
+        result = drive(task_id=args.task_id,
+            store=store,
+            merge=getattr(args, 'merge', False),
+            max_steps=getattr(args, 'max_steps', 100),
+            poll_seconds=getattr(args, 'poll_seconds', 5),
+            sleep=sleep, advance_call=advance_call,
+            pr_number=getattr(args, 'pr', None),
+            integration_pr=getattr(args, 'integration_pr', None),
+            reviewer_session_done=getattr(args, 'reviewer_session_done', False),
+            **adapters)
+    except pm_caller.PMCallerRefused as exc:
+        # A guarded call found the Task adopted away: stop the drive here,
+        # whatever step budget remains, and report only the refusal.
+        _print(pm_caller.refusal(args.task_id, exc.code))
+        return 1
     _print(result)
     return 1 if result.get('codes') else 0
 

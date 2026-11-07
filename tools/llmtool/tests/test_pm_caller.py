@@ -253,6 +253,50 @@ class PMCallerDriveTests(unittest.TestCase):
         self.assertEqual(result['step'], 'REFUSED')
         self.assertEqual(result['codes'], ['PM_CALLER_NOT_TASK_OWNER'])
 
+    def test_label_refusal_on_last_step_is_not_lost_as_max_steps(self):
+        store = _MutableStore({'task_id': 't', 'pm_session_id': 'pm-' + OWNER})
+        calls = []
+
+        def advance(**kwargs):
+            calls.append(kwargs)
+            store.record['pm_session_id'] = 'pm-' + OTHER
+            return {'task_id': 't', 'step': 'WAITING_CI',
+                    'codes': ['CI_WORKFLOW_JOBS_INVALID']}
+
+        label = Mock(return_value={'step': 'WAITING_CI', 'codes': []})
+        code, result = self._drive(store, advance, label, '--merge', '--max-steps', '1')
+        label.assert_not_called()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(code, 1)
+        self.assertEqual(result, {
+            'task_id': 't', 'step': 'REFUSED', 'result': None, 'next': 'REFUSED',
+            'codes': ['PM_CALLER_NOT_TASK_OWNER'], 'acked': []})
+
+    def test_label_refusal_stops_drive_without_another_advance(self):
+        store = _MutableStore({'task_id': 't', 'pm_session_id': 'pm-' + OWNER})
+        calls = []
+        sleeps = []
+
+        def advance(**kwargs):
+            calls.append(kwargs)
+            store.record['pm_session_id'] = 'pm-' + OTHER
+            return {'task_id': 't', 'step': 'WAITING_CI',
+                    'codes': ['CI_WORKFLOW_JOBS_INVALID']}
+
+        label = Mock(return_value={'step': 'WAITING_CI', 'codes': []})
+        args = parser_for_cli().parse_args(['task', 'drive', 't', '--merge'])
+        output = io.StringIO()
+        with _environment(claude=OWNER), redirect_stdout(output):
+            code = task_submission_cli.run_task_drive(
+                args, store=store, sleep=sleeps.append,
+                advance_call=advance, label_mac_ci_call=label)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sleeps, [])
+        label.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())['codes'],
+                         ['PM_CALLER_NOT_TASK_OWNER'])
+
     def test_drive_calls_label_helper_for_owner(self):
         store = _MutableStore({'task_id': 't', 'pm_session_id': 'pm-' + OWNER})
         results = iter([
