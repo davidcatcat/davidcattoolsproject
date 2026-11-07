@@ -379,6 +379,20 @@ def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, m
                     persisted=True, delivery='NOT_DELIVERED_INBOX_UNAVAILABLE', event_id=None)
 
 
+def _fresh_pr_head(pr):
+    """Return this PR's current head SHA from GitHub, or None if unreadable."""
+    try:
+        pr_data = _github_get(f'pulls/{pr}')
+    except Exception:
+        return None
+    head = pr_data.get('head') if type(pr_data) is dict else None
+    if (type(pr_data) is not dict or type(pr_data.get('number')) is not int or
+            pr_data['number'] != pr or type(head) is not dict or
+            type(head.get('sha')) is not str):
+        return None
+    return head['sha']
+
+
 def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
                     store=None, config_path=None, transport=None):
     """Run one SSH session after local Task, D6, module and config admission."""
@@ -407,7 +421,8 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     if not (type(evidence) is dict and evidence.get('common_dir')):
         evidence = callback_evidence if type(callback_evidence) is dict else evidence
     common_dir = evidence.get('common_dir') if type(evidence) is dict else None
-    expected = evidence.get('result', {}).get('result_head') if type(evidence.get('result')) is dict else None
+    result_head = evidence.get('result', {}).get('result_head') if type(evidence.get('result')) is dict else None
+    expected = result_head
     review = evidence.get('review_pr_ci') if type(evidence) is dict else None
     if pr is not None:
         if type(pr) is not int or not 1 <= pr <= 9999999:
@@ -424,17 +439,30 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
             return denied('RECEIPT_HEAD_UNRECORDED')
     except Exception:
         return denied('RECEIPT_HEAD_UNRECORDED')
-    if pr is not None and not (type(review) is dict and 'pr_number' in review):
-        try:
-            pr_data = _github_get(f'pulls/{pr}')
-        except Exception:
-            return denied('RECEIPT_HEAD_UNRECORDED')
-        head = pr_data.get('head') if type(pr_data) is dict else None
-        if (type(pr_data) is not dict or type(pr_data.get('number')) is not int or
-                pr_data['number'] != pr or type(head) is not dict or
-                type(head.get('sha')) is not str):
-            return denied('RECEIPT_HEAD_UNRECORDED')
-        expected = head['sha']
+    review_bound = type(review) is dict and 'pr_number' in review
+    older_heads = []
+    if pr is not None:
+        for head in (result_head, expected):
+            if head not in (None, recorded_head, *older_heads):
+                older_heads.append(head)
+    pr_head = None
+    if pr is not None and (older_heads or not review_bound):
+        pr_head = _fresh_pr_head(pr)
+        if pr_head is None:
+            return denied('RECEIPT_HEAD_MISMATCH' if older_heads
+                          else 'RECEIPT_HEAD_UNRECORDED')
+    if older_heads:
+        # task_submission_cli imports this module and owns the repair chain.
+        from .task_submission_cli import result_head_admitted
+        if (pr_head != recorded_head or sha != recorded_head or
+                not all(result_head_admitted(
+                    task, store, evidence, executor_task=executor_task,
+                    root=getattr(registration, 'root', None), recorded_head=head,
+                    head=recorded_head) for head in older_heads)):
+            return denied('RECEIPT_HEAD_MISMATCH')
+        expected = recorded_head
+    elif pr_head is not None:
+        expected = pr_head
     if ((expected is not None and expected != recorded_head) or
             sha != recorded_head or (expected is not None and sha != expected)):
         return denied('RECEIPT_HEAD_MISMATCH')
