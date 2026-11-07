@@ -786,6 +786,15 @@ def _classify_task(ctx, row, task_id, gates, rows_by_id):
         return DONE, ['Task COMPLETED: merge marker recorded']
     if derived in ('ABANDONED', 'FAILED'):
         return ANOMALY, [f'Task {derived}: dead Task still on board']
+    number = _pr_number(row, record)
+    pull = ctx.pull(number) if number is not None else None
+    # A terminal PR outranks any attempt, review or repair the Task still records
+    # as live, so it is checked before the Developer state or any D6 or process read.
+    if type(pull) is dict and pull['merged']:
+        return ACTIONABLE, [f'PR #{number} merged but the Task has no merge marker: '
+                            'reconcile through task advance']
+    if type(pull) is dict and pull['state'] == 'closed':
+        return ANOMALY, [f'PR #{number} closed unmerged but the Task is still live']
     developer = record.get('developer')
     developer_state = developer.get('state') if type(developer) is dict else None
     if developer_state == 'DEVELOPER_DISPATCHING':
@@ -803,14 +812,6 @@ def _classify_task(ctx, row, task_id, gates, rows_by_id):
 
     executor = _executor_task(record)
     d6 = ctx.d6_snapshot(record, executor) if executor is not None else None
-    number = _pr_number(row, record)
-    pull = ctx.pull(number) if number is not None else None
-    # A terminal PR outranks any review or repair the Task still records as live.
-    if type(pull) is dict and pull['merged']:
-        return ACTIONABLE, [f'PR #{number} merged but the Task has no merge marker: '
-                            'reconcile through task advance']
-    if type(pull) is dict and pull['state'] == 'closed':
-        return ANOMALY, [f'PR #{number} closed unmerged but the Task is still live']
     step = task_advance.decide(record, d6, pull, _related(ctx, record))
     head = d6.get('result_head') if type(d6) is dict else None
     idle = f'Task has next step {step} and nothing is running'

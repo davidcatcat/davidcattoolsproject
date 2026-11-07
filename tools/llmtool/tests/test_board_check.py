@@ -413,10 +413,11 @@ class UnknownRowDoesNotHideOrphansTests(BoardCheckCase):
         self.assertEqual((result['result'], result['exit_code']), ('FLAGGED', 2))
 
     def test_failed_d6_read_does_not_orphan_the_pr_of_its_own_task(self):
-        github = FakeGitHub({OPEN_PRS: [{'number': 41}]})
+        github = FakeGitHub({'pulls/41': pull(), OPEN_PRS: [{'number': 41}]})
         result = run([{'id': 'task', 'task_id': TASK_REVIEW}],
                      store=FakeStore(responded(TASK_REVIEW)), github=github, d6=d6_reader())
         self.assertEqual(states(result), {'task': board_check.UNKNOWN}, result)
+        self.assertRow(result, 'task', board_check.UNKNOWN, 'D6_BINDING_UNAVAILABLE')
         self.assertEqual((result['result'], result['exit_code']), ('UNKNOWN', 1))
 
     def test_failed_process_read_does_not_orphan_the_pr_of_a_dispatching_task(self):
@@ -427,9 +428,11 @@ class UnknownRowDoesNotHideOrphansTests(BoardCheckCase):
                                   'recorded_at': '2026-11-07T10:00:00Z'}
         result = board_check.check_board(
             [{'id': 'task', 'task_id': TASK_RUNNING}], store=FakeStore(record),
-            github_get=FakeGitHub({OPEN_PRS: [{'number': 41}]}), list_processes=broken,
-            read_d6=d6_reader(d6_run=d6_root('d6-run')), evaluate=policy(), now=NOW)
+            github_get=FakeGitHub({'pulls/41': pull(), OPEN_PRS: [{'number': 41}]}),
+            list_processes=broken, read_d6=d6_reader(d6_run=d6_root('d6-run')),
+            evaluate=policy(), now=NOW)
         self.assertEqual(states(result), {'task': board_check.UNKNOWN}, result)
+        self.assertRow(result, 'task', board_check.UNKNOWN, 'PROCESS_LIST_FAILED')
         self.assertEqual((result['result'], result['exit_code']), ('UNKNOWN', 1))
 
 
@@ -548,7 +551,7 @@ class FakeOrStaleTaskTests(BoardCheckCase):
                        'missing from the board')
 
     def test_row_pr_of_a_running_task_is_on_the_board(self):
-        github = FakeGitHub({OPEN_PRS: [{'number': 41}]})
+        github = FakeGitHub({'pulls/41': pull(), OPEN_PRS: [{'number': 41}]})
         result = run([{'id': 'task', 'task_id': TASK_RUNNING, 'pr': 41}],
                      store=FakeStore(dispatching(TASK_RUNNING)), github=github,
                      processes=[process(101, 'd6-run', at(11, 30))],
@@ -808,7 +811,10 @@ class ReviewLivenessTests(BoardCheckCase):
 
 
 class TerminalPrTests(BoardCheckCase):
-    """F7: a terminal PR outranks any review or repair still recorded as live."""
+    """F7: a terminal PR outranks any attempt, review or repair still recorded as live.
+
+    It is read first, so no D6 or process evidence can change or hide the result.
+    """
 
     def setUp(self):
         self.d6 = d6_reader(d6_dev=d6_result('d6-dev'), d6_rev=d6_root('d6-rev'))
@@ -819,6 +825,97 @@ class TerminalPrTests(BoardCheckCase):
         return run([{'id': 'task', 'task_id': TASK_REVIEW}], store=FakeStore(*records),
                    github=FakeGitHub({'pulls/41': terminal_pull}), d6=self.d6,
                    processes=processes)
+
+    def check_unread(self, terminal_pull, record, row=None):
+        """Classify with D6 and process reads that fail the test if they are made."""
+        read_d6 = mock.Mock(side_effect=AssertionError('D6 read before the terminal PR'))
+        listing = mock.Mock(side_effect=AssertionError('process read before the terminal PR'))
+        result = run([dict(row or {}, id='task', task_id=record['task_id'])],
+                     store=FakeStore(record), github=FakeGitHub({'pulls/41': terminal_pull}),
+                     d6=read_d6, listing=listing)
+        read_d6.assert_not_called()
+        listing.assert_not_called()
+        return result
+
+    def live_task(self, build=dispatching):
+        record = build(TASK_RUNNING)
+        record['published_pr'] = {'pr': 41, 'head_sha': HEAD,
+                                  'recorded_at': '2026-11-07T10:00:00Z'}
+        return record
+
+    def test_closed_unmerged_pr_is_anomaly_for_a_dispatching_task(self):
+        result = self.check_unread(pull(state='closed'), self.live_task())
+        self.assertRow(result, 'task', board_check.ANOMALY, 'closed unmerged')
+        self.assertEqual(result['exit_code'], 2)
+
+    def test_merged_pr_without_a_marker_is_actionable_for_a_dispatching_task(self):
+        result = self.check_unread(pull(state='closed', merged=True), self.live_task())
+        self.assertRow(result, 'task', board_check.ACTIONABLE, 'no merge marker')
+        self.assertEqual(result['exit_code'], 2)
+
+    def test_terminal_pr_outranks_a_proven_live_attempt(self):
+        for terminal, state, evidence in (
+                (pull(state='closed'), board_check.ANOMALY, 'closed unmerged'),
+                (pull(state='closed', merged=True), board_check.ACTIONABLE, 'no merge marker')):
+            result = run([{'id': 'task', 'task_id': TASK_RUNNING}],
+                         store=FakeStore(self.live_task()),
+                         github=FakeGitHub({'pulls/41': terminal}),
+                         processes=[process(101, 'd6-run', at(11, 30))],
+                         d6=d6_reader(d6_run=d6_root('d6-run')))
+            self.assertRow(result, 'task', state, evidence)
+
+    def test_row_pr_is_enough_to_end_a_dispatching_task(self):
+        result = self.check_unread(pull(state='closed'), dispatching(TASK_RUNNING), {'pr': 41})
+        self.assertRow(result, 'task', board_check.ANOMALY, 'closed unmerged')
+
+    def test_terminal_pr_ends_a_task_not_yet_dispatched(self):
+        result = self.check_unread(pull(state='closed'), self.live_task(pending))
+        self.assertRow(result, 'task', board_check.ANOMALY, 'closed unmerged')
+        result = self.check_unread(pull(state='closed', merged=True), self.live_task(pending))
+        self.assertRow(result, 'task', board_check.ACTIONABLE, 'no merge marker')
+
+    def test_terminal_pr_is_read_before_the_d6_of_a_responded_task(self):
+        result = self.check_unread(pull(state='closed'), responded(TASK_REVIEW))
+        self.assertRow(result, 'task', board_check.ANOMALY, 'closed unmerged')
+        result = self.check_unread(pull(state='closed', merged=True), responded(TASK_REVIEW))
+        self.assertRow(result, 'task', board_check.ACTIONABLE, 'no merge marker')
+
+    def test_failed_d6_or_process_read_does_not_hide_a_terminal_pr(self):
+        def broken():
+            raise OSError('lsof failed')
+        result = run([{'id': 'task', 'task_id': TASK_RUNNING}],
+                     store=FakeStore(self.live_task()), listing=broken, d6=d6_reader(),
+                     github=FakeGitHub({'pulls/41': pull(state='closed')}))
+        self.assertRow(result, 'task', board_check.ANOMALY, 'closed unmerged')
+
+    def test_open_pr_leaves_a_live_attempt_running(self):
+        result = run([{'id': 'task', 'task_id': TASK_RUNNING}],
+                     store=FakeStore(self.live_task()),
+                     github=FakeGitHub({'pulls/41': pull(), OPEN_PRS: [{'number': 41}]}),
+                     processes=[process(101, 'd6-run', at(11, 30))],
+                     d6=d6_reader(d6_run=d6_root('d6-run')))
+        self.assertRow(result, 'task', board_check.RUNNING, 'process 101')
+        self.assertEqual((result['result'], result['exit_code']), ('CLEAN', 0))
+
+    def test_unreadable_pr_of_a_live_attempt_is_unknown_not_running(self):
+        github = FakeGitHub({'pulls/41': RuntimeError('network down'),
+                             OPEN_PRS: [{'number': 41}]})
+        result = run([{'id': 'task', 'task_id': TASK_RUNNING}],
+                     store=FakeStore(self.live_task()), github=github,
+                     processes=[process(101, 'd6-run', at(11, 30))],
+                     d6=d6_reader(d6_run=d6_root('d6-run')))
+        self.assertRow(result, 'task', board_check.UNKNOWN, 'GITHUB_READ_FAILED')
+        self.assertEqual((result['result'], result['exit_code']), ('UNKNOWN', 1))
+
+    def test_merge_marker_stays_done_without_a_pr_read(self):
+        record = responded(TASK_REVIEW)
+        record['completion_events'] = [{'source': 'GITHUB', 'marker_type': 'merge',
+                                        'marker_status': 'MERGED', 'issue_number': 41}]
+        github = FakeGitHub()
+        result = run([{'id': 'task', 'task_id': TASK_REVIEW}], store=FakeStore(record),
+                     github=github, d6=self.d6)
+        self.assertRow(result, 'task', board_check.DONE, 'merge marker')
+        self.assertNotIn('pulls/41', github.calls)
 
     def test_closed_unmerged_pr_is_anomaly_under_a_live_reviewer(self):
         result = self.check(pull(state='closed'), responded(TASK_REVIEW, claims=[claim()]),
