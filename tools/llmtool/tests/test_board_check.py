@@ -323,6 +323,55 @@ class DoneWithoutReviewerTests(BoardCheckCase):
         self.assertEqual((result['result'], result['exit_code']), ('UNKNOWN', 1))
 
 
+class UnknownRowDoesNotHideOrphansTests(BoardCheckCase):
+    """A failed row read stays on that row; a proven orphan stays ANOMALY."""
+
+    def setUp(self):
+        self.d6 = d6_reader(d6_dev=d6_result('d6-dev'))
+
+    def test_open_pr_missing_from_board_stays_anomaly_beside_an_unknown_row(self):
+        github = FakeGitHub({'pulls/41': RuntimeError('network down'),
+                             OPEN_PRS: [{'number': 41}, {'number': 77}]})
+        result = run([{'id': 'task', 'task_id': TASK_REVIEW}],
+                     store=FakeStore(responded(TASK_REVIEW)), github=github, d6=self.d6)
+        self.assertEqual(states(result), {'task': board_check.UNKNOWN,
+                                          'pr:#77': board_check.ANOMALY}, result)
+        self.assertRow(result, 'pr:#77', board_check.ANOMALY, 'missing from the board')
+        self.assertEqual((result['result'], result['exit_code']), ('FLAGGED', 2))
+
+    def test_live_task_missing_from_board_stays_anomaly_beside_an_unknown_row(self):
+        github = FakeGitHub({'pulls/41': RuntimeError('network down'),
+                             OPEN_PRS: [{'number': 41}]})
+        store = FakeStore(responded(TASK_REVIEW), dispatching(TASK_RUNNING))
+        result = run([{'id': 'task', 'task_id': TASK_REVIEW}],
+                     store=store, github=github, d6=self.d6)
+        self.assertEqual(states(result), {'task': board_check.UNKNOWN,
+                                          f'task:{TASK_RUNNING}': board_check.ANOMALY}, result)
+        self.assertRow(result, f'task:{TASK_RUNNING}', board_check.ANOMALY,
+                       'missing from the board')
+        self.assertEqual((result['result'], result['exit_code']), ('FLAGGED', 2))
+
+    def test_failed_d6_read_does_not_orphan_the_pr_of_its_own_task(self):
+        github = FakeGitHub({OPEN_PRS: [{'number': 41}]})
+        result = run([{'id': 'task', 'task_id': TASK_REVIEW}],
+                     store=FakeStore(responded(TASK_REVIEW)), github=github, d6=d6_reader())
+        self.assertEqual(states(result), {'task': board_check.UNKNOWN}, result)
+        self.assertEqual((result['result'], result['exit_code']), ('UNKNOWN', 1))
+
+    def test_failed_process_read_does_not_orphan_the_pr_of_a_dispatching_task(self):
+        def broken():
+            raise OSError('lsof failed')
+        record = dispatching(TASK_RUNNING)
+        record['published_pr'] = {'pr': 41, 'head_sha': HEAD,
+                                  'recorded_at': '2026-11-07T10:00:00Z'}
+        result = board_check.check_board(
+            [{'id': 'task', 'task_id': TASK_RUNNING}], store=FakeStore(record),
+            github_get=FakeGitHub({OPEN_PRS: [{'number': 41}]}), list_processes=broken,
+            read_d6=d6_reader(d6_run=d6_root('d6-run')), evaluate=policy(), now=NOW)
+        self.assertEqual(states(result), {'task': board_check.UNKNOWN}, result)
+        self.assertEqual((result['result'], result['exit_code']), ('UNKNOWN', 1))
+
+
 class TextAndTimeTests(BoardCheckCase):
     """Owner test 4: changing only row text or time does not change a state."""
 

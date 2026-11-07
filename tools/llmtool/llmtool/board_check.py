@@ -8,7 +8,9 @@ or changes GitHub. GitHub and process reads go through injected adapters, and
 any failed read yields UNKNOWN, never a clean result.
 
 Exit status: 0 clean, 2 when any row is ACTIONABLE (idle work with a next step)
-or ANOMALY, 1 when the board is unreadable or any evidence read failed.
+or ANOMALY, 1 when the board is unreadable or any evidence read failed and
+nothing is flagged. A failed read stays UNKNOWN on the row it affects; it does
+not weaken a finding proven by other evidence.
 """
 
 import json
@@ -164,7 +166,6 @@ class _Context:
         self._issue_markers = {}
         self.covered_prs = set()
         self.covered_tasks = set()
-        self.incomplete = False
 
     def get(self, path):
         try:
@@ -311,8 +312,12 @@ def _claims(record):
     return [item for item in value if type(item) is dict] if type(value) is list else []
 
 
-def _cover_record(ctx, record):
+def _cover_record(ctx, row, record):
+    """Mark what this Task owns before any read that can fail for the row."""
     ctx.covered_tasks.add(record.get('task_id'))
+    number = _pr_number(row, record)
+    if number is not None:
+        ctx.covered_prs.add(number)
     repairs = record.get('review_repair_claims')
     for claim in repairs if type(repairs) is list else []:
         if type(claim) is dict and type(claim.get('repair_task_id')) is str:
@@ -596,7 +601,7 @@ def _classify_task(ctx, row, task_id, gates, rows_by_id):
     record = ctx.record(task_id)
     if record is None:
         return ANOMALY, [f'Task {task_id} not found in TaskStore']
-    _cover_record(ctx, record)
+    _cover_record(ctx, row, record)
     derived = task_status.derive_state(record)
     if _merged(record):
         return DONE, ['Task COMPLETED: merge marker recorded']
@@ -624,10 +629,7 @@ def _classify_task(ctx, row, task_id, gates, rows_by_id):
     executor = _executor_task(record)
     d6 = ctx.d6_snapshot(record, executor) if executor is not None else None
     number = _pr_number(row, record)
-    pull = None
-    if number is not None:
-        ctx.covered_prs.add(number)
-        pull = ctx.pull(number)
+    pull = ctx.pull(number) if number is not None else None
     step = task_advance.decide(record, d6, pull, _related(ctx, record))
     head = d6.get('result_head') if type(d6) is dict else None
     if step == 'WAITING_REPAIR':
@@ -699,10 +701,12 @@ def _classify_row(ctx, row, rows_by_id, duplicate_ids):
 
 
 def _unlisted(ctx):
-    """Report open PRs and live Tasks that no board row covers."""
+    """Report open PRs and live Tasks that no board row covers.
+
+    A successful list read proves the orphan, so it stays ANOMALY even when
+    another row is UNKNOWN; that uncertainty stays on the affected row.
+    """
     findings = []
-    outcome = UNKNOWN if ctx.incomplete else ANOMALY
-    suffix = '; coverage incomplete' if ctx.incomplete else ''
     try:
         pulls = ctx.get_pages('pulls?state=open')
         numbers = []
@@ -715,8 +719,8 @@ def _unlisted(ctx):
         findings.append({'row': 'github:open-prs', 'state': UNKNOWN, 'evidence': [exc.code]})
     else:
         for number in sorted(set(numbers) - ctx.covered_prs):
-            findings.append({'row': f'pr:#{number}', 'state': outcome,
-                             'evidence': ['open PR missing from the board' + suffix]})
+            findings.append({'row': f'pr:#{number}', 'state': ANOMALY,
+                             'evidence': ['open PR missing from the board']})
     try:
         task_ids = sorted(ctx.task_ids())
     except _Unknown as exc:
@@ -732,9 +736,9 @@ def _unlisted(ctx):
         developer = record.get('developer')
         if (type(developer) is dict and developer.get('state') == 'DEVELOPER_DISPATCHING' and
                 task_status.derive_state(record) not in ('COMPLETED', 'ABANDONED')):
-            findings.append({'row': f'task:{task_id}', 'state': outcome,
+            findings.append({'row': f'task:{task_id}', 'state': ANOMALY,
                              'evidence': ['live Task (DEVELOPER_DISPATCHING) missing from the '
-                                          'board' + suffix]})
+                                          'board']})
     return findings
 
 
@@ -769,8 +773,6 @@ def check_board(rows, *, store, github_get, list_processes, read_d6=None,
             state, evidence = UNKNOWN, [exc.code]
         except Exception:
             state, evidence = UNKNOWN, ['BOARD_CHECK_INTERNAL_ERROR']
-        if state == UNKNOWN:
-            ctx.incomplete = True
         findings.append({'row': _row_label(row, index), 'state': state, 'evidence': evidence})
     findings.extend(_unlisted(ctx))
     if any(item['state'] in FLAGGED_STATES for item in findings):
