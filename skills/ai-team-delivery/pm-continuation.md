@@ -74,7 +74,7 @@ The PM plans work as packages of 3 to 6 related items with one shared goal, know
 
 Packaging changes no gate. The per-D6 cap of three Developer runs (one run plus two repairs), the [High Debug rule](pm-continuation-reference.md#high-debug), safety, authorization, formal review, EC2 and exact-head CI apply to each PR as before. Splitting or merging work to get around them is not allowed.
 
-Independent packages run in parallel through Mode B sub-agent PMs with non-overlapping leases. Request formal review only for a finished PR head. Developers may run local checks on unfinished work, but final EC2, formal review and exact-head CI still decide.
+Independent packages run in parallel through Mode B sub-agent PMs with non-overlapping leases. Request formal review only for a finished PR head. On unfinished work, run only the checks that [Validate a Developer result before review](#validate-a-developer-result-before-review-owner-2026-11-02) allows, never tests inside a D6; final EC2, formal review and exact-head CI still decide.
 
 Owner-reserved decisions, new permissions and security boundaries still stop the dependent work for the Owner.
 
