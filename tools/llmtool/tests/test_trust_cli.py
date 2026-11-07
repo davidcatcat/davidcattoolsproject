@@ -130,6 +130,40 @@ class TrustCliTest(unittest.TestCase):
                 self.assertEqual(target.read_bytes(), raw)
                 self.assertEqual(sorted(self.home.rglob("*")), before)
 
+    def test_replace_from_second_checkout_ignores_git_overrides_to_trusted_root(self):
+        trusted = self._real_checkout("trusted")
+        digest = self._write_real_trust(trusted)
+        target = self.home / ".config" / "llmtool" / "trust.json"
+        raw = target.read_bytes()
+        other = self._real_checkout("other")
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(other)
+        before = sorted(self.home.rglob("*"))
+        overrides = {"GIT_DIR": str(trusted / ".git"), "GIT_WORK_TREE": str(trusted)}
+        with mock.patch.dict(os.environ, overrides):
+            code = self._replace_error(self.home / "missing-draft.json", digest)
+        self.assertEqual(code, "TRUST_ROTATION_ROOT_UNTRUSTED")
+        self.assertEqual(target.read_bytes(), raw)
+        self.assertEqual(sorted(self.home.rglob("*")), before)
+
+    def test_replace_from_trusted_root_ignores_git_overrides_to_second_checkout(self):
+        trusted = self._real_checkout("trusted")
+        digest = self._write_real_trust(trusted)
+        self._write_active_record(trusted)
+        draft = self._write_draft()
+        other = self._real_checkout("other", "https://github.com/example/other.git")
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(trusted)
+        overrides = {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)}
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, overrides), contextlib.redirect_stdout(output):
+            self.assertEqual(self._replace(draft, digest), 0)
+        self.assertIn("affected_active_records: 1\n", output.getvalue())
+        target = self.home / ".config" / "llmtool" / "trust.json"
+        document = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(document["canonical_root"], str(trusted))
+        self.assertEqual(document["repository"]["slug"], "example/project")
+
     def test_replace_failures_keep_their_codes_from_trusted_root(self):
         root = self._real_checkout("checkout")
         digest = self._write_real_trust(root)

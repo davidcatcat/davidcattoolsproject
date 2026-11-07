@@ -82,8 +82,10 @@ def _owner_home():
 
 
 def _git(*args, cwd=None):
+    # Inherited GIT_* values could point Git at a different checkout than the real one.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     try:
-        result = subprocess.run(["git", *args], cwd=cwd, check=True,
+        result = subprocess.run(["git", *args], cwd=cwd, check=True, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 text=True, encoding="utf-8")
     except (OSError, subprocess.CalledProcessError, UnicodeError):
