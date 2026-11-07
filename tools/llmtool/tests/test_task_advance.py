@@ -12,6 +12,7 @@ from pathlib import Path
 
 from llmtool import review_dispatch
 from llmtool import task_advance
+from llmtool import task_completion
 from llmtool import task_submission_cli
 from llmtool.errors import LLMToolError
 from llmtool.task_store import _json_bytes
@@ -82,6 +83,113 @@ def with_current_main(github_get, status='ahead'):
     return read
 
 
+def integration_ready(reviewed):
+    """Return a Task whose review passed at reviewed and is ready to integrate."""
+    return base_record(
+        review_dispatch_claim=[{'pr': 17, 'head_sha': reviewed, 'version': 1,
+                                'state': 'COMPLETED'}],
+        completion={'executor_task_id': 'executor-1', 'state': 'PM_EVIDENCE_READY',
+                    'evidence': {'result': {'result_head': reviewed},
+                                 'review_pr_ci': {'stage': 'READY'}}})
+
+
+def review_passed(head):
+    return {'source': 'REVIEWER', 'source_sha': head, 'version': 1,
+            'outcome': 'REVIEW_PASS'}
+
+
+def repo_d6(root, reviewed):
+    return dict(d6(recorded=reviewed), root=root, result_head=reviewed)
+
+
+class IntegrationRepo:
+    """A real repository with a reviewed head on `task`, left checked out on `task`."""
+
+    def __init__(self, test):
+        tmp = tempfile.TemporaryDirectory()
+        test.addCleanup(tmp.cleanup)
+        self.parent = os.path.realpath(tmp.name)
+        self.root = os.path.join(self.parent, 'repo')
+        os.mkdir(self.root)
+        self.git('init', '-q', '-b', 'main')
+        self.base = self.commit('base.txt', 'base\n', 'base')
+        self.git('checkout', '-q', '-b', 'task')
+        self.reviewed = self.commit('task.txt', 'task\n', 'reviewed')
+
+    def run(self, *args, check=True):
+        return subprocess.run(
+            ['git', '-c', 'user.name=Task Test',
+             '-c', 'user.email=task-test@example.invalid',
+             '-c', 'commit.gpgsign=false', *args],
+            cwd=self.root, check=check, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+            env=dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1'))
+
+    def git(self, *args):
+        return self.run(*args).stdout.strip()
+
+    def rev(self, name):
+        return self.git('rev-parse', '--verify', name)
+
+    def parents(self, commit):
+        return self.git('rev-list', '--parents', '-n', '1', commit).split()[1:]
+
+    def stage(self, path, text):
+        with open(os.path.join(self.root, path), 'w', encoding='utf-8') as stream:
+            stream.write(text)
+        self.git('add', '--', path)
+
+    def commit(self, path, text, message):
+        self.stage(path, text)
+        self.git('commit', '-q', '-m', message)
+        return self.rev('HEAD')
+
+    def move_main(self, path='main.txt', text='main\n'):
+        self.git('checkout', '-q', 'main')
+        self.commit(path, text, 'main moved')
+        self.git('checkout', '-q', 'task')
+
+    def other_task(self):
+        """Commit another Task on its own branch, which main does not contain."""
+        self.git('checkout', '-q', '-b', 'other', self.base)
+        self.commit('other.txt', 'other\n', 'other Task')
+        self.git('checkout', '-q', 'task')
+
+    def merge_main(self, *, source='main', change=None):
+        """Merge source into task; change=(path, text) joins the merge commit."""
+        if change is None:
+            self.git('merge', '-q', '--no-ff', '--no-edit', source)
+        else:
+            # A conflicting merge exits non-zero here, and change resolves it.
+            self.run('merge', '-q', '--no-ff', '--no-commit', source, check=False)
+            self.stage(*change)
+            self.git('commit', '-q', '--no-edit')
+        return self.rev('HEAD')
+
+    def clean_tip(self):
+        """Move main, merge it cleanly into task and return the new tip."""
+        self.move_main()
+        return self.merge_main()
+
+    def land(self, *, source='task', merge_commit=False):
+        """Land source on main; return the merge_commit_sha GitHub would report."""
+        main = self.rev('main')
+        parents = ['-p', main, '-p', self.rev(source)] if merge_commit else ['-p', main]
+        landed = self.git('commit-tree', f'{source}^{{tree}}', *parents, '-m', 'landed')
+        self.git('update-ref', 'refs/heads/main', landed)
+        return landed
+
+    def clone_before_pr(self):
+        """Return a clone holding only base, with main and PR 27's head on origin."""
+        origin = os.path.join(self.parent, 'origin.git')
+        clone = os.path.join(self.parent, 'clone')
+        self.git('init', '-q', '--bare', '-b', 'main', origin)
+        self.git('push', '-q', origin, f'{self.base}:refs/heads/main')
+        self.git('clone', '-q', origin, clone)
+        self.git('push', '-q', origin, 'main:refs/heads/main', 'task:refs/pull/27/head')
+        return clone
+
+
 class TaskAdvanceMergeDocsRuleTests(unittest.TestCase):
     """_merge_checks must use the shared docs-only rule of CI and task complete."""
 
@@ -117,6 +225,29 @@ class TaskAdvanceMergeDocsRuleTests(unittest.TestCase):
 
     def test_top_level_readme_stays_docs_only(self):
         self.assertIsNone(self._checks(['README.md'], ['check (docs)']))
+
+    def test_scripts_only_needs_macos_but_not_linux(self):
+        self.assertIsNone(self._checks(['scripts/tool.py', 'scripts/deep/run.sh'],
+                                       ['check (macOS 3.13)']))
+
+    def test_scripts_only_still_requires_macos(self):
+        self.assertEqual(self._checks(['scripts/tool.py'], ['check (Linux 3.14)']),
+                         'MERGE_REQUIRED_CHECK_MISSING')
+
+    def test_any_path_outside_scripts_keeps_the_linux_check(self):
+        for filenames in (['scripts/tool.py', 'src/app.py'],
+                          ['scripts/tool.py', 'docs/guide.md'],
+                          ['tools/llmtool/scripts/tool.py'],
+                          ['scripts-old/tool.py'],
+                          []):
+            with self.subTest(filenames=filenames):
+                self.assertEqual(self._checks(filenames, ['check (macOS 3.13)']),
+                                 'MERGE_REQUIRED_CHECK_MISSING')
+
+    def test_scripts_markdown_keeps_the_docs_rule(self):
+        self.assertIsNone(self._checks(['scripts/notes.md'], ['check (docs)']))
+        self.assertEqual(self._checks(['scripts/notes.md'], ['check (macOS 3.13)']),
+                         'MERGE_REQUIRED_CHECK_MISSING')
 
 
 class TaskAdvanceTests(unittest.TestCase):
@@ -863,28 +994,29 @@ class TaskAdvanceTests(unittest.TestCase):
             def get(self, _task_id):
                 return self.record
 
-        ready = base_record(review_dispatch_claim=[{
-            'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}],
-            completion={'state': 'PM_EVIDENCE_READY', 'evidence': {
-                'result': {'result_head': HEAD}, 'review_pr_ci': {'stage': 'READY'}}})
+        repo = IntegrationRepo(self)
+        tip = repo.clean_tip()
+        merge_sha = repo.land()
+        ready = integration_ready(repo.reviewed)
         store = Store(ready)
         saved = []
+        review_pr = dict(PR, head={'sha': repo.reviewed})
         integration = {'number': 27, 'merged': True,
-                       'head': {'sha': 'c' * 40}, 'merge_commit_sha': 'd' * 40}
+                       'head': {'sha': tip}, 'merge_commit_sha': merge_sha}
         def pr_snapshot(number, _get):
-            return PR if number == 17 else integration
-        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+            return review_pr if number == 17 else integration
+        with patch.object(task_advance, '_d6_snapshot',
+                          return_value=repo_d6(repo.root, repo.reviewed)), \
              patch.object(task_advance, '_pr_snapshot', side_effect=pr_snapshot), \
-             patch.object(task_advance, '_review_outcomes', return_value=[{
-                 'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
-                 'outcome': 'REVIEW_PASS'}]):
+             patch.object(task_advance, '_review_outcomes',
+                          return_value=[review_passed(repo.reviewed)]):
             result = task_advance.advance(task_id=ready['task_id'], store=store,
                 pr_number=17, integration_pr=27,
                 github_get=lambda url: {'status': 'ahead'} if url.startswith('compare/') else [],
                 record_github_event_call=lambda *args: saved.append(args))
         self.assertEqual(result['step'], 'CLOSED')
         self.assertEqual(len(saved), 1)
-        self.assertEqual(saved[0][-2:], ('MERGED', 'd' * 40))
+        self.assertEqual(saved[0][-2:], ('MERGED', merge_sha))
 
     def test_verified_merge_closes_when_d6_binding_is_unavailable(self):
         class Store:
@@ -893,30 +1025,30 @@ class TaskAdvanceTests(unittest.TestCase):
             def get(self, _task_id):
                 return self.record
 
-        ready = base_record(review_dispatch_claim=[{
-            'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}],
-            completion={'state': 'PM_EVIDENCE_READY', 'evidence': {
-                'result': {'result_head': HEAD}, 'review_pr_ci': {'stage': 'READY'}}})
+        repo = IntegrationRepo(self)
+        tip = repo.clean_tip()
+        integration_merge = repo.land()
         merged_review = {'number': 17, 'merged': True,
                          'head': {'sha': HEAD}, 'merge_commit_sha': 'd' * 40}
         integration = {'number': 27, 'merged': True,
-                       'head': {'sha': 'c' * 40}, 'merge_commit_sha': 'e' * 40}
-        for integration_pr, pr_value, expected_number, expected_sha in (
-                (None, merged_review, 17, 'd' * 40),
-                (27, PR, 27, 'e' * 40)):
+                       'head': {'sha': tip}, 'merge_commit_sha': integration_merge}
+        for integration_pr, head, pr_value, expected_number, expected_sha in (
+                (None, HEAD, merged_review, 17, 'd' * 40),
+                (27, repo.reviewed, dict(PR, head={'sha': repo.reviewed}), 27,
+                 integration_merge)):
             with self.subTest(integration_pr=integration_pr):
                 saved = []
+                ready = integration_ready(head)
                 def pr_snapshot(number, _get):
                     return pr_value if number == 17 else integration
                 with patch.object(task_advance, '_d6_snapshot', return_value={
                         'state': 'D6_BINDING_UNAVAILABLE',
                         'code': 'D6_BINDING_UNAVAILABLE'}), \
                      patch.object(task_advance, '_pr_snapshot', side_effect=pr_snapshot), \
-                     patch.object(task_advance, '_review_outcomes', return_value=[{
-                         'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
-                         'outcome': 'REVIEW_PASS'}]):
+                     patch.object(task_advance, '_review_outcomes',
+                                  return_value=[review_passed(head)]):
                     result = task_advance.advance(task_id=ready['task_id'], store=Store(ready),
-                        pr_number=17, integration_pr=integration_pr,
+                        pr_number=17, integration_pr=integration_pr, cwd=repo.root,
                         github_get=lambda _url: {'status': 'ahead'},
                         record_github_event_call=lambda *args: saved.append(args))
                 self.assertEqual(result['step'], 'CLOSED')
@@ -925,20 +1057,22 @@ class TaskAdvanceTests(unittest.TestCase):
 
     def test_integration_compare_uses_real_github_path_validator(self):
         from llmtool.task_completion import _GITHUB_API_PATH
-        ready = base_record(review_dispatch_claim=[{
-            'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}],
-            completion={'state': 'PM_EVIDENCE_READY', 'evidence': {
-                'result': {'result_head': HEAD}, 'review_pr_ci': {'stage': 'READY'}}})
+        repo = IntegrationRepo(self)
+        tip = repo.clean_tip()
+        merge_sha = repo.land()
+        ready = integration_ready(repo.reviewed)
+        review_pr = dict(PR, head={'sha': repo.reviewed})
         integration = {'number': 27, 'merged': True,
-                       'head': {'sha': 'c' * 40}, 'merge_commit_sha': 'd' * 40}
+                       'head': {'sha': tip}, 'merge_commit_sha': merge_sha}
         def get(path):
             self.assertTrue(_GITHUB_API_PATH.fullmatch(path), path)
             return {'status': 'ahead'}
-        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
-             patch.object(task_advance, '_pr_snapshot', side_effect=lambda n, _: PR if n == 17 else integration), \
-             patch.object(task_advance, '_review_outcomes', return_value=[{
-                 'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
-                 'outcome': 'REVIEW_PASS'}]):
+        with patch.object(task_advance, '_d6_snapshot',
+                          return_value=repo_d6(repo.root, repo.reviewed)), \
+             patch.object(task_advance, '_pr_snapshot',
+                          side_effect=lambda n, _: review_pr if n == 17 else integration), \
+             patch.object(task_advance, '_review_outcomes',
+                          return_value=[review_passed(repo.reviewed)]):
             result = task_advance.advance(task_id=ready['task_id'], store=type('S', (), {
                 'get': lambda self, _id: ready})(), pr_number=17, integration_pr=27, github_get=get,
                 record_github_event_call=lambda *args, **kwargs: None)
@@ -1332,6 +1466,39 @@ class TaskAdvanceCiGateTests(unittest.TestCase):
              [{'filename': 'docs/guide.md'}]))
         self.assertEqual(result['step'], 'DISPATCH_REVIEW')
         self.assertEqual(len(dispatched), 1)
+
+    def test_scripts_only_review_does_not_wait_for_linux(self):
+        for name, runs in (('no run', []),
+                           ('pending run', [check_run(status='in_progress',
+                                                      conclusion=None)])):
+            with self.subTest(name):
+                result, dispatched, _ = self.advance_with_ci(
+                    ({'total_count': len(runs), 'check_runs': runs},
+                     [{'filename': 'scripts/tool.py'}]))
+                self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+                self.assertEqual(len(dispatched), 1)
+
+    def test_scripts_only_malformed_reads_still_wait(self):
+        for name, reply in (
+                ('checks', ({'check_runs': []}, [{'filename': 'scripts/tool.py'}])),
+                ('files', ({'total_count': 0, 'check_runs': []},
+                           [{'filename': 'scripts/tool.py'}, {'filename': 7}]))):
+            with self.subTest(name):
+                result, dispatched, _ = self.advance_with_ci(reply)
+                self.assertEqual((result['step'], result['codes']),
+                                 ('WAITING_CI', ['LINUX_CI_UNAVAILABLE']))
+                self.assertEqual(dispatched, [])
+
+    def test_other_changes_with_scripts_keep_today_review_rule(self):
+        for files in ([{'filename': 'scripts/tool.py'}, {'filename': 'src/app.py'}],
+                      [{'filename': 'scripts/notes.md'}],
+                      []):
+            with self.subTest(files=files):
+                result, dispatched, _ = self.advance_with_ci(
+                    ({'total_count': 0, 'check_runs': []}, files))
+                self.assertEqual((result['step'], result['codes']),
+                                 ('WAITING_CI', ['LINUX_CI_PENDING']))
+                self.assertEqual(dispatched, [])
 
     def test_stale_head_run_is_ignored(self):
         result, dispatched, _ = self.advance_with_ci(
@@ -2043,6 +2210,70 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
         self.assertEqual(len(self.gh_calls), 4)
         self.assertEqual(pause.call_args_list, [call(2)] * 3)
 
+    def _listing_gh(self, listings, *, close=0):
+        """Answer each pr list from listings; close is an exit code or an error."""
+        replies = list(listings)
+
+        def gh(_root, args):
+            self.gh_calls.append(list(args))
+            if args[:2] == ['pr', 'list']:
+                return subprocess.CompletedProcess(['gh', *args], 0,
+                    json.dumps(replies.pop(0)).encode(), b'')
+            if args[:2] == ['pr', 'create']:
+                return subprocess.CompletedProcess(['gh', *args], 0, b'', b'')
+            if args[:2] == ['pr', 'close']:
+                if isinstance(close, Exception):
+                    raise close
+                return subprocess.CompletedProcess(['gh', *args], close, b'', b'')
+            raise AssertionError('unexpected gh call')
+        return gh
+
+    def _publish_listings(self, listings, *, close=0):
+        with patch.object(task_advance, '_publish_pause'):
+            return task_advance._publish_pr(
+                self._listing_gh(listings, close=close), '/d6', 'feature/task',
+                self.record['task_id'], HEAD, 'Task summary', 'Task body')
+
+    def _closes(self):
+        return [args for args in self.gh_calls if args[:2] == ['pr', 'close']]
+
+    def test_created_pr_at_a_moved_head_is_closed_and_refused(self):
+        moved = [{'number': 41, 'headRefOid': 'b' * 40}]
+        with self.assertRaises(task_advance._PublishRefusal) as caught:
+            self._publish_listings([[]] + [moved] * 4)
+        self.assertEqual(caught.exception.code, 'PUBLISH_HEAD_MOVED')
+        closes = self._closes()
+        self.assertEqual(len(closes), 1)
+        self.assertEqual(closes[0][2], '41')
+
+    def test_created_pr_that_will_not_close_is_refused_as_open(self):
+        moved = [{'number': 41, 'headRefOid': 'b' * 40}]
+        for close in (1, RuntimeError('offline')):
+            with self.subTest(close=close):
+                self.gh_calls.clear()
+                with self.assertRaises(task_advance._PublishRefusal) as caught:
+                    self._publish_listings([[]] + [moved] * 4, close=close)
+                self.assertEqual(caught.exception.code, 'PUBLISH_MOVED_PR_OPEN')
+                self.assertEqual(len(self._closes()), 1)
+
+    def test_created_pr_matching_at_any_reread_is_returned(self):
+        moved = [{'number': 41, 'headRefOid': 'b' * 40}]
+        current = [{'number': 41, 'headRefOid': HEAD}]
+        for stale_reads in range(4):
+            with self.subTest(stale_reads=stale_reads):
+                self.gh_calls.clear()
+                number = self._publish_listings([[]] + [moved] * stale_reads + [current])
+                self.assertEqual(number, 41)
+                self.assertEqual(self._closes(), [])
+
+    def test_pr_already_open_is_never_closed_on_a_head_mismatch(self):
+        moved = [{'number': 41, 'headRefOid': 'b' * 40}]
+        with self.assertRaises(task_advance._PublishRefusal) as caught:
+            self._publish_listings([moved] * 4)
+        self.assertEqual(caught.exception.code, 'PUBLISH_GITHUB_FAILED')
+        self.assertEqual(self._closes(), [])
+        self.assertFalse(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
+
     def _fake_publish(self, *, main_state='contained', fetch_failed=False):
         initial_head, committed_head, merged_head = 'a' * 40, 'b' * 40, 'c' * 40
         state = {'head': initial_head}
@@ -2162,18 +2393,18 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         self.common = os.path.realpath(self.tmp.name) + '/.git'
         os.makedirs(self.common)
 
-    def ready(self, outcome='REVIEW_PASS'):
+    def ready(self, outcome='REVIEW_PASS', head=HEAD):
         record = base_record(
-            review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED'}],
+            review_dispatch_claim=[{'pr': 17, 'head_sha': head, 'version': 1, 'state': 'COMPLETED'}],
             completion={'executor_task_id': 'executor-1', 'state': 'PM_EVIDENCE_READY',
-                        'evidence': {'common_dir': self.common, 'result': {'result_head': HEAD},
+                        'evidence': {'common_dir': self.common, 'result': {'result_head': head},
                                      'review_pr_ci': {'stage': 'READY'}}})
         record['completion_events'] = [
-            {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1, 'outcome': outcome}]
+            {'source': 'REVIEWER', 'source_sha': head, 'version': 1, 'outcome': outcome}]
         return record
 
-    def advance(self, record, prs, *, compare='ahead', integration_pr=None, registry_code=None):
-        from llmtool import task_completion
+    def advance(self, record, prs, *, compare='ahead', integration_pr=None, registry_code=None,
+                cwd=None):
         saved = []
 
         def get(path):
@@ -2188,14 +2419,14 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             snapshot = task_advance._d6_snapshot(record, 'executor-1')
             result = task_advance.advance(
                 task_id=record['task_id'], store=store, pr_number=17, integration_pr=integration_pr,
-                github_get=get, record_github_event_call=lambda *a: saved.append(a))
+                github_get=get, cwd=cwd, record_github_event_call=lambda *a: saved.append(a))
         else:
             with patch.object(task_completion, 'read_d6_registration',
                               side_effect=lambda *a, **k: task_completion._stop(registry_code)):
                 snapshot = task_advance._d6_snapshot(record, 'executor-1')
                 result = task_advance.advance(
                     task_id=record['task_id'], store=store, pr_number=17,
-                    integration_pr=integration_pr, github_get=get,
+                    integration_pr=integration_pr, github_get=get, cwd=cwd,
                     record_github_event_call=lambda *a: saved.append(a))
         return snapshot, result, saved
 
@@ -2207,13 +2438,18 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         self.assertEqual(saved[0][-2:], ('MERGED', 'd' * 40))
 
     def test_train_merge_closes_with_invalid_registry(self):
+        repo = IntegrationRepo(self)
+        tip = repo.clean_tip()
+        merge_sha = repo.land()
+        train = dict(self.TRAIN, head={'sha': tip}, merge_commit_sha=merge_sha)
         snapshot, result, saved = self.advance(
-            self.ready(), {17: PR, 541: self.TRAIN}, integration_pr=541,
-            registry_code='D6_REGISTRY_INVALID')
+            self.ready(head=repo.reviewed),
+            {17: dict(PR, head={'sha': repo.reviewed}), 541: train}, integration_pr=541,
+            registry_code='D6_REGISTRY_INVALID', cwd=repo.root)
         self.assertEqual(snapshot['code'], 'D6_REGISTRY_INVALID')
         self.assertEqual(result['step'], 'CLOSED')
         self.assertEqual(saved[0][4], 541)
-        self.assertEqual(saved[0][-2:], ('MERGED', 'e' * 40))
+        self.assertEqual(saved[0][-2:], ('MERGED', merge_sha))
 
     def test_without_merge_proof_the_retired_d6_still_refuses(self):
         other_head = dict(self.MERGED_PR, head={'sha': 'f' * 40})
@@ -2597,7 +2833,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             ('FIX', {'record': fix_record}, 'MERGE_REVIEW_NOT_PASS'),
             ('newer FIX', {'record': {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
                 'review_dispatch_claim': [review, newer_fix]},
-                'events': [event, newer_fix_event]}, 'MERGE_REVIEW_NOT_PASS'),
+                'events': [event, newer_fix_event]}, 'MERGE_NEWER_REVIEW_EXISTS'),
             ('stale initial head', {'pr': moved}, 'MERGE_STALE_HEAD'),
             ('moved before merge', {'second_pr': moved}, 'MERGE_STALE_HEAD'),
             ('conflicting PR', {'record': {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
@@ -2979,20 +3215,22 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
              'conclusion': 'success'}
     MACOS = dict(LINUX, name='check (macOS 3.13)')
     COMPARE_PATH = f'compare/{MAIN_SHA}...{HEAD}'
+    PASS_CLAIM = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                  'review_result': {'verdict': 'PASS'}}
+    PASS_EVENT = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                  'outcome': 'REVIEW_PASS'}
 
     def merge(self, *, main_reply=None, compare_reply=None, check_runs=None,
-              labels=('mac-ci',)):
+              labels=('mac-ci',), reviews=None, events=None,
+              filenames=('src/module.py',)):
         from llmtool.task_completion import _GITHUB_API_PATH
         main_reply = {'commit': {'sha': MAIN_SHA}} if main_reply is None else main_reply
         compare_reply = {'status': 'ahead'} if compare_reply is None else compare_reply
         check_runs = [self.LINUX, self.MACOS] if check_runs is None else check_runs
         record = base_record(
             record_sha256='r' * 64,
-            review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1,
-                                    'state': 'COMPLETED',
-                                    'review_result': {'verdict': 'PASS'}}],
-            completion_events=[{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
-                                'outcome': 'REVIEW_PASS'}])
+            review_dispatch_claim=[self.PASS_CLAIM] if reviews is None else reviews,
+            completion_events=[self.PASS_EVENT] if events is None else events)
         pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
               'mergeable': True, 'labels': [{'name': name} for name in labels]}
         reads, calls, claims = [], [], []
@@ -3020,7 +3258,7 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
             if path.startswith('commits/'):
                 return {'total_count': len(check_runs), 'check_runs': check_runs}
             if path.endswith('/files?per_page=100'):
-                return [{'filename': 'src/module.py'}]
+                return [{'filename': name} for name in filenames]
             if path == 'pulls/17':
                 return pr
             return []
@@ -3097,6 +3335,104 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
         _result, reads, _calls, _claims = self.merge(
             main_reply={'commit': {'sha': 'z' * 40}})
         self.assertFalse(any(path.startswith('compare/') for path in reads))
+
+    def test_newer_claim_in_any_state_refuses_with_or_without_an_event(self):
+        fail_event = dict(self.PASS_EVENT, version=2, outcome='REVIEW_FAIL')
+        for state in ('CLAIMED', 'RUNNING', 'UNKNOWN', 'DISPATCHED', 'COMPLETED'):
+            newer = {'pr': 17, 'head_sha': HEAD, 'version': 2, 'state': state}
+            for name, events in (('no event', [self.PASS_EVENT]),
+                                 ('with event', [self.PASS_EVENT, fail_event])):
+                for reviews in ([self.PASS_CLAIM, newer], [newer, self.PASS_CLAIM]):
+                    with self.subTest(state=state, event=name,
+                                      first=reviews[0]['version']):
+                        self.assert_refused(self.merge(reviews=reviews, events=events),
+                                            'MERGE_NEWER_REVIEW_EXISTS')
+
+    def test_non_integer_version_claim_refuses_and_never_raises(self):
+        base = {'pr': 17, 'head_sha': HEAD, 'state': 'CLAIMED'}
+        odd_claims = [dict(base, version=value)
+                      for value in ('2', None, 1.5, True, [2], {'v': 2})]
+        for odd in odd_claims + [base]:
+            with self.subTest(version=odd.get('version', 'missing')):
+                self.assertEqual(
+                    task_advance._merge_pass_claim(
+                        {'review_dispatch_claim': [self.PASS_CLAIM, odd]}, 17, HEAD,
+                        [self.PASS_EVENT]),
+                    'MERGE_NEWER_REVIEW_EXISTS')
+                self.assert_refused(self.merge(reviews=[self.PASS_CLAIM, odd]),
+                                    'MERGE_NEWER_REVIEW_EXISTS')
+
+    def test_pass_on_the_highest_version_merges(self):
+        pass_v2 = dict(self.PASS_CLAIM, version=2)
+        pass_v2_event = dict(self.PASS_EVENT, version=2)
+        fail_v1 = dict(self.PASS_CLAIM, review_result={'verdict': 'FIX'})
+        fail_v1_event = dict(self.PASS_EVENT, outcome='REVIEW_FAIL')
+        cases = (
+            ('FAIL then PASS', [fail_v1, pass_v2], [fail_v1_event, pass_v2_event]),
+            ('PASS then PASS', [self.PASS_CLAIM, pass_v2],
+             [self.PASS_EVENT, pass_v2_event]),
+            ('unknown run then PASS', [dict(self.PASS_CLAIM, state='UNKNOWN'), pass_v2],
+             [pass_v2_event]),
+            ('FAIL then dispatched PASS',
+             [fail_v1, {'pr': 17, 'head_sha': HEAD, 'version': 2, 'state': 'DISPATCHED'}],
+             [fail_v1_event, pass_v2_event]),
+        )
+        for name, reviews, events in cases:
+            with self.subTest(name):
+                result, _reads, calls, merge_claims = self.merge(reviews=reviews, events=events)
+                self.assertEqual(result['step'], 'MERGED')
+                self.assertEqual(calls[0], ['pr', 'merge', '17', '--squash',
+                                            '--match-head-commit', HEAD])
+                self.assertIn('review_version=2', calls[1][-1])
+                self.assertEqual([claim['state'] for claim in merge_claims],
+                                 ['CLAIMED', 'MERGED'])
+
+    def test_claims_on_another_head_or_pr_do_not_veto(self):
+        other_head = 'b' * 40
+        for name, other in (
+                ('newer on another head',
+                 {'pr': 17, 'head_sha': other_head, 'version': 9, 'state': 'CLAIMED'}),
+                ('newer on another PR and head',
+                 {'pr': 18, 'head_sha': other_head, 'version': 9, 'state': 'CLAIMED'}),
+                ('odd version on another head',
+                 {'pr': 17, 'head_sha': other_head, 'version': '9', 'state': 'CLAIMED'})):
+            with self.subTest(name):
+                result, _reads, _calls, _claims = self.merge(
+                    reviews=[self.PASS_CLAIM, other])
+                self.assertEqual(result['step'], 'MERGED')
+        # The same head on another PR stays the _merge_once conflict, not a veto.
+        self.assertEqual(
+            task_advance._merge_pass_claim(
+                {'review_dispatch_claim': [
+                    self.PASS_CLAIM,
+                    {'pr': 18, 'head_sha': HEAD, 'version': 9, 'state': 'CLAIMED'}]},
+                17, HEAD, [self.PASS_EVENT]),
+            1)
+
+    def test_scripts_only_merges_on_macos_without_linux(self):
+        result, _reads, calls, claims = self.merge(
+            check_runs=[self.MACOS], filenames=('scripts/tool.py',))
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual(calls[0], ['pr', 'merge', '17', '--squash',
+                                    '--match-head-commit', HEAD])
+        self.assertEqual([claim['state'] for claim in claims], ['CLAIMED', 'MERGED'])
+
+    def test_scripts_only_keeps_the_mac_ci_label_flow(self):
+        skipped = dict(self.MACOS, conclusion='skipped')
+        result, _reads, calls, claims = self.merge(
+            check_runs=[skipped], labels=(), filenames=('scripts/tool.py',))
+        self.assertEqual(result['step'], 'WAITING_CI')
+        self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
+        self.assertEqual(claims, [])
+        self.assert_refused(
+            self.merge(check_runs=[skipped], filenames=('scripts/tool.py',)),
+            'MERGE_MACOS_CHECK_REQUIRED')
+
+    def test_scripts_with_another_path_still_needs_linux(self):
+        self.assert_refused(
+            self.merge(check_runs=[self.MACOS],
+                       filenames=('scripts/tool.py', 'src/module.py')),
+            'MERGE_REQUIRED_CHECK_MISSING')
 
 
 class TaskAdvanceMacLabelTests(unittest.TestCase):
@@ -3567,6 +3903,237 @@ class TaskAdvanceUnusableReviewTests(unittest.TestCase):
         self.assertEqual(second['next'], 'REVIEW_UNUSABLE_STOPPED')
         self.assertEqual(second['codes'], ['REVIEW_UNUSABLE_STOPPED', 'VERDICT_NOT_JSON'])
         self.assertFalse(any(path.startswith('issues/') for path in reads))
+
+
+class TaskAdvanceIntegrationClosureTests(unittest.TestCase):
+    """#1132: a close through integration_pr proves its delta on real commits."""
+
+    def setUp(self):
+        self.repo = IntegrationRepo(self)
+        self.git_calls = []
+
+    def git_runner(self, root, args):
+        self.git_calls.append(list(args))
+        return subprocess.run(['git', *args], cwd=root, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, timeout=30)
+
+    def fetches(self):
+        return [args for args in self.git_calls if 'fetch' in args]
+
+    def advance(self, tip, merge_sha, *, repo=None, reviewed=None, root=None, retired=False,
+                compare='ahead', cwd=None, lose_first_read=False):
+        repo = self.repo if repo is None else repo
+        reviewed = repo.reviewed if reviewed is None else reviewed
+        record = integration_ready(reviewed)
+        review_pr = {'number': 17, 'head': {'sha': reviewed}, 'merged': False}
+        integration = {'number': 27, 'merged': True, 'head': {'sha': tip},
+                       'merge_commit_sha': merge_sha}
+        snapshot = ({'state': 'D6_BINDING_UNAVAILABLE', 'code': 'D6_BINDING_UNAVAILABLE'}
+                    if retired else repo_d6(root or repo.root, reviewed))
+        reads, saved = [], []
+
+        def get(path):
+            reads.append(path)
+            if path == 'pulls/17':
+                return review_pr
+            if path == 'pulls/27':
+                if lose_first_read and reads.count(path) == 1:
+                    raise RuntimeError('offline')
+                return integration
+            if path == f'compare/{reviewed}...{tip}':
+                return {'status': compare}
+            if path == 'branches/main':
+                return {'commit': {'sha': repo.rev('main')}}
+            raise AssertionError(path)
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=snapshot), \
+             patch.object(task_advance, '_review_outcomes',
+                          return_value=[review_passed(reviewed)]), \
+             patch.object(task_advance, '_publish_run_git', self.git_runner):
+            result = task_advance.advance(
+                task_id=record['task_id'], store=CiGateStore(record), pr_number=17,
+                integration_pr=27, github_get=get, cwd=cwd,
+                publish_git_runner=self.git_runner,
+                record_github_event_call=lambda *args: saved.append(args))
+        return result, saved, reads
+
+    def assert_closed(self, outcome, merge_sha):
+        result, saved, _reads = outcome
+        self.assertEqual(result['step'], 'CLOSED')
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0][4], 27)
+        self.assertEqual(saved[0][-2:], ('MERGED', merge_sha))
+
+    def assert_unverified(self, outcome):
+        result, saved, _reads = outcome
+        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+        self.assertIn('INTEGRATION_DELTA_UNVERIFIED', result['codes'])
+        self.assertEqual(saved, [])
+
+    def assert_delta_refused(self, repo, tip):
+        """Each fixture must trip _developer_tip itself, so the refusal has its named cause."""
+        anchor = repo.rev('main')
+        self.assertNotEqual(
+            task_completion._developer_tip(repo.root, repo.reviewed, tip, anchor),
+            repo.reviewed)
+        self.assert_unverified(self.advance(tip, repo.land(), repo=repo))
+
+    def test_clean_main_merge_closes(self):
+        for merge_commit in (False, True):
+            with self.subTest(merge_commit=merge_commit):
+                repo = IntegrationRepo(self)
+                tip = repo.clean_tip()
+                merge_sha = repo.land(merge_commit=merge_commit)
+                outcome = self.advance(tip, merge_sha, repo=repo)
+                self.assert_closed(outcome, merge_sha)
+                self.assertIn(f'compare/{repo.reviewed}...{tip}', outcome[2])
+        self.assertEqual(self.fetches(), [])
+
+    def test_several_clean_main_merges_close(self):
+        self.repo.clean_tip()
+        self.repo.move_main('later.txt')
+        tip = self.repo.merge_main()
+        merge_sha = self.repo.land()
+        self.assert_closed(self.advance(tip, merge_sha), merge_sha)
+
+    def test_helper_is_anchored_on_main_before_the_merge(self):
+        tip = self.repo.clean_tip()
+        anchor = self.repo.rev('main')
+        merge_sha = self.repo.land()
+        self.assertEqual(self.repo.parents(merge_sha)[0], anchor)
+        self.assertNotEqual(self.repo.rev('main'), anchor)
+        with patch.object(task_completion, '_developer_tip',
+                          wraps=task_completion._developer_tip) as developer_tip:
+            self.assert_closed(self.advance(tip, merge_sha), merge_sha)
+        developer_tip.assert_called_once_with(self.repo.root, self.repo.reviewed, tip, anchor)
+
+    def test_root_is_d6_then_cwd_then_process_directory(self):
+        tip = self.repo.clean_tip()
+        merge_sha = self.repo.land()
+        missing = os.path.join(self.repo.parent, 'missing')
+        self.assert_closed(self.advance(tip, merge_sha, cwd=missing), merge_sha)
+        self.assert_closed(
+            self.advance(tip, merge_sha, retired=True, cwd=self.repo.root), merge_sha)
+        with patch.object(task_advance.os, 'getcwd', return_value=self.repo.root):
+            self.assert_closed(self.advance(tip, merge_sha, retired=True), merge_sha)
+
+    def test_integration_head_at_the_reviewed_head_closes(self):
+        self.assert_closed(self.advance(HEAD, 'd' * 40, reviewed=HEAD, compare='identical'),
+                           'd' * 40)
+
+    def test_ready_step_closes_a_verified_delta(self):
+        tip = self.repo.clean_tip()
+        merge_sha = self.repo.land()
+        self.assert_closed(self.advance(tip, merge_sha, lose_first_read=True), merge_sha)
+
+    def test_ready_step_refuses_an_unverified_delta(self):
+        tip = self.repo.commit('extra.txt', 'extra\n', 'extra')
+        self.assert_unverified(self.advance(tip, self.repo.land(), lose_first_read=True))
+
+    def test_developer_commit_after_the_reviewed_head_never_closes(self):
+        def extra_commit(repo):
+            return repo.commit('extra.txt', 'extra\n', 'extra')
+
+        def extra_after_clean_merge(repo):
+            repo.clean_tip()
+            return extra_commit(repo)
+
+        def extra_before_clean_merge(repo):
+            extra_commit(repo)
+            return repo.clean_tip()
+
+        for build in (extra_commit, extra_after_clean_merge, extra_before_clean_merge):
+            with self.subTest(build.__name__):
+                repo = IntegrationRepo(self)
+                self.assert_delta_refused(repo, build(repo))
+
+    def test_merge_with_a_conflict_resolution_never_closes(self):
+        self.repo.move_main('task.txt', 'main text\n')
+        tip = self.repo.merge_main(change=('task.txt', 'resolved\n'))
+        self.assertEqual(len(self.repo.parents(tip)), 2)
+        self.assert_delta_refused(self.repo, tip)
+
+    def test_merge_with_an_extra_change_never_closes(self):
+        self.repo.move_main()
+        tip = self.repo.merge_main(change=('smuggled.txt', 'extra\n'))
+        self.assertEqual(len(self.repo.parents(tip)), 2)
+        self.assert_delta_refused(self.repo, tip)
+
+    def test_train_carrying_another_task_never_closes(self):
+        for name, lands_later in (('through this PR', False), ('after this PR', True)):
+            with self.subTest(name):
+                repo = IntegrationRepo(self)
+                repo.other_task()
+                tip = repo.merge_main(source='other')
+                anchor = repo.rev('main')
+                merge_sha = repo.land(merge_commit=not lands_later)
+                if lands_later:
+                    repo.land(source='other', merge_commit=True)
+                self.assertEqual(
+                    task_completion._developer_tip(repo.root, repo.reviewed, tip, anchor), tip)
+                # Main after the merge holds the other Task, so it must not be the anchor.
+                self.assertEqual(
+                    task_completion._developer_tip(repo.root, repo.reviewed, tip,
+                                                   repo.rev('main')),
+                    repo.reviewed)
+                self.assert_unverified(self.advance(tip, merge_sha, repo=repo))
+
+    def test_missing_commit_never_closes(self):
+        tip = self.repo.clean_tip()
+        merge_sha = self.repo.land()
+        no_parent = self.repo.git('commit-tree', 'main^{tree}', '-m', 'no parent')
+        for name, kwargs in (
+                ('merge commit', {'tip': tip, 'merge_sha': 'b' * 40}),
+                ('integration head', {'tip': 'c' * 40, 'merge_sha': merge_sha}),
+                ('reviewed head', {'tip': tip, 'merge_sha': merge_sha,
+                                   'reviewed': 'f' * 40}),
+                ('anchor', {'tip': tip, 'merge_sha': no_parent})):
+            with self.subTest(name):
+                self.assert_unverified(self.advance(**kwargs))
+
+    def test_missing_commits_are_fetched_once_then_close(self):
+        tip = self.repo.clean_tip()
+        merge_sha = self.repo.land()
+        clone = self.repo.clone_before_pr()
+        self.assert_closed(self.advance(tip, merge_sha, root=clone), merge_sha)
+        fetches = self.fetches()
+        self.assertEqual(len(fetches), 1)
+        self.assertTrue(any('main' in arg for arg in fetches[0]), fetches[0])
+        self.assertTrue(any('refs/pull/27/head' in arg for arg in fetches[0]), fetches[0])
+
+    def test_failed_fetch_is_tried_once_and_never_closes(self):
+        # A retired D6 reaches only the first close path, so the count is exact.
+        tip = self.repo.clean_tip()
+        self.repo.land()
+        result, saved, _reads = self.advance(tip, 'b' * 40, retired=True, cwd=self.repo.root)
+        self.assertEqual(result['step'], 'D6_BINDING_UNAVAILABLE')
+        self.assertEqual(saved, [])
+        self.assertEqual(len(self.fetches()), 1)
+
+    def test_failed_tip_read_counts_as_not_verified(self):
+        tip = self.repo.clean_tip()
+        merge_sha = self.repo.land()
+        for name, failure in (
+                ('exception', RuntimeError('git failed')),
+                ('typed stop', lambda *_args: task_completion._stop('GIT_INSPECTION_FAILED'))):
+            with self.subTest(name):
+                with patch.object(task_completion, '_developer_tip', side_effect=failure):
+                    self.assert_unverified(self.advance(tip, merge_sha))
+
+    def test_compare_check_is_kept_even_when_the_tip_passes(self):
+        tip = self.repo.clean_tip()
+        merge_sha = self.repo.land()
+        result, saved, reads = self.advance(tip, merge_sha, compare='diverged')
+        self.assertNotEqual(result['step'], 'CLOSED')
+        self.assertEqual(saved, [])
+        self.assertIn(f'compare/{self.repo.reviewed}...{tip}', reads)
+
+    def test_retired_d6_never_closes_an_unverified_delta(self):
+        tip = self.repo.commit('extra.txt', 'extra\n', 'extra')
+        result, saved, _reads = self.advance(tip, self.repo.land(), retired=True,
+                                             cwd=self.repo.root)
+        self.assertEqual(result['step'], 'D6_BINDING_UNAVAILABLE')
+        self.assertEqual(saved, [])
 
 
 if __name__ == '__main__':
