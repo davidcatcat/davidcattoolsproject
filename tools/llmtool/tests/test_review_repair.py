@@ -37,16 +37,35 @@ def tearDownModule():
 
 
 class TempTaskStore:
-    """Small persistent TaskStore fake preserving compare-and-update semantics."""
+    """Small persistent TaskStore fake preserving compare-and-update semantics.
 
-    def __init__(self, root, record):
+    ``others`` maps further Task ids to a record, or to an exception that
+    reading that record raises; ``task_ids_error`` makes task_ids() raise.
+    """
+
+    def __init__(self, root, record, others=None):
         self.path = Path(root) / 'task.json'
         self.path.write_text(json.dumps(record))
+        self.task_id = record.get('task_id')
+        self.others = dict(others or {})
+        self.task_ids_error = None
+        self.writes = []
+
+    def task_ids(self):
+        if self.task_ids_error is not None:
+            raise self.task_ids_error
+        return sorted({self.task_id, *self.others})
 
     def get(self, task_id):
+        if task_id in self.others:
+            other = self.others[task_id]
+            if isinstance(other, Exception):
+                raise other
+            return json.loads(json.dumps(other))
         return json.loads(self.path.read_text())
 
     def compare_and_update(self, task_id, *, expected, **changes):
+        self.writes.append(task_id)
         record = self.get(task_id)
         if any(record.get(key) != value for key, value in expected.items()):
             raise RuntimeError('conflict')
@@ -666,6 +685,115 @@ class ReviewRepairTests(unittest.TestCase):
             TASK, expected={'record_sha256': saved['record_sha256']},
             review_repair_claims=[ec2, review])
         self.assertEqual(saved['review_repair_claims'], [ec2, review])
+
+    # Row 36a: the repair count follows the root Task.
+
+    ROOT = '7' * 32
+
+    def _root_record(self, repair_task_id, **claim_changes):
+        record = dict(_record(), task_id=self.ROOT)
+        record['review_repair_claims'] = [dict(self._stored_claim(
+            attempt=1, repair_id=repair_task_id), **claim_changes)]
+        return record
+
+    def _with_others(self, others):
+        self.store = TempTaskStore(self.temp.name, self.store.get(TASK), others)
+
+    def _assert_refused_without_write(self, code, **kwargs):
+        recorded = []
+        self._assert_refused(
+            code, repair_task_recorder=lambda **request: recorded.append(request), **kwargs)
+        self.assertEqual(recorded, [])
+        self.assertEqual(self.store.writes, [])
+
+    def test_repair_child_named_by_root_claim_is_refused_before_any_write(self):
+        root_claims = {'review': {}, 'ec2': {'family': EC2_FAMILY, 'comment_id': None}}
+        for kind, changes in root_claims.items():
+            for receipt in (None, _receipt()):
+                with self.subTest(root_claim=kind, receipt=receipt is not None):
+                    self.store = TempTaskStore(
+                        self.temp.name, _record(),
+                        {self.ROOT: self._root_record(TASK, **changes)})
+                    self._assert_refused_without_write(
+                        'REPAIR_ROOT_TASK_REQUIRED', remote_test_receipt=receipt)
+                    self.assertNotIn('review_repair_claims', self.store.get(TASK))
+        self.assertEqual(self.calls, [])
+
+    def test_root_scan_runs_before_other_refusals(self):
+        record = _record()
+        record['developer']['provider_profile'] = 'company-gw'
+        for others, code in (({self.ROOT: self._root_record(TASK)},
+                              'REPAIR_ROOT_TASK_REQUIRED'),
+                             ({self.ROOT: RuntimeError('unreadable')},
+                              'REPAIR_COUNT_UNAVAILABLE')):
+            with self.subTest(code=code):
+                self.store = TempTaskStore(self.temp.name, record, others)
+                self._assert_refused_without_write(code)
+
+    def test_root_with_child_claim_replays_as_before(self):
+        for receipt in (None, _receipt()):
+            with self.subTest(receipt=receipt is not None):
+                self.store = TempTaskStore(self.temp.name, _record())
+                calls = len(self.calls)
+                self.dispatch(remote_test_receipt=receipt)
+                child_id = self.store.get(TASK)['review_repair_claims'][0]['repair_task_id']
+                child = dict(_record(), task_id=child_id)
+                self._with_others({child_id: child})
+                result = self.dispatch(remote_test_receipt=receipt)
+                self.assertTrue(result['replayed'])
+                self.assertEqual(result['repair_task_id'], child_id)
+                self.assertEqual(len(self.calls), calls + 1)
+                self.assertEqual(self.store.writes, [])
+
+    def test_root_with_child_claims_refuses_at_cap_as_before(self):
+        version = self._repair_history(MAX)
+        claims = self.store.get(TASK)['review_repair_claims']
+        self._with_others({claim['repair_task_id']: dict(
+            _record(), task_id=claim['repair_task_id']) for claim in claims})
+        self._assert_refused_without_write(
+            'REPAIR_LIMIT_REACHED', family='network',
+            github_get=lambda _path: [_comment(comment_id=11, version=version)])
+
+    def test_own_claim_naming_the_task_is_not_a_parent(self):
+        self._seed_repair_claims([self._stored_claim(
+            attempt=1, family='other', repair_id=TASK)])
+        result = self.dispatch()
+        self.assertEqual((result['claim']['family'], result['claim']['attempt']),
+                         (f'pr-{PR}', 1))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_unreadable_task_list_or_record_refuses_count_unavailable(self):
+        for case in ('task_ids', 'record'):
+            for receipt in (None, _receipt()):
+                with self.subTest(case=case, receipt=receipt is not None):
+                    others = ({self.ROOT: LLMToolError('unreadable')}
+                              if case == 'record' else {})
+                    self.store = TempTaskStore(self.temp.name, _record(), others)
+                    if case == 'task_ids':
+                        self.store.task_ids_error = LLMToolError('unavailable')
+                    self._assert_refused_without_write(
+                        'REPAIR_COUNT_UNAVAILABLE', remote_test_receipt=receipt)
+                    self.assertNotIn('review_repair_claims', self.store.get(TASK))
+        self.assertEqual(self.calls, [])
+
+    def test_malformed_claims_on_another_record_do_not_match(self):
+        missing = object()
+        malformed = (('missing', missing), ('none', None),
+                     ('dict', {'repair_task_id': TASK}), ('string', TASK),
+                     ('non-dict-items', [TASK, None, 5, [TASK], {TASK: TASK}]))
+        for name, claims in malformed:
+            for receipt in (None, _receipt()):
+                with self.subTest(claims=name, receipt=receipt is not None):
+                    other = dict(_record(), task_id=self.ROOT)
+                    if claims is not missing:
+                        other['review_repair_claims'] = claims
+                    self.store = TempTaskStore(self.temp.name, _record(),
+                                               {self.ROOT: other})
+                    calls = len(self.calls)
+                    result = self.dispatch(remote_test_receipt=receipt)
+                    self.assertEqual((result['claim']['attempt'], result['claim']['state']),
+                                     (1, 'DISPATCHED'))
+                    self.assertEqual(len(self.calls), calls + 1)
 
     def test_head_moved(self):
         with self.assertRaisesRegex(Exception, 'refused') as raised:

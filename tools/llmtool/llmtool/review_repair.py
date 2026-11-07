@@ -283,6 +283,30 @@ def ec2_claim_kind(claim):
     return 'NEW' if claim['family'].endswith(EC2_FAMILY_SUFFIX) else 'LEGACY'
 
 
+def _refuse_repair_child(store, task_id):
+    """Refuse a Task that another record's repair claim names as its repair Task."""
+    # The count lives on the root Task, which task advance drives.
+    try:
+        task_ids = list(store.task_ids())
+    except Exception:
+        _refuse('REPAIR_COUNT_UNAVAILABLE')
+    for other_id in task_ids:
+        if other_id == task_id:
+            continue
+        try:
+            other = store.get(other_id)
+        except Exception:
+            _refuse('REPAIR_COUNT_UNAVAILABLE')
+        if type(other) is not dict:
+            _refuse('REPAIR_COUNT_UNAVAILABLE')
+        claims = other.get('review_repair_claims')
+        if type(claims) is not list:
+            continue
+        if any(type(claim) is dict and claim.get('repair_task_id') == task_id
+               for claim in claims):
+            _refuse('REPAIR_ROOT_TASK_REQUIRED')
+
+
 def repair_review(*, store, task_id, executor_task, pr_number, family=None, github_get=None,
                   dispatch_adapter=None, current_head=None, auto_review=False,
                   review_dispatcher=None, delegate_callable=None,
@@ -292,6 +316,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
         _refuse('REPAIR_TASK_INVALID')
+    _refuse_repair_child(store, task_id)
     developer = task.get('developer')
     completion = task.get('completion')
     if (type(developer) is not dict or type(completion) is not dict or
