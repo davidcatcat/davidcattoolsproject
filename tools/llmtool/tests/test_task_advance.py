@@ -10,8 +10,10 @@ from contextlib import redirect_stdout
 from unittest.mock import call, patch
 from pathlib import Path
 
+from llmtool import review_dispatch
 from llmtool import task_advance
 from llmtool import task_submission_cli
+from llmtool.errors import LLMToolError
 from llmtool.task_store import _json_bytes
 from llmtool.cli import main, parser_for_cli
 
@@ -3226,6 +3228,296 @@ class TaskAdvanceCodexVerdictTests(unittest.TestCase):
                 self.assertEqual(result['step'], 'DISPATCH_REVIEW')
                 self.assertIn('REVIEW_VERDICT_COMMENT_FAILED', result['codes'])
                 self.assertEqual(result['result'], {'state': 'COMPLETED', 'verdict': 'FAIL'})
+
+
+TASK, RUN, DIGEST = '1' * 32, '2' * 32, 'd' * 64
+THREAD = '0123456789abcdef0123'
+MARKER = '<!-- activity: type=review_verdict actor=Codex target=PM status=FIX -->'
+STATUS = f'Verdict: FAIL | Version: v1 | HEAD: {HEAD}'
+BINDING = (f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} '
+           f'contract={DIGEST} head={HEAD}')
+MODEL_TEXT = 'SECRET-MODEL-TEXT /Users/someone/private/path'
+
+
+def codex_jsonl(*events):
+    return '\n'.join(json.dumps(event) for event in events).encode('utf-8')
+
+
+def thread_started(thread=THREAD):
+    return {'type': 'thread.started', 'thread_id': thread}
+
+
+def agent_message(text):
+    return {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': text}}
+
+
+def bound_verdict(**changes):
+    verdict = {'task_id': TASK, 'run_id': RUN, 'contract_digest': DIGEST, 'head': HEAD,
+               'verdict': 'FAIL', 'review': '\n'.join((MARKER, STATUS, BINDING))}
+    verdict.update(changes)
+    return json.dumps(verdict)
+
+
+def unusable_claim(version=1, reason='NO_FINAL_MESSAGE', head=HEAD):
+    claim = {'executor_task': 'executor-1', 'pr': 17, 'head_sha': head,
+             'version': version, 'state': 'UNKNOWN', 'reviewer_task': f'reviewer-{version}',
+             'native_session_id': None, 'account_mode': 'ROLES',
+             'claimed_at': '2026-11-07T00:00:00Z', 'updated_at': '2026-11-07T00:00:01Z'}
+    if reason is not None:
+        claim['failure_reason'] = reason
+    return claim
+
+
+class ClaimStore:
+    def __init__(self, record):
+        self.record = record
+        self.writes = 0
+
+    def get(self, _task_id):
+        return self.record
+
+    def compare_and_update(self, _task_id, *, expected, **changes):
+        if any(self.record.get(key) != value for key, value in expected.items()):
+            raise RuntimeError('conflict')
+        self.writes += 1
+        self.record = dict(self.record, **changes)
+        self.record['record_sha256'] = f'{self.writes:064x}'
+        return self.record
+
+
+class CodexReviewFailureReasonTests(unittest.TestCase):
+    """#1105: each refusal of a finished Codex run names its fixed check."""
+
+    def _reason(self, raw):
+        with self.assertRaises(LLMToolError) as caught:
+            review_dispatch._parse_codex_review(raw, task_id=TASK, run_id=RUN,
+                                                contract_digest=DIGEST, head=HEAD)
+        self.assertEqual(caught.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        return caught.exception.review_failure_reason
+
+    def test_each_refusal_point_records_its_fixed_reason(self):
+        two_lines = '\n'.join((MARKER, STATUS))
+        cases = {
+            'OUTPUT_UNREADABLE': 'not bytes',
+            'OUTPUT_NOT_JSONL': b'not json at all\n',
+            'THREAD_ID_INVALID': codex_jsonl(thread_started('bad')),
+            'MESSAGE_NOT_TEXT': codex_jsonl(thread_started(), {
+                'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 5}}),
+            'NO_FINAL_MESSAGE': codex_jsonl(thread_started()),
+            'NO_THREAD_ID': codex_jsonl(agent_message(bound_verdict())),
+            'VERDICT_NOT_JSON': codex_jsonl(thread_started(), agent_message(MODEL_TEXT)),
+            'VERDICT_WRONG_FIELDS': codex_jsonl(thread_started(), agent_message(
+                json.dumps({'verdict': 'PASS', 'review': MODEL_TEXT}))),
+            'VERDICT_BINDING_MISMATCH': codex_jsonl(thread_started(), agent_message(
+                bound_verdict(head='b' * 40))),
+            'VERDICT_STATUS_INVALID': codex_jsonl(thread_started(), agent_message(
+                bound_verdict(verdict='MAYBE'))),
+            'VERDICT_TEXT_INVALID': codex_jsonl(thread_started(), agent_message(
+                bound_verdict(review=7))),
+            'REVIEW_HEADER_MISMATCH': codex_jsonl(thread_started(), agent_message(
+                bound_verdict(review=MODEL_TEXT))),
+            'REVIEW_BINDING_LINE_MISSING': codex_jsonl(thread_started(), agent_message(
+                bound_verdict(review=two_lines + '\n' + MODEL_TEXT))),
+        }
+        for expected, raw in cases.items():
+            with self.subTest(reason=expected):
+                self.assertEqual(self._reason(raw), expected)
+        with patch('llmtool.review_result._comment_verdict', return_value=None):
+            rejected = self._reason(codex_jsonl(thread_started(),
+                                                agent_message(bound_verdict())))
+        self.assertEqual(rejected, 'REVIEW_CLASSIFIER_REJECTED')
+        self.assertEqual(set(cases) | {rejected}, review_dispatch.REVIEW_FAILURE_REASONS)
+
+    def _dispatch(self, runner):
+        record = base_record(
+            record_sha256='f' * 64, task_binding={'contract_digest': DIGEST},
+            developer={'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'claude'})
+        store = ClaimStore(record)
+        executor = type('Executor', (), {'common_dir': '/repo/.git', 'root': '/repo/task'})()
+        reviewer = type('Reviewer', (), {'root': '/repo/reviewer'})()
+        policy = type('Policy', (), {'allowed': True, 'reason_code': None})()
+        role = {'source': 'roles', 'provider': 'codex', 'config_dir': None,
+                'model': None, 'effort': None}
+        with patch.object(review_dispatch, '_preflight',
+                          return_value=(record, executor, HEAD, 'c' * 40, 'codex-reviewer')), \
+             patch.object(review_dispatch, '_policy', return_value=policy), \
+             patch.object(review_dispatch.role_config, 'resolve_role', return_value=role), \
+             patch('llmtool.codex_direct_developer.validate_profile'), \
+             patch.object(review_dispatch, '_resolve_github_login', return_value='login'), \
+             patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                          return_value=reviewer):
+            with self.assertRaises(LLMToolError) as caught:
+                review_dispatch.dispatch_review(
+                    store=store, task_id=TASK, executor_task='executor-1', pr_number=17,
+                    version=1, create_d6=lambda **_kwargs: None,
+                    prompt_renderer=lambda *_args: 'prompt', codex_runner=runner,
+                    bind_session=lambda **_kwargs: self.fail('an unusable run was bound'))
+        return store.record['review_dispatch_claim'], caught.exception
+
+    def test_unusable_run_records_only_the_fixed_reason_in_the_claim(self):
+        raw = codex_jsonl(thread_started(), agent_message(MODEL_TEXT))
+
+        def runner(*, head, version, **_kwargs):
+            return review_dispatch._parse_codex_review(
+                raw, task_id=TASK, run_id=RUN, contract_digest=DIGEST,
+                head=head, version=version)
+
+        claims, error = self._dispatch(runner)
+        self.assertEqual(error.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0]['state'], 'UNKNOWN')
+        self.assertEqual(claims[0]['failure_reason'], 'VERDICT_NOT_JSON')
+        stored = json.dumps(claims)
+        self.assertNotIn('SECRET-MODEL-TEXT', stored)
+        self.assertNotIn('/Users/someone', stored)
+
+    def test_failures_without_a_fixed_reason_store_none(self):
+        for code in ('REVIEW_NOT_POSTED', 'REVIEWER_TIMEOUT'):
+            with self.subTest(code=code):
+                def runner(**_kwargs):
+                    review_dispatch._refuse(code, 'Codex Reviewer exited unsuccessfully')
+                claims, error = self._dispatch(runner)
+                self.assertEqual(error.review_dispatch_code, code)
+                self.assertEqual(claims[0]['state'], 'UNKNOWN')
+                self.assertNotIn('failure_reason', claims[0])
+
+    def test_failure_reason_persists_through_real_task_store(self):
+        from llmtool.task_store import TaskStore, new_id
+        request = 'Bounded non-sensitive review retry task.'
+        task_id, run_id = new_id(), new_id()
+        task = task_submission_cli._record(
+            task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED',
+            request_sha=hashlib.sha256(request.encode()).hexdigest())
+        with tempfile.TemporaryDirectory() as temp:
+            store = TaskStore(Path(temp).resolve() / 'tasks')
+            store.create(task)
+            # The first write checks the plain claim shape, the second the new field.
+            plain = unusable_claim(reason=None)
+            store.compare_and_update(task_id, expected={
+                'record_sha256': store.get(task_id)['record_sha256']},
+                review_dispatch_claim=[plain])
+            store.compare_and_update(task_id, expected={'review_dispatch_claim': [plain]},
+                                     review_dispatch_claim=[unusable_claim()])
+            self.assertEqual(store.get(task_id)['review_dispatch_claim'][0]['failure_reason'],
+                             'NO_FINAL_MESSAGE')
+
+
+class TaskAdvanceUnusableReviewTests(unittest.TestCase):
+    """#1105: one safe redispatch on the same head, then a named stop."""
+
+    def _advance(self, store, *, comments=(), pr=PR, dispatch=None):
+        dispatched, reads = [], []
+
+        def github_get(path):
+            reads.append(path)
+            if path.startswith('issues/'):
+                if comments is None:
+                    raise RuntimeError('comments unavailable')
+                return list(comments)
+            return green_linux_ci(path, pr)
+
+        def default_dispatch(**kwargs):
+            return {'state': 'COMPLETED', 'verdict': 'FAIL'}
+
+        def record_dispatch(**kwargs):
+            dispatched.append(kwargs)
+            return (dispatch or default_dispatch)(**kwargs)
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]):
+            result = task_advance.advance(task_id=TASK, store=store, pr_number=17,
+                                          github_get=github_get,
+                                          dispatch_review_call=record_dispatch)
+        return result, dispatched, reads
+
+    def test_decide_offers_one_redispatch_then_stops(self):
+        one = base_record(review_dispatch_claim=[unusable_claim()])
+        self.assertEqual(task_advance.decide(one, d6(), PR, {}), 'REVIEW_REDISPATCH')
+        two = base_record(review_dispatch_claim=[
+            unusable_claim(1, 'VERDICT_NOT_JSON'), unusable_claim(2)])
+        self.assertEqual(task_advance.decide(two, d6(), PR, {}), 'REVIEW_UNUSABLE_STOPPED')
+        merged = dict(PR, merged=True)
+        self.assertEqual(task_advance.decide(one, d6(), merged, {}), 'PR_MERGED_NO_REVIEW')
+
+    def test_unusable_run_with_no_posted_verdict_redispatches_once_on_same_head(self):
+        store = ClaimStore(base_record(review_dispatch_claim=[unusable_claim()]))
+        result, dispatched, reads = self._advance(store)
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(result['codes'], ['REVIEW_REDISPATCHED', 'NO_FINAL_MESSAGE'])
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual((dispatched[0]['pr_number'], dispatched[0]['version']), (17, 2))
+        self.assertIn('issues/17/comments?per_page=100', reads)
+
+    def test_redispatch_version_is_new_across_all_claims(self):
+        older = dict(unusable_claim(1, None, head='b' * 40), state='COMPLETED')
+        store = ClaimStore(base_record(review_dispatch_claim=[older, unusable_claim(2)]))
+        result, dispatched, _ = self._advance(store)
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(dispatched[0]['version'], 3)
+
+    def test_other_version_comment_does_not_block_redispatch(self):
+        store = ClaimStore(base_record(review_dispatch_claim=[unusable_claim()]))
+        other = {'body': f'Verdict: FAIL | Version: v7 | HEAD: {HEAD}'}
+        result, dispatched, _ = self._advance(store, comments=[other])
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(len(dispatched), 1)
+
+    def test_possible_post_keeps_outcome_unknown_and_refuses(self):
+        cases = {
+            'verdict comment': [{'body': '\n'.join((MARKER, STATUS, BINDING))}],
+            'binding line only': [{'body': BINDING}],
+            'unreadable body': [{'body': None}],
+            'full page': [{'body': 'unrelated'}] * 100,
+            'read failed': None,
+        }
+        for name, comments in cases.items():
+            with self.subTest(case=name):
+                store = ClaimStore(base_record(review_dispatch_claim=[unusable_claim()]))
+                result, dispatched, _ = self._advance(store, comments=comments)
+                self.assertEqual(dispatched, [])
+                self.assertEqual(result['step'], 'REVIEW_OUTCOME_UNKNOWN')
+                self.assertEqual(result['codes'],
+                                 ['REVIEW_OUTCOME_UNKNOWN', 'NO_FINAL_MESSAGE'])
+
+    def test_unknown_without_fixed_reason_refuses_without_reading_comments(self):
+        for reason in (None, MODEL_TEXT):
+            with self.subTest(reason=reason):
+                store = ClaimStore(base_record(
+                    review_dispatch_claim=[unusable_claim(reason=reason)]))
+                result, dispatched, reads = self._advance(store)
+                self.assertEqual(dispatched, [])
+                self.assertEqual(result['step'], 'REVIEW_OUTCOME_UNKNOWN')
+                self.assertEqual(result['codes'], ['REVIEW_OUTCOME_UNKNOWN'])
+                self.assertFalse(any(path.startswith('issues/') for path in reads))
+
+    def test_merged_pr_never_redispatches(self):
+        store = ClaimStore(base_record(review_dispatch_claim=[unusable_claim()]))
+        result, dispatched, _ = self._advance(store, pr=dict(PR, merged=True))
+        self.assertEqual(dispatched, [])
+        self.assertEqual(result['step'], 'PR_MERGED_NO_REVIEW')
+
+    def test_second_unusable_run_stops_with_named_code_and_no_third_run(self):
+        store = ClaimStore(base_record(review_dispatch_claim=[unusable_claim()]))
+
+        def unusable_again(**kwargs):
+            store.record = dict(store.record, review_dispatch_claim=(
+                store.record['review_dispatch_claim'] +
+                [unusable_claim(kwargs['version'], 'VERDICT_NOT_JSON')]))
+            review_dispatch._refuse('REVIEW_NOT_POSTED', reason='VERDICT_NOT_JSON')
+
+        first, dispatched, _ = self._advance(store, dispatch=unusable_again)
+        self.assertEqual(first['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(first['codes'], ['REVIEW_REDISPATCHED', 'NO_FINAL_MESSAGE',
+                                          'REVIEW_NOT_POSTED', 'VERDICT_NOT_JSON'])
+        self.assertEqual(len(dispatched), 1)
+        second, again, reads = self._advance(store, dispatch=unusable_again)
+        self.assertEqual(again, [])
+        self.assertEqual(second['step'], 'REVIEW_UNUSABLE_STOPPED')
+        self.assertEqual(second['next'], 'REVIEW_UNUSABLE_STOPPED')
+        self.assertEqual(second['codes'], ['REVIEW_UNUSABLE_STOPPED', 'VERDICT_NOT_JSON'])
+        self.assertFalse(any(path.startswith('issues/') for path in reads))
 
 
 if __name__ == '__main__':
