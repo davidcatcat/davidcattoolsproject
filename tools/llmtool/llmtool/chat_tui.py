@@ -1619,21 +1619,29 @@ class ChatTUI:
                     "（暫停：" + self.pm_outbox_paused + "）" if self.pm_outbox_paused else "")
             else:
                 queue = "沒有"
+            runtime = self._pm_runtime_name()
             lines = ["狀態（PM 模式）",
-                     "PM session：" + self.pm_target[0] + "（claude-code，cwd "
-                     + chat_tui_pm.safe_text(pm_runtime.display_path(
-                         str(self.pm_target[1]), self.pm_target[1]) or "UNKNOWN") + "）",
-                     "Claude 帳號目錄：" + chat_tui_pm.safe_text(
-                         pm_runtime.display_path(
-                             getattr(self.pm_runtime, "claude_config_dir", None)) or "UNKNOWN"),
-                     "權限模式（本機設定）：" + chat_tui_pm.permission_mode()
-                     + "（自動，不跳出確認）",
-                     "PM 狀態：" + self.pm_status_fields(lambda value, _width: value)["state"],
-                     "背景：" + ("讀取中" if count is None else
-                               "UNKNOWN（TaskStore：" + chat_tui_pm.safe_text(
-                                   str(self.background_error or "read failed")).replace("\n", " ")
-                               + "）" if count == "?" else "%d 件進行中" % count),
-                     "佇列（本機設定）：" + queue, theme]
+                     "PM session：" + self.pm_target[0] + "（" + chat_tui_pm.safe_text(runtime)
+                     + "，cwd " + chat_tui_pm.safe_text(pm_runtime.display_path(
+                         str(self.pm_target[1]), self.pm_target[1]) or "UNKNOWN") + "）"]
+            if runtime == "claude-code":
+                lines.extend((
+                    "Claude 帳號目錄：" + chat_tui_pm.safe_text(
+                        pm_runtime.display_path(
+                            getattr(self.pm_runtime, "claude_config_dir", None)) or "UNKNOWN"),
+                    "權限模式（本機設定）：" + chat_tui_pm.permission_mode()
+                    + "（自動，不跳出確認）"))
+            else:
+                # The folder and permission rows describe Claude only (#683 B6).
+                binding = self.pm_binding if type(self.pm_binding) is dict else {}
+                lines.append("帳號：" + chat_tui_pm.safe_text(binding.get("account") or None))
+            lines.extend((
+                "PM 狀態：" + self.pm_status_fields(lambda value, _width: value)["state"],
+                "背景：" + ("讀取中" if count is None else
+                          "UNKNOWN（TaskStore：" + chat_tui_pm.safe_text(
+                              str(self.background_error or "read failed")).replace("\n", " ")
+                          + "）" if count == "?" else "%d 件進行中" % count),
+                "佇列（本機設定）：" + queue, theme))
             try:
                 turns = self.pm_api.read_all_turns(self.pm_target[0])
                 usage = chat_tui_pm.usage_status_line(turns, _short_count)
@@ -1978,6 +1986,11 @@ class ChatTUI:
         if text.startswith("llmtool:"):
             return [(text, "role.system")]
         return [(text, "text")]
+
+    def _pm_runtime_name(self):
+        """The connected PM's runtime: from its binding, else from the runtime object."""
+        binding = self.pm_binding if type(self.pm_binding) is dict else {}
+        return binding.get('runtime', getattr(self.pm_runtime, 'runtime', 'claude-code'))
 
     def _append_account(self, before, after):
         """A PM notice with the provider and account name, never its config directory."""
@@ -2972,7 +2985,7 @@ class ChatTUI:
             state = PM_STATE_LABELS.get(state, state)
         # Keep the PM mode and permission state in the lead; runtime/account can drop first.
         binding = self.pm_binding if type(self.pm_binding) is dict else {}
-        runtime = binding.get('runtime', getattr(self.pm_runtime, 'runtime', 'claude-code'))
+        runtime = self._pm_runtime_name()
         if runtime == 'claude-code':
             runtime = 'claude'
         account = binding.get('account') or 'default'
@@ -3898,7 +3911,7 @@ class ChatTUI:
         self.pm_warm = True
         self._append_account(
             "PM mode: Enter sends each draft in real time to the PM session "
-            + self.pm_target[0] + " (claude-code, cwd "
+            + self.pm_target[0] + " (" + chat_tui_pm.safe_text(self._pm_runtime_name()) + ", cwd "
             + chat_tui_pm.safe_text(str(self.pm_target[1]))
             + ") through pm_runtime; " + chat_tui_pm.binding_text(self.pm_binding) + "; ",
             ". pm_runtime checked at connect time that the session did not look "
