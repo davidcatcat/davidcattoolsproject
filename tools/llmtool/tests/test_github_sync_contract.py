@@ -1,6 +1,8 @@
 """Tests for the pure GitHubSync message contract (#1144 WP5)."""
 
+import copy
 import dataclasses
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import unittest
@@ -19,7 +21,13 @@ COMMENT_ID = 4242
 STAMP = '2026-11-07T01:02:03Z'
 LATER = '2026-11-07T01:09:00Z'
 TASK_ID = '0123456789abcdef0123456789abcdef'
+OTHER_TASK_ID = 'fedcba9876543210fedcba9876543210'
 REQUEST_ID = 'wp5-sync-0001'
+OWNER_REF = ('https://github.com/davidcatcat/davidcattoolsproject/issues/1144'
+             '#issuecomment-6700000001')
+NOW = datetime(2026, 11, 7, 12, 0, 0, tzinfo=timezone.utc)
+EXPIRES = '2026-11-08T00:00:00Z'
+EXPIRES_AT = datetime(2026, 11, 8, 0, 0, 0, tzinfo=timezone.utc)
 _MISSING = object()
 
 
@@ -28,6 +36,7 @@ def envelope(kind='DISCUSS', **overrides):
              'revision': 1, 'title': 'Sync title', 'summary': 'Short summary.'}
     if kind == 'EXECUTE_REQUEST':
         value['scope'] = ['tools/llmtool/llmtool/github_sync_contract.py']
+        value['operation'] = 'DEVELOP'
     if kind == 'STOP_REQUEST':
         value['task_id'] = TASK_ID
     for key, item in overrides.items():
@@ -41,6 +50,19 @@ def envelope(kind='DISCUSS', **overrides):
 def ack_envelope(**overrides):
     value = {'schema_version': 1, 'kind': 'ACK', 'request_id': REQUEST_ID,
              'revision': 1, 'status': 'RECEIVED'}
+    for key, item in overrides.items():
+        if item is _MISSING:
+            value.pop(key, None)
+        else:
+            value[key] = item
+    return value
+
+
+def authorization(**overrides):
+    """Return a PM-built Owner authorization record that covers ``envelope``."""
+    value = {'owner_ref': OWNER_REF, 'issue_number': ISSUE, 'task_id': None,
+             'operations': ['DEVELOP'], 'scope': ['tools/llmtool/llmtool/'],
+             'expires_at': EXPIRES, 'revoked': False}
     for key, item in overrides.items():
         if item is _MISSING:
             value.pop(key, None)
@@ -122,7 +144,24 @@ class ParseKindsTest(unittest.TestCase):
         message = parse(envelope('EXECUTE_REQUEST', scope=['a.py', 'docs/b.md']))
         self.assertEqual(message.kind, 'EXECUTE_REQUEST')
         self.assertEqual(message.scope, ('a.py', 'docs/b.md'))
+        self.assertEqual(message.operation, 'DEVELOP')
         self.assertIsNone(message.task_id)
+
+    def test_execute_request_operations(self):
+        self.assertEqual(sync.OPERATIONS, frozenset({'DEVELOP', 'DOCS', 'TEST_ONLY'}))
+        for operation in sorted(sync.OPERATIONS):
+            with self.subTest(operation=operation):
+                message = parse(envelope('EXECUTE_REQUEST', operation=operation))
+                self.assertEqual(message.operation, operation)
+
+    def test_execute_request_with_task_id(self):
+        message = parse(envelope('EXECUTE_REQUEST', task_id=TASK_ID))
+        self.assertEqual(message.task_id, TASK_ID)
+
+    def test_non_execute_kinds_have_no_operation(self):
+        for kind in ('DISCUSS', 'RECORD', 'STOP_REQUEST'):
+            with self.subTest(kind=kind):
+                self.assertIsNone(parse(envelope(kind)).operation)
 
     def test_stop_request(self):
         message = parse(envelope('STOP_REQUEST'))
@@ -349,10 +388,15 @@ class RefusalTest(unittest.TestCase):
             envelope('DISCUSS', scope=['a.py']),
             envelope('RECORD', task_id=TASK_ID),
             envelope('STOP_REQUEST', scope=['a.py']),
-            envelope('EXECUTE_REQUEST', task_id=TASK_ID),
+            envelope('DISCUSS', operation='DEVELOP'),
+            envelope('RECORD', operation='DEVELOP'),
+            envelope('STOP_REQUEST', operation='DEVELOP'),
+            envelope('EXECUTE_REQUEST', operations=['DEVELOP']),
+            envelope('EXECUTE_REQUEST', owner_ref=OWNER_REF),
             envelope(status='DONE'),
             ack_envelope(summary='Free text.'),
             ack_envelope(title='Free text.'),
+            ack_envelope(operation='DEVELOP'),
         )
         for payload in cases:
             with self.subTest(payload=payload):
@@ -365,6 +409,7 @@ class RefusalTest(unittest.TestCase):
             envelope(title=_MISSING),
             envelope(summary=_MISSING),
             envelope('EXECUTE_REQUEST', scope=_MISSING),
+            envelope('EXECUTE_REQUEST', operation=_MISSING),
             envelope('STOP_REQUEST', task_id=_MISSING),
             ack_envelope(status=_MISSING),
         )
@@ -414,6 +459,18 @@ class RefusalTest(unittest.TestCase):
             envelope('STOP_REQUEST', task_id='g' * 32),
             envelope('STOP_REQUEST', task_id=123),
             envelope('STOP_REQUEST', task_id=None),
+            envelope('EXECUTE_REQUEST', operation='develop'),
+            envelope('EXECUTE_REQUEST', operation='EXECUTE'),
+            envelope('EXECUTE_REQUEST', operation='DEVELOP '),
+            envelope('EXECUTE_REQUEST', operation=''),
+            envelope('EXECUTE_REQUEST', operation=None),
+            envelope('EXECUTE_REQUEST', operation=5),
+            envelope('EXECUTE_REQUEST', operation=True),
+            envelope('EXECUTE_REQUEST', operation=['DEVELOP']),
+            envelope('EXECUTE_REQUEST', task_id=TASK_ID.upper()),
+            envelope('EXECUTE_REQUEST', task_id=TASK_ID[:-1]),
+            envelope('EXECUTE_REQUEST', task_id=None),
+            envelope('EXECUTE_REQUEST', task_id=7),
             ack_envelope(status='ACCEPTED'),
             ack_envelope(status='done'),
             ack_envelope(status=None),
@@ -571,72 +628,441 @@ class CallerArgumentsTest(unittest.TestCase):
                 self.assertEqual(caught.exception.code, sync.SYNC_FIELD_INVALID)
 
 
+def decide(message, auth=None, ledger_status='NEW', now=NOW):
+    return sync.authority(message, auth, ledger_status=ledger_status, now=now)
+
+
+def execute(login=OWNER, **overrides):
+    return parse(envelope('EXECUTE_REQUEST', **overrides), login=login)
+
+
 class AuthorityTest(unittest.TestCase):
+    """Non-execute kinds, the result shape and caller arguments."""
 
-    def test_decisions_are_fixed(self):
-        self.assertEqual(sync.AUTHORITY_DECISIONS, frozenset({
-            'NO_ACTION', 'RECORD_ONLY', 'REQUEST_FOR_PM', 'STOP_REQUEST_FOR_PM'}))
+    def assertDecision(self, decision, decision_class, reason_code):
+        self.assertIsInstance(decision, sync.AuthorityDecision)
+        self.assertEqual(decision.decision_class, decision_class)
+        self.assertEqual(decision.reason_code, reason_code)
+        if decision_class != sync.DISPATCH_NORMAL_FLOW:
+            self.assertIsNone(decision.owner_ref)
 
-    def test_each_kind(self):
+    def test_classes_and_reasons_are_fixed(self):
+        self.assertEqual(sync.DECISION_CLASSES, frozenset({
+            'NO_ACTION', 'RECORD_ONLY', 'STOP_REQUEST_FOR_PM', 'NEVER_REDISPATCH',
+            'WAITING_OWNER', 'REFUSED_OUT_OF_SCOPE', 'DISPATCH_NORMAL_FLOW'}))
+        self.assertEqual(sync.AUTHORITY_REASONS, frozenset({
+            'NOT_A_SYNC_MESSAGE', 'MESSAGE_INVALID', 'DISCUSS', 'RECORD', 'ACK',
+            'STOP_REQUEST', 'DUPLICATE', 'NO_AUTHORIZATION', 'AUTHORIZATION_INVALID',
+            'REVOKED', 'EXPIRED', 'ISSUE_MISMATCH', 'OPERATION_OUT_OF_SCOPE',
+            'TASK_OUT_OF_SCOPE', 'PATH_OUT_OF_SCOPE', 'AUTHORIZED'}))
+        self.assertEqual(sync.LEDGER_STATUSES, frozenset({'NEW', 'DUPLICATE'}))
+
+    def test_non_execute_kinds(self):
         for login in (OWNER, AI):
             with self.subTest(login=login):
-                discuss = sync.authority(parse(envelope('DISCUSS'), login=login))
-                self.assertEqual(discuss.decision, sync.NO_ACTION)
-                record = sync.authority(parse(envelope('RECORD'), login=login))
-                self.assertEqual(record.decision, sync.RECORD_ONLY)
-                execute_message = parse(envelope('EXECUTE_REQUEST'), login=login)
-                execute = sync.authority(execute_message)
-                self.assertEqual(execute.decision, sync.REQUEST_FOR_PM)
-                self.assertEqual(execute.reason, 'EXECUTE_AUTHORITY_NOT_ESTABLISHED')
-                self.assertEqual(execute.request_key, execute_message.request_key)
-                self.assertEqual(execute.delivery_id, execute_message.delivery_id)
-                self.assertIsNone(execute.task_id)
-                stop = sync.authority(parse(envelope('STOP_REQUEST'), login=login))
-                self.assertEqual(stop.decision, sync.STOP_REQUEST_FOR_PM)
+                discuss_message = parse(envelope('DISCUSS'), login=login)
+                discuss = decide(discuss_message)
+                self.assertDecision(discuss, sync.NO_ACTION, 'DISCUSS')
+                self.assertEqual(discuss.request_key, discuss_message.request_key)
+                self.assertEqual(discuss.delivery_id, discuss_message.delivery_id)
+                self.assertDecision(decide(parse(envelope('RECORD'), login=login)),
+                                    sync.RECORD_ONLY, 'RECORD')
+                stop_message = parse(envelope('STOP_REQUEST'), login=login)
+                stop = decide(stop_message)
+                self.assertDecision(stop, sync.STOP_REQUEST_FOR_PM, 'STOP_REQUEST')
                 self.assertEqual(stop.task_id, TASK_ID)
+                self.assertEqual(stop.request_key, stop_message.request_key)
+                self.assertEqual(stop.delivery_id, stop_message.delivery_id)
+                ack = sync.parse_comment(comment(
+                    sync.render_ack(REQUEST_ID, 1, 'DONE', task_id=TASK_ID), login=login), ISSUE)
+                self.assertDecision(decide(ack), sync.NO_ACTION, 'ACK')
 
-    def test_decision_is_frozen(self):
-        decision = sync.authority(parse(envelope('EXECUTE_REQUEST')))
-        with self.assertRaises(dataclasses.FrozenInstanceError):
-            decision.decision = 'EXECUTE'
+    def test_default_arguments(self):
+        self.assertDecision(sync.authority(parse(envelope('RECORD'))),
+                            sync.RECORD_ONLY, 'RECORD')
+        self.assertDecision(sync.authority(execute()), sync.WAITING_OWNER,
+                            'NO_AUTHORIZATION')
 
-    def test_never_grants_execution(self):
+    def test_discuss_record_stop_ack_never_dispatch_with_any_authorization(self):
+        broad = authorization(operations=sorted(sync.OPERATIONS), scope=['tools', 'docs', 'a'],
+                              task_id=TASK_ID)
+        ack = sync.parse_comment(comment(sync.render_ack(REQUEST_ID, 1, 'LINKED',
+                                                         task_id=TASK_ID)), ISSUE)
         messages = [parse(envelope(kind), login=login)
-                    for kind in sorted(sync.INBOUND_KINDS) for login in (OWNER, AI)]
-        messages.append(sync.parse_comment(
-            comment(sync.render_ack(REQUEST_ID, 1, 'DONE', task_id=TASK_ID), login=AI), ISSUE))
-        execute = parse(envelope('EXECUTE_REQUEST'))
-        inputs = messages + [
-            sync.SyncRefusal(sync.NOT_A_SYNC_MESSAGE),
-            sync.SyncRefusal(sync.SYNC_EDITED),
-            None, {}, 'EXECUTE', envelope('EXECUTE_REQUEST'),
-            dataclasses.replace(execute, kind='EXECUTE'),
-            dataclasses.replace(execute, kind='GRANT'),
-            dataclasses.replace(execute, issuer_login='davidcatcat'),
-        ]
-        for item in inputs:
-            with self.subTest(item=item):
-                decision = sync.authority(item)
-                self.assertIsInstance(decision, sync.AuthorityDecision)
-                self.assertIn(decision.decision, sync.AUTHORITY_DECISIONS)
-                self.assertNotIn('GRANT', decision.decision)
-                self.assertNotEqual(decision.decision, 'EXECUTE')
-                if getattr(item, 'kind', None) == 'EXECUTE_REQUEST':
-                    self.assertEqual(decision.decision, sync.REQUEST_FOR_PM)
-                    self.assertEqual(decision.reason, 'EXECUTE_AUTHORITY_NOT_ESTABLISHED')
+                    for kind in ('DISCUSS', 'RECORD', 'STOP_REQUEST') for login in (OWNER, AI)]
+        messages.append(ack)
+        auths = (None, authorization(), broad, authorization(revoked=True), 'not a dict')
+        for message in messages:
+            for auth in auths:
+                for ledger in ('NEW', 'DUPLICATE'):
+                    with self.subTest(kind=message.kind, auth=auth, ledger=ledger):
+                        decision = decide(message, auth, ledger)
+                        self.assertNotEqual(decision.decision_class, sync.DISPATCH_NORMAL_FLOW)
+                        self.assertIsNone(decision.owner_ref)
+                        expected = {'DISCUSS': sync.NO_ACTION, 'RECORD': sync.RECORD_ONLY,
+                                    'STOP_REQUEST': sync.STOP_REQUEST_FOR_PM,
+                                    'ACK': sync.NO_ACTION}[message.kind]
+                        self.assertEqual(decision.decision_class, expected)
 
     def test_non_messages_get_no_action(self):
-        for item in (None, {}, envelope('EXECUTE_REQUEST'),
-                     sync.SyncRefusal(sync.SYNC_FIELD_INVALID)):
+        items = (None, {}, 'EXECUTE', envelope('EXECUTE_REQUEST'),
+                 comment(block(envelope('EXECUTE_REQUEST'))),
+                 sync.SyncRefusal(sync.NOT_A_SYNC_MESSAGE),
+                 sync.SyncRefusal(sync.SYNC_FIELD_INVALID))
+        for item in items:
             with self.subTest(item=item):
-                self.assertEqual(sync.authority(item).decision, sync.NO_ACTION)
+                self.assertDecision(decide(item, authorization()), sync.NO_ACTION,
+                                    'NOT_A_SYNC_MESSAGE')
 
-    def test_forged_stop_without_valid_task_id_gets_no_action(self):
+    def test_forged_messages_get_no_action(self):
         stop = parse(envelope('STOP_REQUEST'))
-        for task_id in (None, 'x', TASK_ID.upper()):
-            with self.subTest(task_id=task_id):
-                forged = dataclasses.replace(stop, task_id=task_id)
-                self.assertEqual(sync.authority(forged).decision, sync.NO_ACTION)
+        valid = execute()
+        forged = [dataclasses.replace(stop, task_id=task_id)
+                  for task_id in (None, 'x', TASK_ID.upper())]
+        forged += [
+            dataclasses.replace(valid, kind='EXECUTE'),
+            dataclasses.replace(valid, kind='GRANT'),
+            dataclasses.replace(valid, kind=['EXECUTE_REQUEST']),
+            dataclasses.replace(valid, issuer_login='someone-else'),
+            dataclasses.replace(valid, issuer_login=OWNER.upper()),
+            dataclasses.replace(valid, operation='ADMIN'),
+            dataclasses.replace(valid, operation=None),
+            dataclasses.replace(valid, scope=None),
+            dataclasses.replace(valid, scope=()),
+            dataclasses.replace(valid, scope=('/etc/hosts',)),
+            dataclasses.replace(valid, scope=('tools/llmtool/llmtool/../../x',)),
+            dataclasses.replace(valid, scope=['tools/llmtool/llmtool/a.py']),
+            dataclasses.replace(valid, task_id='x'),
+            dataclasses.replace(valid, request_id='Bad id'),
+            dataclasses.replace(valid, revision=True),
+            dataclasses.replace(valid, request_key='someone-else:' + REQUEST_ID),
+            dataclasses.replace(valid, delivery_id='0' * 64),
+            dataclasses.replace(valid, issue_number=ISSUE + 1),
+            dataclasses.replace(valid, comment_id=COMMENT_ID + 1),
+            dataclasses.replace(valid, revision=2),
+        ]
+        for item in forged:
+            with self.subTest(item=item):
+                self.assertDecision(decide(item, authorization()), sync.NO_ACTION,
+                                    'MESSAGE_INVALID')
+                self.assertIsNone(decide(item, authorization()).request_key)
+
+    def test_decision_is_frozen_and_checked(self):
+        decision = decide(execute(), authorization())
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            decision.decision_class = 'EXECUTE'
+        with self.assertRaises(ValueError):
+            sync.AuthorityDecision('EXECUTE', 'AUTHORIZED', owner_ref=OWNER_REF)
+        with self.assertRaises(ValueError):
+            sync.AuthorityDecision(sync.NO_ACTION, 'GRANTED')
+        with self.assertRaises(ValueError):
+            sync.AuthorityDecision(sync.DISPATCH_NORMAL_FLOW, 'AUTHORIZED')
+        with self.assertRaises(ValueError):
+            sync.AuthorityDecision(sync.WAITING_OWNER, 'NO_AUTHORIZATION',
+                                   owner_ref=OWNER_REF)
+
+    def test_invalid_ledger_status_raises(self):
+        for ledger in ('new', 'duplicate', 'SEEN', '', None, True, ['NEW']):
+            with self.subTest(ledger=ledger):
+                with self.assertRaises(sync.GitHubSyncError) as caught:
+                    decide(execute(), authorization(), ledger)
+                self.assertEqual(caught.exception.code, sync.SYNC_FIELD_INVALID)
+
+    def test_invalid_now_raises(self):
+        for now in (datetime(2026, 11, 7, 12, 0, 0), date(2026, 11, 7), STAMP, 0, True):
+            with self.subTest(now=now):
+                with self.assertRaises(sync.GitHubSyncError) as caught:
+                    decide(execute(), authorization(), now=now)
+                self.assertEqual(caught.exception.code, sync.SYNC_FIELD_INVALID)
+
+    def test_now_defaults_to_current_time(self):
+        self.assertEqual(sync.authority(execute(), authorization(
+            expires_at='2999-01-01T00:00:00Z')).decision_class, sync.DISPATCH_NORMAL_FLOW)
+        self.assertEqual(sync.authority(execute(), authorization(
+            expires_at='2000-01-01T00:00:00Z')).reason_code, 'EXPIRED')
+
+
+class ExecuteAuthorityTest(unittest.TestCase):
+    """Phase A classes for EXECUTE_REQUEST, in the documented order."""
+
+    def assertDecision(self, decision, decision_class, reason_code):
+        self.assertIsInstance(decision, sync.AuthorityDecision)
+        self.assertEqual((decision.decision_class, decision.reason_code),
+                         (decision_class, reason_code))
+        if decision_class != sync.DISPATCH_NORMAL_FLOW:
+            self.assertIsNone(decision.owner_ref)
+            self.assertIsNone(decision.task_id)
+
+    def assertOutOfScope(self, decision, reason_code):
+        self.assertDecision(decision, sync.REFUSED_OUT_OF_SCOPE, reason_code)
+
+    def test_dispatch_normal_flow(self):
+        for login in (OWNER, AI):
+            with self.subTest(login=login):
+                message = execute(login=login)
+                decision = decide(message, authorization())
+                self.assertDecision(decision, sync.DISPATCH_NORMAL_FLOW, 'AUTHORIZED')
+                self.assertEqual(decision.owner_ref, OWNER_REF)
+                self.assertIsNone(decision.task_id)
+                self.assertEqual(decision.request_key, message.request_key)
+                self.assertEqual(decision.delivery_id, message.delivery_id)
+
+    def test_dispatch_bound_to_task(self):
+        decision = decide(execute(task_id=TASK_ID), authorization(task_id=TASK_ID))
+        self.assertDecision(decision, sync.DISPATCH_NORMAL_FLOW, 'AUTHORIZED')
+        self.assertEqual(decision.task_id, TASK_ID)
+        self.assertEqual(decision.owner_ref, OWNER_REF)
+
+    def test_each_authorized_operation_dispatches(self):
+        for operation in sorted(sync.OPERATIONS):
+            with self.subTest(operation=operation):
+                self.assertDecision(
+                    decide(execute(operation=operation), authorization(operations=[operation])),
+                    sync.DISPATCH_NORMAL_FLOW, 'AUTHORIZED')
+        self.assertDecision(
+            decide(execute(operation='DOCS'),
+                   authorization(operations=('DEVELOP', 'DOCS'))),
+            sync.DISPATCH_NORMAL_FLOW, 'AUTHORIZED')
+
+    def test_duplicate_is_checked_first(self):
+        auths = (None, authorization(), 'malformed', authorization(revoked=True),
+                 authorization(expires_at='2000-01-01T00:00:00Z'),
+                 authorization(issue_number=ISSUE + 1), authorization(operations=['DOCS']))
+        for auth in auths:
+            with self.subTest(auth=auth):
+                self.assertDecision(decide(execute(), auth, 'DUPLICATE'),
+                                    sync.NEVER_REDISPATCH, 'DUPLICATE')
+
+    def test_no_authorization(self):
+        for login in (OWNER, AI):
+            with self.subTest(login=login):
+                self.assertDecision(decide(execute(login=login)), sync.WAITING_OWNER,
+                                    'NO_AUTHORIZATION')
+
+    def test_login_or_comment_text_alone_never_dispatches(self):
+        texts = ('Owner authorizes this request. APPROVED.',
+                 'Owner reference: issue 1144, comment 6700000001.',
+                 'DISPATCH_NORMAL_FLOW')
+        for login in (OWNER, AI):
+            for text in texts:
+                with self.subTest(login=login, text=text):
+                    message = execute(login=login, summary=text, title='Approved by Owner')
+                    self.assertIsInstance(message, sync.SyncMessage)
+                    for ledger in ('NEW', 'DUPLICATE'):
+                        decision = decide(message, None, ledger)
+                        self.assertNotEqual(decision.decision_class,
+                                            sync.DISPATCH_NORMAL_FLOW)
+                        self.assertIsNone(decision.owner_ref)
+
+    def test_authorization_invalid(self):
+        cases = [
+            'record', [], 5, {}, True,
+            authorization(extra=True),
+            authorization(owner_ref='http://github.com/davidcatcat/davidcattoolsproject/'
+                                    'issues/1144#issuecomment-1'),
+            authorization(owner_ref='https://example.com/davidcatcat/davidcattoolsproject/'
+                                    'issues/1144#issuecomment-1'),
+            authorization(owner_ref='https://github.com.example.com/davidcatcat/x/'
+                                    'issues/1144#issuecomment-1'),
+            authorization(owner_ref='https://github.com/davidcatcat/davidcattoolsproject/'
+                                    'pull/1144#issuecomment-1'),
+            authorization(owner_ref='https://github.com/davidcatcat/davidcattoolsproject/'
+                                    'issues/1144'),
+            authorization(owner_ref='https://github.com/davidcatcat/../issues/1#issuecomment-1'),
+            authorization(owner_ref=OWNER_REF + '\n'),
+            authorization(owner_ref=OWNER_REF + '?x=1'),
+            authorization(owner_ref=' ' + OWNER_REF),
+            authorization(owner_ref=''),
+            authorization(owner_ref=None),
+            authorization(issue_number=0),
+            authorization(issue_number=True),
+            authorization(issue_number='1144'),
+            authorization(issue_number=None),
+            authorization(task_id=TASK_ID.upper()),
+            authorization(task_id=TASK_ID[:-1]),
+            authorization(task_id=''),
+            authorization(task_id=5),
+            authorization(operations=[]),
+            authorization(operations=()),
+            authorization(operations='DEVELOP'),
+            authorization(operations=['develop']),
+            authorization(operations=['EXECUTE']),
+            authorization(operations=['DEVELOP', 'ADMIN']),
+            authorization(operations=[None]),
+            authorization(operations=None),
+            authorization(operations={'DEVELOP'}),
+            authorization(scope=[]),
+            authorization(scope='tools/llmtool/llmtool/'),
+            authorization(scope=None),
+            authorization(scope=['/tools']),
+            authorization(scope=['../tools']),
+            authorization(scope=['tools/../x']),
+            authorization(scope=['tools\\llmtool']),
+            authorization(scope=['tools\0']),
+            authorization(scope=['C:/tools']),
+            authorization(scope=['']),
+            authorization(scope=['.']),
+            authorization(scope=['./']),
+            authorization(scope=['//']),
+            authorization(scope=[None]),
+            authorization(scope=['a' * 257]),
+            authorization(expires_at='2026-11-08'),
+            authorization(expires_at='2026-11-08T00:00:00+00:00'),
+            authorization(expires_at='2026-11-08T00:00:00'),
+            authorization(expires_at='2026-13-01T00:00:00Z'),
+            authorization(expires_at='2026-02-30T00:00:00Z'),
+            authorization(expires_at='2026-11-08T24:00:00Z'),
+            authorization(expires_at=EXPIRES_AT),
+            authorization(expires_at=None),
+            authorization(revoked=None),
+            authorization(revoked=0),
+            authorization(revoked=1),
+            authorization(revoked='false'),
+        ]
+        cases += [authorization(**{key: _MISSING}) for key in sorted(authorization())]
+        for auth in cases:
+            with self.subTest(auth=auth):
+                self.assertDecision(decide(execute(), auth), sync.WAITING_OWNER,
+                                    'AUTHORIZATION_INVALID')
+
+    def test_malformed_is_checked_before_revoked(self):
+        self.assertDecision(decide(execute(), authorization(revoked=True, owner_ref='x')),
+                            sync.WAITING_OWNER, 'AUTHORIZATION_INVALID')
+
+    def test_revoked(self):
+        cases = (authorization(revoked=True),
+                 authorization(revoked=True, expires_at='2000-01-01T00:00:00Z'),
+                 authorization(revoked=True, issue_number=ISSUE + 1),
+                 authorization(revoked=True, operations=['DOCS'], scope=['docs/']))
+        for auth in cases:
+            with self.subTest(auth=auth):
+                self.assertDecision(decide(execute(), auth), sync.NEVER_REDISPATCH, 'REVOKED')
+
+    def test_expired_boundary(self):
+        auth = authorization()
+        self.assertDecision(decide(execute(), auth, now=EXPIRES_AT - timedelta(seconds=1)),
+                            sync.DISPATCH_NORMAL_FLOW, 'AUTHORIZED')
+        self.assertDecision(decide(execute(), auth, now=EXPIRES_AT - timedelta(microseconds=1)),
+                            sync.DISPATCH_NORMAL_FLOW, 'AUTHORIZED')
+        self.assertDecision(decide(execute(), auth, now=EXPIRES_AT),
+                            sync.NEVER_REDISPATCH, 'EXPIRED')
+        self.assertDecision(decide(execute(), auth, now=EXPIRES_AT + timedelta(seconds=1)),
+                            sync.NEVER_REDISPATCH, 'EXPIRED')
+        same_instant = EXPIRES_AT.astimezone(timezone(timedelta(hours=8)))
+        self.assertDecision(decide(execute(), auth, now=same_instant),
+                            sync.NEVER_REDISPATCH, 'EXPIRED')
+
+    def test_expired_is_checked_before_issue_and_scope(self):
+        auth = authorization(expires_at='2026-11-07T00:00:00Z', issue_number=ISSUE + 1,
+                             operations=['DOCS'])
+        self.assertDecision(decide(execute(), auth), sync.NEVER_REDISPATCH, 'EXPIRED')
+
+    def test_issue_mismatch(self):
+        self.assertDecision(decide(execute(), authorization(issue_number=ISSUE + 1)),
+                            sync.WAITING_OWNER, 'ISSUE_MISMATCH')
+        message = parse(envelope('EXECUTE_REQUEST'), issue=ISSUE + 1)
+        self.assertDecision(decide(message, authorization()), sync.WAITING_OWNER,
+                            'ISSUE_MISMATCH')
+        auth = authorization(issue_number=ISSUE + 1, operations=['DOCS'], scope=['docs/'])
+        self.assertDecision(decide(execute(), auth), sync.WAITING_OWNER, 'ISSUE_MISMATCH')
+
+    def test_operation_out_of_scope(self):
+        for operation, operations in (('DOCS', ['DEVELOP']), ('TEST_ONLY', ['DEVELOP', 'DOCS']),
+                                      ('DEVELOP', ['TEST_ONLY'])):
+            with self.subTest(operation=operation, operations=operations):
+                self.assertOutOfScope(
+                    decide(execute(operation=operation), authorization(operations=operations)),
+                    'OPERATION_OUT_OF_SCOPE')
+
+    def test_task_out_of_scope(self):
+        cases = ((TASK_ID, None), (None, TASK_ID), (TASK_ID, OTHER_TASK_ID))
+        for message_task, auth_task in cases:
+            with self.subTest(message_task=message_task, auth_task=auth_task):
+                overrides = {} if message_task is None else {'task_id': message_task}
+                self.assertOutOfScope(
+                    decide(execute(**overrides), authorization(task_id=auth_task)),
+                    'TASK_OUT_OF_SCOPE')
+
+    def test_scope_paths_out_of_scope(self):
+        cases = (
+            (['tools/llmtool-extra/a.py'], ['tools/llmtool']),
+            (['tools/llmtool-extra/a.py'], ['tools/llmtool/']),
+            (['tools/llmtoolx'], ['tools/llmtool']),
+            (['tools/llmtool/llmtool/a.py'], ['tools/llm']),
+            (['tools/llmtool/llmtool/a.py', 'docs/b.md'], ['tools/llmtool/llmtool']),
+            (['Tools/llmtool/llmtool/a.py'], ['tools/llmtool/llmtool']),
+            (['a.py.bak'], ['a.py']),
+            (['a.py/'], ['a.pyc']),
+            (['tools'], ['tools/llmtool']),
+            (['.'], ['tools']),
+            (['./'], ['tools']),
+        )
+        for scope, prefixes in cases:
+            with self.subTest(scope=scope, prefixes=prefixes):
+                self.assertOutOfScope(
+                    decide(execute(scope=scope), authorization(scope=prefixes)),
+                    'PATH_OUT_OF_SCOPE')
+
+    def test_scope_paths_within_scope(self):
+        cases = (
+            (['tools/llmtool/llmtool/a.py'], ['tools/llmtool/llmtool']),
+            (['tools/llmtool/llmtool/a.py'], ['tools/llmtool/llmtool/']),
+            (['tools/llmtool/llmtool/sub/a.py'], ['tools/llmtool']),
+            (['tools/llmtool'], ['tools/llmtool']),
+            (['tools/llmtool/'], ['tools/llmtool']),
+            (['./tools/llmtool/a.py'], ['tools/llmtool']),
+            (['tools/./llmtool/a.py'], ['tools/llmtool']),
+            (['tools//llmtool/a.py'], ['./tools/llmtool']),
+            (['a.py'], ['a.py']),
+            (['a.py', 'docs/b.md'], ['docs', 'a.py']),
+        )
+        for scope, prefixes in cases:
+            with self.subTest(scope=scope, prefixes=prefixes):
+                self.assertDecision(
+                    decide(execute(scope=scope), authorization(scope=prefixes)),
+                    sync.DISPATCH_NORMAL_FLOW, 'AUTHORIZED')
+
+    def test_out_of_scope_order(self):
+        auth = authorization(operations=['DOCS'], task_id=OTHER_TASK_ID, scope=['docs/'])
+        self.assertOutOfScope(decide(execute(task_id=TASK_ID), auth), 'OPERATION_OUT_OF_SCOPE')
+        auth = authorization(task_id=OTHER_TASK_ID, scope=['docs/'])
+        self.assertOutOfScope(decide(execute(task_id=TASK_ID), auth), 'TASK_OUT_OF_SCOPE')
+
+    def test_authorization_is_only_compared(self):
+        auth = authorization(operations=['DEVELOP', 'DOCS'], scope=['tools/', 'docs/'])
+        before = copy.deepcopy(auth)
+        for message in (execute(), execute(operation='TEST_ONLY'),
+                        execute(scope=['other/a.py']), parse(envelope('RECORD'))):
+            decide(message, auth)
+            decide(message, auth, 'DUPLICATE')
+        self.assertEqual(auth, before)
+
+    def test_module_holds_no_execution_or_network_handle(self):
+        for name in ('subprocess', 'socket', 'urllib', 'http', 'requests', 'os', 'shutil'):
+            with self.subTest(name=name):
+                self.assertNotIn(name, vars(sync))
+        fields = {item.name for item in dataclasses.fields(sync.AuthorityDecision)}
+        self.assertEqual(fields, {'decision_class', 'reason_code', 'owner_ref', 'task_id',
+                                  'request_key', 'delivery_id'})
+
+    def test_never_dispatches_without_a_matching_authorization(self):
+        messages = [parse(envelope(kind), login=login)
+                    for kind in sorted(sync.INBOUND_KINDS) for login in (OWNER, AI)]
+        messages += [execute(operation=op, task_id=TASK_ID) for op in sorted(sync.OPERATIONS)]
+        auths = (None, 'x', authorization(revoked=True),
+                 authorization(expires_at='2000-01-01T00:00:00Z'),
+                 authorization(issue_number=ISSUE + 1),
+                 authorization(operations=['DOCS'], scope=['docs/']))
+        for message in messages:
+            for auth in auths:
+                for ledger in ('NEW', 'DUPLICATE'):
+                    with self.subTest(kind=message.kind, auth=auth, ledger=ledger):
+                        decision = decide(message, auth, ledger)
+                        self.assertIn(decision.decision_class, sync.DECISION_CLASSES)
+                        self.assertIn(decision.reason_code, sync.AUTHORITY_REASONS)
+                        self.assertNotEqual(decision.decision_class,
+                                            sync.DISPATCH_NORMAL_FLOW)
+                        self.assertIsNone(decision.owner_ref)
 
 
 class RenderAckTest(unittest.TestCase):
@@ -662,7 +1088,10 @@ class RenderAckTest(unittest.TestCase):
                     self.assertIsNone(message.title)
                     self.assertIsNone(message.summary)
                     self.assertIsNone(message.scope)
-                    self.assertEqual(sync.authority(message).decision, sync.NO_ACTION)
+                    self.assertIsNone(message.operation)
+                    decision = sync.authority(message, authorization(), now=NOW)
+                    self.assertEqual(decision.decision_class, sync.NO_ACTION)
+                    self.assertEqual(decision.reason_code, 'ACK')
 
     def test_round_trip_without_optional_fields(self):
         body = sync.render_ack(REQUEST_ID, 1, 'RECEIVED')
