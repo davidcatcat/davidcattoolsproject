@@ -193,6 +193,20 @@ class LivenessGateTests(AdoptionCase):
         self.assert_refused('PM_SESSION_ADOPTION_LIVENESS_UNKNOWN', old, self.new_claude(), task,
                             process_lister=_failing_lister)
 
+    def test_an_unbound_claude_session_with_no_transcript_left_is_uncertain(self):
+        old, transcript, task = self.stopped_claude()
+        transcript.unlink()
+        self.assert_refused('PM_SESSION_ADOPTION_LIVENESS_UNKNOWN', old, self.new_claude(), task)
+        self.assertIsNone(self.fence(old))
+
+    def test_a_bound_claude_session_needs_no_transcript(self):
+        old, transcript, task = self.stopped_claude(self.bind())
+        transcript.unlink()
+        new = self.new_claude()
+        self.assertEqual(self.adopt(old, new), {'moved': [task['task_id']], 'skipped': []})
+        self.assert_moved(task, old, new,
+                          liveness=['PROCESS_CLEAN', 'LOCK_FREE', 'REGISTRY_CLEAN'])
+
     def test_an_unbound_codex_session_is_uncertain(self):
         old = str(uuid.uuid4())
         self.codex_transcript(old)
@@ -320,7 +334,19 @@ class FenceAndRetryTests(AdoptionCase):
                                         'PM_SESSION_ADOPTION_FENCED_OTHER_TARGET'))
         self.assert_moved(first, old, winner)
         self.assert_moved(second, old, winner)
-        self.assertEqual(self.adopt(old, loser), {'moved': [], 'skipped': []})
+
+        # The fence is checked before the empty-candidate return, so the loser stays refused.
+        self.assert_refused('PM_SESSION_ADOPTION_FENCED_OTHER_TARGET', old, loser, first)
+        self.assert_refused('PM_SESSION_ADOPTION_FENCED_OTHER_TARGET', old, loser, second)
+        self.assert_moved(first, old, winner)
+        self.assert_moved(second, old, winner)
+
+        # The winner's own retry finds its fence and nothing left to move.
+        settled = [self.store.get(task['task_id']) for task in (first, second)]
+        self.assertEqual(self.adopt(old, winner), {'moved': [], 'skipped': []})
+        self.assertEqual([self.store.get(task['task_id']) for task in (first, second)], settled)
+        self.assert_moved(first, old, winner)
+        self.assert_moved(second, old, winner)
 
     def test_a_restarted_old_session_is_refused_by_pm_runtime_open(self):
         old, _, _task = self.stopped_claude(self.bind())

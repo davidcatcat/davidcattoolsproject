@@ -2,6 +2,8 @@
 
 Fail closed: STOPPED needs every check to have run and passed. A failed check is
 never read as "nothing there", and an absent TUI or closed window is no evidence.
+Nor is finding nothing about an ID: a Claude session also needs a valid binding or
+its own transcript, else it stays UNKNOWN.
 ACTIVE evidence outranks UNKNOWN because both refuse a transfer and ACTIVE is the
 more specific answer. The check never starts, stops or resumes a session; it only
 runs ps, sends signal 0 and briefly takes the session lock.
@@ -241,14 +243,21 @@ def _claude_evidence(native_id, cwd, binding, env, home, clock):
     value = (clock or time.time)()
     now = value.timestamp() if isinstance(value, datetime) else float(value)
     evidence = []
+    # A clean registry holds just as well for an ID that never ran, so only a valid
+    # binding or this session's own transcript shows the check is about a real session.
+    observed = binding is not None
     for config_dir in _claude_config_dirs(binding, env, home):
         registry = _guard(REGISTRY_UNREADABLE, _registry_evidence, native_id, config_dir)
         transcript = _guard(TRANSCRIPT_UNREADABLE, _transcript_evidence, native_id, cwd,
                             config_dir, now)
         evidence.extend(registry + transcript)
-        if transcript and not registry:
-            evidence.append(TRANSCRIPT_WITHOUT_REGISTRY)
-    return evidence or [NO_CLAUDE_EVIDENCE]
+        if transcript:
+            observed = True
+            if not registry:
+                evidence.append(TRANSCRIPT_WITHOUT_REGISTRY)
+    if not observed or not evidence:
+        evidence.append(NO_CLAUDE_EVIDENCE)
+    return evidence
 
 
 def _transcript_evidence(native_id, cwd, config_dir, now):

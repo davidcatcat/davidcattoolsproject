@@ -160,9 +160,12 @@ class StoppedTests(LivenessCase):
         self.assertResult(result, 'STOPPED', 'LOCK_FREE', 'PROCESS_CLEAN', 'REGISTRY_CLEAN')
         self.assertLockFree(session)
 
-    def test_sessions_directory_without_a_transcript_is_enough_evidence(self):
+    def test_a_valid_binding_is_enough_without_a_transcript(self):
+        session = self.bind_claude()
         self.sessions(self.first)
-        self.assertResult(self.check(), 'STOPPED', 'REGISTRY_CLEAN')
+        result = self.check(session)
+        self.assertResult(result, 'STOPPED', 'LOCK_FREE', 'PROCESS_CLEAN', 'REGISTRY_CLEAN')
+        self.assertNotIn('NO_CLAUDE_EVIDENCE', result['evidence'])
 
     def test_evidence_is_fixed_codes_only(self):
         self.sessions(self.first)
@@ -315,6 +318,7 @@ class ClaudeRegistryTests(LivenessCase):
 
     def test_a_dead_pid_is_not_a_match(self):
         self.register(self.first)
+        self.transcript(self.first)
         with patch.object(liveness.os, 'kill', side_effect=ProcessLookupError()):
             self.assertResult(self.check(), 'STOPPED', 'REGISTRY_CLEAN')
 
@@ -325,6 +329,7 @@ class ClaudeRegistryTests(LivenessCase):
 
     def test_another_sessions_live_entry_is_not_a_match_and_is_not_signalled(self):
         self.register(self.first, session=NEW_KEY[3:], pid=os.getpid())
+        self.transcript(self.first)
         with patch.object(liveness.os, 'kill') as kill:
             self.assertResult(self.check(), 'STOPPED', 'REGISTRY_CLEAN')
         kill.assert_not_called()
@@ -389,6 +394,7 @@ class ClaudeRegistryTests(LivenessCase):
         extra.mkdir(mode=0o700)
         self.register(extra, pid=os.getpid())
         self.sessions(self.first)
+        self.transcript(self.first)
         self.assertResult(self.check(), 'STOPPED', 'REGISTRY_CLEAN')
         self.environ['CLAUDE_CONFIG_DIR'] = str(extra)
         self.assertResult(self.check(), 'ACTIVE', 'REGISTRY_LIVE_MATCH')
@@ -423,6 +429,7 @@ class ClaudeRegistryTests(LivenessCase):
         sessions = self.sessions(self.first)
         (sessions / 'registry.key').write_text('FAKE_VALUE', encoding='utf-8')
         entry = self.register(self.first, session=NEW_KEY[3:])
+        self.transcript(self.first)
         _audit['opened'] = []
         _audit['recording'] = True
         try:
@@ -483,6 +490,70 @@ class ClaudeEvidenceFloorTests(LivenessCase):
         path.rename(target)
         path.symlink_to(target)
         self.assertResult(self.check(), 'UNKNOWN', 'TRANSCRIPT_UNREADABLE')
+
+
+class UnknownClaudeSessionTests(LivenessCase):
+    """A registry with no entry for an ID says nothing: that ID may never have run."""
+
+    def assertUnproven(self, **options):
+        """UNKNOWN both on its own and under the caller's real lock, every check clean."""
+        result = self.check(**options)
+        self.assertResult(result, 'UNKNOWN', 'NO_CLAUDE_EVIDENCE', 'PROCESS_CLEAN',
+                          'REGISTRY_CLEAN')
+        with pm_runtime.transfer_lock(SESSION, self.state):
+            held = self.check(lock_held=True, **options)
+        self.assertResult(held, 'UNKNOWN', 'NO_CLAUDE_EVIDENCE', 'PROCESS_CLEAN',
+                          'REGISTRY_CLEAN', 'LOCK_FREE')
+
+    def test_sessions_directory_without_a_transcript_is_not_enough_evidence(self):
+        self.sessions(self.first)
+        self.assertUnproven()
+
+    def test_an_unrelated_registry_entry_is_not_proof(self):
+        self.register(self.first, session=NEW_KEY[3:], pid=os.getpid())
+        self.assertUnproven()
+
+    def test_a_dead_registry_entry_for_the_id_is_not_proof(self):
+        self.register(self.first)
+        with patch.object(liveness.os, 'kill', side_effect=ProcessLookupError()):
+            self.assertUnproven()
+
+    def test_another_sessions_transcript_is_not_proof(self):
+        self.sessions(self.first)
+        self.transcript(self.first, session=NEW_KEY[3:])
+        self.assertUnproven()
+
+    def test_the_sessions_transcript_for_another_directory_is_not_proof(self):
+        self.sessions(self.first)
+        self.transcript(self.first)
+        other = self.home / 'other'
+        other.mkdir()
+        self.assertUnproven(cwd=str(other))
+
+    def test_a_transcript_in_any_config_directory_is_proof(self):
+        self.sessions(self.first)
+        self.sessions(self.second)
+        self.transcript(self.second)
+        with pm_runtime.transfer_lock(SESSION, self.state):
+            result = self.check(lock_held=True)
+        self.assertResult(result, 'STOPPED', 'TRANSCRIPT_QUIET', 'LOCK_FREE')
+        self.assertNotIn('NO_CLAUDE_EVIDENCE', result['evidence'])
+
+    def test_active_evidence_still_outranks_it(self):
+        self.sessions(self.first)
+        running = '77 claude --resume ' + SESSION + '\n'
+        self.assertResult(self.check(ps=running), 'ACTIVE', 'PROCESS_MATCH')
+        self.assertResult(self.check(ps=running, lock_held=True), 'ACTIVE', 'PROCESS_MATCH')
+        self.register(self.first, pid=os.getpid())
+        self.assertResult(self.check(), 'ACTIVE', 'REGISTRY_LIVE_MATCH')
+        self.assertResult(self.check(lock_held=True), 'ACTIVE', 'REGISTRY_LIVE_MATCH')
+
+    def test_a_failed_check_keeps_its_own_code(self):
+        self.sessions(self.first)
+        result = self.check(process_lister=_unavailable(OSError()), lock_held=True)
+        self.assertResult(result, 'UNKNOWN', 'PROCESS_LIST_FAILED', 'NO_CLAUDE_EVIDENCE')
+        (self.sessions(self.first) / 'bad.json').write_text('{', encoding='utf-8')
+        self.assertResult(self.check(), 'UNKNOWN', 'REGISTRY_UNREADABLE', 'NO_CLAUDE_EVIDENCE')
 
 
 class CodexTests(LivenessCase):
