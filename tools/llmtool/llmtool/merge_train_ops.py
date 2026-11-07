@@ -326,6 +326,8 @@ def _merge_locked(train_id, store, github_get, gh_runner, root, train_root):
     if record is None:
         return _refused(code)
     train_pr, train_head = record['train_pr'], record['train_head']
+    # BUILT and UNKNOWN may lead to a new merge; MERGE_CLAIMED is recovery
+    # only, under the operation lock, never a new merge.
     if record['state'] not in ('BUILT', 'MERGE_CLAIMED', 'UNKNOWN') or train_pr is None:
         return _refused(TRAIN_NOT_MERGEABLE)
     if record['state'] == 'MERGE_CLAIMED':
