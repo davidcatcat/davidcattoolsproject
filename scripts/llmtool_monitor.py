@@ -4769,6 +4769,8 @@ def pr_board_rows(pulls, verdicts, checks, ec2, reviewing, pending, office=(), *
             next_step, owner = "等審查", "Reviewer"
         elif review == "要修":
             next_step, owner = "修復", "Developer"
+        elif review == "舊審查":   # a stale verdict needs a new review before CI work
+            next_step, owner = "派審查", "PM"
         elif any(word in ("失敗", "逾時", "取消") for word in required):
             next_step, owner = "修 CI", "PM"
         elif ec2_word in ("FAIL", "SHA_MISMATCH", "TIMEOUT"):
@@ -4787,7 +4789,7 @@ def pr_board_rows(pulls, verdicts, checks, ec2, reviewing, pending, office=(), *
                 next_step, owner = "等 macOS", "CI"
             else:   # macOS 略過 or —
                 next_step, owner = "加 mac-ci", "PM"
-        elif review in ("未審", "舊審查"):
+        elif review == "未審":
             next_step, owner = "派審查", "PM"
         current = _current_pr_people(office, pull, checks,
                                      github_known=github_known,

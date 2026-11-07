@@ -8876,6 +8876,27 @@ class PrBoardTests(unittest.TestCase):
                                     ({}, ""), set(), [])[0]
             self.assertEqual((row.next, row.owner), ("未確認 CI", "PM"))
 
+    def test_stale_verdict_dispatches_review_before_ci_and_ec2_failures(self):
+        # Review v1 FAIL at 443dc21: a verdict on an older head needs a new
+        # review first, even when a required check or EC2 failed on the head.
+        stale = self._verdict("PASS", head="1234567")
+        for linux, ec2 in (("failure", {}), ("timed_out", {}), ("cancelled", {}),
+                           ("success", {"abcdef0": "FAIL"}),
+                           ("failure", {"abcdef0": "TIMEOUT"})):
+            ci = self._checks({"linux": ("completed", linux), "mac": ("completed", "success")})
+            row = mon.pr_board_rows([self._pull(1)], stale, ci, (ec2, ""), set(), [])[0]
+            with self.subTest(linux=linux, ec2=ec2):
+                self.assertEqual((row.review, row.next, row.owner), ("舊審查", "派審查", "PM"))
+        # A current-head PASS with the same failures still asks for the CI or EC2 fix.
+        current = self._verdict("PASS")
+        ci = self._checks({"linux": ("completed", "failure"), "mac": ("completed", "success")})
+        row = mon.pr_board_rows([self._pull(1)], current, ci, ({}, ""), set(), [])[0]
+        self.assertEqual((row.review, row.next), ("通過", "修 CI"))
+        ci = self._checks({"linux": ("completed", "success"), "mac": ("completed", "success")})
+        row = mon.pr_board_rows([self._pull(1)], current, ci, ({"abcdef0": "FAIL"}, ""),
+                                set(), [])[0]
+        self.assertEqual((row.review, row.next), ("通過", "修 EC2 失敗"))
+
     def test_pr_verdict_head_binding_open_filter_and_priority_pairs(self):
         rows = mon.pr_board_rows(
             [self._pull(1), self._pull(2, state="CLOSED"), self._pull(3, state="MERGED")],
