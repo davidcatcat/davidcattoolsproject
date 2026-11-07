@@ -971,7 +971,12 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                 return d6
 
             with patch.object(task_submission_cli.task_completion, 'validate_task_binding'), \
-                 patch.object(task_submission_cli, '_validate_trusted_main_pin'), \
+                 patch.object(task_submission_cli, '_validate_trusted_main_pin',
+                              side_effect=lambda pin, *_: pin), \
+                 patch.object(task_submission_cli.task_completion,
+                              'read_authenticated_main_sha', return_value='f' * 40), \
+                 patch.object(task_submission_cli.task_completion, 'ensure_main_commit',
+                              return_value=True), \
                  patch.object(task_submission_cli, '_completion_repair_artifact_segments',
                               return_value=None), \
                  patch.object(task_submission_cli.task_completion, 'collect_executor_result',
