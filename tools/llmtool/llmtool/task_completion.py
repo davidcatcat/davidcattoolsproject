@@ -1184,15 +1184,14 @@ def _private_merge_read(root, args, **git_options):
     only core.bare=true config, an unborn HEAD (so no attribute tree), no
     index and no attributes. Repository objects are reachable only as
     read-only alternates, and every object the merge writes stays private.
+    Every failure stops as GIT_INSPECTION_FAILED, including the timeout,
+    unavailable and oversized-output codes that _git classifies.
     """
     try:
         objects = _git(root, ('rev-parse', '--path-format=absolute', '--git-path', 'objects'),
                        limit=4096).decode('utf-8', 'strict').strip()
-    except UnicodeError:
-        _stop('GIT_INSPECTION_FAILED')
-    if not objects or not os.path.isabs(objects):
-        _stop('GIT_INSPECTION_FAILED')
-    try:
+        if not objects or not os.path.isabs(objects):
+            _stop('GIT_INSPECTION_FAILED')
         with tempfile.TemporaryDirectory(prefix='llmtool-merge-read-') as temporary:
             private = Path(temporary).resolve()
             (private / 'objects').mkdir(mode=0o700)
@@ -1206,8 +1205,6 @@ def _private_merge_read(root, args, **git_options):
                 'GIT_DIR': str(private),
                 'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
             }, **git_options)
-    except LLMToolError:
-        raise
     except Exception:
         _stop('GIT_INSPECTION_FAILED')
 

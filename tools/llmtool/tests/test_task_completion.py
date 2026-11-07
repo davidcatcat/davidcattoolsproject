@@ -9,7 +9,7 @@ import tempfile
 import threading
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -1314,6 +1314,52 @@ class TaskCompletionTests(unittest.TestCase):
                         read(self.source_sha)
                 self.assertEqual(raised.exception.completion_code,
                                  'GIT_INSPECTION_FAILED')
+
+    def _classified_git_failure(self, code, stage, seen):
+        """Make the real _git stop with code at one stage, recording what it raised."""
+        real_git = task_completion._git
+
+        def run(root, args, **options):
+            if ('env_overrides' in options) != (stage == 'merge-read'):
+                return real_git(root, args, **options)
+            failure = nullcontext()
+            if code == 'GIT_INSPECTION_TIMEOUT':
+                failure = patch.object(task_completion, '_TIMEOUT', 0)
+            elif code == 'GIT_INSPECTION_UNAVAILABLE':
+                failure = patch.object(task_completion.subprocess, 'Popen',
+                                       side_effect=OSError('no git'))
+            else:
+                options['limit'] = 0
+            try:
+                with failure:
+                    return real_git(root, args, **options)
+            except LLMToolError as error:
+                seen.append(error.completion_code)
+                raise
+
+        return patch.object(task_completion, '_git', run)
+
+    def test_private_merge_read_classified_git_failure_stops_inspection(self):
+        # A non-merge commit, so both reads print output for the size limit.
+        commit, _ = self._make_result()
+        root = str(self.root)
+        reads = {
+            'remerge': lambda: task_completion._remerge_diff_paths_raw(root, commit),
+            'merge-tree': lambda: task_completion._merge_tree_conflict_paths_raw(
+                root, commit, self.source_sha),
+        }
+        for name, read in reads.items():
+            for stage in ('objects-path', 'merge-read'):
+                for code in ('GIT_INSPECTION_TIMEOUT', 'GIT_INSPECTION_UNAVAILABLE',
+                             'GIT_EVIDENCE_TOO_LARGE'):
+                    with self.subTest(read=name, stage=stage, code=code):
+                        seen = []
+                        with self._classified_git_failure(code, stage, seen):
+                            with self.assertRaises(LLMToolError) as raised:
+                                read()
+                        self.assertEqual(seen, [code])
+                        self.assertEqual(raised.exception.completion_code,
+                                         'GIT_INSPECTION_FAILED')
 
     def _assert_rename_conflict_collectors(self, head):
         executor = {'artifact': head['artifact'],
