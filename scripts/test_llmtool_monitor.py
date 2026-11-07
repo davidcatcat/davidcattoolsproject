@@ -1514,7 +1514,7 @@ class GitHubActivityTests(unittest.TestCase):
         verdict = comment(84, NOW - 9, "**Verdict: PASS** at head abc1234",
                           kind="issues", login=AI_LOGIN)
         self.assertEqual(mon.review_verdicts([verdict]), {
-            "84": [(NOW - 9, "PASS", frozenset({"abc1234"}))]})
+            "84": [(NOW - 9, "PASS", frozenset({"abc1234"}), "abc1234")]})
 
     def test_ai_login_markers_and_verdicts_are_displayed(self):
         marker = comment(84, NOW - 9,
@@ -8212,25 +8212,31 @@ class WorkBoardTests(unittest.TestCase):
                  self._pull(6, title="Unknown verdict", sha="1" * 40),
                  self._pull(7, title="Wrong head", sha="7" * 40),
                  self._pull(4, title="Draft", sha="d" * 40, draft=True)]
-        verdicts = {"1": [(1, "FAIL", frozenset({"aaaaaaa"})),
-                           (2, "PASS", frozenset({"aaaaaaa"}))],
-                    "2": [(3, "PASS", frozenset({"bbbbbbb"})),
-                          (4, "FAIL", frozenset({"bbbbbbb"}))],
-                    "3": [(5, "PASS", frozenset({"eeeeeee"}))],
-                    "5": [(1, "CHANGES_REQUIRED", frozenset({"fffffff"}))],
-                    "6": [(1, "PASS", frozenset({"1111111"})),
-                          (2, "UNKNOWN", frozenset({"1111111"}))],
-                    "7": [(1, "PASS", frozenset({"8888888"}))]}
+        def bound(when, word, head):
+            return (when, word, frozenset({head}), head)
+        verdicts = {"1": [bound(1, "FAIL", "aaaaaaa"), bound(2, "PASS", "aaaaaaa")],
+                    "2": [bound(3, "PASS", "bbbbbbb"), bound(4, "FAIL", "bbbbbbb")],
+                    "3": [bound(5, "PASS", "eeeeeee")],
+                    "5": [bound(1, "CHANGES_REQUIRED", "fffffff")],
+                    "6": [bound(1, "PASS", "1111111"), bound(2, "UNKNOWN", "1111111")],
+                    # The current head appears in the body, but the HEAD line names another.
+                    "7": [(1, "PASS", frozenset({"7777777", "8888888"}), "8888888")]}
         work = mon.work_board(self._github(pulls, verdicts),
                               mon.PmBoard("ok", 0, [], [], []), NOW)
         rows = {item.ref: (item.what, item.next) for item in work.running}
+        stale = "「只有舊版本的審查結論，要重新審查」"
         self.assertEqual(rows["PR #1"], ("Pass", "PM"))
         self.assertEqual(rows["PR #2"], ("Fail", "Developer"))
-        self.assertEqual(rows["PR #3"], ("Unknown「未見審查結論」", "未確認"))
+        self.assertEqual(rows["PR #3"], ("Unknown" + stale, "PM"))
         self.assertEqual(rows["PR #5"], ("Changes「已見審查結論，下一步未確認」", "未確認"))
         self.assertEqual(rows["PR #6"], ("Unknown verdict「已見審查結論，下一步未確認」", "未確認"))
-        self.assertEqual(rows["PR #7"], ("Wrong head「未見審查結論」", "未確認"))
+        self.assertEqual(rows["PR #7"], ("Wrong head" + stale, "PM"))
         self.assertEqual(rows["PR #4"], ("Draft 草稿「未見審查結論」", "未確認"))
+        # The PR table reads the same verdicts the same way.
+        table = {row.number: (row.review, row.next) for row in work.prs}
+        self.assertEqual(table[3], ("舊審查", "派審查"))
+        self.assertEqual(table[7], ("舊審查", "派審查"))
+        self.assertEqual(table[1][0], "通過")
 
     def test_board_pulls_use_the_same_fork_filter_and_safe_head_prefix(self):
         pulls = [self._pull(1, sha="ABCDEF0123456789"),
@@ -8343,7 +8349,8 @@ class WorkBoardTests(unittest.TestCase):
         raw = [self._pull(i, updated=NOW) for i in range(1, 101)]
         raw[-1] = dict(raw[-1], head={"sha": "a" * 40, "repo": {"full_name": "fork/r"}})
         source = mon.GitHubSource("o/r", clock=lambda: NOW)
-        with patch.object(source, "_get", side_effect=[[], raw]), patch.object(source, "refresh_ci"):
+        with patch.object(source, "_get", side_effect=[[], raw]), patch.object(source, "refresh_ci"), \
+                patch.object(source, "refresh_pr_checks"):
             source.refresh(force=True)
         self.assertEqual(source.board_page_count, 100)
         self.assertEqual(source.board_oldest_updated, NOW)
@@ -8585,9 +8592,9 @@ class PrBoardTests(unittest.TestCase):
                                 cpu_of=lambda _pid: cpu)
             return mon._bind_d6_pr_rows(rows, "/repo", prs)[0]
 
-    def _three_views(self, office, ci_heads=None):
+    def _three_views(self, office, checks=None):
         """(PR table, running PR #978, Issue #965 named by the Codex label, Issue #966 closed by PR #978)."""
-        github = self._github([replace(self._pull(978), closes=(966,))], ci_heads)
+        github = self._github([replace(self._pull(978), closes=(966,))], checks)
         board = self._board([mon.PmBoardItem("#965", "Issue", "Developer"),
                              mon.PmBoardItem("#966", "Issue", "Developer"),
                              mon.PmBoardItem("PR #978", "PR", "Developer")])
@@ -8597,10 +8604,10 @@ class PrBoardTests(unittest.TestCase):
         return table, current["PR #978"], current["#965"], current["#966"]
 
     @staticmethod
-    def _github(pulls, ci_heads=None):
+    def _github(pulls, checks=None):
         from types import SimpleNamespace
         return SimpleNamespace(successful_read=True, board_pulls=pulls, verdicts={},
-                               ci_heads=ci_heads or {}, pending=[], window=43200,
+                               ci_heads={}, pr_checks=checks or {}, pending=[], window=43200,
                                read_failed=False, board_page_count=len(pulls),
                                board_oldest_updated=0)
 
@@ -8614,7 +8621,11 @@ class PrBoardTests(unittest.TestCase):
 
     @staticmethod
     def _verdict(word, when=1, head="abcdef0", number="1"):
-        return {number: [(when, word, frozenset({head}))]}
+        return {number: [(when, word, frozenset({head}), head)]}
+
+    @staticmethod
+    def _bound(when, word, head="abcdef0"):
+        return (when, word, frozenset({head}), head)
 
     def test_current_people_use_real_codex_and_d6_review_labels(self):
         codex, codex_review = self._real_codex_rows(self.PRS)
@@ -8793,7 +8804,12 @@ class PrBoardTests(unittest.TestCase):
             ("", False, "審查中", "", "等審查", "Reviewer"),
             ("", False, "要修", "", "修復", "Developer"),
             ("", False, "通過", "失敗", "成功", "修 CI", "PM"),
-            ("", False, "通過", "", "成功", "可合併", "PM"),
+            ("", False, "通過", "成功", "成功", "可合併", "PM"),
+            ("", False, "通過", "", "成功", "未確認 CI", "PM"),       # no Linux run on the head
+            ("", False, "通過", "成功", "", "加 mac-ci", "PM"),       # no macOS run on the head
+            ("", False, "通過", "成功", "取消", "修 CI", "PM"),
+            ("", False, "通過", "逾時", "成功", "修 CI", "PM"),
+            ("", False, "舊審查", "成功", "成功", "派審查", "PM"),
             ("", False, "通過", "執行中", "成功", "等 CI", "CI"),
             ("", False, "通過", "排隊", "成功", "等 CI", "CI"),
             ("", False, "通過", "略過", "成功", "未確認 CI", "PM"),
@@ -8811,24 +8827,28 @@ class PrBoardTests(unittest.TestCase):
                 linux = ""
             else:
                 kind, draft, verdict, linux, mac, expected_next, expected_owner = case
-            review = {"通過": "PASS", "要修": "FAIL", "未確認": "MAYBE"}.get(verdict)
-            verdicts = self._verdict(review, number=str(index)) if review else {}
+            review = {"通過": "PASS", "要修": "FAIL", "未確認": "MAYBE", "舊審查": "PASS"}.get(verdict)
+            verdicts = (self._verdict(review, number=str(index),
+                                      head="1234567" if verdict == "舊審查" else "abcdef0")
+                        if review else {})
             reviewing = {(str(index), "abcdef0")} if verdict == "審查中" else set()
             pending = [mon.OwnerPending(1, f"#{index}", "open", "", kind)] if kind else []
-            linux_entry = {"成功": ("completed", "success"), "失敗": ("completed", "failure"),
-                           "略過": ("completed", "skipped"), "執行中": ("in_progress", ""),
-                           "排隊": ("queued", ""), "結果不明": ("completed", "made_up")}.get(linux)
-            mac_entry = {"成功": ("completed", "success"), "略過": ("completed", "skipped"),
-                         "失敗": ("completed", "failure"), "執行中": ("in_progress", ""),
-                         "結果不明": ("completed", "made_up")}.get(mac)
+            words = {"成功": ("completed", "success"), "失敗": ("completed", "failure"),
+                     "略過": ("completed", "skipped"), "執行中": ("in_progress", ""),
+                     "排隊": ("queued", ""), "結果不明": ("completed", "made_up"),
+                     "取消": ("completed", "cancelled"), "逾時": ("completed", "timed_out"),
+                     "?": None}   # a check that may sit beyond a cut page
             ci = {"abcdef0": {}}
-            if linux_entry:
-                ci["abcdef0"]["linux"] = linux_entry
-            if mac_entry:
-                ci["abcdef0"]["mac"] = mac_entry
+            if linux in words:
+                ci["abcdef0"]["linux"] = words[linux]
+            if mac in words:
+                ci["abcdef0"]["mac"] = words[mac]
             row = mon.pr_board_rows([self._pull(index, draft=draft)], verdicts, ci,
                                     ({}, ""), reviewing, pending)[0]
-            self.assertEqual((row.next, row.owner), (expected_next, expected_owner))
+            with self.subTest(case=case):
+                self.assertEqual((row.next, row.owner), (expected_next, expected_owner))
+                if verdict in ("通過", "舊審查", "要修"):
+                    self.assertEqual(row.review, verdict)
 
         for index, linux in enumerate(("略過", "結果不明"), 30):
             verdicts = self._verdict("PASS", number=str(index))
@@ -8842,9 +8862,9 @@ class PrBoardTests(unittest.TestCase):
     def test_pr_verdict_head_binding_open_filter_and_priority_pairs(self):
         rows = mon.pr_board_rows(
             [self._pull(1), self._pull(2, state="CLOSED"), self._pull(3, state="MERGED")],
-            {"1": [(1, "PASS", frozenset({"oldhead"})),
-                   (2, "FAIL", frozenset({"abcdef0"})),
-                   (3, "PASS", frozenset({"abcdef0"}))]}, None, ({}, ""), set(), [])
+            {"1": [self._bound(1, "PASS", "0123456"),
+                   self._bound(2, "FAIL"),
+                   self._bound(3, "PASS")]}, None, ({}, ""), set(), [])
         self.assertEqual([(row.number, row.review) for row in rows], [(1, "通過")])
         self.assertEqual(mon.pr_board_rows([self._pull(1, head="")], {}, None,
                                            ({}, ""), {("1", "abcdef0")}, [])[0].review, "?")
@@ -8855,10 +8875,10 @@ class PrBoardTests(unittest.TestCase):
         empty_draft = mon.pr_board_rows([self._pull(1, head="", draft=True)], {}, None,
                                         ({}, ""), set(), [])[0]
         self.assertEqual((empty_draft.next, empty_draft.owner), ("草稿", "Developer"))
-        self.assertEqual(mon.pr_board_rows([self._pull(1)], {"1": [(1, "PASS", {"abcdef0"})]},
+        self.assertEqual(mon.pr_board_rows([self._pull(1)], {"1": [self._bound(1, "PASS")]},
                                            None, ({}, ""), {("1", "abcdef0")}, [])[0].review,
                          "審查中")
-        self.assertEqual(mon.pr_board_rows([self._pull(1)], {"1": [(1, "FAIL", {"abcdef0"})]},
+        self.assertEqual(mon.pr_board_rows([self._pull(1)], {"1": [self._bound(1, "FAIL")]},
                                            {"abcdef0": {"mac": ("completed", "success"),
                                                          "linux": ("completed", "failure")}},
                                            ({}, ""), set(), [mon.OwnerPending(1, "#2", "open", "", "waiting_owner")])[0].next,
@@ -8866,9 +8886,11 @@ class PrBoardTests(unittest.TestCase):
 
     def test_next_step_priority_pairs_and_pending_exact_match(self):
         pull = self._pull(1, draft=True)
-        passed = {"1": [(1, "PASS", frozenset({"abcdef0"}))]}
+        passed = {"1": [self._bound(1, "PASS")]}
         ci = {"abcdef0": {"linux": ("completed", "failure"),
                            "mac": ("completed", "success")}}
+        green = {"abcdef0": {"linux": ("completed", "success"),
+                              "mac": ("completed", "success")}}
         def next_for(*, selected=pull, verdicts=passed, statuses=ci, ec2=({}, ""),
                      reviewing=set(), pending=()):
             row = mon.pr_board_rows([selected], verdicts, statuses, ec2,
@@ -8881,11 +8903,11 @@ class PrBoardTests(unittest.TestCase):
         self.assertEqual(next_for(ec2=ec2_failure, reviewing={("1", "abcdef0")}),
                          ("草稿", "Developer"))
         self.assertEqual(next_for(selected=self._pull(1, draft=False),
-                                  verdicts={"1": [(1, "FAIL", {"abcdef0"})]},
+                                  verdicts={"1": [self._bound(1, "FAIL")]},
                                   ec2=ec2_failure, reviewing={("1", "abcdef0")}),
                          ("等審查", "Reviewer"))
         self.assertEqual(next_for(selected=self._pull(1, draft=False),
-                                  verdicts={"1": [(1, "FAIL", {"abcdef0"})]},
+                                  verdicts={"1": [self._bound(1, "FAIL")]},
                                   ec2=ec2_failure),
                          ("修復", "Developer"))
         self.assertEqual(next_for(selected=self._pull(1, draft=False), ec2=ec2_failure),
@@ -8900,10 +8922,13 @@ class PrBoardTests(unittest.TestCase):
                                       ec2=({"abcdef0": failure}, "")),
                              ("修 EC2 失敗", "PM"))
         for non_failure in ("ADMISSION_DENIED", "UNAVAILABLE", "UNKNOWN", "?", "—"):
-            self.assertEqual(next_for(selected=self._pull(1, draft=False),
-                                      statuses={"abcdef0": {"mac": ("completed", "success")}},
+            self.assertEqual(next_for(selected=self._pull(1, draft=False), statuses=green,
                                       ec2=({"abcdef0": non_failure}, "")),
                              ("可合併", "PM"))
+        # macOS success alone is not mergeable: Linux must be 成功 on the same head.
+        self.assertEqual(next_for(selected=self._pull(1, draft=False),
+                                  statuses={"abcdef0": {"mac": ("completed", "success")}}),
+                         ("未確認 CI", "PM"))
         unmatched = [mon.OwnerPending(1, "#2", "open", "", "waiting_owner"),
                      mon.OwnerPending(1, "#1", "open", "", "repair_gate")]
         self.assertEqual(next_for(pending=unmatched), ("草稿", "Developer"))
@@ -8941,6 +8966,172 @@ class PrBoardTests(unittest.TestCase):
             if path.endswith("actions/runs?per_page=30") else {"runners": []}
         source.refresh_ci()
         self.assertIsNone(source.ci_heads)
+
+    @staticmethod
+    def _checks_page(sha, linux=("completed", "success"), mac=("completed", "success"), extra=()):
+        """A fake commit check-runs page with the two required checks on sha."""
+        runs = [{"id": run_id, "name": name, "head_sha": sha, "status": state[0],
+                 "conclusion": state[1] or None}
+                for run_id, name, state in ((10, "check (Linux 3.14)", linux),
+                                            (20, "check (macOS 3.13)", mac)) if state]
+        runs += list(extra)
+        return {"total_count": len(runs), "check_runs": runs}
+
+    def test_head_checks_take_latest_attempt_per_required_name(self):
+        def run(run_id, name, status="completed", conclusion="success", sha=self.SHA):
+            return {"id": run_id, "name": name, "head_sha": sha, "status": status,
+                    "conclusion": conclusion}
+        linux, mac = "check (Linux 3.14)", "check (macOS 3.13)"
+        skipped, success = run(5, mac, conclusion="skipped"), run(9, mac)
+        for order in ((skipped, success), (success, skipped)):
+            page = {"total_count": 3, "check_runs": [run(3, linux), *order]}
+            self.assertEqual(mon.head_checks(page, self.SHA),
+                             {"linux": ("completed", "success"), "mac": ("completed", "success")})
+        # Other names, another head and malformed runs are ignored; no run of a name is "—".
+        noise = [run(1, linux, status="queued", conclusion=None), run(50, "check (docs)"),
+                 run(51, linux, conclusion="failure", sha="f" * 40), run(True, linux),
+                 run(52, linux, status=None), run(53, ["not", "a", "name"]), None]
+        checks = mon.head_checks({"total_count": len(noise), "check_runs": noise}, self.SHA)
+        self.assertEqual(checks, {"linux": ("queued", "")})
+        self.assertEqual(mon._check_word({"abcdef0": checks}, "abcdef0", "linux"), "排隊")
+        self.assertEqual(mon._check_word({"abcdef0": checks}, "abcdef0", "mac"), "—")
+        pending = mon.head_checks(self._checks_page(self.SHA, mac=("in_progress", "")), self.SHA[:7])
+        self.assertEqual(mon._check_word({"abcdef0": pending}, "abcdef0", "mac"), "執行中")
+        failed = mon.head_checks(self._checks_page(self.SHA, linux=("completed", "failure")), self.SHA)
+        self.assertEqual(mon._check_word({"abcdef0": failed}, "abcdef0", "linux"), "失敗")
+        # A cut page may hide a later attempt: both stay unknown.
+        cut = dict(self._checks_page(self.SHA), total_count=150)
+        self.assertEqual(mon.head_checks(cut, self.SHA), {"linux": None, "mac": None})
+        self.assertEqual(mon._check_word({"abcdef0": mon.head_checks(cut, self.SHA)},
+                                         "abcdef0", "linux"), "?")
+        for bad in ({}, [], {"check_runs": None}, None):
+            with self.assertRaises(ValueError):
+                mon.head_checks(bad, self.SHA)
+        # Unread heads and an unread GitHub show ?.
+        self.assertEqual(mon._check_word({}, "abcdef0", "linux"), "?")
+        self.assertEqual(mon._check_word(None, "abcdef0", "mac"), "?")
+
+    def test_old_head_beyond_the_newest_runs_shows_its_exact_head_checks(self):
+        source = mon.GitHubSource("o/r", clock=lambda: self.NOW)
+        # Thirty newer workflow runs from other PRs: the runs page never names this head.
+        newer = {"workflow_runs": [{"id": 100 + index, "name": "llmtool Linux CI",
+                                    "head_sha": f"{index:040x}", "status": "completed",
+                                    "conclusion": "success"} for index in range(1, 31)]}
+        source.ci_heads = mon.ci_head_runs(newer)
+        self.assertNotIn("abcdef0", source.ci_heads)
+        pull = mon.BoardPull(978, "Old work", "OPEN", 0, 0, "abcdef0", False, (), self.SHA)
+        source.board_pulls = [pull]
+        source.successful_read, source.verdicts = True, self._verdict("PASS", number="978")
+        paths = []
+        source._get = lambda path: paths.append(path) or self._checks_page(self.SHA)
+        source.refresh_pr_checks()
+        self.assertEqual(paths, [f"repos/o/r/commits/{self.SHA}/check-runs?per_page=100"])
+        work = mon.work_board(source, self._board(), self.NOW, ec2=({}, ""), reviewing=set())
+        row = work.prs[0]
+        self.assertEqual((row.review, row.linux, row.mac, row.next, row.owner, row.current),
+                         ("通過", "成功", "成功", "可合併", "PM", "沒人"))
+        # A required check still queued on the exact head puts CI in 現在 and waits.
+        source._pr_check_cache = {}
+        source._get = lambda path: self._checks_page(self.SHA, mac=("queued", ""))
+        source.refresh_pr_checks()
+        work = mon.work_board(source, self._board(), self.NOW, ec2=({}, ""), reviewing=set())
+        row = work.prs[0]
+        self.assertEqual((row.mac, row.next, row.owner, row.current), ("排隊", "等 macOS", "CI", "CI"))
+        self.assertEqual(next(item.current for item in work.running if item.ref == "PR #978"), "CI")
+
+    def test_pr_check_reads_are_capped_cached_and_isolated_per_head(self):
+        source = mon.GitHubSource("o/r", clock=lambda: self.NOW)
+        shas = {number: str(number) * 40 for number in range(1, 8)}
+
+        def pulls():
+            return [mon.BoardPull(number, f"Work {number}", "OPEN", 0, 0, sha[:7], False, (), sha)
+                    for number, sha in shas.items()]
+        answers = {shas[7]: self._checks_page(shas[7]),
+                   shas[6]: self._checks_page(shas[6], mac=("in_progress", "")),
+                   shas[5]: RuntimeError("gh api 失敗（HTTP 502）")}
+        reads = []
+
+        def get(path):
+            sha = path.split("/commits/")[1].split("/")[0]
+            reads.append(sha)
+            answer = answers.get(sha, self._checks_page(sha, mac=None))
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        source._get = get
+        source.board_pulls = pulls()
+
+        def columns():
+            rows = mon.pr_board_rows(source.board_pulls, {}, source.pr_checks, ({}, ""), set(), [])
+            return {row.number: (row.linux, row.mac) for row in rows}
+        # At most CI_JOB_READS heads per refresh, newest PRs first; one failed read is ? only there.
+        self.assertEqual(mon.CI_JOB_READS, 5)
+        source.refresh_pr_checks()
+        self.assertEqual(reads, [shas[number] for number in (7, 6, 5, 4, 3)])
+        self.assertEqual(columns(), {7: ("成功", "成功"), 6: ("成功", "執行中"), 5: ("?", "?"),
+                                     4: ("成功", "—"), 3: ("成功", "—"), 2: ("?", "?"),
+                                     1: ("?", "?")})
+        # Heads never read come first; the completed head 7 is cached and not read again.
+        reads.clear()
+        answers[shas[5]] = self._checks_page(shas[5])
+        source.refresh_pr_checks()
+        self.assertEqual(reads, [shas[number] for number in (5, 2, 1, 6, 4)])
+        self.assertEqual(columns()[5], ("成功", "成功"))
+        self.assertEqual(columns()[1], ("成功", "—"))
+        reads.clear()
+        source.refresh_pr_checks()
+        self.assertEqual(reads, [shas[number] for number in (6, 4, 3, 2, 1)])
+        # A changed head is read fresh; a failed read of a known head turns only it to ?.
+        reads.clear()
+        shas[7] = "a" * 40
+        answers[shas[7]] = self._checks_page(shas[7], linux=("queued", ""))
+        answers[shas[6]] = RuntimeError("offline")
+        source.board_pulls = pulls()
+        source.refresh_pr_checks()
+        self.assertEqual(reads[0], "a" * 40)
+        self.assertNotIn("7" * 40, reads)
+        self.assertNotIn("7" * 40, source._pr_check_cache)
+        self.assertEqual(len(reads), mon.CI_JOB_READS)
+        shown = columns()
+        self.assertEqual((shown[7], shown[6], shown[5], shown[4]),
+                         (("排隊", "成功"), ("?", "?"), ("成功", "成功"), ("成功", "—")))
+        # A closed PR's head is dropped from the cache and never read.
+        source.board_pulls = [replace(pull, state="CLOSED") if pull.number == 5 else pull
+                              for pull in pulls()]
+        reads.clear()
+        source.refresh_pr_checks()
+        self.assertNotIn(shas[5], reads)
+        self.assertNotIn(shas[5], source._pr_check_cache)
+
+    def test_verdict_binds_only_to_the_head_named_on_its_head_line(self):
+        green = {"abcdef0": {"linux": ("completed", "success"), "mac": ("completed", "success")}}
+
+        def verdicts(*bodies):
+            return mon.review_verdicts([comment(1, self.NOW - 60 + index, body, login=AI_LOGIN)
+                                        for index, body in enumerate(bodies)])
+        current = "**Verdict: PASS**\nPR #1 HEAD: abcdef0123\n"
+        elsewhere = "**Verdict: PASS**\nPR #1 HEAD: 1234567\nThe follow-up abcdef0 was not reviewed.\n"
+        self.assertEqual(verdicts(elsewhere)["1"][0][3], "1234567")
+        cases = ((current,), (elsewhere,), (current, elsewhere),
+                 ("**Verdict: PASS**\nNo head line; mentions abcdef0 only.\n",))
+        expected = (("通過", "可合併"), ("舊審查", "派審查"), ("通過", "可合併"), ("未審", "派審查"))
+        for bodies, (review, next_step) in zip(cases, expected):
+            with self.subTest(bodies=bodies):
+                row = mon.pr_board_rows([self._pull(1)], verdicts(*bodies), green,
+                                        ({}, ""), set(), [])[0]
+                self.assertEqual((row.review, row.next, row.owner), (review, next_step, "PM"))
+        # The running PR row on the work board follows the same rule.
+        github = self._github([self._pull(1)], green)
+        github.verdicts = verdicts(elsewhere)
+        work = mon.work_board(github, self._board(), self.NOW)
+        item = next(item for item in work.running if item.ref == "PR #1")
+        self.assertNotEqual(item.what, "Work 1")
+        self.assertIn("舊版本", item.what)
+        self.assertEqual(work.prs[0].review, "舊審查")
+        github.verdicts = verdicts(current)
+        work = mon.work_board(github, self._board(), self.NOW)
+        item = next(item for item in work.running if item.ref == "PR #1")
+        self.assertEqual((item.what, item.next), ("Work 1", "PM"))
 
     def test_ec2_head_entry_uses_only_valid_bound_receipt_fields(self):
         stamp = "2026-11-05T00:00:00Z"
@@ -9047,7 +9238,7 @@ class PrBoardTests(unittest.TestCase):
             os.utime(timeout, (NOW + 4, NOW + 4))
             results, problem = mon.ec2_head_results(tasks)
             self.assertEqual((results, problem), ({"abcdef0": "TIMEOUT", "1234567": "FAIL"}, ""))
-            mac = {"abcdef0": {"mac": ("completed", "success")}}
+            mac = {"abcdef0": {"mac": ("completed", "success"), "linux": ("completed", "success")}}
             rows = mon.pr_board_rows([self._pull(1)], self._verdict("PASS"), mac,
                                      ({"1234567": "FAIL"}, ""), set(), [])
             self.assertEqual((rows[0].next, rows[0].owner), ("可合併", "PM"))
@@ -9062,7 +9253,7 @@ class PrBoardTests(unittest.TestCase):
         self.assertEqual(lines[lines.index("── PR 看板 ──") + 1], "未知")
         known_empty = mon.work_board(
             type("GitHub", (), {"successful_read": True, "board_pulls": [], "verdicts": {},
-                                "ci_heads": {}, "pending": [], "window": 43200,
+                                "ci_heads": {}, "pr_checks": {}, "pending": [], "window": 43200,
                                 "read_failed": False, "board_page_count": 0,
                                 "board_oldest_updated": None})(),
             mon.PmBoard("ok", 0, [], [], []), NOW)
@@ -9070,8 +9261,8 @@ class PrBoardTests(unittest.TestCase):
         self.assertEqual(empty_lines[empty_lines.index("── PR 看板 ──") + 1], "無")
         github = type("GitHub", (), {"successful_read": True, "board_pulls": [
             mon.BoardPull(978, "title", "OPEN", 0, 0, "abcdef0", False)],
-            "verdicts": {"978": [(1, "PASS", frozenset({"abcdef0"}))]},
-            "ci_heads": {"abcdef0": {"mac": ("completed", "success")}},
+            "verdicts": {"978": [(1, "PASS", frozenset({"abcdef0"}), "abcdef0")]},
+            "ci_heads": {}, "pr_checks": {"abcdef0": {"mac": ("completed", "success")}},
             "pending": [], "window": 43200, "read_failed": False,
             "board_page_count": 1, "board_oldest_updated": 0})()
         work = mon.work_board(github, mon.PmBoard("ok", 0, [], [], []), NOW,
@@ -9095,7 +9286,7 @@ class PrBoardTests(unittest.TestCase):
 
     def test_running_pr_shows_exact_head_checks_without_session(self):
         pull = self._pull(978)
-        github = self._github([pull], ci_heads={"abcdef0": {
+        github = self._github([pull], checks={"abcdef0": {
             "linux": ("in_progress", "")}})
         work = mon.work_board(github, self._board(), NOW)
         row = next(item for item in work.running if item.ref == "PR #978")

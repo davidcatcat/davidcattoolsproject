@@ -1665,7 +1665,7 @@ GITHUB_REFRESH = 30.0
 GITHUB_BACKOFF = 300.0   # the wait doubles after each failed read, up to this
 GITHUB_JOBS_TTL = 60.0   # an unfinished run's job list is reused while its updated_at stays the same, at most this long
 GITHUB_STALE = 3 * GITHUB_REFRESH   # older runner data is shown as 未確認, never as offline
-CI_JOB_READS = 5   # finished runs' job lists read per refresh (they are cached)
+CI_JOB_READS = 5   # finished runs' job lists, and open PR heads' check runs, read per refresh (both cached)
 CI_RUN_READS = 10  # unfinished runs whose job lists are read per refresh (oldest first)
 GITHUB_LIMIT = 16 << 20   # one page of 100 comments; a larger page fails as a stale status
 GITHUB_PAGE = 100    # comments per request (the API maximum)
@@ -2008,6 +2008,10 @@ class GitHubSource:
         self.board_oldest_updated: float | None = None
         self.ci_runs: list | None = None    # ci_runs(); None until GitHub was read
         self.ci_heads: dict | None = None   # latest Linux/Mac run per head from same page
+        # Open PR heads' required checks (head_checks()), keyed by seven-character
+        # head; a head missing here was not read yet or its read failed.
+        self.pr_checks: dict | None = None
+        self._pr_check_cache: dict = {}   # head key -> head_checks() of the last good read
         self.want_ci = False   # set while a self-hosted runner is on this Mac
         self.want_main = False
         self.main_health: MainHealth | None = None
@@ -2274,6 +2278,8 @@ class GitHubSource:
             if GITHUB_IDENTITY_STATUS:
                 self.status += f"；{GITHUB_IDENTITY_STATUS}"
             self.read_failed = True
+        if not failed:
+            self.refresh_pr_checks()
         self.refresh_ci()
         if self.want_main:
             self.refresh_main()
@@ -2343,6 +2349,35 @@ class GitHubSource:
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             self.main_error = (str(exc)[:40] if isinstance(exc, RuntimeError)
                                else type(exc).__name__)
+
+    def refresh_pr_checks(self) -> None:
+        """The two required checks of every open PR's exact head, from that
+        commit's check-runs page (not the newest workflow runs, which miss
+        heads pushed long ago). At most CI_JOB_READS heads are read per
+        refresh: heads never read first, then heads still running, newest PR
+        first within each. A head whose two checks have both completed is kept
+        and not read again while it stays the head; a new head is read fresh.
+        A failed read shows only that head as ?."""
+        pulls = self.board_pulls
+        if pulls is None:
+            return
+        heads: dict = {}   # head key -> (newest PR number, seven-character head)
+        for pull in pulls:
+            if not isinstance(pull, BoardPull) or pull.state != "OPEN" or not pull.head:
+                continue
+            key = pull.sha or pull.head
+            heads[key] = (max(pull.number, heads.get(key, (0, ""))[0]), pull.head)
+        cache = {key: value for key, value in self._pr_check_cache.items() if key in heads}
+        wanted = sorted((key for key in heads if not _checks_done(cache.get(key))),
+                        key=lambda key: (key in cache, -heads[key][0]))
+        for key in wanted[:CI_JOB_READS]:
+            try:
+                cache[key] = head_checks(
+                    self._get(f"repos/{self.repo}/commits/{key}/check-runs?per_page=100"), key)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                cache.pop(key, None)
+        self._pr_check_cache = cache
+        self.pr_checks = {head: cache[key] for key, (_, head) in heads.items() if key in cache}
 
     def refresh_ci(self) -> None:
         """Runners and CI, read on their own: a failure only marks them 未確認."""
@@ -2970,8 +3005,8 @@ def d6_task_lines(canonical: str, office: list, now: float,
         reviewer_done = False
         match = _review_task(task_id)
         if match and task_id not in running:
-            reviewer_done = any(match[1].lower() in ids
-                                for _, _, ids in (verdicts or {}).get(match[0], []))
+            reviewer_done = any(match[1].lower() in entry[2]
+                                for entry in (verdicts or {}).get(match[0], []))
         if task_id not in running and not prs:
             phase = D6_STATES.get(state, state)
         elif match and task_id not in running:
@@ -3894,6 +3929,47 @@ def ci_head_runs(payload) -> dict:
             for sha, workflows in found.items()}
 
 
+REQUIRED_CHECKS = {"check (Linux 3.14)": "linux", "check (macOS 3.13)": "mac"}
+
+
+def head_checks(payload, sha: str) -> dict:
+    """{"linux"/"mac": (status, conclusion)} from one commit's check-runs page:
+    the required check runs on that exact head, the latest attempt (highest
+    check run id) per name, whatever order they come in. A name with no run is
+    absent. On a cut page (total_count above the runs given) both names are
+    None, unknown. A payload that is not a check-runs page raises ValueError.
+    Pure; no I/O."""
+    runs = payload.get("check_runs") if type(payload) is dict else None
+    if type(runs) is not list:
+        raise ValueError("check runs page")
+    sha = sha.lower()
+    found: dict = {}
+    for run in runs:
+        if type(run) is not dict:
+            continue
+        name, run_id, head = run.get("name"), run.get("id"), run.get("head_sha")
+        status, conclusion = run.get("status"), run.get("conclusion")
+        key = REQUIRED_CHECKS.get(name) if type(name) is str else None
+        if (key is None or type(run_id) is not int or type(status) is not str
+                or (conclusion is not None and type(conclusion) is not str)
+                or type(head) is not str or not sha or not head.lower().startswith(sha)):
+            continue
+        previous = found.get(key)
+        if previous is None or run_id > previous[0]:
+            found[key] = (run_id, (status, conclusion or ""))
+    total = payload.get("total_count")
+    if type(total) is int and total > len(runs):
+        return {key: None for key in REQUIRED_CHECKS.values()}
+    return {key: entry for key, (_, entry) in found.items()}
+
+
+def _checks_done(checks) -> bool:
+    """Both required checks of a head were read and have completed."""
+    return type(checks) is dict and all(
+        type(checks.get(key)) is tuple and checks[key][0] == "completed"
+        for key in REQUIRED_CHECKS.values())
+
+
 def ci_runs(payload) -> list:
     """Workflow runs not finished yet, oldest first: (status, text, started,
     runner, run id); runner is None until ci_runner_names() fills it in.
@@ -4030,9 +4106,11 @@ def ci_queued_jobs(payload, text: str) -> list:
 
 
 def review_verdicts(comments) -> dict:
-    """{pr: [(time, verdict, ids)]} from verdicts trusted accounts posted on
-    PRs: a verdict line, the 7-character prefixes of every commit-like id the
-    comment names, and the comment's last-edit time. Pure; no I/O."""
+    """{pr: [(time, verdict, ids, head)]} from verdicts trusted accounts posted
+    on PRs: a verdict line, the 7-character prefixes of every commit-like id the
+    comment names, the 7-character head its HEAD line names (REVIEW_HEAD; "" if
+    none), and the comment's last-edit time. The PR board binds a verdict only
+    to that head. Pure; no I/O."""
     found: dict = {}
     for comment in comments if type(comments) is list else []:
         if not _trusted_github_comment(comment):
@@ -4042,7 +4120,9 @@ def review_verdicts(comments) -> dict:
         if verdict:
             when = max(_github_time(comment.get("created_at")), _github_time(comment.get("updated_at")))
             ids = frozenset(token[:7].lower() for token in COMMIT_ID.findall(body))
-            found.setdefault(number, []).append((when, verdict.group(1), ids))
+            named = REVIEW_HEAD.search(body)
+            head = named.group(1)[:7].lower() if named else ""
+            found.setdefault(number, []).append((when, verdict.group(1), ids, head))
     return found
 
 
@@ -4082,6 +4162,7 @@ class BoardPull:
     head: str
     draft: bool
     closes: tuple[int, ...] = ()
+    sha: str = ""   # the full 40-character head, when GitHub gave one
 
 
 @dataclass(frozen=True)
@@ -4200,6 +4281,7 @@ def board_pulls(pulls, repo: str) -> list[BoardPull]:
             continue
         sha = head_data.get("sha")
         head = sha[:7].lower() if type(sha) is str and re.fullmatch(r"[0-9a-fA-F]+", sha) else ""
+        full = sha.lower() if head and HEX_SHA.fullmatch(sha.lower()) else ""
         title = re.sub(r"#(?=[0-9])", "", title)
         body = pull.get("body")
         closes = tuple(sorted({int(match.group(1)) for match in re.finditer(
@@ -4207,7 +4289,7 @@ def board_pulls(pulls, repo: str) -> list[BoardPull]:
             body if type(body) is str else "")}))
         out.append(BoardPull(pull["number"], _label(title, 60), state,
                              _github_time(pull.get("merged_at")), _github_time(pull.get("updated_at")),
-                             head, pull.get("draft") is True, closes))
+                             head, pull.get("draft") is True, closes, full))
     return out
 
 
@@ -4243,6 +4325,32 @@ def _ci_word(entry, known: bool) -> str:
     if status == "completed":
         return CI_CONCLUSIONS.get(conclusion, "結果不明")
     return "?"
+
+
+def _check_word(checks, head: str, key: str) -> str:
+    """One required check ("linux" or "mac") on one exact head: ? while that
+    head's check runs are unread or unreadable, — when the head has no run of
+    that check, else its state."""
+    found = checks.get(head) if type(checks) is dict and head else None
+    if type(found) is not dict:
+        return "?"
+    if key not in found:
+        return "—"
+    return _ci_word(found[key], True)
+
+
+def _head_verdict(entries, head: str) -> tuple[str, str]:
+    """A PR's review state for its current head, from review_verdicts()
+    entries. Only the head a verdict's HEAD line names counts, never another
+    commit id in its body. ("current", verdict) for the newest verdict naming
+    this head; ("stale", "") when verdicts name only other heads; ("", "")
+    when none names a head."""
+    bound = [entry for entry in entries if type(entry) in (tuple, list) and len(entry) >= 4
+             and type(entry[3]) is str and entry[3]] if type(entries) in (tuple, list) else []
+    current = [entry for entry in bound if head and entry[3] == head[:7]]
+    if current:
+        return "current", max(current, key=lambda entry: entry[0])[1]
+    return ("stale" if bound and head else ""), ""
 
 
 def _work_names(row: OfficeRow) -> str:
@@ -4348,32 +4456,35 @@ def _current_person(rows, predicate, *, readable=True) -> str:
     return _people_text(*_current_people(rows, predicate))
 
 
-def _pr_people(office, pull, ci_heads) -> tuple[set, bool]:
-    """The one person/CI answer per PR the PR table, running PR row and Issue rows share."""
+def _pr_people(office, pull, checks) -> tuple[set, bool]:
+    """The one person/CI answer per PR the PR table, running PR row and Issue rows share.
+    checks: GitHubSource.pr_checks; CI counts while a required check on the
+    exact head is queued or running."""
     if not pull or not pull.head:
         return set(), True   # a PR missing from the read page has unknown head and CI
     people, uncertain = _current_people(
         office, lambda row: _names_pr(row, pull.number, pull.head))
     if pull.state == "OPEN":
-        if ci_heads is None:
+        if checks is None:
             uncertain = True
-        else:
-            ci = ci_heads.get(pull.head.lower(), {})
-            if any(_ci_word(ci.get(key), True) in ("執行中", "排隊") for key in ("linux", "mac")):
-                people.add("CI")
+        elif any(_check_word(checks, pull.head.lower(), key) in ("執行中", "排隊")
+                 for key in ("linux", "mac")):
+            people.add("CI")
     return people, uncertain
 
 
-def _current_pr_people(office, pull, ci_heads, *, github_known=True, office_known=True):
+def _current_pr_people(office, pull, checks, *, github_known=True, office_known=True):
     """One shared person/CI answer for a PR and its issue-board aliases."""
     if not github_known or not office_known:
         return "未確認"
-    return _people_text(*_pr_people(office, pull, ci_heads))
+    return _people_text(*_pr_people(office, pull, checks))
 
 
-def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending, office=(), *, github_known=True,
+def pr_board_rows(pulls, verdicts, checks, ec2, reviewing, pending, office=(), *, github_known=True,
                   office_known=True) -> list[PrRow]:
-    """Build the read-only PR status table from already-read local/GitHub data."""
+    """Build the read-only PR status table from already-read local/GitHub data.
+    checks: GitHubSource.pr_checks, the required check runs of each exact head;
+    verdicts: review_verdicts(), bound to the head their HEAD line names."""
     rows = []
     for pull in sorted((item for item in pulls or []
                         if isinstance(item, BoardPull) and item.state == "OPEN"),
@@ -4382,18 +4493,16 @@ def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending, office=(),
         review = "未審" if head else "?"
         if head and (number, head) in (reviewing or set()):
             review = "審查中"
-        else:
-            matches = [entry for entry in (verdicts or {}).get(number, [])
-                       if type(entry) in (tuple, list) and len(entry) >= 3
-                       and head and head in entry[2]]
-            if matches:
-                verdict = max(matches, key=lambda entry: entry[0])[1]
+        elif head:
+            bound, verdict = _head_verdict((verdicts or {}).get(number, []), head)
+            if bound == "current":
                 review = {"PASS": "通過", "FAIL": "要修"}.get(verdict, "未確認")
+            elif bound == "stale":
+                review = "舊審查"
         ec2_word = "?" if not head or ec2 is None else (
             ec2[0].get(head, "?") if head in ec2[0] else "?" if ec2[1] else "—")
-        ci = (ci_heads or {}).get(head, {}) if head else {}
-        linux = _ci_word(ci.get("linux"), ci_heads is not None)
-        mac = _ci_word(ci.get("mac"), ci_heads is not None)
+        linux = _check_word(checks, head, "linux")
+        mac = _check_word(checks, head, "mac")
         waiting_owner = any(type(item) is OwnerPending and item.kind == "waiting_owner"
                             and item.reference == f"#{number}" for item in pending or [])
         next_step, owner = "未確認", "PM"
@@ -4410,19 +4519,20 @@ def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending, office=(),
         elif ec2_word in ("FAIL", "SHA_MISMATCH", "TIMEOUT"):
             next_step, owner = "修 EC2 失敗", "PM"
         elif review == "通過":
-            if linux in ("略過", "結果不明") or mac in ("?", "結果不明"):
+            # Linux runs on every PR, so no Linux run on the head is not a pass.
+            if linux in ("?", "—", "略過", "結果不明") or mac in ("?", "結果不明"):
                 next_step, owner = "未確認 CI", "PM"
             elif linux in ("執行中", "排隊"):
                 next_step, owner = "等 CI", "CI"
-            elif mac == "成功" and linux in ("成功", "?"):
+            elif mac == "成功":   # Linux is 成功 here
                 next_step, owner = "可合併", "PM"
             elif mac in ("執行中", "排隊"):
                 next_step, owner = "等 macOS", "CI"
-            else:
+            else:   # macOS 略過 or —
                 next_step, owner = "加 mac-ci", "PM"
-        elif review == "未審":
+        elif review in ("未審", "舊審查"):
             next_step, owner = "派審查", "PM"
-        current = _current_pr_people(office, pull, ci_heads,
+        current = _current_pr_people(office, pull, checks,
                                      github_known=github_known,
                                      office_known=office_known)
         rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, next_step, owner, current))
@@ -4451,17 +4561,21 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
         for pull in pulls or []:
             if pull.state != "OPEN" or pull.number in refs or pull.number in queued_blocked:
                 continue
-            verdicts = (github.verdicts or {}).get(str(pull.number), [])
-            matching = [entry for entry in verdicts if pull.head and pull.head in entry[2]]
-            matching.sort(key=lambda entry: entry[0], reverse=True)
+            # The same head-bound rule as the PR table: a verdict counts only for
+            # the head its HEAD line names.
+            bound, verdict = _head_verdict((github.verdicts or {}).get(str(pull.number), []),
+                                           pull.head.lower())
             what = pull.title + (" 草稿" if pull.draft else "")
-            if matching and matching[0][1] == "FAIL":
+            if bound == "current" and verdict == "FAIL":
                 next_step = "Developer"
-            elif matching and matching[0][1] == "PASS":
+            elif bound == "current" and verdict == "PASS":
                 next_step = "PM"
-            elif matching:
+            elif bound == "current":
                 next_step = "未確認"
                 what += "「已見審查結論，下一步未確認」"
+            elif bound == "stale":
+                next_step = "PM"
+                what += "「只有舊版本的審查結論，要重新審查」"
             else:
                 next_step = "未確認"
                 what += "「未見審查結論」"
@@ -4470,7 +4584,7 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
     # PR page. An issue may be worked through an open PR whose body closes it.
     # Issue aliases need a readable pulls page and come from open PRs only.
     snapshot_known = github_known and pulls is not None
-    ci_heads = getattr(github, "ci_heads", None) if github is not None else None
+    checks = getattr(github, "pr_checks", None) if github is not None else None
     pulls_by_number = {pull.number: pull for pull in (pulls or [])}
     issue_prs = {}
     if snapshot_known:
@@ -4484,12 +4598,12 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
         if not office_known or not snapshot_known:
             current = "未確認"
         elif re.match(r"PR\s", item.ref):
-            current = _people_text(*_pr_people(office, pulls_by_number.get(number), ci_heads))
+            current = _people_text(*_pr_people(office, pulls_by_number.get(number), checks))
         else:
             people, uncertain = _current_people(
                 office, lambda row, issue=number: _names_issue(row, issue))
             for pr in sorted(issue_prs.get(number, ())):
-                more, unsure = _pr_people(office, pulls_by_number[pr], ci_heads)
+                more, unsure = _pr_people(office, pulls_by_number[pr], checks)
                 people |= more
                 uncertain = uncertain or unsure
             current = _people_text(people, uncertain)
@@ -4522,7 +4636,7 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
     if github is not None and GITHUB_IDENTITY_STATUS:
         github_status = "；".join(
             part for part in (github_status, GITHUB_IDENTITY_STATUS) if part)
-    prs = (pr_board_rows(pulls, github.verdicts, getattr(github, "ci_heads", None),
+    prs = (pr_board_rows(pulls, github.verdicts, checks,
                          ec2, reviewing, github.pending, office, github_known=github_known,
                          office_known=office_known) if github_known else [])
     return WorkBoard(owner, running, queue, blocked, done, github_known, board_known,
