@@ -58,11 +58,16 @@ _MAX_PID = 2 ** 31 - 1
 
 
 def check_session(native_id, runtime, cwd, *, state_root=None, environ=None, home=None,
-                  clock=None, process_lister=None):
-    """Return {'state': ACTIVE|STOPPED|UNKNOWN, 'evidence': [fixed codes]}."""
+                  clock=None, process_lister=None, lock_held=False):
+    """Return {'state': ACTIVE|STOPPED|UNKNOWN, 'evidence': [fixed codes]}.
+
+    The lock probe opens a new descriptor, so it reads as busy under the caller's
+    own transfer_lock. With lock_held the caller holds that lock: the probe is
+    skipped, and LOCK_FREE is recorded and required, bound session or not.
+    """
     try:
         evidence, required = _collect(native_id, runtime, cwd, state_root, environ, home,
-                                      clock, process_lister)
+                                      clock, process_lister, lock_held)
     except Exception:
         evidence, required = [CHECK_FAILED], None
     evidence = list(dict.fromkeys(evidence))
@@ -92,7 +97,8 @@ def _exists(path):
     return True
 
 
-def _collect(native_id, runtime, cwd, state_root, environ, home, clock, process_lister):
+def _collect(native_id, runtime, cwd, state_root, environ, home, clock, process_lister,
+             lock_held):
     """(evidence, the exact evidence that STOPPED requires, or None if it cannot apply)."""
     if (type(native_id) is not str or
             active_pm_inbox.PM_NATIVE_SESSION_ID.fullmatch(native_id) is None):
@@ -123,7 +129,9 @@ def _collect(native_id, runtime, cwd, state_root, environ, home, clock, process_
         except Exception:
             evidence.append(CODEX_STATE_INVALID)
     evidence.extend(_guard(PROCESS_LIST_FAILED, _process_evidence, ids, process_lister))
-    if binding is not None:
+    if lock_held:
+        evidence.append(LOCK_FREE)
+    elif binding is not None:
         evidence.extend(_guard(LOCK_CHECK_FAILED, _lock_evidence, native_id, root))
     if runtime == 'codex':
         if binding is None:
@@ -132,7 +140,7 @@ def _collect(native_id, runtime, cwd, state_root, environ, home, clock, process_
     evidence.extend(_guard(CLAUDE_CONFIG_UNAVAILABLE, _claude_evidence, native_id, cwd,
                            binding, env, home, clock))
     required = {PROCESS_CLEAN, REGISTRY_CLEAN}
-    return evidence, required if binding is None else required | {LOCK_FREE}
+    return evidence, required | {LOCK_FREE} if lock_held or binding is not None else required
 
 
 def _load_binding(root, native_id, runtime, cwd):

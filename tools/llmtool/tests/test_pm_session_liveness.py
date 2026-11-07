@@ -173,6 +173,49 @@ class StoppedTests(LivenessCase):
             self.assertRegex(code, r'\A[A-Z_]+\Z')
 
 
+class LockHeldTests(LivenessCase):
+    def test_a_bound_session_reads_as_active_under_the_callers_lock_without_the_flag(self):
+        session = self.bind_claude()
+        self.sessions(self.first)
+        self.transcript(self.first, session)
+        with pm_runtime.transfer_lock(session, self.state):
+            self.assertResult(self.check(session), 'ACTIVE', 'LOCK_BUSY')
+            result = self.check(session, lock_held=True)
+        self.assertResult(result, 'STOPPED', 'LOCK_FREE', 'PROCESS_CLEAN', 'REGISTRY_CLEAN')
+        self.assertNotIn('LOCK_BUSY', result['evidence'])
+
+    def test_an_unbound_claude_session_is_stopped_and_records_the_held_lock(self):
+        self.sessions(self.first)
+        self.transcript(self.first)
+        with pm_runtime.transfer_lock(SESSION, self.state):
+            result = self.check(lock_held=True)
+        self.assertResult(result, 'STOPPED', 'LOCK_FREE', 'PROCESS_CLEAN', 'REGISTRY_CLEAN')
+
+    def test_a_bound_codex_session_is_stopped_under_the_callers_lock(self):
+        session = self.bind_codex()
+        with pm_runtime.transfer_lock(session, self.state):
+            result = self.check(session, 'codex', lock_held=True)
+        self.assertEqual(result, {'state': 'STOPPED', 'evidence': ['PROCESS_CLEAN', 'LOCK_FREE']})
+
+    def test_the_probe_is_skipped(self):
+        session = self.bind_claude()
+        self.sessions(self.first)
+        with patch.object(liveness, '_lock_evidence') as probe:
+            self.assertResult(self.check(session, lock_held=True), 'STOPPED', 'LOCK_FREE')
+        probe.assert_not_called()
+
+    def test_it_never_turns_other_evidence_into_stopped(self):
+        session = self.bind_claude()
+        self.sessions(self.first)
+        self.assertResult(self.check(session, ps='77 claude --resume ' + session + '\n',
+                                     lock_held=True), 'ACTIVE', 'PROCESS_MATCH')
+        self.assertResult(self.check(session, process_lister=_unavailable(OSError()),
+                                     lock_held=True), 'UNKNOWN', 'PROCESS_LIST_FAILED')
+        self.assertResult(self.check(runtime='codex', lock_held=True), 'UNKNOWN', 'CODEX_UNBOUND')
+        pm_runtime._binding_path(self.state, SESSION).write_text('{', encoding='utf-8')
+        self.assertResult(self.check(lock_held=True), 'UNKNOWN', 'BINDING_INVALID')
+
+
 class ProcessCheckTests(LivenessCase):
     def setUp(self):
         super().setUp()

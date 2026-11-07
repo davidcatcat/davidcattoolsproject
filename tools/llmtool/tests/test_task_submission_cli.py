@@ -713,6 +713,15 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(main(['task', 'show', saved['task_id']]), 0)
         self.assertEqual(json.loads(output.getvalue())['pm_provenance'], saved['pm_provenance'])
 
+    def _adopt_liveness_evidence_ready(self, claude_home):
+        """Give the liveness check the account config and registry it reads."""
+        config = self.home / '.config' / 'llmtool' / 'config.yaml'
+        config.parent.mkdir(parents=True, exist_ok=True)
+        claude_home.chmod(0o700)
+        config.write_text('accounts:\n  claude-one:\n    kind: claude\n    config_dir: ' +
+                          str(claude_home) + '\n', encoding='utf-8')
+        (claude_home / 'sessions').mkdir(mode=0o700, exist_ok=True)
+
     def test_task_adopt_moves_open_tasks_and_second_run_is_noop(self):
         pm_cwd = Path(self.temp.name).resolve() / 'pm-cwd'
         pm_cwd.mkdir()

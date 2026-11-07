@@ -309,6 +309,30 @@ def _valid_pm_session_binding(record, provenance):
             os.path.normpath(cwd) == cwd and
             not any(ord(char) < 0x20 or ord(char) == 0x7f for char in cwd))
 
+
+# An adoption audit entry: the original three fields, or those plus each side's
+# runtime, the new account and the liveness evidence the move relied on (#683).
+_PM_ADOPTION_FIELDS = frozenset(('old_session_key', 'new_session_key', 'at'))
+_PM_ADOPTION_AUDIT_FIELDS = _PM_ADOPTION_FIELDS | frozenset((
+    'old_runtime', 'new_runtime', 'new_account', 'liveness'))
+# Every code a STOPPED result can carry (pm_session_liveness).
+_PM_STOPPED_EVIDENCE = frozenset(('PROCESS_CLEAN', 'LOCK_FREE', 'REGISTRY_CLEAN',
+                                  'TRANSCRIPT_QUIET'))
+
+
+def _valid_pm_adoption_audit(item):
+    """The fields added to an adoption entry name real runtimes and STOPPED evidence."""
+    account = item['new_account']
+    liveness = item['liveness']
+    return (item['old_runtime'] in ('claude-code', 'codex') and
+            item['new_runtime'] in ('claude-code', 'codex') and
+            (account is None or (type(account) is str and _NAME.fullmatch(account) is not None)) and
+            type(liveness) is list and
+            all(type(code) is str and code in _PM_STOPPED_EVIDENCE for code in liveness) and
+            len(liveness) == len(set(liveness)) and
+            {'PROCESS_CLEAN', 'LOCK_FREE'}.issubset(liveness))
+
+
 # R5 technical observations live inside the existing TaskStore root. They are
 # evidence only: this registry is deliberately separate from worker-dispatch.json
 # and never participates in dispatch authorization.
@@ -949,10 +973,12 @@ def _validate(record):
         if type(adoptions) is not list or len(adoptions) > 32:
             _fail('PM_SESSION_ADOPTION_INVALID')
         for item in adoptions:
-            if (type(item) is not dict or set(item) !=
-                    frozenset(('old_session_key', 'new_session_key', 'at')) or
+            if (type(item) is not dict or
+                    set(item) not in (_PM_ADOPTION_FIELDS, _PM_ADOPTION_AUDIT_FIELDS) or
                     not _safe_identifier(item.get('old_session_key'), SESSION_ID) or
-                    not _safe_identifier(item.get('new_session_key'), SESSION_ID)):
+                    not _safe_identifier(item.get('new_session_key'), SESSION_ID) or
+                    (set(item) == _PM_ADOPTION_AUDIT_FIELDS and
+                     not _valid_pm_adoption_audit(item))):
                 _fail('PM_SESSION_ADOPTION_INVALID')
             try:
                 stamp = datetime.strptime(item.get('at'), '%Y-%m-%dT%H:%M:%SZ')
@@ -2818,7 +2844,8 @@ class TaskStore:
                             changes={'developer': developer}, **{trusted_flag: True})
 
     def adopt_pm_session(self, task_id, *, old_session_key, new_session_key, at,
-                         expected_record_sha256):
+                         expected_record_sha256, old_runtime, new_runtime, new_account,
+                         liveness):
         """Library-internal: atomically move one PM binding, inbox and audit entry."""
         current = self.get(task_id)
         if current.get('pm_session_id') != old_session_key:
@@ -2827,13 +2854,16 @@ class TaskStore:
             _fail('PM_SESSION_ADOPTION_LIMIT')
         audit = list(current.get('pm_session_adoptions', []))
         audit.append({'old_session_key': old_session_key,
-                      'new_session_key': new_session_key, 'at': at})
+                      'new_session_key': new_session_key, 'at': at,
+                      'old_runtime': old_runtime, 'new_runtime': new_runtime,
+                      'new_account': new_account, 'liveness': list(liveness)})
         events = current.get('completion_events')
         changes = {'pm_session_id': new_session_key, 'pm_session_adoptions': audit}
         provenance = current.get('pm_provenance')
         if type(provenance) is dict and 'pm_native_session_id' in provenance:
             changes['pm_provenance'] = dict(
-                provenance, pm_native_session_id=new_session_key[3:])
+                provenance, pm_runtime=new_runtime,
+                pm_native_session_id=new_session_key[3:])
         if events is not None:
             changes['completion_events'] = [
                 dict(event, pm_session_id=new_session_key) for event in events]
