@@ -1235,7 +1235,8 @@ class RefusedReviewReceiptTests(unittest.TestCase):
         self.assertTrue(all(path.read_text(encoding='utf-8') == 'keep' for path in others))
 
     def test_refusals_without_a_fixed_reason_write_no_receipt(self):
-        for code in ('REVIEWER_TIMEOUT', 'REVIEWER_NOT_ALLOWED', 'REVIEW_NOT_POSTED'):
+        for code in ('REVIEWER_TIMEOUT', 'REVIEWER_NOT_ALLOWED', 'REVIEW_NOT_POSTED',
+                     'REVIEW_PROMPT_BINDING_MISSING'):
             with self.subTest(code=code):
                 def runner(**_kwargs):
                     review_dispatch._refuse(code, 'Codex Reviewer exited unsuccessfully')
