@@ -344,7 +344,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                     "tools/llmtool/tests/test_task_advance.py",
                 ],
                 "L1",
-                MAC_REQUIRED | {"test_review_d6_create_failure", "test_merge_required_checks"} | {
+                MAC_REQUIRED | {"test_review_d6_create_failure", "test_merge_required_checks", "test_train_member_closure"} | {
                     "test_review_repair", "test_task_advance", "test_task_drive",
                     "test_claude_route_wiring",
                 },
