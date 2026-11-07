@@ -6238,13 +6238,15 @@ def _remote_test_paths(root: str) -> tuple[list, bool]:
     return paths, capped
 
 
-def _remote_test_open(path: str, budget: int):
+def _remote_test_open(path: str, budget: int, read=None):
     """(file key, raw bytes) of one regular task file, opened without following
     a link or blocking on a FIFO and checked again on the open descriptor, so a
     file swapped after the listing is refused too. A hard link (TaskStore
     writes by rename, so its files have one) could name the remote-test config
     and is refused. (key, None) for a refused or oversized file, (key, False)
-    when it does not fit the remaining budget, None when unreadable."""
+    when it does not fit the remaining budget, None when unreadable. With
+    read, (key, read(unbuffered handle, size)) replaces the raw bytes, so a
+    caller that needs a few fields need not hold the whole file."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
@@ -6256,9 +6258,9 @@ def _remote_test_open(path: str, budget: int):
             return key, None
         if info.st_size > budget:
             return key, False
-        with os.fdopen(fd, "rb") as handle:
+        with os.fdopen(fd, "rb", -1 if read is None else 0) as handle:
             fd = -1
-            return key, handle.read(info.st_size)
+            return key, handle.read(info.st_size) if read is None else read(handle, info.st_size)
     except OSError:
         return None
     finally:
@@ -6323,7 +6325,16 @@ def _dispatch_entry(record) -> DispatchRecord | None:
     return DispatchRecord(created, provider, found.group(1) if found else "")
 
 
-def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
+def _task_load(path: str, budget: int):
+    """(file key, whole parsed record, bytes read), or None when it was not read."""
+    opened = _remote_test_open(path, budget)
+    if opened is None or opened[1] is False:
+        return None
+    key, raw = opened
+    return key, _remote_test_json(raw) if raw else None, len(raw or b"")
+
+
+def _bounded_task_entries(root: str, cache: dict, budget: int, extract, load=_task_load):
     """Read bounded, unchanged-cached Task records through a field extractor."""
     paths, capped = _remote_test_paths(root)
     stamped = []
@@ -6347,16 +6358,12 @@ def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
         if cached and cached[0] == key:
             record_entries = cached[1]
         else:
-            opened = _remote_test_open(path, budget)
-            if opened is None:
+            loaded = load(path, budget)
+            if loaded is None:
                 short = True
                 continue
-            key, raw = opened
-            if raw is False:
-                short = True
-                continue
-            budget -= len(raw or b"")
-            record = _remote_test_json(raw) if raw else None
+            key, record, used = loaded
+            budget -= used
             entry = extract(record)
             record_entries = (tuple(entry) if type(entry) in (tuple, list)
                               else (entry,) if entry is not None else ())
@@ -6646,7 +6653,9 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
 # row for OFFICE_DONE_WINDOW; otherwise only its status row stays. A run is
 # live only on process evidence: the gw-agent gateway process itself, or for
 # company gw (an API call inside llmtool) the llmtool CLI that was running when
-# the running Task record was written. A Task record alone never is.
+# the running Task record was written. A Task record alone never is. The Task
+# file holds the prompt and model output, so it is walked for named fields
+# (_TaskScan), never loaded whole.
 GW_PROVIDERS = {"openai-compatible": "company gw", "gw-agent-cli": "gw-agent"}
 GW_ROSTER = {"company gw developer": "公司 gw", "gw-agent developer": "公司 gw agent"}
 GW_RUNNING = frozenset({"DEVELOPER_DISPATCHING", "DEVELOPER_RUNNING"})
@@ -6656,6 +6665,161 @@ GW_NOT_MODELS = frozenset({"UNKNOWN", "gw"})   # routing names, not the model th
 GW_MAX_TOKENS = 50_000_000
 GW_BUDGET = 4 << 20
 _gw_run_parsed: dict = {}  # root -> {path: ((st_ino, st_mtime_ns, st_size), entries)}
+GW_SCAN_CHUNK = 8 << 10   # the most Task file bytes held at once
+GW_SCAN_FIELD = 256       # no id, state, time or model is longer; longer text is not kept
+GW_SCAN_DEPTH = 256
+GW_SCAN_TOKEN = re.compile(rb"[^ \t\r\n]")
+GW_SCAN_STRING = re.compile(rb'["\\]')
+GW_SCAN_END = frozenset(b",}] \t\r\n")
+# The only Task fields _gw_run_entry reads: True keeps a short string, number
+# or literal, a dict keeps those fields of an object.
+GW_USAGE_FIELDS = {"prompt_tokens": True, "completion_tokens": True}
+GW_TASK_FIELDS = {"task_id": True, "updated_at": True, "developer": {
+    "provider_type": True, "provider_profile": True, "state": True, "error_code": True,
+    "executor_task_id": True, "created_at": True, "updated_at": True, "served_model": True,
+    "model": True, "usage": GW_USAGE_FIELDS,
+    "execution": {"native_session_id": True, "run_id": True, "served_model": True,
+                  "model": True, "usage": GW_USAGE_FIELDS}}}
+
+
+class _TaskScan:
+    """Walks one JSON file through a GW_SCAN_CHUNK buffer, keeping named fields.
+    A file has no index, so other bytes pass through that buffer, but they are
+    never collected, decoded or parsed, and only their shape is checked."""
+
+    def __init__(self, handle, size: int):
+        self.handle, self.left, self.data, self.at = handle, size, b"", 0
+
+    def _fill(self) -> bool:
+        """Whether a byte is ready at self.at, reading the next chunk if needed."""
+        if self.at >= len(self.data):
+            self.data, self.at = self.handle.read(min(GW_SCAN_CHUNK, self.left)), 0
+            self.left -= len(self.data)
+        return self.at < len(self.data)
+
+    def token(self) -> bytes:
+        """The next byte that is not white space; b"" at the end of the file."""
+        while self._fill():
+            found = GW_SCAN_TOKEN.search(self.data, self.at)
+            if found:
+                self.at = found.end()
+                return found.group()
+            self.at = len(self.data)
+        return b""
+
+    def string(self, limit: int = 0) -> bytes | None:
+        """Walk a string from just after its opening quote. Its raw text when
+        it fits limit, else None; longer text is never collected."""
+        kept = b"" if limit else None
+        while True:
+            if not self._fill():
+                raise ValueError("unterminated string")
+            found = GW_SCAN_STRING.search(self.data, self.at)
+            end = found.start() if found else len(self.data)
+            if kept is not None:
+                kept = kept + self.data[self.at:end] if len(kept) + end - self.at <= limit else None
+            self.at = found.end() if found else end
+            if found is None:
+                continue
+            if found.group() == b'"':
+                return kept
+            if not self._fill():   # the escaped byte can start the next chunk
+                raise ValueError("unterminated string")
+            if kept is not None:
+                kept = (kept + b"\\" + self.data[self.at:self.at + 1]
+                        if len(kept) + 2 <= limit else None)
+            self.at += 1
+
+    def scalar(self, first: bytes) -> bytes:
+        """A number or literal from its first byte, at most GW_SCAN_FIELD + 1 bytes."""
+        kept = first
+        while self._fill() and self.data[self.at] not in GW_SCAN_END:
+            if len(kept) <= GW_SCAN_FIELD:
+                kept += self.data[self.at:self.at + 1]
+            self.at += 1
+        return kept
+
+    def skip(self, first: bytes) -> None:
+        """Walk one value from its first byte, collecting none of it."""
+        closers: list[bytes] = []
+        while True:
+            if first == b'"':
+                self.string()
+            elif first in (b"{", b"["):
+                closers.append(b"}" if first == b"{" else b"]")
+                if len(closers) > GW_SCAN_DEPTH:
+                    raise ValueError("nested too deeply")
+            elif first in (b"}", b"]"):
+                if not closers or closers.pop() != first:
+                    raise ValueError("unbalanced value")
+            elif first == b"" or (first in (b",", b":") and not closers):
+                raise ValueError("no value")
+            elif first not in (b",", b":"):
+                self.scalar(first)
+            if not closers:
+                return
+            first = self.token()
+
+    def fields(self, shape: dict) -> dict:
+        """Walk an object from just after its `{`, keeping only shape's fields.
+        As in json.loads, the last of a repeated field wins, even when that
+        last one is too long to keep."""
+        kept: dict = {}
+        first = self.token()
+        if first == b"}":
+            return kept
+        while True:
+            if first != b'"':
+                raise ValueError("no field name")
+            raw = self.string(GW_SCAN_FIELD)
+            name = None if raw is None else _scan_text(raw)
+            if self.token() != b":":
+                raise ValueError("no field value")
+            want = shape.get(name)
+            kept.pop(name, None)
+            first = self.token()
+            if type(want) is dict and first == b"{":
+                kept[name] = self.fields(want)
+            elif want is True and first == b'"':
+                raw = self.string(GW_SCAN_FIELD)
+                if raw is not None:
+                    kept[name] = _scan_text(raw)
+            elif want is True and first not in (b"{", b"["):
+                raw = self.scalar(first)
+                if len(raw) <= GW_SCAN_FIELD:
+                    kept[name] = json.loads(raw)
+            else:
+                self.skip(first)
+            first = self.token()
+            if first == b"}":
+                return kept
+            if first != b",":
+                raise ValueError("no field separator")
+            first = self.token()
+
+
+def _scan_text(raw: bytes) -> str:
+    return json.loads(b'"' + raw + b'"')
+
+
+def _gw_fields(handle, size: int) -> dict | None:
+    """GW_TASK_FIELDS of one Task file, None when it is not one JSON object."""
+    scan = _TaskScan(handle, size)
+    try:
+        if scan.token() != b"{":
+            return None
+        kept = scan.fields(GW_TASK_FIELDS)
+        return kept if scan.token() == b"" else None
+    except ValueError:
+        return None
+
+
+def _gw_load(path: str, budget: int):
+    """_task_load for gw_rows: the named fields only, never the request or response."""
+    opened = _remote_test_open(path, budget, _gw_fields)
+    if opened is None or opened[1] is False:
+        return None
+    return opened[0], opened[1], opened[0][2]
 
 
 @dataclass(frozen=True)
@@ -6674,8 +6838,8 @@ class GwRun:
 
 def _gw_run_entry(record) -> GwRun | None:
     """Ids, states, times, the served model and token counts of one company gw
-    or gw-agent Developer run. The request, response, contract, summary and
-    audit text are never kept."""
+    or gw-agent Developer run, from the fields _gw_load kept. The request,
+    response, contract, summary and audit text never reach it."""
     if type(record) is not dict:
         return None
     task, developer = record.get("task_id"), record.get("developer")
@@ -6741,7 +6905,8 @@ def gw_rows(processes: list[Process], now: float, canonical: str,
     """Live and recently finished company gw and gw-agent Developer runs."""
     root = LLMTOOL_TASKS if root is None else root
     try:
-        entries, problem = _bounded_task_entries(root, _gw_run_parsed, GW_BUDGET, _gw_run_entry)
+        entries, problem = _bounded_task_entries(root, _gw_run_parsed, GW_BUDGET, _gw_run_entry,
+                                                 _gw_load)
     except Exception:   # optional local evidence: a gateway process still shows, unbound
         entries, problem = [], REMOTE_TEST_OVER_BUDGET
     registered = registered_tasks(canonical)

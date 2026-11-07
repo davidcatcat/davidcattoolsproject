@@ -3533,6 +3533,136 @@ class OfficeViewTests(unittest.TestCase):
                 self.assertNotIn("wp-1", mon._d6_running_tasks(rows))
                 self.assertIn("公司 gw", self.by_name(rows))
 
+    def _gw_scan(self, body):
+        """_gw_fields over bytes, as _remote_test_open hands it a file."""
+        path = Path(self.tmp.name) / "scan.bin"
+        path.write_bytes(body)
+        with open(path, "rb") as handle:
+            return mon._gw_fields(handle, len(body))
+
+    def test_gw_rows_never_load_the_request_or_response(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        task = "8b" * 16
+        path = self._gw_record(tasks, task, "openai-compatible", "DEVELOPER_RESPONDED",
+                               self.NOW - 90, updated=self.NOW - 30,
+                               artifact="TOOL-OUTPUT-SECRET",
+                               execution={"served_model": "gw-model-x",
+                                          "notes": ["PROMPT-SECRET"]})
+        real_loads, parsed, kept = json.loads, [], []
+
+        def loads(raw, *args, **kwargs):
+            parsed.append(raw if type(raw) is bytes else str(raw).encode("utf-8"))
+            return real_loads(raw, *args, **kwargs)
+
+        def entry(record):
+            kept.append(record)
+            return real_entry(record)
+
+        real_entry = mon._gw_run_entry
+        with patch.object(mon.json, "loads", side_effect=loads), \
+                patch.object(mon, "_gw_run_entry", side_effect=entry), \
+                patch.object(mon, "_remote_test_json",
+                             side_effect=AssertionError("whole record parsed")):
+            runs = mon.gw_rows([], self.NOW, self.canonical, str(tasks))
+        self.assertEqual([row.state for row in runs], [mon.DONE])
+        self.assertIn("gw-model-x", runs[0].detail)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(set(kept[0]), {"task_id", "developer", "updated_at"})
+        self.assertEqual(set(kept[0]["developer"]),
+                         {"provider_type", "state", "executor_task_id", "created_at", "execution"})
+        self.assertEqual(kept[0]["developer"]["execution"], {"served_model": "gw-model-x"})
+        for secret in (b"PROMPT-SECRET", b"MODEL-OUTPUT-SECRET", b"TOOL-OUTPUT-SECRET"):
+            self.assertIn(secret, path.read_bytes())   # the fixture really holds it
+            self.assertFalse(any(secret in raw for raw in parsed))
+
+    def test_gw_scan_holds_at_most_one_chunk_of_a_large_request(self):
+        body = json.dumps({"request": "PROMPT-SECRET" * 5000, "task_id": "9c" * 16,
+                           "response": "MODEL-OUTPUT-SECRET" * 5000}).encode("utf-8")
+        self.assertGreater(len(body), 4 * mon.GW_SCAN_CHUNK)
+
+        class Handle:
+            sizes, at = [], 0
+
+            def read(self, size):
+                self.sizes.append(size)
+                piece = body[self.at:self.at + size]
+                self.at += len(piece)
+                return piece
+
+        handle = Handle()
+        self.assertEqual(mon._gw_fields(handle, len(body)), {"task_id": "9c" * 16})
+        self.assertLessEqual(max(handle.sizes), mon.GW_SCAN_CHUNK)
+        self.assertEqual(handle.at, len(body))
+        # A buffered file object would hold more of the file than one chunk.
+        path = Path(self.tmp.name) / "large.json"
+        path.write_bytes(body)
+        opened = mon._remote_test_open(
+            str(path), len(body),
+            lambda file, size: (type(file).__name__, mon._gw_fields(file, size)))
+        self.assertEqual(opened[1], ("FileIO", {"task_id": "9c" * 16}))
+
+    def test_gw_scan_matches_json_loads_at_every_chunk_boundary(self):
+        task = "ab" * 16
+        record = {
+            "request": 'He said "PROMPT-SECRET" \\ and \\" 中文 \n', "task_id": task,
+            "other": [{"task_id": "not this one", "developer": {"state": "NESTED"}}, 1.5, None],
+            "developer": {"artifact": {"state": "NESTED", "model": ["x"]},
+                          "provider_type": "gw-agent-cli", "state": "DEVELOPER_RESPONDED",
+                          "created_at": "2026-11-07T00:00:00Z", "executor_task_id": "wp-1",
+                          "error_code": None, "model": "gw",
+                          "execution": {"run_id": "0123456789abcdef01234567",
+                                        "served_model": "gw-model-x",
+                                        "usage": {"prompt_tokens": 12, "completion_tokens": 3,
+                                                  "total_tokens": 15}}},
+            "updated_at": "2026-11-07T00:01:00Z", "response": "MODEL-OUTPUT-SECRET",
+        }
+        expected = mon._gw_run_entry(record)
+        self.assertEqual(expected.tokens, (12, 3))
+        for text in (json.dumps(record), json.dumps(record, indent=2),
+                     json.dumps(record, ensure_ascii=False)):
+            body = text.encode("utf-8")
+            for chunk in range(1, 40):
+                with self.subTest(chunk=chunk), patch.object(mon, "GW_SCAN_CHUNK", chunk):
+                    self.assertEqual(mon._gw_run_entry(self._gw_scan(body)), expected)
+
+    def test_gw_scan_keeps_field_rules_and_refuses_malformed_files(self):
+        self.assertEqual(self._gw_scan(b'{"task_\\u0069d": "a\\u0062"}'), {"task_id": "ab"})
+        self.assertEqual(self._gw_scan(b'{"task_id": "a", "task_id": "b"}'), {"task_id": "b"})
+        too_long = b'"' + b"x" * (mon.GW_SCAN_FIELD + 1) + b'"'
+        self.assertEqual(self._gw_scan(b'{"task_id": "a", "task_id": ' + too_long + b"}"), {})
+        self.assertEqual(self._gw_scan(b'{"task_id": ["a"], "developer": "x"}'), {})
+        self.assertEqual(self._gw_scan(b'{"developer": {"usage": {"prompt_tokens": 1, '
+                                       b'"completion_tokens": null}}}'),
+                         {"developer": {"usage": {"prompt_tokens": 1, "completion_tokens": None}}})
+        deep = b"[" * (mon.GW_SCAN_DEPTH + 1) + b"]" * (mon.GW_SCAN_DEPTH + 1)
+        for body in (b"", b"[]", b"null", b'{"task_id": "a"', b'{"task_id": "a', b'{"a": "b\\',
+                     b'{"task_id": "a"} x', b'{"a": [}', b'{"a": }', b'{"a": ,}', b'{"a" 1}',
+                     b'{"a": 1 "b": 2}', b'{1: 2}', b'{"task_id": "\\q"}', b'{"task_id": tru}',
+                     b'{"task_id": "\xff"}', b'{"a": ' + deep + b"}"):
+            with self.subTest(body=body[:24]):
+                self.assertIsNone(self._gw_scan(body))
+        self.assertIsNone(mon._gw_run_entry(self._gw_scan(b"[]")))
+
+    def test_gw_load_counts_the_read_budget_and_uses_the_file_cache(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        older = self._gw_record(tasks, "a1" * 16, "gw-agent-cli", "DEVELOPER_RESPONDED",
+                                self.NOW - 90)
+        newer = self._gw_record(tasks, "b2" * 16, "gw-agent-cli", "DEVELOPER_RESPONDED",
+                                self.NOW - 60)
+        os.utime(older, (self.NOW - 20, self.NOW - 20))
+        os.utime(newer, (self.NOW - 10, self.NOW - 10))
+        cache = {}
+        entries, problem = mon._bounded_task_entries(
+            str(tasks), cache, newer.stat().st_size, mon._gw_run_entry, mon._gw_load)
+        self.assertEqual([entry.task for entry in entries], ["b2" * 16])
+        self.assertEqual(problem, mon.REMOTE_TEST_OVER_BUDGET)
+        with patch.object(mon, "_remote_test_open", wraps=mon._remote_test_open) as opened:
+            entries, problem = mon._bounded_task_entries(
+                str(tasks), cache, older.stat().st_size, mon._gw_run_entry, mon._gw_load)
+        self.assertEqual([call.args[0] for call in opened.call_args_list], [str(older)])
+        self.assertEqual({entry.task for entry in entries}, {"a1" * 16, "b2" * 16})
+        self.assertEqual(problem, "")
+
     def test_idle_claude_session_row_covers_its_d6_process(self):
         self._write(self.claude / "proj" / "idle.jsonl", [
             {"type": "user", "cwd": str(self.task), "entrypoint": "cli"}], age=10)
