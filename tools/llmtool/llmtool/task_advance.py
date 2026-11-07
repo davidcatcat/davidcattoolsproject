@@ -1579,9 +1579,85 @@ def _integration_delta_verified(root, reviewed_head, integration_head, merge_sha
         return False
 
 
+def _train_member_merged(train, task_id, number, head, integration, integration_pr,
+                         root=None, git_runner=None):
+    """Return whether a merged merge train proves this Task's reviewed head merged.
+
+    Needs the record's member entry for this Task, PR and reviewed head, the
+    integration PR merged at the record's train head and merge commit, a
+    one-parent merge commit on the record's main with the train head's tree,
+    and the train delta proof. A missing commit allows one fetch of main and
+    the integration PR head; any doubt is not merged.
+    """
+    from . import merge_train
+    try:
+        if type(train) is not dict or train.get('state') not in ('MERGED', 'CLOSED'):
+            return False
+        if type(integration_pr) is not int or train.get('train_pr') != integration_pr:
+            return False
+        members = train.get('members')
+        if type(members) is not list or any(type(item) is not dict for item in members):
+            return False
+        if type(task_id) is not str or type(number) is not int or not any(
+                item.get('task_id') == task_id and item.get('pr') == number and
+                item.get('head') == head for item in members):
+            return False
+        main_sha, train_head = train.get('main_sha'), train.get('train_head')
+        merge_sha = train.get('merge_sha')
+        heads = [item.get('head') for item in members]
+        if any(type(sha) is not str or _HEX40.fullmatch(sha) is None
+               for sha in (main_sha, train_head, merge_sha, head, *heads)):
+            return False
+        integration_head = integration.get('head') if type(integration) is dict else None
+        if (type(integration) is not dict or integration.get('merged') is not True or
+                integration.get('number', integration_pr) != integration_pr or
+                type(integration_head) is not dict or
+                integration_head.get('sha') != train_head or
+                integration.get('merge_commit_sha') != merge_sha):
+            return False
+        run = _publish_run_git if git_runner is None else git_runner
+        root = root or os.getcwd()
+
+        def present():
+            for sha in (merge_sha, main_sha, train_head, *heads):
+                try:
+                    result = run(root, ['cat-file', '-e', f'{sha}^{{commit}}'])
+                except Exception:
+                    return False
+                if getattr(result, 'returncode', 1) != 0:
+                    return False
+            return True
+
+        if not present():
+            _publish_command(run, root, ['fetch', 'origin', 'main',
+                                         f'refs/pull/{integration_pr}/head'])
+            if not present():
+                return False
+        # A graft file could rewrite the parents read below.
+        task_completion._reject_legacy_grafts(root)
+        merge_tree, merge_parents = merge_train._commit_header(root, merge_sha)
+        train_tree, _train_parents = merge_train._commit_header(root, train_head)
+        if merge_parents != [main_sha] or merge_tree != train_tree:
+            return False
+        return merge_train.train_delta_verified(root, main_sha, heads, train_head) is True
+    except Exception:
+        return False
+
+
 def _merged_review_target(record, claims, events, pr, integration_pr, github_get, *,
                           root=None, git_runner=None):
-    """Return a verified merged PR tuple for a completed review, if present."""
+    """Return a verified merged PR tuple for a completed review, if present.
+
+    When integration_pr is a recorded merge train, only the train proof
+    decides; a store refusal closes nothing.
+    """
+    train = None
+    if integration_pr is not None:
+        from . import merge_train_store
+        try:
+            train = merge_train_store.find_by_pr(integration_pr)
+        except Exception:
+            return None
     completion = record.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
     result = evidence.get('result') if type(evidence) is dict else None
@@ -1603,6 +1679,16 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
                    event.get('source_sha') == head and event.get('version') == version and
                    (event.get('outcome') or event.get('state')) == 'REVIEW_PASS'
                    for event in events):
+            continue
+
+        if train is not None:
+            try:
+                integration = _pr_snapshot(integration_pr, github_get)
+            except Exception:
+                continue
+            if _train_member_merged(train, record.get('task_id'), number, head, integration,
+                                    integration_pr, root, git_runner):
+                return integration_pr, train['merge_sha']
             continue
 
         if type(pr) is dict and pr.get('number', number) == number and pr.get('merged') is True:
