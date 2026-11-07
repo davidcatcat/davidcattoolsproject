@@ -17,7 +17,7 @@ from types import MappingProxyType
 from typing import Mapping, Optional
 
 from .terminal import contains_unsafe_controls
-from .test_output_excerpts import _CLOUD_KEY
+from .test_output_excerpts import _CLOUD_KEY, _MARKER_BOUNDARY, _NON_ASCII_WORD
 
 EVENT_MAX_BYTES = 16 * 1024
 DIAGNOSTIC_TEXT_MAX_BYTES = 2 * 1024
@@ -97,17 +97,19 @@ _RUN_STATUSES = frozenset(('success', 'error', 'interrupted', 'output_closed', '
 # Recognizable credential values, not ordinary authorization/status vocabulary.
 _CREDENTIAL = re.compile(
     r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
-    + _CLOUD_KEY + r'|\bsk-[A-Za-z0-9_-]{12,}|'
-    r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
-    r'\bxox[abprs]-[A-Za-z0-9-]{20,}|'
-    r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b', re.IGNORECASE,
+    + _CLOUD_KEY + r'|' + _MARKER_BOUNDARY + r'sk-[A-Za-z0-9_-]{12,}|'
+    + _MARKER_BOUNDARY + r'(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
+    + _MARKER_BOUNDARY + r'xox[abprs]-[A-Za-z0-9-]{20,}|'
+    + _MARKER_BOUNDARY + r'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
+    r'(?:\b|(?=' + _NON_ASCII_WORD + r'))', re.IGNORECASE,
 )
 _AUTH_VALUE = re.compile(
-    r'\b(bearer|basic)\s+([A-Za-z0-9._~+/-]+={0,2})',
+    _MARKER_BOUNDARY + r'(bearer|basic)\s+([A-Za-z0-9._~+/-]+={0,2})',
     re.IGNORECASE,
 )
 _CREDENTIAL_ASSIGNMENT = re.compile(
-    r'["\']?\b(?:api[_-]?key|password|token|secret|access[_-]?token|client[_-]?secret|'
+    r'["\']?' + _MARKER_BOUNDARY
+    + r'(?:api[_-]?key|password|token|secret|access[_-]?token|client[_-]?secret|'
     r'aws_secret_access_key)["\']?\s*[:=]\s*(<redacted>|\[redacted\]|"[^"\n]*"|\'[^\'\n]*\'|[^\s,;}\]]+)',
     re.IGNORECASE,
 )

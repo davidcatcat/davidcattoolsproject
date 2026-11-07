@@ -20,7 +20,10 @@ from pathlib import Path
 
 from . import active_pm_inbox, role_config
 from .errors import LLMToolError
-from .test_output_excerpts import _CLOUD_KEY, _emitted_sensitive
+from .test_output_excerpts import (
+    _CLOUD_KEY, _MARKER_BOUNDARY, _NON_ASCII_WORD, _URL_AUTHORITY, _URL_SCHEME,
+    _emitted_sensitive, _sensitive_url_authority,
+)
 
 # The Claude Code permission mode of the dedicated PM process (shown in the TUI status).
 PM_PERMISSION_MODE = 'auto'
@@ -294,54 +297,79 @@ def _tool_description(name, tool_input, cwd=None):
 
 _STREAM_SECRET_START = re.compile(
     r'-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----|'
-    + _CLOUD_KEY + r'|'
-    r'(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]*|\bsk-[A-Za-z0-9_-]*|'
-    r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]*|'
-    r'\bxox[abprs]-[A-Za-z0-9-]*|\b(?:bearer|basic)\s+\S*|'
-    r'\beyJ[A-Za-z0-9_.-]*', re.IGNORECASE)
-_STREAM_URL_SCHEME = re.compile(r'[a-z][a-z0-9+.-]*', re.IGNORECASE)
+    r'(?P<cloud_key>' + _CLOUD_KEY + r')|'
+    # An underscore can only follow a full-length key: an identifier that
+    # continues one keeps its hold, while a shorter run stops at the underscore.
+    + _MARKER_BOUNDARY + r'(?:AKIA|ASIA)(?:[A-Z0-9]{16}[A-Z0-9_]*|[A-Z0-9]{0,15})|'
+    + _MARKER_BOUNDARY + r'sk-[A-Za-z0-9_-]*|'
+    + _MARKER_BOUNDARY + r'(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]*|'
+    + _MARKER_BOUNDARY + r'xox[abprs]-[A-Za-z0-9-]*|'
+    + _MARKER_BOUNDARY + r'(?:bearer|basic)\s+\S*|'
+    + _MARKER_BOUNDARY + r'eyJ[A-Za-z0-9_.-]*', re.IGNORECASE)
+_STREAM_MARKERS = ('-----BEGIN', 'github_pat_', 'AKIA', 'ASIA', 'sk-', 'ghp_', 'gho_',
+                   'ghu_', 'ghs_', 'ghr_', 'xoxa-', 'xoxb-', 'xoxp-', 'xoxr-', 'xoxs-',
+                   'eyJ', 'bearer', 'basic')
+_STREAM_PARTIAL_SPAN = max(len(marker) for marker in _STREAM_MARKERS) - 1
+_STREAM_PARTIAL_MARKER = re.compile(
+    _MARKER_BOUNDARY + r'(?:'
+    + '|'.join(sorted({re.escape(marker[:size]) for marker in _STREAM_MARKERS
+                       for size in range(1, len(marker))}, key=len, reverse=True))
+    + r')\Z', re.IGNORECASE)
+_STREAM_NON_ASCII_WORD = re.compile(_NON_ASCII_WORD)
+
+
+def _stream_candidate_open(match, value):
+    """True while this _STREAM_SECRET_START match must stay out of the stream."""
+    token = match.group(0)
+    if token.startswith('-----BEGIN'):
+        return '-----END' not in value[match.start():]
+    # Complete matches have already been redacted by _screen_stream_text, so a
+    # complete key seen here was not screened. Anything else can only grow into
+    # a value while it reaches the end of the text: a later character outside
+    # its alphabet has ended it for good.
+    return match['cloud_key'] is not None or (
+        match.end() == len(value) and not any(char.isspace() for char in token))
+
+
+def _stream_url_start(value):
+    """Return where a URL that _sensitive_url could still match begins, or None."""
+    for scheme in _URL_SCHEME.finditer(value):
+        start, end = scheme.span()
+        if value.startswith('://', end):
+            authority = _URL_AUTHORITY.match(value, end + 3)
+            if authority is None:
+                if end + 3 == len(value):
+                    return start
+            elif authority.end() == len(value) or _sensitive_url_authority(authority[0]):
+                return start
+        # Before its separator a scheme looks like any word. ASCII prose has to
+        # keep flowing, so only a run directly after a non-ASCII word character,
+        # where a marker has no other boundary to show, is held this early.
+        elif (start > 0 and len(value) - end < 3 and '://'.startswith(value[end:])
+                and _STREAM_NON_ASCII_WORD.match(value, start - 1)):
+            return start
+    return None
 
 
 def _stream_safe_end(value):
     """Return the prefix boundary before any trailing, unfinished secret token."""
     safe_end = len(value)
-    for match in _STREAM_SECRET_START.finditer(value):
-        tail = value[match.start():]
-        # Complete matches have already been redacted by _screen_stream_text.
-        # Keep an unredacted candidate only while it can still grow into a token.
-        if ('[REDACTED]' not in tail and '[REDACTED_SENSITIVE_OUTPUT]' not in tail and
-                not any(char.isspace() for char in tail)):
-            safe_end = min(safe_end, match.start())
-        elif match.group(0).startswith('-----BEGIN') and '-----END' not in tail:
-            safe_end = min(safe_end, match.start())
+    # Step one character past a finished candidate rather than past its end: a
+    # marker inside it, as in xoxb-ghp_, can have a wider alphabet and run on.
+    position = 0
+    while (match := _STREAM_SECRET_START.search(value, position)) is not None:
+        if _stream_candidate_open(match, value):
+            safe_end = match.start()
+            break
+        position = match.start() + 1
     # A delta can end in the middle of a marker (for example "gh" + "p_").
     # Hold only that partial marker so the next delta can be screened as a whole.
-    markers = ('-----BEGIN', 'github_pat_', 'AKIA', 'ASIA', 'sk-', 'ghp_',
-               'gho_', 'ghu_', 'ghs_', 'ghr_', 'xox', 'eyJ', 'bearer', 'basic')
-    lowered = value.lower()
-    for marker in markers:
-        marker = marker.lower()
-        for size in range(1, len(marker)):
-            start = len(value) - size
-            if lowered.endswith(marker[:size]) and (
-                    start == 0 or not (
-                        value[start - 1].isascii()
-                        and (value[start - 1].isalnum() or value[start - 1] == '_'))):
-                safe_end = min(safe_end, start)
-    token_start = max((index for index, char in enumerate(value) if char.isspace()),
-                      default=-1) + 1
-    tail = value[token_start:]
-    for scheme in _STREAM_URL_SCHEME.finditer(tail):
-        start, end = scheme.span()
-        if ((start == 0 or not (tail[start - 1].isalnum() or tail[start - 1] == '_')) and
-                tail.startswith('://', end)):
-            authority = tail[end + 3:]
-            authority_end = min((position for marker in '/?#'
-                                 if (position := authority.find(marker)) >= 0),
-                                default=len(authority))
-            if ':' in authority[:authority_end]:
-                safe_end = min(safe_end, token_start + start)
-                break
+    partial = _STREAM_PARTIAL_MARKER.search(value, max(0, len(value) - _STREAM_PARTIAL_SPAN))
+    if partial is not None:
+        safe_end = min(safe_end, partial.start())
+    url_start = _stream_url_start(value)
+    if url_start is not None:
+        safe_end = min(safe_end, url_start)
     return safe_end
 
 

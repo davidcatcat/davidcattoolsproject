@@ -38,18 +38,23 @@ _PYTEST_STATS = re.compile(
 # Disable IGNORECASE for this boundary class: otherwise its negated ASCII range
 # also excludes İ, ı, ſ, and K when used inside the credential patterns.
 _NON_ASCII_WORD = r'(?-i:[^\W\x00-\x7f])'
+# The one rule for what may stand directly before a credential marker: only an
+# ASCII letter, digit or underscore stops a match. Every screen and stream hold
+# uses this constant. IGNORECASE stays off for the same reason as above: folded,
+# the class would also refuse ſ, K, ı and İ.
+_MARKER_BOUNDARY = r'(?<!(?-i:[A-Za-z0-9_]))'
 _CLOUD_KEY = (
-    r'(?:(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b|'
-    r'(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]{16}(?=' + _NON_ASCII_WORD + r'))'
+    r'(?:' + _MARKER_BOUNDARY + r'(?:AKIA|ASIA)[A-Z0-9]{16}\b|'
+    + _MARKER_BOUNDARY + r'(?:AKIA|ASIA)[A-Z0-9]{16}(?=' + _NON_ASCII_WORD + r'))'
 )
 _SENSITIVE_PREFIX = (
     r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
     + _CLOUD_KEY + r'|'
-    r'(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|'
-    r'(?<![A-Za-z0-9_])(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
-    r'(?<![A-Za-z0-9_])xox[abprs]-[A-Za-z0-9-]{20,}|'
-    r'(?<![A-Za-z0-9_])(?:bearer|basic)\s+\S+|'
-    r'["\']?(?<![A-Za-z0-9_])(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
+    + _MARKER_BOUNDARY + r'sk-[A-Za-z0-9_-]{12,}|'
+    + _MARKER_BOUNDARY + r'(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
+    + _MARKER_BOUNDARY + r'xox[abprs]-[A-Za-z0-9-]{20,}|'
+    + _MARKER_BOUNDARY + r'(?:bearer|basic)\s+\S+|'
+    r'["\']?' + _MARKER_BOUNDARY + r'(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
     r'client[_-]?secret|aws_secret_access_key)["\']?\s*[:=]')
 # A keyword assignment whose whole remaining line is a null/boolean literal
 # (e.g. `token = None`, `password: null`) carries no value. Any other text
@@ -66,7 +71,7 @@ _SENSITIVE_JSON = re.compile(
 _LOG_ERROR = re.compile(r'ERROR:[\w.-]+:')
 _PYTEST_LOG_ERROR = re.compile(r'ERROR(?::[\w.-]+:| {4}\S)')
 _JWT_SEGMENT = re.compile(r'[A-Za-z0-9_-]+', re.IGNORECASE)
-_JWT_START = re.compile(r'(?<!(?-i:[A-Za-z0-9_]))eyJ', re.IGNORECASE)
+_JWT_START = re.compile(_MARKER_BOUNDARY + r'eyJ', re.IGNORECASE)
 _JWT_END = re.compile(r'[A-Za-z0-9_-]{8,}\b', re.IGNORECASE)
 _JWT_END_NON_ASCII = re.compile(r'[A-Za-z0-9_-]{8,}(?=' + _NON_ASCII_WORD + r')', re.IGNORECASE)
 _URL_SCHEME = re.compile(r'[a-z][a-z0-9+.-]*', re.IGNORECASE)
@@ -95,6 +100,11 @@ def _sensitive_jwt(text):
     return False
 
 
+def _sensitive_url_authority(value):
+    colon = value.find(':', 1)
+    return colon != -1 and value.find('@', colon + 2) != -1
+
+
 def _sensitive_url(text):
     # Consume scheme runs without a suffix that could trigger backtracking.
     # Authorities end at whitespace or '/', so these additional scans cannot
@@ -105,11 +115,8 @@ def _sensitive_url(text):
         if not text.startswith('://', start):
             continue
         authority = _URL_AUTHORITY.match(text, start + 3)
-        if authority is not None:
-            value = authority[0]
-            colon = value.find(':', 1)
-            if colon != -1 and value.find('@', colon + 2) != -1:
-                return True
+        if authority is not None and _sensitive_url_authority(authority[0]):
+            return True
     return False
 
 

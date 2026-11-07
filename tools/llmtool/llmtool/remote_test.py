@@ -14,8 +14,9 @@ from .active_pm_inbox import record_remote_test_event, record_remote_test_outcom
 from .errors import LLMToolError
 from .task_completion import _github_get, read_d6_registration
 from .task_store import TaskStore, _emitted_sensitive, _json_bytes
+from .test_output_excerpts import _CLOUD_KEY, _MARKER_BOUNDARY, _NON_ASCII_WORD
 
-_SHA = re.compile(r'[0-9a-f]{40}\Z')
+_SHA =re.compile(r'[0-9a-f]{40}\Z')
 _REF = re.compile(r'(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z')
 _MODULE = re.compile(r'test_[a-z0-9_]{1,80}\Z')
 _TASK = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
@@ -38,6 +39,26 @@ def _valid_failure_excerpt(value):
         return len(value.encode('utf-8')) <= _FAILURE_EXCERPT_LIMIT
     except UnicodeError:
         return False
+
+# Joined from module constants at import, so the remote screen keeps the shared
+# boundary rule. It is written into the script below as one fixed literal.
+_REMOTE_SENSITIVE = (
+    r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
+    + _CLOUD_KEY + r'|'
+    + _MARKER_BOUNDARY + r'sk-[A-Za-z0-9_-]{12,}|'
+    + _MARKER_BOUNDARY + r'(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
+    + _MARKER_BOUNDARY + r'xox[abprs]-[A-Za-z0-9-]{20,}|'
+    + _MARKER_BOUNDARY + r'(?:bearer|basic)\s+\S+|'
+    + _MARKER_BOUNDARY + r'[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|'
+    # The value alphabet holds every ASCII word character, so no boundary can stop
+    # this one. It starts only at the head of a run: a hyphen passes the marker
+    # boundary, and a start after each one would make a long dash line quadratic.
+    r'(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
+    r'(?:\b|(?=' + _NON_ASCII_WORD + r'))|'
+    r"[\"']?" + _MARKER_BOUNDARY
+    + r'(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|client[_-]?secret|'
+    r"aws_secret_access_key)[\"']?\s*[:=]"
+)
 
 # This is deliberately a fixed program. Dynamic values arrive as individually
 # validated argv words; no Task value becomes a command or script fragment.
