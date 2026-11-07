@@ -1,0 +1,12 @@
+synthetic-row-01 value=11
+synthetic-row-02 value=22
+synthetic-row-03 value=33
+synthetic-row-04 value=44
+synthetic-row-05 value=55
+synthetic-row-06 value=66
+synthetic-row-07 status=draft owner=nobody
+synthetic-row-08 value=88
+synthetic-row-09 value=99
+synthetic-row-10 value=110
+synthetic-row-11 value=121
+synthetic-row-12 value=132
