@@ -346,7 +346,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 "L1",
                 MAC_REQUIRED | {
                     "test_review_repair", "test_task_advance", "test_task_drive",
-                    "test_claude_route_wiring",
+                    "test_claude_route_wiring", "test_board_check",
                 },
                 None,
             ),
