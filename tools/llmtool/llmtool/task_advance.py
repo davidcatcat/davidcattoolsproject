@@ -3,6 +3,7 @@
 import hashlib
 import contextlib
 from datetime import datetime, timedelta, timezone
+import functools
 import io
 import importlib.util
 import json
@@ -159,7 +160,8 @@ def _publish_pr(gh_runner, root, branch, task_id, expected_head, title, body):
         raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
     if type(pulls) is not list:
         raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
-    if not pulls:
+    created = not pulls
+    if created:
         _publish_command(gh_runner, root,
             ['pr', 'create', '--head', branch,
              '--base', 'main', '--title', title, '--body', body],
@@ -182,6 +184,11 @@ def _publish_pr(gh_runner, root, branch, task_id, expected_head, title, body):
         if head == expected_head:
             return number
         if attempt == 3:
+            if created:
+                # This call opened the PR, so it must not stay open at an uncleared head.
+                _publish_command(gh_runner, root, ['pr', 'close', str(number)],
+                                 code='PUBLISH_MOVED_PR_OPEN')
+                raise _PublishRefusal('PUBLISH_HEAD_MOVED')
             raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
         _publish_pause(2)
         output = _publish_command(gh_runner, root,
@@ -226,6 +233,14 @@ def _owner_acceptance_required(files):
     return False
 
 
+def _scripts_only_ci(files):
+    """Return whether every path a PR changes, rename sources included, is under scripts/."""
+    paths = [item[key] for item in files for key in ('filename', 'previous_filename')
+             if key in item]
+    return bool(paths) and all(type(path) is str and path.startswith('scripts/')
+                               for path in paths)
+
+
 def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False):
     try:
         checks = github_get(f'commits/{head}/check-runs?per_page=100')
@@ -253,7 +268,8 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     if len(paths) != len(files) or any(type(path) is not str for path in paths):
         return 'MERGE_CHECKS_UNAVAILABLE'
     docs_only = task_completion._docs_only_ci(paths)
-    required_checks = ['check (docs)'] if docs_only else ['check (Linux 3.14)']
+    required_checks = ['check (docs)'] if docs_only else (
+        [] if _scripts_only_ci(files) else ['check (Linux 3.14)'])
     requires_macos = not docs_only
     if requires_macos:
         required_checks.append('check (macOS 3.13)')
@@ -320,8 +336,10 @@ def _review_ci_gate(number, head, github_get):
         if type(path) is not str:
             return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
         paths.append(path)
-    required_name = ('check (docs)' if task_completion._docs_only_ci(paths)
-                     else 'check (Linux 3.14)')
+    docs_only = task_completion._docs_only_ci(paths)
+    if not docs_only and _scripts_only_ci(files):
+        return None, None
+    required_name = 'check (docs)' if docs_only else 'check (Linux 3.14)'
     runs = checks['check_runs']
     if any(type(item) is not dict for item in runs):
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
@@ -423,14 +441,25 @@ def _merge_pass_claim(record, number, head, events):
         candidates.append((claim['version'], verdict, outcome))
     if not candidates:
         return None
-    latest = max(candidates, key=lambda item: item[0])
-    if latest[1] != 'PASS' or latest[2] != 'REVIEW_PASS':
+    passing = ('PASS', 'REVIEW_PASS')
+    passed = [item[0] for item in candidates if item[1:] == passing]
+    if not passed:
+        return 'MERGE_REVIEW_NOT_PASS'
+    latest = max(passed)
+    # A newer claim vetoes whatever its state, even before any verdict exists.
+    # A version that cannot be ordered could be newer, so it vetoes as well.
+    for claim in _claims(record):
+        if type(claim) is dict and claim.get('pr') == number and claim.get('head_sha') == head:
+            version = claim.get('version')
+            if type(version) is not int or version > latest:
+                return 'MERGE_NEWER_REVIEW_EXISTS'
+    if any(item[0] == latest and item[1:] != passing for item in candidates):
         return 'MERGE_REVIEW_NOT_PASS'
     if any(type(event) is dict and event.get('source') == 'REVIEWER' and
            event.get('source_sha') == head and type(event.get('version')) is int and
-           event['version'] > latest[0] for event in events):
+           event['version'] > latest for event in events):
         return 'MERGE_NEWER_REVIEW_EXISTS'
-    return latest[0]
+    return latest
 
 
 def _merge_once(*, store, record, number, head, pr, events, github_get,
@@ -1294,7 +1323,49 @@ def _review_outcomes(record, claims, github_get):
     return outcomes
 
 
-def _merged_review_target(record, claims, events, pr, integration_pr, github_get):
+def _integration_delta_verified(d6, cwd, git_runner, fetched, number, reviewed_head,
+                                integration_head, merge_sha):
+    """Return whether integration_head adds only clean main merges to reviewed_head.
+
+    The anchor is main just before PR number merged: the first parent of its
+    merge commit. Main after the merge may hold that PR's own commits, so it
+    never serves. fetched holds the PRs already fetched in this advance call,
+    which keeps a missing commit to one fetch across both close paths. Any
+    failed read counts as not verified.
+    """
+    commits = (reviewed_head, integration_head, merge_sha)
+    if any(type(sha) is not str or re.fullmatch(r'[0-9a-f]{40}', sha) is None
+           for sha in commits):
+        return False
+    if reviewed_head == integration_head:
+        return True
+    try:
+        root = (d6.get('root') if type(d6) is dict else None) or cwd or os.getcwd()
+
+        def commit_missing():
+            return any(getattr(git_runner(root, ['cat-file', '-e', f'{sha}^{{commit}}']),
+                               'returncode', 1) != 0 for sha in commits)
+
+        if commit_missing():
+            if number in fetched:
+                return False
+            fetched.add(number)
+            _publish_command(git_runner, root,
+                             ['fetch', 'origin', 'main', f'refs/pull/{number}/head'])
+            if commit_missing():
+                return False
+        anchor = _publish_command(git_runner, root,
+            ['rev-parse', '--verify', f'{merge_sha}^1^{{commit}}']).strip()
+        if re.fullmatch(r'[0-9a-f]{40}', anchor) is None:
+            return False
+        return task_completion._developer_tip(
+            root, reviewed_head, integration_head, anchor) == reviewed_head
+    except Exception:
+        return False
+
+
+def _merged_review_target(record, claims, events, pr, integration_pr, github_get,
+                          delta_verified):
     """Return a verified merged PR tuple for a completed review, if present."""
     completion = record.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
@@ -1342,7 +1413,8 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
             if type(integration_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', integration_sha) is None:
                 continue
             compare = github_get(f'compare/{head}...{integration_sha}')
-            if type(compare) is dict and compare.get('status') in ('ahead', 'identical'):
+            if (type(compare) is dict and compare.get('status') in ('ahead', 'identical') and
+                    delta_verified(integration_pr, head, integration_sha, merge_sha)):
                 return integration_pr, merge_sha
         except Exception:
             continue
@@ -1399,8 +1471,11 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     except Exception:
         # Advance may proceed from persisted reviewer events when GitHub is unavailable.
         pass
+    delta_verified = functools.partial(
+        _integration_delta_verified, d6, cwd,
+        _publish_run_git if publish_git_runner is None else publish_git_runner, set())
     merged = _merged_review_target(record, _claims(record), related['events'], pr,
-                                    integration_pr, get)
+                                    integration_pr, get, delta_verified)
     if merged is not None:
         merge_number, merge_sha = merged
         import hashlib
@@ -1623,6 +1698,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             integration = _pr_snapshot(integration_pr, get) if integration_pr is not None else pr
             merged = type(integration) is dict and integration.get('merged') is True
             merge_sha = integration.get('merge_commit_sha') if merged else None
+            delta_unverified = False
             if merged:
                 integration_head = integration.get('head')
                 integration_sha = integration_head.get('sha') if type(integration_head) is dict else None
@@ -1633,6 +1709,11 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                                if type(integration_sha) is str and
                                re.fullmatch(r'[0-9a-f]{40}', integration_sha) else None)
                     merged = type(compare) is dict and compare.get('status') in ('ahead', 'identical')
+                    if (merged and type(merge_sha) is str and
+                            re.fullmatch(r'[0-9a-f]{40}', merge_sha) and
+                            not delta_verified(integration_pr, d6['result_head'],
+                                               integration_sha, merge_sha)):
+                        merged, delta_unverified = False, True
             if merged and type(merge_sha) is str and re.fullmatch(r'[0-9a-f]{40}', merge_sha):
                 import hashlib
                 event_id = hashlib.sha256(
@@ -1642,7 +1723,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                        integration_pr or number, None, 'merge', 'MERGED', merge_sha)
                 step = 'CLOSED'
             else:
-                codes.append('WAITING_INTEGRATION')
+                codes.append('INTEGRATION_DELTA_UNVERIFIED' if delta_unverified else
+                             'WAITING_INTEGRATION')
         except Exception as exc:
             step, codes = 'REFUSED', [_refusal(exc, 'completion_code') if
                 getattr(exc, 'completion_code', None) else
