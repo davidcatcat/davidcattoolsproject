@@ -174,6 +174,8 @@ class ScriptsOnlyCiTests(unittest.TestCase):
         self.assertEqual(evidence['successful_checks'], [MAC_CHECK])
         self.assertFalse(evidence['linux_required'])
         self.assertFalse(evidence['docs_only'])
+        # The result keeps today's key set (OwnerValuesGoldenTests); no new key.
+        self.assertNotIn('scripts_only', evidence)
         self.assertEqual(self._workflow_reads(calls),
                          ['actions/workflows/llmtool-mac-ci.yml'])
         self.assertFalse(any('workflows/43/' in path or 'runs/200/' in path
@@ -190,6 +192,7 @@ class ScriptsOnlyCiTests(unittest.TestCase):
                 self.assertEqual(evidence['successful_checks'], [LINUX_CHECK, MAC_CHECK])
                 self.assertTrue(evidence['linux_required'])
                 self.assertFalse(evidence['docs_only'])
+                self.assertNotIn('scripts_only', evidence)
                 self.assertEqual(self._workflow_reads(calls), [
                     'actions/workflows/llmtool-mac-ci.yml',
                     'actions/workflows/llmtool-linux-ci.yml'])
@@ -209,6 +212,7 @@ class ScriptsOnlyCiTests(unittest.TestCase):
         self.assertEqual(evidence['successful_checks'], [DOCS_CHECK])
         self.assertTrue(evidence['docs_only'])
         self.assertTrue(evidence['linux_required'])
+        self.assertNotIn('scripts_only', evidence)
         self.assertEqual(self._workflow_reads(calls),
                          ['actions/workflows/llmtool-linux-ci.yml'])
 
