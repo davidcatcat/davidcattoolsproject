@@ -5657,16 +5657,23 @@ class PMConversationTests(BoundedPMTest):
                             lambda ui: self.until(ui, lambda ui: '狀態（PM 模式）' in
                                                   ui.conversation.text)])
         status = ui.conversation.text.split('> /status', 1)[1]
-        self.assertIn('PM session：' + self.session_id + '（claude-code，cwd .）', status)
+        # #683 RD3: the cwd is a real path (~/... under home, else full), never a bare '.'.
+        self.assertIn('PM session：' + self.session_id + '（claude-code，cwd '
+                      + self.expected_cwd(ui.pm_target[1]) + '）', status)
+        self.assertNotIn('cwd .）', status)
         # Owner #683: TUI shows paths like Claude Code (repo-relative, ~/, else full path).
         # Full path, or ~/... when the temp dir sits under home (CI runners).
         self.assertRegex(status, r'Claude 帳號目錄：(/|~/)\S*\.claude\n')
+        # #683 RD5: no roles.pm model is configured in this test's user config.
+        self.assertIn('  模型（本機設定，不是實際使用的模型）：llmtool 未設定'
+                      '（Claude Code 使用預設模型）\n', status)
         self.assertIn('權限模式（本機設定）：auto（自動，不跳出確認）', status)
         self.assertIn('PM 狀態：暖機中…', status)
         self.assertIn('佇列（本機設定）：沒有', status)
         self.assertRegex(status, '背景：(讀取中|UNKNOWN（TaskStore：.*）|[0-9]+ 件進行中)')
         self.assertIn('主題（本機設定）：', status)
         ordered = ['狀態（PM 模式）', 'PM session：', 'Claude 帳號目錄：',
+                   '模型（本機設定，不是實際使用的模型）：',
                    '權限模式（本機設定）：', 'PM 狀態：', '背景：', '佇列（本機設定）：',
                    '主題（本機設定）：', '用量（本 session）：', 'Context 與額度：']
         positions = [status.index(line) for line in ordered]
@@ -5676,6 +5683,96 @@ class PMConversationTests(BoundedPMTest):
             '  Context 與額度：UNAVAILABLE（llmtool 沒有這項資料）'])
         self.assertNotIn('供應商', status)
         self.assertNotIn('provider:', status)
+
+    @staticmethod
+    def expected_cwd(cwd):
+        """The PM cwd as /status should show it: ~/... under home, else the full path."""
+        path = os.path.normpath(os.path.abspath(str(cwd)))
+        home = os.path.normpath(str(Path.home()))
+        if os.path.commonpath((home, path)) == home:
+            relative = os.path.relpath(path, home)
+            return '~' if relative == '.' else '~/' + relative
+        return path
+
+    def test_status_cwd_is_home_relative_under_home_else_the_full_path(self):
+        seen = {}
+
+        def check(ui):
+            cwd = str(ui.pm_target[1])
+            with patch.dict(os.environ, {'HOME': os.path.dirname(cwd)}):
+                seen['home'] = ui.status_report()
+            with patch.dict(os.environ, {'HOME': os.path.join(
+                    os.path.dirname(cwd), 'not-the-pm-home-683')}):
+                seen['other'] = ui.status_report()
+            seen['cwd'] = cwd
+
+        self.drive([self.connect(), self.connected, check])
+        name = os.path.basename(seen['cwd'])
+        self.assertIn('（claude-code，cwd ~/' + name + '）', seen['home'])
+        self.assertIn('（claude-code，cwd ' + seen['cwd'] + '）', seen['other'])
+        for status in seen.values():
+            self.assertNotIn('cwd .）', status)
+
+    def test_status_cwd_of_a_codex_pm_is_a_real_path(self):
+        self.bind_codex('codex-test')
+        seen = {}
+
+        def check(ui):
+            cwd = str(ui.pm_target[1])
+            with patch.dict(os.environ, {'HOME': os.path.dirname(cwd)}):
+                seen['status'], seen['cwd'] = ui.status_report(), cwd
+
+        self.drive([self.connect(), self.connected, check])
+        self.assertIn('（codex，cwd ~/' + os.path.basename(seen['cwd']) + '）', seen['status'])
+        self.assertNotIn('cwd .）', seen['status'])
+
+    def write_pm_role(self, text):
+        path = self.temp_root / '.config/llmtool/config.yaml'
+        path.write_text(CONFIG + text)
+
+    def test_status_model_row_shows_the_configured_claude_pm_model(self):
+        self.write_pm_role('roles:\n  pm:\n    model: claude-test-model-683\n')
+        seen = {}
+
+        def check(ui):
+            seen['status'] = ui.status_report()
+
+        self.drive([self.connect(), self.connected, check])
+        # The row shows the same local setting pm_runtime passed the PM.
+        argv = self.fakes[0].argv
+        self.assertEqual(argv[argv.index('--model') + 1], 'claude-test-model-683')
+        self.assertIn('\n  模型（本機設定，不是實際使用的模型）：claude-test-model-683\n',
+                      seen['status'])
+        lines = seen['status'].splitlines()
+        model = next(index for index, line in enumerate(lines) if '模型（本機設定' in line)
+        self.assertIn('Claude 帳號目錄：', lines[model - 1])
+        self.assertIn('權限模式（本機設定）：auto', lines[model + 1])
+
+    def test_status_model_row_is_unknown_when_the_config_cannot_be_read(self):
+        seen = {}
+
+        def check(ui):
+            self.write_pm_role('roles:\n  pm:\n    not_a_role_field: x\n')
+            seen['status'] = ui.status_report()
+
+        self.drive([self.connect(), self.connected, check])
+        self.assertIn('\n  模型（本機設定，不是實際使用的模型）：UNKNOWN（設定無法讀取）\n',
+                      seen['status'])
+        self.assertIn('權限模式（本機設定）：auto（自動，不跳出確認）', seen['status'])
+
+    def test_status_model_row_of_a_codex_pm_says_llmtool_sets_none(self):
+        self.bind_codex('codex-test')
+        seen = {}
+
+        def check(ui):
+            # A Codex PM gets no model from llmtool, so a roles.pm model is not shown.
+            self.write_pm_role('roles:\n  pm:\n    model: claude-test-model-683\n')
+            seen['status'] = ui.status_report()
+
+        self.drive([self.connect(), self.connected, check])
+        self.assertIn('\n  帳號：codex-test\n  模型（本機設定，不是實際使用的模型）：'
+                      'llmtool 未設定（使用 Codex CLI 預設模型）\n', seen['status'])
+        self.assertNotIn('claude-test-model-683', seen['status'])
 
     def bind_codex(self, account):
         binding = dict(self.binding, runtime='codex', account=account)
@@ -5703,6 +5800,8 @@ class PMConversationTests(BoundedPMTest):
                       '/pm disconnect ends the connection. Chat replies are never the PM.',
                       connect)
         self.assertEqual(fields['identity'], 'claude/default')
+        self.assertTrue(fields['mode'].startswith('▸▸ PM 模式 · auto'), fields['mode'])
+        self.assertNotIn('workspace-write', fields['mode'])
 
     def test_codex_binding_names_codex_on_the_connect_line_and_status(self):
         self.bind_codex('codex-test')
@@ -5711,17 +5810,26 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('; codex account codex-test. pm_runtime checked', connect)
         self.assertNotIn('(claude-code, cwd', connect)
         self.assertNotIn('claude-code account', connect)
-        self.assertIn('PM session：' + self.session_id + '（codex，cwd .）', status)
+        self.assertIn('PM session：' + self.session_id + '（codex，cwd '
+                      + self.expected_cwd(self.binding['cwd']) + '）', status)
+        self.assertNotIn('cwd .）', status)
         self.assertIn('  帳號：codex-test\n', status)
+        self.assertIn('  模型（本機設定，不是實際使用的模型）：llmtool 未設定'
+                      '（使用 Codex CLI 預設模型）\n', status)
         self.assertNotIn('Claude', status)
         self.assertNotIn('claude-code', status)
         self.assertNotIn('權限模式', status)
-        ordered = ['狀態（PM 模式）', 'PM session：', '帳號：', 'PM 狀態：', '背景：',
+        ordered = ['狀態（PM 模式）', 'PM session：', '帳號：',
+                   '模型（本機設定，不是實際使用的模型）：', 'PM 狀態：', '背景：',
                    '佇列（本機設定）：', '主題（本機設定）：', '用量（本 session）：',
                    'Context 與額度：']
         positions = [status.index(line) for line in ordered]
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(fields['identity'], 'codex/codex-test')
+        # #683 B6: a Codex PM runs under Codex's workspace-write sandbox, not Claude's auto.
+        self.assertTrue(fields['mode'].startswith('▸▸ PM 模式 · workspace-write'),
+                        fields['mode'])
+        self.assertNotIn('auto', fields['mode'])
 
     def assert_codex_account_unknown(self, account):
         self.bind_codex(account)
@@ -5743,8 +5851,12 @@ class PMConversationTests(BoundedPMTest):
                 identity = ui.pm_status_fields(lambda value, _width: value)['identity']
             finally:
                 ui.pm_runtime = real
-            self.assertIn('PM session：' + self.session_id + '（codex，cwd .）', status)
+            self.assertIn('PM session：' + self.session_id + '（codex，cwd '
+                          + self.expected_cwd(ui.pm_target[1]) + '）', status)
+            self.assertNotIn('cwd .）', status)
             self.assertIn('  帳號：UNKNOWN\n', status)
+            self.assertIn('模型（本機設定，不是實際使用的模型）：llmtool 未設定'
+                          '（使用 Codex CLI 預設模型）', status)
             self.assertNotIn('權限模式', status)
             self.assertEqual(identity, 'codex/default')
 

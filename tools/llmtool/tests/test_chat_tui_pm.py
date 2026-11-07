@@ -149,6 +149,52 @@ class PMUsageStatusTests(unittest.TestCase):
         turns[0]["seq"] = 1
         self.assertNotIn("≥", chat_tui_pm.usage_status_line(turns, formatter))
 
+    def test_codex_cached_input_tokens_count_as_cache_read(self):
+        # #683: Codex reports cache reads as cached_input_tokens and no cache creation.
+        formatter = chat_tui._short_count
+        turns = [{"usage": {"input_tokens": 1200, "cached_input_tokens": 800,
+                            "output_tokens": 30}},
+                 {"usage": {"input_tokens": 100, "cached_input_tokens": 50,
+                            "output_tokens": 5}}]
+        totals, counted, missing = chat_tui_pm.usage_totals(turns)
+        self.assertEqual(totals, {"input_tokens": 1300, "output_tokens": 35,
+                                  "cache_read_input_tokens": 850,
+                                  "cache_creation_input_tokens": None})
+        self.assertEqual((counted, missing), (2, 0))
+        self.assertEqual(chat_tui_pm.usage_gaps(turns)["cache_read_input_tokens"], 0)
+        self.assertEqual(chat_tui_pm.usage_status_line(turns, formatter),
+                         "用量（本 session）：輸入 1.3k · 輸出 35 · 快取讀取 850 · 快取建立 未回報 tokens"
+                         "（2 回合）")
+        self.assertEqual(turns[0]["usage"], {"input_tokens": 1200, "cached_input_tokens": 800,
+                                             "output_tokens": 30})   # the record is not changed
+
+    def test_cache_read_input_tokens_wins_over_cached_input_tokens(self):
+        formatter = chat_tui._short_count
+        turns = [{"usage": {"input_tokens": 10, "output_tokens": 2,
+                            "cache_read_input_tokens": 3, "cached_input_tokens": 99,
+                            "cache_creation_input_tokens": 4}}]
+        self.assertEqual(chat_tui_pm.usage_status_line(turns, formatter),
+                         "用量（本 session）：輸入 10 · 輸出 2 · 快取讀取 3 · 快取建立 4 tokens"
+                         "（1 回合）")
+        # An invalid Claude value is not replaced by the Codex key.
+        turns[0]["usage"]["cache_read_input_tokens"] = None
+        self.assertIn("快取讀取 未回報", chat_tui_pm.usage_status_line(turns, formatter))
+
+    def test_turn_end_usage_text_reads_codex_cached_input_tokens(self):
+        codex = {"input_tokens": 1200, "cached_input_tokens": 800, "output_tokens": 30}
+        self.assertEqual(chat_tui_pm.usage_text(codex),
+                         "input 1200, output 30, cache read input 800 (provider-reported)")
+        self.assertIn("usage: input 1200, output 30, cache read input 800 (provider-reported)",
+                      chat_tui_pm.turn_end_text({"type": "TURN_END", "status": "COMPLETED",
+                                                 "usage": codex}, 1.0))
+        self.assertNotIn("cache creation", chat_tui_pm.usage_text(codex))
+        claude = {"input_tokens": 5, "output_tokens": 6, "cache_read_input_tokens": 7,
+                  "cache_creation_input_tokens": 8}
+        self.assertEqual(chat_tui_pm.usage_text(claude),
+                         "input 5, output 6, cache read input 7, cache creation input 8 "
+                         "(provider-reported)")
+        self.assertEqual(chat_tui_pm.usage_text({}), chat_tui_pm.UNKNOWN)
+
     def test_read_all_turns_pages_until_empty_page(self):
         # This mocked fixture tests the paging loop, not the store's 200-turn capacity.
         turns = [{"seq": index} for index in range(1, 451)]
@@ -166,6 +212,80 @@ class PMUsageStatusTests(unittest.TestCase):
                                  ("session-id", 200, 200, "state-root"),
                                  ("session-id", 400, 200, "state-root"),
                                  ("session-id", 450, 200, "state-root")])
+
+
+class PMStatusRowTests(unittest.TestCase):
+    """#683 RD3, RD5, B6: /status cwd, model and permission text for Claude and Codex."""
+
+    def test_permission_mode_is_auto_for_claude_and_the_sandbox_for_codex(self):
+        from llmtool import pm_runtime
+        self.assertEqual(chat_tui_pm.permission_mode(), pm_runtime.PM_PERMISSION_MODE)
+        self.assertEqual(chat_tui_pm.permission_mode('claude-code'), 'auto')
+        self.assertEqual(chat_tui_pm.permission_mode('codex'), 'workspace-write')
+
+    def test_codex_sandbox_text_matches_the_sandbox_codex_is_started_with(self):
+        from unittest.mock import Mock
+        from llmtool import pm_runtime_codex
+        runtime = pm_runtime_codex.CodexRuntime(Mock(cwd="/pm-cwd"))
+        popen = Mock()
+        with patch.object(runtime, "_environment", return_value={"PATH": "/bin"}), \
+                patch.object(pm_runtime_codex.shutil, "which", return_value="/bin/codex"), \
+                patch.object(pm_runtime_codex.subprocess, "Popen", popen):
+            runtime._launch("hello")
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[argv.index("--sandbox") + 1], chat_tui_pm.CODEX_SANDBOX)
+
+    def test_cwd_text_is_home_relative_or_full_never_dot(self):
+        with patch.dict("os.environ", {"HOME": "/home/pm-user"}):
+            self.assertEqual(chat_tui_pm.cwd_text("/home/pm-user/repo/sub"), "~/repo/sub")
+            self.assertEqual(chat_tui_pm.cwd_text("/home/pm-user"), "~")
+            self.assertEqual(chat_tui_pm.cwd_text("/srv/repo"), "/srv/repo")
+            self.assertEqual(chat_tui_pm.cwd_text("/"), "[root]")
+        self.assertEqual(chat_tui_pm.cwd_text(None), chat_tui_pm.UNKNOWN)
+        self.assertEqual(chat_tui_pm.cwd_text(""), chat_tui_pm.UNKNOWN)
+        self.assertEqual(chat_tui_pm.cwd_text("/srv/bad\x01dir"), chat_tui_pm.UNKNOWN)
+
+    def test_model_status_line_for_claude_and_codex(self):
+        from unittest.mock import Mock
+        label = "模型（本機設定，不是實際使用的模型）："
+        api = Mock()
+        api.pm_model.return_value = "claude-test-model"
+        self.assertEqual(chat_tui_pm.model_status_line(api, "claude-code", "claude-a"),
+                         label + "claude-test-model")
+        api.pm_model.assert_called_once_with("claude-a")
+        api.pm_model.return_value = None
+        self.assertEqual(chat_tui_pm.model_status_line(api, "claude-code"),
+                         label + "llmtool 未設定（Claude Code 使用預設模型）")
+        api.pm_model.side_effect = OSError("config unreadable")
+        self.assertEqual(chat_tui_pm.model_status_line(api, "claude-code"),
+                         label + "UNKNOWN（設定無法讀取）")
+        codex = Mock()
+        self.assertEqual(chat_tui_pm.model_status_line(codex, "codex", "codex-a"),
+                         label + "llmtool 未設定（使用 Codex CLI 預設模型）")
+        codex.pm_model.assert_not_called()
+
+    def test_pm_model_resolves_roles_pm_for_the_bound_account(self):
+        from llmtool import role_config
+        calls = []
+
+        def resolve(role, **options):
+            calls.append((role, options))
+            return {"model": "claude-test-model"}
+
+        api = chat_tui_pm.PMRuntimeAPI(environ={"HOME": "/home/pm-user"})
+        with patch.object(role_config, "resolve_role", side_effect=resolve):
+            self.assertEqual(api.pm_model("claude-a"), "claude-test-model")
+            self.assertEqual(api.pm_model(), "claude-test-model")
+        self.assertEqual(calls, [
+            ("pm", {"environ": {"HOME": "/home/pm-user"}, "home": "/home/pm-user",
+                    "cli": {"account": "claude-a"}}),
+            ("pm", {"environ": {"HOME": "/home/pm-user"}, "home": "/home/pm-user"})])
+        with patch.object(role_config, "resolve_role", return_value={"model": None}):
+            self.assertIsNone(api.pm_model())
+        with patch.object(role_config, "resolve_role",
+                          side_effect=role_config.LLMToolError("bad config")):
+            with self.assertRaises(role_config.LLMToolError):
+                api.pm_model()
 
 
 class PMLogsTests(unittest.TestCase):

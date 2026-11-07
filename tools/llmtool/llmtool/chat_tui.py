@@ -1620,21 +1620,27 @@ class ChatTUI:
             else:
                 queue = "沒有"
             runtime = self._pm_runtime_name()
+            binding = self.pm_binding if type(self.pm_binding) is dict else {}
+            # The cwd is shown as a real path, never shortened against itself (#683 RD3).
             lines = ["狀態（PM 模式）",
                      "PM session：" + self.pm_target[0] + "（" + chat_tui_pm.safe_text(runtime)
-                     + "，cwd " + chat_tui_pm.safe_text(pm_runtime.display_path(
-                         str(self.pm_target[1]), self.pm_target[1]) or "UNKNOWN") + "）"]
+                     + "，cwd " + chat_tui_pm.cwd_text(
+                         None if self.pm_target[1] is None else str(self.pm_target[1])) + "）"]
+            # The model row follows the account rows; it is the local setting (#683 RD5).
+            model = chat_tui_pm.model_status_line(self.pm_api, runtime,
+                                                  binding.get("account") or None)
             if runtime == "claude-code":
                 lines.extend((
                     "Claude 帳號目錄：" + chat_tui_pm.safe_text(
                         pm_runtime.display_path(
                             getattr(self.pm_runtime, "claude_config_dir", None)) or "UNKNOWN"),
+                    model,
                     "權限模式（本機設定）：" + chat_tui_pm.permission_mode()
                     + "（自動，不跳出確認）"))
             else:
                 # The folder and permission rows describe Claude only (#683 B6).
-                binding = self.pm_binding if type(self.pm_binding) is dict else {}
-                lines.append("帳號：" + chat_tui_pm.safe_text(binding.get("account") or None))
+                lines.extend(("帳號：" + chat_tui_pm.safe_text(binding.get("account") or None),
+                              model))
             lines.extend((
                 "PM 狀態：" + self.pm_status_fields(lambda value, _width: value)["state"],
                 "背景：" + ("讀取中" if count is None else
@@ -2989,7 +2995,8 @@ class ChatTUI:
         if runtime == 'claude-code':
             runtime = 'claude'
         account = binding.get('account') or 'default'
-        lead = ["▸▸ " + PM_LABEL + " 模式", chat_tui_pm.permission_mode()]
+        # A Codex PM shows the sandbox mode it runs under, not Claude's auto (#683 B6).
+        lead = ["▸▸ " + PM_LABEL + " 模式", chat_tui_pm.permission_mode(runtime)]
         count = self.background_count()
         if count is not None:
             lead.append("背景 %s" % count)

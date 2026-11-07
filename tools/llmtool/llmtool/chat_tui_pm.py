@@ -66,10 +66,44 @@ _RECOVERY = {
 }
 
 
-def permission_mode():
-    """The permission mode pm_runtime starts the PM with (W56d status line)."""
+# The --sandbox value pm_runtime_codex.CodexRuntime._launch starts Codex with (#683 B6).
+CODEX_SANDBOX = 'workspace-write'
+MODEL_LABEL = "模型（本機設定，不是實際使用的模型）："
+
+
+def permission_mode(runtime='claude-code'):
+    """The permission mode pm_runtime starts the PM with (W56d status line); for a
+    Codex PM, the sandbox mode it starts Codex with."""
+    if runtime == 'codex':
+        return CODEX_SANDBOX
     from . import pm_runtime
     return pm_runtime.PM_PERMISSION_MODE
+
+
+def cwd_text(cwd):
+    """The PM cwd as a real path: ~/... under home, else the full path (#683 RD3)."""
+    from . import pm_runtime
+    if type(cwd) is not str or not cwd:
+        return UNKNOWN
+    try:
+        value = os.path.normpath(os.path.abspath(cwd))
+    except (OSError, ValueError):
+        return UNKNOWN
+    return safe_text(pm_runtime.display_path(value) or None)
+
+
+def model_status_line(api, runtime, account=None):
+    """/status model row: the local model setting llmtool passes the PM, never the served
+    model. Codex: llmtool passes no model. A config read error shows UNKNOWN (#683 RD5)."""
+    if runtime == 'codex':
+        return MODEL_LABEL + "llmtool 未設定（使用 Codex CLI 預設模型）"
+    try:
+        model = api.pm_model(account)
+    except Exception:
+        return MODEL_LABEL + UNKNOWN + "（設定無法讀取）"
+    if model is None:
+        return MODEL_LABEL + "llmtool 未設定（Claude Code 使用預設模型）"
+    return MODEL_LABEL + safe_text(model)
 
 
 def error_code(exc):
@@ -179,6 +213,17 @@ class PMRuntimeAPI:
                 results.append(False)
         return results
 
+    def pm_model(self, account=None):
+        """The roles.pm model pm_runtime passes a Claude PM for this account, else None.
+        Resolved as PMRuntime.open resolves it; never reads account folders' contents."""
+        from . import role_config
+        options = {'environ': self.environ,
+                   'home': None if self.environ is None else self.environ.get('HOME')}
+        if account is not None:
+            options['cli'] = {'account': account}
+        model = role_config.resolve_role('pm', **options).get('model')
+        return model if type(model) is str else None
+
     def read_history(self, session_id):
         from .pm_runtime import read_history
         return read_history(session_id, after=0, limit=200, state_root=self.state_root)
@@ -204,12 +249,22 @@ _USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens',
                'cache_creation_input_tokens')
 
 
+def _usage(usage):
+    """Provider usage in the Claude key names. Codex reports cache reads as
+    cached_input_tokens; it counts as cache read only when cache_read_input_tokens is
+    absent. Codex reports no cache creation (#683)."""
+    if (type(usage) is dict and 'cache_read_input_tokens' not in usage
+            and 'cached_input_tokens' in usage):
+        usage = dict(usage, cache_read_input_tokens=usage['cached_input_tokens'])
+    return usage
+
+
 def usage_totals(turns):
     """Return recorded token totals and the number of recorded and missing turns."""
     totals = {key: None for key in _USAGE_KEYS}
     counted = missing = 0
     for turn in turns:
-        usage = turn.get('usage') if type(turn) is dict else None
+        usage = _usage(turn.get('usage')) if type(turn) is dict else None
         recorded = False
         if type(usage) is dict:
             for key in _USAGE_KEYS:
@@ -231,7 +286,7 @@ def usage_gaps(turns):
     valid_counts = {key: 0 for key in _USAGE_KEYS}
     counted = 0
     for turn in turns:
-        usage = turn.get('usage') if type(turn) is dict else None
+        usage = _usage(turn.get('usage')) if type(turn) is dict else None
         valid = set()
         if type(usage) is dict:
             for key in _USAGE_KEYS:
@@ -398,6 +453,7 @@ def safe_code(value):
 def usage_text(usage):
     if type(usage) is not dict or not usage:
         return UNKNOWN
+    usage = _usage(usage)
     parts = []
     for key in ("input_tokens", "output_tokens", "cache_read_input_tokens",
                 "cache_creation_input_tokens"):
