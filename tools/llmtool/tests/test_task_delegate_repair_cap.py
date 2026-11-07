@@ -885,5 +885,135 @@ class HighDebugRunBindingTests(unittest.TestCase):
         self._passes(diagnosis)
 
 
+# Invented comment URLs of valid shape for the trusted slug; neither names a
+# real comment.
+_COMMENT_REFS = (_HIGH_DEBUG_REF,
+                 'https://github.com/example/project/issues/12#issuecomment-56')
+
+
+class CommentCannotPassRepairCapTests(unittest.TestCase):
+    """#914: at the cap, a comment URL never stands in for a bound High Debug Task."""
+
+    def setUp(self):
+        for target, kwargs in (
+                ((task_submission_cli.trust, 'load_trust'),
+                 {'return_value': SimpleNamespace(
+                     repository={'slug': 'example/project'})}),
+                ((task_submission_cli, '_delegate_d6_binding'),
+                 {'return_value': (None, SimpleNamespace(head=_HEAD))})):
+            started = patch.object(*target, **kwargs)
+            started.start()
+            self.addCleanup(started.stop)
+
+    def _refuses(self, diagnosis, **overrides):
+        store = _Store(count=1 + MAX_REPAIR_ATTEMPTS, diagnosis=diagnosis)
+        with self.assertRaisesRegex(
+                LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
+            task_submission_cli._check_delegate_repair_cap(_args(**overrides), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_comment_url_as_high_debug_task_refuses(self):
+        for ref in _COMMENT_REFS:
+            with self.subTest(ref=ref):
+                self._refuses(_diagnosis([_entry()]), high_debug_task=ref)
+
+    def test_unknown_high_debug_task_refuses(self):
+        self._refuses(_diagnosis([_entry()]), high_debug_task='1' * 32)
+
+    def test_task_without_high_debug_key_refuses(self):
+        diagnosis = _diagnosis([_entry()])
+        del diagnosis['high_debug']
+        self._refuses(diagnosis)
+
+    def test_record_naming_another_task_refuses(self):
+        diagnosis = _diagnosis([_entry()])
+        diagnosis['task_id'] = 'c' * 32
+        self._refuses(diagnosis)
+
+    def test_last_entry_not_a_dict_refuses(self):
+        confirmed = _entry()
+        for last in ('RCA_CONFIRMED', None, ['RCA_CONFIRMED']):
+            with self.subTest(last=last):
+                self._refuses(_diagnosis([confirmed, last],
+                                         events=[_event(confirmed)]))
+
+    def test_missing_high_debug_family_refuses(self):
+        self._refuses(_diagnosis([_entry()]), high_debug_family=None)
+
+    def test_unconfirmed_sole_entry_refuses(self):
+        for status in ('RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID', 'RUN_FAILED'):
+            with self.subTest(status=status):
+                self._refuses(_diagnosis([_entry(status=status)]))
+
+    def test_unconfirmed_entry_after_confirmed_one_refuses(self):
+        for status in ('RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID', 'RUN_FAILED'):
+            with self.subTest(status=status):
+                self._refuses(_diagnosis([
+                    _entry(), _entry(status=status,
+                                     recorded_at='2026-11-04T00:00:02Z')]))
+
+    def test_d6_derived_from_another_head_refuses(self):
+        from llmtool.high_debug import _d6_name
+
+        entry = _entry()
+        entry['d6'] = _d6_name(_EXECUTOR_TASK, 1, 'b' * 40)
+        self.assertNotEqual(entry['d6'], _entry()['d6'])
+        self._refuses(_diagnosis([entry]))
+
+    def test_d6_without_attempt_suffix_refuses(self):
+        for d6 in (_EXECUTOR_TASK, _EXECUTOR_TASK + '-' + _HEAD[:7],
+                   _EXECUTOR_TASK + '-hd-' + _HEAD[:7],
+                   _EXECUTOR_TASK + '-hd0-' + _HEAD[:7]):
+            entry = _entry()
+            entry['d6'] = d6
+            with self.subTest(d6=d6):
+                self._refuses(_diagnosis([entry]))
+
+
+class DelegateRequiresHighDebugTaskTests(unittest.TestCase):
+    """#914: every delegate route refuses a comment URL with no High Debug Task."""
+
+    def setUp(self):
+        for target, kwargs in (
+                ((task_submission_cli.trust, 'load_trust'),
+                 {'return_value': SimpleNamespace(
+                     repository={'slug': 'example/project'})}),
+                ((task_submission_cli, '_delegate_d6_binding'),
+                 {'return_value': (None, SimpleNamespace(head=_HEAD))})):
+            started = patch.object(*target, **kwargs)
+            started.start()
+            self.addCleanup(started.stop)
+
+    def test_each_route_refuses_before_its_runner(self):
+        owner_ref = 'https://github.com/example/project/issues/12#issuecomment-78'
+        routes = (
+            ('run_task_agy_delegate',
+             {'provider': 'agy', 'mode': 'direct', 'owner_ref': owner_ref,
+              'acceptance': ['Synthetic acceptance.']}),
+            ('run_task_claude_delegate',
+             {'provider': 'claude', 'mode': 'direct', 'owner_ref': owner_ref,
+              'acceptance': ['Synthetic acceptance.']}),
+            ('run_task_gw_agent_delegate',
+             {'provider': 'gw-agent', 'mode': 'direct'}),
+            ('run_task_codex_delegate',
+             {'provider': 'codex', 'mode': 'direct',
+              'acceptance': ['Synthetic acceptance.']}),
+            ('run_task_opencode_delegate',
+             {'provider': 'opencode', 'acceptance': ['Synthetic acceptance.']}),
+        )
+        for route, route_args in routes:
+            for ref in _COMMENT_REFS:
+                store = _Store(count=1 + MAX_REPAIR_ATTEMPTS,
+                               diagnosis=_diagnosis([_entry()]))
+                args = _args(high_debug_ref=ref, high_debug_task=None, **route_args)
+                with self.subTest(route=route, ref=ref), \
+                        patch.object(task_submission_cli, route) as runner:
+                    with self.assertRaisesRegex(
+                            LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$'):
+                        task_submission_cli.run_task_delegate(args, store=store)
+                    runner.assert_not_called()
+                self.assertEqual(store.recorded, [])
+
+
 if __name__ == '__main__':
     unittest.main()
