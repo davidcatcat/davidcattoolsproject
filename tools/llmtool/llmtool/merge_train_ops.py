@@ -3,8 +3,10 @@
 merge_train merges a BUILT (or UNKNOWN) train record once through the same
 exact-head squash merge route as ``task advance --merge``. Before it claims the
 merge it rechecks authenticated main, the open train PR at the recorded head,
-the train delta, every member's bound PASS and the train-head CI. close_train
-then closes the member Tasks in record order through ``task advance``.
+the train delta, every member's bound PASS and the train-head CI. A record left
+in MERGE_CLAIMED (its UNKNOWN write failed) is settled from one fresh PR read
+without a new merge: MERGED when the train merged at its head, else UNKNOWN.
+close_train then closes the member Tasks in record order through ``task advance``.
 
 Each call does one step and fails closed. Both return
 ``{'step': STEP, 'codes': [...], 'result': ...}``. A refusal is step
@@ -184,14 +186,51 @@ def _resolve_unknown(record, github_get, gh_runner, root, train_root):
                           gh_runner, root, train_root)
 
 
+def _record_unknown(train_id, expected_sha256, attempt, train_root):
+    """Move a claimed train to UNKNOWN with one bounded retry; return True when written."""
+    for _ in range(2):
+        try:
+            merge_train_store.compare_and_update(
+                train_id, expected_sha256, root=train_root,
+                state='UNKNOWN', merge_attempt=dict(attempt, state='UNKNOWN'))
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _recover_claimed(record, github_get, gh_runner, root, train_root):
+    """Settle a MERGE_CLAIMED train whose UNKNOWN write failed; never merges.
+
+    A fresh read showing the train merged at train_head records MERGED. Any
+    other read moves the record to UNKNOWN, so a later call merges only after
+    the full recheck.
+    """
+    train_pr, train_head = record['train_pr'], record['train_head']
+    attempt = record['merge_attempt']
+    if (type(attempt) is not dict or attempt.get('pr') != train_pr or
+            attempt.get('head_sha') != train_head):
+        return _refused(TRAIN_NOT_MERGEABLE)
+    merge_sha = _merged_at(_read_pr(github_get, train_pr), train_head)
+    if merge_sha is not None:
+        return _finish_merged(record, record['record_sha256'], attempt, merge_sha,
+                              gh_runner, root, train_root)
+    _record_unknown(record['train_id'], record['record_sha256'], attempt, train_root)
+    return _refused(TRAIN_MERGE_OUTCOME_UNKNOWN,
+                    {'train_id': record['train_id'], 'pr': train_pr, 'head': train_head})
+
+
 def merge_train(train_id, *, store, github_get, gh_runner, root, train_root=None):
     """Merge one recorded train once at its exact head; one step, fail closed."""
     record, code = _read_record(train_id, train_root)
     if record is None:
         return _refused(code)
     train_pr, train_head = record['train_pr'], record['train_head']
-    if record['state'] not in ('BUILT', 'UNKNOWN') or train_pr is None:
+    if record['state'] not in ('BUILT', 'MERGE_CLAIMED', 'UNKNOWN') or train_pr is None:
         return _refused(TRAIN_NOT_MERGEABLE)
+    if record['state'] == 'MERGE_CLAIMED':
+        # Recovery only: this call never runs pr merge.
+        return _recover_claimed(record, github_get, gh_runner, root, train_root)
     if record['state'] == 'UNKNOWN':
         resolved = _resolve_unknown(record, github_get, gh_runner, root, train_root)
         if resolved is not None:
@@ -263,12 +302,9 @@ def merge_train(train_id, *, store, github_get, gh_runner, root, train_root=None
     # success and an ambiguous failure resolve the same way.
     merge_sha = _merged_at(_read_pr(github_get, train_pr), train_head)
     if merge_sha is None:
-        try:
-            merge_train_store.compare_and_update(
-                train_id, claimed['record_sha256'], root=train_root,
-                state='UNKNOWN', merge_attempt=dict(attempt, state='UNKNOWN'))
-        except Exception:
-            pass
+        # If both writes fail the record stays MERGE_CLAIMED; the next call
+        # settles it through _recover_claimed without a new merge.
+        _record_unknown(train_id, claimed['record_sha256'], attempt, train_root)
         return _refused(TRAIN_MERGE_OUTCOME_UNKNOWN,
                         {'train_id': train_id, 'pr': train_pr, 'head': train_head})
     return _finish_merged(claimed, claimed['record_sha256'], attempt, merge_sha,

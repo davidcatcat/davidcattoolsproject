@@ -407,6 +407,94 @@ class MergeTrainOpsTest(unittest.TestCase):
         self.assertEqual(len(self.gh.named('merge')), 1)
         self.assertEqual(len(self.gh.named('comment')), 1)
 
+    def _fail_unknown_writes(self, count):
+        """Patch the store so the first ``count`` UNKNOWN writes fail; record each try."""
+        real = merge_train_store.compare_and_update
+        attempts = []
+
+        def update(train_id, expected_sha256, root=None, **changes):
+            if changes.get('state') == 'UNKNOWN':
+                attempts.append(changes)
+                if len(attempts) <= count:
+                    raise LLMToolError('TRAIN_RECORD_UNAVAILABLE')
+            return real(train_id, expected_sha256, root=root, **changes)
+
+        patcher = mock.patch.object(merge_train_store, 'compare_and_update', side_effect=update)
+        return patcher, attempts
+
+    def _leave_claimed(self):
+        """Run one ambiguous merge whose UNKNOWN write fails twice."""
+        self._create()
+        self.gh.merge_effect = False
+        patcher, attempts = self._fail_unknown_writes(2)
+        with patcher:
+            result = self._merge()
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_MERGE_OUTCOME_UNKNOWN])
+        self.assertEqual(len(attempts), 2)
+        record = self._record()
+        self.assertEqual(record['state'], 'MERGE_CLAIMED')
+        self.assertEqual(len(self.gh.named('merge')), 1)
+        return record
+
+    def test_failed_unknown_write_is_retried_once(self):
+        self._create()
+        self.gh.merge_effect = False
+        patcher, attempts = self._fail_unknown_writes(1)
+        with patcher:
+            result = self._merge()
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_MERGE_OUTCOME_UNKNOWN])
+        self.assertEqual(len(attempts), 2)
+        record = self._record()
+        self.assertEqual(record['state'], 'UNKNOWN')
+        self.assertEqual(record['merge_attempt']['state'], 'UNKNOWN')
+
+    def test_claimed_record_moves_to_unknown_without_merge(self):
+        claimed = self._leave_claimed()
+        main_reads = self.read_main.call_count
+        # Recovery whose UNKNOWN write fails again leaves MERGE_CLAIMED and never merges.
+        patcher, attempts = self._fail_unknown_writes(2)
+        with patcher:
+            result = self._merge()
+        self.assertEqual(result['step'], 'MERGE_REFUSED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_MERGE_OUTCOME_UNKNOWN])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self._record()['state'], 'MERGE_CLAIMED')
+        self.assertEqual(len(self.gh.named('merge')), 1)
+        # A fresh read that does not show the merge records UNKNOWN, still without a merge.
+        result = self._merge()
+        self.assertEqual(result['step'], 'MERGE_REFUSED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_MERGE_OUTCOME_UNKNOWN])
+        record = self._record()
+        self.assertEqual(record['state'], 'UNKNOWN')
+        self.assertEqual(record['merge_attempt'],
+                         dict(claimed['merge_attempt'], state='UNKNOWN'))
+        self.assertIsNone(record['merge_sha'])
+        self.assertEqual(len(self.gh.named('merge')), 1)
+        self.assertEqual(self.gh.named('comment'), [])
+        self.assertEqual(self.read_main.call_count, main_reads)
+        # A later call merges only after the full recheck.
+        self.gh.merge_effect = True
+        self.assertEqual(self._merge()['step'], 'MERGED')
+        self.assertEqual(self._record()['state'], 'MERGED')
+        self.assertEqual(len(self.gh.named('merge')), 2)
+        self.assertEqual(self.read_main.call_count, main_reads + 1)
+
+    def test_claimed_record_resolved_from_merged_read_without_new_merge(self):
+        self._leave_claimed()
+        # The merge landed later; main now contains it.
+        self.github.pulls[TRAIN_PR].update(state='closed', merged=True,
+                                           merge_commit_sha=MERGE_SHA)
+        self.read_main.return_value = MERGE_SHA
+        result = self._merge()
+        self.assertEqual(result['step'], 'MERGED', result)
+        self.assertEqual(result['codes'], [])
+        record = self._record()
+        self.assertEqual(record['state'], 'MERGED')
+        self.assertEqual(record['merge_sha'], MERGE_SHA)
+        self.assertEqual(record['merge_attempt']['state'], 'MERGED')
+        self.assertEqual(len(self.gh.named('merge')), 1)
+        self.assertEqual(len(self.gh.named('comment')), 1)
+
     # close_train
 
     def _merged_train(self):
