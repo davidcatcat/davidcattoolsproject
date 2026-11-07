@@ -38,7 +38,7 @@ _RULE_ALERT_PATCH = patch.object(
 def setUpModule():
     # Never let a test read the developer's real agent sessions: a live session
     # changing state mid-test would add office events to unrelated assertions.
-    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
+    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
     _RULE_ALERT_PATCH.start()
 
@@ -3397,20 +3397,34 @@ class OfficeViewTests(unittest.TestCase):
                 self.assertFalse(any(row.task == "task wp-1" for row in gone))
 
     # Company LLM runs in the 即時 section (#763).
-    def _gw_record(self, tasks, task, provider, state, created, d6="wp-1", updated=None,
-                   **developer):
+    def _gw_record(self, tasks, task, provider, state, created):
+        """A Task record, which holds prompt text and must never be opened."""
         path = Path(tasks) / f"{task}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        stamp = lambda when: mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(when))
-        record = {"task_id": task, "request": "PROMPT-SECRET", "response": "MODEL-OUTPUT-SECRET",
-                  "goal": "PROMPT-SECRET",
-                  "developer": {"provider_type": provider, "state": state,
-                                "executor_task_id": d6, "created_at": stamp(created),
-                                **developer}}
-        if updated is not None:
-            record["updated_at"] = stamp(updated)
-        path.write_text(json.dumps(record), encoding="utf-8")
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(created))
+        path.write_text(json.dumps({
+            "task_id": task, "request": "PROMPT-SECRET", "response": "MODEL-OUTPUT-SECRET",
+            "developer": {"provider_type": provider, "state": state,
+                          "executor_task_id": "wp-1", "created_at": stamp}}), encoding="utf-8")
         os.chmod(path, 0o600)
+        return path
+
+    def _gw_route(self, task):
+        """The temporary route folder of a run: its audit and authorization files."""
+        audit = Path(self.tmp.name) / "route" / "audit.jsonl"
+        audit.parent.mkdir()
+        audit.write_text('{"type":"tool","note":"PROMPT-SECRET"}\n', encoding="utf-8")
+        os.utime(audit, (self.NOW - 7, self.NOW - 7))
+        (audit.parent / "authorization.json").write_text(json.dumps(
+            {"schema_version": 1, "task_id": task, "session_id": None}), encoding="utf-8")
+        return audit
+
+    def _gw_audit_copy(self, root, name, age):
+        """The audit copy llmtool keeps once a run ends."""
+        path = Path(root) / (mon.GW_AUDIT_PREFIX + name) / "audit.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text('{"type":"tool","note":"PROMPT-SECRET"}\n', encoding="utf-8")
+        os.utime(path, (self.NOW - age, self.NOW - age))
         return path
 
     def _gw_agent_process(self, workdir, audit, elapsed="00:30", pid=91):
@@ -3440,24 +3454,18 @@ class OfficeViewTests(unittest.TestCase):
         proc = self._gw_agent_process(self.task, audit)[0]
         self.assertEqual(proc.gw, ("gw", str(self.task), str(audit)))
         bad = mon._gw_run_job("python3 -m api_agent_gateway run --workdir /a/../b "
-                              "--audit-file /t/other.log", mon.GW_AGENT_ROLE, ())
+                              "--audit-file /t/other.log", mon.GW_AGENT_ROLE)
         self.assertEqual(bad, ("gw", "", ""))
+        self.assertEqual(mon._gw_run_job("python3 -m llmtool task develop x", "llmtool CLI"), ())
 
     def test_gw_agent_run_shows_live_row_while_its_process_runs(self):
-        tasks = Path(self.tmp.name) / "tasks"
-        task = "1d091894" + "a" * 24
-        self._gw_record(tasks, task, "gw-agent-cli", "DEVELOPER_DISPATCHING", self.NOW - 40,
-                        execution={"run_id": "0123456789abcdef01234567"})
-        audit = Path(self.tmp.name) / "route" / "audit.jsonl"
-        audit.parent.mkdir()
-        audit.write_text('{"type":"tool","note":"PROMPT-SECRET"}\n', encoding="utf-8")
-        os.utime(audit, (self.NOW - 7, self.NOW - 7))
-        rows = self.rows(self._gw_agent_process(self.task, audit), llmtool_tasks=str(tasks))
+        audit = self._gw_route("1d091894" + "a" * 24)
+        rows = self.rows(self._gw_agent_process(self.task, audit))
         live = [row for row in rows if row.name == "gw-agent developer"]
         self.assertEqual(len(live), 1)
         row = live[0]
         self.assertEqual((row.state, row.task, row.sid, row.evidence, row.kind),
-                         (mon.WORKING, "task wp-1", "01234567", "程序", "agent"))
+                         (mon.WORKING, "task wp-1", "pid 91", "程序", "agent"))
         self.assertAlmostEqual(row.age, 7, delta=1)
         self.assertIn("task 1d091894", mon._row_detail(row))
         self.assertIn("D6 wp-1", mon._row_detail(row))
@@ -3466,44 +3474,56 @@ class OfficeViewTests(unittest.TestCase):
         status = self.by_name(rows)["公司 gw agent"]
         self.assertIn("有 1 個執行中", status.detail)
         lines = self._gw_view(rows)
-        at = next(i for i, line in enumerate(lines) if "gw-agent developer 01234567" in line)
+        at = next(i for i, line in enumerate(lines) if "gw-agent developer pid 91" in line)
         self.assertLess(lines.index(next(l for l in lines if mon.LIVE_SECTION in l)), at)
         self.assertLess(at, lines.index(next(l for l in lines if mon.STATUS_SECTION in l)))
-
-    def test_company_gw_run_is_live_only_with_the_llmtool_cli_that_wrote_it(self):
-        tasks = Path(self.tmp.name) / "tasks"
-        task = "2b" * 16
-        self._gw_record(tasks, task, "openai-compatible", "DEVELOPER_DISPATCHING", self.NOW - 50)
-        rows = self.rows(self._llmtool_process(f"task develop {task}", "01:00"),
-                         llmtool_tasks=str(tasks))
-        row = self.by_name(rows)["company gw developer"]
-        self.assertEqual((row.state, row.task, row.sid), (mon.WORKING, "task wp-1", "pid 90"))
-        self.assertAlmostEqual(row.age, 50, delta=1)
-        self.assertNotIn("公司 gw", self.by_name(rows))   # ALLOWED: the live row says it all
-        self._gw_view(rows)
         self.assertEqual(mon._row_person(row), "CompanyGW")
 
-    def test_finished_gw_run_shows_done_with_model_and_tokens_for_the_done_window(self):
-        tasks = Path(self.tmp.name) / "tasks"
-        self._gw_record(tasks, "3c" * 16, "openai-compatible", "DEVELOPER_RESPONDED",
-                        self.NOW - 400, updated=self.NOW - 120,
-                        execution={"served_model": "gw-model-x",
-                                   "usage": {"prompt_tokens": 12300, "completion_tokens": 4500,
-                                             "total_tokens": 16800}})
-        self._gw_record(tasks, "4d" * 16, "gw-agent-cli", "DEVELOPER_RESPONDED",
-                        self.NOW - 4000, updated=self.NOW - mon.OFFICE_DONE_WINDOW - 60)
-        rows = self.rows(llmtool_tasks=str(tasks))
+    def test_gw_agent_process_without_a_valid_authorization_stays_live_unbound(self):
+        audit = self._gw_route("not a task id")
+        for label, change in (("bad id", lambda: None),
+                              ("not JSON", lambda: audit.with_name("authorization.json")
+                               .write_bytes(b"\xff{")),
+                              ("missing", audit.with_name("authorization.json").unlink)):
+            with self.subTest(label):
+                change()
+                row = self.by_name(self.rows(self._gw_agent_process(self.task, audit)))[
+                    "gw-agent developer"]
+                self.assertEqual((row.state, row.task), (mon.WORKING, "task wp-1"))
+                self.assertIn("未綁定 Task", row.detail)
+
+    def test_finished_gw_agent_run_shows_done_for_the_done_window(self):
+        root = Path(self.tmp.name) / "audits"
+        self._gw_audit_copy(root, "abcd1234", 120)
+        self._gw_audit_copy(root, "old00000", mon.OFFICE_DONE_WINDOW + 60)
+        with patch.object(mon, "GW_AUDIT_ROOT", str(root)):
+            rows = self.rows()
         done = [row for row in rows if row.name in mon.GW_ROSTER]
-        self.assertEqual([(row.name, row.state) for row in done],
-                         [("company gw developer", mon.DONE)])
+        self.assertEqual([(row.state, row.sid, row.evidence) for row in done],
+                         [(mon.DONE, "abcd1234", "llmtool 稽核檔")])
         self.assertAlmostEqual(done[0].age, 120, delta=1)
-        self.assertIn("gw-model-x", done[0].detail)
-        self.assertIn("輸入 12.3k / 輸出 4.5k", done[0].detail)
-        self.assertIn("成功回應", done[0].detail)
+        self.assertIn("已結束", done[0].detail)
         names = self.by_name(rows)
         self.assertIn("公司 gw", names)          # the status row is back
         self.assertIn("公司 gw agent", names)
         self._gw_view(rows)
+
+    def test_gw_audit_copy_counts_only_as_the_users_own_plain_file(self):
+        root = Path(self.tmp.name) / "audits"
+        real = self._gw_audit_copy(Path(self.tmp.name) / "elsewhere", "real0000", 60)
+        linked = root / (mon.GW_AUDIT_PREFIX + "symlink0")
+        linked.mkdir(parents=True)
+        (linked / "audit.jsonl").symlink_to(real)
+        hard = root / (mon.GW_AUDIT_PREFIX + "hardlink")
+        hard.mkdir()
+        os.link(real, hard / "audit.jsonl")
+        (root / (mon.GW_AUDIT_PREFIX + "folderlink")).symlink_to(real.parent)
+        self._gw_audit_copy(root, "bad.name", 60)
+        self._gw_audit_copy(root, "future00", -3600)
+        with patch.object(mon, "GW_AUDIT_ROOT", str(root)):
+            self.assertEqual(mon._gw_finished(self.NOW), [])
+        with patch.object(mon, "GW_AUDIT_ROOT", str(root / "missing")):
+            self.assertEqual(mon._gw_finished(self.NOW), [])
 
     def test_no_gw_run_keeps_todays_status_rows(self):
         tasks = Path(self.tmp.name) / "tasks"
@@ -3515,16 +3535,16 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((names["公司 gw agent"].kind, names["公司 gw agent"].state),
                          ("worker", mon.PAUSED))
 
-    def test_stale_gw_dispatch_record_is_not_shown_as_running(self):
+    def test_stale_gw_record_is_not_shown_as_running(self):
         tasks = Path(self.tmp.name) / "tasks"
         task = "5e" * 16
         self._gw_record(tasks, task, "openai-compatible", "DEVELOPER_DISPATCHING", self.NOW - 600)
         self._gw_record(tasks, "6f" * 16, "gw-agent-cli", "DEVELOPER_DISPATCHING", self.NOW - 600)
+        self._gw_route("6f" * 16)   # a route folder left behind, its gateway gone
         cases = {
             "no process": [],
-            "a later CLI only reads it": self._llmtool_process(f"task inspect {task}", "00:10"),
+            "a CLI on that Task": self._llmtool_process(f"task develop {task}", "20:00"),
             "an unrelated old CLI": self._llmtool_process("monitor", "02:00:00"),
-            "a CLI on another Task": self._llmtool_process(f"task develop {'7a' * 16}", "20:00"),
         }
         for label, processes in cases.items():
             with self.subTest(label):
@@ -3533,135 +3553,36 @@ class OfficeViewTests(unittest.TestCase):
                 self.assertNotIn("wp-1", mon._d6_running_tasks(rows))
                 self.assertIn("公司 gw", self.by_name(rows))
 
-    def _gw_scan(self, body):
-        """_gw_fields over bytes, as _remote_test_open hands it a file."""
-        path = Path(self.tmp.name) / "scan.bin"
-        path.write_bytes(body)
-        with open(path, "rb") as handle:
-            return mon._gw_fields(handle, len(body))
-
-    def test_gw_rows_never_load_the_request_or_response(self):
+    def test_gw_rows_open_no_task_file_and_no_audit_content(self):
         tasks = Path(self.tmp.name) / "tasks"
         task = "8b" * 16
-        path = self._gw_record(tasks, task, "openai-compatible", "DEVELOPER_RESPONDED",
-                               self.NOW - 90, updated=self.NOW - 30,
-                               artifact="TOOL-OUTPUT-SECRET",
-                               execution={"served_model": "gw-model-x",
-                                          "notes": ["PROMPT-SECRET"]})
-        real_loads, parsed, kept = json.loads, [], []
+        record = self._gw_record(tasks, task, "gw-agent-cli", "DEVELOPER_DISPATCHING",
+                                 self.NOW - 40)
+        audit = self._gw_route(task)
+        root = Path(self.tmp.name) / "audits"
+        copy = self._gw_audit_copy(root, "abcd1234", 60)
+        real_os_open, real_open, opened = os.open, open, []
 
-        def loads(raw, *args, **kwargs):
-            parsed.append(raw if type(raw) is bytes else str(raw).encode("utf-8"))
-            return real_loads(raw, *args, **kwargs)
+        def os_open(path, *args, **kwargs):
+            opened.append(str(path))
+            return real_os_open(path, *args, **kwargs)
 
-        def entry(record):
-            kept.append(record)
-            return real_entry(record)
+        def plain_open(path, *args, **kwargs):
+            opened.append(str(path))
+            return real_open(path, *args, **kwargs)
 
-        real_entry = mon._gw_run_entry
-        with patch.object(mon.json, "loads", side_effect=loads), \
-                patch.object(mon, "_gw_run_entry", side_effect=entry), \
-                patch.object(mon, "_remote_test_json",
-                             side_effect=AssertionError("whole record parsed")):
-            runs = mon.gw_rows([], self.NOW, self.canonical, str(tasks))
-        self.assertEqual([row.state for row in runs], [mon.DONE])
-        self.assertIn("gw-model-x", runs[0].detail)
-        self.assertEqual(len(kept), 1)
-        self.assertEqual(set(kept[0]), {"task_id", "developer", "updated_at"})
-        self.assertEqual(set(kept[0]["developer"]),
-                         {"provider_type", "state", "executor_task_id", "created_at", "execution"})
-        self.assertEqual(kept[0]["developer"]["execution"], {"served_model": "gw-model-x"})
-        for secret in (b"PROMPT-SECRET", b"MODEL-OUTPUT-SECRET", b"TOOL-OUTPUT-SECRET"):
-            self.assertIn(secret, path.read_bytes())   # the fixture really holds it
-            self.assertFalse(any(secret in raw for raw in parsed))
-
-    def test_gw_scan_holds_at_most_one_chunk_of_a_large_request(self):
-        body = json.dumps({"request": "PROMPT-SECRET" * 5000, "task_id": "9c" * 16,
-                           "response": "MODEL-OUTPUT-SECRET" * 5000}).encode("utf-8")
-        self.assertGreater(len(body), 4 * mon.GW_SCAN_CHUNK)
-
-        class Handle:
-            sizes, at = [], 0
-
-            def read(self, size):
-                self.sizes.append(size)
-                piece = body[self.at:self.at + size]
-                self.at += len(piece)
-                return piece
-
-        handle = Handle()
-        self.assertEqual(mon._gw_fields(handle, len(body)), {"task_id": "9c" * 16})
-        self.assertLessEqual(max(handle.sizes), mon.GW_SCAN_CHUNK)
-        self.assertEqual(handle.at, len(body))
-        # A buffered file object would hold more of the file than one chunk.
-        path = Path(self.tmp.name) / "large.json"
-        path.write_bytes(body)
-        opened = mon._remote_test_open(
-            str(path), len(body),
-            lambda file, size: (type(file).__name__, mon._gw_fields(file, size)))
-        self.assertEqual(opened[1], ("FileIO", {"task_id": "9c" * 16}))
-
-    def test_gw_scan_matches_json_loads_at_every_chunk_boundary(self):
-        task = "ab" * 16
-        record = {
-            "request": 'He said "PROMPT-SECRET" \\ and \\" 中文 \n', "task_id": task,
-            "other": [{"task_id": "not this one", "developer": {"state": "NESTED"}}, 1.5, None],
-            "developer": {"artifact": {"state": "NESTED", "model": ["x"]},
-                          "provider_type": "gw-agent-cli", "state": "DEVELOPER_RESPONDED",
-                          "created_at": "2026-11-07T00:00:00Z", "executor_task_id": "wp-1",
-                          "error_code": None, "model": "gw",
-                          "execution": {"run_id": "0123456789abcdef01234567",
-                                        "served_model": "gw-model-x",
-                                        "usage": {"prompt_tokens": 12, "completion_tokens": 3,
-                                                  "total_tokens": 15}}},
-            "updated_at": "2026-11-07T00:01:00Z", "response": "MODEL-OUTPUT-SECRET",
-        }
-        expected = mon._gw_run_entry(record)
-        self.assertEqual(expected.tokens, (12, 3))
-        for text in (json.dumps(record), json.dumps(record, indent=2),
-                     json.dumps(record, ensure_ascii=False)):
-            body = text.encode("utf-8")
-            for chunk in range(1, 40):
-                with self.subTest(chunk=chunk), patch.object(mon, "GW_SCAN_CHUNK", chunk):
-                    self.assertEqual(mon._gw_run_entry(self._gw_scan(body)), expected)
-
-    def test_gw_scan_keeps_field_rules_and_refuses_malformed_files(self):
-        self.assertEqual(self._gw_scan(b'{"task_\\u0069d": "a\\u0062"}'), {"task_id": "ab"})
-        self.assertEqual(self._gw_scan(b'{"task_id": "a", "task_id": "b"}'), {"task_id": "b"})
-        too_long = b'"' + b"x" * (mon.GW_SCAN_FIELD + 1) + b'"'
-        self.assertEqual(self._gw_scan(b'{"task_id": "a", "task_id": ' + too_long + b"}"), {})
-        self.assertEqual(self._gw_scan(b'{"task_id": ["a"], "developer": "x"}'), {})
-        self.assertEqual(self._gw_scan(b'{"developer": {"usage": {"prompt_tokens": 1, '
-                                       b'"completion_tokens": null}}}'),
-                         {"developer": {"usage": {"prompt_tokens": 1, "completion_tokens": None}}})
-        deep = b"[" * (mon.GW_SCAN_DEPTH + 1) + b"]" * (mon.GW_SCAN_DEPTH + 1)
-        for body in (b"", b"[]", b"null", b'{"task_id": "a"', b'{"task_id": "a', b'{"a": "b\\',
-                     b'{"task_id": "a"} x', b'{"a": [}', b'{"a": }', b'{"a": ,}', b'{"a" 1}',
-                     b'{"a": 1 "b": 2}', b'{1: 2}', b'{"task_id": "\\q"}', b'{"task_id": tru}',
-                     b'{"task_id": "\xff"}', b'{"a": ' + deep + b"}"):
-            with self.subTest(body=body[:24]):
-                self.assertIsNone(self._gw_scan(body))
-        self.assertIsNone(mon._gw_run_entry(self._gw_scan(b"[]")))
-
-    def test_gw_load_counts_the_read_budget_and_uses_the_file_cache(self):
-        tasks = Path(self.tmp.name) / "tasks"
-        older = self._gw_record(tasks, "a1" * 16, "gw-agent-cli", "DEVELOPER_RESPONDED",
-                                self.NOW - 90)
-        newer = self._gw_record(tasks, "b2" * 16, "gw-agent-cli", "DEVELOPER_RESPONDED",
-                                self.NOW - 60)
-        os.utime(older, (self.NOW - 20, self.NOW - 20))
-        os.utime(newer, (self.NOW - 10, self.NOW - 10))
-        cache = {}
-        entries, problem = mon._bounded_task_entries(
-            str(tasks), cache, newer.stat().st_size, mon._gw_run_entry, mon._gw_load)
-        self.assertEqual([entry.task for entry in entries], ["b2" * 16])
-        self.assertEqual(problem, mon.REMOTE_TEST_OVER_BUDGET)
-        with patch.object(mon, "_remote_test_open", wraps=mon._remote_test_open) as opened:
-            entries, problem = mon._bounded_task_entries(
-                str(tasks), cache, older.stat().st_size, mon._gw_run_entry, mon._gw_load)
-        self.assertEqual([call.args[0] for call in opened.call_args_list], [str(older)])
-        self.assertEqual({entry.task for entry in entries}, {"a1" * 16, "b2" * 16})
-        self.assertEqual(problem, "")
+        processes = self._gw_agent_process(self.task, audit)
+        with patch.object(mon, "GW_AUDIT_ROOT", str(root)), \
+                patch.object(mon, "LLMTOOL_TASKS", str(tasks)), \
+                patch.object(mon.os, "open", side_effect=os_open), \
+                patch("builtins.open", side_effect=plain_open):
+            runs = mon.gw_rows(processes, self.NOW, self.canonical)
+        self.assertEqual([row.state for row in runs], [mon.WORKING, mon.DONE])
+        self.assertIn(str(audit.with_name("authorization.json")), opened)
+        for path in (record, audit, copy, audit.with_name("task.json"),
+                     audit.with_name("result.json")):
+            self.assertNotIn(str(path), opened)
+        self.assertFalse(any(path.startswith(str(tasks)) for path in opened))
 
     def test_idle_claude_session_row_covers_its_d6_process(self):
         self._write(self.claude / "proj" / "idle.jsonl", [

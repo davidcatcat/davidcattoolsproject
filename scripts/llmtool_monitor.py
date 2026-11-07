@@ -174,7 +174,7 @@ class Process:
     job: tuple = ()   # a remote-test run: (source, task, sha, modules), validated tokens only
     codex_exec: bool = False   # a Codex CLI started as `codex exec` (a one-shot run)
     # A company LLM run (#763): ("gw", work folder, audit file) of a gw-agent
-    # gateway, or ("llmtool", Task id or "") of another llmtool CLI; checked tokens only.
+    # gateway; checked tokens only.
     gw: tuple = ()
 
 
@@ -375,24 +375,21 @@ def _remote_test_job(command: str) -> tuple:
 
 
 GW_PATH = re.compile(r"/[A-Za-z0-9_.+/-]{0,1023}")
-LLMTOOL_TASK_ARG = re.compile(r"[0-9a-f]{32}")
 
 
-def _gw_run_job(command: str, role: str | None, remote: tuple) -> tuple:
+def _gw_run_job(command: str, role: str | None) -> tuple:
     """What a company LLM run's command line says (see Process.gw). A path is
     kept only when it is a plain absolute path; nothing else of argv is."""
+    if role != GW_AGENT_ROLE:
+        return ()
     parts = command.split()
-    if role == GW_AGENT_ROLE:
-        found = dict.fromkeys(("--workdir", "--audit-file"), "")
-        for flag, value in zip(parts, parts[1:]):
-            if (flag in found and not found[flag] and GW_PATH.fullmatch(value)
-                    and ".." not in value.split("/")):
-                found[flag] = value
-        audit = found["--audit-file"]
-        return ("gw", found["--workdir"], audit if audit.endswith("/audit.jsonl") else "")
-    if role == "llmtool CLI" and not remote:
-        return ("llmtool", next((part for part in parts if LLMTOOL_TASK_ARG.fullmatch(part)), ""))
-    return ()
+    found = dict.fromkeys(("--workdir", "--audit-file"), "")
+    for flag, value in zip(parts, parts[1:]):
+        if (flag in found and not found[flag] and GW_PATH.fullmatch(value)
+                and ".." not in value.split("/")):
+            found[flag] = value
+    audit = found["--audit-file"]
+    return ("gw", found["--workdir"], audit if audit.endswith("/audit.jsonl") else "")
 
 
 # What snapshot_from derives from a command line (role, executable name,
@@ -421,7 +418,7 @@ def _row_facts(command: str) -> tuple:
     job = _remote_test_job(command)
     return (role, safe_name(command), job,
             role is not None and role.startswith("Codex CLI") and _codex_exec_command(command),
-            _gw_run_job(command, role, job))
+            _gw_run_job(command, role))
 
 
 def parse_processes(output: str, self_pid: int, remembered: dict | None = None) -> Snapshot:
@@ -6238,15 +6235,13 @@ def _remote_test_paths(root: str) -> tuple[list, bool]:
     return paths, capped
 
 
-def _remote_test_open(path: str, budget: int, read=None):
+def _remote_test_open(path: str, budget: int):
     """(file key, raw bytes) of one regular task file, opened without following
     a link or blocking on a FIFO and checked again on the open descriptor, so a
     file swapped after the listing is refused too. A hard link (TaskStore
     writes by rename, so its files have one) could name the remote-test config
     and is refused. (key, None) for a refused or oversized file, (key, False)
-    when it does not fit the remaining budget, None when unreadable. With
-    read, (key, read(unbuffered handle, size)) replaces the raw bytes, so a
-    caller that needs a few fields need not hold the whole file."""
+    when it does not fit the remaining budget, None when unreadable."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
@@ -6258,9 +6253,9 @@ def _remote_test_open(path: str, budget: int, read=None):
             return key, None
         if info.st_size > budget:
             return key, False
-        with os.fdopen(fd, "rb", -1 if read is None else 0) as handle:
+        with os.fdopen(fd, "rb") as handle:
             fd = -1
-            return key, handle.read(info.st_size) if read is None else read(handle, info.st_size)
+            return key, handle.read(info.st_size)
     except OSError:
         return None
     finally:
@@ -6334,7 +6329,7 @@ def _task_load(path: str, budget: int):
     return key, _remote_test_json(raw) if raw else None, len(raw or b"")
 
 
-def _bounded_task_entries(root: str, cache: dict, budget: int, extract, load=_task_load):
+def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
     """Read bounded, unchanged-cached Task records through a field extractor."""
     paths, capped = _remote_test_paths(root)
     stamped = []
@@ -6358,7 +6353,7 @@ def _bounded_task_entries(root: str, cache: dict, budget: int, extract, load=_ta
         if cached and cached[0] == key:
             record_entries = cached[1]
         else:
-            loaded = load(path, budget)
+            loaded = _task_load(path, budget)
             if loaded is None:
                 short = True
                 continue
@@ -6648,233 +6643,60 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
                      80, kind="worker", evidence="llmtool 紀錄")
 
 
-# Company LLM runs (#763 Owner): while a company gw or gw-agent Developer run
-# is under way it gets a live row like the Claude and Codex rows, then a 完成
-# row for OFFICE_DONE_WINDOW; otherwise only its status row stays. A run is
-# live only on process evidence: the gw-agent gateway process itself, or for
-# company gw (an API call inside llmtool) the llmtool CLI that was running when
-# the running Task record was written. A Task record alone never is. The Task
-# file holds the prompt and model output, so it is walked for named fields
-# (_TaskScan), never loaded whole.
-GW_PROVIDERS = {"openai-compatible": "company gw", "gw-agent-cli": "gw-agent"}
-GW_ROSTER = {"company gw developer": "公司 gw", "gw-agent developer": "公司 gw agent"}
-GW_RUNNING = frozenset({"DEVELOPER_DISPATCHING", "DEVELOPER_RUNNING"})
-GW_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
-GW_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{3,127}")
-GW_NOT_MODELS = frozenset({"UNKNOWN", "gw"})   # routing names, not the model that served
-GW_MAX_TOKENS = 50_000_000
-GW_BUDGET = 4 << 20
-_gw_run_parsed: dict = {}  # root -> {path: ((st_ino, st_mtime_ns, st_size), entries)}
-GW_SCAN_CHUNK = 8 << 10   # the most Task file bytes held at once
-GW_SCAN_FIELD = 256       # no id, state, time or model is longer; longer text is not kept
-GW_SCAN_DEPTH = 256
-GW_SCAN_TOKEN = re.compile(rb"[^ \t\r\n]")
-GW_SCAN_STRING = re.compile(rb'["\\]')
-GW_SCAN_END = frozenset(b",}] \t\r\n")
-# The only Task fields _gw_run_entry reads: True keeps a short string, number
-# or literal, a dict keeps those fields of an object.
-GW_USAGE_FIELDS = {"prompt_tokens": True, "completion_tokens": True}
-GW_TASK_FIELDS = {"task_id": True, "updated_at": True, "developer": {
-    "provider_type": True, "provider_profile": True, "state": True, "error_code": True,
-    "executor_task_id": True, "created_at": True, "updated_at": True, "served_model": True,
-    "model": True, "usage": GW_USAGE_FIELDS,
-    "execution": {"native_session_id": True, "run_id": True, "served_model": True,
-                  "model": True, "usage": GW_USAGE_FIELDS}}}
+# Company LLM runs (#763 Owner): while a gw-agent Developer run is under way it
+# gets a live row like the Claude and Codex rows, then a 完成 row for
+# OFFICE_DONE_WINDOW; otherwise only its status row stays. No Task file is
+# opened for these rows: it holds the prompt and model output. A run is live
+# only on its gateway process. Its Task id comes from the authorization.json
+# beside its audit file (ids, scope digest, egress basis; no prompt, no
+# credential), and a finished run from the time of the audit copy llmtool keeps
+# (developer_routes/gw_agent.py, collect). A company gw run is an API call
+# inside llmtool and leaves neither, so it has no row here.
+GW_ROSTER = {"gw-agent developer": "公司 gw agent"}
+GW_AUDIT_ROOT = tempfile.gettempdir()
+GW_AUDIT_PREFIX = "llmtool-gw-agent-audit-"
+GW_AUDIT_ID = re.compile(r"[A-Za-z0-9_]{1,16}")   # the random end of a mkdtemp name
+GW_AUTH_MAX = 64 << 10
 
 
-class _TaskScan:
-    """Walks one JSON file through a GW_SCAN_CHUNK buffer, keeping named fields.
-    A file has no index, so other bytes pass through that buffer, but they are
-    never collected, decoded or parsed, and only their shape is checked."""
-
-    def __init__(self, handle, size: int):
-        self.handle, self.left, self.data, self.at = handle, size, b"", 0
-
-    def _fill(self) -> bool:
-        """Whether a byte is ready at self.at, reading the next chunk if needed."""
-        if self.at >= len(self.data):
-            self.data, self.at = self.handle.read(min(GW_SCAN_CHUNK, self.left)), 0
-            self.left -= len(self.data)
-        return self.at < len(self.data)
-
-    def token(self) -> bytes:
-        """The next byte that is not white space; b"" at the end of the file."""
-        while self._fill():
-            found = GW_SCAN_TOKEN.search(self.data, self.at)
-            if found:
-                self.at = found.end()
-                return found.group()
-            self.at = len(self.data)
-        return b""
-
-    def string(self, limit: int = 0) -> bytes | None:
-        """Walk a string from just after its opening quote. Its raw text when
-        it fits limit, else None; longer text is never collected."""
-        kept = b"" if limit else None
-        while True:
-            if not self._fill():
-                raise ValueError("unterminated string")
-            found = GW_SCAN_STRING.search(self.data, self.at)
-            end = found.start() if found else len(self.data)
-            if kept is not None:
-                kept = kept + self.data[self.at:end] if len(kept) + end - self.at <= limit else None
-            self.at = found.end() if found else end
-            if found is None:
-                continue
-            if found.group() == b'"':
-                return kept
-            if not self._fill():   # the escaped byte can start the next chunk
-                raise ValueError("unterminated string")
-            if kept is not None:
-                kept = (kept + b"\\" + self.data[self.at:self.at + 1]
-                        if len(kept) + 2 <= limit else None)
-            self.at += 1
-
-    def scalar(self, first: bytes) -> bytes:
-        """A number or literal from its first byte, at most GW_SCAN_FIELD + 1 bytes."""
-        kept = first
-        while self._fill() and self.data[self.at] not in GW_SCAN_END:
-            if len(kept) <= GW_SCAN_FIELD:
-                kept += self.data[self.at:self.at + 1]
-            self.at += 1
-        return kept
-
-    def skip(self, first: bytes) -> None:
-        """Walk one value from its first byte, collecting none of it."""
-        closers: list[bytes] = []
-        while True:
-            if first == b'"':
-                self.string()
-            elif first in (b"{", b"["):
-                closers.append(b"}" if first == b"{" else b"]")
-                if len(closers) > GW_SCAN_DEPTH:
-                    raise ValueError("nested too deeply")
-            elif first in (b"}", b"]"):
-                if not closers or closers.pop() != first:
-                    raise ValueError("unbalanced value")
-            elif first == b"" or (first in (b",", b":") and not closers):
-                raise ValueError("no value")
-            elif first not in (b",", b":"):
-                self.scalar(first)
-            if not closers:
-                return
-            first = self.token()
-
-    def fields(self, shape: dict) -> dict:
-        """Walk an object from just after its `{`, keeping only shape's fields.
-        As in json.loads, the last of a repeated field wins, even when that
-        last one is too long to keep."""
-        kept: dict = {}
-        first = self.token()
-        if first == b"}":
-            return kept
-        while True:
-            if first != b'"':
-                raise ValueError("no field name")
-            raw = self.string(GW_SCAN_FIELD)
-            name = None if raw is None else _scan_text(raw)
-            if self.token() != b":":
-                raise ValueError("no field value")
-            want = shape.get(name)
-            kept.pop(name, None)
-            first = self.token()
-            if type(want) is dict and first == b"{":
-                kept[name] = self.fields(want)
-            elif want is True and first == b'"':
-                raw = self.string(GW_SCAN_FIELD)
-                if raw is not None:
-                    kept[name] = _scan_text(raw)
-            elif want is True and first not in (b"{", b"["):
-                raw = self.scalar(first)
-                if len(raw) <= GW_SCAN_FIELD:
-                    kept[name] = json.loads(raw)
-            else:
-                self.skip(first)
-            first = self.token()
-            if first == b"}":
-                return kept
-            if first != b",":
-                raise ValueError("no field separator")
-            first = self.token()
+def _gw_auth_task(audit: str) -> str:
+    """The Task id in the authorization.json llmtool wrote beside a running
+    gateway's audit file, else ""."""
+    if not audit:
+        return ""
+    opened = _remote_test_open(os.path.join(os.path.dirname(audit), "authorization.json"),
+                               GW_AUTH_MAX)
+    record = _remote_test_json(opened[1]) if opened and opened[1] else None
+    task = record.get("task_id") if type(record) is dict else None
+    return task if type(task) is str and DISPATCH_TASK_ID.fullmatch(task) else ""
 
 
-def _scan_text(raw: bytes) -> str:
-    return json.loads(b'"' + raw + b'"')
-
-
-def _gw_fields(handle, size: int) -> dict | None:
-    """GW_TASK_FIELDS of one Task file, None when it is not one JSON object."""
-    scan = _TaskScan(handle, size)
+def _gw_finished(now: float) -> list[tuple[float, str]]:
+    """[(age, id)], newest first, of gw-agent runs that ended within
+    OFFICE_DONE_WINDOW. llmtool copies the audit file when a run ends, so the
+    copy's time is the end, and its folder's random name tells runs apart. Only
+    file times are read, and only the user's own plain files count, as in
+    cleanup_audit_copies (developer_routes/gw_agent.py)."""
     try:
-        if scan.token() != b"{":
-            return None
-        kept = scan.fields(GW_TASK_FIELDS)
-        return kept if scan.token() == b"" else None
-    except ValueError:
-        return None
-
-
-def _gw_load(path: str, budget: int):
-    """_task_load for gw_rows: the named fields only, never the request or response."""
-    opened = _remote_test_open(path, budget, _gw_fields)
-    if opened is None or opened[1] is False:
-        return None
-    return opened[0], opened[1], opened[0][2]
-
-
-@dataclass(frozen=True)
-class GwRun:
-    route: str      # "company gw" | "gw-agent"
-    task: str
-    d6: str
-    state: str
-    code: str
-    created: float
-    ended: float    # the record's last update, else its dispatch time
-    run_id: str
-    model: str      # the served model when recorded, else ""
-    tokens: tuple   # (input, output) when recorded, else ()
-
-
-def _gw_run_entry(record) -> GwRun | None:
-    """Ids, states, times, the served model and token counts of one company gw
-    or gw-agent Developer run, from the fields _gw_load kept. The request,
-    response, contract, summary and audit text never reach it."""
-    if type(record) is not dict:
-        return None
-    task, developer = record.get("task_id"), record.get("developer")
-    if (type(task) is not str or not DISPATCH_TASK_ID.fullmatch(task)
-            or type(developer) is not dict):
-        return None
-    provider = developer.get("provider_type")
-    route = GW_PROVIDERS.get(provider) if type(provider) is str else None
-    if route is None and provider is None and developer.get("provider_profile") == "company-gw":
-        route = "company gw"
-    state = developer.get("state")
-    created = _remote_test_time(developer.get("created_at"))
-    if (route is None or type(state) is not str
-            or state not in DISPATCH_ACCEPTED | GW_RUNNING or created <= 0):
-        return None
-    code = developer.get("error_code")
-    d6 = developer.get("executor_task_id")
-    execution = developer.get("execution")
-    execution = execution if type(execution) is dict else {}
-    run_id = next((value for value in (execution.get("native_session_id"), execution.get("run_id"))
-                   if type(value) is str and GW_RUN_ID.fullmatch(value)), "")
-    model = next((value for source in (execution, developer)
-                  for value in (source.get("served_model"), source.get("model"))
-                  if type(value) is str and GW_MODEL.fullmatch(value)
-                  and value not in GW_NOT_MODELS), "")
-    usage = execution.get("usage") or developer.get("usage")
-    tokens = ((usage.get("prompt_tokens"), usage.get("completion_tokens"))
-              if type(usage) is dict else ())
-    if not all(type(n) is int and 0 <= n <= GW_MAX_TOKENS for n in tokens):
-        tokens = ()
-    ended = (_remote_test_time(developer.get("updated_at"))
-             or _remote_test_time(record.get("updated_at")) or created)
-    return GwRun(route, task, d6 if type(d6) is str and AGENT_PATH.fullmatch(d6) else "", state,
-                 code if type(code) is str and CODE_TEXT.fullmatch(code) else "",
-                 created, max(created, ended), run_id, model, tokens)
+        with os.scandir(GW_AUDIT_ROOT) as entries:
+            names = [entry.name for entry in entries if entry.name.startswith(GW_AUDIT_PREFIX)]
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        run = name[len(GW_AUDIT_PREFIX):]
+        folder = os.path.join(GW_AUDIT_ROOT, name)
+        try:
+            folder_info, info = os.lstat(folder), os.lstat(os.path.join(folder, "audit.jsonl"))
+        except OSError:
+            continue
+        age = now - info.st_mtime
+        if (GW_AUDIT_ID.fullmatch(run) and stat.S_ISDIR(folder_info.st_mode)
+                and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                and folder_info.st_uid == info.st_uid == os.getuid()
+                and -REMOTE_TEST_SKEW <= age <= OFFICE_DONE_WINDOW):
+            found.append((max(0.0, age), run))
+    return sorted(found)
 
 
 def _gw_activity(audit: str, now: float, elapsed: float | None) -> float:
@@ -6888,85 +6710,34 @@ def _gw_activity(audit: str, now: float, elapsed: float | None) -> float:
     return elapsed or 0.0
 
 
-def _gw_row(route: str, state: str, words: str, age: float, d6: str, registered: dict,
-            entry: GwRun | None, sid: str, evidence: str) -> OfficeRow:
+def _gw_row(state: str, words: str, age: float, d6: str, registered: dict, task: str,
+            sid: str, evidence: str) -> OfficeRow:
     """A registered D6 is named by the PR binding (_bind_d6_pr_rows) like other
     D6 rows; any other place is named here."""
-    parts = [f"task {entry.task[:8]}"] if entry else ["未綁定 Task"]
+    parts = [f"task {task[:8]}"] if task else ["未綁定 Task"]
     if d6 not in registered:
         parts.append(f"D6 {d6}（未登記）" if d6 else "未綁定 D6")
-    return OfficeRow(f"{route} developer", state, " · ".join(parts + [words]), age, 10,
+    return OfficeRow("gw-agent developer", state, " · ".join(parts + [words]), age, 10,
                      role="developer", task=f"task {d6}" if d6 in registered else "",
                      evidence=evidence, sid=sid)
 
 
-def gw_rows(processes: list[Process], now: float, canonical: str,
-            root: str | None = None) -> list[OfficeRow]:
-    """Live and recently finished company gw and gw-agent Developer runs."""
-    root = LLMTOOL_TASKS if root is None else root
-    try:
-        entries, problem = _bounded_task_entries(root, _gw_run_parsed, GW_BUDGET, _gw_run_entry,
-                                                 _gw_load)
-    except Exception:   # optional local evidence: a gateway process still shows, unbound
-        entries, problem = [], REMOTE_TEST_OVER_BUDGET
+def gw_rows(processes: list[Process], now: float, canonical: str) -> list[OfficeRow]:
+    """Live and recently finished gw-agent Developer runs."""
     registered = registered_tasks(canonical)
-    running = sorted((entry for entry in entries if entry.state in GW_RUNNING),
-                     key=lambda entry: -entry.created)
-    rows, bound = [], set()
-    procs = sorted(processes, key=lambda p: p.pid)
-    for proc in procs:
+    rows = []
+    for proc in sorted(processes, key=lambda p: p.pid):
         if proc.role != GW_AGENT_ROLE or len(proc.gw) != 3:
             continue
-        elapsed = _elapsed_seconds(proc.elapsed)
         workdir = os.path.realpath(proc.gw[1]) if proc.gw[1] else ""
         d6 = next((task_id for task_id, (place, _) in registered.items() if place == workdir), "")
         if not d6 and AGENT_PATH.fullmatch(os.path.basename(workdir)):
             d6 = os.path.basename(workdir)
-        # llmtool records the dispatch, then starts the gateway.
-        entry = next((entry for entry in running
-                      if entry.route == "gw-agent" and entry.task not in bound and d6
-                      and entry.d6 == d6 and elapsed is not None
-                      and entry.created - CODEX_WORK_BEFORE <= now - elapsed
-                      <= entry.created + CODEX_WORK_AFTER), None)
-        if entry is not None:
-            bound.add(entry.task)
-        words = "執行中" + ("（工作紀錄未讀完，未確認）" if entry is None and problem else "")
-        rows.append(_gw_row("gw-agent", WORKING, words, _gw_activity(proc.gw[2], now, elapsed),
-                            d6, registered, entry,
-                            entry.run_id[:8] if entry and entry.run_id else f"pid {proc.pid}",
-                            "程序"))
-    clis = [p for p in procs if p.role == "llmtool CLI" and not p.job and len(p.gw) == 2]
-    used = set()
-    for entry in running:
-        if entry.route != "company gw":
-            continue
-        for proc in clis:
-            elapsed = _elapsed_seconds(proc.elapsed)
-            if proc.pid in used or elapsed is None:
-                continue
-            # The CLI writes the record, so it was already running; a CLI
-            # naming another Task, or started later, is not this run.
-            named, started = proc.gw[1], now - elapsed
-            if ((named and named != entry.task) or started > entry.created + CODEX_WORK_BEFORE
-                    or (not named and started < entry.created - CODEX_WORK_AFTER)):
-                continue
-            used.add(proc.pid)
-            rows.append(_gw_row("company gw", WORKING, "執行中", max(0.0, now - entry.created),
-                                entry.d6, registered, entry,
-                                entry.run_id[:8] or f"pid {proc.pid}", "程序"))
-            break
-    for entry in sorted(entries, key=lambda entry: -entry.ended):
-        age = now - entry.ended
-        if entry.state in GW_RUNNING or not -REMOTE_TEST_SKEW <= age <= OFFICE_DONE_WINDOW:
-            continue
-        words = "已結束：" + (DEVELOPER_RESULTS.get(entry.code)
-                             or DEVELOPER_RESULTS.get(entry.state) or entry.state)
-        if entry.model:
-            words += f"；{entry.model[:40]}"
-        if entry.tokens:
-            words += f"；輸入 {entry.tokens[0] / 1000:.1f}k / 輸出 {entry.tokens[1] / 1000:.1f}k"
-        rows.append(_gw_row(entry.route, DONE, words, max(0.0, age), entry.d6, registered,
-                            entry, entry.run_id[:8], "llmtool 紀錄"))
+        age = _gw_activity(proc.gw[2], now, _elapsed_seconds(proc.elapsed))
+        rows.append(_gw_row(WORKING, "執行中", age, d6, registered, _gw_auth_task(proc.gw[2]),
+                            f"pid {proc.pid}", "程序"))
+    for age, run in _gw_finished(now):
+        rows.append(_gw_row(DONE, "已結束", age, "", registered, "", run, "llmtool 稽核檔"))
     return rows
 
 
@@ -7768,7 +7539,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         mac.append(ci_queue_row(mac_waiting, runner_count))
     rows += agy + mac + github_runner_rows(ci_view, now, local_names, ci)
     rows.append(remote_test_row(processes, now, llmtool_tasks))
-    gw_runs = gw_rows(processes, now, canonical, llmtool_tasks)
+    gw_runs = gw_rows(processes, now, canonical)
     rows += gw_runs
     gw_live: dict = {}
     for row in gw_runs:
