@@ -173,6 +173,9 @@ class Process:
     owner: str = ""   # nearest agent this process belongs to / was started by
     job: tuple = ()   # a remote-test run: (source, task, sha, modules), validated tokens only
     codex_exec: bool = False   # a Codex CLI started as `codex exec` (a one-shot run)
+    # A company LLM run (#763): ("gw", work folder, audit file) of a gw-agent
+    # gateway; checked tokens only.
+    gw: tuple = ()
 
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._+-]")
@@ -274,6 +277,11 @@ def _codex_exec_command(command: str) -> bool:
     return "exec" in command.split()[1:]
 
 
+# The gw-agent route runs `python -B -P -m api_agent_gateway run ...`
+# (tools/llmtool/llmtool/developer_routes/gw_agent.py, build_argv).
+GW_AGENT_ROLE = "gw agent run"
+
+
 def classify(command: str) -> str | None:
     """Never return the command text; it might contain secrets."""
     if command.startswith("(") and command.endswith(")"):
@@ -292,6 +300,8 @@ def classify(command: str) -> str | None:
         target = _python_target(args)
         if target == ("module", "llmtool"):
             return "llmtool CLI"
+        if target == ("module", "api_agent_gateway") and "run" in args:
+            return GW_AGENT_ROLE
         if target is not None and target[0] == "script":
             name = target[1]
             if name in ("invoke_once.py", "live_once.py"):
@@ -364,6 +374,24 @@ def _remote_test_job(command: str) -> tuple:
     return ("cli", task, sha, tuple(modules))
 
 
+GW_PATH = re.compile(r"/[A-Za-z0-9_.+/-]{0,1023}")
+
+
+def _gw_run_job(command: str, role: str | None) -> tuple:
+    """What a company LLM run's command line says (see Process.gw). A path is
+    kept only when it is a plain absolute path; nothing else of argv is."""
+    if role != GW_AGENT_ROLE:
+        return ()
+    parts = command.split()
+    found = dict.fromkeys(("--workdir", "--audit-file"), "")
+    for flag, value in zip(parts, parts[1:]):
+        if (flag in found and not found[flag] and GW_PATH.fullmatch(value)
+                and ".." not in value.split("/")):
+            found[flag] = value
+    audit = found["--audit-file"]
+    return ("gw", found["--workdir"], audit if audit.endswith("/audit.jsonl") else "")
+
+
 # What snapshot_from derives from a command line (role, executable name,
 # remote-test job, `codex exec` bit), computed once per distinct command and
 # reused on every later poll (~500 rows a second). The key is a keyed BLAKE2b
@@ -384,11 +412,13 @@ def _argv_digest(command: str) -> bytes:
 
 
 def _row_facts(command: str) -> tuple:
-    """(role, safe name, remote-test job, codex exec) of a command line; only
-    these sanitized results are ever stored."""
+    """(role, safe name, remote-test job, codex exec, gw run) of a command
+    line; only these sanitized results are ever stored."""
     role = classify(command)
-    return (role, safe_name(command), _remote_test_job(command),
-            role is not None and role.startswith("Codex CLI") and _codex_exec_command(command))
+    job = _remote_test_job(command)
+    return (role, safe_name(command), job,
+            role is not None and role.startswith("Codex CLI") and _codex_exec_command(command),
+            _gw_run_job(command, role))
 
 
 def parse_processes(output: str, self_pid: int, remembered: dict | None = None) -> Snapshot:
@@ -478,7 +508,7 @@ def snapshot_from(entries, self_pid: int, remembered: dict | None = None) -> Sna
         if stat.startswith("Z"):
             role += " (zombie)"
         result.append(Process(pid, ppid, pgid, elapsed, stat, role, facts[1], owner, facts[2],
-                              facts[3]))
+                              facts[3], facts[4]))
     watched = {g: {pid for pid, row in rows.items() if row[1] == g} for g in groups}
     watched.update(orphans)
     lingering = sorted(
@@ -6670,6 +6700,15 @@ def _dispatch_entry(record) -> DispatchRecord | None:
     return DispatchRecord(created, provider, found.group(1) if found else "")
 
 
+def _task_load(path: str, budget: int):
+    """(file key, whole parsed record, bytes read), or None when it was not read."""
+    opened = _remote_test_open(path, budget)
+    if opened is None or opened[1] is False:
+        return None
+    key, raw = opened
+    return key, _remote_test_json(raw) if raw else None, len(raw or b"")
+
+
 def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
     """Read bounded, unchanged-cached Task records through a field extractor."""
     paths, capped = _remote_test_paths(root)
@@ -6694,16 +6733,12 @@ def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
         if cached and cached[0] == key:
             record_entries = cached[1]
         else:
-            opened = _remote_test_open(path, budget)
-            if opened is None:
+            loaded = _task_load(path, budget)
+            if loaded is None:
                 short = True
                 continue
-            key, raw = opened
-            if raw is False:
-                short = True
-                continue
-            budget -= len(raw or b"")
-            record = _remote_test_json(raw) if raw else None
+            key, record, used = loaded
+            budget -= used
             entry = extract(record)
             record_entries = (tuple(entry) if type(entry) in (tuple, list)
                               else (entry,) if entry is not None else ())
@@ -6986,6 +7021,106 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
                          evidence="llmtool 紀錄")
     return OfficeRow("EC2 遠端測試", IDLE, f"最近一次：{latest[1]}", max(0.0, now - latest[0]),
                      80, kind="worker", evidence="llmtool 紀錄")
+
+
+# Company LLM runs (#763 Owner): while a gw-agent Developer run is under way it
+# gets a live row like the Claude and Codex rows, then a 完成 row for
+# OFFICE_DONE_WINDOW; otherwise only its status row stays. No Task file is
+# opened for these rows: it holds the prompt and model output. A run is live
+# only on its gateway process. Its Task id comes from the authorization.json
+# beside its audit file (ids, scope digest, egress basis; no prompt, no
+# credential), and a finished run from the time of the audit copy llmtool keeps
+# (developer_routes/gw_agent.py, collect). A company gw run is an API call
+# inside llmtool and leaves neither, so it has no row here.
+GW_ROSTER = {"gw-agent developer": "公司 gw agent"}
+GW_AUDIT_ROOT = None   # None: the temp directory, resolved in _gw_finished (it may not exist)
+GW_AUDIT_PREFIX = "llmtool-gw-agent-audit-"
+GW_AUDIT_ID = re.compile(r"[A-Za-z0-9_]{1,16}")   # the random end of a mkdtemp name
+GW_AUTH_MAX = 64 << 10
+
+
+def _gw_auth_task(audit: str) -> str:
+    """The Task id in the authorization.json llmtool wrote beside a running
+    gateway's audit file, else ""."""
+    if not audit:
+        return ""
+    opened = _remote_test_open(os.path.join(os.path.dirname(audit), "authorization.json"),
+                               GW_AUTH_MAX)
+    record = _remote_test_json(opened[1]) if opened and opened[1] else None
+    task = record.get("task_id") if type(record) is dict else None
+    return task if type(task) is str and DISPATCH_TASK_ID.fullmatch(task) else ""
+
+
+def _gw_finished(now: float) -> list[tuple[float, str]]:
+    """[(age, id)], newest first, of gw-agent runs that ended within
+    OFFICE_DONE_WINDOW. llmtool copies the audit file when a run ends, so the
+    copy's time is the end, and its folder's random name tells runs apart. Only
+    file times are read, and only the user's own plain files count, as in
+    cleanup_audit_copies (developer_routes/gw_agent.py). Without a temp
+    directory there are no finished runs to show."""
+    try:
+        root = tempfile.gettempdir() if GW_AUDIT_ROOT is None else GW_AUDIT_ROOT
+        with os.scandir(root) as entries:
+            names = [entry.name for entry in entries if entry.name.startswith(GW_AUDIT_PREFIX)]
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        run = name[len(GW_AUDIT_PREFIX):]
+        folder = os.path.join(root, name)
+        try:
+            folder_info, info = os.lstat(folder), os.lstat(os.path.join(folder, "audit.jsonl"))
+        except OSError:
+            continue
+        age = now - info.st_mtime
+        if (GW_AUDIT_ID.fullmatch(run) and stat.S_ISDIR(folder_info.st_mode)
+                and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                and folder_info.st_uid == info.st_uid == os.getuid()
+                and -REMOTE_TEST_SKEW <= age <= OFFICE_DONE_WINDOW):
+            found.append((max(0.0, age), run))
+    return sorted(found)
+
+
+def _gw_activity(audit: str, now: float, elapsed: float | None) -> float:
+    """Seconds since the gateway last wrote its audit file: only the file's
+    time is read, never its content. Without it, the process age."""
+    try:
+        if audit:
+            return max(0.0, now - os.lstat(audit).st_mtime)
+    except (OSError, ValueError):
+        pass
+    return elapsed or 0.0
+
+
+def _gw_row(state: str, words: str, age: float, d6: str, registered: dict, task: str,
+            sid: str, evidence: str) -> OfficeRow:
+    """A registered D6 is named by the PR binding (_bind_d6_pr_rows) like other
+    D6 rows; any other place is named here."""
+    parts = [f"task {task[:8]}"] if task else ["未綁定 Task"]
+    if d6 not in registered:
+        parts.append(f"D6 {d6}（未登記）" if d6 else "未綁定 D6")
+    return OfficeRow("gw-agent developer", state, " · ".join(parts + [words]), age, 10,
+                     role="developer", task=f"task {d6}" if d6 in registered else "",
+                     evidence=evidence, sid=sid)
+
+
+def gw_rows(processes: list[Process], now: float, canonical: str) -> list[OfficeRow]:
+    """Live and recently finished gw-agent Developer runs."""
+    registered = registered_tasks(canonical)
+    rows = []
+    for proc in sorted(processes, key=lambda p: p.pid):
+        if proc.role != GW_AGENT_ROLE or len(proc.gw) != 3:
+            continue
+        workdir = os.path.realpath(proc.gw[1]) if proc.gw[1] else ""
+        d6 = next((task_id for task_id, (place, _) in registered.items() if place == workdir), "")
+        if not d6 and AGENT_PATH.fullmatch(os.path.basename(workdir)):
+            d6 = os.path.basename(workdir)
+        age = _gw_activity(proc.gw[2], now, _elapsed_seconds(proc.elapsed))
+        rows.append(_gw_row(WORKING, "執行中", age, d6, registered, _gw_auth_task(proc.gw[2]),
+                            f"pid {proc.pid}", "程序"))
+    for age, run in _gw_finished(now):
+        rows.append(_gw_row(DONE, "已結束", age, "", registered, "", run, "llmtool 稽核檔"))
+    return rows
 
 
 # Codex reviewers are not a standing Worker: they run as sessions the PM starts
@@ -7786,10 +7921,17 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         mac.append(ci_queue_row(mac_waiting, runner_count))
     rows += agy + mac + github_runner_rows(ci_view, now, local_names, ci)
     rows.append(remote_test_row(processes, now, llmtool_tasks))
+    gw_runs = gw_rows(processes, now, canonical)
+    rows += gw_runs
+    gw_live: dict = {}
+    for row in gw_runs:
+        if row.state == WORKING:
+            gw_live.setdefault(GW_ROSTER[row.name], []).append(row)
     raw, source = load_dispatch(canonical, dispatch)
     switches, problem = worker_dispatch(raw)
     for name, key, order in WORKER_ROSTER:
-        live = opencode if name == "opencode developer" else agy if name == "agy" else []
+        live = (opencode if name == "opencode developer" else agy if name == "agy"
+                else gw_live.get(name, []))
         switch = switches.get(key)
         trouble = problem
         paused = not trouble and switch[0] == "PAUSED"
@@ -7815,7 +7957,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 notes.append(f"本機 llmtool 紀錄（不分 repo）最近一次：{gw[3]}"
                              f"（近 7 天 {gw[1]} 次，成功 {gw[2]} 次）")
         if live:
-            notes.append(f"有 {len(live)} 個 CLI 開著（非派工）")
+            notes.append(f"有 {len(live)} 個執行中" if name in gw_live
+                         else f"有 {len(live)} 個 CLI 開著（非派工）")
         if trouble:
             label, state, authority = DISPATCH_PROBLEMS[trouble], UNCHECKED, ""
         else:
