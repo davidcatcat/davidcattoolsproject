@@ -367,6 +367,8 @@ _D6_BINDING_JOURNAL_FIELDS = frozenset((
     'schema_version', 'epoch', 'entries', 'record_sha256',
 ))
 _D6_BINDING_ENTRY_FIELDS = frozenset(('epoch', 'd6_sha256', 'task_id'))
+# #1133 Claims come only from the binding lock, never from a caller's changes.
+_D6_CLAIM_ARGUMENTS = frozenset(('_d6_claims', 'd6_claims'))
 
 # #367 Developer assignment inbox: PM -> Developer ASSIGNED events and their
 # one-time claim receipts, in one locked sidecar inside the TaskStore root so
@@ -2516,12 +2518,11 @@ class TaskStore:
     def update(self, task_id, **changes):
         return self._update(task_id, expected=None, changes=changes)
 
-    def compare_and_update(self, task_id, *, expected, _d6_claims=None, **changes):
+    def compare_and_update(self, task_id, *, expected, **changes):
         """Update only if selected persisted fields still match under the task lock."""
         if type(expected) is not dict or not expected:
             _fail()
-        return self._update(task_id, expected=expected, changes=changes,
-                            d6_claims=_d6_claims)
+        return self._update(task_id, expected=expected, changes=changes)
 
     @staticmethod
     def _claude_d6_holds(record, executor_task_id):
@@ -2741,8 +2742,8 @@ class TaskStore:
                 update_expected = dict(expected)
                 update_expected['record_sha256'] = target['record_sha256']
                 try:
-                    return self.compare_and_update(
-                        task_id, expected=update_expected, _d6_claims=claims, **changes)
+                    return self._update(task_id, expected=update_expected,
+                                        changes=dict(changes), d6_claims=claims)
                 except TaskStoreConflict:
                     if self.get(task_id).get('abandonment') is not None:
                         _fail(abandoned_target_code)
@@ -3724,6 +3725,10 @@ class TaskStore:
                        trusted_completion_events=False, trusted_abandonment=False,
                        abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
                        trusted_codex_launch=False, trusted_opencode_launch=False):
+        # Refused here, not by the writable-field check: the dispatch gate
+        # before that check can write its audit to the record.
+        if _D6_CLAIM_ARGUMENTS & set(changes):
+            _fail()
         if ('developer' in changes and type(changes['developer']) is dict and
                 'execution' in changes['developer'] and
                 type(changes['developer'].get('execution')) is dict and
