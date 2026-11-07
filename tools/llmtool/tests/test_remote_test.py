@@ -630,6 +630,101 @@ class RemoteTestTests(unittest.TestCase):
         self.assertEqual(self.store.task['published_pr']['pr'], 425)
         self.assertEqual(self.store.task['published_pr']['head_sha'], SHA)
 
+    def run_with_merged_head(self, *, pr=425, pr_head=SHA, admitted=True, sha=SHA):
+        """Run with the D6 at SHA while the Task evidence still records an older head."""
+        registration = SimpleNamespace(result_sha=SHA, root='/repo/worktree')
+
+        def transport(argv, script, timeout):
+            self.calls.append((argv, script, timeout))
+            return SimpleNamespace(stdout=self.receipt(), stderr=b'', returncode=0)
+
+        with patch.object(remote_test, 'read_d6_registration', return_value=registration), \
+                patch.object(remote_test, '_github_get',
+                             return_value={'number': 425, 'head': {'sha': pr_head}}) as github, \
+                patch('llmtool.task_submission_cli.result_head_admitted',
+                      return_value=admitted) as check:
+            result = remote_test.run_remote_test(
+                self.store.task['task_id'], executor_task='d6-task', sha=sha,
+                ref='refs/pull/425/head', modules=('test_remote_test',), pr=pr,
+                store=self.store, config_path=self.config, transport=transport)
+        return result, check, github
+
+    def test_older_evidence_head_runs_when_fresh_pr_and_shared_check_agree(self):
+        self.store.task['completion']['evidence']['result']['result_head'] = OTHER
+
+        result, check, github = self.run_with_merged_head()
+
+        self.assertEqual(result['result'], 'PASS')
+        self.assertEqual(len(self.calls), 1)
+        github.assert_called_once_with('pulls/425')
+        check.assert_called_once()
+        self.assertEqual(check.call_args.kwargs['recorded_head'], OTHER)
+        self.assertEqual(check.call_args.kwargs['head'], SHA)
+        self.assertEqual(check.call_args.kwargs['root'], '/repo/worktree')
+        self.assertEqual(self.store.task['published_pr']['head_sha'], SHA)
+
+    def test_older_review_head_runs_when_fresh_pr_and_shared_check_agree(self):
+        self.store.task['completion']['evidence']['review_pr_ci'] = {
+            'pr_number': 425, 'head_sha': OTHER}
+
+        result, check, _ = self.run_with_merged_head()
+
+        self.assertEqual(result['result'], 'PASS')
+        self.assertEqual(check.call_args.kwargs['recorded_head'], OTHER)
+
+    def test_each_older_recorded_head_must_pass_the_shared_check(self):
+        older = 'c' * 40
+        evidence = self.store.task['completion']['evidence']
+        evidence['result']['result_head'] = older
+        evidence['review_pr_ci'] = {'pr_number': 425, 'head_sha': OTHER}
+
+        result, check, _ = self.run_with_merged_head()
+
+        self.assertEqual(result['result'], 'PASS')
+        self.assertEqual([call.kwargs['recorded_head'] for call in check.call_args_list],
+                         [older, OTHER])
+
+    def test_older_head_is_refused_when_the_shared_check_refuses(self):
+        self.store.task['completion']['evidence']['result']['result_head'] = OTHER
+
+        result, check, _ = self.run_with_merged_head(admitted=False)
+
+        self.assertEqual((result['result'], result['code']),
+                         ('ADMISSION_DENIED', 'RECEIPT_HEAD_MISMATCH'))
+        check.assert_called_once()
+        self.assertEqual(self.calls, [])
+        self.assertIsNone(self.store.task['published_pr'])
+
+    def test_older_head_is_refused_unless_fresh_pr_and_sha_equal_the_d6_head(self):
+        for overrides in ({'pr_head': OTHER}, {'pr_head': 'c' * 40}, {'sha': OTHER}):
+            with self.subTest(overrides=overrides):
+                self.store = Store()
+                self.store.task['completion']['evidence']['result']['result_head'] = OTHER
+                result, check, _ = self.run_with_merged_head(**overrides)
+                self.assertEqual((result['result'], result['code']),
+                                 ('ADMISSION_DENIED', 'RECEIPT_HEAD_MISMATCH'))
+                check.assert_not_called()
+        self.assertEqual(self.calls, [])
+
+    def test_older_head_is_refused_when_the_fresh_pr_head_is_unreadable(self):
+        self.store.task['completion']['evidence']['result']['result_head'] = OTHER
+        with patch.object(remote_test, '_github_get', side_effect=OSError('unavailable')):
+            result = self.run_it(pr=425)
+        self.assertEqual((result['result'], result['code']),
+                         ('ADMISSION_DENIED', 'RECEIPT_HEAD_MISMATCH'))
+        self.assertEqual(self.calls, [])
+
+    def test_older_head_without_a_pr_keeps_todays_refusal(self):
+        self.store.task['completion']['evidence']['result']['result_head'] = OTHER
+
+        result, check, github = self.run_with_merged_head(pr=None)
+
+        self.assertEqual((result['result'], result['code']),
+                         ('ADMISSION_DENIED', 'RECEIPT_HEAD_MISMATCH'))
+        check.assert_not_called()
+        github.assert_not_called()
+        self.assertEqual(self.calls, [])
+
     def test_invalid_pr_mismatch_and_missing_pr_do_not_record_link(self):
         invalid = self.run_it(pr=True)
         self.assertEqual(invalid['code'], 'RECEIPT_HEAD_UNRECORDED')
