@@ -328,6 +328,69 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(result['state'], 'UNKNOWN')
         self.assertEqual(len(self.sent), before)
 
+    def _preflight_with_recorded_head(self, recorded_head, admitted):
+        """Run _preflight with the D6 at HEAD and evidence recording recorded_head."""
+        task = {'task_id': TASK, 'run_id': 'c' * 32,
+                'task_binding': {'task_id': TASK, 'run_id': 'c' * 32,
+                                 'contract_digest': 'd' * 64},
+                'developer': {'provider_profile': 'claude'},
+                'completion': {'executor_task_id': 'executor-d6', 'evidence': {
+                    'common_dir': '/repo/.git',
+                    'result': {'result_head': recorded_head}}}}
+        executor = SimpleNamespace(root='/repo/worktree', common_dir='/repo/.git',
+                                   branch='task-branch', result_sha=HEAD)
+        snapshot = SimpleNamespace(root='/repo/worktree', common_dir='/repo/.git',
+                                   branch='task-branch', head=HEAD, clean=True)
+        completion = review_dispatch.task_completion
+        with patch.object(review_dispatch, '_select_reviewer',
+                          return_value='codex-reviewer'), \
+                patch.object(completion, 'validate_task_binding'), \
+                patch.object(completion, 'read_d6_registration', return_value=executor), \
+                patch.object(completion, 'collect_git_snapshot', return_value=snapshot), \
+                patch.object(completion, '_github_get', return_value={
+                    'number': 42, 'head': {'sha': HEAD},
+                    'base': {'sha': 'd' * 40}}) as github, \
+                patch.object(task_submission_cli, 'result_head_admitted',
+                             return_value=admitted) as check:
+            try:
+                return review_dispatch._preflight(
+                    self.store, TASK, 'executor-d6', 42, 2, task=task), check, github
+            except LLMToolError as exc:
+                return exc, check, github
+
+    def test_preflight_binds_a_newer_head_the_shared_check_admits(self):
+        result, check, _ = self._preflight_with_recorded_head('e' * 40, True)
+        self.assertEqual(result[2], HEAD)
+        check.assert_called_once()
+        self.assertEqual(check.call_args.kwargs['recorded_head'], 'e' * 40)
+        self.assertEqual(check.call_args.kwargs['head'], HEAD)
+        self.assertEqual(check.call_args.kwargs['executor_task'], 'executor-d6')
+        self.assertEqual(check.call_args.kwargs['root'], '/repo/worktree')
+
+    def test_preflight_refuses_a_head_the_shared_check_refuses_before_the_pr_read(self):
+        result, check, github = self._preflight_with_recorded_head('e' * 40, False)
+        self.assertEqual(result.review_dispatch_code,
+                         'REVIEW_PROMPT_EXECUTOR_HEAD_MISMATCH')
+        check.assert_called_once()
+        github.assert_not_called()
+
+    def test_refused_head_creates_no_reviewer_d6_or_claim(self):
+        self.store.data.update({
+            'task_id': TASK, 'run_id': 'c' * 32,
+            'task_binding': {'task_id': TASK, 'run_id': 'c' * 32,
+                             'contract_digest': 'd' * 64}})
+        refused = LLMToolError('head refused')
+        refused.review_dispatch_code = 'REVIEW_PROMPT_EXECUTOR_HEAD_MISMATCH'
+        with patch.object(review_dispatch, '_preflight', side_effect=refused):
+            with self.assertRaises(LLMToolError) as raised:
+                review_dispatch.dispatch_review(
+                    store=self.store, task_id=TASK, executor_task='executor-d6',
+                    pr_number=42, version=2,
+                    create_d6=lambda **_kw: self.fail('Reviewer D6 created'))
+        self.assertEqual(raised.exception.review_dispatch_code,
+                         'REVIEW_PROMPT_EXECUTOR_HEAD_MISMATCH')
+        self.assertNotIn('review_dispatch_claim', self.store.get(TASK))
+
     def test_head_moved_before_session_dispatch_is_refused(self):
         moved = (TASK, self.executor, 'e' * 40, 'd' * 40, 'claude-reviewer')
         with self.assertRaises(LLMToolError):

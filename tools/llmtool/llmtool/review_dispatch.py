@@ -23,7 +23,10 @@ _CODEX_REVIEW_MAX_OUTPUT = 1024 * 1024
 # Fixed names of the check that refused a finished Codex run's output. They are
 # the only failure text a claim stores: never review text, model output or a path.
 # A claim holds one only when the read-only run ended and nothing was posted for it.
-REVIEW_FAILURE_REASONS = frozenset((
+# The Reviewer D6 create names mark a run that never started, so nothing was posted.
+_D6_CREATE_FAILURE_REASONS = frozenset((
+    'REVIEWER_D6_CREATE_FAILED', 'REVIEWER_D6_CREATE_TIMEOUT'))
+REVIEW_FAILURE_REASONS = _D6_CREATE_FAILURE_REASONS | frozenset((
     'OUTPUT_UNREADABLE', 'OUTPUT_NOT_JSONL', 'THREAD_ID_INVALID', 'MESSAGE_NOT_TEXT',
     'NO_FINAL_MESSAGE', 'NO_THREAD_ID', 'VERDICT_NOT_JSON', 'VERDICT_WRONG_FIELDS',
     'VERDICT_BINDING_MISMATCH', 'VERDICT_STATUS_INVALID', 'VERDICT_TEXT_INVALID',
@@ -137,9 +140,14 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None,
             _refuse('REVIEW_PROMPT_EXECUTOR_DIRTY')
         recorded = evidence.get('result')
         if (type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None or
-                type(recorded) is dict and recorded.get('result_head') not in (None, head) or
                 snap.head != head or snap.root != executor.root or
                 snap.common_dir != executor.common_dir or snap.branch != executor.branch):
+            _refuse('REVIEW_PROMPT_EXECUTOR_HEAD_MISMATCH')
+        # task_submission_cli loads this module lazily and owns the repair chain.
+        from .task_submission_cli import result_head_admitted
+        if type(recorded) is dict and not result_head_admitted(
+                task, store, evidence, executor_task=executor_task, root=executor.root,
+                recorded_head=recorded.get('result_head'), head=head):
             _refuse('REVIEW_PROMPT_EXECUTOR_HEAD_MISMATCH')
     except LLMToolError as exc:
         if getattr(exc, 'review_dispatch_code', None):
@@ -173,11 +181,17 @@ def _create_d6(*, task_id, base_sha, repo_root, executor_task, github_login,
             '--lease-ref', lease, '--branch', 'llmtool/reviewer-' + task_id,
             '--base-sha', base_sha, '--github-login', github_login,
             '--repo-root', str(repo_root)]
-    result = subprocess.run(args, cwd=str(repo_root), stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            check=False, timeout=180)
+    # Lifecycle output is never kept or raised; only the fixed name is.
+    try:
+        result = subprocess.run(args, cwd=str(repo_root), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                check=False, timeout=180)
+    except subprocess.TimeoutExpired:
+        _refuse('REVIEWER_D6_CREATE_TIMEOUT', reason='REVIEWER_D6_CREATE_TIMEOUT')
+    except OSError:
+        _refuse('REVIEWER_D6_CREATE_FAILED', reason='REVIEWER_D6_CREATE_FAILED')
     if result.returncode:
-        raise RuntimeError('REVIEWER_D6_CREATE_FAILED')
+        _refuse('REVIEWER_D6_CREATE_FAILED', reason='REVIEWER_D6_CREATE_FAILED')
 
 
 def _codex_argv(executable, reviewer_root, *, model=_CODEX_REVIEW_MODEL,
