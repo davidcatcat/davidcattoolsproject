@@ -26,7 +26,8 @@ from .config import (CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS, api_key,
 from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
-from .task_store import TaskStore, TaskStoreConflict, new_id, _json_bytes
+from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
+                         _DIRECT_EXECUTION_FIELDS)
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
@@ -2782,6 +2783,133 @@ def _bind_codex_native_session(registration, native_session_id):
     return 'D6_BIND_NATIVE_SESSION_REFUSED'
 
 
+# The session format TaskStore accepts for a DONE gw-agent execution (#1072).
+_GW_AGENT_SESSION = re.compile(r'[0-9a-fA-F-]{16,64}')
+
+
+class _D6SessionRefused(Exception):
+    """The D6 did not take, or did not confirm, the session a run reported."""
+
+
+# The accepted execution status TaskStore expects per direct route (#1072).
+_DIRECT_BIND_STATUS = {'opencode': 'SUCCEEDED', 'gw-agent': 'DONE'}
+
+
+def _bounded_int(value, low, high):
+    """None, or an int (never a bool) within the store's bounds."""
+    return value is None or (type(value) is int and low <= value <= high)
+
+
+def _store_accepts_direct_execution(developer):
+    """Whether TaskStore would accept this accepted OpenCode or gw-agent execution.
+
+    Mirrors the task_store execution checks for a SUCCEEDED/DONE run of these
+    routes, so a run the store would refuse never leaves a session on the D6.
+    The session format is checked by the caller.
+    """
+    profile = developer.get('provider_profile')
+    execution = developer.get('execution')
+    status = _DIRECT_BIND_STATUS.get(profile)
+    if status is None or type(execution) is not dict:
+        return False
+    # Exact field set: no Codex binding, launch or diff fields on these routes.
+    if set(execution) != _DIRECT_EXECUTION_FIELDS:
+        return False
+    digest = execution['stdout_sha256']
+    manifest = execution['source_manifest_sha256']
+    source = (execution['source_bytes'], execution['source_file_count'], manifest)
+    if (execution['status'] != status or
+            type(execution['process_exit_code']) is not int or
+            execution['process_exit_code'] != 0 or
+            execution['cleanup_status'] != 'CONFIRMED' or
+            type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None or
+            not _bounded_int(execution['elapsed_ms'], 0, 86_400_000) or
+            not _bounded_int(execution['source_bytes'], 0, 2 * 1024 * 1024) or
+            not _bounded_int(execution['source_file_count'], 1, 32) or
+            (manifest is not None and
+             (type(manifest) is not str or
+              re.fullmatch(r'[0-9a-f]{64}', manifest) is None)) or
+            execution['usage_source'] not in ('CLI_REPORTED', 'UNKNOWN')):
+        return False
+    # A responded OpenCode record reports CLI usage exactly when it holds usage.
+    if profile == 'opencode' and execution['usage_source'] != (
+            'CLI_REPORTED' if developer.get('usage') is not None else 'UNKNOWN'):
+        return False
+    # Source observation: all set or all null; OpenCode must report all of it.
+    if any(value is None for value in source):
+        return profile != 'opencode' and all(value is None for value in source)
+    return True
+
+
+def _bind_direct_native_session(registration, developer, completion, session_format,
+                                *, repair=False):
+    """Bind an accepted OpenCode or gw-agent run's session to its D6 (#1072).
+
+    Returns True when both evidence blocks now name the session as VERIFIED,
+    False when there is nothing to bind. Raises _D6SessionRefused when the D6
+    does not end up holding exactly that session; evidence is then unchanged.
+    A bound session cannot be taken back off the D6, so only a run that passes
+    the store's execution checks is bound. Every OpenCode run is a new
+    session, so a repair run keeps the session the D6 already holds.
+    """
+    if developer.get('state') != 'DEVELOPER_RESPONDED':
+        return False
+    execution = developer.get('execution')
+    if not _store_accepts_direct_execution(developer):
+        return False
+    session = execution['native_session_id']
+    if (type(session) is not str or session == 'UNKNOWN' or
+            session_format.fullmatch(session) is None):
+        return False
+    callback = developer.get('direct_result_callback')
+    blocks = (completion.get('evidence') if type(completion) is dict else None,
+              callback.get('evidence') if type(callback) is dict else None)
+    if any(type(block) is not dict for block in blocks):
+        raise _D6SessionRefused()
+    held = registration.native_session_id
+    if held != session:
+        if held not in (None, '', 'UNKNOWN'):
+            if repair:
+                return False
+            raise _D6SessionRefused()
+        try:
+            if _bind_codex_native_session(registration, session) != 'BOUND':
+                raise _D6SessionRefused()
+            bound = task_completion.read_d6_registration(
+                registration.task_id, registration.common_dir)
+            expected = dataclasses.replace(registration, native_session_id=session)
+        except Exception:
+            raise _D6SessionRefused() from None
+        if bound != expected:
+            raise _D6SessionRefused()
+    for block in blocks:
+        block['executor_native_session_id'] = session
+        block['executor_native_session'] = 'VERIFIED'
+    return True
+
+
+def _reviewer_shares_direct_run_session(developer, initial, reviewer_task, common_dir):
+    """Whether the Reviewer D6 holds this OpenCode or gw-agent run's session.
+
+    The run's own session counts even when the executor D6 does not hold it,
+    as after a repair run on a D6 already bound to an earlier session.
+    """
+    execution = developer.get('execution')
+    sessions = {value for value in (
+        initial.get('executor_native_session_id'),
+        execution.get('native_session_id') if type(execution) is dict else None)
+        if type(value) is str and value and value != 'UNKNOWN'}
+    if not sessions or type(reviewer_task) is not str:
+        return False
+    try:
+        reviewer = task_completion.read_d6_registration(
+            reviewer_task, common_dir, allowed_states=task_completion._D6_EVIDENCE_STATES)
+    except LLMToolError:
+        # The primary collector already records an unreadable Reviewer D6.
+        return False
+    return reviewer.native_session_id in sessions
+
+
 def _interrupted_execution(exc):
     """Return only adapter-observed process evidence after an interrupt."""
     observed = getattr(exc, '_llmtool_direct_opencode_execution', None)
@@ -3221,10 +3349,24 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
                     developer=developer)
             finally:
                 raise
+    final_write = {'developer': developer}
     try:
+        try:
+            if _bind_direct_native_session(
+                    registration, developer, completion, opencode_direct_developer._SESSION,
+                    repair=getattr(args, 'repair_packet', None) is not None):
+                # One write saves the result and the evidence naming its D6 session.
+                final_write['completion'] = completion
+        except _D6SessionRefused:
+            # The D6 holds another session or did not confirm this one. Keep
+            # the observed run facts; never replay it.
+            developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
+                artifact=None, artifact_sha256=None, usage=None,
+                error_code='OPENCODE_D6_SESSION_REFUSED',
+                execution={**_direct_execution(result, status='UNKNOWN'),
+                           'usage_source': 'UNKNOWN'})
         saved = store.compare_and_update(
-            task['task_id'], expected={'developer': expected_developer},
-            developer=developer)
+            task['task_id'], expected={'developer': expected_developer}, **final_write)
     except (KeyboardInterrupt, CLIHostTermination) as exc:
         saved = _persist_opencode_interruption(
             store, task['task_id'], developer, exc, model=model,
@@ -4173,6 +4315,10 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None})
+        _bind_direct_native_session(registration, developer, completion, _GW_AGENT_SESSION)
+    except _D6SessionRefused:
+        return persist_failure('DEVELOPER_GW_AGENT_D6_SESSION_REFUSED',
+                               state='DEVELOPER_OUTCOME_UNKNOWN')
     except RouteError as exc:
         code = 'DEVELOPER_' + (exc.code if not owner_gate_denied else 'DISPATCH_DENIED')
         gateway_code = exc.facts.get('gateway_code') if type(exc.facts) is dict else None
@@ -4917,6 +5063,64 @@ def _collect_ec2_repair_task_ids(record, new_ids, legacy_ids):
         (new_ids if kind == 'NEW' else legacy_ids).add(repair_task_id)
 
 
+_HIGH_DEBUG_MODEL = 'gpt-6.1-sol'
+
+
+def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
+                                  executor_task):
+    """Raise ValueError unless ``entry`` is bound to the run behind it (#914).
+
+    The High Debug Task must be the original Task of the executor D6 being
+    repaired; the stored report must match its digest, carry every required
+    section and itself say RCA_CONFIRMED; the observed model must be the
+    High Debug model; and the Task must hold the HIGH_DEBUG completion event
+    run_high_debug records for this entry, live or compacted to a tombstone.
+    """
+    from .high_debug import REPORT_SECTIONS, _has_report_section, _outcome_status
+
+    completion = diagnosis_task.get('completion')
+    if (type(completion) is not dict or type(executor_task) is not str or
+            completion.get('executor_task_id') != executor_task):
+        raise ValueError
+    if entry.get('model_observed') != _HIGH_DEBUG_MODEL:
+        raise ValueError
+    report = entry.get('report')
+    report_sha256 = entry.get('report_sha256')
+    if (type(report) is not str or type(report_sha256) is not str or
+            hashlib.sha256(report.encode('utf-8')).hexdigest() != report_sha256):
+        raise ValueError
+    if (any(not _has_report_section(report, heading) for heading in REPORT_SECTIONS) or
+            _outcome_status(report) != 'RCA_CONFIRMED'):
+        raise ValueError
+    # The same derivation run_high_debug uses when it records the event.
+    examined_sha = entry['examined_sha']
+    event_id = hashlib.sha256(
+        ('HIGH_DEBUG\0' + high_debug_task + '\0' + examined_sha + '\0' +
+         report_sha256).encode()).hexdigest()[:32]
+    session_id = 'high-debug-' + entry['d6']
+    payload_sha256 = hashlib.sha256(report_sha256.encode()).hexdigest()
+    events = diagnosis_task.get('completion_events', [])
+    tombstones = diagnosis_task.get('completion_event_tombstones', [])
+    if type(events) is not list or type(tombstones) is not list:
+        raise ValueError
+    live = [event for event in events
+            if type(event) is dict and event.get('event_id') == event_id]
+    if live:
+        if not all(event.get('source') == 'HIGH_DEBUG' and
+                   event.get('session_id') == session_id and
+                   event.get('source_sha') == examined_sha and
+                   event.get('payload_sha256') == payload_sha256
+                   for event in live):
+            raise ValueError
+        return
+    compacted = [tombstone for tombstone in tombstones
+                 if type(tombstone) is dict and tombstone.get('event_id') == event_id]
+    if not compacted or not all(tombstone.get('source') == 'HIGH_DEBUG' and
+                                tombstone.get('session_id') == session_id
+                                for tombstone in compacted):
+        raise ValueError
+
+
 def _check_delegate_repair_cap(args, store, d6_binding=None):
     """Fail closed before dispatch when this D6 has exhausted its repair rounds.
 
@@ -5080,6 +5284,8 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
                 attempt_match is None or
                 d6 != _d6_name(executor_task, int(attempt_match.group(1)), examined_sha)):
             raise ValueError
+        _require_bound_high_debug_run(
+            diagnosis_task, high_debug_task, entry, executor_task)
     except Exception:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
     if d6_binding is None:
@@ -6072,6 +6278,13 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                         github['missing_gates'] +
                         ['REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT']))
                     github['evidence']['formal_review_state'] = 'UNVERIFIED'
+            elif (developer.get('provider_profile') in ('opencode', 'gw-agent') and
+                    _reviewer_shares_direct_run_session(
+                        developer, initial, args.reviewer_task,
+                        git_evidence['common_dir'])):
+                github['missing_gates'] = sorted(set(
+                    github['missing_gates'] + ['REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT']))
+                github['evidence']['formal_review_state'] = 'UNVERIFIED'
             evidence['review_pr_ci'] = github['evidence']
             missing.extend(github['missing_gates'])
     except LLMToolError as exc:
