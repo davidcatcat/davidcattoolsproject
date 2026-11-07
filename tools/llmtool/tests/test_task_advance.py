@@ -3390,6 +3390,12 @@ class CodexReviewFailureReasonTests(unittest.TestCase):
             state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
             backend='NO_NATIVE_SESSION_ID_EXPOSED',
             request_sha=hashlib.sha256(request.encode()).hexdigest())
+        task.update(pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                                      'base_url': None},
+                    response='PM returned a bounded task.', error_code=None,
+                    pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                                   'goal': 'Retry an unusable review.',
+                                   'acceptance': ['the failure reason is recorded']})
         with tempfile.TemporaryDirectory() as temp:
             store = TaskStore(Path(temp).resolve() / 'tasks')
             store.create(task)
