@@ -12,7 +12,7 @@ Current collaboration and execution authority is in [AGENTS.md](../../AGENTS.md)
 | P1 — Failure Usage Preservation | DONE and merged. | [PR #39](https://github.com/davidcatcat/davidcattoolsproject/pull/39) |
 | A11b — Execution, Approval & Recovery | IN PROGRESS; F2 general user-repository mutation is NOT AUTHORIZED, except `task advance` in this repository under Owner S4 (#1019). | [PR #32](https://github.com/davidcatcat/davidcattoolsproject/pull/32), [PR #43](https://github.com/davidcatcat/davidcattoolsproject/pull/43), [PR #49](https://github.com/davidcatcat/davidcattoolsproject/pull/49), [PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84), [issue #97](https://github.com/davidcatcat/davidcattoolsproject/issues/97) |
 | A11c — Integration & Real-world Acceptance | IN PROGRESS; M1b real-task adoption and full M2 are NOT_VERIFIED; T1 is HOLD_REPRIORITIZE. | [PR #128](https://github.com/davidcatcat/davidcattoolsproject/pull/128), [PR #129](https://github.com/davidcatcat/davidcattoolsproject/pull/129), [PR #131](https://github.com/davidcatcat/davidcattoolsproject/pull/131), [PR #133](https://github.com/davidcatcat/davidcattoolsproject/pull/133), [issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120) |
-| A12 — Remote Frontends / Telegram Agent | FUTURE OPTIONAL. v1 design (read-only status, notifications, approve/reject only via the A11b.3 `REMOTE_OWNER` issuer; remote-approvable classes empty by default) posted on [#120](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6552977888). | [issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120) |
+| A12 — Remote Frontends / Telegram Agent | FUTURE OPTIONAL. v1 design (read-only status, notifications, approve/reject only via the A11b.3 `REMOTE_OWNER` issuer; remote-approvable classes empty by default) posted on [#120](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6552977888). WP5 GitHubSync (#1144) has started with offline parts; live use waits for A11c, see the [WP5 section](#a12-wp5--githubsync-chatgpt-to-github-to-llmtool-core-1144). | [issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120) |
 | A13 — Distribution, Installation & Updates | **OWNER-DIRECTED DESIGN (2026-11-01); implementation by PM dispatch.** Private wheel-only distribution to other users first (D1, D9); open source later via a clean-history repo (D5). Each installation's user is its own Owner (D3). POSIX only (D4). Design specs posted; no implementation started. See [A13 — Private distribution](#a13--private-distribution-owner-decisions-2026-11-01-396-d1d14). | [issue #396](https://github.com/davidcatcat/davidcattoolsproject/issues/396) (decisions D1–D14), trust root [#369](https://github.com/davidcatcat/davidcattoolsproject/issues/369) |
 
 ## Next steps
@@ -39,6 +39,37 @@ The Owner authorizes **incremental improvement on the already delivered TUI**, t
 | **P2 — user preferences** | Optional focus/verbose, status-line fields, keybindings/terminal modes, minimal appearance refinements. | Retain shipped theme and link support; avoid unnecessary dependencies, continuous polling, heavy repaint or background daemon. |
 
 **Order of work:** finish ongoing W57 gates → #683 actual-code gap matrix (merged / WIP / not Mac-verified / defect / Core-dependent) → PM dispatches one bounded W58 UI Agent task → Developer self-test → independent cross-family Reviewer → exact-head CI + Mac PTY/Owner acceptance → next smallest real user-facing gap. **An issue or roadmap entry is not evidence that the Worker has started.** A11c real PM → Developer → Reviewer work stays the product-critical track; UI beautification cannot gate that cutover. The earlier 26/12/8 functional candidate inventory is *design input*, not a promise to add 46 new functions or 46 work packages.
+
+## A12 WP5 — GitHubSync: ChatGPT to GitHub to llmtool Core (#1144)
+
+The Owner talks in ChatGPT. ChatGPT may record a selected summary or request on GitHub, using a tool it really has. llmtool Core reads eligible records by incremental polling while it runs. It catches up on the next launch. Closed [PR #261](https://github.com/davidcatcat/davidcattoolsproject/pull/261) is reference only, not a shipped feature.
+
+Binding limits:
+
+- No paid OpenAI API.
+- No new standing agent, runner, supervisor, launchd item, webhook, tunnel or listening service.
+- No second Task, PM or authorization system.
+- DISCUSS, RECORD, EXECUTE request and STOP request are distinct.
+- All D6, Reviewer, CI, safety and Owner limits stay.
+
+Phase A rule (in use):
+
+- **Phase A (Owner 2026-11-07):** an EXECUTE request from GitHub goes to the PM. If an existing Owner authorization covers it (Issue, scope, Task, operation and limits match), the PM dispatches through the normal flow without asking again. If it is not authorized, it is WAITING_OWNER. If it is outside scope, it is refused. A duplicate, expired or revoked request is never redispatched. A GitHub login or comment text alone never creates authority.
+
+| Part | Needs | Status |
+| --- | --- | --- |
+| Message contract `github_sync_contract.py` | Nothing unfinished | [PR #1155](https://github.com/davidcatcat/davidcattoolsproject/pull/1155) |
+| Incremental poll, dedupe, recovery and persistence `github_sync_poll.py` | Wiring into a running Core | [PR #1157](https://github.com/davidcatcat/davidcattoolsproject/pull/1157); not wired |
+| Fake integration tests | Both modules | To do |
+| Wiring into a running Core | A11c Core background lifecycle ([#1019](https://github.com/davidcatcat/davidcattoolsproject/issues/1019) section 10) | Waiting |
+| Sanitized result write-back | [#1019](https://github.com/davidcatcat/davidcattoolsproject/issues/1019) step 3 and [#926](https://github.com/davidcatcat/davidcattoolsproject/issues/926) | Waiting |
+| Phase B | Owner approval and formal security review | Off |
+
+### Phase B — trusted remote EXECUTE (design only, off)
+
+Goal: an explicit Owner command in ChatGPT runs without being repeated in the PM chat. The command must be provably from the trusted Owner. It must be bound to Issue, scope, operation, budget, version and expiry. It must be unforgeable and not replayable. It must never extend to other Tasks or repositories. The next step is research, a spec and negative-test design. Phase B stays off until Owner approval and formal security review.
+
+Gap analysis: [#1144 comment](https://github.com/davidcatcat/davidcattoolsproject/issues/1144#issuecomment-6705012003); phase plan: [#1144 comment](https://github.com/davidcatcat/davidcattoolsproject/issues/1144#issuecomment-6705241594).
 
 ## A13 — Private distribution (Owner decisions 2026-11-01, #396 D1–D14)
 
