@@ -1104,10 +1104,7 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
     while current != source_sha:
         if current not in listed_commits:
             _stop('SOURCE_NOT_ANCESTOR')
-        parents = commit_parents[current]
-        if not parents:
-            _stop('SOURCE_NOT_ANCESTOR')
-        current = parents[0]
+        current = commit_parents[current][0]
 
     inherited = set()
     merge_parents = {}
@@ -1178,8 +1175,16 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
     return tuple(sorted(developer_paths))
 
 
-def _remerge_diff_paths_raw(root, commit):
-    """Read resolution paths while containing synthetic merge object writes."""
+def _private_merge_read(root, args, **git_options):
+    """Run one merge read in a private temporary bare repository.
+
+    A merge in the Developer repository would honour its merge.* config,
+    custom merge drivers, info/attributes and .gitattributes: a driver could
+    run a command here and hide a conflict path. The private repository has
+    only core.bare=true config, an unborn HEAD (so no attribute tree), no
+    index and no attributes. Repository objects are reachable only as
+    read-only alternates, and every object the merge writes stays private.
+    """
     try:
         objects = _git(root, ('rev-parse', '--path-format=absolute', '--git-path', 'objects'),
                        limit=4096).decode('utf-8', 'strict').strip()
@@ -1188,48 +1193,36 @@ def _remerge_diff_paths_raw(root, commit):
     if not objects or not os.path.isabs(objects):
         _stop('GIT_INSPECTION_FAILED')
     try:
-        with tempfile.TemporaryDirectory(prefix='llmtool-remerge-objects-') as temporary:
-            object_dir = Path(temporary) / 'objects'
-            object_dir.mkdir(mode=0o700)
-            return _git(root, ('show', '--remerge-diff', '--format=', '--no-renames',
-                               '--name-only', '-z', commit), limit=1024 * 1024,
-                        env_overrides={
-                            'GIT_OBJECT_DIRECTORY': str(object_dir),
-                            'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
-                        })
+        with tempfile.TemporaryDirectory(prefix='llmtool-merge-read-') as temporary:
+            private = Path(temporary).resolve()
+            (private / 'objects').mkdir(mode=0o700)
+            (private / 'refs').mkdir(mode=0o700)
+            (private / 'HEAD').write_text('ref: refs/heads/llmtool-merge-read\n',
+                                          encoding='ascii')
+            (private / 'config').write_text(
+                '[core]\n\trepositoryformatversion = 0\n\tbare = true\n',
+                encoding='ascii')
+            return _git(str(private), args, env_overrides={
+                'GIT_DIR': str(private),
+                'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
+            }, **git_options)
     except LLMToolError:
         raise
     except Exception:
         _stop('GIT_INSPECTION_FAILED')
+
+
+def _remerge_diff_paths_raw(root, commit):
+    """Read resolution paths without repository merge config or attributes."""
+    return _private_merge_read(root, ('show', '--remerge-diff', '--format=', '--no-renames',
+                                      '--name-only', '-z', commit), limit=1024 * 1024)
 
 
 def _merge_tree_conflict_paths_raw(root, first_parent, second_parent):
-    """List conflict paths with all merge-tree object writes kept temporary."""
-    try:
-        objects = _git(root, ('rev-parse', '--path-format=absolute', '--git-path', 'objects'),
-                       limit=4096).decode('utf-8', 'strict').strip()
-    except UnicodeError:
-        _stop('GIT_INSPECTION_FAILED')
-    if not objects or not os.path.isabs(objects):
-        _stop('GIT_INSPECTION_FAILED')
-    try:
-        with tempfile.TemporaryDirectory(prefix='llmtool-merge-tree-objects-') as temporary:
-            object_dir = Path(temporary) / 'objects'
-            object_dir.mkdir(mode=0o700)
-            output, status = _git(root, ('merge-tree', '--write-tree', '--name-only',
-                                  '--no-messages', '-z', first_parent, second_parent),
-                limit=1024 * 1024, allow_exit_1=True, return_exit_code=True,
-                env_overrides={
-                    'GIT_OBJECT_DIRECTORY': str(object_dir),
-                    'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
-                })
-            if status not in (0, 1):
-                _stop('GIT_INSPECTION_FAILED')
-            return output
-    except LLMToolError:
-        raise
-    except Exception:
-        _stop('GIT_INSPECTION_FAILED')
+    """List conflict paths without repository merge config or attributes."""
+    return _private_merge_read(root, ('merge-tree', '--write-tree', '--name-only',
+                                      '--no-messages', '-z', first_parent, second_parent),
+                               limit=1024 * 1024, allow_exit_1=True)
 
 
 def _is_ancestor(root, ancestor, descendant):
