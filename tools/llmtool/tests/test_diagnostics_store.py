@@ -944,13 +944,24 @@ from llmtool.diagnostics_store import DiagnosticsStore
 from llmtool.diagnostics_settings import DiagnosticsSettings
 from llmtool.diagnostics_summary import RunSummary
 resource.setrlimit(resource.RLIMIT_NOFILE, (64, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
+def fd_link(fd):
+    try: return os.readlink('/proc/self/fd/%d' % fd)
+    except OSError: return 'unavailable'
 def descriptors():
     result = set()
     for fd in range(64):
-        try: fcntl.fcntl(fd, fcntl.F_GETFD); result.add(fd)
-        except OSError: pass
+        try: fcntl.fcntl(fd, fcntl.F_GETFD)
+        except OSError: continue
+        # #1093: libffi can open its own /memfd:libffi descriptor; the store does not own it.
+        if not fd_link(fd).startswith('/memfd:libffi'): result.add(fd)
     return result
 baseline = descriptors()
+baseline_links = {fd: fd_link(fd) for fd in baseline}
+def fd_change(number):
+    current = descriptors()
+    added = ['%d=%s' % (fd, fd_link(fd)) for fd in sorted(current - baseline)]
+    removed = ['%d=%s' % (fd, baseline_links[fd]) for fd in sorted(baseline - current)]
+    return 'loop %d: added fds %s; removed fds %s' % (number, added, removed)
 s = DiagnosticsStore(DiagnosticsSettings(persist_metadata=True, max_runs=80), home=sys.argv[1])
 def complete(w):
     assert w is not None, s.warning
@@ -962,12 +973,12 @@ def complete(w):
     assert w.finish(summary), w.warning
 for number in range(80):
     complete(s.start('%032x' % number))
-    assert descriptors() == baseline
+    assert descriptors() == baseline, fd_change(number)
 assert len(os.listdir(os.path.join(sys.argv[1], 'runs'))) == 80
 # Existing implementation holds 160 candidate descriptors, above the 64 soft limit.
 for number in range(80, 90):
     complete(s.start('%032x' % number))
-    assert descriptors() == baseline
+    assert descriptors() == baseline, fd_change(number)
 assert len(os.listdir(os.path.join(sys.argv[1], 'runs'))) == 80
 assert not os.path.exists(os.path.join(sys.argv[1], 'runs', '%032x' % 0))
 print('NOFILE_64_RUNS_80_NO_LEAK_PASS')
