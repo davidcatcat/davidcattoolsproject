@@ -135,6 +135,12 @@ class MergeTrainStoreTest(unittest.TestCase):
                            merge_attempt=_attempt('CLAIMED'))
         self.assertFalse(self.path().exists())
 
+    def test_create_valid_non_built_state_refused(self):
+        # A fully valid MERGED shape passes validation, then fails the BUILT rule.
+        self.assertRefused('TRAIN_STATE_INVALID', self.create, state='MERGED',
+                           train_pr=200, merge_sha=MERGE, merge_attempt=_attempt('MERGED'))
+        self.assertFalse(self.path().exists())
+
     def test_each_bad_field_refused(self):
         member = _member(1)
         bad = []

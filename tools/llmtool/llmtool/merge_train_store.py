@@ -384,9 +384,10 @@ def create(record, root=None):
     body = {key: item for key, item in record.items() if key != 'record_sha256'}
     if set(body) != FIELDS - {'record_sha256'}:
         _refuse(TRAIN_RECORD_INVALID, train_id)
-    if body['state'] != 'BUILT':
-        _refuse(TRAIN_STATE_INVALID, train_id)
+    # Shape first: an unknown state is INVALID; a valid non-BUILT state is a bad move.
     sealed = _sealed(body, train_id)
+    if sealed['state'] != 'BUILT':
+        _refuse(TRAIN_STATE_INVALID, train_id)
     name = _record_name(sealed['train_id'])
     directory = _open_directory(root)
     temporary = None
