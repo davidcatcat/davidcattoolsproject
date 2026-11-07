@@ -180,11 +180,14 @@ def _importing_test_ids(target: str, repo_root: Path) -> set[str] | None:
     return selected
 
 
-def _outside_markdown(path: str) -> bool:
-    """Accept a plain repository-relative ``*.md`` path outside tools/llmtool/."""
+def _other_tool_markdown(path: str) -> bool:
+    """Accept a plain ``tools/<name>/**/*.md`` path for a tool other than llmtool.
+
+    The repository root README.md and Markdown elsewhere stay unsupported.
+    """
     parts = path.split("/")
-    return (path.endswith(".md") and not path.startswith("/")
-            and not path.startswith("tools/llmtool/")
+    return (len(parts) >= 3 and parts[0] == "tools" and parts[1] != "llmtool"
+            and parts[-1].endswith(".md") and len(parts[-1]) > len(".md")
             and all(part not in {"", ".", ".."} for part in parts))
 
 
@@ -263,10 +266,11 @@ def select_test_ids(
             if (path_class == "docs" and (path in {"AGENTS.md", "CLAUDE.md"}
                                            or path.startswith(("skills/", "docs/")))):
                 continue
-            if _outside_markdown(path):
-                # #714: Markdown outside tools/llmtool/ (for example another
-                # tool's README) is not a Mac input and adds no modules.
-                # Workflow and CI Markdown were already rejected above.
+            if _other_tool_markdown(path):
+                # #714: Markdown inside another tools/<name>/ directory (for
+                # example tools/ec2-runner/README.md) is not a Mac input and
+                # adds no modules. Workflow and CI Markdown were already
+                # rejected above; the root README.md stays unsupported.
                 continue
             reject(path, "unsupported_path")
             continue

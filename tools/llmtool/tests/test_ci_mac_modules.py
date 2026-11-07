@@ -614,7 +614,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
             "tools/nlf/README.md",
             "tools/ai-loop/README.md",
             "tools/api-agent-gateway/README.md",
-            "README.md",
+            "tools/ec2-runner/docs/notes.md",
         ):
             with self.subTest(path=path):
                 report = ci_mac_modules.selection_report([path], REPO_ROOT)
@@ -684,7 +684,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
         for rejected, reason in rejected_cases:
             with self.subTest(rejected=rejected):
                 report = ci_mac_modules.selection_report(
-                    ["tools/ec2-runner/README.md", "README.md", rejected], REPO_ROOT
+                    ["tools/ec2-runner/README.md", "tools/nlf/README.md", rejected], REPO_ROOT
                 )
                 self.assertEqual(report["level"], "L3")
                 self.assertEqual(report["test_ids"], ["FULL"])
@@ -692,6 +692,23 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 self.assertEqual(report["fallback_paths"], [rejected])
                 self.assertEqual(report["fallback_details"],
                                  [{"path": rejected, "reason": reason}])
+
+    def test_root_and_non_tool_markdown_keep_unsupported_path_fallback(self):
+        for path in ("README.md", "NOTES.md", "tools/README.md",
+                     "examples/guide.md", "tools/ec2-runner/.md"):
+            with self.subTest(path=path):
+                report = ci_mac_modules.selection_report([path], REPO_ROOT)
+                self.assertEqual(report["level"], "L3")
+                self.assertEqual(report["test_ids"], ["FULL"])
+                self.assertEqual(report["fallback_reasons"], ["unsupported_path"])
+                self.assertEqual(report["fallback_paths"], [path])
+
+        report = ci_mac_modules.selection_report(
+            ["tools/ec2-runner/README.md", "README.md"], REPO_ROOT
+        )
+        self.assertEqual(report["level"], "L3")
+        self.assertEqual(report["fallback_details"],
+                         [{"path": "README.md", "reason": "unsupported_path"}])
 
     def test_workflow_markdown_keeps_workflow_fallback_and_llmtool_paths_unchanged(self):
         for path in (".github/workflows/README.md", ".github/workflows/notes/guide.md"):
