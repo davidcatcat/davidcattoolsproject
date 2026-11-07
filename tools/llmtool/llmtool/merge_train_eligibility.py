@@ -58,12 +58,22 @@ class _Snapshot:
 
 
 def _pr_snapshot(pr, github_get):
-    """Return (pr dict, head sha) for a well-formed PR read, else None."""
+    """Return (pr dict, head sha) for a well-formed PR read, else None.
+
+    Well-formed means: ``number`` is the int ``pr``, ``state`` is a string,
+    ``merged`` is a bool and ``head.sha`` is a 40-hex SHA. A missing or
+    malformed field is unavailable, decided before the open check.
+    """
     try:
         value = github_get(f'pulls/{pr}')
     except Exception:
         return None
-    if type(value) is not dict or value.get('number') != pr:
+    if type(value) is not dict:
+        return None
+    number = value.get('number')
+    if type(number) is not int or number != pr:
+        return None
+    if type(value.get('state')) is not str or type(value.get('merged')) is not bool:
         return None
     head = value.get('head')
     sha = head.get('sha') if type(head) is dict else None
@@ -133,7 +143,10 @@ def _rule_file_code(files):
         filename = item.get('filename') if type(item) is dict else None
         if type(filename) is not str or not filename:
             return TRAIN_MEMBER_PR_UNAVAILABLE
-    # An unreadable sensitive list comes back as a match: fail closed.
+    # An unreadable sensitive-paths list comes back as the SENSITIVE_LIST_UNREADABLE
+    # match and refuses TRAIN_MEMBER_RULE_FILE on purpose: pm-continuation.md
+    # "Rule-file PRs" says to treat the PR as a rule-file PR when the list cannot
+    # be read. Only an unreadable PR file list is TRAIN_MEMBER_PR_UNAVAILABLE.
     if sensitive_paths.sensitive_matches(files):
         return TRAIN_MEMBER_RULE_FILE
     return None

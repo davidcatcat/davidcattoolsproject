@@ -280,6 +280,56 @@ class RecordAndPrRefusalTests(_Base):
                 self.assertRefused(self.check(routes=_routes(**{PULL: pull})),
                                    'TRAIN_MEMBER_PR_UNAVAILABLE')
 
+    def test_pr_missing_merged_is_unavailable(self):
+        pull = _pull()
+        del pull['merged']
+        self.assertRefused(self.check(routes=_routes(**{PULL: pull})),
+                           'TRAIN_MEMBER_PR_UNAVAILABLE')
+
+    def test_pr_non_bool_merged_is_unavailable(self):
+        for merged in (None, 'false', 0, 1):
+            with self.subTest(merged=merged):
+                self.assertRefused(self.check(routes=_routes(**{PULL: _pull(merged=merged)})),
+                                   'TRAIN_MEMBER_PR_UNAVAILABLE')
+
+    def test_pr_missing_state_is_unavailable(self):
+        pull = _pull()
+        del pull['state']
+        self.assertRefused(self.check(routes=_routes(**{PULL: pull})),
+                           'TRAIN_MEMBER_PR_UNAVAILABLE')
+
+    def test_pr_non_string_state_is_unavailable(self):
+        for state in (None, 1, True, ['open']):
+            with self.subTest(state=state):
+                self.assertRefused(self.check(routes=_routes(**{PULL: _pull(state=state)})),
+                                   'TRAIN_MEMBER_PR_UNAVAILABLE')
+
+    def test_pr_wrong_or_missing_number_is_unavailable(self):
+        missing = _pull()
+        del missing['number']
+        for pull in (_pull(number=PR + 1), _pull(number=str(PR)), _pull(number=None),
+                     _pull(number=True), missing):
+            with self.subTest(pull=pull):
+                self.assertRefused(self.check(routes=_routes(**{PULL: pull})),
+                                   'TRAIN_MEMBER_PR_UNAVAILABLE')
+
+    def test_pr_malformed_decides_before_open_check(self):
+        # A closed PR whose snapshot is malformed is unavailable, not "not open".
+        closed_no_merged = _pull(state='closed')
+        del closed_no_merged['merged']
+        for pull in (closed_no_merged, _pull(merged='true'), _pull(state=None, merged=True)):
+            with self.subTest(pull=pull):
+                self.assertRefused(self.check(routes=_routes(**{PULL: pull})),
+                                   'TRAIN_MEMBER_PR_UNAVAILABLE')
+                self.assertEqual(self.github.calls, [PULL])
+
+    def test_well_formed_closed_or_merged_pr_is_not_open(self):
+        for pull in (_pull(state='closed'), _pull(state='closed', merged=True),
+                     _pull(merged=True)):
+            with self.subTest(pull=pull):
+                self.assertRefused(self.check(routes=_routes(**{PULL: pull})),
+                                   'TRAIN_MEMBER_PR_NOT_OPEN')
+
     def test_pr_argument_invalid(self):
         for pr in (0, -1, True, '41', None):
             with self.subTest(pr=pr):
@@ -397,8 +447,19 @@ class RuleFileTests(_Base):
         self.assertRefused(self.check(routes=routes), 'TRAIN_MEMBER_RULE_FILE')
 
     def test_unreadable_sensitive_list_refuses(self):
+        # pm-continuation.md "Rule-file PRs": when the sensitive-paths list cannot
+        # be read, the PR is treated as a rule-file PR. The unreadable-list
+        # sentinel therefore refuses TRAIN_MEMBER_RULE_FILE, not PR_UNAVAILABLE.
         with mock.patch.object(sensitive_paths, '_read_list', return_value=None):
+            self.assertEqual(sensitive_paths.sensitive_matches(
+                [{'filename': 'docs/a.md'}]), (sensitive_paths.SENSITIVE_LIST_UNREADABLE,))
+            self.assertEqual(eligibility._rule_file_code([{'filename': 'docs/a.md'}]),
+                             'TRAIN_MEMBER_RULE_FILE')
             self.assertRefused(self.check(), 'TRAIN_MEMBER_RULE_FILE')
+
+    def test_unreadable_pr_file_list_read_is_pr_unavailable(self):
+        routes = _routes(**{FILES: OSError('down')})
+        self.assertRefused(self.check(routes=routes), 'TRAIN_MEMBER_PR_UNAVAILABLE')
 
     def test_unreadable_file_list_is_pr_unavailable(self):
         for files in (None, {}, [None], [{'filename': 3}], [{}] * 100):
