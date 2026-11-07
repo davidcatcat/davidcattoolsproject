@@ -173,6 +173,9 @@ class Process:
     owner: str = ""   # nearest agent this process belongs to / was started by
     job: tuple = ()   # a remote-test run: (source, task, sha, modules), validated tokens only
     codex_exec: bool = False   # a Codex CLI started as `codex exec` (a one-shot run)
+    # A company LLM run (#763): ("gw", work folder, audit file) of a gw-agent
+    # gateway, or ("llmtool", Task id or "") of another llmtool CLI; checked tokens only.
+    gw: tuple = ()
 
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._+-]")
@@ -274,6 +277,11 @@ def _codex_exec_command(command: str) -> bool:
     return "exec" in command.split()[1:]
 
 
+# The gw-agent route runs `python -B -P -m api_agent_gateway run ...`
+# (tools/llmtool/llmtool/developer_routes/gw_agent.py, build_argv).
+GW_AGENT_ROLE = "gw agent run"
+
+
 def classify(command: str) -> str | None:
     """Never return the command text; it might contain secrets."""
     if command.startswith("(") and command.endswith(")"):
@@ -292,6 +300,8 @@ def classify(command: str) -> str | None:
         target = _python_target(args)
         if target == ("module", "llmtool"):
             return "llmtool CLI"
+        if target == ("module", "api_agent_gateway") and "run" in args:
+            return GW_AGENT_ROLE
         if target is not None and target[0] == "script":
             name = target[1]
             if name in ("invoke_once.py", "live_once.py"):
@@ -364,6 +374,27 @@ def _remote_test_job(command: str) -> tuple:
     return ("cli", task, sha, tuple(modules))
 
 
+GW_PATH = re.compile(r"/[A-Za-z0-9_.+/-]{0,1023}")
+LLMTOOL_TASK_ARG = re.compile(r"[0-9a-f]{32}")
+
+
+def _gw_run_job(command: str, role: str | None, remote: tuple) -> tuple:
+    """What a company LLM run's command line says (see Process.gw). A path is
+    kept only when it is a plain absolute path; nothing else of argv is."""
+    parts = command.split()
+    if role == GW_AGENT_ROLE:
+        found = dict.fromkeys(("--workdir", "--audit-file"), "")
+        for flag, value in zip(parts, parts[1:]):
+            if (flag in found and not found[flag] and GW_PATH.fullmatch(value)
+                    and ".." not in value.split("/")):
+                found[flag] = value
+        audit = found["--audit-file"]
+        return ("gw", found["--workdir"], audit if audit.endswith("/audit.jsonl") else "")
+    if role == "llmtool CLI" and not remote:
+        return ("llmtool", next((part for part in parts if LLMTOOL_TASK_ARG.fullmatch(part)), ""))
+    return ()
+
+
 # What snapshot_from derives from a command line (role, executable name,
 # remote-test job, `codex exec` bit), computed once per distinct command and
 # reused on every later poll (~500 rows a second). The key is a keyed BLAKE2b
@@ -384,11 +415,13 @@ def _argv_digest(command: str) -> bytes:
 
 
 def _row_facts(command: str) -> tuple:
-    """(role, safe name, remote-test job, codex exec) of a command line; only
-    these sanitized results are ever stored."""
+    """(role, safe name, remote-test job, codex exec, gw run) of a command
+    line; only these sanitized results are ever stored."""
     role = classify(command)
-    return (role, safe_name(command), _remote_test_job(command),
-            role is not None and role.startswith("Codex CLI") and _codex_exec_command(command))
+    job = _remote_test_job(command)
+    return (role, safe_name(command), job,
+            role is not None and role.startswith("Codex CLI") and _codex_exec_command(command),
+            _gw_run_job(command, role, job))
 
 
 def parse_processes(output: str, self_pid: int, remembered: dict | None = None) -> Snapshot:
@@ -478,7 +511,7 @@ def snapshot_from(entries, self_pid: int, remembered: dict | None = None) -> Sna
         if stat.startswith("Z"):
             role += " (zombie)"
         result.append(Process(pid, ppid, pgid, elapsed, stat, role, facts[1], owner, facts[2],
-                              facts[3]))
+                              facts[3], facts[4]))
     watched = {g: {pid for pid, row in rows.items() if row[1] == g} for g in groups}
     watched.update(orphans)
     lingering = sorted(
@@ -6608,6 +6641,170 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
                      80, kind="worker", evidence="llmtool 紀錄")
 
 
+# Company LLM runs (#763 Owner): while a company gw or gw-agent Developer run
+# is under way it gets a live row like the Claude and Codex rows, then a 完成
+# row for OFFICE_DONE_WINDOW; otherwise only its status row stays. A run is
+# live only on process evidence: the gw-agent gateway process itself, or for
+# company gw (an API call inside llmtool) the llmtool CLI that was running when
+# the running Task record was written. A Task record alone never is.
+GW_PROVIDERS = {"openai-compatible": "company gw", "gw-agent-cli": "gw-agent"}
+GW_ROSTER = {"company gw developer": "公司 gw", "gw-agent developer": "公司 gw agent"}
+GW_RUNNING = frozenset({"DEVELOPER_DISPATCHING", "DEVELOPER_RUNNING"})
+GW_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
+GW_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{3,127}")
+GW_NOT_MODELS = frozenset({"UNKNOWN", "gw"})   # routing names, not the model that served
+GW_MAX_TOKENS = 50_000_000
+GW_BUDGET = 4 << 20
+_gw_run_parsed: dict = {}  # root -> {path: ((st_ino, st_mtime_ns, st_size), entries)}
+
+
+@dataclass(frozen=True)
+class GwRun:
+    route: str      # "company gw" | "gw-agent"
+    task: str
+    d6: str
+    state: str
+    code: str
+    created: float
+    ended: float    # the record's last update, else its dispatch time
+    run_id: str
+    model: str      # the served model when recorded, else ""
+    tokens: tuple   # (input, output) when recorded, else ()
+
+
+def _gw_run_entry(record) -> GwRun | None:
+    """Ids, states, times, the served model and token counts of one company gw
+    or gw-agent Developer run. The request, response, contract, summary and
+    audit text are never kept."""
+    if type(record) is not dict:
+        return None
+    task, developer = record.get("task_id"), record.get("developer")
+    if (type(task) is not str or not DISPATCH_TASK_ID.fullmatch(task)
+            or type(developer) is not dict):
+        return None
+    provider = developer.get("provider_type")
+    route = GW_PROVIDERS.get(provider) if type(provider) is str else None
+    if route is None and provider is None and developer.get("provider_profile") == "company-gw":
+        route = "company gw"
+    state = developer.get("state")
+    created = _remote_test_time(developer.get("created_at"))
+    if (route is None or type(state) is not str
+            or state not in DISPATCH_ACCEPTED | GW_RUNNING or created <= 0):
+        return None
+    code = developer.get("error_code")
+    d6 = developer.get("executor_task_id")
+    execution = developer.get("execution")
+    execution = execution if type(execution) is dict else {}
+    run_id = next((value for value in (execution.get("native_session_id"), execution.get("run_id"))
+                   if type(value) is str and GW_RUN_ID.fullmatch(value)), "")
+    model = next((value for source in (execution, developer)
+                  for value in (source.get("served_model"), source.get("model"))
+                  if type(value) is str and GW_MODEL.fullmatch(value)
+                  and value not in GW_NOT_MODELS), "")
+    usage = execution.get("usage") or developer.get("usage")
+    tokens = ((usage.get("prompt_tokens"), usage.get("completion_tokens"))
+              if type(usage) is dict else ())
+    if not all(type(n) is int and 0 <= n <= GW_MAX_TOKENS for n in tokens):
+        tokens = ()
+    ended = (_remote_test_time(developer.get("updated_at"))
+             or _remote_test_time(record.get("updated_at")) or created)
+    return GwRun(route, task, d6 if type(d6) is str and AGENT_PATH.fullmatch(d6) else "", state,
+                 code if type(code) is str and CODE_TEXT.fullmatch(code) else "",
+                 created, max(created, ended), run_id, model, tokens)
+
+
+def _gw_activity(audit: str, now: float, elapsed: float | None) -> float:
+    """Seconds since the gateway last wrote its audit file: only the file's
+    time is read, never its content. Without it, the process age."""
+    try:
+        if audit:
+            return max(0.0, now - os.lstat(audit).st_mtime)
+    except (OSError, ValueError):
+        pass
+    return elapsed or 0.0
+
+
+def _gw_row(route: str, state: str, words: str, age: float, d6: str, registered: dict,
+            entry: GwRun | None, sid: str, evidence: str) -> OfficeRow:
+    """A registered D6 is named by the PR binding (_bind_d6_pr_rows) like other
+    D6 rows; any other place is named here."""
+    parts = [f"task {entry.task[:8]}"] if entry else ["未綁定 Task"]
+    if d6 not in registered:
+        parts.append(f"D6 {d6}（未登記）" if d6 else "未綁定 D6")
+    return OfficeRow(f"{route} developer", state, " · ".join(parts + [words]), age, 10,
+                     role="developer", task=f"task {d6}" if d6 in registered else "",
+                     evidence=evidence, sid=sid)
+
+
+def gw_rows(processes: list[Process], now: float, canonical: str,
+            root: str | None = None) -> list[OfficeRow]:
+    """Live and recently finished company gw and gw-agent Developer runs."""
+    root = LLMTOOL_TASKS if root is None else root
+    try:
+        entries, problem = _bounded_task_entries(root, _gw_run_parsed, GW_BUDGET, _gw_run_entry)
+    except Exception:   # optional local evidence: a gateway process still shows, unbound
+        entries, problem = [], REMOTE_TEST_OVER_BUDGET
+    registered = registered_tasks(canonical)
+    running = sorted((entry for entry in entries if entry.state in GW_RUNNING),
+                     key=lambda entry: -entry.created)
+    rows, bound = [], set()
+    procs = sorted(processes, key=lambda p: p.pid)
+    for proc in procs:
+        if proc.role != GW_AGENT_ROLE or len(proc.gw) != 3:
+            continue
+        elapsed = _elapsed_seconds(proc.elapsed)
+        workdir = os.path.realpath(proc.gw[1]) if proc.gw[1] else ""
+        d6 = next((task_id for task_id, (place, _) in registered.items() if place == workdir), "")
+        if not d6 and AGENT_PATH.fullmatch(os.path.basename(workdir)):
+            d6 = os.path.basename(workdir)
+        # llmtool records the dispatch, then starts the gateway.
+        entry = next((entry for entry in running
+                      if entry.route == "gw-agent" and entry.task not in bound and d6
+                      and entry.d6 == d6 and elapsed is not None
+                      and entry.created - CODEX_WORK_BEFORE <= now - elapsed
+                      <= entry.created + CODEX_WORK_AFTER), None)
+        if entry is not None:
+            bound.add(entry.task)
+        words = "執行中" + ("（工作紀錄未讀完，未確認）" if entry is None and problem else "")
+        rows.append(_gw_row("gw-agent", WORKING, words, _gw_activity(proc.gw[2], now, elapsed),
+                            d6, registered, entry,
+                            entry.run_id[:8] if entry and entry.run_id else f"pid {proc.pid}",
+                            "程序"))
+    clis = [p for p in procs if p.role == "llmtool CLI" and not p.job and len(p.gw) == 2]
+    used = set()
+    for entry in running:
+        if entry.route != "company gw":
+            continue
+        for proc in clis:
+            elapsed = _elapsed_seconds(proc.elapsed)
+            if proc.pid in used or elapsed is None:
+                continue
+            # The CLI writes the record, so it was already running; a CLI
+            # naming another Task, or started later, is not this run.
+            named, started = proc.gw[1], now - elapsed
+            if ((named and named != entry.task) or started > entry.created + CODEX_WORK_BEFORE
+                    or (not named and started < entry.created - CODEX_WORK_AFTER)):
+                continue
+            used.add(proc.pid)
+            rows.append(_gw_row("company gw", WORKING, "執行中", max(0.0, now - entry.created),
+                                entry.d6, registered, entry,
+                                entry.run_id[:8] or f"pid {proc.pid}", "程序"))
+            break
+    for entry in sorted(entries, key=lambda entry: -entry.ended):
+        age = now - entry.ended
+        if entry.state in GW_RUNNING or not -REMOTE_TEST_SKEW <= age <= OFFICE_DONE_WINDOW:
+            continue
+        words = "已結束：" + (DEVELOPER_RESULTS.get(entry.code)
+                             or DEVELOPER_RESULTS.get(entry.state) or entry.state)
+        if entry.model:
+            words += f"；{entry.model[:40]}"
+        if entry.tokens:
+            words += f"；輸入 {entry.tokens[0] / 1000:.1f}k / 輸出 {entry.tokens[1] / 1000:.1f}k"
+        rows.append(_gw_row(entry.route, DONE, words, max(0.0, age), entry.d6, registered,
+                            entry, entry.run_id[:8], "llmtool 紀錄"))
+    return rows
+
+
 # Codex reviewers are not a standing Worker: they run as sessions the PM starts
 # and appear under it. The `codex-reviewer` dispatch switch (Owner 2026-10-25)
 # gates them but gets no roster row of its own.
@@ -7406,10 +7603,17 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         mac.append(ci_queue_row(mac_waiting, runner_count))
     rows += agy + mac + github_runner_rows(ci_view, now, local_names, ci)
     rows.append(remote_test_row(processes, now, llmtool_tasks))
+    gw_runs = gw_rows(processes, now, canonical, llmtool_tasks)
+    rows += gw_runs
+    gw_live: dict = {}
+    for row in gw_runs:
+        if row.state == WORKING:
+            gw_live.setdefault(GW_ROSTER[row.name], []).append(row)
     raw, source = load_dispatch(canonical, dispatch)
     switches, problem = worker_dispatch(raw)
     for name, key, order in WORKER_ROSTER:
-        live = opencode if name == "opencode developer" else agy if name == "agy" else []
+        live = (opencode if name == "opencode developer" else agy if name == "agy"
+                else gw_live.get(name, []))
         switch = switches.get(key)
         trouble = problem
         paused = not trouble and switch[0] == "PAUSED"
@@ -7435,7 +7639,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 notes.append(f"本機 llmtool 紀錄（不分 repo）最近一次：{gw[3]}"
                              f"（近 7 天 {gw[1]} 次，成功 {gw[2]} 次）")
         if live:
-            notes.append(f"有 {len(live)} 個 CLI 開著（非派工）")
+            notes.append(f"有 {len(live)} 個執行中" if name in gw_live
+                         else f"有 {len(live)} 個 CLI 開著（非派工）")
         if trouble:
             label, state, authority = DISPATCH_PROBLEMS[trouble], UNCHECKED, ""
         else:

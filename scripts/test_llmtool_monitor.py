@@ -3396,6 +3396,143 @@ class OfficeViewTests(unittest.TestCase):
                                        cwd_of=lambda pid: str(self.task))
                 self.assertFalse(any(row.task == "task wp-1" for row in gone))
 
+    # Company LLM runs in the 即時 section (#763).
+    def _gw_record(self, tasks, task, provider, state, created, d6="wp-1", updated=None,
+                   **developer):
+        path = Path(tasks) / f"{task}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = lambda when: mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(when))
+        record = {"task_id": task, "request": "PROMPT-SECRET", "response": "MODEL-OUTPUT-SECRET",
+                  "goal": "PROMPT-SECRET",
+                  "developer": {"provider_type": provider, "state": state,
+                                "executor_task_id": d6, "created_at": stamp(created),
+                                **developer}}
+        if updated is not None:
+            record["updated_at"] = stamp(updated)
+        path.write_text(json.dumps(record), encoding="utf-8")
+        os.chmod(path, 0o600)
+        return path
+
+    def _gw_agent_process(self, workdir, audit, elapsed="00:30", pid=91):
+        command = (f"/usr/bin/python3 -B -P -m api_agent_gateway run --authorization-file "
+                   f"{audit.parent}/authorization.json --workdir {workdir} --profile p "
+                   f"--task-file {audit.parent}/task.json --result-file {audit.parent}/result.json "
+                   f"--audit-file {audit} --profiles-file {audit.parent}/profiles.json "
+                   f"--state-dir {audit.parent}/state")
+        return mon.snapshot_from([(pid, 90, pid, elapsed, "S", command)], self_pid=99999).processes
+
+    def _llmtool_process(self, argv, elapsed, pid=90):
+        return mon.snapshot_from([(pid, 1, pid, elapsed, "S", f"python3 -m llmtool {argv}")],
+                                 self_pid=99999).processes
+
+    def _gw_view(self, rows):
+        lines = mon.office_lines(rows, expand=True)
+        text = "\n".join(lines)
+        for secret in ("PROMPT-SECRET", "MODEL-OUTPUT-SECRET", "CREDENTIAL-SECRET"):
+            self.assertNotIn(secret, text)
+        return lines
+
+    def test_gw_agent_classify_keeps_only_checked_paths(self):
+        self.assertEqual(mon.classify("python3 -B -P -m api_agent_gateway run --workdir /x"),
+                         mon.GW_AGENT_ROLE)
+        self.assertIsNone(mon.classify("python3 -m api_agent_gateway --help"))
+        audit = Path(self.tmp.name) / "route" / "audit.jsonl"
+        proc = self._gw_agent_process(self.task, audit)[0]
+        self.assertEqual(proc.gw, ("gw", str(self.task), str(audit)))
+        bad = mon._gw_run_job("python3 -m api_agent_gateway run --workdir /a/../b "
+                              "--audit-file /t/other.log", mon.GW_AGENT_ROLE, ())
+        self.assertEqual(bad, ("gw", "", ""))
+
+    def test_gw_agent_run_shows_live_row_while_its_process_runs(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        task = "1d091894" + "a" * 24
+        self._gw_record(tasks, task, "gw-agent-cli", "DEVELOPER_DISPATCHING", self.NOW - 40,
+                        execution={"run_id": "0123456789abcdef01234567"})
+        audit = Path(self.tmp.name) / "route" / "audit.jsonl"
+        audit.parent.mkdir()
+        audit.write_text('{"type":"tool","note":"PROMPT-SECRET"}\n', encoding="utf-8")
+        os.utime(audit, (self.NOW - 7, self.NOW - 7))
+        rows = self.rows(self._gw_agent_process(self.task, audit), llmtool_tasks=str(tasks))
+        live = [row for row in rows if row.name == "gw-agent developer"]
+        self.assertEqual(len(live), 1)
+        row = live[0]
+        self.assertEqual((row.state, row.task, row.sid, row.evidence, row.kind),
+                         (mon.WORKING, "task wp-1", "01234567", "程序", "agent"))
+        self.assertAlmostEqual(row.age, 7, delta=1)
+        self.assertIn("task 1d091894", mon._row_detail(row))
+        self.assertIn("D6 wp-1", mon._row_detail(row))
+        self.assertIn("wp-1", mon._d6_running_tasks(rows))
+        # The gw-agent switch is PAUSED in the fixture: its status row stays and says so.
+        status = self.by_name(rows)["公司 gw agent"]
+        self.assertIn("有 1 個執行中", status.detail)
+        lines = self._gw_view(rows)
+        at = next(i for i, line in enumerate(lines) if "gw-agent developer 01234567" in line)
+        self.assertLess(lines.index(next(l for l in lines if mon.LIVE_SECTION in l)), at)
+        self.assertLess(at, lines.index(next(l for l in lines if mon.STATUS_SECTION in l)))
+
+    def test_company_gw_run_is_live_only_with_the_llmtool_cli_that_wrote_it(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        task = "2b" * 16
+        self._gw_record(tasks, task, "openai-compatible", "DEVELOPER_DISPATCHING", self.NOW - 50)
+        rows = self.rows(self._llmtool_process(f"task develop {task}", "01:00"),
+                         llmtool_tasks=str(tasks))
+        row = self.by_name(rows)["company gw developer"]
+        self.assertEqual((row.state, row.task, row.sid), (mon.WORKING, "task wp-1", "pid 90"))
+        self.assertAlmostEqual(row.age, 50, delta=1)
+        self.assertNotIn("公司 gw", self.by_name(rows))   # ALLOWED: the live row says it all
+        self._gw_view(rows)
+        self.assertEqual(mon._row_person(row), "CompanyGW")
+
+    def test_finished_gw_run_shows_done_with_model_and_tokens_for_the_done_window(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        self._gw_record(tasks, "3c" * 16, "openai-compatible", "DEVELOPER_RESPONDED",
+                        self.NOW - 400, updated=self.NOW - 120,
+                        execution={"served_model": "gw-model-x",
+                                   "usage": {"prompt_tokens": 12300, "completion_tokens": 4500,
+                                             "total_tokens": 16800}})
+        self._gw_record(tasks, "4d" * 16, "gw-agent-cli", "DEVELOPER_RESPONDED",
+                        self.NOW - 4000, updated=self.NOW - mon.OFFICE_DONE_WINDOW - 60)
+        rows = self.rows(llmtool_tasks=str(tasks))
+        done = [row for row in rows if row.name in mon.GW_ROSTER]
+        self.assertEqual([(row.name, row.state) for row in done],
+                         [("company gw developer", mon.DONE)])
+        self.assertAlmostEqual(done[0].age, 120, delta=1)
+        self.assertIn("gw-model-x", done[0].detail)
+        self.assertIn("輸入 12.3k / 輸出 4.5k", done[0].detail)
+        self.assertIn("成功回應", done[0].detail)
+        names = self.by_name(rows)
+        self.assertIn("公司 gw", names)          # the status row is back
+        self.assertIn("公司 gw agent", names)
+        self._gw_view(rows)
+
+    def test_no_gw_run_keeps_todays_status_rows(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        tasks.mkdir()
+        rows = self.rows(llmtool_tasks=str(tasks))
+        self.assertFalse(any(row.name in mon.GW_ROSTER for row in rows))
+        names = self.by_name(rows)
+        self.assertEqual((names["公司 gw"].kind, names["公司 gw"].state), ("worker", mon.IDLE))
+        self.assertEqual((names["公司 gw agent"].kind, names["公司 gw agent"].state),
+                         ("worker", mon.PAUSED))
+
+    def test_stale_gw_dispatch_record_is_not_shown_as_running(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        task = "5e" * 16
+        self._gw_record(tasks, task, "openai-compatible", "DEVELOPER_DISPATCHING", self.NOW - 600)
+        self._gw_record(tasks, "6f" * 16, "gw-agent-cli", "DEVELOPER_DISPATCHING", self.NOW - 600)
+        cases = {
+            "no process": [],
+            "a later CLI only reads it": self._llmtool_process(f"task inspect {task}", "00:10"),
+            "an unrelated old CLI": self._llmtool_process("monitor", "02:00:00"),
+            "a CLI on another Task": self._llmtool_process(f"task develop {'7a' * 16}", "20:00"),
+        }
+        for label, processes in cases.items():
+            with self.subTest(label):
+                rows = self.rows(processes, llmtool_tasks=str(tasks))
+                self.assertFalse(any(row.name in mon.GW_ROSTER for row in rows))
+                self.assertNotIn("wp-1", mon._d6_running_tasks(rows))
+                self.assertIn("公司 gw", self.by_name(rows))
+
     def test_idle_claude_session_row_covers_its_d6_process(self):
         self._write(self.claude / "proj" / "idle.jsonl", [
             {"type": "user", "cwd": str(self.task), "entrypoint": "cli"}], age=10)
