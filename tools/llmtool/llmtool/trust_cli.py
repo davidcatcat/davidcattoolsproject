@@ -258,6 +258,11 @@ def _affected_active_records(home, new_binding):
         raise
     except OSError:
         raise TrustError("TRUST_REGISTRY_UNAVAILABLE") from None
+    # Records are read in full up to 1 MiB (#1093). A record above 64 KiB is
+    # parsed like any other: an ACTIVE, REVIEW_PENDING or REPAIR one is counted
+    # by the rule below and any other state is ignored. Larger, unparsable or
+    # unsafe records stay TRUST_REGISTRY_INVALID.
+    max_record_bytes = 1024 * 1024
     count = 0
     for registry in paths:
         descriptor = None
@@ -267,16 +272,16 @@ def _affected_active_records(home, new_binding):
             info = os.fstat(descriptor)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
                     stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or
-                    not 1 <= info.st_size <= 64 * 1024):
+                    not 1 <= info.st_size <= max_record_bytes):
                 raise TrustError("TRUST_REGISTRY_INVALID")
             with os.fdopen(descriptor, "rb", closefd=True) as stream:
                 descriptor = None
-                raw = stream.read(64 * 1024 + 1)
+                raw = stream.read(max_record_bytes + 1)
                 after = os.fstat(stream.fileno())
             current = registry.lstat()
             identity = lambda item: (item.st_dev, item.st_ino, item.st_size,
                                      item.st_mtime_ns, item.st_ctime_ns)
-            if (len(raw) != info.st_size or len(raw) > 64 * 1024 or
+            if (len(raw) != info.st_size or len(raw) > max_record_bytes or
                     identity(info) != identity(after) or identity(info) != identity(current)):
                 raise TrustError("TRUST_REGISTRY_INVALID")
             record = json.loads(raw.decode("utf-8"))
