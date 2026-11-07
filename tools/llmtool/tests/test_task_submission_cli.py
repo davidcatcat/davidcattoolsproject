@@ -2573,6 +2573,70 @@ class TaskSubmissionCLITests(unittest.TestCase):
             submission_cli._validate_trusted_main_pin(pin, wrong_task, source_sha)
         self.assertEqual(raised.exception.completion_code, 'MAIN_REF_PIN_INVALID')
 
+    def test_result_head_admitted_skips_the_check_for_no_or_the_same_recorded_head(self):
+        head = 'b' * 40
+        for recorded_head in (None, head):
+            with self.subTest(recorded_head=recorded_head), \
+                    patch.object(submission_cli.task_completion,
+                                 'head_adds_only_main') as only_main:
+                self.assertTrue(submission_cli.result_head_admitted(
+                    {}, None, {}, executor_task='executor', root='/repo',
+                    recorded_head=recorded_head, head=head))
+                only_main.assert_not_called()
+
+    def test_result_head_admitted_needs_main_only_merges_or_a_bound_repair(self):
+        recorded_head, head = 'a' * 40, 'b' * 40
+        for only_main, repair, expected in ((True, False, True), (False, True, True),
+                                            (False, False, False)):
+            with self.subTest(only_main=only_main, repair=repair), \
+                    patch.object(submission_cli.task_completion, 'head_adds_only_main',
+                                 return_value=only_main) as main_check, \
+                    patch.object(submission_cli, '_repair_head_admitted',
+                                 return_value=repair):
+                self.assertIs(submission_cli.result_head_admitted(
+                    {}, None, {}, executor_task='executor', root='/repo',
+                    recorded_head=recorded_head, head=head), expected)
+                main_check.assert_called_once_with('/repo', recorded_head, head)
+
+    def test_repair_rule_refuses_without_claims_and_on_any_failure(self):
+        evidence = {'root': '/repo'}
+        with patch.object(submission_cli.task_completion,
+                          'read_authenticated_main_sha') as main_read:
+            self.assertIs(submission_cli._repair_head_admitted(
+                {}, None, evidence, executor_task='executor', head='b' * 40), False)
+            main_read.assert_not_called()
+        task = {'review_repair_claims': [{'attempt': 1}], 'developer': {'source_sha': 'a' * 40}}
+        with patch.object(submission_cli.task_completion, 'read_authenticated_main_sha',
+                          side_effect=LLMToolError('unavailable')):
+            self.assertIs(submission_cli._repair_head_admitted(
+                task, None, evidence, executor_task='executor', head='b' * 40), False)
+        with patch.object(submission_cli.task_completion, 'read_authenticated_main_sha',
+                          return_value='9' * 40), \
+                patch.object(submission_cli.task_completion, 'ensure_main_commit',
+                             return_value=False), \
+                patch.object(submission_cli,
+                             '_completion_repair_artifact_segments') as segments:
+            self.assertIs(submission_cli._repair_head_admitted(
+                task, None, evidence, executor_task='executor', head='b' * 40), False)
+            segments.assert_not_called()
+
+    def test_completion_packet_reports_developer_paths_and_evidence_keeps_all(self):
+        result = {'source_sha': 'a' * 40, 'result_head': 'b' * 40, 'diff_sha256': 'c' * 64,
+                  'changed_paths': ['README.md', 'tools/llmtool/llmtool/cli.py'],
+                  'developer_changed_paths': ['README.md']}
+        task = {'task_id': 'd' * 32, 'run_id': 'e' * 32, 'request_sha256': 'f' * 64,
+                'task_binding': {'contract_digest': '1' * 64}, 'pm_assignment': None}
+        evidence = {'developer': {}, 'executor': {}, 'result': result, 'tests': [],
+                    'review_pr_ci': {}}
+        packet = submission_cli._completion_packet(task, evidence)
+        self.assertEqual(packet['changed_paths'], ['README.md'])
+        self.assertEqual(result['changed_paths'],
+                         ['README.md', 'tools/llmtool/llmtool/cli.py'])
+
+        legacy = {key: value for key, value in result.items()
+                  if key != 'developer_changed_paths'}
+        self.assertEqual(submission_cli._attributed_paths(legacy), legacy['changed_paths'])
+
     def _remote_test_task(self):
         path = 'tools/llmtool/tests/test_task_submission_cli.py'
         return {
