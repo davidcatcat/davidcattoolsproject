@@ -232,6 +232,207 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertEqual(store.recorded, [])
 
 
+def _record_id(number):
+    return f'{number:032x}'
+
+
+def _ec2_claim(repair_task_id, *, family='pr-938-ec2', comment_id=None):
+    claim = {'repair_task_id': repair_task_id, 'comment_id': comment_id}
+    if family is not None:
+        claim['family'] = family
+    return claim
+
+
+def _split_store(*, review_runs=0, ec2_runs=0, legacy_runs=0, current=None,
+                 **kwargs):
+    """A parent Task plus review, new EC2 and legacy EC2 repair runs on one D6.
+
+    The parent Task stores the EC2 claims naming those runs; ``current`` is an
+    extra claim naming the Task being delegated.
+    """
+    store = _Store(count=1 + review_runs + ec2_runs + legacy_runs, **kwargs)
+    first_ec2 = 1 + review_runs
+    first_legacy = first_ec2 + ec2_runs
+    claims = [_ec2_claim(_record_id(n)) for n in range(first_ec2, first_legacy)]
+    claims += [_ec2_claim(_record_id(n), family='pr-938')
+               for n in range(first_legacy, first_legacy + legacy_runs)]
+    if current is not None:
+        claims.append(current)
+    store.records[_record_id(0)]['review_repair_claims'] = claims
+    return store
+
+
+class SplitRepairCountTests(unittest.TestCase):
+    """Row 35: review rounds and EC2 repair rounds have separate D6 caps."""
+
+    def setUp(self):
+        for target, kwargs in (
+                ((task_submission_cli.trust, 'load_trust'),
+                 {'return_value': SimpleNamespace(
+                     repository={'slug': 'example/project'})}),
+                ((task_submission_cli, '_delegate_d6_binding'),
+                 {'return_value': (None, SimpleNamespace(head=_HEAD))})):
+            started = patch.object(*target, **kwargs)
+            started.start()
+            self.addCleanup(started.stop)
+
+    def _passes(self, store):
+        task_submission_cli._check_delegate_repair_cap(
+            _args(high_debug_ref=None, high_debug_task=None), store)
+        self.assertEqual(store.recorded, [])
+
+    def _refuses(self, store):
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
+            task_submission_cli._check_delegate_repair_cap(
+                _args(high_debug_ref=None, high_debug_task=None), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_ec2_runs_leave_every_review_round_available(self):
+        self._passes(_split_store(ec2_runs=MAX_REPAIR_ATTEMPTS))
+        self._passes(_split_store(review_runs=MAX_REPAIR_ATTEMPTS - 1,
+                                  ec2_runs=MAX_REPAIR_ATTEMPTS))
+        self._refuses(_split_store(review_runs=MAX_REPAIR_ATTEMPTS,
+                                   ec2_runs=MAX_REPAIR_ATTEMPTS))
+
+    def test_review_runs_leave_every_ec2_round_available(self):
+        current = _ec2_claim(_CURRENT_TASK)
+        self._refuses(_split_store(review_runs=MAX_REPAIR_ATTEMPTS))
+        self._passes(_split_store(review_runs=MAX_REPAIR_ATTEMPTS, current=current))
+        self._passes(_split_store(review_runs=MAX_REPAIR_ATTEMPTS,
+                                  ec2_runs=MAX_REPAIR_ATTEMPTS - 1, current=current))
+        self._refuses(_split_store(review_runs=MAX_REPAIR_ATTEMPTS,
+                                   ec2_runs=MAX_REPAIR_ATTEMPTS, current=current))
+
+    def test_legacy_ec2_runs_count_on_both_counts(self):
+        # Review: a legacy EC2 run still counts as a review round.
+        self._refuses(_split_store(review_runs=MAX_REPAIR_ATTEMPTS - 1,
+                                   legacy_runs=1))
+        # EC2: a legacy run counts as a prior EC2 run, for a new or a legacy
+        # current EC2 claim alike.
+        for current in (_ec2_claim(_CURRENT_TASK),
+                        _ec2_claim(_CURRENT_TASK, family='pr-938')):
+            with self.subTest(current=current):
+                self._passes(_split_store(ec2_runs=MAX_REPAIR_ATTEMPTS - 1,
+                                          current=current))
+                self._refuses(_split_store(ec2_runs=MAX_REPAIR_ATTEMPTS - 1,
+                                           legacy_runs=1, current=current))
+
+    def test_claims_with_comment_id_or_without_family_stay_review(self):
+        for make in (lambda task_id: _ec2_claim(task_id, comment_id=9),
+                     lambda task_id: _ec2_claim(task_id, family=None)):
+            store = _split_store(review_runs=MAX_REPAIR_ATTEMPTS,
+                                 current=make(_CURRENT_TASK))
+            store.records[_record_id(0)]['review_repair_claims'] += [
+                make(_record_id(n)) for n in range(1, 1 + MAX_REPAIR_ATTEMPTS)]
+            with self.subTest(claim=make('x')):
+                self._refuses(store)
+
+    def test_unreadable_claims_take_the_review_limit(self):
+        for claims in ('bad', [None, 'bad', {'comment_id': None, 'family': 'pr-938-ec2'},
+                               {'comment_id': None, 'family': 'pr-938-ec2',
+                                'repair_task_id': ['x']},
+                               {'family': 'pr-938-ec2', 'repair_task_id': _CURRENT_TASK},
+                               {'comment_id': None, 'family': ['pr-938-ec2'],
+                                'repair_task_id': _CURRENT_TASK}]):
+            store = _split_store(review_runs=MAX_REPAIR_ATTEMPTS)
+            store.records[_record_id(0)]['review_repair_claims'] = claims
+            with self.subTest(claims=claims):
+                self._refuses(store)
+
+    def test_high_debug_override_records_the_count_that_tripped_the_cap(self):
+        diagnosis = _diagnosis([_entry()])
+        store = _split_store(review_runs=MAX_REPAIR_ATTEMPTS,
+                             ec2_runs=MAX_REPAIR_ATTEMPTS, diagnosis=diagnosis)
+        task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [(
+            _CURRENT_TASK, _HIGH_DEBUG_REF, max(3, (1 + MAX_REPAIR_ATTEMPTS) + 1))])
+
+        store = _split_store(review_runs=MAX_REPAIR_ATTEMPTS,
+                             ec2_runs=MAX_REPAIR_ATTEMPTS,
+                             current=_ec2_claim(_CURRENT_TASK), diagnosis=diagnosis)
+        task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [(
+            _CURRENT_TASK, _HIGH_DEBUG_REF, max(3, MAX_REPAIR_ATTEMPTS + 1))])
+
+
+class MixedFamilyRepairChainTests(unittest.TestCase):
+    """Completion walks review and EC2 repairs in stored claim order."""
+
+    SOURCE, HEAD1, HEAD2, FINAL = '1' * 40, '2' * 40, '3' * 40, '4' * 40
+    ARTIFACT = 'diff --git a/allowed.py b/allowed.py\n'
+
+    def setUp(self):
+        digest = hashlib.sha256(self.ARTIFACT.encode()).hexdigest()
+        self.original = {'source_sha': self.SOURCE, 'artifact': self.ARTIFACT,
+                         'artifact_sha256': digest, 'write_paths': ['allowed.py']}
+        self.repairs = {
+            'a' * 32: {'developer': {'state': 'DEVELOPER_RESPONDED',
+                                     'source_sha': self.HEAD1,
+                                     'artifact': self.ARTIFACT,
+                                     'artifact_sha256': digest}},
+            'b' * 32: {'developer': {'state': 'DEVELOPER_RESPONDED',
+                                     'source_sha': self.HEAD2,
+                                     'artifact': self.ARTIFACT,
+                                     'artifact_sha256': digest}},
+        }
+        reader = patch.object(
+            task_submission_cli.task_completion, 'read_d6_registration',
+            return_value=SimpleNamespace(root='/repo', branch='task',
+                                         source_sha=self.SOURCE,
+                                         result_sha=self.FINAL))
+        reader.start()
+        self.addCleanup(reader.stop)
+
+    def _segments(self, claims):
+        return task_submission_cli._completion_repair_artifact_segments(
+            {'developer': self.original, 'review_repair_claims': claims},
+            SimpleNamespace(get=lambda task_id: self.repairs[task_id]),
+            executor_task='executor', common_dir='/repo/.git', root='/repo',
+            branch='task', source_sha=self.SOURCE)
+
+    @staticmethod
+    def _claim(family, attempt, head, repair_id, state='DISPATCHED'):
+        claim = {'pr': 7, 'attempt': attempt, 'state': state, 'head_sha': head,
+                 'repair_task_id': repair_id}
+        if family is not None:
+            claim['family'] = family
+        return claim
+
+    def _assert_invalid(self, claims):
+        with self.assertRaises(LLMToolError) as caught:
+            self._segments(claims)
+        self.assertEqual(caught.exception.completion_code,
+                         'DEVELOPER_ARTIFACT_CHAIN_INVALID')
+
+    def test_ec2_repair_then_review_repair_passes(self):
+        result = self._segments([
+            self._claim('pr-7-ec2', 1, self.HEAD1, 'a' * 32),
+            self._claim('pr-7', 1, self.HEAD2, 'b' * 32)])
+        self.assertEqual([segment[2:] for segment in result], [
+            (self.SOURCE, self.HEAD1), (self.HEAD1, self.HEAD2),
+            (self.HEAD2, self.FINAL)])
+
+    def test_legacy_family_claims_share_the_default_family(self):
+        result = self._segments([
+            self._claim(None, 1, self.HEAD1, 'a' * 32, state='FAILED'),
+            self._claim('pr-7', 2, self.HEAD1, 'a' * 32),
+            self._claim('pr-7-ec2', 1, self.HEAD2, 'b' * 32)])
+        self.assertEqual(len(result), 3)
+
+    def test_gap_in_one_family_fails(self):
+        for claims in (
+                [self._claim('pr-7-ec2', 1, self.HEAD1, 'a' * 32),
+                 self._claim('pr-7', 2, self.HEAD2, 'b' * 32)],
+                [self._claim('pr-7', 1, self.HEAD1, 'a' * 32),
+                 self._claim('pr-7-ec2', 2, self.HEAD2, 'b' * 32)],
+                [self._claim('pr-7', 2, self.HEAD2, 'b' * 32),
+                 self._claim('pr-7', 1, self.HEAD1, 'a' * 32)],
+                [self._claim(None, 1, self.HEAD1, 'a' * 32),
+                 self._claim('pr-7', 1, self.HEAD2, 'b' * 32)]):
+            with self.subTest(claims=claims):
+                self._assert_invalid(claims)
+
+
 def _no_work(**overrides):
     # The real shape persisted by the Codex route: no changed_files field.
     developer = {
