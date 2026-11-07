@@ -52,6 +52,11 @@ class FakeGitHub:
     def add(self, *items):
         self.comments.extend(items)
 
+    def remove_newest(self):
+        newest = max(self.comments, key=lambda item: item['id'])
+        self.comments.remove(newest)
+        return newest['id']
+
     def pages(self):
         return [int(call[len(QUERY):]) for call in self.calls]
 
@@ -314,8 +319,9 @@ class PollTests(SyncTestCase):
         self.github.add(sync_comment(1251, 'req-x', 1, 'd1'))
         result = self.poll()
         self.assertEqual(result['status'], 'SYNCED')
-        self.assertEqual(self.github.pages(), [1, 2, 3])
-        self.assertEqual(result['pages_read'], 3)
+        # A multi-page walk is confirmed by a second walk before it is accepted.
+        self.assertEqual(self.github.pages(), [1, 2, 3, 1, 2, 3])
+        self.assertEqual(result['pages_read'], 6)
         self.assertEqual(self.parser.seen, list(range(1001, 1252)))
         self.assertEqual(result['new_comments'], 251)
         self.assertEqual(result['counts']['non_sync'], 250)
@@ -345,22 +351,86 @@ class PollTests(SyncTestCase):
         self.assertEqual(self.github.calls, [])
         self.assertEqual(self.poll(max_pages=50)['status'], 'IDLE')
 
+    def arrive_once(self, *items):
+        pending_items = list(items)
+
+        def arrive(page):
+            if page == 1 and pending_items:
+                self.github.add(*pending_items)
+                pending_items.clear()
+        self.github.after_call = arrive
+
     def test_comment_arriving_mid_catch_up_is_handled_once(self):
         sync.init_state(self.path, 0)
         self.github.add(*(comment(i) for i in range(1, 151)))
-
-        def arrive(page):
-            if page == 1:
-                self.github.add(comment(151))
-        self.github.after_call = arrive
+        self.arrive_once(comment(151))
         result = self.poll()
         self.github.after_call = None
+        self.assertEqual(result['status'], 'SYNCED')
+        self.assertEqual(self.github.pages(), [1, 2, 1, 2])
         self.assertEqual(self.parser.seen, list(range(1, 151)))
         self.assertEqual(result['cursor'], 150)
         self.parser.seen.clear()
         result = self.poll()
         self.assertEqual(self.parser.seen, [151])
         self.assertEqual(result['cursor'], 151)
+
+    def test_several_comments_arriving_between_pages_are_not_skipped(self):
+        sync.init_state(self.path, 0)
+        self.github.add(*(comment(i) for i in range(1, 151)))
+        self.arrive_once(comment(151), comment(152))
+        result = self.poll()
+        self.github.after_call = None
+        # Page 2 repeats ids 52 and 51; every id up to 150 is handled exactly once.
+        self.assertEqual(self.parser.seen, list(range(1, 151)))
+        self.assertEqual(result['cursor'], 150)
+        self.parser.seen.clear()
+        result = self.poll()
+        self.assertEqual(self.parser.seen, [151, 152])
+        self.assertEqual(result['cursor'], 152)
+        self.parser.seen.clear()
+        self.assertEqual(self.poll()['status'], 'IDLE')
+        self.assertEqual(self.parser.seen, [])
+
+    def test_comment_deleted_between_pages_does_not_skip_a_comment(self):
+        sync.init_state(self.path, 0)
+        self.github.add(*(comment(i) for i in range(1, 151)))
+        deleted = []
+
+        def delete_once(page):
+            if page == 1 and not deleted:
+                deleted.append(self.github.remove_newest())
+        self.github.after_call = delete_once
+        result = self.poll()
+        self.github.after_call = None
+        # The first walk misses comment 50 after comment 150 is deleted; the second walk
+        # disagrees, and the third walk confirms the second.
+        self.assertEqual(deleted, [150])
+        self.assertEqual(result['status'], 'SYNCED')
+        self.assertEqual(self.github.pages(), [1, 2, 1, 2, 1, 2])
+        self.assertEqual(result['pages_read'], 6)
+        self.assertEqual(self.parser.seen, list(range(1, 150)))
+        self.assertEqual(result['cursor'], 149)
+        self.assertEqual(result['new_comments'], 149)
+        self.parser.seen.clear()
+        self.assertEqual(self.poll()['status'], 'IDLE')
+        self.assertEqual(self.parser.seen, [])
+
+    def test_every_refusal_code_keeps_its_own_count(self):
+        sync.init_state(self.path, 0)
+        codes = [f'SYNC_REFUSED_{number:02d}' for number in range(40)]
+        self.github.add(*(refuse_comment(i + 1, code) for i, code in enumerate(codes)))
+        self.github.add(refuse_comment(41, codes[39]), refuse_comment(42, codes[0]))
+        result = self.poll()
+        expected = dict.fromkeys(codes, 1)
+        expected[codes[0]] = 2
+        expected[codes[39]] = 2
+        self.assertEqual(result['refusals'], expected)
+        self.assertEqual(list(result['refusals']), sorted(codes))
+        self.assertEqual(result['counts']['refused'], 42)
+        self.assertNotIn('SYNC_REFUSAL_OTHER', result['refusals'])
+        self.assertEqual(self.state()['requests'], {})
+        self.assertNotIn('SYNC_REFUSED', Path(self.path).read_text(encoding='utf-8'))
 
     def test_refusals_are_counted_by_code_and_never_stored(self):
         sync.init_state(self.path, 0)
@@ -640,6 +710,32 @@ class OfflineTests(SyncTestCase):
         self.assertEqual(result['status'], 'SYNCED')
         self.assertEqual(result['cursor'], 151)
         self.assertEqual(len(self.state()['requests']), 151)
+
+    def test_listing_that_never_settles_is_offline_and_keeps_cursor(self):
+        self.github.add(*(sync_comment(i, f'req-{i}', 1, 'd') for i in range(2, 152)))
+        before = self.state()
+        deleted = []
+
+        def delete_every_time(page):
+            if page == 1:
+                deleted.append(self.github.remove_newest())
+        self.github.after_call = delete_every_time
+        result = self.poll()
+        self.github.after_call = None
+        self.assertEqual(deleted, [151, 150, 149])
+        self.assertEqual(result['status'], 'OFFLINE')
+        self.assertEqual(result['pages_read'], 6)
+        self.assertEqual(self.github.pages(), [1, 2, 1, 2, 1, 2])
+        self.assertEqual((result['failure_count'], result['backoff_seconds']), (1, 30))
+        self.assertEqual(result['cursor'], 1)
+        self.assertEqual(self.parser.seen, [])
+        self.assertOnlyFailureCountChanged(before, 1)
+        result = self.poll()
+        self.assertEqual(result['status'], 'SYNCED')
+        self.assertEqual(result['cursor'], 148)
+        self.assertEqual(self.parser.seen, list(range(2, 149)))
+        self.assertEqual(len(self.state()['requests']), 148)
+        self.assertEqual(self.state()['failure_count'], 0)
 
     def test_unexpected_exception_is_not_treated_as_offline(self):
         before = self.snapshot()

@@ -14,6 +14,13 @@ The cursor and ledger are committed in one write after the whole batch is
 handled. A crash before that write replays the same comments next time, and
 the ledger rules make the replayed result identical.
 
+Page-number pagination is not a snapshot. One page is one response and has no
+gap, but a comment deleted between two page reads shifts later pages up, so
+the walk skips the comment that moved across the page boundary. A walk that
+read more than one page is therefore accepted only when a second walk agrees
+on every id the first walk could have seen; otherwise the poll is OFFLINE and
+the cursor does not move.
+
 Failures raise ``LLMToolError`` with a fixed ``sync_code``; a GitHub read
 failure is not raised but returned as ``OFFLINE`` with a backoff.
 """
@@ -32,7 +39,7 @@ MAX_PAGES_LIMIT = 50
 MAX_REQUESTS = 2000
 MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_FAILURE_COUNT = 1000000
-MAX_REFUSAL_CODES = 32
+MAX_WALKS = 3
 BACKOFF_SECONDS = (30, 60, 120, 240, 480, 900)
 
 _MAX_ID = 2**63 - 1
@@ -286,28 +293,59 @@ def init_state(path, start_after_comment_id):
     return {'status': 'INITIALIZED', 'cursor': start_after_comment_id}
 
 
-def _read_new(github_get, cursor, max_pages):
-    """Return ({id: comment} newer than cursor, pages_read)."""
+def _walk(github_get, cursor, max_pages, reads):
+    """One newest-first walk: return ({id: comment} newer than cursor, pages walked).
+
+    ``reads`` is a one-item list counting every page read in this poll.
+    """
     fresh = {}
     for page in range(1, max_pages + 1):
+        reads[0] += 1
         try:
             batch = github_get('issues/comments?sort=created&direction=desc'
                                f'&per_page={PAGE_SIZE}&page={page}')
         except LLMToolError:
-            raise _Offline(page) from None
+            raise _Offline(reads[0]) from None
         if (type(batch) is not list or len(batch) > PAGE_SIZE or
                 any(type(item) is not dict or not _is_int(item.get('id'), 1, _MAX_ID)
                     for item in batch)):
-            raise _Offline(page)
+            raise _Offline(reads[0])
         for item in batch:
             if item['id'] <= cursor:
                 return fresh, page
-            # A comment created during pagination shifts later pages; keep the first copy.
+            # A comment created during the walk shifts later pages down and repeats
+            # an id; keep the first copy.
             fresh.setdefault(item['id'], item)
         if len(batch) < PAGE_SIZE:
             return fresh, page
     # Page max_pages was full and had no comment at or below the cursor.
     _fail('SYNC_CATCHUP_LIMIT')
+
+
+def _read_new(github_get, cursor, max_pages):
+    """Return ({id: comment} newer than cursor with no gap, pages_read).
+
+    A one-page walk is one response and is accepted as is. A multi-page walk can
+    miss a comment only when a comment it already read was deleted before a later
+    page was read. That deleted comment cannot appear in a later walk, so the walk
+    is accepted only when the next walk, limited to ids up to the walk's newest id,
+    returns exactly the same ids. New comments above that id are left for the next
+    poll. No agreement within MAX_WALKS walks is an unstable listing: OFFLINE.
+    """
+    reads = [0]
+    walk, pages = _walk(github_get, cursor, max_pages, reads)
+    for _ in range(MAX_WALKS - 1):
+        if pages == 1:
+            return walk, reads[0]
+        # A full first page newer than the cursor means the walk is not empty.
+        newest = max(walk)
+        check, pages = _walk(github_get, cursor, max_pages, reads)
+        if {comment_id for comment_id in check if comment_id <= newest} == set(walk):
+            return walk, reads[0]
+        walk = check
+    if pages == 1:
+        return walk, reads[0]
+    raise _Offline(reads[0])
 
 
 def _parse_one(parse, item):
@@ -379,10 +417,9 @@ def poll_once(path, github_get, parse, max_pages=10):
             counts['non_sync'] += 1
             continue
         if type(parsed) is str:
-            code = parsed
-            if code not in refusals and len(refusals) >= MAX_REFUSAL_CODES:
-                code = 'SYNC_REFUSAL_OTHER'
-            refusals[code] = refusals.get(code, 0) + 1
+            # Every code keeps its own count. Codes are short fixed-format names,
+            # never stored, and bounded by the comments read (max_pages * 100).
+            refusals[parsed] = refusals.get(parsed, 0) + 1
             counts['refused'] += 1
             continue
         key, revision, delivery_id, kind = parsed
