@@ -8420,9 +8420,11 @@ def office_state(mon, now: float) -> dict:
         work = work_board(github, mon.pm_board, now, ec2=mon.ec2_heads,
                           reviewing=pr_reviewing(mon.office), office=mon.office,
                           office_known=not bool(error))
-        prs = [{"number": row.number, "review": row.review, "ec2": row.ec2,
-                "linux": row.linux, "mac": row.mac, "next": row.next,
-                "owner": row.owner, "current": row.current} for row in work.prs]
+        # The board shows 未知 for its PR rows until GitHub is read: null, not [].
+        prs = None if not work.github_known else [
+            {"number": row.number, "review": row.review, "ec2": row.ec2,
+             "linux": row.linux, "mac": row.mac, "next": row.next,
+             "owner": row.owner, "current": row.current} for row in work.prs]
     except Exception:   # the board cannot be built: unknown, never an empty board
         prs = None
     built = getattr(mon, "office_built", None)
@@ -8505,8 +8507,12 @@ class _StateHandler(http.server.BaseHTTPRequestHandler):
                 and hosts[0].strip().lower() in (f"127.0.0.1:{port}", f"localhost:{port}"))
 
     def _target(self) -> str | None:
-        """The page or the state for a path under the right token, else None."""
-        parts = self.path.partition("?")[0].split("/")
+        """The page or the state for a path under the right token, else None.
+        The path is the request line's own target: http.server rewrites a
+        leading // in self.path to /, and //<token>/ is not a served path."""
+        words = self.requestline.split()
+        target = words[1] if len(words) >= 2 else ""
+        parts = target.partition("?")[0].split("/")
         if len(parts) != 3 or parts[0] or parts[2] not in ("", "state.json"):
             return None
         given = parts[1].encode("latin-1", "replace")

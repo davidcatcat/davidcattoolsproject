@@ -9535,21 +9535,33 @@ class OfficeStateTests(unittest.TestCase):
     def test_unshown_fields_and_credentials_never_exported(self):
         credential = "gh" + "p_" + "A" * 24
         rows = self._rows(detail=f"整理白板 token=abcdef {credential}")
+        # summary= lands on the oldest request, past the ★ limit: the newest gets one too.
         github = self._github(health_title="deploy secret=hunter2value",
-                              summary=f"看 {credential}")
+                              summary=f"OLDER-SUMMARY-SECRET {credential}")
+        github.pending[-1] = mon.OwnerPending(self.NOW - 60, "#960", "WAITING", f"看 {credential}",
+                                              "waiting_owner")
         monitor = self._monitor(rows, github, quota=["Claude 已到用量上限 password=letmein"])
         with self._local():
             body = mon.state_bytes(monitor, self.NOW).decode("utf-8")
             state = mon.office_state(monitor, self.NOW)
+            text = self._terminal(monitor)
+        # Row keys and evidence are never a value of their own. The Linux runner's
+        # key is also the tail of its shown name, so only the bare key string counts.
         for secret in SECRETS + (credential, "hunter2value", "letmein", self.FULL_SESSION,
-                                 "codex:", "davidproject-self-action", "ec2-self-runner\"",
-                                 "llmtool 紀錄", "派工檔\""):
+                                 "codex:", "davidproject-self-action", '"ec2-self-runner"',
+                                 "llmtool 紀錄", '"派工檔"', '"程序"', '"GitHub"',
+                                 "OLDER-SUMMARY-SECRET"):
             self.assertNotIn(secret, body)
+        self.assertIn('"linux ci runner ec2-self-runner"', body)   # the shown name is kept
+        # Redaction only ever puts the fixed text in: every other piece is terminal text.
+        for value in _state_strings(state):
+            for piece in value.split(mon.STATE_REDACTED):
+                self.assertIn(piece, text)
         pm = next(entry for entry in state["office"] if entry["room"] == "pm" and entry["depth"] == 0)
         self.assertEqual(pm["detail"], "整理白板 [已遮蔽] [已遮蔽]")
         self.assertIn("[已遮蔽]", state["top"]["health"]["text"])
         self.assertIn({"text": "Claude 已到用量上限 [已遮蔽]", "style": "alert"}, state["top"]["notices"])
-        self.assertEqual(state["owner"]["items"][0]["summary"], "看 [已遮蔽]")
+        self.assertEqual(state["owner"]["items"][-1]["summary"], "看 [已遮蔽]")
 
     def test_redaction_reuses_secretish(self):
         with patch.object(mon, "SECRETISH", re.compile("PLAIN")):
@@ -9557,10 +9569,13 @@ class OfficeStateTests(unittest.TestCase):
                              {"PLAIN": ["a [已遮蔽] b", 3, None]})
 
     def test_office_error_and_no_github(self):
-        monitor = self._monitor(github=None, office_built=None, quota=[])
+        # _monitor(github=None) means "the default fake GitHub": no GitHub is set afterwards.
+        monitor = self._monitor(office_built=None, quota=[])
+        monitor.github = None
         monitor.office, monitor.office_error = [], "TypeError"
         with self._local():
             state = mon.office_state(monitor, self.NOW)
+            text = self._terminal(monitor)
         self.assertIsNone(state["data_age"])
         self.assertIsNone(state["top"]["working"])
         self.assertIsNone(state["top"]["waiting"])
@@ -9568,7 +9583,10 @@ class OfficeStateTests(unittest.TestCase):
         self.assertIsNone(state["top"]["health"])
         self.assertEqual(state["office"], [])
         self.assertEqual(state["owner"], {"items": [], "older": 0})
-        self.assertEqual(state["prs"], [])
+        self.assertIsNone(state["prs"])   # the board shows 未知, not an empty PR list
+        self.assertIn("── PR 看板 ──\n未知", text)
+        for value in _state_strings(state):
+            self.assertIn(value, text)
 
     def test_state_starts_no_github_or_process_call(self):
         github = self._github()
@@ -9582,21 +9600,39 @@ class OfficeStateTests(unittest.TestCase):
             mon.state_bytes(monitor, self.NOW)
 
     def test_office_view_text_unchanged_by_shared_helper(self):
+        # The two steps office_view applied inline before the helper existed: a
+        # dispatch problem shared by several Workers is said once (ℹ), and a
+        # fallback dispatch-file source shared by several rows goes to the legend.
         problem = mon.DISPATCH_PROBLEMS["missing"]
-        rows = [mon.OfficeRow("agy", mon.UNCHECKED, f"{problem}；App 開著（本機 main 的派工檔）",
-                              None, 60, kind="worker", evidence="本機 main 的派工檔"),
-                mon.OfficeRow("公司 gw", mon.UNCHECKED, f"{problem}（本機 main 的派工檔）", None, 70,
-                              kind="worker", evidence="本機 main 的派工檔")]
+        source = "本機 origin/main 的派工檔（可能不是最新）"
+        rows = [mon.OfficeRow("agy", mon.UNCHECKED, f"{problem}；App 開著", None, 60, kind="worker",
+                              evidence="派工檔"),
+                mon.OfficeRow("公司 gw", mon.UNCHECKED, problem, None, 70, kind="worker",
+                              evidence="派工檔"),
+                mon.OfficeRow("opencode developer", mon.PAUSED,
+                              f"Owner 暫停派工（10-22）（{source}）；App 開著", None, 50,
+                              kind="worker", evidence=source),
+                mon.OfficeRow("claude developer", mon.ATTENTION, f"可派工（{source}）", 34 * 3600, 55,
+                              kind="worker", evidence=source)]
         lines = [line for line, _ in mon.office_view(rows, expand=True, now=self.NOW)]
         self.assertIn(f"ℹ {problem}：agy、公司 gw", lines)
+        self.assertEqual("\n".join(lines).count(problem), 1)
+        self.assertEqual("\n".join(lines).count(source), 1)
         self.assertTrue(any(line.startswith("agy") and line.endswith("App 開著") for line in lines))
         self.assertTrue(any(line.startswith("公司 gw") and line.endswith("沒有其他紀錄")
                             for line in lines))
-        self.assertEqual(lines[-1], "派工狀態讀自本機 main 的派工檔；工作中 = 最近有動作，不代表模型正在產生內容")
+        self.assertTrue(any(line.startswith("opencode developer")
+                            and line.endswith("Owner 暫停派工（10-22）；App 開著") for line in lines))
+        self.assertTrue(any(line.startswith("claude developer") and "可派工 " in line
+                            and line.endswith("  34 小時前") for line in lines))
+        self.assertEqual(lines[-1], f"派工狀態讀自{source}；工作中 = 最近有動作，不代表模型正在產生內容")
         shown, notes, legend = mon._office_display(rows)
-        self.assertEqual([row.detail for row in shown], ["App 開著", "沒有其他紀錄"])
+        self.assertEqual([row.detail for row in shown],
+                         ["App 開著", "沒有其他紀錄", "Owner 暫停派工（10-22）；App 開著", "可派工"])
         self.assertEqual(notes, [f"ℹ {problem}：agy、公司 gw"])
-        self.assertEqual(legend, ["派工狀態讀自本機 main 的派工檔"])
+        self.assertEqual(legend, [f"派工狀態讀自{source}"])
+        self.assertEqual([row.name for row in shown], [row.name for row in rows])   # input untouched
+        self.assertEqual(rows[1].detail, problem)
 
     def test_monitor_records_last_successful_office_rebuild(self):
         def poll(monitor, **office):
