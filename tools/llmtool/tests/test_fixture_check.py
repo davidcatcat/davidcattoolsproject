@@ -168,6 +168,33 @@ class FixtureCheckTests(unittest.TestCase):
             "test_unlisted_module",
         )), 1)
 
+    def test_newly_listed_modules_follow_label_policy(self):
+        for module in ("test_diagnostics", "test_remote_test"):
+            with self.subTest(module=module):
+                self.assertIn(module, fixture_check.SCREEN_TOOL_TEST_MODULES)
+                self.assertEqual(self.findings(
+                    "# synthetic-fixture: screen-tool test\nvalue = 'mar' + 'ker'",
+                    module,
+                ), [])
+                self.assertEqual(len(self.findings("value = 'mar' + 'ker'", module)), 1)
+                self.assertEqual(len(self.findings(
+                    "# synthetic-fixture: screen-tool test\nother = 1\nvalue = 'mar' + 'ker'",
+                    module,
+                )), 1)
+                self.assertEqual(len(self.findings(
+                    "value = 'mar' + 'ker'\n# synthetic-fixture: screen-tool test",
+                    module,
+                )), 1)
+
+    def test_labelled_unlisted_module_still_reported(self):
+        for module in ("test_diagnostics_extra", "test_remote_test_runner"):
+            with self.subTest(module=module):
+                self.assertNotIn(module, fixture_check.SCREEN_TOOL_TEST_MODULES)
+                self.assertEqual(len(self.findings(
+                    "# synthetic-fixture: screen-tool test\nvalue = 'mar' + 'ker'",
+                    module,
+                )), 1)
+
     def test_baseline_over_and_under_are_reported(self):
         over, over_findings = fixture_check.compare_counts({"sample.py": 2}, {"sample.py": 1})
         under, under_findings = fixture_check.compare_counts({"sample.py": 0}, {"sample.py": 1})

@@ -27,6 +27,8 @@ SCREEN_TOOL_TEST_MODULES = (
     "test_spec_preflight",
     "test_fixture_check",
     "test_developer_diff_screen",
+    "test_diagnostics",
+    "test_remote_test",
 )
 LABEL = "# synthetic-fixture: screen-tool test"
 BASELINE = REPO / "tools" / "llmtool" / "tests" / "fixture_check_baseline.json"
