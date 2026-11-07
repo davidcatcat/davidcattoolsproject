@@ -323,17 +323,38 @@ class ScreenTests(unittest.TestCase):
         self.assertEqual(tc.outbound_text("id 123456789:" + "a" * 29),
                          "id 123456789:" + "a" * 29)
 
+    def test_screens_are_the_core_functions(self):
+        from llmtool import diagnostics, test_output_excerpts
+        self.assertIs(tc.safe_diagnostic_text, diagnostics.safe_diagnostic_text)
+        self.assertIs(tc._emitted_sensitive, test_output_excerpts._emitted_sensitive)
+
     def test_line_screen_hits(self):
         for text in ("ok\nbell \x07 here", "tab\there", "ok\n\nblank line", "", "  ",
-                     "ok\r\nx", "pass" + "word=hunter22secret", "x" * 2049):
+                     "ok\r\nx", "x" * 2049):
             self.assertEqual(tc.outbound_text(text), "CONTENT_WITHHELD", repr(text))
+
+    def test_line_screen_credential_hit(self):
+        # A credential found by safe_diagnostic_text on any one line withholds it all.
+        def screen(line):
+            if line == "flagged line":
+                raise ValueError("credential")
+            return line
+        with mock.patch.object(tc, "safe_diagnostic_text", side_effect=screen) as patched:
+            self.assertEqual(tc.outbound_text("first\nflagged line\nlast"), "CONTENT_WITHHELD")
+            self.assertIn(mock.call("flagged line"), patched.call_args_list)
+            self.assertEqual(tc.outbound_text("first\nlast"), "first\nlast")
 
     def test_whole_text_screen_hits(self):
         # Each line passes safe_diagnostic_text; only the whole-text screen catches these.
-        self.assertEqual(tc.outbound_text("see https:" + "//user:pw@example.invalid/x"),
-                         "CONTENT_WITHHELD")
-        self.assertEqual(tc.outbound_text("auth bearer\nabcdefghijklmnop"),
-                         "CONTENT_WITHHELD")
+        seen = []
+
+        def whole(text):
+            seen.append(text)
+            return "\n" in text
+        with mock.patch.object(tc, "_emitted_sensitive", side_effect=whole):
+            self.assertEqual(tc.outbound_text("first part\nsecond part"), "CONTENT_WITHHELD")
+            self.assertIn("first part\nsecond part", seen)
+            self.assertEqual(tc.outbound_text("one line"), "one line")
         with mock.patch.object(tc, "_emitted_sensitive", return_value=True):
             self.assertEqual(tc.outbound_text("harmless"), "CONTENT_WITHHELD")
 
@@ -588,8 +609,8 @@ class ModuleBoundaryTests(unittest.TestCase):
         self.assertNotIn("importlib", source)
 
     def test_no_source_line_matches_the_credential_screen(self):
-        # Credential-shaped fixtures are built at run time from fragments, so no
-        # single source line of this module or its tests trips the diff screen.
+        # No credential-shaped fixture exists here; credential screen hits are covered
+        # by patching the screen functions, so no source line trips the diff screen.
         from llmtool.test_output_excerpts import _emitted_sensitive
         for path in (Path(tc.__file__), Path(__file__)):
             lines = path.read_text(encoding="utf-8").split("\n")
