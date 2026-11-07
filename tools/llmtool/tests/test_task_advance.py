@@ -460,27 +460,130 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(task_advance._remote_test_status(record, d6()),
                          ('ADMISSION_DENIED', None, None))
 
+    @staticmethod
+    def _timeout_outcome(sha=HEAD, executor_task='executor-1'):
+        return {'result': 'TIMEOUT', 'code': 'SSH_TIMEOUT', 'executor_task': executor_task,
+                'sha': sha, 'modules': ['test_task_advance']}
+
     def test_timeout_and_sha_mismatch_receipts_require_attention(self):
-        for outcome, code in (('TIMEOUT', 'REMOTE_TEST_TIMEOUT'),
-                              ('SHA_MISMATCH', 'REMOTE_TEST_SHA_MISMATCH')):
-            record = base_record(remote_test_outcomes=[])
-            if outcome == 'TIMEOUT':
-                record['remote_test_outcomes'] = [{
-                    'result': 'TIMEOUT', 'executor_task': 'executor-1',
-                    'sha': HEAD, 'modules': ['test_task_advance'],
-                }]
-            else:
-                record['remote_test_receipts'] = [remote_receipt(
-                    base_record(), result=outcome)]
-            self.assertEqual(task_advance.decide(record, d6(), PR, {}),
-                             'NEEDS_ATTENTION')
-            store = type('S', (), {'get': lambda self, _id: record})()
-            with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
-                 patch.object(task_advance, '_pr_snapshot', return_value=PR):
-                result = task_advance.advance(task_id=record['task_id'], store=store,
-                    pr_number=17)
-            self.assertEqual(result['step'], 'NEEDS_ATTENTION')
-            self.assertEqual(result['codes'], [code])
+        timeout_receipt = remote_receipt(base_record(), result='TIMEOUT')
+        once = {'outcome': ([self._timeout_outcome()], []),
+                'receipt': ([], [timeout_receipt])}
+        twice = {'outcomes': ([self._timeout_outcome(), self._timeout_outcome()], []),
+                 'receipts': ([], [timeout_receipt, dict(timeout_receipt)]),
+                 'outcome and receipt': ([self._timeout_outcome()], [timeout_receipt])}
+        for name, (outcomes, receipts) in once.items():
+            with self.subTest(once=name):
+                record = base_record(remote_test_outcomes=outcomes,
+                                     remote_test_receipts=receipts)
+                self.assertEqual(task_advance._remote_test_timeout_count(record, d6()), 1)
+                self.assertEqual(task_advance.decide(record, d6(), PR, {}),
+                                 'RUN_REMOTE_TEST')
+        for name, (outcomes, receipts) in twice.items():
+            with self.subTest(twice=name):
+                record = base_record(remote_test_outcomes=outcomes,
+                                     remote_test_receipts=receipts)
+                self.assertEqual(task_advance._remote_test_timeout_count(record, d6()), 2)
+                self.assertEqual(task_advance.decide(record, d6(), PR, {}),
+                                 'NEEDS_ATTENTION')
+                store = type('S', (), {'get': lambda self, _id: record})()
+                with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+                     patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+                     patch.object(task_submission_cli, 'run_task_remote_test',
+                                  side_effect=AssertionError('no third remote test')):
+                    result = task_advance.advance(task_id=record['task_id'], store=store,
+                        pr_number=17)
+                self.assertEqual(result['step'], 'NEEDS_ATTENTION')
+                self.assertEqual(result['codes'], ['REMOTE_TEST_TIMEOUT'])
+        record = base_record(remote_test_outcomes=[], remote_test_receipts=[
+            remote_receipt(base_record(), result='SHA_MISMATCH')])
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'NEEDS_ATTENTION')
+        self.assertEqual(task_advance.decide(record, d6(), None, {}), 'NEEDS_ATTENTION')
+        store = type('S', (), {'get': lambda self, _id: record})()
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_submission_cli, 'run_task_remote_test',
+                          side_effect=AssertionError('SHA_MISMATCH never reruns')):
+            result = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17)
+        self.assertEqual(result['step'], 'NEEDS_ATTENTION')
+        self.assertEqual(result['codes'], ['REMOTE_TEST_SHA_MISMATCH'])
+
+    def test_timeout_on_another_head_or_malformed_does_not_count(self):
+        other = 'b' * 40
+        tampered = remote_receipt(base_record(), result='TIMEOUT')
+        tampered['elapsed_s'] = 9.9
+        record = base_record(remote_test_outcomes=[
+            self._timeout_outcome(),
+            self._timeout_outcome(sha=other),
+            self._timeout_outcome(executor_task='executor-2'),
+            'not an outcome',
+        ], remote_test_receipts=[
+            remote_receipt(base_record(), result='TIMEOUT', source_sha=other),
+            remote_receipt(base_record(), result='TIMEOUT', executor_task='executor-2'),
+            tampered, None,
+        ])
+        self.assertEqual(task_advance._remote_test_timeout_count(record, d6()), 1)
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'RUN_REMOTE_TEST')
+        self.assertEqual(task_advance.decide(record, d6(), None, {}), 'PUBLISH')
+        record['remote_test_outcomes'] = 'malformed'
+        record['remote_test_receipts'] = {'malformed': True}
+        self.assertEqual(task_advance._remote_test_timeout_count(record, d6()), 0)
+
+    def test_one_timeout_after_pr_reruns_on_same_head_then_decides_fresh(self):
+        for second, step, codes in (
+                ('TIMEOUT', 'NEEDS_ATTENTION', ['REMOTE_TEST_TIMEOUT']),
+                ('PASS', 'DISPATCH_REVIEW', []),
+                ('FAIL', 'REPAIR_REVIEW', [])):
+            with self.subTest(second=second):
+                record = base_record(remote_test_outcomes=[self._timeout_outcome()])
+                store = type('S', (), {'get': lambda self, _id: record})()
+                calls = []
+                def remote_test(args, *, store):
+                    calls.append((args.sha, args.ref, args.pr))
+                    if second == 'TIMEOUT':
+                        record['remote_test_outcomes'].append(self._timeout_outcome())
+                    else:
+                        record.setdefault('remote_test_receipts', []).append(remote_receipt(
+                            record, result=second,
+                            excerpt='FAIL: test_x' if second == 'FAIL' else None))
+                    return 0
+                repairs = []
+                with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+                     patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+                     patch.object(task_advance, '_review_outcomes', return_value=[]), \
+                     patch.object(task_submission_cli, 'run_task_remote_test',
+                                  side_effect=remote_test):
+                    rerun = task_advance.advance(task_id=record['task_id'], store=store,
+                        pr_number=17,
+                        publish_gh_runner=lambda *_args: type('R', (), {'returncode': 0})())
+                    following = task_advance.advance(task_id=record['task_id'], store=store,
+                        pr_number=17, github_get=green_linux_ci, cwd='/repo/task',
+                        dispatch_review_call=lambda **_kwargs: {'state': 'DISPATCHED'},
+                        repair_review_call=lambda **kwargs: repairs.append(kwargs) or {})
+                self.assertEqual(rerun['step'], 'RUN_REMOTE_TEST')
+                self.assertEqual(rerun['codes'], [])
+                self.assertEqual(rerun['result']['remote_test_rerun'], 'TIMEOUT')
+                self.assertEqual(calls, [(HEAD, 'refs/pull/17/head', 17)])
+                self.assertEqual(following['step'], step)
+                self.assertEqual(following['codes'], codes)
+                if second == 'FAIL':
+                    self.assertEqual(repairs[0]['remote_test_receipt']['failure_excerpt'],
+                                     'FAIL: test_x')
+
+    def test_first_run_after_pr_carries_no_rerun_marker(self):
+        record = base_record(remote_test_outcomes=[])
+        store = type('S', (), {'get': lambda self, _id: record})()
+        def remote_test(_args, *, store):
+            record['remote_test_outcomes'].append(self._timeout_outcome())
+            return 0
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_submission_cli, 'run_task_remote_test', side_effect=remote_test):
+            first = task_advance.advance(task_id=record['task_id'], store=store, pr_number=17)
+        self.assertEqual(first['step'], 'RUN_REMOTE_TEST')
+        self.assertNotIn('remote_test_rerun', first['result'])
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'RUN_REMOTE_TEST')
 
     def test_no_admitted_modules_admission_denied_allows_review(self):
         record = base_record(remote_test_outcomes=[{
@@ -1886,6 +1989,160 @@ class TaskAdvancePublishTests(unittest.TestCase):
 
         self.assertEqual((held['step'], held['codes'], held['pr']),
                          ('NEEDS_ATTENTION', ['REMOTE_TEST_SHA_MISMATCH'], None))
+        self.assert_no_pr()
+
+    def scripted_remote_test(self, results, refs):
+        """Return a remote-test fake that records each listed result in turn."""
+        def remote_test(args, *, store):
+            refs.append((args.sha, args.ref, args.pr))
+            result = results.pop(0)
+            if result == 'TIMEOUT':
+                store.record['remote_test_outcomes'].append({
+                    'result': 'TIMEOUT', 'code': 'SSH_TIMEOUT',
+                    'executor_task': self.EXECUTOR_TASK, 'sha': args.sha,
+                    'modules': ['test_task_advance']})
+            else:
+                store.record.setdefault('remote_test_receipts', []).append(remote_receipt(
+                    store.record, source_sha=args.sha, result=result,
+                    excerpt='FAIL: test_example' if result == 'FAIL' else None,
+                    executor_task=self.EXECUTOR_TASK))
+            return 0
+        return remote_test
+
+    def test_pre_pr_timeout_reruns_once_then_second_timeout_opens_no_pr(self):
+        self.change_file()
+        store = self.gated_store()
+        refs = []
+        remote_test = self.scripted_remote_test(['TIMEOUT', 'TIMEOUT'], refs)
+
+        first = self.advance_gated(store, remote_test, dirty=True)
+        head = self.head()
+        self.assertEqual((first['step'], first['next'], first['codes'], first['pr']),
+                         ('RUN_REMOTE_TEST', 'PUBLISH', [], None))
+        self.assertNotIn('remote_test_rerun', first['result'])
+        self.assert_no_pr()
+
+        second = self.advance_gated(store, remote_test)
+        self.assertEqual((second['step'], second['codes'], second['pr']),
+                         ('NEEDS_ATTENTION', ['REMOTE_TEST_TIMEOUT'], None))
+        self.assert_no_pr()
+
+        third = self.advance_gated(store, lambda *_a, **_k: self.fail('no third remote test'))
+        self.assertEqual((third['step'], third['codes']),
+                         ('NEEDS_ATTENTION', ['REMOTE_TEST_TIMEOUT']))
+        self.assertEqual(refs, [(head, f'refs/heads/{self.BRANCH}', None)] * 2)
+        self.assert_no_pr()
+        self.assertEqual(store.published, [])
+
+    def test_pre_pr_gate_runs_at_most_one_remote_test_per_call(self):
+        store = self.gated_store()
+        refs = []
+        remote_test = self.scripted_remote_test(['TIMEOUT', 'TIMEOUT'], refs)
+        binding = {'result_head': self.head()}
+        with patch.object(task_submission_cli, 'run_task_remote_test', side_effect=remote_test):
+            status, hold = task_advance._pre_pr_remote_gate(
+                store.record, store, self.EXECUTOR_TASK, self.head(), self.BRANCH)
+            self.assertEqual((status, hold['step'], len(refs)), ('TIMEOUT', 'RUN_REMOTE_TEST', 1))
+            status, hold = task_advance._pre_pr_remote_gate(
+                store.record, store, self.EXECUTOR_TASK, self.head(), self.BRANCH)
+            self.assertEqual((status, hold['step'], len(refs)), ('TIMEOUT', 'NEEDS_ATTENTION', 2))
+        self.assertEqual(task_advance._remote_test_timeout_count(store.record, binding), 2)
+
+    def test_pre_pr_timeout_rerun_without_result_waits_and_keeps_its_one_rerun(self):
+        self.change_file()
+        store = self.gated_store()
+        refs = []
+        timeout = self.scripted_remote_test(['TIMEOUT', 'PASS'], refs)
+        replies = [timeout, None, timeout]
+        def remote_test(args, *, store):
+            reply = replies.pop(0)
+            if reply is None:
+                refs.append((args.sha, args.ref, args.pr))
+                print(json.dumps({'result': 'UNAVAILABLE', 'code': 'REMOTE_BUSY'}))
+                return 0
+            return reply(args, store=store)
+
+        self.advance_gated(store, remote_test, dirty=True)
+        waiting = self.advance_gated(store, remote_test)
+        self.assertEqual((waiting['step'], waiting['codes'], waiting['pr']),
+                         ('WAITING_REMOTE_TEST', ['REMOTE_TEST_UNAVAILABLE', 'REMOTE_BUSY'], None))
+        self.assert_no_pr()
+
+        opened = self.advance_gated(store, remote_test)
+        self.assertEqual(opened['pr'], 23)
+        self.assertEqual(len(refs), 3)
+
+    def test_pre_pr_timeout_then_pass_opens_pr(self):
+        self.change_file()
+        store = self.gated_store()
+        refs = []
+        remote_test = self.scripted_remote_test(['TIMEOUT', 'PASS'], refs)
+
+        self.advance_gated(store, remote_test, dirty=True)
+        opened = self.advance_gated(store, remote_test)
+
+        head = self.head()
+        self.assertEqual(opened, {'task_id': self.TASK_ID, 'codes': [], 'pr': 23, 'head': head})
+        self.assertEqual(refs, [(head, f'refs/heads/{self.BRANCH}', None)] * 2)
+        self.assertEqual(store.published, [(self.TASK_ID, 23, head)])
+
+    def test_pre_pr_timeout_then_fail_goes_to_repair(self):
+        self.change_file()
+        store = self.gated_store()
+        refs = []
+        remote_test = self.scripted_remote_test(['TIMEOUT', 'FAIL'], refs)
+
+        self.advance_gated(store, remote_test, dirty=True)
+        held = self.advance_gated(store, remote_test)
+
+        self.assertEqual((held['step'], held['next'], held['codes'], held['pr']),
+                         ('RUN_REMOTE_TEST', 'REPAIR_REVIEW', ['REMOTE_TEST_FAIL'], None))
+        self.assertEqual(held['result']['remote_test_rerun'], 'TIMEOUT')
+        self.assertEqual(held['result']['remote_test']['result'], 'FAIL')
+        self.assert_no_pr()
+
+        repairs = []
+        repaired = self.advance_gated(store, lambda *_a, **_k: self.fail('no third test'),
+            repair=lambda **kwargs: repairs.append(kwargs) or {'repair_task_id': 'repair-1'})
+        self.assertEqual(repaired['step'], 'REPAIR_REVIEW')
+        self.assertEqual(repairs[0]['remote_test_receipt']['failure_excerpt'], 'FAIL: test_example')
+        self.assertEqual(len(refs), 2)
+        self.assert_no_pr()
+
+    def test_pre_pr_timeout_on_another_head_does_not_count(self):
+        store = self.gated_store()
+        store.record['remote_test_outcomes'] = [{
+            'result': 'TIMEOUT', 'code': 'SSH_TIMEOUT', 'executor_task': self.EXECUTOR_TASK,
+            'sha': 'b' * 40, 'modules': ['test_task_advance']}]
+        refs = []
+        remote_test = self.scripted_remote_test(['TIMEOUT'], refs)
+        with patch.object(task_submission_cli, 'run_task_remote_test', side_effect=remote_test):
+            status, hold = task_advance._pre_pr_remote_gate(
+                store.record, store, self.EXECUTOR_TASK, self.head(), self.BRANCH)
+        # The other head's TIMEOUT does not make this head's first TIMEOUT a second one.
+        self.assertEqual((status, hold['step'], hold['next'], hold['codes']),
+                         ('TIMEOUT', 'RUN_REMOTE_TEST', 'PUBLISH', []))
+
+    def test_drive_reruns_one_pre_pr_timeout_then_stops_on_second(self):
+        store = self.gated_store()
+        refs = []
+        remote_test = self.scripted_remote_test(['TIMEOUT', 'TIMEOUT'], refs)
+        head = self.head()
+        binding = {'root': self.root, 'task_id': self.EXECUTOR_TASK, 'branch': self.BRANCH,
+                   'common_dir': os.path.join(self.tmp.name, 'canonical', '.git'),
+                   'result_head': head, 'recorded_result_head': head,
+                   'dirty': False, 'state': 'CLEAN'}
+        with patch.object(task_advance, '_d6_snapshot', return_value=binding), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(task_submission_cli, 'run_task_remote_test', side_effect=remote_test):
+            driven = task_drive.drive(task_id=self.TASK_ID, store=store, max_steps=5,
+                sleep=lambda _seconds: self.fail('drive must not poll'),
+                publish_git_runner=self.git_runner, publish_gh_runner=self.gh,
+                record_result_call=self.record_result,
+                github_get=lambda path: self.fail(f'unexpected read: {path}'))
+        self.assertEqual((driven['step'], driven['codes'], driven['steps']),
+                         ('NEEDS_ATTENTION', ['REMOTE_TEST_TIMEOUT'], 2))
+        self.assertEqual(refs, [(head, f'refs/heads/{self.BRANCH}', None)] * 2)
         self.assert_no_pr()
 
     def test_remote_test_refusal_is_named_and_opens_no_pr(self):

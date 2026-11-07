@@ -1129,6 +1129,47 @@ def _remote_test_status(record, d6):
     return None, None, None
 
 
+def _remote_test_timeout_count(record, d6):
+    """Count exact-head TIMEOUT results for the record's executor Task.
+
+    A receipt counts only when it passes the checks _remote_test_status applies;
+    an outcome counts only when it names this executor and head. Anything
+    malformed is not counted.
+    """
+    head = d6.get('result_head') if type(d6) is dict else None
+    completion = record.get('completion') if type(record) is dict else None
+    executor_task = completion.get('executor_task_id') if type(completion) is dict else None
+    if type(head) is not str or type(executor_task) is not str:
+        return 0
+    count = 0
+    receipts = record.get('remote_test_receipts', [])
+    for receipt in receipts if type(receipts) is list else []:
+        if (type(receipt) is not dict or
+                receipt.get('task_id') != record.get('task_id') or
+                receipt.get('run_id') != record.get('run_id') or
+                receipt.get('executor_task') != executor_task or
+                receipt.get('source_sha') != head or
+                receipt.get('result') != 'TIMEOUT' or
+                type(receipt.get('modules')) is not list or not receipt['modules']):
+            continue
+        digest_input = dict(receipt)
+        claimed = digest_input.pop('receipt_digest', None)
+        if (type(claimed) is str and
+                claimed == hashlib.sha256(_json_bytes(digest_input)).hexdigest()):
+            count += 1
+    outcomes = record.get('remote_test_outcomes', [])
+    for outcome in outcomes if type(outcomes) is list else []:
+        if (type(outcome) is dict and outcome.get('executor_task') == executor_task and
+                outcome.get('sha') == head and outcome.get('result') == 'TIMEOUT'):
+            count += 1
+    return count
+
+
+def _timeout_rerun_due(record, d6, status):
+    """Return True when one exact-head TIMEOUT allows one more run on that head."""
+    return status == 'TIMEOUT' and _remote_test_timeout_count(record, d6) == 1
+
+
 def _run_remote_test(store, task_id, executor_task, head, ref, pr):
     """Run one remote test through the CLI adapter and return its emitted result."""
     args = Namespace(task_id=task_id, executor_task=executor_task, sha=head, ref=ref,
@@ -1156,6 +1197,8 @@ def _pre_pr_remote_gate(record, store, executor_task, head, branch):
 
     Return (status, hold). A None hold lets the PR open. A None status with it
     means no test module is declared, so the PR-ref step records that as today.
+    One stored exact-head TIMEOUT runs the test once more; a second one holds.
+    Each call runs at most one remote test.
     """
     if not remote_test._task_path_modules(record):
         return None, None
@@ -1163,14 +1206,23 @@ def _pre_pr_remote_gate(record, store, executor_task, head, branch):
     binding = {'result_head': head}
     identity = {'task_id': task_id, 'executor_task': executor_task, 'head': head}
     remote_result = None
+    rerun = False
     try:
         fresh = store.get(task_id)
         status = _remote_test_status(fresh, binding)[0]
-        if status is None:
+        timeouts = _remote_test_timeout_count(fresh, binding)
+        # One exact-head TIMEOUT is an environment failure: run once more.
+        rerun = status == 'TIMEOUT' and timeouts == 1
+        if status is None or rerun:
             remote_result = _run_remote_test(store, task_id, executor_task, head,
                                              f'refs/heads/{branch}', None)
             fresh = store.get(task_id)
             status = _remote_test_status(fresh, binding)[0]
+            later = _remote_test_timeout_count(fresh, binding)
+            if status == 'TIMEOUT' and later == timeouts:
+                # This run left no new result, so the earlier TIMEOUT still decides.
+                status = None
+            timeouts = later
     except Exception as exc:
         return None, _remote_test_hold(
             'REMOTE_TEST_REFUSED',
@@ -1178,8 +1230,15 @@ def _pre_pr_remote_gate(record, store, executor_task, head, branch):
     if status in ('PASS', 'ADMISSION_DENIED'):
         return status, None
     if status == 'FAIL':
-        return status, _remote_test_hold('RUN_REMOTE_TEST', ['REMOTE_TEST_FAIL'],
-                                         record=fresh, next_step='REPAIR_REVIEW', **identity)
+        hold = _remote_test_hold('RUN_REMOTE_TEST', ['REMOTE_TEST_FAIL'],
+                                 record=fresh, next_step='REPAIR_REVIEW', **identity)
+        if rerun:
+            hold['result']['remote_test_rerun'] = 'TIMEOUT'
+        return status, hold
+    if status == 'TIMEOUT' and timeouts == 1:
+        # The first TIMEOUT on this head: the next publish step reruns it.
+        return status, _remote_test_hold('RUN_REMOTE_TEST', [], record=fresh,
+                                         next_step='PUBLISH', **identity)
     if status in ('TIMEOUT', 'SHA_MISMATCH'):
         return status, _remote_test_hold('NEEDS_ATTENTION', ['REMOTE_TEST_' + status],
                                          record=fresh, **identity)
@@ -1265,6 +1324,8 @@ def derive_repair_state(repair_record):
 def _pre_review_action(record, d6, pr, related, result_head):
     """Return the gate action before a Reviewer may start on this head."""
     remote_status, _, _ = _remote_test_status(record, d6)
+    if _timeout_rerun_due(record, d6, remote_status):
+        return 'RUN_REMOTE_TEST'
     if remote_status in ('TIMEOUT', 'SHA_MISMATCH'):
         return 'NEEDS_ATTENTION'
     if remote_status == 'FAIL':
@@ -1302,8 +1363,11 @@ def decide(record, d6, pr, related):
     if (type(chosen_pr) is not int or chosen_pr < 1 or type(pr_head) is not dict or
             pr_head.get('sha') != result_head):
         # EC2 runs on the branch before any PR, so a stopped head stays here
-        # with no PR. Every other state re-enters the idempotent publish step.
+        # with no PR. Every other state re-enters the idempotent publish step,
+        # whose pre-PR gate reruns one exact-head TIMEOUT.
         remote_status, _, _ = _remote_test_status(record, d6)
+        if _timeout_rerun_due(record, d6, remote_status):
+            return 'PUBLISH'
         if remote_status in ('TIMEOUT', 'SHA_MISMATCH'):
             return 'NEEDS_ATTENTION'
         if remote_status == 'FAIL':
@@ -1736,6 +1800,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         else:
             step = 'REVIEW_OUTCOME_UNKNOWN'
     if step == 'RUN_REMOTE_TEST':
+        # decide chose this step for a stored TIMEOUT only when one more run is due.
+        rerun = _remote_test_status(record, d6)[0] == 'TIMEOUT'
         try:
             remote_result = _run_remote_test(store, task_id, executor_task, d6['result_head'],
                                              f'refs/pull/{number}/head', number)
@@ -1744,6 +1810,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                 codes.append(code)
             result = {'task_id': task_id, 'executor_task': executor_task,
                       'head': d6['result_head']}
+            if rerun:
+                result['remote_test_rerun'] = 'TIMEOUT'
             try:
                 fresh_record = store.get(task_id)
             except Exception:
