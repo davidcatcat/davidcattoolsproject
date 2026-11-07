@@ -31,6 +31,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
+from . import source_freshness
 from . import trust
 from .errors import LLMToolError
 from .test_output_excerpts import select_test_excerpts
@@ -1104,10 +1105,7 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
     while current != source_sha:
         if current not in listed_commits:
             _stop('SOURCE_NOT_ANCESTOR')
-        parents = commit_parents[current]
-        if not parents:
-            _stop('SOURCE_NOT_ANCESTOR')
-        current = parents[0]
+        current = commit_parents[current][0]
 
     inherited = set()
     merge_parents = {}
@@ -1128,25 +1126,8 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
         inherited.update(inherited_commits)
         if len(fields) > 3:
             continue
-        resolution_raw = _remerge_diff_paths_raw(root, commit)
-        first_parent = fields[1]
-        conflict_raw = _merge_tree_conflict_paths_raw(
-            root, first_parent, second_parent)
-        try:
-            resolution_paths = set(
-                path for path in resolution_raw.decode('utf-8', 'strict').split('\x00')
-                if path)
-            conflict_fields = conflict_raw.decode('utf-8', 'strict').split('\x00')
-            if (len(conflict_fields) < 2 or
-                    re.fullmatch(r'[0-9a-f]{40}', conflict_fields[0]) is None or
-                    conflict_fields[-1] != ''):
-                _stop('GIT_INSPECTION_FAILED')
-            conflict_paths = conflict_fields[1:-1]
-            if any(not path for path in conflict_paths):
-                _stop('GIT_INSPECTION_FAILED')
-            merge_resolution_paths[commit] = resolution_paths | set(conflict_paths)
-        except UnicodeError:
-            _stop('GIT_INSPECTION_FAILED')
+        merge_resolution_paths[commit] = _merge_resolution_paths(
+            root, commit, fields[1], second_parent)
 
     developer_paths = set()
     for commit in commit_ids:
@@ -1178,58 +1159,155 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
     return tuple(sorted(developer_paths))
 
 
-def _remerge_diff_paths_raw(root, commit):
-    """Read resolution paths while containing synthetic merge object writes."""
+def _merge_resolution_paths(root, commit, first_parent, second_parent):
+    """Return the paths a two-parent merge resolved by hand or conflicted on."""
+    resolution_raw = _remerge_diff_paths_raw(root, commit)
+    conflict_raw = _merge_tree_conflict_paths_raw(root, first_parent, second_parent)
+    try:
+        resolution_paths = set(
+            path for path in resolution_raw.decode('utf-8', 'strict').split('\x00')
+            if path)
+        conflict_fields = conflict_raw.decode('utf-8', 'strict').split('\x00')
+        if (len(conflict_fields) < 2 or
+                re.fullmatch(r'[0-9a-f]{40}', conflict_fields[0]) is None or
+                conflict_fields[-1] != ''):
+            _stop('GIT_INSPECTION_FAILED')
+        conflict_paths = conflict_fields[1:-1]
+        if any(not path for path in conflict_paths):
+            _stop('GIT_INSPECTION_FAILED')
+    except UnicodeError:
+        _stop('GIT_INSPECTION_FAILED')
+    return resolution_paths | set(conflict_paths)
+
+
+def _developer_tip(root, start_sha, head_sha, trusted_base_sha=None):
+    """Return head_sha with its trailing clean trusted-main merges stripped.
+
+    A stripped merge has exactly two parents, a trusted second parent and no
+    resolution or conflict path, so it adds nothing to its first parent except
+    trusted main. The first commit that fails is returned, or else start_sha.
+    """
+    if trusted_base_sha is None:
+        trusted_base_sha = start_sha
+    current = head_sha
+    while current != start_sha:
+        raw = _git(root, ('rev-list', '--parents', '-n', '1', current), limit=4096)
+        parents = raw.decode('ascii').split()[1:]
+        if (len(parents) != 2 or not _is_ancestor(root, parents[1], trusted_base_sha) or
+                _merge_resolution_paths(root, current, parents[0], parents[1])):
+            return current
+        current = parents[0]
+    return start_sha
+
+
+def read_authenticated_main_sha():
+    """Return the commit of main read from GitHub for the trusted repository.
+
+    This is the only anchor for "trusted main": a PR base.sha, origin/main or any
+    local ref can be stale or Developer-controlled. Every failure stops as
+    MAIN_REF_PIN_INVALID.
+    """
+    try:
+        response = _github_get('git/ref/heads/main')
+    except Exception:
+        _stop('MAIN_REF_PIN_INVALID')
+    if (type(response) is not dict or response.get('ref') != 'refs/heads/main' or
+            type(response.get('object')) is not dict or
+            response['object'].get('type') != 'commit' or
+            type(response['object'].get('sha')) is not str or
+            _HEX40.fullmatch(response['object']['sha']) is None):
+        _stop('MAIN_REF_PIN_INVALID')
+    return response['object']['sha']
+
+
+def _commit_present(root, sha):
+    try:
+        _git(root, ('cat-file', '-e', sha + '^{commit}'), limit=4096)
+    except LLMToolError:
+        return False
+    return True
+
+
+def ensure_main_commit(root, main_sha):
+    """Return whether main_sha is local, fetching origin/main at most once."""
+    if _commit_present(root, main_sha):
+        return True
+    source_freshness._fetch_origin_main(root)
+    return _commit_present(root, main_sha)
+
+
+def head_adds_only_main(root, recorded_head, head):
+    """Return whether head is recorded_head plus only clean merges of fresh main.
+
+    Main is read afresh for each decision. Anything unreadable is not admitted.
+    """
+    if any(type(sha) is not str or _HEX40.fullmatch(sha) is None
+           for sha in (recorded_head, head)):
+        return False
+    try:
+        main_sha = read_authenticated_main_sha()
+        if not ensure_main_commit(root, main_sha):
+            return False
+        # A graft file could rewrite the parents that the walk below trusts.
+        _reject_legacy_grafts(root)
+        return _developer_tip(root, recorded_head, head, main_sha) == recorded_head
+    except Exception:
+        return False
+
+
+def _diff_paths(root, start_sha, end_sha):
+    """Return the sorted paths that differ between two commits."""
+    changed = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv',
+                          '--no-renames', start_sha, end_sha, '--'), limit=1024 * 1024)
+    return tuple(sorted(set(path for path in changed.decode('utf-8', 'strict').split('\x00')
+                            if path)))
+
+
+def _private_merge_read(root, args, **git_options):
+    """Run one merge read in a private temporary bare repository.
+
+    A merge in the Developer repository would honour its merge.* config,
+    custom merge drivers, info/attributes and .gitattributes: a driver could
+    run a command here and hide a conflict path. The private repository has
+    only core.bare=true config, an unborn HEAD (so no attribute tree), no
+    index and no attributes. Repository objects are reachable only as
+    read-only alternates, and every object the merge writes stays private.
+    Every failure stops as GIT_INSPECTION_FAILED, including the timeout,
+    unavailable and oversized-output codes that _git classifies.
+    """
     try:
         objects = _git(root, ('rev-parse', '--path-format=absolute', '--git-path', 'objects'),
                        limit=4096).decode('utf-8', 'strict').strip()
-    except UnicodeError:
-        _stop('GIT_INSPECTION_FAILED')
-    if not objects or not os.path.isabs(objects):
-        _stop('GIT_INSPECTION_FAILED')
-    try:
-        with tempfile.TemporaryDirectory(prefix='llmtool-remerge-objects-') as temporary:
-            object_dir = Path(temporary) / 'objects'
-            object_dir.mkdir(mode=0o700)
-            return _git(root, ('show', '--remerge-diff', '--format=', '--no-renames',
-                               '--name-only', '-z', commit), limit=1024 * 1024,
-                        env_overrides={
-                            'GIT_OBJECT_DIRECTORY': str(object_dir),
-                            'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
-                        })
-    except LLMToolError:
-        raise
+        if not objects or not os.path.isabs(objects):
+            _stop('GIT_INSPECTION_FAILED')
+        with tempfile.TemporaryDirectory(prefix='llmtool-merge-read-') as temporary:
+            private = Path(temporary).resolve()
+            (private / 'objects').mkdir(mode=0o700)
+            (private / 'refs').mkdir(mode=0o700)
+            (private / 'HEAD').write_text('ref: refs/heads/llmtool-merge-read\n',
+                                          encoding='ascii')
+            (private / 'config').write_text(
+                '[core]\n\trepositoryformatversion = 0\n\tbare = true\n',
+                encoding='ascii')
+            return _git(str(private), args, env_overrides={
+                'GIT_DIR': str(private),
+                'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
+            }, **git_options)
     except Exception:
         _stop('GIT_INSPECTION_FAILED')
+
+
+def _remerge_diff_paths_raw(root, commit):
+    """Read resolution paths without repository merge config or attributes."""
+    return _private_merge_read(root, ('show', '--remerge-diff', '--format=', '--no-renames',
+                                      '--name-only', '-z', commit), limit=1024 * 1024)
 
 
 def _merge_tree_conflict_paths_raw(root, first_parent, second_parent):
-    """List conflict paths with all merge-tree object writes kept temporary."""
-    try:
-        objects = _git(root, ('rev-parse', '--path-format=absolute', '--git-path', 'objects'),
-                       limit=4096).decode('utf-8', 'strict').strip()
-    except UnicodeError:
-        _stop('GIT_INSPECTION_FAILED')
-    if not objects or not os.path.isabs(objects):
-        _stop('GIT_INSPECTION_FAILED')
-    try:
-        with tempfile.TemporaryDirectory(prefix='llmtool-merge-tree-objects-') as temporary:
-            object_dir = Path(temporary) / 'objects'
-            object_dir.mkdir(mode=0o700)
-            output, status = _git(root, ('merge-tree', '--write-tree', '--name-only',
-                                  '--no-messages', '-z', first_parent, second_parent),
-                limit=1024 * 1024, allow_exit_1=True, return_exit_code=True,
-                env_overrides={
-                    'GIT_OBJECT_DIRECTORY': str(object_dir),
-                    'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
-                })
-            if status not in (0, 1):
-                _stop('GIT_INSPECTION_FAILED')
-            return output
-    except LLMToolError:
-        raise
-    except Exception:
-        _stop('GIT_INSPECTION_FAILED')
+    """List conflict paths without repository merge config or attributes."""
+    return _private_merge_read(root, ('merge-tree', '--write-tree', '--name-only',
+                                      '--no-messages', '-z', first_parent, second_parent),
+                               limit=1024 * 1024, allow_exit_1=True)
 
 
 def _is_ancestor(root, ancestor, descendant):
@@ -1283,11 +1361,10 @@ def _collect_registered_result_diff(*, task_id, expected_common_dir, expected_ro
         limit=4096, allow_exit_1=True, return_exit_code=True)
     if ancestor_status != 0:
         _stop('SOURCE_NOT_ANCESTOR')
-    changed = _git(registration.root, ('diff', '--name-only', '-z', '--no-ext-diff',
-                  '--no-textconv', '--no-renames', source_sha, snapshot.head, '--'),
-                   limit=1024*1024)
-    paths = tuple(sorted(set(path for path in changed.decode('utf-8', 'strict').split('\x00') if path)))
-    if not paths or len(paths) > 128:
+    # The 128-path limit counts Developer paths only: a merged main can bring in
+    # any number of its own files.
+    paths = _diff_paths(registration.root, source_sha, snapshot.head)
+    if not paths:
         _stop('RESULT_DIFF_INVALID')
     developer_paths = _developer_changed_paths(
         registration.root, source_sha, snapshot.head, trusted_base_sha)
@@ -1315,10 +1392,14 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
         expected_native_session_id=expected_native_session_id,
         write_paths=write_paths, artifact_segments=artifact_segments,
         trusted_base_sha=trusted_base_sha)
+    # An artifact describes the Developer's work, so it is compared with the
+    # Developer tip. Paths, digest and scope above still cover the full head.
     if artifact_segments is None:
+        tip = _developer_tip(registration.root, source_sha, snapshot.head, trusted_base_sha)
         verify_artifact_applied(registration.root, artifact, artifact_sha256,
-                                source_sha, snapshot.head, paths, write_paths,
-                                scope_paths=developer_paths)
+                                source_sha, tip,
+                                _diff_paths(registration.root, source_sha, tip),
+                                write_paths, scope_paths=developer_paths)
     else:
         if (type(artifact_segments) is not list or not artifact_segments or
                 any(type(segment) is not tuple or len(segment) != 4
@@ -1339,19 +1420,18 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
                      limit=4096)
             except LLMToolError:
                 _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
-            changed_segment = _git(registration.root,
-                ('diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv',
-                 '--no-renames', start_sha, end_sha, '--'), limit=1024*1024)
-            segment_paths = tuple(sorted(set(
-                path for path in changed_segment.decode('utf-8', 'strict').split('\x00') if path)))
+            segment_paths = _diff_paths(registration.root, start_sha, end_sha)
             segment_developer_paths = _developer_changed_paths(
                 registration.root, start_sha, end_sha, trusted_base_sha)
             if (not segment_paths or not segment_developer_paths or
                     not set(segment_developer_paths).issubset(set(write_paths))):
                 _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+            segment_tip = _developer_tip(registration.root, start_sha, end_sha,
+                                         trusted_base_sha)
             try:
                 verify_artifact_applied(registration.root, segment_artifact,
-                    segment_digest, start_sha, end_sha, segment_paths, write_paths,
+                    segment_digest, start_sha, segment_tip,
+                    _diff_paths(registration.root, start_sha, segment_tip), write_paths,
                     scope_paths=segment_developer_paths)
             except LLMToolError:
                 _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
@@ -1387,10 +1467,16 @@ def collect_claude_result(*, task_id, expected_common_dir, expected_root,
         expected_native_session_id=expected_native_session_id,
         write_paths=write_paths, trusted_base_sha=trusted_base_sha)
     if (type(claude_result) is not dict or
-            claude_result.get('executor_task_id') != registration.task_id or
-            claude_result.get('head_sha') != registration.result_sha):
+            claude_result.get('executor_task_id') != registration.task_id):
         _stop('CLAUDE_RESULT_BINDING_INVALID')
-    if claude_result.get('head_sha') != snapshot.head:
+    claimed_head = claude_result.get('head_sha')
+    if claimed_head != registration.result_sha:
+        # The bound result stays valid when the head only adds clean main merges.
+        if (type(claimed_head) is not str or _HEX40.fullmatch(claimed_head) is None or
+                _developer_tip(registration.root, claimed_head, snapshot.head,
+                               trusted_base_sha) != claimed_head):
+            _stop('CLAUDE_RESULT_BINDING_INVALID')
+    elif claimed_head != snapshot.head:
         _stop('RESULT_HEAD_MISMATCH')
     _reject_legacy_grafts(registration.root, registration.common_dir)
     return {

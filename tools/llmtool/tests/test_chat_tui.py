@@ -5677,6 +5677,79 @@ class PMConversationTests(BoundedPMTest):
         self.assertNotIn('供應商', status)
         self.assertNotIn('provider:', status)
 
+    def bind_codex(self, account):
+        binding = dict(self.binding, runtime='codex', account=account)
+        self.api.current_binding = lambda session_id=None: binding
+
+    def connect_and_status(self):
+        """(connect text, /status text, status bar fields) of one connected PM."""
+        fields = {}
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: fields.update(
+                                ui.pm_status_fields(lambda value, _width: value)),
+                            '/status\r',
+                            lambda ui: self.until(ui, lambda ui: '狀態（PM 模式）' in
+                                                  ui.conversation.text)])
+        connect, status = ui.conversation.text.split('> /status', 1)
+        return connect, status, fields
+
+    def test_connect_line_keeps_the_claude_text(self):
+        connect, _, fields = self.connect_and_status()
+        self.assertIn('PM mode: Enter sends each draft in real time to the PM session '
+                      + self.session_id + ' (claude-code, cwd ', connect)
+        self.assertIn(') through pm_runtime; ', connect)
+        self.assertIn('; claude-code account default. pm_runtime checked at connect time '
+                      'that the session did not look open elsewhere. Esc interrupts a turn; '
+                      '/pm disconnect ends the connection. Chat replies are never the PM.',
+                      connect)
+        self.assertEqual(fields['identity'], 'claude/default')
+
+    def test_codex_binding_names_codex_on_the_connect_line_and_status(self):
+        self.bind_codex('codex-test')
+        connect, status, fields = self.connect_and_status()
+        self.assertIn('the PM session ' + self.session_id + ' (codex, cwd ', connect)
+        self.assertIn('; codex account codex-test. pm_runtime checked', connect)
+        self.assertNotIn('(claude-code, cwd', connect)
+        self.assertNotIn('claude-code account', connect)
+        self.assertIn('PM session：' + self.session_id + '（codex，cwd .）', status)
+        self.assertIn('  帳號：codex-test\n', status)
+        self.assertNotIn('Claude', status)
+        self.assertNotIn('claude-code', status)
+        self.assertNotIn('權限模式', status)
+        ordered = ['狀態（PM 模式）', 'PM session：', '帳號：', 'PM 狀態：', '背景：',
+                   '佇列（本機設定）：', '主題（本機設定）：', '用量（本 session）：',
+                   'Context 與額度：']
+        positions = [status.index(line) for line in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(fields['identity'], 'codex/codex-test')
+
+    def assert_codex_account_unknown(self, account):
+        self.bind_codex(account)
+        _, status, _ = self.connect_and_status()
+        self.assertIn('  帳號：UNKNOWN\n', status)
+        self.assertNotIn('Claude 帳號目錄', status)
+
+    def test_status_shows_unknown_for_a_codex_binding_with_no_account(self):
+        self.assert_codex_account_unknown(None)
+
+    def test_status_shows_unknown_for_a_codex_binding_with_an_empty_account(self):
+        self.assert_codex_account_unknown('')
+
+    def test_status_without_a_binding_takes_the_runtime_from_the_runtime_object(self):
+        def check(ui):
+            real, ui.pm_runtime, ui.pm_binding = ui.pm_runtime, Mock(runtime='codex'), None
+            try:
+                status = ui.status_report()
+                identity = ui.pm_status_fields(lambda value, _width: value)['identity']
+            finally:
+                ui.pm_runtime = real
+            self.assertIn('PM session：' + self.session_id + '（codex，cwd .）', status)
+            self.assertIn('  帳號：UNKNOWN\n', status)
+            self.assertNotIn('權限模式', status)
+            self.assertEqual(identity, 'codex/default')
+
+        self.drive([self.connect(), self.connected, check])
+
     def test_status_pm_history_read_failure_shows_unknown_and_returns(self):
         ui, _ = self.drive([self.connect(), self.connected,
                             lambda ui: setattr(ui.pm_api, 'read_all_turns',
