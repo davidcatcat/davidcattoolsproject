@@ -54,6 +54,30 @@ The Owner authorizes **incremental improvement on the already delivered TUI**, t
 | 5 | Install experience: `setup`, version/migrate, uninstall, private release (R1…R10; R1/R2 can start first) | 1–3 | [#396](https://github.com/davidcatcat/davidcattoolsproject/issues/396#issuecomment-6553006696) |
 | 6 | Pluggable execution backend local/ssh/github-actions (PR-1…PR-9; PR-9 needs D13 approval) | 1, #417 DET-1 | [#417](https://github.com/davidcatcat/davidcattoolsproject/issues/417#issuecomment-6552996403) |
 
+## A12.1 — Telegram v1: read-only status and notifications (#1160)
+
+Owner order puts A12.1 Telegram after the Mac CLI and before the A12.2 local Web UI. Requirements are not yet agreed. This work builds only what the posted [v1 design](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6552977888) fixes. Open questions wait for the Owner.
+
+- Read-only status and notifications only.
+- No approvals, Task creation, execution, free chat to the PM or STOP from Telegram.
+- No standing service, listener, webhook, launchd item or runner.
+- No egress except the Telegram Bot API.
+- Every outbound text passes the existing sensitive-content screens.
+- Only opaque Task codes, states, counts and times leave.
+- A bot token and a chat ID are credentials held by the Owner. No AI creates, requests, prints or stores them, so the real transport and setup wait for the Owner.
+
+| Part | Needs | Status |
+| --- | --- | --- |
+| 1. Channel module `telegram_channel.py`: status text, notification events, screened delivery over an injected transport | Nothing | PR #1170; offline, not wired |
+| 2. Per-chat cursor and dedupe `telegram_cursor.py` | Nothing | PR #1165; offline, not wired |
+| 3. Real Bot API transport, token file, pairing and allowlist | Owner enables new data egress and holds the token | Not started |
+| 4. Foreground run command | Owner decides run mode | Not started |
+| 5. Remote approve and reject | A11b.3 `REMOTE_OWNER` issuer, Security review and an Owner grant | Not started |
+
+The cursor follows the same private state-file rules as the WP5 GitHubSync poll ledger (#1144); a shared helper can follow once both merge.
+
+Gap analysis and open Owner questions: [#1160 comment](https://github.com/davidcatcat/davidcattoolsproject/issues/1160#issuecomment-6705724171).
+
 ## Future backlog — TUI attachments (DEFERRED, Owner 2026-11-03)
 
 **Position:** Last in this Roadmap, **after A13**. Parked for future consideration; not part of active A3.5 W58–W63, A11c or A13 delivery. This is an item in the existing backlog, **not a new A-series milestone**.
