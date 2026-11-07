@@ -950,7 +950,15 @@ def descriptors():
         try: fcntl.fcntl(fd, fcntl.F_GETFD); result.add(fd)
         except OSError: pass
     return result
+def fd_target(fd):
+    try: return os.readlink('/proc/self/fd/%d' % fd)
+    except OSError: return 'unavailable'
+def fd_report(number, current):
+    added = ['%d -> %s' % (fd, fd_target(fd)) for fd in sorted(current - baseline)]
+    removed = ['%d -> %s' % (fd, baseline_targets[fd]) for fd in sorted(baseline - current)]
+    return 'descriptors changed at loop %d: added=%s removed=%s' % (number, added, removed)
 baseline = descriptors()
+baseline_targets = {fd: fd_target(fd) for fd in baseline}
 s = DiagnosticsStore(DiagnosticsSettings(persist_metadata=True, max_runs=80), home=sys.argv[1])
 def complete(w):
     assert w is not None, s.warning
@@ -962,12 +970,12 @@ def complete(w):
     assert w.finish(summary), w.warning
 for number in range(80):
     complete(s.start('%032x' % number))
-    assert descriptors() == baseline
+    assert (current := descriptors()) == baseline, fd_report(number, current)
 assert len(os.listdir(os.path.join(sys.argv[1], 'runs'))) == 80
 # Existing implementation holds 160 candidate descriptors, above the 64 soft limit.
 for number in range(80, 90):
     complete(s.start('%032x' % number))
-    assert descriptors() == baseline
+    assert (current := descriptors()) == baseline, fd_report(number, current)
 assert len(os.listdir(os.path.join(sys.argv[1], 'runs'))) == 80
 assert not os.path.exists(os.path.join(sys.argv[1], 'runs', '%032x' % 0))
 print('NOFILE_64_RUNS_80_NO_LEAK_PASS')
