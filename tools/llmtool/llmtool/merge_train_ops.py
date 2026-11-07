@@ -16,7 +16,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import re
 
-from . import merge_train, merge_train_store, task_advance, task_completion
+from . import merge_train as _train_build
+from . import merge_train_store, task_advance, task_completion
 
 _HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 _CODE = re.compile(r'[A-Z][A-Z0-9_]{0,63}\Z')
@@ -214,7 +215,7 @@ def merge_train(train_id, *, store, github_get, gh_runner, root, train_root=None
         return _refused(TRAIN_PR_STALE)
 
     heads = [member['head'] for member in record['members']]
-    if merge_train.train_delta_verified(root, record['main_sha'], heads, train_head) is not True:
+    if _train_build.train_delta_verified(root, record['main_sha'], heads, train_head) is not True:
         return _refused(TRAIN_DELTA_UNVERIFIED)
 
     for member in record['members']:
