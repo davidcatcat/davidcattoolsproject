@@ -3943,8 +3943,16 @@ class TaskAdvanceReviewRefusalTests(unittest.TestCase):
         two = dict(store.record, review_dispatch_claim=[claim, dict(
             claim, version=2, reviewer_task='reviewer-2')])
         self.assertEqual(task_advance.decide(two, d6(), PR, {}), 'REVIEW_UNUSABLE_STOPPED')
-        self.assertEqual(task_advance._merge_pass_claim(two, 17, HEAD, []),
-                         'MERGE_REVIEW_NOT_PASS')
+        # No refused claim is a merge candidate, so the PASS lookup finds
+        # nothing and the merge gate maps that to MERGE_REVIEW_NOT_PASS.
+        self.assertIsNone(task_advance._merge_pass_claim(two, 17, HEAD, []))
+        merged = task_advance._merge_once(
+            store=store, record=two, number=17, head=HEAD,
+            pr={'number': 17, 'head': {'sha': HEAD}}, events=[],
+            github_get=lambda *_args: self.fail('no GitHub read'),
+            gh_runner=lambda *_args: self.fail('no GitHub call'), root=None)
+        self.assertEqual(merged, {'step': 'MERGE_REFUSED',
+                                  'codes': ['MERGE_REVIEW_NOT_PASS'], 'result': None})
 
     def test_drive_stops_after_one_refused_advance_and_redispatches_only_later(self):
         store, dispatched = self.rooted_store(), []
