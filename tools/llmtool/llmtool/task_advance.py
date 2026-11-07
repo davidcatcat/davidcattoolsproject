@@ -1023,6 +1023,10 @@ def derive_repair_state(repair_record):
         return 'UNKNOWN'
     developer = repair_record.get('developer')
     state = developer.get('state') if type(developer) is dict else None
+    # This failure updates only the developer field, so check it before the
+    # top-level state, which may still read PM_PENDING.
+    if state == 'BLOCKED' and developer.get('error_code') == 'CLAUDE_NO_CHANGES':
+        return 'BLOCKED'
     if state == 'DEVELOPER_PENDING' or repair_record.get('state') == 'PM_PENDING':
         return 'PENDING'
     if state == 'DEVELOPER_DISPATCHING':
@@ -1134,6 +1138,11 @@ def decide(record, d6, pr, related):
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') == 'RESPONDED'):
                 return 'PUBLISH'
+            # Only a COMPLETED claim's outcome carries a count. Without a code
+            # finding a Developer has nothing to repair, so the PM decides.
+            findings = event.get('findings_count')
+            if claim.get('state') == 'COMPLETED' and type(findings) is int and findings == 0:
+                return 'REVIEW_NO_CODE_FINDING'
             return 'REPAIR_REVIEW'
         if outcome == 'REVIEW_PASS':
             completion = record.get('completion')
@@ -1251,7 +1260,8 @@ def _review_outcomes(record, claims, github_get):
                 continue
             if any(event.get('event_id') == event_id for event in events):
                 outcomes.append({'source': 'REVIEWER', 'source_sha': head,
-                                 'version': version, 'outcome': latest[2]})
+                                 'version': version, 'outcome': latest[2],
+                                 'findings_count': latest[3]})
             continue
         if claim.get('state') != 'DISPATCHED':
             continue
@@ -1719,7 +1729,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         failure = _failure_reason(claim.get('failure_reason')) if claim else None
         if failure is not None:
             codes.append(failure)
-    elif step in ('WAITING_REPAIR', 'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH'):
+    elif step in ('WAITING_REPAIR', 'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH',
+                  'REVIEW_NO_CODE_FINDING'):
         codes.append(step)
     next_action =('resume the reviewer to post its verdict' if step == 'REVIEW_NOT_POSTED'
                    else step)
