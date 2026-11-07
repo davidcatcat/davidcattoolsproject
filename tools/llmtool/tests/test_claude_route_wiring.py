@@ -1,5 +1,6 @@
 import contextlib
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -10,6 +11,8 @@ from unittest.mock import Mock, patch
 
 from llmtool import task_submission_cli
 from llmtool import review_repair
+from llmtool import skill_ledger
+from llmtool import skill_manifest
 from llmtool import task_advance
 from llmtool import worker_dispatch
 from llmtool.developer_routes import RouteError
@@ -18,6 +21,12 @@ from llmtool.task_store import TaskStore
 
 
 import review_trust_fixture
+
+
+_SKILL_MANIFEST = {'commit': 'd' * 40, 'role': 'developer', 'gate': 'develop',
+                   'entries': [], 'manifest_sha256': '7' * 64}
+_SKILL_FILES = [('CLAUDE.md', 'Claude repository rules.\n'),
+                ('skills/ai-team-delivery/SKILL.md', 'Delivery skill rules.\n')]
 
 
 def setUpModule():
@@ -137,6 +146,11 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             patch.object(task_submission_cli, 'for_platform', return_value=PolicyBoundary()),
             patch.object(task_submission_cli, '_task_view', return_value={}),
             patch.object(task_submission_cli, 'run_task_direct_result_event', return_value=0),
+            patch.object(task_submission_cli.skill_manifest, 'build_manifest',
+                         return_value=_SKILL_MANIFEST),
+            patch.object(task_submission_cli.skill_manifest, 'read_manifest_files',
+                         return_value=_SKILL_FILES),
+            patch.object(task_submission_cli.skill_ledger, 'record', return_value='receipt'),
         ]
         return task_submission_cli, store, args, registration, evaluations, prompts, requests, patches, route_runner
 
@@ -262,6 +276,133 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                             for call in evaluations))
         self.assertTrue(all('log_path' not in request for request in requests))
         self.assertIn('Claude Developer', prompts[0])
+
+    def test_success_embeds_manifest_skill_text_and_records_delivery(self):
+        cli, store, args, registration, _evaluations, prompts, _requests, patches, runner = self._setup()
+        build, read, record = (next(item for item in patches if item.attribute == name)
+                               for name in ('build_manifest', 'read_manifest_files', 'record'))
+        with contextlib.ExitStack() as stack:
+            entered = {id(item): stack.enter_context(item) for item in patches}
+            status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+        self.assertEqual(status, 0)
+        entered[id(build)].assert_called_once_with(
+            registration.root, 'd' * 40, 'developer', 'develop', provider='claude')
+        entered[id(read)].assert_called_once_with(registration.root, _SKILL_MANIFEST)
+        prompt = prompts[0]
+        raw = prompt.encode('utf-8')
+        for path, text in _SKILL_FILES:
+            self.assertIn('REQUIRED_SKILL_BEGIN path=' + path + '\n' + text, prompt)
+            self.assertLess(prompt.index(text), prompt.index('\nTASK_JSON='))
+        self.assertLess(len(raw), 64 * 1024)
+        developer = store.task['developer']
+        self.assertEqual(developer['input_bytes'], len(raw))
+        self.assertEqual(developer['context_sha256'], hashlib.sha256(raw).hexdigest())
+        entered[id(record)].assert_called_once_with({
+            'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'session_id': '12345678-1234-4234-8234-123456789abc',
+            'agent_id': 'claude-developer', 'role': 'developer', 'provider': 'claude',
+            'model': developer['model'], 'repo': '/repo/.git', 'head': 'd' * 40,
+            'manifest_sha256': '7' * 64, 'evidence_level': 'CONTROLLER_DELIVERED',
+        })
+
+    def test_real_ledger_entry_matches_the_run(self):
+        cli, store, args, registration, _evaluations, _prompts, _requests, patches, runner = self._setup()
+        patches = [item for item in patches if item.attribute != 'record']
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        ledger_path = Path(temp.name) / 'ledger.jsonl'
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            stack.enter_context(patch.object(skill_ledger, '_path', return_value=ledger_path))
+            status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+            native_session = store.task['developer']['execution']['native_session_id']
+            verified = skill_ledger.check(
+                store.task['task_id'], store.task['run_id'], native_session,
+                registration.trusted_agent_id, 'developer', 'claude',
+                store.task['developer']['model'], registration.common_dir,
+                store.task['developer']['source_sha'], _SKILL_MANIFEST['manifest_sha256'])
+            chain = skill_ledger.verify_chain()
+        self.assertEqual(status, 0)
+        self.assertEqual(chain, (True, None))
+        self.assertEqual(verified['status'], 'VERIFIED')
+        self.assertEqual(verified['evidence_level'], 'CONTROLLER_DELIVERED')
+        self.assertEqual(len(ledger_path.read_text(encoding='utf-8').splitlines()), 1)
+
+    def test_missing_or_unreadable_skill_refuses_before_provider_call(self):
+        for target, code in (
+                ('build_manifest', skill_manifest.SKILL_MANIFEST_PATH_MISSING),
+                ('build_manifest', skill_manifest.SKILL_MANIFEST_NOT_FILE),
+                ('build_manifest', skill_manifest.SKILL_MANIFEST_NOT_UTF8),
+                ('read_manifest_files', skill_manifest.SKILL_MANIFEST_PATH_MISSING)):
+            with self.subTest(target=target, code=code):
+                def configure(cli, _store, _args, patches, target=target, code=code):
+                    patches.append(patch.object(cli.skill_manifest, target,
+                        side_effect=skill_manifest.SkillManifestError(code)))
+                self._assert_prewrite_refusal(configure, message=code)
+
+    def test_unsafe_skill_text_refuses_before_provider_call(self):
+        for text in (' \n', 'rules\x01\n'):
+            with self.subTest(text=text):
+                def configure(cli, _store, _args, patches, text=text):
+                    patches.append(patch.object(cli.skill_manifest, 'read_manifest_files',
+                        return_value=[('CLAUDE.md', text)]))
+                self._assert_prewrite_refusal(configure, message='CLAUDE_SKILL_TEXT_REFUSED')
+
+    def test_skill_prompt_limit_refuses_and_never_truncates(self):
+        def files(extra):
+            path, text = _SKILL_FILES[1]
+            padding = ('skill rule ' * (extra // 11 + 1))[:extra]
+            return [_SKILL_FILES[0], (path, text + padding)]
+
+        def run(extra):
+            cli, store, args, _reg, _evaluations, prompts, _requests, patches, runner = self._setup()
+            patches.append(patch.object(cli.skill_manifest, 'read_manifest_files',
+                                        return_value=files(extra)))
+            with contextlib.ExitStack() as stack:
+                for item in patches:
+                    stack.enter_context(item)
+                self.assertEqual(cli.run_task_claude_delegate(
+                    args, store=store, route_runner=runner), 0)
+            return prompts[0]
+
+        limit = task_submission_cli._CLAUDE_PROMPT_MAX_BYTES
+        self.assertLess(limit, 64 * 1024)
+        room = limit - len(run(0).encode('utf-8'))
+        self.assertGreater(room, 0)
+        fitted = run(room)
+        self.assertEqual(len(fitted.encode('utf-8')), limit)
+        self.assertIn(files(room)[1][1], fitted)
+
+        def configure(cli, _store, _args, patches):
+            patches.append(patch.object(cli.skill_manifest, 'read_manifest_files',
+                                        return_value=files(room + 1)))
+        self._assert_prewrite_refusal(configure, message='CLAUDE_SKILL_PROMPT_TOO_LARGE')
+
+    def test_ledger_failure_keeps_the_finished_run_and_reports_the_code(self):
+        cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = self._setup()
+        patches.append(patch.object(cli.skill_ledger, 'record',
+            side_effect=skill_ledger.SkillLedgerError('CHAIN_BROKEN')))
+        stderr = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            stack.enter_context(contextlib.redirect_stderr(stderr))
+            status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+        self.assertEqual(status, 0)
+        self.assertEqual(store.task['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertIn('CLAUDE_SKILL_LEDGER_OUTCOME_UNKNOWN: CHAIN_BROKEN', stderr.getvalue())
+
+    def test_route_failure_records_no_delivery(self):
+        error = RouteError('BLOCKED_WRITE_ISOLATION', blocked_reason='BLOCKED_WRITE_ISOLATION')
+        cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = self._setup(
+            runner_error=error)
+        record = next(item for item in patches if item.attribute == 'record')
+        with contextlib.ExitStack() as stack:
+            entered = {id(item): stack.enter_context(item) for item in patches}
+            status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+        self.assertEqual(status, 1)
+        entered[id(record)].assert_not_called()
 
     def test_bad_d6_identity_refuses_before_store_write(self):
         cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = self._setup(
