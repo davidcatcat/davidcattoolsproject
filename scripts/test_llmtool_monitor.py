@@ -38,7 +38,7 @@ _RULE_ALERT_PATCH = patch.object(
 def setUpModule():
     # Never let a test read the developer's real agent sessions: a live session
     # changing state mid-test would add office events to unrelated assertions.
-    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
+    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
     _RULE_ALERT_PATCH.start()
 
@@ -3395,6 +3395,224 @@ class OfficeViewTests(unittest.TestCase):
                                        claude_root=str(self.claude), canonical=self.canonical,
                                        cwd_of=lambda pid: str(self.task))
                 self.assertFalse(any(row.task == "task wp-1" for row in gone))
+
+    # Company LLM runs in the 即時 section (#763).
+    def _gw_record(self, tasks, task, provider, state, created):
+        """A Task record, which holds prompt text and must never be opened."""
+        path = Path(tasks) / f"{task}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(created))
+        path.write_text(json.dumps({
+            "task_id": task, "request": "PROMPT-SECRET", "response": "MODEL-OUTPUT-SECRET",
+            "developer": {"provider_type": provider, "state": state,
+                          "executor_task_id": "wp-1", "created_at": stamp}}), encoding="utf-8")
+        os.chmod(path, 0o600)
+        return path
+
+    def _gw_route(self, task):
+        """The temporary route folder of a run: its audit and authorization files."""
+        audit = Path(self.tmp.name) / "route" / "audit.jsonl"
+        audit.parent.mkdir()
+        audit.write_text('{"type":"tool","note":"PROMPT-SECRET"}\n', encoding="utf-8")
+        os.utime(audit, (self.NOW - 7, self.NOW - 7))
+        (audit.parent / "authorization.json").write_text(json.dumps(
+            {"schema_version": 1, "task_id": task, "session_id": None}), encoding="utf-8")
+        return audit
+
+    def _gw_audit_copy(self, root, name, age):
+        """The audit copy llmtool keeps once a run ends."""
+        path = Path(root) / (mon.GW_AUDIT_PREFIX + name) / "audit.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text('{"type":"tool","note":"PROMPT-SECRET"}\n', encoding="utf-8")
+        os.utime(path, (self.NOW - age, self.NOW - age))
+        return path
+
+    def _gw_agent_process(self, workdir, audit, elapsed="00:30", pid=91):
+        command = (f"/usr/bin/python3 -B -P -m api_agent_gateway run --authorization-file "
+                   f"{audit.parent}/authorization.json --workdir {workdir} --profile p "
+                   f"--task-file {audit.parent}/task.json --result-file {audit.parent}/result.json "
+                   f"--audit-file {audit} --profiles-file {audit.parent}/profiles.json "
+                   f"--state-dir {audit.parent}/state")
+        return mon.snapshot_from([(pid, 90, pid, elapsed, "S", command)], self_pid=99999).processes
+
+    def _llmtool_process(self, argv, elapsed, pid=90):
+        return mon.snapshot_from([(pid, 1, pid, elapsed, "S", f"python3 -m llmtool {argv}")],
+                                 self_pid=99999).processes
+
+    def _gw_view(self, rows):
+        lines = mon.office_lines(rows, expand=True)
+        text = "\n".join(lines)
+        for secret in ("PROMPT-SECRET", "MODEL-OUTPUT-SECRET", "CREDENTIAL-SECRET"):
+            self.assertNotIn(secret, text)
+        return lines
+
+    def test_gw_agent_classify_keeps_only_checked_paths(self):
+        self.assertEqual(mon.classify("python3 -B -P -m api_agent_gateway run --workdir /x"),
+                         mon.GW_AGENT_ROLE)
+        self.assertIsNone(mon.classify("python3 -m api_agent_gateway --help"))
+        audit = Path(self.tmp.name) / "route" / "audit.jsonl"
+        proc = self._gw_agent_process(self.task, audit)[0]
+        self.assertEqual(proc.gw, ("gw", str(self.task), str(audit)))
+        bad = mon._gw_run_job("python3 -m api_agent_gateway run --workdir /a/../b "
+                              "--audit-file /t/other.log", mon.GW_AGENT_ROLE)
+        self.assertEqual(bad, ("gw", "", ""))
+        self.assertEqual(mon._gw_run_job("python3 -m llmtool task develop x", "llmtool CLI"), ())
+
+    def test_gw_agent_run_shows_live_row_while_its_process_runs(self):
+        audit = self._gw_route("1d091894" + "a" * 24)
+        rows = self.rows(self._gw_agent_process(self.task, audit))
+        live = [row for row in rows if row.name == "gw-agent developer"]
+        self.assertEqual(len(live), 1)
+        row = live[0]
+        self.assertEqual((row.state, row.task, row.sid, row.evidence, row.kind),
+                         (mon.WORKING, "task wp-1", "pid 91", "程序", "agent"))
+        self.assertAlmostEqual(row.age, 7, delta=1)
+        self.assertIn("task 1d091894", mon._row_detail(row))
+        self.assertIn("D6 wp-1", mon._row_detail(row))
+        self.assertIn("wp-1", mon._d6_running_tasks(rows))
+        # The gw-agent switch is PAUSED in the fixture: its status row stays and says so.
+        status = self.by_name(rows)["公司 gw agent"]
+        self.assertIn("有 1 個執行中", status.detail)
+        lines = self._gw_view(rows)
+        at = next(i for i, line in enumerate(lines) if "gw-agent developer pid 91" in line)
+        self.assertLess(lines.index(next(l for l in lines if mon.LIVE_SECTION in l)), at)
+        self.assertLess(at, lines.index(next(l for l in lines if mon.STATUS_SECTION in l)))
+        self.assertEqual(mon._row_person(row), "CompanyGW")
+
+    def test_gw_agent_process_without_a_valid_authorization_stays_live_unbound(self):
+        audit = self._gw_route("not a task id")
+        for label, change in (("bad id", lambda: None),
+                              ("not JSON", lambda: audit.with_name("authorization.json")
+                               .write_bytes(b"\xff{")),
+                              ("missing", audit.with_name("authorization.json").unlink)):
+            with self.subTest(label):
+                change()
+                row = self.by_name(self.rows(self._gw_agent_process(self.task, audit)))[
+                    "gw-agent developer"]
+                self.assertEqual((row.state, row.task), (mon.WORKING, "task wp-1"))
+                self.assertIn("未綁定 Task", row.detail)
+
+    def test_finished_gw_agent_run_shows_done_for_the_done_window(self):
+        root = Path(self.tmp.name) / "audits"
+        self._gw_audit_copy(root, "abcd1234", 120)
+        self._gw_audit_copy(root, "old00000", mon.OFFICE_DONE_WINDOW + 60)
+        with patch.object(mon, "GW_AUDIT_ROOT", str(root)):
+            rows = self.rows()
+        done = [row for row in rows if row.name in mon.GW_ROSTER]
+        self.assertEqual([(row.state, row.sid, row.evidence) for row in done],
+                         [(mon.DONE, "abcd1234", "llmtool 稽核檔")])
+        self.assertAlmostEqual(done[0].age, 120, delta=1)
+        self.assertIn("已結束", done[0].detail)
+        names = self.by_name(rows)
+        self.assertIn("公司 gw", names)          # the status row is back
+        self.assertIn("公司 gw agent", names)
+        self._gw_view(rows)
+
+    def test_gw_audit_copy_counts_only_as_the_users_own_plain_file(self):
+        root = Path(self.tmp.name) / "audits"
+        real = self._gw_audit_copy(Path(self.tmp.name) / "elsewhere", "real0000", 60)
+        linked = root / (mon.GW_AUDIT_PREFIX + "symlink0")
+        linked.mkdir(parents=True)
+        (linked / "audit.jsonl").symlink_to(real)
+        hard = root / (mon.GW_AUDIT_PREFIX + "hardlink")
+        hard.mkdir()
+        os.link(real, hard / "audit.jsonl")
+        (root / (mon.GW_AUDIT_PREFIX + "folderlink")).symlink_to(real.parent)
+        self._gw_audit_copy(root, "bad.name", 60)
+        self._gw_audit_copy(root, "future00", -3600)
+        with patch.object(mon, "GW_AUDIT_ROOT", str(root)):
+            self.assertEqual(mon._gw_finished(self.NOW), [])
+        with patch.object(mon, "GW_AUDIT_ROOT", str(root / "missing")):
+            self.assertEqual(mon._gw_finished(self.NOW), [])
+
+    def test_gw_audit_root_is_resolved_only_when_finished_runs_are_read(self):
+        root = Path(self.tmp.name) / "audits"
+        self._gw_audit_copy(root, "abcd1234", 120)
+        with patch.object(mon, "GW_AUDIT_ROOT", None), \
+                patch.object(tempfile, "gettempdir", return_value=str(root)):
+            self.assertEqual([run for _, run in mon._gw_finished(self.NOW)], ["abcd1234"])
+        with patch.object(mon, "GW_AUDIT_ROOT", str(root)), \
+                patch.object(tempfile, "gettempdir", side_effect=FileNotFoundError) as temp:
+            self.assertEqual([run for _, run in mon._gw_finished(self.NOW)], ["abcd1234"])
+        temp.assert_not_called()
+
+    def test_no_temp_directory_blocks_neither_import_nor_live_gw_rows(self):
+        audit = self._gw_route("1d091894" + "a" * 24)
+        spec = importlib.util.spec_from_file_location("llmtool_monitor_no_temp", _PATH)
+        fresh = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = fresh
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        with patch.object(tempfile, "gettempdir", side_effect=FileNotFoundError) as temp:
+            spec.loader.exec_module(fresh)
+            temp.assert_not_called()
+            self.assertIsNone(fresh.GW_AUDIT_ROOT)
+            with patch.object(mon, "GW_AUDIT_ROOT", None):
+                self.assertEqual(mon._gw_finished(self.NOW), [])
+                temp.assert_called()
+                rows = self.rows(self._gw_agent_process(self.task, audit))
+        live = [row for row in rows if row.name in mon.GW_ROSTER]
+        self.assertEqual([(row.state, row.sid) for row in live], [(mon.WORKING, "pid 91")])
+        self.assertIn("task 1d091894", mon._row_detail(live[0]))
+        self.assertIn("公司 gw agent", self.by_name(rows))
+
+    def test_no_gw_run_keeps_todays_status_rows(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        tasks.mkdir()
+        rows = self.rows(llmtool_tasks=str(tasks))
+        self.assertFalse(any(row.name in mon.GW_ROSTER for row in rows))
+        names = self.by_name(rows)
+        self.assertEqual((names["公司 gw"].kind, names["公司 gw"].state), ("worker", mon.IDLE))
+        self.assertEqual((names["公司 gw agent"].kind, names["公司 gw agent"].state),
+                         ("worker", mon.PAUSED))
+
+    def test_stale_gw_record_is_not_shown_as_running(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        task = "5e" * 16
+        self._gw_record(tasks, task, "openai-compatible", "DEVELOPER_DISPATCHING", self.NOW - 600)
+        self._gw_record(tasks, "6f" * 16, "gw-agent-cli", "DEVELOPER_DISPATCHING", self.NOW - 600)
+        self._gw_route("6f" * 16)   # a route folder left behind, its gateway gone
+        cases = {
+            "no process": [],
+            "a CLI on that Task": self._llmtool_process(f"task develop {task}", "20:00"),
+            "an unrelated old CLI": self._llmtool_process("monitor", "02:00:00"),
+        }
+        for label, processes in cases.items():
+            with self.subTest(label):
+                rows = self.rows(processes, llmtool_tasks=str(tasks))
+                self.assertFalse(any(row.name in mon.GW_ROSTER for row in rows))
+                self.assertNotIn("wp-1", mon._d6_running_tasks(rows))
+                self.assertIn("公司 gw", self.by_name(rows))
+
+    def test_gw_rows_open_no_task_file_and_no_audit_content(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        task = "8b" * 16
+        record = self._gw_record(tasks, task, "gw-agent-cli", "DEVELOPER_DISPATCHING",
+                                 self.NOW - 40)
+        audit = self._gw_route(task)
+        root = Path(self.tmp.name) / "audits"
+        copy = self._gw_audit_copy(root, "abcd1234", 60)
+        real_os_open, real_open, opened = os.open, open, []
+
+        def os_open(path, *args, **kwargs):
+            opened.append(str(path))
+            return real_os_open(path, *args, **kwargs)
+
+        def plain_open(path, *args, **kwargs):
+            opened.append(str(path))
+            return real_open(path, *args, **kwargs)
+
+        processes = self._gw_agent_process(self.task, audit)
+        with patch.object(mon, "GW_AUDIT_ROOT", str(root)), \
+                patch.object(mon, "LLMTOOL_TASKS", str(tasks)), \
+                patch.object(mon.os, "open", side_effect=os_open), \
+                patch("builtins.open", side_effect=plain_open):
+            runs = mon.gw_rows(processes, self.NOW, self.canonical)
+        self.assertEqual([row.state for row in runs], [mon.WORKING, mon.DONE])
+        self.assertIn(str(audit.with_name("authorization.json")), opened)
+        for path in (record, audit, copy, audit.with_name("task.json"),
+                     audit.with_name("result.json")):
+            self.assertNotIn(str(path), opened)
+        self.assertFalse(any(path.startswith(str(tasks)) for path in opened))
 
     def test_idle_claude_session_row_covers_its_d6_process(self):
         self._write(self.claude / "proj" / "idle.jsonl", [
