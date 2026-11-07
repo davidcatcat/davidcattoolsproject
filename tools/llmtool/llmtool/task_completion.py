@@ -2079,14 +2079,39 @@ def _review_time(review, field='submitted_at'):
         _stop('REVIEW_EVIDENCE_INVALID')
 
 
+def _recorded_model_family(model):
+    """Return 'claude', 'codex' or None for a recorded run model name.
+
+    The name is normalised by dropping any provider prefix up to the last
+    '/', dropping any variant suffix from the first '#', and lowercasing.
+    """
+    if type(model) is not str:
+        return None
+    name = model.rsplit('/', 1)[-1].split('#', 1)[0].lower()
+    if name.startswith('claude'):
+        return 'claude'
+    if name.startswith(('gpt', 'codex')) or re.match(r'o[0-9]', name):
+        return 'codex'
+    return None
+
+
 def _reviewer_author_family(developer):
-    """Return the known family relevant to formal Reviewer separation."""
+    """Return the known family relevant to formal Reviewer separation.
+
+    The route profile and the recorded run model both count: a multi-model
+    route takes the family of its recorded model, and a single-family route
+    whose recorded model belongs to the other Reviewer family fails closed.
+    """
     if type(developer) is not dict:
         return None
     profile = developer.get('provider_profile')
     if profile == 'claude':
+        if _recorded_model_family(developer.get('model')) == 'codex':
+            return None
         return 'claude'
     elif profile == 'codex':
+        if _recorded_model_family(developer.get('model')) == 'claude':
+            return None
         return 'codex'
     elif profile == 'agy':
         model = developer.get('model')
@@ -2096,7 +2121,7 @@ def _reviewer_author_family(developer):
             return 'other'
         return None
     elif profile in ('opencode', 'company-gw', 'company-gw-agent', 'gw-agent'):
-        return 'other'
+        return _recorded_model_family(developer.get('model')) or 'other'
     else:
         return None
 

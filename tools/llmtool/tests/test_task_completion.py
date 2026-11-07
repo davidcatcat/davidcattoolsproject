@@ -2927,6 +2927,79 @@ class TaskCompletionTests(unittest.TestCase):
                     self.assertFalse(task_completion._review_family_compatible(
                         developer, reviewer))
 
+    def test_review_family_uses_recorded_run_model_and_conflicts_fail_closed(self):
+        missing = object()
+        deepseek = 'opencode/deepseek-v4.1-flash-free#high'
+        cases = []
+        for profile in ('opencode', 'company-gw', 'company-gw-agent', 'gw-agent'):
+            cases.extend((profile, model, family) for model, family in (
+                (deepseek, 'other'),
+                ('anthropic/claude-opus-5-5', 'claude'),
+                ('claude-opus-5-5', 'claude'),
+                ('Anthropic/Claude-Sonnet-5-5#high', 'claude'),
+                ('openai/gpt-6-luna', 'codex'),
+                ('gpt-6-luna', 'codex'),
+                ('openai/codex-mini#high', 'codex'),
+                ('o4-mini', 'codex'),
+                ('o3', 'codex'),
+                ('other-model', 'other'),
+                ('opus-5', 'other'),
+                (None, 'other'),
+                (123, 'other'),
+                (missing, 'other')))
+        cases.extend(('codex', model, family) for model, family in (
+            ('gpt-6-luna', 'codex'),
+            ('openai/gpt-6-luna', 'codex'),
+            ('o4-mini', 'codex'),
+            (deepseek, 'codex'),
+            ('claude-opus-5-5', None),
+            ('anthropic/claude-opus-5-5', None),
+            (None, 'codex'),
+            (missing, 'codex')))
+        cases.extend(('claude', model, family) for model, family in (
+            ('claude-opus-5-5', 'claude'),
+            ('anthropic/claude-opus-5-5', 'claude'),
+            (deepseek, 'claude'),
+            ('gpt-6-luna', None),
+            ('openai/gpt-6-luna', None),
+            ('codex-mini', None),
+            ('o4-mini', None),
+            (None, 'claude'),
+            (missing, 'claude')))
+        cases.extend(('agy', model, family) for model, family in (
+            ('claude-sonnet-5-5-medium', 'claude'),
+            ('gemini-2.5-pro', 'other'),
+            ('anthropic/claude-opus-5-5', None),
+            ('gpt-6-luna', None),
+            ('o4-mini', None),
+            (deepseek, None),
+            (None, None),
+            (missing, None)))
+        cases.extend(('unknown-route', model, None) for model in (
+            'claude-opus-5-5', 'gpt-6-luna', deepseek, missing))
+        compatible = {
+            'claude': ('codex-reviewer',),
+            'codex': ('claude-reviewer',),
+            'other': ('claude-reviewer', 'codex-reviewer'),
+            None: (),
+        }
+        for profile, model, family in cases:
+            developer = {'provider_profile': profile}
+            if model is not missing:
+                developer['model'] = model
+            with self.subTest(developer=developer):
+                self.assertEqual(
+                    task_completion._reviewer_author_family(developer), family)
+                for reviewer in ('claude-reviewer', 'codex-reviewer'):
+                    self.assertEqual(task_completion._review_family_compatible(
+                        developer, reviewer), reviewer in compatible[family])
+        for developer in (None, 'opencode', ['claude-opus-5-5']):
+            with self.subTest(developer=developer):
+                self.assertIsNone(task_completion._reviewer_author_family(developer))
+                for reviewer in ('claude-reviewer', 'codex-reviewer'):
+                    self.assertFalse(task_completion._review_family_compatible(
+                        developer, reviewer))
+
     def test_review_binding_must_match_task_run_contract_and_result_head(self):
         result_sha, _ = self._make_result()
         reviewer_root = self.base / 'reviewer'

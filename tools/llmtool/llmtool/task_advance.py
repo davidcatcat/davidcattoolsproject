@@ -442,6 +442,13 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
                         if name != 'check (macOS 3.13)')
     if other_missing or (missing_macos and not allow_missing_macos):
         return 'MERGE_REQUIRED_CHECK_MISSING'
+    # #1182: a skipped required check never counts as SUCCESS. Every run is
+    # completed here, so a required name without a success run was skipped.
+    # The macOS check keeps its own skipped and mac-ci rules below.
+    if any(not any(item['name'] == name and item.get('conclusion') == 'success'
+                   for item in check_runs)
+           for name in required_checks if name != 'check (macOS 3.13)'):
+        return 'MERGE_REQUIRED_CHECK_SKIPPED'
     if _owner_acceptance_required(files):
         return 'MERGE_OWNER_ACCEPTANCE_MANUAL'
     if not docs_only:
