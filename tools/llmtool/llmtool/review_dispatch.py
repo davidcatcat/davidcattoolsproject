@@ -638,11 +638,13 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         reason = getattr(exc, 'review_failure_reason', None)
         if reason in REVIEW_FAILURE_REASONS:
             unknown['failure_reason'] = reason
+        unknown_written = False
         try:
             claimed = claims + [claim]
             updated_claims = [unknown if item is claim else item for item in claimed]
             store.compare_and_update(task_id, expected={'review_dispatch_claim': claimed},
                                      review_dispatch_claim=updated_claims)
+            unknown_written = True
         except Exception:
             pass
         if reason in REVIEW_FAILURE_REASONS:
@@ -652,7 +654,10 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             if (type(output) is not dict or len(output) != 1 or
                     not ('excerpt' in output or 'label' in output)):
                 output = {'label': REVIEW_OUTPUT_ABSENT}
-            receipt = _write_refusal_receipt(store, task_id, unknown, reason, output)
+            # A receipt follows only a written UNKNOWN claim; without it the
+            # receipt would sit beside a claim still marked CLAIMED.
+            receipt = (_write_refusal_receipt(store, task_id, unknown, reason, output)
+                       if unknown_written else None)
             exc.review_refusal = dict(output, failure_reason=reason, receipt_path=receipt)
         if getattr(exc, 'review_dispatch_code', None):
             raise

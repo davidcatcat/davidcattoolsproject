@@ -1183,6 +1183,30 @@ class RefusedReviewReceiptTests(unittest.TestCase):
         self.assertFalse(self._receipt(2).exists())
         self.assertClaimUnchanged(failing, 'VERDICT_NOT_JSON')
 
+    def test_failed_unknown_claim_write_writes_no_receipt_and_keeps_the_refusal(self):
+        store = self._store()
+        original = store.compare_and_update
+
+        def refuse_unknown(task_id, *, expected, **changes):
+            claims = changes.get('review_dispatch_claim') or []
+            if any(type(item) is dict and item.get('state') == 'UNKNOWN' for item in claims):
+                raise RuntimeError('store write failed')
+            return original(task_id, expected=expected, **changes)
+
+        store.compare_and_update = refuse_unknown
+        error = self._dispatch(store, 'not a review object: unrecorded')
+        self.assertEqual(error.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertEqual(error.review_failure_reason, 'VERDICT_NOT_JSON')
+        self.assertEqual(error.review_refusal, {
+            'failure_reason': 'VERDICT_NOT_JSON',
+            'excerpt': 'not a review object: unrecorded', 'receipt_path': None})
+        claims = store.record['review_dispatch_claim']
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0]['state'], 'CLAIMED')
+        self.assertNotIn('failure_reason', claims[0])
+        self.assertFalse(self.directory.exists())
+        self.assertFalse(self._receipt().exists())
+
     def test_failed_prune_leaves_the_refusal_and_returns_no_path(self):
         store = self._store()
         with patch.object(review_dispatch, '_prune_refusal_receipts',
