@@ -5424,11 +5424,12 @@ class OfficeViewTests(unittest.TestCase):
             comment(281, 60, "**Verdict: PASS** at exact head 281818a"),
         ])
         # only trusted verdict lines are kept, each with every id its comment names
+        # and the head its HEAD line names
         self.assertEqual(verdicts, {
-            "283": [(self.NOW - 850, "PASS", frozenset({"18538d5"})),
-                    (self.NOW - 820, "PASS", frozenset({"1234567"}))],
-            "999": [(self.NOW - 820, "FAIL", frozenset({"18538d5"}))],
-            "281": [(self.NOW - 60, "PASS", frozenset({"281818a"}))]})
+            "283": [(self.NOW - 850, "PASS", frozenset({"18538d5"}), "18538d5"),
+                    (self.NOW - 820, "PASS", frozenset({"1234567"}), "1234567")],
+            "999": [(self.NOW - 820, "FAIL", frozenset({"18538d5"}), "18538d5")],
+            "281": [(self.NOW - 60, "PASS", frozenset({"281818a"}), "281818a")]})
 
         # a call's verdict is the first one posted on its PR after it started that
         # names its head, however the comment is worded
