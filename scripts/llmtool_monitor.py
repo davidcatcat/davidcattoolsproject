@@ -2008,10 +2008,12 @@ class GitHubSource:
         self.board_oldest_updated: float | None = None
         self.ci_runs: list | None = None    # ci_runs(); None until GitHub was read
         self.ci_heads: dict | None = None   # latest Linux/Mac run per head from same page
-        # Open PR heads' checks from this refresh's one GraphQL read
-        # (pr_head_checks()), keyed by the full 40-character head SHA; None
-        # while that read failed or GitHub was not read. Never kept across
-        # refreshes, so a rerun on the same head shows on the next one.
+        # Open PRs' checks from this refresh's one GraphQL read
+        # (pr_head_checks()), keyed by (PR number, full 40-character head
+        # SHA); its keys are also the open PRs the PR board shows
+        # (board_open_pulls()). None while that read failed or GitHub was not
+        # read. Never kept across refreshes, so a rerun on the same head shows
+        # on the next one.
         self.pr_checks: dict | None = None
         self.want_ci = False   # set while a self-hosted runner is on this Mac
         self.want_main = False
@@ -2387,17 +2389,21 @@ class GitHubSource:
     def refresh_pr_checks(self) -> None:
         """Every open PR's exact-head checks and changed paths from one
         GraphQL read (PR_CHECKS_QUERY: the 100 most recently updated open PRs),
-        so no PR waits behind others. Results are keyed by the full head SHA
-        (pr_head_checks()) and replace the previous refresh's; nothing is
-        cached. A failed read leaves every PR unknown (None). Without an open
-        PR that has a full head SHA there is nothing to read."""
+        so no PR waits behind others. Results are keyed by PR number and full
+        head SHA (pr_head_checks()) and replace the previous refresh's; nothing
+        is cached. A failed read leaves every PR unknown (None). The read is
+        skipped only when the pulls page is not full and lists no open PR with
+        a full head SHA: that page then holds every PR, so none is open. A full
+        page may leave older open PRs out; the GraphQL read finds them."""
         pulls = self.board_pulls or []
-        if not any(isinstance(pull, BoardPull) and pull.state == "OPEN"
-                   and type(pull.sha) is str and HEX_SHA.fullmatch(pull.sha) for pull in pulls):
+        page_full = type(self.board_page_count) is int and self.board_page_count >= 100
+        if not page_full and not any(
+                isinstance(pull, BoardPull) and pull.state == "OPEN"
+                and type(pull.sha) is str and HEX_SHA.fullmatch(pull.sha) for pull in pulls):
             self.pr_checks = {}
             return
-        owner, name = self.repo.split("/", 1)
         try:
+            owner, name = self.repo.split("/", 1)
             self.pr_checks = pr_head_checks(self._graphql(PR_CHECKS_QUERY, owner=owner, name=name))
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             self.pr_checks = None
@@ -3957,6 +3963,8 @@ REQUIRED_CHECKS = {"check (Linux 3.14)": "linux", "check (macOS 3.13)": "mac",
 
 # One read per refresh for every open PR: its head, changed paths (which
 # checks its workflows' path filters require) and the head commit's check runs.
+# isDraft and isCrossRepository keep the board's draft step and fork filter
+# for open PRs the REST pulls page does not list.
 PR_CHECKS_QUERY = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
@@ -3964,6 +3972,8 @@ query($owner: String!, $name: String!) {
       nodes {
         number
         headRefOid
+        isDraft
+        isCrossRepository
         files(first: 100) { totalCount nodes { path } }
         commits(last: 1) {
           nodes {
@@ -3987,12 +3997,14 @@ query($owner: String!, $name: String!) {
 
 @dataclass(frozen=True)
 class HeadChecks:
-    """One open PR head: which checks its changed paths require (None when
-    the file list was cut or unreadable) and the newest run of each check
+    """One open PR at its head: which checks its changed paths require (None
+    when the file list was cut or unreadable), the newest run of each check
     name on that exact commit, as (status, conclusion) in lower case (None
-    when the check list was cut or unreadable)."""
+    when the check list was cut or unreadable), and whether GitHub calls the
+    PR a draft."""
     required: frozenset | None
     runs: dict | None
+    draft: bool = False
 
 
 def _ci_path_class(path: str) -> str:
@@ -4096,12 +4108,15 @@ def _rollup_runs(node: dict, sha: str):
 
 
 def pr_head_checks(payload) -> dict:
-    """{full head SHA: HeadChecks} from one PR_CHECKS_QUERY answer. A PR
-    whose node the answer's errors name is unknown (HeadChecks(None, None));
-    an error naming no PR, or an answer without the pull request list, raises
-    ValueError. A cut file list leaves required unknown, a cut check list
-    leaves runs unknown. Two open PRs on one head share its runs and need the
-    checks either requires. Pure; no I/O."""
+    """{(PR number, full head SHA): HeadChecks} from one PR_CHECKS_QUERY
+    answer, newest updated first; PRs from forks are left out, as on the
+    pulls page (board_pulls()). Each PR has its own entry, so two open PRs on
+    one head never share required checks or read errors. A PR whose node the
+    answer's errors name is unknown (HeadChecks(None, None)); an error naming
+    no PR, or a PR node the answer cannot identify by number and full head,
+    or an answer without the pull request list, raises ValueError. A cut file
+    list leaves required unknown, a cut check list leaves runs unknown. Pure;
+    no I/O."""
     if type(payload) is not dict:
         raise ValueError("GraphQL answer")
     errors = payload.get("errors")
@@ -4123,14 +4138,25 @@ def pr_head_checks(payload) -> dict:
     nodes = pulls.get("nodes") if type(pulls) is dict else None
     if type(nodes) is not list:
         raise ValueError("GraphQL pull requests")
+    if any(index >= len(nodes) for index in failed):
+        raise ValueError("GraphQL error")
     found: dict = {}
     for index, node in enumerate(nodes):
+        number = node.get("number") if type(node) is dict else None
         sha = node.get("headRefOid") if type(node) is dict else None
-        if type(sha) is not str or not HEX_SHA.fullmatch(sha.lower()):
+        sha = sha.lower() if type(sha) is str else ""
+        if type(number) is not int or number < 1 or not HEX_SHA.fullmatch(sha):
+            if index in failed:
+                raise ValueError("GraphQL error")   # a failed PR the answer cannot name
             continue
-        sha = sha.lower()
+        draft = node.get("isDraft") is True
         if index in failed:
-            result = HeadChecks(None, None)
+            # Only a known fork is left out; the error may be on that field.
+            if node.get("isCrossRepository") is True:
+                continue
+            result = HeadChecks(None, None, draft)
+        elif node.get("isCrossRepository") is not False:
+            continue
         else:
             files = node.get("files")
             listed = files.get("nodes") if type(files) is dict else None
@@ -4140,14 +4166,8 @@ def pr_head_checks(payload) -> dict:
             required = (required_checks(paths)
                         if paths is not None and all(type(path) is str for path in paths)
                         and type(total) is int and total <= len(paths) else None)
-            result = HeadChecks(required, _rollup_runs(node, sha))
-        earlier = found.get(sha)
-        if earlier is not None:
-            result = HeadChecks(
-                None if earlier.required is None or result.required is None
-                else earlier.required | result.required,
-                None if earlier.runs is None or result.runs is None else result.runs)
-        found[sha] = result
+            result = HeadChecks(required, _rollup_runs(node, sha), draft)
+        found[(number, sha)] = result
     return found
 
 
@@ -4512,14 +4532,15 @@ def _ci_word(entry, known: bool) -> str:
 CHECK_KEYS = ("linux", "mac", "docs")
 
 
-def _check_word(checks, sha: str, key: str) -> str:
-    """One check ("linux", "mac" or "docs") on one exact head, looked up by
-    its full 40-character SHA (GitHubSource.pr_checks keys): 不需 when the
-    PR's changed paths do not require it; ? when the read failed, named this
-    PR in its errors, cut its file or check list, or the full SHA is unknown;
-    — when a required check has no run on the head; else its state."""
-    found = (checks.get(sha) if type(checks) is dict and type(sha) is str
-             and HEX_SHA.fullmatch(sha) else None)
+def _check_word(checks, number: int, sha: str, key: str) -> str:
+    """One check ("linux", "mac" or "docs") of one PR at its exact head,
+    looked up by PR number and full 40-character SHA (GitHubSource.pr_checks
+    keys): 不需 when the PR's changed paths do not require it; ? when the read
+    failed, did not return this PR at this head, named this PR in its errors,
+    cut its file or check list, or the full SHA is unknown; — when a required
+    check has no run on the head; else its state."""
+    found = (checks.get((number, sha)) if type(checks) is dict and type(number) is int
+             and type(sha) is str and HEX_SHA.fullmatch(sha) else None)
     if not isinstance(found, HeadChecks) or found.required is None:
         return "?"
     if key not in found.required:
@@ -4529,6 +4550,30 @@ def _check_word(checks, sha: str, key: str) -> str:
     if key not in found.runs:
         return "—"
     return _ci_word(found.runs[key], True)
+
+
+def board_open_pulls(pulls, checks) -> list[BoardPull]:
+    """The open PRs the PR board shows, by number: every open PR the GraphQL
+    read returned (GitHubSource.pr_checks keys), plus open PRs on the pulls
+    page it did not return (their checks then show ?). The GraphQL read comes
+    after the pulls page, so its head wins. Title, draft flag and closing
+    references come from the pulls page when it lists the PR, else the draft
+    flag from the GraphQL read. Pure."""
+    found = {pull.number: pull for pull in pulls or []
+             if isinstance(pull, BoardPull) and pull.state == "OPEN"}
+    for key, result in (checks.items() if type(checks) is dict else ()):
+        if not (type(key) is tuple and len(key) == 2 and type(key[0]) is int
+                and type(key[1]) is str and HEX_SHA.fullmatch(key[1])):
+            continue
+        number, sha = key
+        known = found.get(number)
+        if known is not None:
+            found[number] = replace(known, head=sha[:7], sha=sha)
+        else:
+            found[number] = BoardPull(number, "", "OPEN", 0.0, 0.0, sha[:7],
+                                      isinstance(result, HeadChecks) and result.draft is True,
+                                      (), sha)
+    return sorted(found.values(), key=lambda pull: pull.number)
 
 
 def _names_head(named: str, head: str, sha: str = "") -> bool:
@@ -4666,16 +4711,17 @@ def _pr_people(office, pull, checks) -> tuple[set, bool]:
     """The one person/CI answer per PR the PR table, running PR row and Issue rows share.
     checks: GitHubSource.pr_checks; CI counts while a check the PR's paths
     require is queued or running on the exact head (_check_word() says 不需
-    for any other)."""
+    for any other). Check data missing or unreadable for this PR (any ?)
+    leaves it uncertain."""
     if not pull or not pull.head:
         return set(), True   # a PR missing from the read page has unknown head and CI
     people, uncertain = _current_people(
         office, lambda row: _names_pr(row, pull.number, pull.head))
     if pull.state == "OPEN":
-        if checks is None:
+        words = [_check_word(checks, pull.number, pull.sha, key) for key in CHECK_KEYS]
+        if "?" in words:
             uncertain = True
-        elif any(_check_word(checks, pull.sha, key) in ("執行中", "排隊")
-                 for key in CHECK_KEYS):
+        if any(word in ("執行中", "排隊") for word in words):
             people.add("CI")
     return people, uncertain
 
@@ -4690,14 +4736,13 @@ def _current_pr_people(office, pull, checks, *, github_known=True, office_known=
 def pr_board_rows(pulls, verdicts, checks, ec2, reviewing, pending, office=(), *, github_known=True,
                   office_known=True) -> list[PrRow]:
     """Build the read-only PR status table from already-read local/GitHub data.
-    checks: GitHubSource.pr_checks, HeadChecks of each exact head keyed by its
-    full SHA (BoardPull.sha); only the checks a PR's changed paths require
-    decide its next step;
+    checks: GitHubSource.pr_checks, HeadChecks of each open PR keyed by its
+    number and full head SHA; the rows are board_open_pulls(), so every open
+    PR that read returned has a row even when the pulls page misses it; only
+    the checks a PR's changed paths require decide its next step;
     verdicts: review_verdicts(), bound to the head their HEAD line names."""
     rows = []
-    for pull in sorted((item for item in pulls or []
-                        if isinstance(item, BoardPull) and item.state == "OPEN"),
-                       key=lambda item: item.number):
+    for pull in board_open_pulls(pulls, checks):
         number, head = str(pull.number), pull.head.lower()
         review = "未審" if head else "?"
         if head and (number, head) in (reviewing or set()):
@@ -4710,7 +4755,7 @@ def pr_board_rows(pulls, verdicts, checks, ec2, reviewing, pending, office=(), *
                 review = "舊審查"
         ec2_word = "?" if not head or ec2 is None else (
             ec2[0].get(head, "?") if head in ec2[0] else "?" if ec2[1] else "—")
-        linux, mac, docs = (_check_word(checks, pull.sha, key) for key in CHECK_KEYS)
+        linux, mac, docs = (_check_word(checks, pull.number, pull.sha, key) for key in CHECK_KEYS)
         required = [word for word in (linux, mac, docs) if word != "不需"]
         others = [word for word in (linux, docs) if word != "不需"]   # the EC2 Linux workflow
         waiting_owner = any(type(item) is OwnerPending and item.kind == "waiting_owner"
@@ -4770,14 +4815,19 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
     refs = {_board_ref_number(item.ref) for item in file_items}
     # Queue and blocked assignments take an open PR out of the running column.
     queued_blocked = {_board_ref_number(item.ref) for item in queue + blocked}
+    checks = getattr(github, "pr_checks", None) if github is not None else None
+    # Open PRs at the heads the PR table uses (the GraphQL read wins).
+    open_pulls = ({pull.number: pull for pull in board_open_pulls(pulls, checks)}
+                  if github_known and pulls is not None else {})
     if github_known:
         for pull in pulls or []:
             if pull.state != "OPEN" or pull.number in refs or pull.number in queued_blocked:
                 continue
             # The same head-bound rule as the PR table: a verdict counts only for
             # the head its HEAD line names.
+            at = open_pulls.get(pull.number, pull)
             bound, verdict = _head_verdict((github.verdicts or {}).get(str(pull.number), []),
-                                           pull.head.lower(), pull.sha)
+                                           at.head.lower(), at.sha)
             what = pull.title + (" 草稿" if pull.draft else "")
             if bound == "current" and verdict == "FAIL":
                 next_step = "Developer"
@@ -4797,8 +4847,8 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
     # PR page. An issue may be worked through an open PR whose body closes it.
     # Issue aliases need a readable pulls page and come from open PRs only.
     snapshot_known = github_known and pulls is not None
-    checks = getattr(github, "pr_checks", None) if github is not None else None
     pulls_by_number = {pull.number: pull for pull in (pulls or [])}
+    pulls_by_number.update(open_pulls)
     issue_prs = {}
     if snapshot_known:
         for pull in pulls:
