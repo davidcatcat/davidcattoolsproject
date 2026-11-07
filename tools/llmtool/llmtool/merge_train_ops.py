@@ -3,10 +3,16 @@
 merge_train merges a BUILT (or UNKNOWN) train record once through the same
 exact-head squash merge route as ``task advance --merge``. Before it claims the
 merge it rechecks authenticated main, the open train PR at the recorded head,
-the train delta, every member's bound PASS and the train-head CI. A record left
-in MERGE_CLAIMED (its UNKNOWN write failed) is settled from one fresh PR read
-without a new merge: MERGED when the train merged at its head, else UNKNOWN.
+the train delta, every member's bound PASS and the train-head CI, then reads
+authenticated main once more right before the claim. A record left in
+MERGE_CLAIMED (its UNKNOWN or MERGED write failed) is settled from one fresh PR
+read without a new merge: MERGED when the train merged at its head, else UNKNOWN.
+The provenance comment is posted only after MERGED is durably recorded.
 close_train then closes the member Tasks in record order through ``task advance``.
+
+merge_train holds an exclusive non-blocking per-train operation lock (a
+dot-file beside the record) for the whole call; a held lock refuses
+TRAIN_OPERATION_BUSY, so a live claim is never recovered as abandoned.
 
 Each call does one step and fails closed. Both return
 ``{'step': STEP, 'codes': [...], 'result': ...}``. A refusal is step
@@ -16,7 +22,10 @@ Each call does one step and fails closed. Both return
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import fcntl
+import os
 import re
+import stat
 
 from . import merge_train as _train_build
 from . import merge_train_store, task_advance, task_completion
@@ -36,6 +45,7 @@ TRAIN_RESULT_RECORD_FAILED = 'TRAIN_RESULT_RECORD_FAILED'
 TRAIN_PROVENANCE_COMMENT_FAILED = 'TRAIN_PROVENANCE_COMMENT_FAILED'
 TRAIN_NOT_MERGED = 'TRAIN_NOT_MERGED'
 TRAIN_MEMBERS_OPEN = 'TRAIN_MEMBERS_OPEN'
+TRAIN_OPERATION_BUSY = 'TRAIN_OPERATION_BUSY'
 
 # The two train-head macOS codes that _merge_once answers with the mac-ci label.
 _MACOS_LABEL_CODES = frozenset(('MERGE_MACOS_CHECK_MISSING', 'MERGE_MACOS_CHECK_SKIPPED'))
@@ -58,6 +68,55 @@ def _store_code(exc):
     if type(code) is str and _CODE.fullmatch(code):
         return code
     return merge_train_store.TRAIN_RECORD_UNAVAILABLE
+
+
+def _operation_lock_name(train_id):
+    """Per-train merge operation lock; distinct from the store's ``.<id>.lock``.
+
+    A train_id has no dot, so this name never equals another train's store lock,
+    and the leading dot keeps record listing from treating it as a record.
+    """
+    return '.' + train_id + '.merge-op.lock'
+
+
+def _acquire_operation_lock(train_id, train_root):
+    """Return (fd, None) holding the exclusive operation lock, or (None, code)."""
+    try:
+        merge_train_store._record_name(train_id)
+        directory = merge_train_store._open_directory(train_root)
+    except Exception as exc:
+        return None, _store_code(exc)
+    try:
+        fd = os.open(_operation_lock_name(train_id),
+                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600,
+                     dir_fd=directory)
+    except OSError:
+        return None, merge_train_store.TRAIN_RECORD_INVALID
+    finally:
+        os.close(directory)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                info.st_nlink != 1):
+            os.close(fd)
+            return None, merge_train_store.TRAIN_RECORD_INVALID
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None, TRAIN_OPERATION_BUSY
+    except OSError:
+        os.close(fd)
+        return None, merge_train_store.TRAIN_RECORD_UNAVAILABLE
+    return fd, None
+
+
+def _release_operation_lock(fd):
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _read_record(train_id, train_root):
@@ -141,8 +200,14 @@ def _provenance(record, merge_sha):
 
 
 def _finish_merged(record, expected_sha256, attempt, merge_sha, gh_runner, root, train_root):
-    """Record a merge seen at the exact train head, then post one provenance comment."""
-    codes = []
+    """Record a merge seen at the exact train head, then post one provenance comment.
+
+    The comment follows only a durable MERGED write. When both writes fail the
+    record stays MERGE_CLAIMED or UNKNOWN and the next call settles it from a
+    fresh PR read without a new merge, posting the comment then.
+    """
+    outcome = {'train_id': record['train_id'], 'pr': record['train_pr'],
+               'head': record['train_head'], 'merge_sha': merge_sha}
     changes = {'state': 'MERGED', 'merge_attempt': dict(attempt, state='MERGED'),
                'merge_sha': merge_sha}
     # The remote merge already happened. One bounded record retry cannot repeat it.
@@ -154,7 +219,8 @@ def _finish_merged(record, expected_sha256, attempt, merge_sha, gh_runner, root,
         except Exception:
             continue
     else:
-        codes.append(TRAIN_RESULT_RECORD_FAILED)
+        return _result('MERGED', [TRAIN_RESULT_RECORD_FAILED], outcome)
+    codes = []
     try:
         comment = gh_runner(root, ['pr', 'comment', str(record['train_pr']),
                                    '--body', _provenance(record, merge_sha)])
@@ -162,8 +228,7 @@ def _finish_merged(record, expected_sha256, attempt, merge_sha, gh_runner, root,
             codes.append(TRAIN_PROVENANCE_COMMENT_FAILED)
     except Exception:
         codes.append(TRAIN_PROVENANCE_COMMENT_FAILED)
-    return _result('MERGED', codes, {'train_id': record['train_id'], 'pr': record['train_pr'],
-                                     'head': record['train_head'], 'merge_sha': merge_sha})
+    return _result('MERGED', codes, outcome)
 
 
 def _resolve_unknown(record, github_get, gh_runner, root, train_root):
@@ -220,8 +285,43 @@ def _recover_claimed(record, github_get, gh_runner, root, train_root):
                     {'train_id': record['train_id'], 'pr': train_pr, 'head': train_head})
 
 
+def _main_moved(record, train_root):
+    """Return None when authenticated main still equals main_sha, else the step.
+
+    A moved main supersedes the record; a failed read refuses without a write.
+    """
+    try:
+        main_sha = task_completion.read_authenticated_main_sha()
+    except Exception:
+        return _refused(TRAIN_MAIN_UNAVAILABLE)
+    if main_sha == record['main_sha']:
+        return None
+    train_id = record['train_id']
+    moved = {'train_id': train_id, 'main_sha': record['main_sha'], 'current_main': main_sha}
+    try:
+        merge_train_store.compare_and_update(
+            train_id, record['record_sha256'], root=train_root, state='SUPERSEDED')
+    except Exception as exc:
+        return _result('MERGE_REFUSED', [TRAIN_MAIN_MOVED, _store_code(exc)], moved)
+    return _result('SUPERSEDED', [TRAIN_MAIN_MOVED], moved)
+
+
 def merge_train(train_id, *, store, github_get, gh_runner, root, train_root=None):
-    """Merge one recorded train once at its exact head; one step, fail closed."""
+    """Merge one recorded train once at its exact head; one step, fail closed.
+
+    The whole call runs under the per-train operation lock; a held lock
+    refuses TRAIN_OPERATION_BUSY before any read, write or command.
+    """
+    lock_fd, code = _acquire_operation_lock(train_id, train_root)
+    if lock_fd is None:
+        return _refused(code)
+    try:
+        return _merge_locked(train_id, store, github_get, gh_runner, root, train_root)
+    finally:
+        _release_operation_lock(lock_fd)
+
+
+def _merge_locked(train_id, store, github_get, gh_runner, root, train_root):
     record, code = _read_record(train_id, train_root)
     if record is None:
         return _refused(code)
@@ -229,25 +329,17 @@ def merge_train(train_id, *, store, github_get, gh_runner, root, train_root=None
     if record['state'] not in ('BUILT', 'MERGE_CLAIMED', 'UNKNOWN') or train_pr is None:
         return _refused(TRAIN_NOT_MERGEABLE)
     if record['state'] == 'MERGE_CLAIMED':
-        # Recovery only: this call never runs pr merge.
+        # Recovery only, and only under the operation lock, so no live call
+        # holds this claim: this call never runs pr merge.
         return _recover_claimed(record, github_get, gh_runner, root, train_root)
     if record['state'] == 'UNKNOWN':
         resolved = _resolve_unknown(record, github_get, gh_runner, root, train_root)
         if resolved is not None:
             return resolved
 
-    try:
-        main_sha = task_completion.read_authenticated_main_sha()
-    except Exception:
-        return _refused(TRAIN_MAIN_UNAVAILABLE)
-    if main_sha != record['main_sha']:
-        moved = {'train_id': train_id, 'main_sha': record['main_sha'], 'current_main': main_sha}
-        try:
-            merge_train_store.compare_and_update(
-                train_id, record['record_sha256'], root=train_root, state='SUPERSEDED')
-        except Exception as exc:
-            return _result('MERGE_REFUSED', [TRAIN_MAIN_MOVED, _store_code(exc)], moved)
-        return _result('SUPERSEDED', [TRAIN_MAIN_MOVED], moved)
+    moved = _main_moved(record, train_root)
+    if moved is not None:
+        return moved
 
     pr = _read_pr(github_get, train_pr)
     if not _open_at(pr, train_head) or pr.get('mergeable') is not True:
@@ -281,6 +373,11 @@ def merge_train(train_id, *, store, github_get, gh_runner, root, train_root=None
                 'MERGE_REQUIRED_CHECK_MISSING')
     if code:
         return _refused(code)
+
+    # Main may have moved during the gate reads; recheck right before the claim.
+    moved = _main_moved(record, train_root)
+    if moved is not None:
+        return moved
 
     prior = record['merge_attempt']
     attempt = {'pr': train_pr, 'head_sha': train_head, 'state': 'CLAIMED',

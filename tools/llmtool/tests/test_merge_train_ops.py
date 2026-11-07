@@ -1,6 +1,7 @@
 """Tests for the merge-train merge and close steps (#1182 T4b2)."""
 
 import copy
+import fcntl
 import os
 from pathlib import Path
 import shutil
@@ -407,13 +408,13 @@ class MergeTrainOpsTest(unittest.TestCase):
         self.assertEqual(len(self.gh.named('merge')), 1)
         self.assertEqual(len(self.gh.named('comment')), 1)
 
-    def _fail_unknown_writes(self, count):
-        """Patch the store so the first ``count`` UNKNOWN writes fail; record each try."""
+    def _fail_writes(self, state, count):
+        """Patch the store so the first ``count`` writes to ``state`` fail; record each try."""
         real = merge_train_store.compare_and_update
         attempts = []
 
         def update(train_id, expected_sha256, root=None, **changes):
-            if changes.get('state') == 'UNKNOWN':
+            if changes.get('state') == state:
                 attempts.append(changes)
                 if len(attempts) <= count:
                     raise LLMToolError('TRAIN_RECORD_UNAVAILABLE')
@@ -421,6 +422,9 @@ class MergeTrainOpsTest(unittest.TestCase):
 
         patcher = mock.patch.object(merge_train_store, 'compare_and_update', side_effect=update)
         return patcher, attempts
+
+    def _fail_unknown_writes(self, count):
+        return self._fail_writes('UNKNOWN', count)
 
     def _leave_claimed(self):
         """Run one ambiguous merge whose UNKNOWN write fails twice."""
@@ -477,7 +481,8 @@ class MergeTrainOpsTest(unittest.TestCase):
         self.assertEqual(self._merge()['step'], 'MERGED')
         self.assertEqual(self._record()['state'], 'MERGED')
         self.assertEqual(len(self.gh.named('merge')), 2)
-        self.assertEqual(self.read_main.call_count, main_reads + 1)
+        # Main is read before the gates and again right before the claim.
+        self.assertEqual(self.read_main.call_count, main_reads + 2)
 
     def test_claimed_record_resolved_from_merged_read_without_new_merge(self):
         self._leave_claimed()
@@ -494,6 +499,174 @@ class MergeTrainOpsTest(unittest.TestCase):
         self.assertEqual(record['merge_attempt']['state'], 'MERGED')
         self.assertEqual(len(self.gh.named('merge')), 1)
         self.assertEqual(len(self.gh.named('comment')), 1)
+
+    # High Debug finding 1: the provenance comment follows a durable MERGED record.
+
+    def _mark_train_merged(self):
+        self.github.pulls[TRAIN_PR].update(state='closed', merged=True, mergeable=None,
+                                           merge_commit_sha=MERGE_SHA)
+        self.read_main.return_value = MERGE_SHA
+
+    def _assert_record_failed(self, result):
+        self.assertEqual(result['step'], 'MERGED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_RESULT_RECORD_FAILED])
+        self.assertEqual(result['result'], {'train_id': TRAIN_ID, 'pr': TRAIN_PR,
+                                            'head': self.train_head, 'merge_sha': MERGE_SHA})
+        self.assertEqual(self.gh.named('comment'), [])
+        self.assertIsNone(self._record()['merge_sha'])
+
+    def _assert_recovers_with_one_comment(self):
+        merges = len(self.gh.named('merge'))
+        result = self._merge()
+        self.assertEqual(result['step'], 'MERGED', result)
+        self.assertEqual(result['codes'], [])
+        record = self._record()
+        self.assertEqual(record['state'], 'MERGED')
+        self.assertEqual(record['merge_sha'], MERGE_SHA)
+        self.assertEqual(record['merge_attempt']['state'], 'MERGED')
+        self.assertEqual(len(self.gh.named('comment')), 1)
+        self.assertEqual(len(self.gh.named('merge')), merges)
+        # A MERGED train is never merged or commented on again.
+        result = self._merge()
+        self.assertEqual(result['step'], 'MERGE_REFUSED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_NOT_MERGEABLE])
+        self.assertEqual(self._record()['state'], 'MERGED')
+        self.assertEqual(len(self.gh.named('comment')), 1)
+        self.assertEqual(len(self.gh.named('merge')), merges)
+
+    def test_failed_merged_writes_from_built_post_no_comment(self):
+        self._create()
+        patcher, attempts = self._fail_writes('MERGED', 2)
+        with patcher:
+            result = self._merge()
+        self._assert_record_failed(result)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self._record()['state'], 'MERGE_CLAIMED')
+        self.assertEqual(len(self.gh.named('merge')), 1)
+        self._assert_recovers_with_one_comment()
+
+    def test_failed_merged_writes_from_unknown_post_no_comment(self):
+        self._create()
+        self.gh.merge_effect = False
+        self._merge()
+        self.assertEqual(self._record()['state'], 'UNKNOWN')
+        self._mark_train_merged()
+        patcher, attempts = self._fail_writes('MERGED', 2)
+        with patcher:
+            result = self._merge()
+        self._assert_record_failed(result)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self._record()['state'], 'UNKNOWN')
+        self.assertEqual(len(self.gh.named('merge')), 1)
+        self._assert_recovers_with_one_comment()
+
+    def test_failed_merged_writes_from_claimed_post_no_comment(self):
+        self._leave_claimed()
+        self._mark_train_merged()
+        patcher, attempts = self._fail_writes('MERGED', 2)
+        with patcher:
+            result = self._merge()
+        self._assert_record_failed(result)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self._record()['state'], 'MERGE_CLAIMED')
+        self.assertEqual(len(self.gh.named('merge')), 1)
+        self._assert_recovers_with_one_comment()
+
+    def test_first_merged_write_fails_second_succeeds_posts_one_comment(self):
+        self._create()
+        patcher, attempts = self._fail_writes('MERGED', 1)
+        with patcher:
+            result = self._merge()
+        self.assertEqual(result['step'], 'MERGED', result)
+        self.assertEqual(result['codes'], [])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self._record()['state'], 'MERGED')
+        self.assertEqual(len(self.gh.named('comment')), 1)
+        self.assertEqual(len(self.gh.named('merge')), 1)
+
+    # High Debug finding 2: one merge_train call per train at a time.
+
+    def _operation_lock_path(self):
+        directory = Path(self.train_root).parent / merge_train_store.DIRECTORY_NAME
+        return directory / merge_train_ops._operation_lock_name(TRAIN_ID)
+
+    def _hold_operation_lock(self):
+        fd = os.open(self._operation_lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+
+    def _operation_lock_free(self):
+        fd = os.open(self._operation_lock_path(), os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        finally:
+            os.close(fd)
+        return True
+
+    def test_held_operation_lock_refuses_without_side_effect(self):
+        self._create()
+        fd = self._hold_operation_lock()
+        self._assert_refused(self._merge(), merge_train_ops.TRAIN_OPERATION_BUSY)
+        self.assertEqual(self.gh.calls, [])
+        self.assertEqual(self.github.reads, [])
+        self.read_main.assert_not_called()
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        self.assertEqual(self._merge()['step'], 'MERGED')
+        # The dot-file lock is not a train record.
+        self.assertEqual(
+            merge_train_store.find_by_pr(TRAIN_PR, root=self.train_root)['train_id'], TRAIN_ID)
+
+    def test_live_claim_is_not_recovered_while_lock_held(self):
+        self._leave_claimed()
+        reads = len(self.github.reads)
+        self._hold_operation_lock()
+        result = self._merge()
+        self.assertEqual(result['step'], 'MERGE_REFUSED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_OPERATION_BUSY])
+        self.assertEqual(self._record()['state'], 'MERGE_CLAIMED')
+        self.assertEqual(len(self.github.reads), reads)
+        self.assertEqual(len(self.gh.named('merge')), 1)
+
+    def test_operation_lock_held_for_the_call_and_released(self):
+        self._create()
+        seen = []
+        self.github.hooks[f'commits/{self.train_head}/check-runs?per_page=100'] = (
+            lambda: seen.append(self._operation_lock_free()))
+        self.assertEqual(self._merge()['step'], 'MERGED')
+        self.assertEqual(seen, [False])
+        self.assertTrue(self._operation_lock_free())
+
+    # High Debug finding 3: authenticated main is read again right before the claim.
+
+    def test_main_moved_during_ci_read_supersedes_without_claim(self):
+        self._create()
+
+        def move_main():
+            self.read_main.return_value = OTHER_SHA
+
+        self.github.hooks[f'commits/{self.train_head}/check-runs?per_page=100'] = move_main
+        result = self._merge()
+        self.assertEqual(result['step'], 'SUPERSEDED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_MAIN_MOVED])
+        record = self._record()
+        self.assertEqual(record['state'], 'SUPERSEDED')
+        self.assertIsNone(record['merge_attempt'])
+        self.assertEqual(self.gh.calls, [])
+        self.assertEqual(self.read_main.call_count, 2)
+
+    def test_main_unavailable_before_claim_refuses(self):
+        self._create()
+
+        def lose_main():
+            self.read_main.side_effect = LLMToolError('main unavailable')
+
+        self.github.hooks[f'commits/{self.train_head}/check-runs?per_page=100'] = lose_main
+        self._assert_refused(self._merge(), merge_train_ops.TRAIN_MAIN_UNAVAILABLE)
+        self.assertIsNone(self._record()['merge_attempt'])
+        self.assertEqual(self.gh.calls, [])
 
     # close_train
 
