@@ -180,6 +180,14 @@ def _importing_test_ids(target: str, repo_root: Path) -> set[str] | None:
     return selected
 
 
+def _outside_markdown(path: str) -> bool:
+    """Accept a plain repository-relative ``*.md`` path outside tools/llmtool/."""
+    parts = path.split("/")
+    return (path.endswith(".md") and not path.startswith("/")
+            and not path.startswith("tools/llmtool/")
+            and all(part not in {"", ".", ".."} for part in parts))
+
+
 def select_test_ids(
     changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT,
     rejection_reasons: list[str] | None = None,
@@ -254,6 +262,11 @@ def select_test_ids(
         if not path.startswith("tools/llmtool/"):
             if (path_class == "docs" and (path in {"AGENTS.md", "CLAUDE.md"}
                                            or path.startswith(("skills/", "docs/")))):
+                continue
+            if _outside_markdown(path):
+                # #714: Markdown outside tools/llmtool/ (for example another
+                # tool's README) is not a Mac input and adds no modules.
+                # Workflow and CI Markdown were already rejected above.
                 continue
             reject(path, "unsupported_path")
             continue

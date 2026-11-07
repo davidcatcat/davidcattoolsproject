@@ -605,6 +605,118 @@ class MacTestIdSelectionTests(unittest.TestCase):
         self.assertIn("canonical unittest test-case count:", workflow)
         self.assertIn("verify=true", workflow)
 
+    def test_markdown_outside_llmtool_selects_no_subset_like_claude_md(self):
+        baseline = ci_mac_modules.selection_report(["CLAUDE.md"], REPO_ROOT)
+        self.assertEqual(baseline["level"], "L0")
+        for path in (
+            "tools/ec2-runner/README.md",
+            "tools/mac-runner/README.md",
+            "tools/nlf/README.md",
+            "tools/ai-loop/README.md",
+            "tools/api-agent-gateway/README.md",
+            "README.md",
+        ):
+            with self.subTest(path=path):
+                report = ci_mac_modules.selection_report([path], REPO_ROOT)
+                self.assertEqual(report["level"], "L0")
+                self.assertEqual(report["test_ids"], [])
+                self.assertEqual(report["test_ids"], baseline["test_ids"])
+                self.assertEqual(report["fallback_reasons"], [])
+                self.assertEqual(report["fallback_paths"], [])
+                self.assertEqual(report["fallback_details"], [])
+
+        alone = ci_mac_modules.selection_report(
+            ["tools/llmtool/tests/test_worker_dispatch.py"], REPO_ROOT
+        )
+        mixed = ci_mac_modules.selection_report(
+            ["tools/ec2-runner/README.md", "tools/llmtool/tests/test_worker_dispatch.py"],
+            REPO_ROOT,
+        )
+        self.assertEqual(mixed["level"], alone["level"])
+        self.assertEqual(mixed["test_ids"], alone["test_ids"])
+        self.assertEqual(mixed["fallback_reasons"], [])
+
+    def test_pr_1150_path_set_selects_guidance_drift_subset_not_full(self):
+        alone = ci_mac_modules.selection_report(
+            ["tools/llmtool/guidance-drift.json"], REPO_ROOT
+        )
+        report = ci_mac_modules.selection_report([
+            "AGENTS.md",
+            "CLAUDE.md",
+            "docs/governance/dispatch-token-and-identity-20261027.md",
+            "skills/ai-team-delivery/formal-verdict.md",
+            "tools/ec2-runner/README.md",
+            "tools/llmtool/guidance-drift.json",
+        ], REPO_ROOT)
+        self.assertEqual(alone["level"], "L1")
+        self.assertEqual(report["level"], "L1")
+        self.assertNotEqual(report["test_ids"], ["FULL"])
+        self.assertEqual(report["test_ids"], alone["test_ids"])
+        self.assertEqual(report["test_ids"], sorted(MAC_REQUIRED | {
+            "test_guidance_drift_check", "test_docs_check",
+        }))
+        self.assertEqual(report["fallback_reasons"], [])
+        self.assertEqual(report["fallback_paths"], [])
+
+    def test_non_markdown_outside_llmtool_still_falls_back_to_full(self):
+        for path in (
+            "tools/mac-runner/setup.sh",
+            "tools/ec2-runner/install.sh",
+            "tools/ec2-runner/README.txt",
+            "tools/nlf/main.go",
+            "../outside/README.md",
+            "tools/ec2-runner/../README.md",
+        ):
+            with self.subTest(path=path):
+                report = ci_mac_modules.selection_report([path], REPO_ROOT)
+                self.assertEqual(report["level"], "L3")
+                self.assertEqual(report["test_ids"], ["FULL"])
+                self.assertEqual(report["fallback_reasons"], ["unsupported_path"])
+                self.assertEqual(report["fallback_paths"], [path])
+
+    def test_markdown_with_rejected_path_reports_only_the_rejected_path(self):
+        rejected_cases = (
+            ("tools/mac-runner/setup.sh", "unsupported_path"),
+            (".github/workflows/llmtool-mac-ci.yml", "workflow_change"),
+            ("tools/llmtool/scripts/ci_mac_modules.py", "selector_change"),
+            ("tools/llmtool/llmtool/authorization_policy.py", "high_risk_file"),
+        )
+        for rejected, reason in rejected_cases:
+            with self.subTest(rejected=rejected):
+                report = ci_mac_modules.selection_report(
+                    ["tools/ec2-runner/README.md", "README.md", rejected], REPO_ROOT
+                )
+                self.assertEqual(report["level"], "L3")
+                self.assertEqual(report["test_ids"], ["FULL"])
+                self.assertEqual(report["fallback_reasons"], [reason])
+                self.assertEqual(report["fallback_paths"], [rejected])
+                self.assertEqual(report["fallback_details"],
+                                 [{"path": rejected, "reason": reason}])
+
+    def test_workflow_markdown_keeps_workflow_fallback_and_llmtool_paths_unchanged(self):
+        for path in (".github/workflows/README.md", ".github/workflows/notes/guide.md"):
+            with self.subTest(path=path):
+                report = ci_mac_modules.selection_report([path], REPO_ROOT)
+                self.assertEqual(report["level"], "L3")
+                self.assertEqual(report["test_ids"], ["FULL"])
+                self.assertEqual(report["fallback_reasons"], ["workflow_change"])
+                self.assertEqual(report["fallback_paths"], [path])
+
+        for path, level, reason in (
+            ("tools/llmtool/README.md", "L0", None),
+            ("tools/llmtool/llmtool/guide.md", "L0", None),
+            ("tools/llmtool/requirements-ci.txt", "L3", "ci_or_dependency_change"),
+            ("tools/llmtool/llmtool/unknown_config.json", "L3", "unmapped_source"),
+            ("tools/llmtool/llmtool/authorization_policy.py", "L3", "high_risk_file"),
+        ):
+            with self.subTest(path=path):
+                report = ci_mac_modules.selection_report([path], REPO_ROOT)
+                self.assertEqual(report["level"], level)
+                if reason is None:
+                    self.assertEqual(report["fallback_reasons"], [])
+                else:
+                    self.assertIn(reason, report["fallback_reasons"])
+
 
 if __name__ == "__main__":
     unittest.main()
