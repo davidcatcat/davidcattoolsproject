@@ -39,6 +39,9 @@ TASK_C = 'c' * 32
 TASK_X = 'e' * 32
 PRS = {TASK_A: 101, TASK_B: 102, TASK_C: 103, TASK_X: 104}
 
+# Default for _build's members: build from task_ids. Never a valid members value.
+_DEFAULT_MEMBERS = object()
+
 
 def _executor_task():
     """Return a D6 executor id that the train store accepts."""
@@ -184,10 +187,12 @@ class BuildTrainTests(unittest.TestCase):
         return {'eligible': True, 'code': None,
                 'member': _eligible_member(task_id, pr, self.heads[task_id])}
 
-    def _build(self, task_ids, runners=None, main=None, members=None, **patches):
+    def _build(self, task_ids, runners=None, main=None, members=_DEFAULT_MEMBERS,
+               **patches):
         runners = _Runners() if runners is None else runners
-        members = [(task_id, PRS[task_id]) for task_id in task_ids] if members is None \
-            else members
+        # A distinct sentinel, so every explicit value, None included, reaches build_train.
+        if members is _DEFAULT_MEMBERS:
+            members = [(task_id, PRS[task_id]) for task_id in task_ids]
         main_read = mock.Mock(return_value=self.repo.base) if main is None else main
         check = patches.get('check', mock.Mock(side_effect=self._fake_check))
         with mock.patch.object(task_completion, 'read_authenticated_main_sha', main_read), \
