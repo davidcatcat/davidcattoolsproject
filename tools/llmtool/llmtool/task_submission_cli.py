@@ -1850,20 +1850,48 @@ def _record_developer_screen_refusal(store, task_id, value):
 
     If it cannot be written (or the store names no root), the delegate gate
     still refuses from the Task record and records the refusal as unlocated.
+    The record keeps a digest of the screened output and the refused Task's
+    D6, never the output, so overflow batch recovery can prove that what it
+    rereads from that D6 is the refused output.
     """
     from . import high_debug
     root = _developer_screen_root(store)
     if root is None:
         return
     try:
-        byte_count = (len(value.encode('utf-8', 'replace'))
-                      if type(value) is str else 0)
+        screened = value.encode('utf-8', 'replace') if type(value) is str else None
+        try:
+            completion = store.get(task_id).get('completion')
+            d6 = completion.get('executor_task_id') if type(completion) is dict else None
+        except Exception:
+            d6 = None
         high_debug._write_screen_record(
             task_id, _DEVELOPER_SCREEN_FAMILY, 'DEVELOPER_OUTPUT_SENSITIVE',
-            _DEVELOPER_SCREEN_SOURCE, _developer_screen_hits(value), byte_count,
-            root=root)
+            _DEVELOPER_SCREEN_SOURCE, _developer_screen_hits(value),
+            0 if screened is None else len(screened), root=root,
+            screened=screened, d6=d6)
     except Exception:
         pass
+
+
+def _developer_screen_source(task_id, d6, root):
+    """Rebuild refused Developer output in memory from its D6, or return None.
+
+    This is the same Task-base diff the D6 routes screen. The caller proves it
+    against the record's digest, so a D6 that moved on refuses. Output that
+    never was a D6 diff (a text route's reply) has no source here: its digest
+    cannot match, and an unchanged D6 gives no diff at all.
+    """
+    try:
+        task = (TaskStore() if root is None else TaskStore(root)).get(task_id)
+        registration = task_completion.read_d6_registration(
+            d6, task['completion']['evidence']['common_dir'],
+            allowed_states=task_completion._D6_EVIDENCE_STATES)
+        _changed_paths, raw = task_completion._worktree_diff(
+            registration.root, task['developer']['source_sha'])
+    except Exception:
+        return None
+    return raw or None
 
 
 def _check_developer_screen_disposition(store, task_id, developer):
