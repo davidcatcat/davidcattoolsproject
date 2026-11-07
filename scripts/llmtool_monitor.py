@@ -2011,7 +2011,7 @@ class GitHubSource:
         # Open PR heads' required checks (head_checks()), keyed by seven-character
         # head; a head missing here was not read yet or its read failed.
         self.pr_checks: dict | None = None
-        self._pr_check_cache: dict = {}   # head key -> head_checks() of the last good read
+        self._pr_check_cache: dict = {}   # full head SHA -> head_checks() of the last good read
         self.want_ci = False   # set while a self-hosted runner is on this Mac
         self.want_main = False
         self.main_health: MainHealth | None = None
@@ -2353,31 +2353,34 @@ class GitHubSource:
     def refresh_pr_checks(self) -> None:
         """The two required checks of every open PR's exact head, from that
         commit's check-runs page (not the newest workflow runs, which miss
-        heads pushed long ago). At most CI_JOB_READS heads are read per
-        refresh: heads never read first, then heads still running, newest PR
-        first within each. A head whose two checks have both completed is kept
+        heads pushed long ago), keyed by the full 40-character head SHA so two
+        heads sharing a seven-character prefix never share a result. Every
+        head that needs a read (never read, or a check not completed yet) goes
+        into one list, newest PR first, and at most CI_JOB_READS of them are
+        read per refresh. A head whose two checks have both completed is kept
         and not read again while it stays the head; a new head is read fresh.
-        A failed read shows only that head as ?."""
+        A failed read shows only that head as ?. A PR without a full head SHA
+        is not read and shows ?."""
         pulls = self.board_pulls
         if pulls is None:
             return
-        heads: dict = {}   # head key -> (newest PR number, seven-character head)
+        heads: dict = {}   # full head SHA -> newest open PR number on it
         for pull in pulls:
-            if not isinstance(pull, BoardPull) or pull.state != "OPEN" or not pull.head:
+            if (not isinstance(pull, BoardPull) or pull.state != "OPEN"
+                    or type(pull.sha) is not str or not HEX_SHA.fullmatch(pull.sha)):
                 continue
-            key = pull.sha or pull.head
-            heads[key] = (max(pull.number, heads.get(key, (0, ""))[0]), pull.head)
-        cache = {key: value for key, value in self._pr_check_cache.items() if key in heads}
-        wanted = sorted((key for key in heads if not _checks_done(cache.get(key))),
-                        key=lambda key: (key in cache, -heads[key][0]))
-        for key in wanted[:CI_JOB_READS]:
+            heads[pull.sha] = max(pull.number, heads.get(pull.sha, 0))
+        cache = {sha: value for sha, value in self._pr_check_cache.items() if sha in heads}
+        wanted = sorted((sha for sha in heads if not _checks_done(cache.get(sha))),
+                        key=lambda sha: -heads[sha])
+        for sha in wanted[:CI_JOB_READS]:
             try:
-                cache[key] = head_checks(
-                    self._get(f"repos/{self.repo}/commits/{key}/check-runs?per_page=100"), key)
+                cache[sha] = head_checks(
+                    self._get(f"repos/{self.repo}/commits/{sha}/check-runs?per_page=100"), sha)
             except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
-                cache.pop(key, None)
+                cache.pop(sha, None)
         self._pr_check_cache = cache
-        self.pr_checks = {head: cache[key] for key, (_, head) in heads.items() if key in cache}
+        self.pr_checks = dict(cache)
 
     def refresh_ci(self) -> None:
         """Runners and CI, read on their own: a failure only marks them 未確認."""
@@ -4327,11 +4330,13 @@ def _ci_word(entry, known: bool) -> str:
     return "?"
 
 
-def _check_word(checks, head: str, key: str) -> str:
-    """One required check ("linux" or "mac") on one exact head: ? while that
-    head's check runs are unread or unreadable, — when the head has no run of
-    that check, else its state."""
-    found = checks.get(head) if type(checks) is dict and head else None
+def _check_word(checks, sha: str, key: str) -> str:
+    """One required check ("linux" or "mac") on one exact head, looked up by
+    its full 40-character SHA (GitHubSource.pr_checks keys): ? while that
+    head's check runs are unread or unreadable or the full SHA is unknown, —
+    when the head has no run of that check, else its state."""
+    found = (checks.get(sha) if type(checks) is dict and type(sha) is str
+             and HEX_SHA.fullmatch(sha) else None)
     if type(found) is not dict:
         return "?"
     if key not in found:
@@ -4342,15 +4347,19 @@ def _check_word(checks, head: str, key: str) -> str:
 def _head_verdict(entries, head: str) -> tuple[str, str]:
     """A PR's review state for its current head, from review_verdicts()
     entries. Only the head a verdict's HEAD line names counts, never another
-    commit id in its body. ("current", verdict) for the newest verdict naming
-    this head; ("stale", "") when verdicts name only other heads; ("", "")
-    when none names a head."""
+    commit id in its body. The newest verdict whose HEAD line names any head
+    decides: ("current", verdict) when it names this head; ("stale", "") when
+    it names another (older) head, even if an earlier verdict named this one;
+    ("", "") when no verdict names a head."""
     bound = [entry for entry in entries if type(entry) in (tuple, list) and len(entry) >= 4
-             and type(entry[3]) is str and entry[3]] if type(entries) in (tuple, list) else []
-    current = [entry for entry in bound if head and entry[3] == head[:7]]
-    if current:
-        return "current", max(current, key=lambda entry: entry[0])[1]
-    return ("stale" if bound and head else ""), ""
+             and type(entry[0]) in (int, float) and type(entry[3]) is str and entry[3]
+             ] if type(entries) in (tuple, list) else []
+    if not bound or not head:
+        return "", ""
+    newest = max(bound, key=lambda entry: entry[0])
+    if newest[3] == head[:7]:
+        return "current", newest[1]
+    return "stale", ""
 
 
 def _work_names(row: OfficeRow) -> str:
@@ -4467,7 +4476,7 @@ def _pr_people(office, pull, checks) -> tuple[set, bool]:
     if pull.state == "OPEN":
         if checks is None:
             uncertain = True
-        elif any(_check_word(checks, pull.head.lower(), key) in ("執行中", "排隊")
+        elif any(_check_word(checks, pull.sha, key) in ("執行中", "排隊")
                  for key in ("linux", "mac")):
             people.add("CI")
     return people, uncertain
@@ -4483,7 +4492,8 @@ def _current_pr_people(office, pull, checks, *, github_known=True, office_known=
 def pr_board_rows(pulls, verdicts, checks, ec2, reviewing, pending, office=(), *, github_known=True,
                   office_known=True) -> list[PrRow]:
     """Build the read-only PR status table from already-read local/GitHub data.
-    checks: GitHubSource.pr_checks, the required check runs of each exact head;
+    checks: GitHubSource.pr_checks, the required check runs of each exact head
+    keyed by its full SHA (BoardPull.sha);
     verdicts: review_verdicts(), bound to the head their HEAD line names."""
     rows = []
     for pull in sorted((item for item in pulls or []
@@ -4501,8 +4511,8 @@ def pr_board_rows(pulls, verdicts, checks, ec2, reviewing, pending, office=(), *
                 review = "舊審查"
         ec2_word = "?" if not head or ec2 is None else (
             ec2[0].get(head, "?") if head in ec2[0] else "?" if ec2[1] else "—")
-        linux = _check_word(checks, head, "linux")
-        mac = _check_word(checks, head, "mac")
+        linux = _check_word(checks, pull.sha, "linux")
+        mac = _check_word(checks, pull.sha, "mac")
         waiting_owner = any(type(item) is OwnerPending and item.kind == "waiting_owner"
                             and item.reference == f"#{number}" for item in pending or [])
         next_step, owner = "未確認", "PM"
