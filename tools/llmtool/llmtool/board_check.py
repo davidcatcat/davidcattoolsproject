@@ -27,6 +27,12 @@ the row can be claimed again. A refused claim names its code and exits 3.
 
 A Task counts as RUNNING only when a live ledger claim binds it or its
 Developer worker is a worker-dispatch.json Worker.
+
+Idle work: every ACTIONABLE row without a live ledger claim is also named in
+the top-level ``anomalies`` list with code IDLE_RUNNABLE. A row with a live
+claim never is. Next items: a DONE row may list ``next`` row ids; each id with
+no board row is reported ACTIONABLE as pending authorized work. A listed row
+that is on the board is classified only on its own evidence.
 """
 
 import contextlib
@@ -59,6 +65,7 @@ UNKNOWN = 'UNKNOWN'
 DONE = 'DONE'
 CLAIMED = 'CLAIMED'
 FLAGGED_STATES = frozenset((ACTIONABLE, ANOMALY))
+IDLE_RUNNABLE = 'IDLE_RUNNABLE'
 
 LEDGER_SCHEMA_VERSION = 1
 MAX_LEDGER_BYTES = 256 * 1024
@@ -1281,13 +1288,44 @@ def _row_label(row, index):
     return f'row[{index}]'
 
 
+def _next_items(rows, findings, rows_by_id):
+    """Yield (row id, finding) for each ``next`` id of a DONE row with no board row.
+
+    The item is pending authorized work. A listed id that is on the board is
+    skipped here, so that row keeps the state its own evidence gives it.
+    """
+    seen = set()
+    for row, finding in zip(rows, findings):
+        if finding['state'] != DONE or type(row) is not dict:
+            continue
+        # A DONE row passed _row_problem, so ``next`` is None or a list of row ids.
+        for item in row.get('next') or ():
+            if item in rows_by_id or item in seen:
+                continue
+            seen.add(item)
+            yield item, {'row': f'next:{_label(item)}', 'state': ACTIONABLE,
+                         'evidence': [f"next item of DONE row {finding['row']} has no board "
+                                      'row: pending authorized work']}
+
+
+def _has_live_claim(ctx, row_id):
+    """True when a live ledger claim holds ``row_id``; an unreadable ledger is UNKNOWN."""
+    if type(row_id) is not str:
+        return False
+    if ctx.ledger_error is not None:
+        raise _Unknown(ctx.ledger_error)
+    return any(claim['row'] == row_id and _claim_status(ctx, claim) == _LIVE
+               for claim in ctx.ledger)
+
+
 def check_board(rows, *, store, github_get, list_processes, read_d6=None,
                 evaluate=None, now=None, ledger=None, ledger_error=None):
-    """Classify every row and return {'result', 'exit_code', 'rows'}.
+    """Classify every row and return {'result', 'exit_code', 'rows', 'anomalies'}.
 
     ``ledger`` holds validated ledger claims (none by default). ``ledger_error``
     names why the ledger could not be read; every row with an id is then
-    UNKNOWN unless other evidence proves it ANOMALY.
+    UNKNOWN unless other evidence proves it ANOMALY. ``anomalies`` names every
+    ACTIONABLE row without a live ledger claim with code IDLE_RUNNABLE.
     """
     ctx = _Context(store=store, github_get=github_get, list_processes=list_processes,
                    read_d6=read_d6 or task_advance._d6_snapshot,
@@ -1300,7 +1338,7 @@ def check_board(rows, *, store, github_get, list_processes, read_d6=None,
             if row['id'] in rows_by_id:
                 duplicate_ids.add(row['id'])
             rows_by_id[row['id']] = row
-    findings = []
+    findings, row_ids = [], []
     for index, row in enumerate(rows):
         try:
             state, evidence = _classify_row(ctx, row, rows_by_id, duplicate_ids)
@@ -1313,14 +1351,32 @@ def check_board(rows, *, store, github_get, list_processes, read_d6=None,
             # The row may hold a ledger claim that would change its state.
             state, evidence = UNKNOWN, [ctx.ledger_error]
         findings.append({'row': _row_label(row, index), 'state': state, 'evidence': evidence})
+        row_ids.append(row.get('id') if type(row) is dict and type(row.get('id')) is str
+                       else None)
+    for row_id, finding in list(_next_items(rows, findings, rows_by_id)):
+        findings.append(finding)
+        row_ids.append(row_id)
+    anomalies = []
+    for finding, row_id in zip(findings, row_ids):
+        if finding['state'] != ACTIONABLE:
+            continue
+        try:
+            claimed = _has_live_claim(ctx, row_id)
+        except _Unknown as exc:
+            # Without the ledger the row may be held by a claim; it is not proven idle.
+            finding['state'], finding['evidence'] = UNKNOWN, [exc.code]
+            continue
+        if not claimed:
+            anomalies.append({'code': IDLE_RUNNABLE, 'row': finding['row'],
+                              'evidence': ['ACTIONABLE with no live ledger claim']})
     findings.extend(_unlisted(ctx))
-    if any(item['state'] in FLAGGED_STATES for item in findings):
+    if anomalies or any(item['state'] in FLAGGED_STATES for item in findings):
         result, code = 'FLAGGED', 2
     elif any(item['state'] == UNKNOWN for item in findings):
         result, code = 'UNKNOWN', 1
     else:
         result, code = 'CLEAN', 0
-    return {'result': result, 'exit_code': code, 'rows': findings}
+    return {'result': result, 'exit_code': code, 'rows': findings, 'anomalies': anomalies}
 
 
 def github_reader(runner=None):
@@ -1394,6 +1450,8 @@ def format_result(result):
     lines = [f'board-check: {result["result"]}']
     for item in result['rows']:
         lines.append(f"{item['row']} {item['state']} " + '; '.join(item['evidence']))
+    for item in result.get('anomalies', ()):
+        lines.append(f"anomaly {item['code']} {item['row']} " + '; '.join(item['evidence']))
     return '\n'.join(lines)
 
 
@@ -1541,8 +1599,8 @@ def run_board_check(args, *, store=None, github_get=None, list_processes_call=No
         rows = read_board(path)
     except BoardUnreadable:
         if as_json:
-            print(json.dumps({'result': 'UNREADABLE', 'exit_code': 1, 'rows': []},
-                             ensure_ascii=True, sort_keys=True))
+            print(json.dumps({'result': 'UNREADABLE', 'exit_code': 1, 'rows': [],
+                              'anomalies': []}, ensure_ascii=True, sort_keys=True))
         else:
             print('board-check: UNREADABLE board file')
         return 1

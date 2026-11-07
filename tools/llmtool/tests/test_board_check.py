@@ -11,6 +11,9 @@ temporary HOME: (6) two schedule runs give one claim and one bound Task; (8) a
 fresh session reads the persisted ledger, refuses a duplicate claim and reports
 the bound Task's next step. Every test runs under a temporary HOME, so none reads
 the real ~/.local/state ledger or TaskStore.
+
+Part 2 adds (3) a merged PR row with a next item lists it as pending, not DONE,
+and IDLE_RUNNABLE for every ACTIONABLE row without a live ledger claim.
 """
 
 import contextlib
@@ -1646,6 +1649,139 @@ class NextFieldTests(BoardCheckCase):
         for value in ('b', [1], [''], ['x'] * 33):
             result = run([{'id': 'a', 'next': value}])
             self.assertRow(result, 'a', board_check.ANOMALY, 'next is not a list of row ids')
+
+    def test_next_items_come_only_from_done_rows_once_each(self):
+        github = FakeGitHub({'pulls/12': pull(12, state='closed', merged=True),
+                             'pulls/14': pull(14, state='closed', merged=True)})
+        rows = [{'id': 'a', 'pr': 12, 'next': ['x']},
+                {'id': 'b', 'pr': 14, 'next': ['x', 'a']},
+                {'id': 'c', 'next': ['y']}]
+        result = run(rows, github=github)
+        # 'a' is on the board, so b's next does not add it; c is not DONE, so 'y' is not pending.
+        self.assertEqual(states(result), {'a': board_check.DONE, 'b': board_check.DONE,
+                                          'c': board_check.ACTIONABLE,
+                                          'next:x': board_check.ACTIONABLE}, result)
+        self.assertRow(result, 'next:x', board_check.ACTIONABLE,
+                       'next item of DONE row a has no board row: pending authorized work')
+
+
+def idle_rows(result):
+    return [item['row'] for item in result['anomalies']
+            if item['code'] == board_check.IDLE_RUNNABLE]
+
+
+class NextItemTests(LedgerCase):
+    """Owner test 3: a merged PR row with a next item lists it as pending, not DONE."""
+
+    def test_merged_pr_row_lists_its_next_item_as_pending_not_done(self):
+        self.write_board([{'id': 'impl', 'pr': 12, 'next': ['docs', 'qa']},
+                          {'id': 'qa', 'after': 'impl'}])
+        github = FakeGitHub({'pulls/12': pull(12, state='closed', merged=True)})
+        result = self.check(github=github)
+        self.assertEqual(states(result), {'impl': board_check.DONE,
+                                          'qa': board_check.ACTIONABLE,
+                                          'next:docs': board_check.ACTIONABLE}, result)
+        self.assertRow(result, 'impl', board_check.DONE, 'PR #12 merged')
+        self.assertRow(result, 'next:docs', board_check.ACTIONABLE,
+                       'next item of DONE row impl has no board row: pending authorized work')
+        # The listed row is classified on its own evidence: undispatched work.
+        self.assertRow(result, 'qa', board_check.ACTIONABLE, 'work not dispatched')
+        self.assertEqual(idle_rows(result), ['qa', 'next:docs'])
+        self.assertEqual((result['result'], result['exit_code']), ('FLAGGED', 2))
+
+    def test_listed_next_row_keeps_its_own_state(self):
+        merged = responded(TASK_REVIEW)
+        merged['completion_events'] = MERGED
+        self.put(merged)
+        self.write_board([{'id': 'impl', 'next': ['qa', 'docs']}, {'id': 'qa'},
+                          {'id': 'docs', 'pr': 13}])
+        self.write_ledger([ledger_claim('impl', task=TASK_REVIEW)])
+        self.assertClaim(self.claim('qa', 'sched-a'), 'RESERVED')
+        github = FakeGitHub({'pulls/13': pull(13), OPEN_PRS: [{'number': 13}],
+                             CHECKS: checks('in_progress')})
+        result = self.check(github=github)
+        self.assertEqual(states(result), {'impl': board_check.DONE,
+                                          'qa': board_check.CLAIMED,
+                                          'docs': board_check.WAITING_CI}, result)
+        self.assertRow(result, 'impl', board_check.DONE, 'merge marker')
+        self.assertEqual(result['anomalies'], [])
+        self.assertEqual((result['result'], result['exit_code']), ('CLEAN', 0))
+
+    def test_malformed_next_on_a_merged_row_is_anomaly(self):
+        github = FakeGitHub({'pulls/12': pull(12, state='closed', merged=True)})
+        for value in ('docs', [7], ['x' * 129], {'docs': 1}):
+            with self.subTest(value=value):
+                self.write_board([{'id': 'impl', 'pr': 12, 'next': value}])
+                result = self.check(github=github)
+                self.assertEqual(states(result), {'impl': board_check.ANOMALY}, result)
+                self.assertRow(result, 'impl', board_check.ANOMALY,
+                               'next is not a list of row ids')
+                self.assertEqual(result['exit_code'], 2)
+
+    def test_unreadable_ledger_leaves_a_next_item_unknown(self):
+        self.write_board([{'id': 'work'}, {'pr': 12, 'next': ['docs']}])
+        self.write_ledger(raw=b'{bad json')
+        github = FakeGitHub({'pulls/12': pull(12, state='closed', merged=True)})
+        result = self.check(github=github)
+        self.assertEqual(states(result), {'work': board_check.UNKNOWN,
+                                          'row[1]': board_check.DONE,
+                                          'next:docs': board_check.UNKNOWN}, result)
+        self.assertRow(result, 'next:docs', board_check.UNKNOWN, 'LEDGER_UNREADABLE')
+        self.assertEqual(result['anomalies'], [])
+        self.assertEqual((result['result'], result['exit_code']), ('UNKNOWN', 1))
+
+
+class IdleRunnableTests(LedgerCase):
+    """Every ACTIONABLE row without a live ledger claim is IDLE_RUNNABLE; exit stays 2."""
+
+    def test_actionable_rows_without_a_claim_are_idle_runnable(self):
+        self.write_board([{'id': 'work'}, {'id': 'task', 'task_id': TASK_PENDING}])
+        self.put(pending(TASK_PENDING))
+        result = self.check()
+        self.assertEqual(states(result), {'work': board_check.ACTIONABLE,
+                                          'task': board_check.ACTIONABLE}, result)
+        self.assertEqual(result['anomalies'], [
+            {'code': 'IDLE_RUNNABLE', 'row': 'work',
+             'evidence': ['ACTIONABLE with no live ledger claim']},
+            {'code': 'IDLE_RUNNABLE', 'row': 'task',
+             'evidence': ['ACTIONABLE with no live ledger claim']}])
+        self.assertEqual((result['result'], result['exit_code']), ('FLAGGED', 2))
+
+    def test_row_with_a_live_claim_is_never_idle_runnable(self):
+        self.write_board([{'id': 'work'}, {'id': 'task', 'task_id': TASK_PENDING}])
+        self.put(pending(TASK_PENDING), pending(TASK_OTHER))
+        self.bind('work', 'sched-a', TASK_OTHER)
+        self.bind('task', 'sched-b', TASK_PENDING)
+        result = self.check()
+        self.assertEqual(states(result), {'work': board_check.ACTIONABLE,
+                                          'task': board_check.ACTIONABLE}, result)
+        self.assertEqual(result['anomalies'], [])
+        self.assertEqual(result['exit_code'], 2)
+
+    def test_reservation_is_not_idle_and_its_expiry_is_an_anomaly_row(self):
+        self.assertClaim(self.claim('work', 'sched-a'), 'RESERVED')
+        result = self.check(now=at(12, 5))
+        self.assertRow(result, 'work', board_check.CLAIMED)
+        self.assertEqual((result['anomalies'], result['exit_code']), ([], 0))
+        result = self.check(now=at(12, 15))
+        self.assertRow(result, 'work', board_check.ANOMALY, 'expired')
+        self.assertEqual((result['anomalies'], result['exit_code']), ([], 2))
+
+    def test_fake_or_stale_claim_leaves_an_actionable_row_idle(self):
+        self.write_board([{'id': 'work', 'task_id': TASK_PENDING}])
+        self.put(pending(TASK_PENDING))
+        for claims in ([ledger_claim('work', task=TASK_UNKNOWN)],
+                       [ledger_claim('work', reserved_at='2026-11-07T11:00:00Z')]):
+            with self.subTest(claims=claims):
+                self.write_ledger(claims)
+                result = self.check()
+                self.assertRow(result, 'work', board_check.ACTIONABLE, 'DEVELOPER_ATTENTION')
+                self.assertEqual(idle_rows(result), ['work'])
+                self.assertEqual(result['exit_code'], 2)
+
+    def test_text_output_names_idle_runnable(self):
+        text = board_check.format_result(run([{'id': 'work'}]))
+        self.assertIn('anomaly IDLE_RUNNABLE work ACTIONABLE with no live ledger claim', text)
 
 
 if __name__ == '__main__':
