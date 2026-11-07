@@ -719,10 +719,37 @@ class ReviewRepairTests(unittest.TestCase):
                     self.assertNotIn('review_repair_claims', self.store.get(TASK))
         self.assertEqual(self.calls, [])
 
-    def test_root_scan_runs_before_other_refusals(self):
-        record = _record()
-        record['developer']['provider_profile'] = 'company-gw'
-        for others, code in (({self.ROOT: self._root_record(TASK)},
+    def test_earlier_refusals_keep_their_order_before_root_scan(self):
+        gw = _record()
+        gw['developer']['provider_profile'] = 'company-gw'
+        denied = type('Decision', (), {'allowed': False, 'reason_code': 'PAUSED'})()
+        bad_receipt = dict(_receipt(), receipt_digest='0' * 64)
+        cases = (
+            ('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED', gw, {}),
+            ('RUNTIME_NOT_ON_PATH', _record(), {'runtime_path': None}),
+            ('REVIEW_FAIL_EVENT_MISSING', _record(),
+             {'github_get': lambda _path: []}),
+            ('REMOTE_TEST_RECEIPT_INVALID', _record(),
+             {'remote_test_receipt': bad_receipt}),
+            ('REPAIR_HEAD_MOVED', _record(),
+             {'current_head': lambda _task, _executor: 'a' * 40}),
+            ('PAUSED', _record(), {'decision': denied}),
+            ('REPAIR_FAMILY_INVALID', _record(), {'family': EC2_FAMILY}),
+        )
+        for code, record, kwargs in cases:
+            for others in ({self.ROOT: self._root_record(TASK)},
+                           {self.ROOT: RuntimeError('unreadable')}):
+                with self.subTest(code=code, root=type(others[self.ROOT]).__name__):
+                    self.store = TempTaskStore(self.temp.name, record, others)
+                    scanned = []
+                    self.store.task_ids = lambda: scanned.append(1) or [TASK, self.ROOT]
+                    self._assert_refused_without_write(code, **kwargs)
+                    self.assertEqual(scanned, [])
+
+    def test_root_scan_runs_before_own_claims_list_is_read(self):
+        record = dict(_record(), review_repair_claims='not-a-list')
+        for others, code in (({}, 'REPAIR_CLAIM_UNAVAILABLE'),
+                             ({self.ROOT: self._root_record(TASK)},
                               'REPAIR_ROOT_TASK_REQUIRED'),
                              ({self.ROOT: RuntimeError('unreadable')},
                               'REPAIR_COUNT_UNAVAILABLE')):

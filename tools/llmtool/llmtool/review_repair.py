@@ -316,7 +316,6 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
         _refuse('REPAIR_TASK_INVALID')
-    _refuse_repair_child(store, task_id)
     developer = task.get('developer')
     completion = task.get('completion')
     if (type(developer) is not dict or type(completion) is not dict or
@@ -359,7 +358,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
               else base_family + EC2_FAMILY_SUFFIX)
     if len(family) > 64:
         _refuse('REPAIR_FAMILY_INVALID')
-    claims = task.get('review_repair_claims', [])
+    # After every no-write refusal above and before the claims list is read.
+    _refuse_repair_child(store, task_id)
+    claims =task.get('review_repair_claims', [])
     if type(claims) is not list:
         _refuse('REPAIR_CLAIM_UNAVAILABLE')
     stored = [claim for claim in claims if _claim_family(claim) == family]
