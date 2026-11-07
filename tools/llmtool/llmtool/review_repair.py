@@ -265,6 +265,24 @@ def _claim_family(claim):
     return claim.get('family', f"pr-{claim.get('pr')}")
 
 
+# EC2 remote-test repairs store their claims in '<base>-ec2' so they keep a
+# count separate from review repairs; each count has its own MAX_REPAIR_ATTEMPTS.
+EC2_FAMILY_SUFFIX = '-ec2'
+
+
+def ec2_claim_kind(claim):
+    """Return 'NEW' or 'LEGACY' for an EC2 repair claim, else None.
+
+    An EC2 claim has a family field and comment_id None. 'NEW' is stored in a
+    '-ec2' family; 'LEGACY' was stored in the base family before this split and
+    counts on both counts. Anything else, or anything malformed, is a review claim.
+    """
+    if (type(claim) is not dict or 'comment_id' not in claim or
+            claim['comment_id'] is not None or type(claim.get('family')) is not str):
+        return None
+    return 'NEW' if claim['family'].endswith(EC2_FAMILY_SUFFIX) else 'LEGACY'
+
+
 def repair_review(*, store, task_id, executor_task, pr_number, family=None, github_get=None,
                   dispatch_adapter=None, current_head=None, auto_review=False,
                   review_dispatcher=None, delegate_callable=None,
@@ -305,13 +323,30 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         worker, developer.get('owner_assignment_ref'), policy_task)
     if not decision.allowed:
         _refuse(decision.reason_code)
-    family = f'pr-{pr_number}' if family is None else family
-    if type(family) is not str or re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None:
+    base_family = f'pr-{pr_number}' if family is None else family
+    if (type(base_family) is not str or
+            re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or
+            base_family.endswith(EC2_FAMILY_SUFFIX)):
+        _refuse('REPAIR_FAMILY_INVALID')
+    # The stored family: a review repair stays in the base family, an EC2
+    # remote-test repair goes to '<base>-ec2'.
+    family = (base_family if remote_test_receipt is None
+              else base_family + EC2_FAMILY_SUFFIX)
+    if len(family) > 64:
         _refuse('REPAIR_FAMILY_INVALID')
     claims = task.get('review_repair_claims', [])
     if type(claims) is not list:
         _refuse('REPAIR_CLAIM_UNAVAILABLE')
-    attempts = [claim for claim in claims if _claim_family(claim) == family]
+    stored = [claim for claim in claims if _claim_family(claim) == family]
+    if remote_test_receipt is None:
+        # Review count: every claim in the base family, legacy EC2 claims included.
+        attempts = stored
+    else:
+        # EC2 count: the '-ec2' family plus legacy EC2 claims stored in base.
+        attempts = [claim for claim in claims
+                    if _claim_family(claim) == family or
+                    (_claim_family(claim) == base_family and
+                     ec2_claim_kind(claim) == 'LEGACY')]
     packet_version = packet.get('version', 0)
     packet_sha = hashlib.sha256(json.dumps(
         packet, ensure_ascii=True, sort_keys=True,
@@ -348,10 +383,18 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                 'replayed': dispatched,
                 'next_action': (f"review-dispatch --version {packet_version + 1}"
                                 if dispatched else f"task delegate {task_id_for_repair}")}
-    attempt = len(attempts) + 1
-    if attempt > MAX_REPAIR_ATTEMPTS:
+    if len(attempts) >= MAX_REPAIR_ATTEMPTS:
         # Stop after two failed corrections; continue through High Debug or reassignment.
         _refuse('REPAIR_LIMIT_REACHED')
+    # The store numbers attempts within the stored family only.
+    attempt = len(stored) + 1
+    identity = (pr_number, packet['failed_head'], claim_version, attempt)
+    if any(type(item) is dict and
+           (item.get('pr'), item.get('head_sha'), item.get('version'),
+            item.get('attempt')) == identity for item in claims):
+        # A review and an EC2 claim in different families can share this
+        # identity, which the store refuses; refuse before any write.
+        _refuse('REPAIR_CLAIM_UNAVAILABLE')
     repair_task_id = new_id()
     claim = {
         'executor_task': executor_task, 'pr': pr_number,
