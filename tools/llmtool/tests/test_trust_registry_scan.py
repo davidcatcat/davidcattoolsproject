@@ -11,9 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from unittest import mock
 
-from llmtool import review_bundle
 from llmtool import trust_cli
 
 
@@ -59,10 +57,6 @@ class TrustRegistryScanTest(unittest.TestCase):
         self.registry_dir = self.repo / ".git" / "llmtool-worktrees"
         self.registry_dir.mkdir(mode=0o700)
         self.registry_dir.chmod(0o700)
-        patcher = mock.patch.object(review_bundle, "LEGACY_PROTECTED",
-                                    (self.repo, self.base / "workspace"))
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def _write(self, name, raw, mode=0o600):
         path = self.registry_dir / name
@@ -71,7 +65,8 @@ class TrustRegistryScanTest(unittest.TestCase):
         return path
 
     def _scan(self, new_binding="new"):
-        return trust_cli._affected_active_records(self.home, new_binding)
+        # The replace path passes the trusted canonical_root from trust.json (#369).
+        return trust_cli._affected_active_records(str(self.repo), new_binding)
 
     def _assert_invalid(self):
         with self.assertRaises(trust_cli.TrustError) as caught:
