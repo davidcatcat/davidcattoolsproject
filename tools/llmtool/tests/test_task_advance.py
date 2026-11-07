@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from unittest.mock import call, patch
 from pathlib import Path
 
@@ -3681,6 +3681,299 @@ class TaskAdvanceUnusableReviewTests(unittest.TestCase):
         self.assertEqual(second['next'], 'REVIEW_UNUSABLE_STOPPED')
         self.assertEqual(second['codes'], ['REVIEW_UNUSABLE_STOPPED', 'VERDICT_NOT_JSON'])
         self.assertFalse(any(path.startswith('issues/') for path in reads))
+
+
+PLAIN_CLAIM_FIELDS = {'executor_task', 'pr', 'head_sha', 'version', 'state',
+                      'reviewer_task', 'native_session_id', 'account_mode',
+                      'claimed_at', 'updated_at'}
+REFUSED_PASS_TEXT = '\n'.join((
+    '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->',
+    f'Verdict: PASS | Version: v1 | HEAD: {HEAD}',
+    'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT', BINDING))
+
+
+@contextmanager
+def codex_review_seams(record):
+    """Run the real dispatch_review up to its Codex runner with no host effects."""
+    executor = type('Executor', (), {'common_dir': '/repo/.git', 'root': '/repo/task'})()
+    reviewer = type('Reviewer', (), {'root': '/repo/reviewer'})()
+    policy = type('Policy', (), {'allowed': True, 'reason_code': None})()
+    role = {'source': 'roles', 'provider': 'codex', 'config_dir': None,
+            'model': None, 'effort': None}
+    with patch.object(review_dispatch, '_preflight',
+                      return_value=(record, executor, HEAD, 'c' * 40, 'codex-reviewer')), \
+         patch.object(review_dispatch, '_policy', return_value=policy), \
+         patch.object(review_dispatch.role_config, 'resolve_role', return_value=role), \
+         patch('llmtool.codex_direct_developer.validate_profile'), \
+         patch.object(review_dispatch, '_resolve_github_login', return_value='login'), \
+         patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                      return_value=reviewer):
+        yield
+
+
+def refusing_dispatch(final_text, calls):
+    """A real dispatch_review whose finished Codex run returns ``final_text``."""
+    raw = codex_jsonl(thread_started(), agent_message(final_text))
+
+    def runner(*, head, version, **_kwargs):
+        return review_dispatch._parse_codex_review(
+            raw, task_id=TASK, run_id=RUN, contract_digest=DIGEST,
+            head=head, version=version)
+
+    def dispatch(**kwargs):
+        calls.append(kwargs)
+        return review_dispatch.dispatch_review(
+            **kwargs, create_d6=lambda **_kwargs: None,
+            prompt_renderer=lambda *_args: 'prompt', codex_runner=runner,
+            bind_session=lambda **_kwargs: None)
+    return dispatch
+
+
+def refusal_error(reason='VERDICT_NOT_JSON', **kept):
+    error = LLMToolError('Reviewer dispatch refused; details omitted')
+    error.review_dispatch_code = 'REVIEW_NOT_POSTED'
+    error.review_failure_reason = reason
+    error.review_refusal = dict(kept or {'label': 'REVIEW_OUTPUT_ABSENT'},
+                                failure_reason=reason, receipt_path=None)
+    return error
+
+
+class TaskAdvanceReviewRefusalTests(unittest.TestCase):
+    """#763: a refused review returns a local excerpt or label, never a verdict."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.state = Path(temp.name).resolve()
+
+    def _store(self, claims=()):
+        store = ClaimStore(base_record(
+            record_sha256='f' * 64, task_binding={'contract_digest': DIGEST},
+            developer={'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'claude'},
+            review_dispatch_claim=list(claims)))
+        store.root = self.state / 'tasks'
+        return store
+
+    def _advance(self, store, dispatch, *, merge=False, outcomes=True):
+        gh_calls, reads = [], []
+
+        def github_get(path):
+            reads.append(path)
+            return green_linux_ci(path)
+
+        def gh(*args):
+            gh_calls.append(args)
+            return subprocess.CompletedProcess([], 0)
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             no_review_outcomes(outcomes), \
+             codex_review_seams(store.record):
+            result = task_advance.advance(
+                task_id=TASK, store=store, pr_number=17, merge=merge,
+                github_get=with_current_main(github_get), dispatch_review_call=dispatch,
+                publish_gh_runner=gh, merge_gh_runner=gh)
+        return result, gh_calls
+
+    def _receipt(self, version=1):
+        return self.state / 'review-refusals' / f'{TASK}-{HEAD}-v{version}.json'
+
+    def test_refused_review_returns_excerpt_without_posting_or_storing_it(self):
+        store, calls = self._store(), []
+        final = bound_verdict(review='the reviewer stopped before its verdict')
+        result, gh_calls = self._advance(store, refusing_dispatch(final, calls))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(result['next'], 'DISPATCH_REVIEW')
+        self.assertIsNone(result['result'])
+        self.assertEqual(result['codes'], ['REVIEW_NOT_POSTED', 'REVIEW_HEADER_MISMATCH'])
+        refusal = result['review_refusal']
+        self.assertEqual(set(refusal), {'failure_reason', 'excerpt', 'receipt_path'})
+        self.assertEqual(refusal['failure_reason'], 'REVIEW_HEADER_MISMATCH')
+        self.assertIn('the reviewer stopped before its verdict', refusal['excerpt'])
+        self.assertTrue(final.startswith(refusal['excerpt']))
+        self.assertEqual(refusal['receipt_path'], str(self._receipt()))
+        self.assertTrue(self._receipt().is_file())
+        # Nothing reaches GitHub, the claim, the Task record or a completion event.
+        self.assertEqual(gh_calls, [])
+        claims = store.record['review_dispatch_claim']
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(set(claims[0]), PLAIN_CLAIM_FIELDS | {'failure_reason'})
+        self.assertEqual(claims[0]['state'], 'UNKNOWN')
+        self.assertEqual(claims[0]['failure_reason'], 'REVIEW_HEADER_MISMATCH')
+        self.assertNotIn('stopped before its verdict', json.dumps(store.record))
+        self.assertEqual(store.record['completion_events'], [])
+
+    def test_review_refusal_key_appears_only_on_a_well_formed_refused_dispatch(self):
+        def replying(reply):
+            return lambda **_kwargs: reply
+
+        def raising(error):
+            def dispatch(**_kwargs):
+                raise error
+            return dispatch
+
+        timeout = LLMToolError('Reviewer dispatch refused; details omitted')
+        timeout.review_dispatch_code = 'REVIEWER_TIMEOUT'
+        unknown_reason = refusal_error()
+        unknown_reason.review_failure_reason = MODEL_TEXT
+        cases = {
+            'completed': (replying({'state': 'COMPLETED', 'verdict': 'FAIL'}),
+                          []),
+            'timeout': (raising(timeout), ['REVIEWER_TIMEOUT']),
+            'unknown reason': (raising(unknown_reason), ['REVIEW_NOT_POSTED']),
+            'extra key': (raising(refusal_error(label='REVIEW_OUTPUT_ABSENT',
+                                                 excerpt='both')),
+                          ['REVIEW_NOT_POSTED', 'VERDICT_NOT_JSON']),
+            'unknown label': (raising(refusal_error(label=MODEL_TEXT)),
+                              ['REVIEW_NOT_POSTED', 'VERDICT_NOT_JSON']),
+            'oversized excerpt': (raising(refusal_error(excerpt='x' * 2049)),
+                                  ['REVIEW_NOT_POSTED', 'VERDICT_NOT_JSON']),
+        }
+        bad_reason = refusal_error()
+        bad_reason.review_refusal['failure_reason'] = MODEL_TEXT
+        cases['bad reason in dict'] = (raising(bad_reason),
+                                       ['REVIEW_NOT_POSTED', 'VERDICT_NOT_JSON'])
+        for name, (dispatch, codes) in cases.items():
+            with self.subTest(case=name):
+                result, _ = self._advance(self._store(), dispatch)
+                self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+                self.assertEqual(result['codes'], codes)
+                self.assertNotIn('review_refusal', result)
+        well_formed, _ = self._advance(self._store(), raising(refusal_error()))
+        self.assertEqual(well_formed['review_refusal'], {
+            'failure_reason': 'VERDICT_NOT_JSON', 'label': 'REVIEW_OUTPUT_ABSENT',
+            'receipt_path': None})
+        stopped = self._store([unusable_claim(1), unusable_claim(2, 'VERDICT_NOT_JSON')])
+        result, _ = self._advance(stopped, lambda **_kwargs: self.fail('no third run'))
+        self.assertEqual(result['step'], 'REVIEW_UNUSABLE_STOPPED')
+        self.assertNotIn('review_refusal', result)
+
+    def test_real_task_store_accepts_the_refused_claim_unchanged(self):
+        from llmtool.task_store import TaskStore, new_id
+        request = 'Bounded non-sensitive refused review task.'
+        task_id, run_id = new_id(), new_id()
+        task = task_submission_cli._record(
+            task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED',
+            request_sha=hashlib.sha256(request.encode()).hexdigest())
+        task.update(pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                                      'base_url': None},
+                    response='PM returned a bounded task.', error_code=None,
+                    pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                                   'goal': 'Keep a refused review excerpt locally.',
+                                   'acceptance': ['the claim stays unchanged']})
+        root = self.state / 'tasks'
+        store = TaskStore(root)
+        store.create(task)
+        final = 'not a review object: kept only in the local receipt'
+        raw = codex_jsonl(thread_started(), agent_message(final))
+        with codex_review_seams(store.get(task_id)):
+            with self.assertRaises(LLMToolError) as raised:
+                review_dispatch.dispatch_review(
+                    store=store, task_id=task_id, executor_task='executor-1',
+                    pr_number=17, version=1, create_d6=lambda **_kwargs: None,
+                    prompt_renderer=lambda *_args: 'prompt',
+                    codex_runner=lambda **_kwargs: review_dispatch._parse_codex_review(
+                        raw, task_id=task_id, run_id=run_id, contract_digest=DIGEST,
+                        head=HEAD),
+                    bind_session=lambda **_kwargs: None)
+        error = raised.exception
+        self.assertEqual(error.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertEqual(error.review_failure_reason, 'VERDICT_NOT_JSON')
+        receipt = self.state / 'review-refusals' / f'{task_id}-{HEAD}-v1.json'
+        self.assertEqual(error.review_refusal, {
+            'failure_reason': 'VERDICT_NOT_JSON', 'excerpt': final,
+            'receipt_path': str(receipt)})
+        claims = TaskStore(root).get(task_id)['review_dispatch_claim']
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(set(claims[0]), PLAIN_CLAIM_FIELDS | {'failure_reason'})
+        self.assertEqual((claims[0]['state'], claims[0]['failure_reason']),
+                         ('UNKNOWN', 'VERDICT_NOT_JSON'))
+        for path in root.rglob('*'):
+            if path.is_file():
+                self.assertNotIn(b'kept only in the local receipt', path.read_bytes())
+        self.assertIn('kept only in the local receipt', receipt.read_text(encoding='utf-8'))
+
+    def test_pass_shaped_refused_output_is_never_a_verdict(self):
+        store, calls = self._store(), []
+        dispatch = refusing_dispatch(REFUSED_PASS_TEXT, calls)
+        first, gh_calls = self._advance(store, dispatch)
+        self.assertEqual(first['codes'], ['REVIEW_NOT_POSTED', 'VERDICT_NOT_JSON'])
+        self.assertIn('review_refusal', first)
+        self.assertTrue(self._receipt().is_file())
+        claim = store.record['review_dispatch_claim'][0]
+        self.assertNotIn('review_result', claim)
+        self.assertEqual(store.record['completion_events'], [])
+        self.assertEqual(gh_calls, [])
+        related = {'events': [], 'repair_claims': []}
+        self.assertEqual(task_advance.decide(store.record, d6(), PR, related),
+                         'REVIEW_REDISPATCH')
+        merged, merge_calls = self._advance(store, dispatch, merge=True, outcomes=False)
+        self.assertEqual(merged['step'], 'MERGE_REFUSED')
+        self.assertEqual(merged['codes'], ['MERGE_REVIEW_NOT_PASS'])
+        self.assertNotIn('review_refusal', merged)
+        self.assertEqual(merge_calls, [])
+
+        second, gh_calls = self._advance(store, dispatch)
+        self.assertEqual(second['codes'], ['REVIEW_REDISPATCHED', 'VERDICT_NOT_JSON',
+                                           'REVIEW_NOT_POSTED', 'VERDICT_NOT_JSON'])
+        self.assertEqual(gh_calls, [])
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(self._receipt(2).is_file())
+        self.assertFalse(any('review_result' in item
+                             for item in store.record['review_dispatch_claim']))
+        self.assertEqual(task_advance.decide(store.record, d6(), PR, related),
+                         'REVIEW_UNUSABLE_STOPPED')
+        merged, merge_calls = self._advance(store, dispatch, merge=True, outcomes=False)
+        self.assertEqual(merged['codes'], ['MERGE_REVIEW_NOT_PASS'])
+        self.assertEqual(merge_calls, [])
+        self.assertEqual(len(calls), 2)
+
+    def test_one_drive_call_stops_at_a_refused_review_without_redispatch(self):
+        store = self._store()
+        calls = []
+
+        def counted(**kwargs):
+            calls.append(kwargs)
+            store.record = dict(store.record, review_dispatch_claim=(
+                store.record['review_dispatch_claim'] +
+                [unusable_claim(kwargs['version'], 'VERDICT_NOT_JSON')]))
+            raise refusal_error()
+
+        def drive():
+            with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+                 patch.object(task_advance, '_review_outcomes', return_value=[]):
+                return task_drive.drive(
+                    task_id=TASK, store=store, pr_number=17, github_get=green_linux_ci,
+                    dispatch_review_call=counted,
+                    sleep=lambda _seconds: self.fail('drive must not poll'))
+
+        first = drive()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(first['steps'], 1)
+        self.assertEqual(first['codes'], ['REVIEW_NOT_POSTED', 'VERDICT_NOT_JSON'])
+        self.assertEqual(first['review_refusal']['failure_reason'], 'VERDICT_NOT_JSON')
+        # A later, separate drive spends the one redispatch for this head.
+        second = drive()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(second['codes'], ['REVIEW_REDISPATCHED', 'VERDICT_NOT_JSON',
+                                           'REVIEW_NOT_POSTED', 'VERDICT_NOT_JSON'])
+        third = drive()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(third['step'], 'REVIEW_UNUSABLE_STOPPED')
+        self.assertNotIn('review_refusal', third)
+
+
+@contextmanager
+def no_review_outcomes(enabled):
+    """Patch _review_outcomes to return none, or keep the real one when disabled."""
+    if not enabled:
+        yield
+        return
+    with patch.object(task_advance, '_review_outcomes', return_value=[]):
+        yield
 
 
 if __name__ == '__main__':

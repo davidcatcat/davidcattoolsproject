@@ -1157,6 +1157,29 @@ def decide(record, d6, pr, related):
     return 'REVIEW_OUTCOME_UNKNOWN'
 
 
+def _review_refusal(exc):
+    """Return a refused review's excerpt or label only in its exact bounded shape."""
+    refusal = getattr(exc, 'review_refusal', None)
+    if type(refusal) is not dict or _failure_reason(refusal.get('failure_reason')) is None:
+        return None
+    receipt = refusal.get('receipt_path')
+    if receipt is not None and (type(receipt) is not str or not receipt):
+        return None
+    kept = set(refusal) - {'failure_reason', 'receipt_path'}
+    if len(refusal) != 3 or 'receipt_path' not in refusal or kept not in ({'excerpt'}, {'label'}):
+        return None
+    if kept == {'label'}:
+        label = refusal['label']
+        if type(label) is not str or label not in review_dispatch.REVIEW_OUTPUT_LABELS:
+            return None
+    else:
+        excerpt = refusal['excerpt']
+        if (type(excerpt) is not str or not excerpt.strip() or
+                len(excerpt.encode('utf-8', 'replace')) > review_dispatch.REVIEW_EXCERPT_BYTES):
+            return None
+    return dict(refusal)
+
+
 def _refusal(exc, attribute):
     code = getattr(exc, attribute, None)
     if type(code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', code):
@@ -1455,6 +1478,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     step = decide(record, d6, pr, related)
     result, codes = None, []
     redispatch_reason = None
+    review_refusal = None
     if step == 'REVIEW_REDISPATCH':
         unusable = _head_review_claim(record, number, d6['result_head'])
         if unusable is not None and _review_verdict_absent(unusable, get):
@@ -1510,6 +1534,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             failure = _failure_reason(getattr(exc, 'review_failure_reason', None))
             if failure is not None:
                 codes.append(failure)
+                # Local caller output only: never posted, stored or treated as a verdict.
+                review_refusal = _review_refusal(exc)
         if type(result) is dict:
             review_text = result.get('review_text')
             if (result.get('state') == 'COMPLETED' and
@@ -1734,7 +1760,9 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         codes.append(step)
     next_action =('resume the reviewer to post its verdict' if step == 'REVIEW_NOT_POSTED'
                    else step)
+    summary = {'task_id': task_id, 'step': step, 'result': result,
+               'next': next_action, 'codes': codes}
+    if review_refusal is not None:
+        summary['review_refusal'] = review_refusal
     return _ack_consumed_events(
-        {'task_id': task_id, 'step': step, 'result': result,
-         'next': next_action, 'codes': codes}, record, store,
-        d6.get('result_head') if type(d6) is dict else None)
+        summary, record, store, d6.get('result_head') if type(d6) is dict else None)
