@@ -94,22 +94,6 @@ def parse(payload, issue=ISSUE, **kwargs):
     return sync.parse_comment(comment(body, **kwargs), issue)
 
 
-def sensitive_sample():
-    """Return a value the real record-pm screen flags, built at run time."""
-    candidates = (
-        'gh' + 'p_' + ''.join(('Zq7Xw2', 'Lm9Rt4', 'Vb6Np3', 'Hs8Kd1', 'Jf5Gc0', 'Ty2Ue7')),
-        'AK' + 'IA' + ''.join(('QX7Z', 'W2LM', '9RT4', 'VB6N')),
-        '-----BEGIN ' + 'PRIVATE KEY-----',
-        'sk' + '-' + ''.join(('Zq7Xw2Lm9R', 't4Vb6Np3Hs', '8Kd1Jf5Gc0', 'Ty2Ue7Pa')),
-    )
-    for candidate in candidates:
-        try:
-            task_submission_cli._screen_text('Summary ' + candidate, 16 * 1024)
-        except LLMToolError:
-            return candidate
-    raise AssertionError('no sample is recognised by the record-pm screen')
-
-
 def expected_delivery_id(issue, comment_id, request_id, revision):
     text = '\0'.join(('llmtool-github-sync-delivery-v1', str(issue), str(comment_id),
                       request_id, str(revision)))
@@ -520,13 +504,36 @@ class RefusalTest(unittest.TestCase):
                 self.assertRefused(parse(envelope('EXECUTE_REQUEST', scope=scope)),
                                    sync.SYNC_FIELD_INVALID)
 
-    def test_sensitive_summary_with_real_screen(self):
-        sample = sensitive_sample()
+    def test_sensitive_summary_is_refused(self):
+        # Benign text stands in for credential material; the patched screen
+        # flags only this summary, so no secret-shaped value is ever built.
+        summary = 'Summary marked for the screen test.'
+
+        def flag_summary(value, limit):
+            if value == summary:
+                raise LLMToolError('recognizable credential material')
+            return value
+
         for kind in sorted(sync.INBOUND_KINDS):
             with self.subTest(kind=kind):
-                result = parse(envelope(kind, summary='Summary ' + sample))
+                with mock.patch.object(sync, '_screen_text',
+                                       side_effect=flag_summary) as screen:
+                    result = parse(envelope(kind, summary=summary))
                 self.assertRefused(result, sync.SYNC_SENSITIVE_CONTENT)
-                self.assertNotIn(sample, repr(result))
+                self.assertNotIn(summary, repr(result))
+                self.assertNotIn(summary, str(result))
+                screen.assert_any_call(summary, mock.ANY)
+
+    def test_benign_execute_request_reaches_the_real_screen(self):
+        scope = ['tools/llmtool/llmtool/github_sync_contract.py', 'docs/b.md']
+        payload = envelope('EXECUTE_REQUEST', scope=scope)
+        with mock.patch.object(sync, '_screen_text',
+                               wraps=task_submission_cli._screen_text) as screen:
+            message = parse(payload)
+        self.assertIsInstance(message, sync.SyncMessage)
+        self.assertEqual(message.scope, tuple(scope))
+        screened = [call.args[0] for call in screen.call_args_list]
+        self.assertEqual(screened, [REQUEST_ID, payload['title'], payload['summary'], *scope])
 
     def test_sensitive_fields_are_screened(self):
         def fake_screen(value, limit):
@@ -554,9 +561,11 @@ class RefusalTest(unittest.TestCase):
             self.assertRefused(parse(envelope()), sync.SYNC_SENSITIVE_CONTENT)
 
     def test_structural_errors_win_over_sensitive(self):
-        sample = sensitive_sample()
-        self.assertRefused(parse(envelope(title='a\nb', summary=sample)),
-                           sync.SYNC_FIELD_INVALID)
+        screen = mock.Mock(side_effect=AssertionError('screen must not be called'))
+        with mock.patch.object(sync, '_screen_text', screen):
+            result = parse(envelope(title='a\nb', summary='Benign summary text.'))
+        self.assertRefused(result, sync.SYNC_FIELD_INVALID)
+        screen.assert_not_called()
 
     def test_untrusted_issuer(self):
         logins = ('someone-else', OWNER.upper(), AI.upper(), OWNER + '[bot]',
