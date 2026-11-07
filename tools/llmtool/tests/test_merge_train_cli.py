@@ -1,0 +1,516 @@
+"""``llmtool task train`` build, status, merge and close (#1182 T3b2)."""
+
+import contextlib
+import copy
+import io
+import json
+import os
+import re
+import sys
+import tempfile
+import types
+import unittest
+from unittest import mock
+
+from llmtool import cli, merge_train_cli, merge_train_store, pm_caller
+from llmtool import task_advance, task_completion
+
+SESSION = '3f2b8c1e-6a4d-4e2b-9c1a-7d5e8f9a0b1c'
+OTHER_SESSION = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d'
+TASK_A = 'a' * 32
+TASK_B = 'b' * 32
+TASK_C = 'c' * 32
+EXECUTOR = 'e' * 32
+TRAIN_ID = 'train-0001'
+TRAIN_PR = 500
+
+
+class FakeStore:
+    def __init__(self, records):
+        self.records = records
+        self.calls = []
+
+    def get(self, task_id):
+        self.calls.append(task_id)
+        if task_id not in self.records:
+            raise KeyError(task_id)
+        return copy.deepcopy(self.records[task_id])
+
+
+class Recorder:
+    """A fake step; records every call and returns ``result``."""
+
+    def __init__(self, result=None, side_effect=None):
+        self.result = result
+        self.side_effect = side_effect
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        if self.side_effect is not None:
+            return self.side_effect(*args, **kwargs)
+        return copy.deepcopy(self.result)
+
+
+class Forbidden:
+    """An adapter the CLI may pass on but must never call itself."""
+
+    def __call__(self, *args, **kwargs):
+        raise AssertionError('adapter must not be called by the CLI')
+
+
+def _record(train_id=TRAIN_ID, state='BUILT'):
+    members = []
+    for index, task_id in enumerate((TASK_A, TASK_B)):
+        members.append({
+            'task_id': task_id, 'pr': 101 + index, 'head': str(index + 1) * 40,
+            'executor_task': EXECUTOR, 'review_version': 1,
+            'linux_check_run_id': None, 'macos_check_run_id': None,
+            'remote_test_receipt_digest': 'abcdef12'})
+    return {
+        'schema_version': 1, 'train_id': train_id, 'main_sha': 'c' * 40,
+        'members': members, 'excluded': [], 'train_branch': 'llmtool/train-' + train_id,
+        'train_head': 'd' * 40, 'train_pr': TRAIN_PR, 'state': state,
+        'merge_attempt': None, 'merge_sha': None,
+        'created_at': '2026-11-08T00:00:00Z'}
+
+
+class MergeTrainCliTest(unittest.TestCase):
+    def setUp(self):
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in pm_caller.ENVIRONMENT_KEYS:
+            os.environ.pop(name, None)
+        # The executor-task pattern belongs to task_store and is outside this
+        # Task; pin it so test records stay valid whatever its exact format.
+        pattern = mock.patch.object(merge_train_store, '_EXECUTOR_TASK',
+                                    re.compile(r'[0-9a-f]{32}'))
+        pattern.start()
+        self.addCleanup(pattern.stop)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.base = temporary.name
+        self.train_root = os.path.join(self.base, 'tasks')
+        self.train_dir = os.path.join(self.base, merge_train_store.DIRECTORY_NAME)
+        self.caller = pm_caller.resolve_caller_session(SESSION, environ={})
+        self.other = pm_caller.resolve_caller_session(OTHER_SESSION, environ={})
+        self.store = FakeStore({
+            TASK_A: {'task_id': TASK_A, 'pm_session_id': self.caller},
+            TASK_B: {'task_id': TASK_B, 'pm_session_id': self.caller},
+            TASK_C: {'task_id': TASK_C, 'pm_session_id': self.other},
+        })
+        self.root = os.path.join(self.base, 'repo')
+        self.github_get = Forbidden()
+        self.gh_runner = Forbidden()
+        self.git_runner = Forbidden()
+
+    def _create(self, **kwargs):
+        return merge_train_store.create(_record(**kwargs), root=self.train_root)
+
+    def _adapters(self, **inject):
+        adapters = {'store': self.store, 'train_root': self.train_root, 'root': self.root,
+                    'github_get': self.github_get, 'gh_runner': self.gh_runner,
+                    'git_runner': self.git_runner}
+        adapters.update(inject)
+        return adapters
+
+    def _main(self, argv, **inject):
+        """Run ``cli.main`` with fakes injected; return (exit, one JSON object, runs)."""
+        original = merge_train_cli.run_task_train
+        runs = []
+
+        def wrapped(args):
+            runs.append(args)
+            return original(args, **self._adapters(**inject))
+
+        out = io.StringIO()
+        with mock.patch.object(merge_train_cli, 'run_task_train', wrapped), \
+                contextlib.redirect_stdout(out):
+            try:
+                code = cli.main(['task', 'train', *argv])
+            except SystemExit as exc:
+                code = exc.code
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, out.getvalue())
+        return code, json.loads(lines[0]), runs
+
+    def _run(self, argv, **adapters):
+        """Call run_task_train directly (defaults not injected); one JSON object."""
+        args = cli.parser_for_cli().parse_args(['task', 'train', *argv])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = merge_train_cli.run_task_train(args, **adapters)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, out.getvalue())
+        return code, json.loads(lines[0])
+
+    def assertRefused(self, value, code, train_id=None, task_id=None):
+        self.assertEqual(value['step'], 'REFUSED')
+        self.assertEqual(value['codes'], [code])
+        self.assertIsNone(value['result'])
+        self.assertEqual(value['task_id'], task_id)
+        if train_id is None:
+            self.assertNotIn('train_id', value)
+        else:
+            self.assertEqual(value['train_id'], train_id)
+
+    # Parser
+
+    def test_parser_accepts_each_command(self):
+        parser = cli.parser_for_cli()
+        args = parser.parse_args(['task', 'train', 'build', '--member', TASK_A + ':101',
+                                  '--member', TASK_B + ':102', '--pm-session', SESSION])
+        self.assertEqual((args.action, args.train_action), ('train', 'build'))
+        self.assertEqual(args.member, [TASK_A + ':101', TASK_B + ':102'])
+        self.assertEqual(args.pm_session, SESSION)
+        args = parser.parse_args(['task', 'train', 'status', TRAIN_ID])
+        self.assertEqual((args.train_action, args.train_id), ('status', TRAIN_ID))
+        for action in ('merge', 'close'):
+            args = parser.parse_args(['task', 'train', action, TRAIN_ID])
+            self.assertEqual((args.train_action, args.train_id, args.pm_session),
+                             (action, TRAIN_ID, None))
+            args = parser.parse_args(['task', 'train', action, TRAIN_ID,
+                                      '--pm-session', SESSION])
+            self.assertEqual(args.pm_session, SESSION)
+
+    def test_malformed_input_refuses_once_without_any_call(self):
+        build = Recorder({'step': 'BUILT', 'codes': [], 'result': {'train_id': TRAIN_ID}})
+        merge = Recorder({'step': 'MERGED', 'codes': [], 'result': None})
+        member_a, member_b = TASK_A + ':101', TASK_B + ':102'
+        cases = [
+            [],
+            ['bogus'],
+            ['status'],
+            ['status', TRAIN_ID, 'extra'],
+            ['status', 'Bad_ID'],
+            ['merge', TRAIN_ID, '--bogus'],
+            ['merge', '../escape'],
+            ['close'],
+            ['build'],
+            ['build', '--member', member_a],
+            ['build', '--member', member_a, '--member', member_b, '--bogus'],
+            ['build', '--member', member_a, '--member', 'not-a-member'],
+            ['build', '--member', member_a, '--member', TASK_B + ':0'],
+            ['build', '--member', member_a, '--member', TASK_B + ':01'],
+            ['build', '--member', member_a, '--member', TASK_B.upper() + ':102'],
+            ['build', '--member', member_a, '--member', member_a],
+            ['build', '--member', member_a, '--member', TASK_B + ':101'],
+            ['build'] + [item for index in range(7) for item in
+                         ('--member', format(index + 1, '032x') + ':' + str(index + 1))],
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                code, value, _ = self._main(argv + ['--pm-session', SESSION]
+                                            if argv[:1] == ['build'] else argv,
+                                            build_call=build, merge_call=merge)
+                self.assertEqual(code, 1)
+                self.assertRefused(value, merge_train_cli.TRAIN_INPUT_INVALID)
+        self.assertEqual(build.calls, [])
+        self.assertEqual(merge.calls, [])
+        self.assertEqual(self.store.calls, [])
+
+    def test_six_members_are_accepted(self):
+        records = {}
+        argv = ['build']
+        for index in range(6):
+            task_id = format(index + 1, '032x')
+            records[task_id] = {'task_id': task_id, 'pm_session_id': self.caller}
+            argv += ['--member', task_id + ':' + str(index + 1)]
+        self.store.records = records
+        build = Recorder({'step': 'BUILT', 'codes': [], 'result': {'train_id': TRAIN_ID}})
+        code, value, _ = self._main(argv + ['--pm-session', SESSION], build_call=build)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(build.calls[0][0][0]), 6)
+
+    # cli.py dispatch
+
+    def test_cli_dispatch_reaches_run_task_train(self):
+        self._create()
+        code, value, runs = self._main(['status', TRAIN_ID])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].action, 'train')
+        self.assertEqual(value['step'], 'STATUS')
+
+    # build
+
+    def test_build_passes_members_in_order_with_caller(self):
+        build = Recorder({'step': 'BUILT', 'codes': [], 'result': {'train_id': TRAIN_ID}})
+        code, value, _ = self._main(['build', '--member', TASK_B + ':102',
+                                     '--member', TASK_A + ':101', '--pm-session', SESSION],
+                                    build_call=build)
+        self.assertEqual(code, 0)
+        self.assertEqual(value, {'train_id': TRAIN_ID, 'step': 'BUILT', 'codes': [],
+                                 'result': {'train_id': TRAIN_ID}})
+        self.assertEqual(len(build.calls), 1)
+        args, kwargs = build.calls[0]
+        self.assertEqual(args, ([{'task_id': TASK_B, 'pr': 102},
+                                 {'task_id': TASK_A, 'pr': 101}],))
+        self.assertIs(kwargs['store'], self.store)
+        self.assertEqual(kwargs['caller_key'], self.caller)
+        self.assertIs(kwargs['github_get'], self.github_get)
+        self.assertIs(kwargs['git_runner'], self.git_runner)
+        self.assertIs(kwargs['gh_runner'], self.gh_runner)
+        self.assertEqual(kwargs['root'], self.root)
+        self.assertEqual(kwargs['train_root'], self.train_root)
+        self.assertEqual(self.store.calls, [TASK_B, TASK_A])
+
+    def test_build_uses_environment_session(self):
+        os.environ['CLAUDE_CODE_SESSION_ID'] = SESSION
+        build = Recorder({'step': 'BUILT', 'codes': [], 'result': {'train_id': TRAIN_ID}})
+        code, _, _ = self._main(['build', '--member', TASK_A + ':101',
+                                 '--member', TASK_B + ':102'], build_call=build)
+        self.assertEqual(code, 0)
+        self.assertEqual(build.calls[0][1]['caller_key'], self.caller)
+
+    def test_build_refuses_non_owner_before_any_call(self):
+        build = Recorder({'step': 'BUILT', 'codes': [], 'result': {'train_id': TRAIN_ID}})
+        code, value, _ = self._main(['build', '--member', TASK_A + ':101',
+                                     '--member', TASK_C + ':103', '--pm-session', SESSION],
+                                    build_call=build)
+        self.assertEqual(code, 1)
+        self.assertRefused(value, pm_caller.NOT_TASK_OWNER, task_id=TASK_C)
+        self.assertEqual(build.calls, [])
+
+    def test_build_refuses_unreadable_task_record(self):
+        build = Recorder({'step': 'BUILT', 'codes': [], 'result': None})
+        code, value, _ = self._main(['build', '--member', TASK_A + ':101',
+                                     '--member', 'f' * 32 + ':104', '--pm-session', SESSION],
+                                    build_call=build)
+        self.assertEqual(code, 1)
+        self.assertRefused(value, pm_caller.TASK_RECORD_UNAVAILABLE, task_id='f' * 32)
+        self.assertEqual(build.calls, [])
+
+    def test_build_refuses_missing_and_conflicting_session(self):
+        build = Recorder({'step': 'BUILT', 'codes': [], 'result': None})
+        argv = ['build', '--member', TASK_A + ':101', '--member', TASK_B + ':102']
+        code, value, _ = self._main(argv, build_call=build)
+        self.assertEqual(code, 1)
+        self.assertRefused(value, pm_caller.SESSION_MISSING)
+        os.environ['CLAUDE_CODE_SESSION_ID'] = OTHER_SESSION
+        code, value, _ = self._main(argv + ['--pm-session', SESSION], build_call=build)
+        self.assertEqual(code, 1)
+        self.assertRefused(value, pm_caller.SESSION_CONFLICT)
+        self.assertEqual(build.calls, [])
+        self.assertEqual(self.store.calls, [])
+
+    def test_missing_build_module_refuses_unavailable(self):
+        package = merge_train_cli.__name__.rpartition('.')[0]
+        with mock.patch.dict(sys.modules, {package + '.merge_train_build': None}):
+            code, value, _ = self._main(['build', '--member', TASK_A + ':101',
+                                         '--member', TASK_B + ':102',
+                                         '--pm-session', SESSION])
+        self.assertEqual(code, 1)
+        self.assertRefused(value, merge_train_cli.TRAIN_BUILD_UNAVAILABLE)
+
+    def test_build_default_module_and_adapters(self):
+        build = Recorder({'step': 'BUILT', 'codes': [], 'result': {'train_id': TRAIN_ID}})
+        module = types.ModuleType('merge_train_build')
+        module.build_train = build
+        package = merge_train_cli.__name__.rpartition('.')[0]
+        with mock.patch.dict(sys.modules, {package + '.merge_train_build': module}):
+            code, value = self._run(['build', '--member', TASK_A + ':101',
+                                     '--member', TASK_B + ':102', '--pm-session', SESSION],
+                                    store=self.store, train_root=self.train_root)
+        self.assertEqual(code, 0)
+        self.assertEqual(value['train_id'], TRAIN_ID)
+        kwargs = build.calls[0][1]
+        self.assertIs(kwargs['github_get'], task_completion._github_get)
+        self.assertIs(kwargs['gh_runner'], task_advance._publish_run_gh)
+        self.assertIs(kwargs['git_runner'], task_advance._publish_run_git)
+        self.assertEqual(kwargs['root'], os.getcwd())
+
+    # merge
+
+    def test_merge_passes_train_id_after_checking_record_members(self):
+        self._create()
+        merge = Recorder({'step': 'MERGED', 'codes': [], 'result': {'merge_sha': 'f' * 40}})
+        code, value, _ = self._main(['merge', TRAIN_ID, '--pm-session', SESSION],
+                                    merge_call=merge)
+        self.assertEqual(code, 0)
+        self.assertEqual(value, {'train_id': TRAIN_ID, 'step': 'MERGED', 'codes': [],
+                                 'result': {'merge_sha': 'f' * 40}})
+        self.assertEqual(self.store.calls, [TASK_A, TASK_B])
+        self.assertEqual(len(merge.calls), 1)
+        args, kwargs = merge.calls[0]
+        self.assertEqual(args, (TRAIN_ID,))
+        self.assertEqual(kwargs, {'store': self.store, 'github_get': self.github_get,
+                                  'gh_runner': self.gh_runner, 'root': self.root,
+                                  'train_root': self.train_root})
+
+    def test_merge_refuses_non_owner_and_changes_nothing(self):
+        before = self._create()
+        self.store.records[TASK_B]['pm_session_id'] = self.other
+        merge = Recorder({'step': 'MERGED', 'codes': [], 'result': None})
+        code, value, _ = self._main(['merge', TRAIN_ID, '--pm-session', SESSION],
+                                    merge_call=merge)
+        self.assertEqual(code, 1)
+        self.assertRefused(value, pm_caller.NOT_TASK_OWNER, TRAIN_ID, TASK_B)
+        self.assertEqual(merge.calls, [])
+        self.assertEqual(merge_train_store.get(TRAIN_ID, root=self.train_root), before)
+
+    def test_merge_refuses_missing_record(self):
+        os.makedirs(self.train_dir, mode=0o700)
+        merge = Recorder({'step': 'MERGED', 'codes': [], 'result': None})
+        code, value, _ = self._main(['merge', TRAIN_ID, '--pm-session', SESSION],
+                                    merge_call=merge)
+        self.assertEqual(code, 1)
+        self.assertRefused(value, merge_train_store.TRAIN_RECORD_UNAVAILABLE, TRAIN_ID)
+        self.assertEqual(merge.calls, [])
+        self.assertEqual(self.store.calls, [])
+
+    def test_merge_refuses_missing_session_before_reading(self):
+        self._create()
+        merge = Recorder({'step': 'MERGED', 'codes': [], 'result': None})
+        code, value, _ = self._main(['merge', TRAIN_ID], merge_call=merge)
+        self.assertEqual(code, 1)
+        self.assertRefused(value, pm_caller.SESSION_MISSING, TRAIN_ID)
+        self.assertEqual(merge.calls, [])
+        self.assertEqual(self.store.calls, [])
+
+    def test_merge_default_is_merge_train_ops(self):
+        from llmtool import merge_train_ops
+        self._create()
+        merge = Recorder({'step': 'WAITING_CI', 'codes': [], 'result': None})
+        with mock.patch.object(merge_train_ops, 'merge_train', merge):
+            code, value = self._run(['merge', TRAIN_ID, '--pm-session', SESSION],
+                                    store=self.store, train_root=self.train_root)
+        self.assertEqual(code, 0)
+        self.assertEqual(value['step'], 'WAITING_CI')
+        kwargs = merge.calls[0][1]
+        self.assertIs(kwargs['github_get'], task_completion._github_get)
+        self.assertIs(kwargs['gh_runner'], task_advance._publish_run_gh)
+        self.assertEqual(kwargs['root'], os.getcwd())
+
+    # close
+
+    def test_close_passes_train_id_and_owner_checked_advance(self):
+        self._create(state='BUILT')
+        advance = Recorder({'step': 'CLOSED', 'codes': []})
+
+        def close_step(train_id, *, store, advance_call, train_root):
+            first = advance_call(task_id=TASK_A, pr_number=101, integration_pr=TRAIN_PR)
+            # A member adopted away between the CLI check and its advance is refused.
+            self.store.records[TASK_B]['pm_session_id'] = self.other
+            second = advance_call(task_id=TASK_B, pr_number=102, integration_pr=TRAIN_PR)
+            return {'step': 'WAITING_MEMBERS', 'codes': ['TRAIN_MEMBERS_OPEN'],
+                    'result': {'first': first['step'], 'second': second['step']}}
+
+        close = Recorder(side_effect=close_step)
+        code, value, _ = self._main(['close', TRAIN_ID, '--pm-session', SESSION],
+                                    close_call=close, advance_call=advance)
+        self.assertEqual(code, 1)
+        self.assertEqual(value, {'train_id': TRAIN_ID, 'step': 'WAITING_MEMBERS',
+                                 'codes': ['TRAIN_MEMBERS_OPEN'],
+                                 'result': {'first': 'CLOSED', 'second': 'REFUSED'}})
+        args, kwargs = close.calls[0]
+        self.assertEqual(args, (TRAIN_ID,))
+        self.assertIs(kwargs['store'], self.store)
+        self.assertEqual(kwargs['train_root'], self.train_root)
+        self.assertEqual(advance.calls, [((), {'task_id': TASK_A, 'pr_number': 101,
+                                              'integration_pr': TRAIN_PR})])
+
+    def test_close_refuses_non_owner_before_any_call(self):
+        self._create()
+        self.store.records[TASK_A]['pm_session_id'] = self.other
+        close = Recorder({'step': 'CLOSED', 'codes': [], 'result': None})
+        advance = Recorder({'step': 'CLOSED', 'codes': []})
+        code, value, _ = self._main(['close', TRAIN_ID, '--pm-session', SESSION],
+                                    close_call=close, advance_call=advance)
+        self.assertEqual(code, 1)
+        self.assertRefused(value, pm_caller.NOT_TASK_OWNER, TRAIN_ID, TASK_A)
+        self.assertEqual(close.calls, [])
+        self.assertEqual(advance.calls, [])
+
+    def test_close_default_binds_store_into_task_advance(self):
+        from llmtool import merge_train_ops
+        self._create()
+        advance = Recorder({'step': 'CLOSED', 'codes': []})
+
+        def close_step(train_id, *, store, advance_call, train_root):
+            outcome = advance_call(task_id=TASK_A, pr_number=101, integration_pr=TRAIN_PR)
+            return {'step': 'CLOSED', 'codes': [], 'result': {'first': outcome['step']}}
+
+        close = Recorder(side_effect=close_step)
+        with mock.patch.object(merge_train_ops, 'close_train', close), \
+                mock.patch.object(task_advance, 'advance', advance):
+            code, value = self._run(['close', TRAIN_ID, '--pm-session', SESSION],
+                                    store=self.store, train_root=self.train_root)
+        self.assertEqual(code, 0)
+        self.assertEqual(value['result'], {'first': 'CLOSED'})
+        kwargs = advance.calls[0][1]
+        self.assertIs(kwargs['store'], self.store)
+        self.assertEqual((kwargs['task_id'], kwargs['pr_number'], kwargs['integration_pr']),
+                         (TASK_A, 101, TRAIN_PR))
+
+    # status
+
+    def test_status_reads_only(self):
+        before = self._create()
+        build, merge, close = Recorder(), Recorder(), Recorder()
+        code, value, _ = self._main(['status', TRAIN_ID], build_call=build,
+                                    merge_call=merge, close_call=close)
+        self.assertEqual(code, 0)
+        self.assertEqual(value['train_id'], TRAIN_ID)
+        self.assertEqual(value['step'], 'STATUS')
+        self.assertEqual(value['codes'], [])
+        self.assertEqual(value['result'], {field: before[field] for field in (
+            'train_id', 'state', 'main_sha', 'train_head', 'train_pr', 'members',
+            'excluded', 'merge_sha')})
+        self.assertEqual((build.calls, merge.calls, close.calls), ([], [], []))
+        self.assertEqual(self.store.calls, [])
+        self.assertEqual(merge_train_store.get(TRAIN_ID, root=self.train_root), before)
+
+    def test_status_of_missing_train_creates_nothing(self):
+        code, value, _ = self._main(['status', TRAIN_ID])
+        self.assertEqual(code, 1)
+        self.assertRefused(value, merge_train_store.TRAIN_RECORD_UNAVAILABLE, TRAIN_ID)
+        self.assertFalse(os.path.lexists(self.train_dir))
+
+    # Output and exit codes
+
+    def test_exit_code_follows_step(self):
+        self._create()
+        expected = {'BUILT': 0, 'MERGED': 0, 'CLOSED': 0, 'SUPERSEDED': 0, 'WAITING_CI': 0,
+                    'MERGE_REFUSED': 1, 'CLOSE_REFUSED': 1, 'WAITING_MEMBERS': 1}
+        for step, exit_code in expected.items():
+            with self.subTest(step=step):
+                merge = Recorder({'step': step, 'codes': [], 'result': None})
+                code, value, _ = self._main(['merge', TRAIN_ID, '--pm-session', SESSION],
+                                            merge_call=merge)
+                self.assertEqual(code, exit_code)
+                self.assertEqual(value['step'], step)
+
+    def test_step_output_is_suppressed(self):
+        self._create()
+
+        def noisy(train_id, **kwargs):
+            print('noise from the step')
+            return {'step': 'MERGED', 'codes': ['TRAIN_PROVENANCE_COMMENT_FAILED'],
+                    'result': None}
+
+        code, value, _ = self._main(['merge', TRAIN_ID, '--pm-session', SESSION],
+                                    merge_call=Recorder(side_effect=noisy))
+        self.assertEqual(code, 0)
+        self.assertEqual(value['codes'], ['TRAIN_PROVENANCE_COMMENT_FAILED'])
+
+    def test_failing_or_malformed_step_refuses(self):
+        self._create()
+
+        def explode(train_id, **kwargs):
+            raise RuntimeError('secret detail')
+
+        for merge in (Recorder(side_effect=explode), Recorder(None),
+                      Recorder({'codes': []}), Recorder({'step': 'MERGED', 'codes': 'X'}),
+                      Recorder({'step': 'MERGED', 'codes': [], 'result': object()})):
+            with self.subTest(result=merge.result):
+                code, value, _ = self._main(['merge', TRAIN_ID, '--pm-session', SESSION],
+                                            merge_call=merge)
+                self.assertEqual(code, 1)
+                self.assertRefused(value, merge_train_cli.TRAIN_STEP_FAILED, TRAIN_ID)
+                self.assertNotIn('secret', json.dumps(value))
+
+
+if __name__ == '__main__':
+    unittest.main()
