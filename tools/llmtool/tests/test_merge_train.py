@@ -208,7 +208,8 @@ class MergeTrainTests(unittest.TestCase):
         # Branch creation needs checkout, so make members with plumbing only.
         tree_one = self.tree_with(self.rev(f'{self.base}^{{tree}}'), 'one.txt', 'one\n')
         tree_two = self.tree_with(self.rev(f'{self.base}^{{tree}}'), 'two.txt', 'two\n')
-        tree_clash = self.tree_with(self.rev(f'{self.base}^{{tree}}'), 'base.txt', 'clash\n')
+        # pr-9 adds one.txt with other text, so it conflicts with pr-1 (add/add).
+        tree_clash = self.tree_with(self.rev(f'{self.base}^{{tree}}'), 'one.txt', 'clash\n')
         one = self.commit_tree(tree_one, self.base)
         two = self.commit_tree(tree_two, self.base)
         clash = self.commit_tree(tree_clash, self.base)
@@ -216,6 +217,8 @@ class MergeTrainTests(unittest.TestCase):
         result = merge_train.build_candidate(
             self.root, self.base, [('pr-1', one), ('pr-9', clash), ('pr-2', two)])
         self.assertEqual(result['merged'], ['pr-1', 'pr-2'])
+        self.assertEqual(result['excluded'],
+                         [{'key': 'pr-9', 'code': 'TRAIN_MEMBER_CONFLICT'}])
         self.assertEqual(self.state(), before)
         self.assertEqual(self.git('cat-file', '-t', result['head']).strip(), 'commit')
         self.assertTrue(merge_train.train_delta_verified(
