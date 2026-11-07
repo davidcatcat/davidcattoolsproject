@@ -381,6 +381,69 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(caught.exception.task_store_error_code,
                              'TASK_PUBLISHED_PR_INVALID')
 
+    def test_publish_operations_are_bounded_capped_and_validated(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        older = self.store.get(task['task_id'])
+        self.assertNotIn('publish_operations', older)
+        task_store_module._validate(older)
+
+        def operation(number):
+            return {'task_id': task['task_id'], 'repository': 'owner/repo',
+                    'branch': 'feature/task', 'pr': number,
+                    'creation_url': f'https://github.com/owner/repo/pull/{number}',
+                    'expected_head': 'a' * 40, 'observed_head': None,
+                    'recheck': 'PASS', 'close_attempted': True,
+                    'record_comment': 'POSTED', 'outcome': 'CLOSED',
+                    'next_action': 'publish again'}
+
+        self.assertEqual(task_store_module.MAX_PUBLISH_OPERATIONS, 8)
+        for number in range(1, 11):
+            self.assertEqual(self.store.record_publish_operation(
+                task['task_id'], operation(number)), operation(number))
+        saved = self.store.get(task['task_id'])
+        self.assertEqual([item['pr'] for item in saved['publish_operations']],
+                         list(range(3, 11)))
+        task_store_module._validate(saved)
+
+        long_value = 'x' * (task_store_module._PUBLISH_OPERATION_VALUE_BYTES + 1)
+        missing = operation(1)
+        missing.pop('outcome')
+        invalid_items = (
+            ('not a dict', 'record'),
+            ('missing field', missing),
+            ('extra field', dict(operation(1), stderr='output')),
+            ('long string', dict(operation(1), next_action=long_value)),
+            ('long multibyte string', dict(operation(1), next_action='é' * 257)),
+            ('float value', dict(operation(1), pr=1.5)),
+            ('list value', dict(operation(1), recheck=['FAIL:list'])),
+            ('dict value', dict(operation(1), observed_head={'sha': 'a' * 40})),
+        )
+        for label, item in invalid_items:
+            with self.subTest(label):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.record_publish_operation(task['task_id'], item)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_PUBLISH_OPERATION_INVALID')
+                malformed = dict(saved, publish_operations=[item])
+                malformed['record_sha256'] = task_store_module._digest(malformed)
+                with self.assertRaises(LLMToolError) as caught:
+                    task_store_module._validate(malformed)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_PUBLISH_OPERATION_INVALID')
+        self.assertEqual(self.store.get(task['task_id'])['publish_operations'],
+                         saved['publish_operations'])
+        for label, value in (('too many', [operation(1)] * 9), ('not a list', {})):
+            with self.subTest(label):
+                malformed = dict(saved, publish_operations=value)
+                malformed['record_sha256'] = task_store_module._digest(malformed)
+                with self.assertRaises(LLMToolError) as caught:
+                    task_store_module._validate(malformed)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_PUBLISH_OPERATION_INVALID')
+        exact = dict(operation(1), next_action='y' * task_store_module._PUBLISH_OPERATION_VALUE_BYTES)
+        self.assertEqual(self.store.record_publish_operation(task['task_id'], exact), exact)
+
     def test_remote_test_receipt_accepts_missing_log_and_rejects_other_paths(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
