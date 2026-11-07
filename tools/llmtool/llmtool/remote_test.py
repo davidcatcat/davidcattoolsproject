@@ -50,10 +50,12 @@ _REMOTE_SENSITIVE = (
     + _MARKER_BOUNDARY + r'xox[abprs]-[A-Za-z0-9-]{20,}|'
     + _MARKER_BOUNDARY + r'(?:bearer|basic)\s+\S+|'
     + _MARKER_BOUNDARY + r'[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|'
-    # The value alphabet holds every ASCII word character, so no boundary can stop
-    # this one. It starts only at the head of a run: a hyphen passes the marker
-    # boundary, and a start after each one would make a long dash line quadratic.
-    r'(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
+    # The value alphabet holds every ASCII word character, so the start keeps the
+    # old word-boundary starts: it rejects only an ASCII word character before a
+    # word character, and a hyphen before a hyphen. A start after a hyphen or a
+    # non-ASCII word character still matches; a dash run starts only at its head,
+    # so a long dash line stays linear.
+    r'(?<!(?a:\w)(?=\w)|-(?=-))[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
     r'(?:\b|(?=' + _NON_ASCII_WORD + r'))|'
     r"[\"']?" + _MARKER_BOUNDARY
     + r'(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|client[_-]?secret|'

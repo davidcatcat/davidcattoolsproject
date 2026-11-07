@@ -351,6 +351,108 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIn(header, excerpt)
         self.assertIn('測試失敗', excerpt)
 
+    def test_remote_jwt_start_preserves_old_boundaries(self):
+        # synthetic-fixture: screen-tool test
+        pattern = re.compile(remote_test._REMOTE_SENSITIVE, re.I)
+        # The start the JWT-shaped alternative had before the shared boundary
+        # rule. Every start it allowed must still be allowed.
+        old_start = re.compile(
+            r'\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}', re.I)
+        word_first = '.'.join(('a' * 8, 'b' * 8, 'c' * 8))
+        dash_first = '.'.join(('-' + 'a' * 7, 'b' * 8, 'c' * 8))
+        leads = ('', ' ', '-', '--', 'x-', '=', '.', '/', '(', '"', ':',
+                 'x', 'Z', '_', '7', '測', 'é', 'ſ', 'K',
+                 'ı', 'İ')
+        for lead in leads:
+            for value in (word_first, dash_first):
+                line = lead + value
+                if old_start.match(line, len(lead)) is None:
+                    continue
+                with self.subTest(lead=lead, dash_first=value is dash_first):
+                    self.assertIsNotNone(pattern.match(line, len(lead)))
+        for line, offset, value in (('-' + word_first, 1, word_first),
+                                    ('x-' + word_first, 2, word_first),
+                                    (dash_first, 0, dash_first),
+                                    (' ' + dash_first, 1, dash_first),
+                                    ('x' + dash_first, 1, dash_first)):
+            with self.subTest(prefix=line[:offset]):
+                found = pattern.match(line, offset)
+                self.assertIsNotNone(found)
+                self.assertTrue(found.group().startswith(value))
+                excerpt = self.excerpt_with(line)
+                self.assertNotIn(value, excerpt)
+                self.assertIn('AssertionError: expected value', excerpt)
+        for lead in ('x', 'Z', '_', '7'):
+            with self.subTest(unmatched=lead):
+                self.assertIsNone(pattern.match(lead + word_first, 1))
+
+    def test_remote_jwt_non_ascii_neighbours(self):
+        # synthetic-fixture: screen-tool test
+        pattern = re.compile(remote_test._REMOTE_SENSITIVE, re.I)
+        value = '.'.join(('a' * 8, 'b' * 8, 'c' * 8))
+        neighbours = ('測', 'é', 'ſ', 'K', 'ı', 'İ')
+        for neighbour in neighbours:
+            for before, after in ((neighbour, ''), ('', neighbour),
+                                  (neighbour, neighbour)):
+                line = before + value + after
+                with self.subTest(neighbour=neighbour, before=bool(before),
+                                  after=bool(after)):
+                    found = pattern.match(line, len(before))
+                    self.assertIsNotNone(found)
+                    self.assertTrue(found.group().startswith(value))
+                    excerpt = self.excerpt_with(line)
+                    self.assertNotIn(value, excerpt)
+                    self.assertIn('AssertionError: expected value', excerpt)
+
+    def test_remote_jwt_long_dash_run_is_bounded(self):
+        # synthetic-fixture: screen-tool test
+        script = remote_test._REMOTE_SCRIPT
+        parsed = ast.parse(script)
+        sensitive = next(node for node in parsed.body
+                         if isinstance(node, ast.Assign) and
+                         any(isinstance(target, ast.Name) and target.id == 'SENSITIVE'
+                             for target in node.targets))
+        helper = next(node for node in parsed.body
+                      if isinstance(node, ast.FunctionDef) and
+                      node.name == 'failure_excerpt')
+        helper_source = (ast.get_source_segment(script, sensitive) + '\n' +
+                         ast.get_source_segment(script, helper) + '\n')
+        child = (
+            'import json,re,sys\n'
+            'data=json.load(sys.stdin)\n'
+            'namespace={"re":re}\n'
+            'exec(compile(data["helper"],"<remote-excerpt-helper>","exec"),namespace)\n'
+            'matched=namespace["SENSITIVE"].search(data["text"]) is not None\n'
+            'excerpt=namespace["failure_excerpt"]([data["output"].encode()],'
+            '"/tmp/llmtool-remote-test.Abc123","/home/runner")\n'
+            'json.dump({"matched":matched,"excerpt":excerpt},sys.stdout)\n')
+        run = '-' * (1 << 20)
+        value = '.'.join(('a' * 8, 'b' * 8, 'c' * 8))
+        near_miss = '.'.join(('a' * 8, 'b' * 8, 'c' * 7))
+        header = 'FAIL: test_expected (test_remote_test.Case)'
+        cases = (('bare', run, False, None),
+                 ('near_miss', run + near_miss, False, None),
+                 ('value', run + value, True, value),
+                 ('newline_value', run + '\n' + value, True, value))
+        for name, text, expected, screened in cases:
+            output = (header + '\nTraceback (most recent call last):\n' + text +
+                      '\nAssertionError: expected value\n' + '-' * 70 + '\n')
+            payload = json.dumps({'helper': helper_source, 'text': text,
+                                  'output': output})
+            with self.subTest(case=name):
+                completed = subprocess.run(
+                    [sys.executable, '-B', '-c', child],
+                    input=payload.encode('ascii'), capture_output=True,
+                    timeout=5, check=False)
+                self.assertEqual(completed.returncode, 0,
+                                 completed.stderr.decode('utf-8', 'replace')[-2000:])
+                result = json.loads(completed.stdout.decode('ascii'))
+                self.assertIs(result['matched'], expected)
+                self.assertIn(header, result['excerpt'])
+                self.assertLessEqual(len(result['excerpt'].encode('utf-8')), 4096)
+                if screened is not None:
+                    self.assertNotIn(screened, result['excerpt'])
+
     def test_timeout_unavailable_and_unknown_receipts(self):
         timed = self.run_it(error=__import__('subprocess').TimeoutExpired('ssh', 600))
         self.assertEqual(timed['result'], 'TIMEOUT')
