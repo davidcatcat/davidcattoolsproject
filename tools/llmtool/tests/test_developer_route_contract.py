@@ -8,7 +8,8 @@ import tempfile
 
 from llmtool import task_completion
 from llmtool.developer_routes.base import (
-    DeveloperRoute, RouteError, _git_state_changed, capture_snapshot, run_route,
+    DeveloperRoute, RouteError, _git_state_changed, _git_state_difference,
+    capture_snapshot, run_route,
 )
 
 _DEFAULT_MODEL = object()
@@ -132,11 +133,78 @@ class DeveloperRouteContractTests(unittest.TestCase):
         with mock.patch('llmtool.developer_routes.base.task_completion.collect_git_snapshot',
                         side_effect=(self.git, task_completion.GitSnapshot(
                             '/root', '/git', 'task', 'b' * 40, False))):
+            with mock.patch('llmtool.developer_routes.base._git_status_paths', return_value=()):
+                with self.assertRaises(RouteError) as caught:
+                    run_route(self.route, self.request, gate=lambda: True,
+                              runner=lambda *args: (0, b'ok', b''), boundary=FakeBoundary(),
+                              snapshot=lambda root: self.before if not hasattr(self, '_seen') else changed)
+        self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED_IDENTITY')
+        self.assertEqual(caught.exception.facts, {'git_state_label': 'IDENTITY'})
+
+    def test_snapshot_and_status_failures_use_snapshot_label(self):
+        failure = OSError('private detail')
+        for snapshots, statuses in (((self.before,), (failure,)),
+                                    ((self.before, failure), ((),)),
+                                    ((self.before, self.after), ((), failure))):
+            with self.subTest(snapshots=len(snapshots), statuses=len(statuses)):
+                with mock.patch('llmtool.developer_routes.base.task_completion.collect_git_snapshot',
+                                return_value=self.git):
+                    with mock.patch('llmtool.developer_routes.base._git_status_paths',
+                                    side_effect=statuses):
+                        with self.assertRaises(RouteError) as caught:
+                            run_route(self.route, self.request, gate=lambda: True,
+                                      runner=lambda *args: (0, b'ok', b''),
+                                      boundary=FakeBoundary(),
+                                      snapshot=mock.Mock(side_effect=snapshots))
+                self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED_SNAPSHOT')
+                self.assertEqual(caught.exception.facts, {'git_state_label': 'SNAPSHOT'})
+
+    def test_baseline_snapshot_failure_uses_snapshot_label_and_starts_no_runner(self):
+        calls = []
+        with mock.patch('llmtool.developer_routes.base.task_completion.collect_git_snapshot',
+                        return_value=self.git):
             with self.assertRaises(RouteError) as caught:
                 run_route(self.route, self.request, gate=lambda: True,
-                          runner=lambda *args: (0, b'ok', b''), boundary=FakeBoundary(),
-                          snapshot=lambda root: self.before if not hasattr(self, '_seen') else changed)
-        self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED')
+                          runner=lambda *args: calls.append(args), boundary=FakeBoundary(),
+                          snapshot=mock.Mock(side_effect=OSError('private detail')))
+        self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED_SNAPSHOT')
+        self.assertEqual(caught.exception.facts, {'git_state_label': 'SNAPSHOT'})
+        self.assertEqual(calls, [])
+
+    def test_git_state_difference_returns_fixed_labels(self):
+        for key, label in (('head', 'HEAD'), ('branch', 'BRANCH'),
+                           ('branch_ref', 'BRANCH_REF'), ('git_dir', 'GIT_DIR'),
+                           ('index', 'INDEX'), ('stash', 'STASH'), ('pointer', 'POINTER'),
+                           ('config_worktree', 'CONFIG_WORKTREE'),
+                           ('config_common', 'CONFIG_COMMON')):
+            with self.subTest(key=key):
+                before = {'git_state': {key: 'before'}}
+                after = {'git_state': {key: 'after'}}
+                self.assertEqual(_git_state_difference(before, after), label)
+                self.assertTrue(_git_state_changed(before, after))
+        invalid = {'git_state': {'config_common': 'INVALID:same'}}
+        self.assertEqual(_git_state_difference(invalid, invalid), 'CONFIG_COMMON')
+        # The first difference wins when several states changed.
+        self.assertEqual(_git_state_difference(
+            {'git_state': {'head': 'a', 'index': 'a'}},
+            {'git_state': {'head': 'b', 'index': 'b'}}), 'HEAD')
+
+    def test_git_state_difference_identity_fallback(self):
+        self.assertEqual(_git_state_difference({'head': 'a'}, {'head': 'b'}), 'IDENTITY')
+        self.assertEqual(_git_state_difference({'git_state': {'head': 'a'}},
+                                               {'git_state': 'not-a-mapping'}), 'IDENTITY')
+        self.assertIsNone(_git_state_difference({'head': 'a'}, {'head': 'a'}))
+        self.assertFalse(_git_state_changed({'head': 'a'}, {'head': 'a'}))
+
+    def test_other_worktree_branches_come_from_after_snapshot(self):
+        head = 'a' * 40
+        listed = {'head': head, 'refs': {}, 'worktree_branches': frozenset({'other'})}
+        unlisted = {'head': head, 'refs': {}, 'worktree_branches': frozenset()}
+        ref = {'refs/heads/other': (head, head)}
+        self.assertEqual(_git_state_difference({'git_state': listed},
+                                               {'git_state': dict(unlisted, refs=ref)}), 'REFS')
+        self.assertIsNone(_git_state_difference({'git_state': unlisted},
+                                                {'git_state': dict(listed, refs=ref)}))
 
     def test_out_of_scope_write_and_timeout_fail_typed(self):
         outside = {'files': {'other.txt': (0o600, 'new')},
@@ -244,8 +312,116 @@ class DeveloperRouteContractTests(unittest.TestCase):
                                boundary=FakeBoundary(), snapshot=capture_snapshot)
             self.assertEqual(result.changed_files, ('out.txt',))
 
+    def test_other_worktree_new_branch_at_d6_head_is_not_owned(self):
+        """#1109: another D6 branching from this head must not fail this run."""
+        for with_tracking_ref in (False, True):
+            with self.subTest(with_tracking_ref=with_tracking_ref):
+                with tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp) / 'repo'
+                    other = Path(temp) / 'other-worktree'
+                    root.mkdir()
+                    request = self._real_git_request(root)
+                    head = request['expected_head']
+
+                    def runner(*args):
+                        subprocess.run(['/usr/bin/git', '-C', str(root), 'worktree', 'add',
+                                        '-b', 'team/other-task', str(other), head],
+                                       check=True, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL)
+                        if with_tracking_ref:
+                            subprocess.run(['/usr/bin/git', '-C', str(root), 'update-ref',
+                                            'refs/remotes/origin/team/other-task', head],
+                                           check=True)
+                        (root / 'out.txt').write_text('after\n')
+                        return 0, b'output', b''
+
+                    result = run_route(self.route, request, gate=lambda: True, runner=runner,
+                                       boundary=FakeBoundary(), snapshot=capture_snapshot)
+                    self.assertEqual(result.changed_files, ('out.txt',))
+
+    def test_refs_at_d6_head_outside_other_worktree_branches_are_detected(self):
+        for template in ('refs/remotes/origin/{current}', 'refs/tags/other-task',
+                         'refs/notes/other-task', 'refs/heads/other-task-2',
+                         'refs/remotes/other-task',
+                         'refs/remotes/origin/nested/other-task'):
+            with self.subTest(template=template):
+                with tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp) / 'repo'
+                    linked = Path(temp) / 'linked'
+                    root.mkdir()
+                    request = self._real_git_request(root)
+                    head = request['expected_head']
+                    subprocess.run(['/usr/bin/git', '-C', str(root), 'worktree', 'add',
+                                    '-b', 'other-task', str(linked), head],
+                                   check=True, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+                    ref = template.format(current=request['expected_branch'])
+
+                    def runner(*args):
+                        subprocess.run(['/usr/bin/git', '-C', str(root), 'update-ref', ref, head],
+                                       check=True)
+                        return 0, b'output', b''
+
+                    with self.assertRaises(RouteError) as caught:
+                        run_route(self.route, request, gate=lambda: True, runner=runner,
+                                  boundary=FakeBoundary(), snapshot=capture_snapshot)
+                    self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED_REFS')
+
+    def test_capture_snapshot_lists_only_other_worktree_branches(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            linked = Path(temp) / 'linked'
+            detached = Path(temp) / 'detached'
+            root.mkdir()
+            request = self._real_git_request(root)
+            head = request['expected_head']
+            for args in (('-b', 'team/other-task', str(linked), head),
+                         ('--detach', str(detached), head)):
+                subprocess.run(['/usr/bin/git', '-C', str(root), 'worktree', 'add', *args],
+                               check=True, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+            with mock.patch('llmtool.developer_routes.base.task_completion._git',
+                            wraps=task_completion._git) as git:
+                snapshot = capture_snapshot(root)
+            self.assertEqual(snapshot['git_state']['worktree_branches'], {'team/other-task'})
+            self.assertEqual(capture_snapshot(linked)['git_state']['worktree_branches'],
+                             {request['expected_branch']})
+            call = next(item for item in git.call_args_list
+                        if item.args[1] == ('worktree', 'list', '--porcelain'))
+            self.assertGreaterEqual(call.kwargs['limit'], 1024 * 1024)
+
+    def test_git_state_refusal_carries_no_values(self):
+        config_value = 'Private config value'
+        for label, command in (
+                ('REFS', ('tag', 'private-ref-name')),
+                ('CONFIG_COMMON', ('config', 'user.name', config_value))):
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp) / 'repo'
+                    root.mkdir()
+                    request = self._real_git_request(root)
+
+                    def runner(*args):
+                        (root / 'out.txt').write_text('after\n')
+                        subprocess.run(['/usr/bin/git', '-C', str(root), *command], check=True)
+                        return 0, b'output', b''
+
+                    with self.assertRaises(RouteError) as caught:
+                        run_route(self.route, request, gate=lambda: True, runner=runner,
+                                  boundary=FakeBoundary(), snapshot=capture_snapshot)
+                    error = caught.exception
+                    self.assertEqual(error.code, f'FAKE_GIT_STATE_CHANGED_{label}')
+                    self.assertEqual(error.facts, {'git_state_label': label})
+                    self.assertIsNone(error.blocked_reason)
+                    rendered = ' '.join((error.code, repr(error.facts), str(error)))
+                    for value in ('private-ref-name', config_value, 'out.txt', str(root),
+                                  request['expected_head'], request['expected_branch']):
+                        self.assertNotIn(value, rendered)
+
     def test_owned_git_state_changes_are_detected(self):
-        for mutation in ('branch', 'commit', 'index', 'stash'):
+        for mutation, label in (('branch', 'HEAD'), ('commit', 'HEAD'),
+                                ('checkout', 'BRANCH'), ('index', 'INDEX'),
+                                ('stash', 'STASH')):
             with self.subTest(mutation=mutation):
                 with tempfile.TemporaryDirectory() as temp:
                     root = Path(temp) / 'repo'
@@ -271,6 +447,10 @@ class DeveloperRouteContractTests(unittest.TestCase):
                             subprocess.run(['/usr/bin/git', '-C', str(root), 'commit', '-m',
                                             'D6 commit'], check=True, stdout=subprocess.DEVNULL,
                                            stderr=subprocess.DEVNULL)
+                        elif mutation == 'checkout':
+                            subprocess.run(['/usr/bin/git', '-C', str(root), 'checkout', '-b',
+                                            'd6-checkout'], check=True,
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         elif mutation == 'index':
                             subprocess.run(['/usr/bin/git', '-C', str(root), 'add', 'out.txt'],
                                            check=True)
@@ -283,7 +463,8 @@ class DeveloperRouteContractTests(unittest.TestCase):
                     with self.assertRaises(RouteError) as caught:
                         run_route(self.route, request, gate=lambda: True, runner=runner,
                                   boundary=FakeBoundary(), snapshot=capture_snapshot)
-                    self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED')
+                    self.assertEqual(caught.exception.code,
+                                     f'FAKE_GIT_STATE_CHANGED_{label}')
 
     def test_refs_created_from_d6_are_detected(self):
         for mutation in ('branch', 'lightweight_tag', 'annotated_tag', 'notes'):
@@ -311,7 +492,7 @@ class DeveloperRouteContractTests(unittest.TestCase):
                     with self.assertRaises(RouteError) as caught:
                         run_route(self.route, request, gate=lambda: True, runner=runner,
                                   boundary=FakeBoundary(), snapshot=capture_snapshot)
-                    self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED')
+                    self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED_REFS')
 
     def test_git_config_changes_are_detected(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -328,7 +509,7 @@ class DeveloperRouteContractTests(unittest.TestCase):
             with self.assertRaises(RouteError) as caught:
                 run_route(self.route, request, gate=lambda: True, runner=runner,
                           boundary=FakeBoundary(), snapshot=capture_snapshot)
-            self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED')
+            self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED_CONFIG_COMMON')
 
     def test_worktree_git_config_changes_are_detected(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -347,7 +528,7 @@ class DeveloperRouteContractTests(unittest.TestCase):
             with self.assertRaises(RouteError) as caught:
                 run_route(self.route, request, gate=lambda: True, runner=runner,
                           boundary=FakeBoundary(), snapshot=capture_snapshot)
-            self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED')
+            self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED_CONFIG_WORKTREE')
 
     def test_other_branch_tracking_config_is_ignored_with_linked_worktree(self):
         with tempfile.TemporaryDirectory() as temp:
