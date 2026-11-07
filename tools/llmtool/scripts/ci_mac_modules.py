@@ -246,6 +246,14 @@ def select_test_ids(
             continue
         if path_class == "runtime" and path.endswith(".md"):
             continue
+        if path_class != "workflow" and _other_tool_markdown(path):
+            # #714: Markdown inside another tools/<name>/ directory (for
+            # example tools/ec2-runner/README.md, tools/ec2-runner/ci/README.md
+            # or tools/ec2-runner/requirements.md) is not a Mac input and adds
+            # no modules. This runs before the generic /ci/ and requirements
+            # checks; tools/llmtool/ paths, workflow paths and non-Markdown
+            # files never match, and the root README.md stays unsupported.
+            continue
         if (path_class == "workflow" or path == "tools/llmtool/ci/mac-modules.txt"
                 or path in {"tools/llmtool/scripts/ci_mac_modules.py",
                             "tools/llmtool/scripts/ci_path_classes.py",
@@ -265,12 +273,6 @@ def select_test_ids(
         if not path.startswith("tools/llmtool/"):
             if (path_class == "docs" and (path in {"AGENTS.md", "CLAUDE.md"}
                                            or path.startswith(("skills/", "docs/")))):
-                continue
-            if _other_tool_markdown(path):
-                # #714: Markdown inside another tools/<name>/ directory (for
-                # example tools/ec2-runner/README.md) is not a Mac input and
-                # adds no modules. Workflow and CI Markdown were already
-                # rejected above; the root README.md stays unsupported.
                 continue
             reject(path, "unsupported_path")
             continue

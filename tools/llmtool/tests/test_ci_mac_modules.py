@@ -734,6 +734,56 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 else:
                     self.assertIn(reason, report["fallback_reasons"])
 
+    def test_other_tool_ci_and_requirements_markdown_adds_no_modules(self):
+        for path in (
+            "tools/ec2-runner/ci/README.md",
+            "tools/ec2-runner/requirements.md",
+            "tools/mac-runner/ci/notes/guide.md",
+            "tools/nlf/requirements-notes.md",
+        ):
+            with self.subTest(path=path):
+                report = ci_mac_modules.selection_report([path], REPO_ROOT)
+                self.assertEqual(report["level"], "L0")
+                self.assertEqual(report["test_ids"], [])
+                self.assertEqual(report["fallback_reasons"], [])
+                self.assertEqual(report["fallback_paths"], [])
+                self.assertEqual(report["fallback_details"], [])
+
+        alone = ci_mac_modules.selection_report(
+            ["tools/llmtool/guidance-drift.json"], REPO_ROOT
+        )
+        mixed = ci_mac_modules.selection_report(
+            ["tools/ec2-runner/ci/README.md", "tools/ec2-runner/requirements.md",
+             "tools/llmtool/guidance-drift.json"], REPO_ROOT
+        )
+        self.assertEqual(mixed["level"], alone["level"])
+        self.assertEqual(mixed["test_ids"], alone["test_ids"])
+        self.assertEqual(mixed["fallback_reasons"], [])
+
+    def test_ci_and_requirements_non_markdown_and_llmtool_paths_stay_rejected(self):
+        for path in (
+            "tools/ec2-runner/ci/run.sh",
+            "tools/ec2-runner/ci/README.txt",
+            "tools/ec2-runner/requirements.txt",
+            "tools/nlf/requirements-dev.txt",
+            "tools/llmtool/requirements-ci.txt",
+            "tools/llmtool/ci/mac-modules.txt",
+        ):
+            with self.subTest(path=path):
+                report = ci_mac_modules.selection_report([path], REPO_ROOT)
+                self.assertEqual(report["level"], "L3")
+                self.assertEqual(report["test_ids"], ["FULL"])
+                self.assertEqual(report["fallback_reasons"], ["ci_or_dependency_change"])
+                self.assertEqual(report["fallback_paths"], [path])
+
+        report = ci_mac_modules.selection_report(
+            ["tools/ec2-runner/ci/README.md", "tools/ec2-runner/ci/run.sh"], REPO_ROOT
+        )
+        self.assertEqual(report["level"], "L3")
+        self.assertEqual(report["fallback_details"],
+                         [{"path": "tools/ec2-runner/ci/run.sh",
+                           "reason": "ci_or_dependency_change"}])
+
 
 if __name__ == "__main__":
     unittest.main()
