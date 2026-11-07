@@ -250,3 +250,43 @@ class ReviewResultTests(unittest.TestCase):
                                        '--reviewer', 'codex-reviewer']), 17)
         self.assertEqual(handler.call_args.args[0].reviewer, 'codex-reviewer')
 
+
+class FindingsCountTests(unittest.TestCase):
+    """#1130: priority-tagged lines such as [P1] or **[P2]** count as findings."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = _store(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def count(self, extra):
+        verdict = review_result._comment_verdict(
+            _comment('FAIL', extra=extra), head=HEAD, version=1,
+            task=self.store.get(TASK))
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict[2], 'REVIEW_FAIL')
+        return verdict[3]
+
+    def test_plain_priority_lines_count(self):
+        self.assertEqual(self.count('[P0] data loss\n[P1] broken gate\n'
+                                    '  [P2] indented\n[P3] nit\n'), 4)
+
+    def test_bold_priority_lines_count(self):
+        self.assertEqual(self.count('**[P1]** broken gate\n**[P2] wrong count**\n'), 2)
+
+    def test_priority_tag_with_finding_prefix_counts_each_line_once(self):
+        extra = ('- [P1] dash and tag\n* [P2] star and tag\n'
+                 'Finding [P3]: word and tag\n[P0] tag only\n- plain dash\n')
+        self.assertEqual(self.count(extra), 5)
+
+    def test_mid_line_tag_and_out_of_range_priority_do_not_count(self):
+        extra = ('See the [P1] note above.\n[P4] beyond range\n[Px] not a priority\n'
+                 'Summary [P2] mid-line\n')
+        self.assertEqual(self.count(extra), 0)
+
+    def test_verdict_without_finding_line_counts_zero(self):
+        self.assertEqual(self.count(''), 0)
+        self.assertEqual(self.count('Summary: needs another pass.\n'), 0)
+
