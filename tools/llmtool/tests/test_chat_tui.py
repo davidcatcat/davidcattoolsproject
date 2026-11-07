@@ -385,18 +385,35 @@ class WidgetTests(Base):
     def test_settings_ghost_hints_render_without_editing_input(self):
         seen = {}
 
-        def capture(ui, key):
+        def rendered(ui):
             screen = ui.app.renderer.last_rendered_screen
+            if screen is None:
+                return ''
             size = ui.app.output.get_size()
-            seen[key] = "".join(screen.data_buffer[y][x].char
-                                for y in range(size.rows) for x in range(size.columns))
-            seen[key + "_draft"] = ui.input.text
+            return "".join(screen.data_buffer[y][x].char
+                           for y in range(size.rows) for x in range(size.columns))
 
-        ui, _ = self.drive(['/settings', lambda ui: capture(ui, 'command'),
-                            ' ', lambda ui: capture(ui, 'command_space'),
-                            'auto-resume', lambda ui: capture(ui, 'setting'),
-                            ' ', lambda ui: capture(ui, 'setting_space'),
-                            'on', lambda ui: capture(ui, 'value')])
+        def capture(key, draft, hint=None):
+            # #996: wait for the typed draft and a render after it, instead of trusting
+            # a fixed sleep on a loaded runner; the until deadline still bounds the wait.
+            async def step(ui):
+                await self.until(ui, lambda ui: ui.input.text == draft,
+                                 key + ' draft ' + repr(draft))
+                drawn = ui.app.render_counter
+                await self.until(ui, lambda ui: ui.app.render_counter > drawn,
+                                 key + ' render after the draft')
+                if hint is not None:
+                    await self.until(ui, lambda ui: hint in rendered(ui),
+                                     key + ' hint ' + repr(hint) + ' on screen')
+                seen[key] = rendered(ui)
+                seen[key + "_draft"] = ui.input.text
+            return step
+
+        ui, _ = self.drive(['/settings', capture('command', '/settings', 'auto-resume on|off'),
+                            ' ', capture('command_space', '/settings ', 'auto-resume on|off'),
+                            'auto-resume', capture('setting', '/settings auto-resume', 'on|off'),
+                            ' ', capture('setting_space', '/settings auto-resume ', 'on|off'),
+                            'on', capture('value', '/settings auto-resume on')])
         self.assertIn('auto-resume on|off', seen['command'])
         self.assertIn('auto-resume on|off', seen['command_space'])
         self.assertIn('on|off', seen['setting'])
@@ -1358,9 +1375,14 @@ class WidgetTests(Base):
             self.assertIn('interrupted', ui.status_text())
             self.assertGreater(ui._default_timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
 
+        async def restored(ui):
+            # #996: the timeout is restored on the next render, so wait for it (bounded).
+            await self.until(ui, lambda ui: ui.app.timeoutlen == ui._default_timeoutlen,
+                             'default Esc timeout after the interrupted reply')
+            self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+
         ui, result = self.drive(['question\r', streaming, lone_escape, escaped, after,
-                                 lambda ui: self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen),
-                                 '/status\r'])
+                                 restored, '/status\r'])
         self.assertEqual(result, 0)
         self.assertEqual([t['content'] for t in self.session.history], ['question', 'Hello world'])
         self.assertEqual(self.session.state, 'interrupted')
