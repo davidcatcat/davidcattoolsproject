@@ -61,10 +61,10 @@ _SCREEN_KEYS = _SCREEN_LEGACY_KEYS | {'total', 'hits_sha256', 'source_sha256', '
 _SCREEN_DIGEST = re.compile(r'[0-9a-f]{64}\Z')
 _SCREEN_REFUSAL_ID = re.compile(r'[0-9a-f]{16}\Z')
 _SCREEN_D6 = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z')
-# Append-only refusal and batch events, and the privately retained source of
-# a refusal whose hits overflow the record, sit beside the record directory.
+# Append-only refusal and batch events sit beside the record directory. They
+# hold metadata and digests only: refused text is never persisted, so recovery
+# rereads it from its original source, at most this many bytes.
 _SCREEN_HISTORY_DIR = 'high-debug-screen-history'
-_SCREEN_SOURCE_DIR = 'high-debug-screen-source'
 _SCREEN_SOURCE_LIMIT = 4 * 1024 * 1024
 _SCREEN_BATCH_KEYS = frozenset(('event', 'task_id', 'family', 'd6', 'refusal_id',
                                 'hits_sha256', 'source_sha256', 'batch', 'batches',
@@ -357,12 +357,6 @@ def _screen_history_for(record_path):
     return record_path.parent.parent / _SCREEN_HISTORY_DIR / record_path.stem
 
 
-def _screen_source_for(record_path, refusal_id):
-    """The privately retained source of one refusal of one record path."""
-    return (record_path.parent.parent / _SCREEN_SOURCE_DIR /
-            (record_path.stem + '-' + refusal_id + '.bin'))
-
-
 def _hits_digest(hits):
     """SHA-256 of the complete sorted hit list; the hit list holds no text."""
     canonical = json.dumps([[rule, line] for rule, line in hits], separators=(',', ':'))
@@ -466,8 +460,8 @@ def _write_screen_record(task_id, family, code, source, hits, byte_count, root=N
     The record keeps the first hits, the total hit count, a digest of the
     complete hit list and, when ``screened`` (the refused bytes) is given, a
     digest of that source. ``d6`` binds batch recovery to the refused D6.
-    Only a refusal whose hits overflow the record keeps a private copy of
-    ``screened``, because only batch recovery rescreens it.
+    ``screened`` is only digested, never stored: batch recovery rereads the
+    original source and proves it against this digest.
     """
     directory = _screen_location(task_id, family, root).parent
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -489,8 +483,8 @@ def _write_screen_record(task_id, family, code, source, hits, byte_count, root=N
               'refusal_id': secrets.token_hex(8)}
     target = _screen_location(task_id, family, root)
     _replace_private(target, record)
-    # Best effort after the block is stored: a missing event or source copy
-    # only makes batch recovery refuse, so the block stays.
+    # Best effort after the block is stored: a missing event only makes batch
+    # recovery refuse, so the block stays.
     try:
         history = _screen_history_for(target)
         _private_directory(history.parent)
@@ -500,13 +494,6 @@ def _write_screen_record(task_id, family, code, source, hits, byte_count, root=N
         _create_private(history / (record['refusal_id'] + '-refusal.json'), _json_bytes(event))
     except Exception:
         pass
-    if omitted and record['source_sha256'] is not None and len(screened) <= _SCREEN_SOURCE_LIMIT:
-        try:
-            retained = _screen_source_for(target, record['refusal_id'])
-            _private_directory(retained.parent)
-            _create_private(retained, screened)
-        except Exception:
-            pass
 
 
 def _read_screen_record(task_id, family, root=None):
@@ -755,15 +742,42 @@ def _confirmed_batches(task_id, family, root, record, all_hits=None):
 
 
 def _rescreen(source, text):
-    """Locate hits in retained ``text`` with the screen its refusal used."""
+    """Locate hits in reread ``text`` with the screen its refusal used."""
     if source == 'DEVELOPER_OUTPUT':
         from .task_submission_cli import _developer_screen_hits
         return sorted(set(_developer_screen_hits(text)))
     return sorted(set(_screen_hits(text) or [('unlocated', 0)]))
 
 
-def _recovery_state(task_id, family, d6, root):
-    """Prove a pending overflow record still describes its retained source.
+def _original_source(record, task_id, d6, source, root):
+    """Reread the refused bytes from where they came from, into memory only.
+
+    Developer output is rebuilt from its D6. Evidence and reports are read
+    from the file named by ``source``, which needs no trust: the caller checks
+    the bytes against the record's full SHA-256 digest.
+    """
+    if record['source'] == 'DEVELOPER_OUTPUT':
+        if source is not None:
+            _refuse('HIGH_DEBUG_SCREEN_RECOVERY_INVALID')
+        from .task_submission_cli import _developer_screen_source
+        raw = _developer_screen_source(task_id, d6, root)
+        if raw is None:
+            _refuse('HIGH_DEBUG_SCREEN_SOURCE_MISSING')
+        if len(raw) > _SCREEN_SOURCE_LIMIT:
+            _refuse('HIGH_DEBUG_SCREEN_SOURCE_MISMATCH')
+        return raw
+    if source is None:
+        _refuse('HIGH_DEBUG_SCREEN_SOURCE_MISSING')
+    try:
+        return _read_bounded(Path(source), _SCREEN_SOURCE_LIMIT)
+    except FileNotFoundError:
+        _refuse('HIGH_DEBUG_SCREEN_SOURCE_MISSING')
+    except Exception:
+        _refuse('HIGH_DEBUG_SCREEN_SOURCE_MISMATCH')
+
+
+def _recovery_state(task_id, family, d6, root, source=None):
+    """Prove a pending overflow record still describes its original source.
 
     Returns the record path, record, rescreened hits and stored batch events.
     """
@@ -786,13 +800,7 @@ def _recovery_state(task_id, family, d6, root):
         _refuse('HIGH_DEBUG_SCREEN_RECOVERY_BINDING')
     if record['source_sha256'] is None:
         _refuse('HIGH_DEBUG_SCREEN_SOURCE_MISSING')
-    try:
-        raw = _read_bounded(_screen_source_for(path, record['refusal_id']),
-                            _SCREEN_SOURCE_LIMIT)
-    except FileNotFoundError:
-        _refuse('HIGH_DEBUG_SCREEN_SOURCE_MISSING')
-    except Exception:
-        _refuse('HIGH_DEBUG_SCREEN_SOURCE_MISMATCH')
+    raw = _original_source(record, task_id, d6, source, root)
     if hashlib.sha256(raw).hexdigest() != record['source_sha256']:
         _refuse('HIGH_DEBUG_SCREEN_SOURCE_MISMATCH')
     try:
@@ -820,20 +828,15 @@ def _finish_recovery(path, record, ref):
     record['disposition'] = {'classification': _SCREEN_BATCH_CLEARED, 'ref': ref,
                              'recorded_at': datetime.now(timezone.utc).isoformat()}
     _store_disposition(path, record)
-    # The retained source is no longer needed once the block is cleared.
-    try:
-        os.unlink(_screen_source_for(path, record['refusal_id']))
-    except OSError:
-        pass
 
 
-def screen_recovery_pending(task_id, family, d6, root=None):
+def screen_recovery_pending(task_id, family, d6, root=None, source=None):
     """Return the next batch to confirm as rule/line metadata, never text.
 
     If every batch is already stored (an interrupted final confirmation),
     the clearing is recorded and the state is CLEARED.
     """
-    path, record, all_hits, events = _recovery_state(task_id, family, d6, root)
+    path, record, all_hits, events = _recovery_state(task_id, family, d6, root, source)
     if len(events) == _batch_count(record['total']):
         _finish_recovery(path, record, events[-1]['ref'])
         return _recovery_progress(record, events, 'CLEARED')
@@ -845,14 +848,15 @@ def screen_recovery_pending(task_id, family, d6, root=None):
     return progress
 
 
-def confirm_screen_batch(task_id, family, d6, batch, hits, classification, ref, root=None):
+def confirm_screen_batch(task_id, family, d6, batch, hits, classification, ref, root=None,
+                         source=None):
     """Confirm the next batch of an overflow record; the last batch clears it.
 
     A batch names exactly its slice of at most the hit limit of the
     rescreened, sorted hits. Each confirmation is appended to the refusal
     history and is never replaced; nothing clears before full coverage.
     """
-    path, record, all_hits, events = _recovery_state(task_id, family, d6, root)
+    path, record, all_hits, events = _recovery_state(task_id, family, d6, root, source)
     batches = _batch_count(record['total'])
     if (classification not in _SCREEN_CLASSIFICATIONS or
             type(ref) is not str or _SCREEN_REF.fullmatch(ref) is None):
@@ -1285,6 +1289,7 @@ def _screen_disposition_main(argv=None):
     parser.add_argument('--ref')
     parser.add_argument('--d6')
     parser.add_argument('--batch')
+    parser.add_argument('--source')
     try:
         args = parser.parse_args(arguments)
         hits = []
@@ -1295,7 +1300,8 @@ def _screen_disposition_main(argv=None):
             hits.append((match.group(1), int(match.group(2))))
         confirming = (args.hit, args.classification, args.ref, args.batch)
         if args.command == 'screen-disposition':
-            if args.d6 is not None or args.batch is not None or not all(confirming[:3]):
+            if (args.d6 is not None or args.batch is not None or
+                    args.source is not None or not all(confirming[:3])):
                 _refuse(fallback)
             record_screen_disposition(args.task_id, args.family, hits,
                                       args.classification, args.ref)
@@ -1304,7 +1310,8 @@ def _screen_disposition_main(argv=None):
             _refuse(fallback)
         elif not any(item is not None for item in confirming):
             # Without a batch, print the next batch's rule:line metadata.
-            result = screen_recovery_pending(args.task_id, args.family, args.d6)
+            result = screen_recovery_pending(args.task_id, args.family, args.d6,
+                                             source=args.source)
         elif not all(item is not None for item in confirming):
             _refuse(fallback)
         else:
@@ -1312,7 +1319,8 @@ def _screen_disposition_main(argv=None):
                 _refuse(fallback)
             result = confirm_screen_batch(args.task_id, args.family, args.d6,
                                           int(args.batch), hits,
-                                          args.classification, args.ref)
+                                          args.classification, args.ref,
+                                          source=args.source)
         print(json.dumps(result, sort_keys=True))
         return 0
     except LLMToolError as error:

@@ -1351,15 +1351,18 @@ class HighDebugTests(unittest.TestCase):
             self.assertNotIn(_fixture_value(), text)
         return code, out.getvalue(), err.getvalue()
 
-    def _recover_every_batch(self):
-        """Confirm each pending batch through the module entry; return the last result."""
+    def _recover_every_batch(self, source):
+        """Confirm each pending batch through the module entry; return the last result.
+
+        ``source`` is the original refused file that every command rereads.
+        """
         for _round in range(16):
-            code, out, err = self._recover_main()
+            code, out, err = self._recover_main('--source', source)
             self.assertEqual((code, err), (0, ''))
             pending = json.loads(out)
             self.assertEqual(pending['state'], 'PENDING')
             self.assertLessEqual(len(pending['hits']), high_debug._SCREEN_HIT_LIMIT)
-            argv = ['--batch', str(pending['batch']), '--classification',
+            argv = ['--source', source, '--batch', str(pending['batch']), '--classification',
                     'SYNTHETIC_TEST_DATA', '--ref', _RECOVERY_REF]
             for hit in pending['hits']:
                 argv.extend(('--hit', hit))
@@ -1375,8 +1378,18 @@ class HighDebugTests(unittest.TestCase):
         return ''.join('## ' + heading + '\nDetails.\n'
                        for heading in high_debug.REPORT_SECTIONS) + 'RCA_CONFIRMED'
 
+    def _evidence_path(self):
+        return Path(self.unposted_root.name) / 'evidence.txt'
+
+    def _assert_no_file_holds_fixture(self, *originals):
+        """Only the ``originals`` the refusal came from may hold its text."""
+        for item in Path(self.unposted_root.name).rglob('*'):
+            if item.is_file() and item not in originals:
+                self.assertNotIn(_fixture_value().encode('utf-8'), item.read_bytes())
+        self.assertFalse((Path(self.unposted_root.name) / 'high-debug-screen-source').exists())
+
     def _refuse_overflow_evidence(self, count):
-        evidence = Path(self.unposted_root.name) / 'evidence.txt'
+        evidence = self._evidence_path()
         evidence.write_text(_keyword_lines(count), encoding='utf-8')
         with self.assertRaises(LLMToolError) as caught:
             high_debug.run_high_debug(store=_Store(), task_id='a' * 32,
@@ -1406,8 +1419,9 @@ class HighDebugTests(unittest.TestCase):
         evaluate.assert_not_called()
         create.assert_not_called()
         runner.assert_not_called()
-        result = self._recover_every_batch()
+        result = self._recover_every_batch(str(self._evidence_path()))
         self.assertEqual((result['confirmed'], result['total'], result['batches']), (33, 33, 2))
+        self._assert_no_file_holds_fixture(self._evidence_path())
         _result, _invoke, store = self._run_case(self._clean_report())
         self.assertEqual(store.entries[0]['status'], 'RCA_CONFIRMED')
 
@@ -1427,9 +1441,17 @@ class HighDebugTests(unittest.TestCase):
             high_debug.record_screen_disposition('a' * 32, 'family',
                 [tuple(hit) for hit in record['hits']], 'SYNTHETIC_TEST_DATA', _RECOVERY_REF)
         self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_SCREEN_HITS_OMITTED')
-        result = self._recover_every_batch()
+        # The run deletes its report file, so nothing it left can recover this.
+        self._assert_no_file_holds_fixture()
+        self.assertEqual(self._recover_main(),
+                         (1, '', 'HIGH_DEBUG_SCREEN_SOURCE_MISSING\n'))
+        # A file that still holds the identical report bytes is a valid source.
+        original = Path(self.unposted_root.name) / 'report-original.txt'
+        original.write_bytes(report.encode('utf-8'))
+        result = self._recover_every_batch(str(original))
         self.assertEqual((result['confirmed'], result['total'], result['batches']),
                          (100, 100, 4))
+        self._assert_no_file_holds_fixture(original)
         history = high_debug._screen_history_for(path)
         self.assertEqual(sorted(item.name for item in history.iterdir()),
                          [record['refusal_id'] + f'-b{number:06d}.json'
@@ -1468,6 +1490,25 @@ class HighDebugTests(unittest.TestCase):
         create.assert_not_called()
         runner.assert_not_called()
 
+    def test_overflow_evidence_without_its_original_stays_blocked(self):
+        self._refuse_overflow_evidence(33)
+        evidence = str(self._evidence_path())
+        self.assertEqual(self._recover_main(),
+                         (1, '', 'HIGH_DEBUG_SCREEN_SOURCE_MISSING\n'))
+        self._evidence_path().unlink()
+        self.assertEqual(self._recover_main('--source', evidence),
+                         (1, '', 'HIGH_DEBUG_SCREEN_SOURCE_MISSING\n'))
+        self._assert_no_file_holds_fixture()
+        create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.run_high_debug(store=_Store(), task_id='a' * 32,
+                executor_task='executor', pr_number=17, family='family',
+                failed_corrections=2, runner=runner, create_d6=create)
+        self.assertEqual(caught.exception.high_debug_code,
+                         'HIGH_DEBUG_SCREEN_DISPOSITION_REQUIRED')
+        create.assert_not_called()
+        runner.assert_not_called()
+
     def test_screen_recover_module_entry_refusals_print_code_only(self):
         _hits, path = self._write_screen_hits('EVIDENCE', 1)
         before = path.read_bytes()
@@ -1489,6 +1530,8 @@ class HighDebugTests(unittest.TestCase):
                 (['screen-disposition'] + base + ['--d6', 'executor'] + confirm,
                  'HIGH_DEBUG_SCREEN_DISPOSITION_INVALID'),
                 (['screen-disposition'] + base + ['--batch', '1'] + confirm,
+                 'HIGH_DEBUG_SCREEN_DISPOSITION_INVALID'),
+                (['screen-disposition'] + base + ['--source', 'evidence.txt'] + confirm,
                  'HIGH_DEBUG_SCREEN_DISPOSITION_INVALID')):
             with self.subTest(argv=argv):
                 out, err = StringIO(), StringIO()

@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -202,7 +203,7 @@ class DeveloperOutputSensitiveRefusalGateTests(unittest.TestCase):
         self.assertEqual(record['d6'], self.executor)
         self.assertEqual(record['bytes'], len(diff.encode('utf-8')))
         self.assertIsNone(record['disposition'])
-        # Every hit is stored, so no copy of the screened source is kept.
+        # No copy of the screened source is ever kept.
         self.assertFalse((self.store.root.parent / 'high-debug-screen-source').exists())
         for text in (_keyword_value(), _keyword_line(), _screened_looking_value()):
             self.assertNotIn(text, raw)
@@ -344,6 +345,8 @@ _OUT_OF_RANGE = 'HIGH_DEBUG_SCREEN_BATCH_OUT_OF_RANGE'
 _WRONG = 'HIGH_DEBUG_SCREEN_BATCH_WRONG'
 _REPEATED = 'HIGH_DEBUG_SCREEN_BATCH_REPEATED'
 _RECOVERY_INVALID = 'HIGH_DEBUG_SCREEN_RECOVERY_INVALID'
+_SOURCE_MISSING = 'HIGH_DEBUG_SCREEN_SOURCE_MISSING'
+_BASE_SHA = 'b' * 40
 
 
 def _keyword_text(count):
@@ -364,15 +367,33 @@ class ScreenBatchRecoveryTests(unittest.TestCase):
 
     def setUp(self):
         self._fresh_store()
-        root_patch = patch.object(high_debug.task_store, 'default_root',
-                                  side_effect=lambda: self.store.root)
-        root_patch.start()
-        self.addCleanup(root_patch.stop)
+        # The original of a refusal is one file outside the state directories:
+        # the evidence or report file, or the fake D6 whose diff is that file.
+        for target, name, fake in (
+                (high_debug.task_store, 'default_root', lambda: self.store.root),
+                (submission_cli, 'TaskStore', lambda *_root: self.store),
+                (submission_cli.task_completion, 'read_d6_registration',
+                 lambda _d6, common_dir, allowed_states=None:
+                     SimpleNamespace(root=common_dir)),
+                (submission_cli.task_completion, '_worktree_diff',
+                 lambda root, _base: (['example.py'], Path(root).read_bytes()))):
+            active = patch.object(target, name, side_effect=fake)
+            active.start()
+            self.addCleanup(active.stop)
 
     def _fresh_store(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.store = _Store(Path(temp.name).resolve() / 'tasks')
+        self.originals = Path(temp.name).resolve() / 'originals'
+        self.originals.mkdir()
+
+    def _original(self, task_id):
+        return self.originals / task_id
+
+    def _source_argument(self, task_id, family):
+        """The named source of a recovery; Developer output needs none."""
+        return None if family == 'developer-output' else str(self._original(task_id))
 
     def _task(self):
         task_id = new_id()
@@ -380,14 +401,17 @@ class ScreenBatchRecoveryTests(unittest.TestCase):
             'task_id': task_id,
             'developer': {'state': 'DEVELOPER_DISPATCHING', 'artifact': None,
                           'artifact_sha256': None, 'error_code': None,
+                          'source_sha': _BASE_SHA,
                           'created_at': '2026-11-07T00:00:00Z'},
-            'completion': {'executor_task_id': self.executor}}
+            'completion': {'executor_task_id': self.executor,
+                           'evidence': {'common_dir': str(self._original(task_id))}}}
         return task_id
 
     def _refuse(self, source, count, *, task_id=None):
         """Store one refusal of ``source`` the way its writer does."""
         task_id = task_id or self._task()
         text = _source_text(source, count)
+        self._original(task_id).write_text(text, encoding='utf-8')
         if source == 'DEVELOPER_OUTPUT':
             submission_cli._persist_developer_output_rejection(
                 self.store, task_id, self.store.get(task_id)['developer'],
@@ -417,9 +441,15 @@ class ScreenBatchRecoveryTests(unittest.TestCase):
     def _write_record(self, task_id, family, record):
         self._record_path(task_id, family).write_text(json.dumps(record), encoding='utf-8')
 
-    def _retained(self, task_id, family):
-        return high_debug._screen_source_for(self._record_path(task_id, family),
-                                             self._record(task_id, family)['refusal_id'])
+    def _state_files(self):
+        """Every file llmtool keeps beside the Task store."""
+        return {path for path in self.store.root.parent.rglob('*')
+                if path.is_file() and self.originals not in path.parents}
+
+    def _assert_no_refused_text_copy(self):
+        self.assertFalse((self.store.root.parent / 'high-debug-screen-source').exists())
+        for path in self._state_files():
+            self.assertNotIn(_keyword_value().encode('utf-8'), path.read_bytes())
 
     def _history(self, task_id, family):
         return high_debug._screen_history_for(self._record_path(task_id, family))
@@ -429,13 +459,15 @@ class ScreenBatchRecoveryTests(unittest.TestCase):
 
     def _pending(self, task_id, family, *, d6=None):
         return high_debug.screen_recovery_pending(
-            task_id, family, self.executor if d6 is None else d6, root=self.store.root)
+            task_id, family, self.executor if d6 is None else d6, root=self.store.root,
+            source=self._source_argument(task_id, family))
 
     def _confirm(self, task_id, family, batch, hits, *, d6=None,
                  classification='SYNTHETIC_TEST_DATA', ref=None):
         return high_debug.confirm_screen_batch(
             task_id, family, self.executor if d6 is None else d6, batch, hits,
-            classification, self.ref if ref is None else ref, root=self.store.root)
+            classification, self.ref if ref is None else ref, root=self.store.root,
+            source=self._source_argument(task_id, family))
 
     @staticmethod
     def _parse(pending):
@@ -508,11 +540,8 @@ class ScreenBatchRecoveryTests(unittest.TestCase):
                                      hashlib.sha256(text.encode('utf-8')).hexdigest())
                     self.assertEqual(record['d6'], self.executor)
                     self.assertIsNone(record['disposition'])
-                    # Only an overflowing refusal keeps its source, privately.
-                    retained = self._retained(task_id, family)
-                    self.assertEqual(retained.exists(), len(expected) > limit)
-                    if retained.exists():
-                        self.assertEqual(retained.stat().st_mode & 0o777, 0o600)
+                    # No refusal keeps its source, however many hits it has.
+                    self._assert_no_refused_text_copy()
                     self.assertEqual(self._history_names(task_id, family),
                                      [record['refusal_id'] + '-refusal.json'])
                     refusal = json.loads((self._history(task_id, family) / (
@@ -579,11 +608,8 @@ class ScreenBatchRecoveryTests(unittest.TestCase):
             with self.subTest(source=source):
                 task_id, family, _text = self._refuse(source, 100)
                 prefix = self._record(task_id, family)['refusal_id']
-                retained = self._retained(task_id, family)
                 for _batch in range(4):
                     self._confirm_next(task_id, family)
-                # The retained source is removed once the block clears.
-                self.assertFalse(retained.exists())
                 self.assertEqual(self._history_names(task_id, family),
                                  [f'{prefix}-b{number:06d}.json' for number in range(1, 5)] +
                                  [prefix + '-refusal.json'])
@@ -679,17 +705,17 @@ class ScreenBatchRecoveryTests(unittest.TestCase):
                                    dict(self._record(task_id, family), **changes))
             return tamper
 
-        def change_source(_source, task_id, family):
-            path = self._retained(task_id, family)
+        def change_source(_source, task_id, _family):
+            path = self._original(task_id)
             path.write_bytes(path.read_bytes() + b'\n')
 
-        def remove_source(_source, task_id, family):
-            self._retained(task_id, family).unlink()
+        def remove_source(_source, task_id, _family):
+            self._original(task_id).unlink()
 
         def other_source_with_its_digest(source, task_id, family):
             # Both digests agree with the new source, but it holds other hits.
             raw = _source_text(source, 34).encode('utf-8')
-            self._retained(task_id, family).write_bytes(raw)
+            self._original(task_id).write_bytes(raw)
             edit_record(source_sha256=hashlib.sha256(raw).hexdigest())(
                 source, task_id, family)
 
@@ -723,7 +749,7 @@ class ScreenBatchRecoveryTests(unittest.TestCase):
              'HIGH_DEBUG_SCREEN_SOURCE_MISMATCH'),
             ('no source digest', edit_record(source_sha256=None),
              'HIGH_DEBUG_SCREEN_SOURCE_MISSING'),
-            ('refusal id', edit_record(refusal_id='0' * 16), 'HIGH_DEBUG_SCREEN_SOURCE_MISSING'),
+            ('refusal id', edit_record(refusal_id='0' * 16), 'HIGH_DEBUG_SCREEN_HISTORY_INVALID'),
             ('hidden overflow', edit_record(omitted=0, total=32),
              'HIGH_DEBUG_SCREEN_RECORD_INVALID'),
             ('total', edit_record(total=34), 'HIGH_DEBUG_SCREEN_RECORD_INVALID'),
@@ -742,15 +768,67 @@ class ScreenBatchRecoveryTests(unittest.TestCase):
                     self._assert_refused(code, self._confirm, task_id, family, 1, first)
                     self._assert_blocked(source, task_id, family)
 
-    def test_source_too_large_to_retain_refuses_as_missing(self):
+    def test_source_too_large_to_reread_refuses(self):
         for source in _SOURCES:
             with self.subTest(source=source):
+                task_id, family, _text = self._refuse(source, 33)
                 with patch.object(high_debug, '_SCREEN_SOURCE_LIMIT', 16):
-                    task_id, family, _text = self._refuse(source, 33)
-                self.assertFalse(self._retained(task_id, family).exists())
-                self._assert_refused('HIGH_DEBUG_SCREEN_SOURCE_MISSING',
-                                     self._pending, task_id, family)
+                    self._assert_refused('HIGH_DEBUG_SCREEN_SOURCE_MISMATCH',
+                                         self._pending, task_id, family)
                 self._assert_blocked(source, task_id, family)
+
+    def test_recovery_creates_no_copy_of_the_refused_text(self):
+        for source in _SOURCES:
+            with self.subTest(source=source):
+                self._fresh_store()
+                task_id, family, text = self._refuse(source, 100)
+                self._assert_no_refused_text_copy()
+                before = self._state_files()
+                prefix = self._record(task_id, family)['refusal_id']
+                for _batch in range(4):
+                    self._confirm_next(task_id, family)
+                    self._assert_no_refused_text_copy()
+                # The batch events are the only new files, and they are text-free.
+                self.assertEqual(self._state_files() - before, {
+                    self._history(task_id, family) / f'{prefix}-b{number:06d}.json'
+                    for number in range(1, 5)})
+                self.assertEqual(self._original(task_id).read_text(encoding='utf-8'), text)
+                self.assertIsNone(self._gate(source, task_id, family))
+
+    def test_missing_original_source_refuses_recovery(self):
+        for source in _SOURCES:
+            with self.subTest(source=source):
+                task_id, family, _text = self._refuse(source, 65)
+                second = self._expected_hits(source, 65)[32:64]
+                self._confirm_next(task_id, family)
+                names = self._history_names(task_id, family)
+                self._original(task_id).unlink()
+                self._assert_refused(_SOURCE_MISSING, self._pending, task_id, family)
+                self._assert_refused(_SOURCE_MISSING, self._confirm, task_id, family, 2, second)
+                self.assertEqual(self._history_names(task_id, family), names)
+                self.assertIsNone(self._record(task_id, family)['disposition'])
+                self._assert_blocked(source, task_id, family)
+
+    def test_evidence_and_report_recovery_must_name_the_source(self):
+        for source in ('EVIDENCE', 'REPORT'):
+            with self.subTest(source=source):
+                task_id, family, _text = self._refuse(source, 33)
+                self._assert_refused(_SOURCE_MISSING, high_debug.screen_recovery_pending,
+                                     task_id, family, self.executor, root=self.store.root)
+                self._assert_blocked(source, task_id, family)
+
+    def test_developer_output_is_reread_from_its_d6_only(self):
+        task_id, family, _text = self._refuse('DEVELOPER_OUTPUT', 33)
+        self.assertEqual(self._pending(task_id, family)['state'], 'PENDING')
+        submission_cli.task_completion._worktree_diff.assert_called_with(
+            str(self._original(task_id)), _BASE_SHA)
+        self._assert_refused(_RECOVERY_INVALID, high_debug.screen_recovery_pending,
+                             task_id, family, self.executor, root=self.store.root,
+                             source=str(self._original(task_id)))
+        # A D6 with no diff (a text route never wrote one) has no source.
+        self._original(task_id).write_bytes(b'')
+        self._assert_refused(_SOURCE_MISSING, self._pending, task_id, family)
+        self._assert_blocked('DEVELOPER_OUTPUT', task_id, family)
 
     def test_legacy_record_without_digests_stays_blocked(self):
         limit = high_debug._SCREEN_HIT_LIMIT

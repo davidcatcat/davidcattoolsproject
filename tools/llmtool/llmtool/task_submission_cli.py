@@ -1851,7 +1851,8 @@ def _record_developer_screen_refusal(store, task_id, value):
     If it cannot be written (or the store names no root), the delegate gate
     still refuses from the Task record and records the refusal as unlocated.
     The record keeps a digest of the screened output and the refused Task's
-    D6, so overflow batch recovery can prove it rescreens the same output.
+    D6, never the output, so overflow batch recovery can prove that what it
+    rereads from that D6 is the refused output.
     """
     from . import high_debug
     root = _developer_screen_root(store)
@@ -1871,6 +1872,26 @@ def _record_developer_screen_refusal(store, task_id, value):
             screened=screened, d6=d6)
     except Exception:
         pass
+
+
+def _developer_screen_source(task_id, d6, root):
+    """Rebuild refused Developer output in memory from its D6, or return None.
+
+    This is the same Task-base diff the D6 routes screen. The caller proves it
+    against the record's digest, so a D6 that moved on refuses. Output that
+    never was a D6 diff (a text route's reply) has no source here: its digest
+    cannot match, and an unchanged D6 gives no diff at all.
+    """
+    try:
+        task = (TaskStore() if root is None else TaskStore(root)).get(task_id)
+        registration = task_completion.read_d6_registration(
+            d6, task['completion']['evidence']['common_dir'],
+            allowed_states=task_completion._D6_EVIDENCE_STATES)
+        _changed_paths, raw = task_completion._worktree_diff(
+            registration.root, task['developer']['source_sha'])
+    except Exception:
+        return None
+    return raw or None
 
 
 def _check_developer_screen_disposition(store, task_id, developer):
