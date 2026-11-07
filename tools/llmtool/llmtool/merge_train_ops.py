@@ -397,6 +397,9 @@ def _merge_locked(train_id, store, github_get, gh_runner, root, train_root):
         pass
     # The merge commit comes only from a fresh exact-head read, so a reported
     # success and an ambiguous failure resolve the same way.
+    # MERGED needs the verified merge_commit_sha from that fresh read. An exit-0
+    # merge the read does not yet confirm stays UNKNOWN; a later call settles it
+    # through _resolve_unknown from a new read, without a second merge command.
     merge_sha = _merged_at(_read_pr(github_get, train_pr), train_head)
     if merge_sha is None:
         # If both writes fail the record stays MERGE_CLAIMED; the next call

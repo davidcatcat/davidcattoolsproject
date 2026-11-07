@@ -408,6 +408,41 @@ class MergeTrainOpsTest(unittest.TestCase):
         self.assertEqual(len(self.gh.named('merge')), 1)
         self.assertEqual(len(self.gh.named('comment')), 1)
 
+    def test_exit_zero_merge_unconfirmed_then_settled_without_second_merge(self):
+        self._create()
+        # The merge command exits 0, but the next PR read still shows the PR open.
+        self.gh.merge_returncode = 0
+        self.gh.merge_effect = False
+        result = self._merge()
+        self.assertEqual(result['step'], 'MERGE_REFUSED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_MERGE_OUTCOME_UNKNOWN])
+        record = self._record()
+        self.assertEqual(record['state'], 'UNKNOWN')
+        self.assertEqual(record['merge_attempt']['state'], 'UNKNOWN')
+        self.assertIsNone(record['merge_sha'])
+        self.assertEqual(self.gh.named('comment'), [])
+        self.assertEqual(len(self.gh.named('merge')), 1)
+        claimed_at = record['merge_attempt']['claimed_at']
+        # A later fresh read shows the PR merged at train_head with a merge commit.
+        settled_sha = 'f' * 40
+        self.github.pulls[TRAIN_PR].update(state='closed', merged=True, mergeable=None,
+                                           merge_commit_sha=settled_sha)
+        result = self._merge()
+        self.assertEqual(result['step'], 'MERGED', result)
+        self.assertEqual(result['codes'], [])
+        self.assertEqual(result['result']['merge_sha'], settled_sha)
+        record = self._record()
+        self.assertEqual(record['state'], 'MERGED')
+        self.assertEqual(record['merge_sha'], settled_sha)
+        self.assertEqual(record['merge_attempt']['state'], 'MERGED')
+        self.assertEqual(record['merge_attempt']['claimed_at'], claimed_at)
+        comments = self.gh.named('comment')
+        self.assertEqual(len(comments), 1)
+        self.assertIn(settled_sha, comments[0][-1])
+        # The merge command ran exactly once in total.
+        self.assertEqual(self.gh.named('merge'), [[
+            'pr', 'merge', str(TRAIN_PR), '--squash', '--match-head-commit', self.train_head]])
+
     def _fail_writes(self, state, count):
         """Patch the store so the first ``count`` writes to ``state`` fail; record each try."""
         real = merge_train_store.compare_and_update
