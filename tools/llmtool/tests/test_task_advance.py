@@ -2210,69 +2210,339 @@ class TaskAdvancePublishLookupTests(unittest.TestCase):
         self.assertEqual(len(self.gh_calls), 4)
         self.assertEqual(pause.call_args_list, [call(2)] * 3)
 
-    def _listing_gh(self, listings, *, close=0):
-        """Answer each pr list from listings; close is an exit code or an error."""
+    PR_URL = 'https://github.com/owner/repo/pull/41'
+    CREATED = (PR_URL + '\n').encode()
+    MOVED = [{'number': 41, 'headRefOid': 'b' * 40}]
+    CURRENT = [{'number': 41, 'headRefOid': HEAD}]
+    READS = (['pr', 'list'], ['pr', 'view'], ['repo', 'view'], ['api', 'user'])
+
+    def _pr_view(self, **changes):
+        return dict({'number': 41, 'url': self.PR_URL, 'headRefName': 'feature/task',
+                     'headRefOid': 'b' * 40, 'isCrossRepository': False, 'state': 'OPEN',
+                     'author': {'login': 'ai-bot'}, 'title': 'Task summary',
+                     'body': 'Task body'}, **changes)
+
+    def _listing_gh(self, listings, *, close=0, create=b'', view=None,
+                    repo=None, user=None):
+        """Answer gh from fixed replies: an exit code, raw bytes, an error or JSON."""
         replies = list(listings)
+        view = self._pr_view() if view is None else view
+        repo = {'nameWithOwner': 'owner/repo'} if repo is None else repo
+        user = {'login': 'ai-bot'} if user is None else user
+
+        def answer(args, value):
+            if isinstance(value, Exception):
+                raise value
+            if type(value) is int:
+                return subprocess.CompletedProcess(['gh', *args], value, b'', b'')
+            output = value if type(value) is bytes else json.dumps(value).encode()
+            return subprocess.CompletedProcess(['gh', *args], 0, output, b'')
 
         def gh(_root, args):
             self.gh_calls.append(list(args))
             if args[:2] == ['pr', 'list']:
-                return subprocess.CompletedProcess(['gh', *args], 0,
-                    json.dumps(replies.pop(0)).encode(), b'')
-            if args[:2] == ['pr', 'create']:
-                return subprocess.CompletedProcess(['gh', *args], 0, b'', b'')
-            if args[:2] == ['pr', 'close']:
-                if isinstance(close, Exception):
-                    raise close
-                return subprocess.CompletedProcess(['gh', *args], close, b'', b'')
+                return answer(args, replies.pop(0))
+            for prefix, value in ((['pr', 'create'], create), (['pr', 'close'], close),
+                                  (['pr', 'view'], view), (['repo', 'view'], repo),
+                                  (['api', 'user'], user)):
+                if args[:2] == prefix:
+                    return answer(args, value)
             raise AssertionError('unexpected gh call')
         return gh
 
-    def _publish_listings(self, listings, *, close=0):
+    def _publish_listings(self, listings, **replies):
         with patch.object(task_advance, '_publish_pause'):
             return task_advance._publish_pr(
-                self._listing_gh(listings, close=close), '/d6', 'feature/task',
+                self._listing_gh(listings, **replies), '/d6', 'feature/task',
                 self.record['task_id'], HEAD, 'Task summary', 'Task body')
+
+    def _refused(self, listings, **replies):
+        self.gh_calls.clear()
+        with self.assertRaises(task_advance._PublishRefusal) as caught:
+            self._publish_listings(listings, **replies)
+        return caught.exception
+
+    def _advance_publish(self, listings, **replies):
+        """Run the real PUBLISH refusal handler over the real _publish_pr."""
+        gh = self._listing_gh(listings, **replies)
+
+        def publish(*_args, **_kwargs):
+            number = task_advance._publish_pr(gh, '/d6', 'feature/task',
+                self.record['task_id'], HEAD, 'Task summary', 'Task body')
+            return {'pr': number, 'head': HEAD}
+
+        def lookup_failed(_root, args):
+            return subprocess.CompletedProcess(['gh', *args], 1, b'', b'')
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=self.snapshot), \
+             patch.object(task_advance, '_publish_pause'), \
+             patch.object(task_advance, '_publish_task', side_effect=publish):
+            return self._advance(gh=lookup_failed)
 
     def _closes(self):
         return [args for args in self.gh_calls if args[:2] == ['pr', 'close']]
 
+    def _views(self):
+        return [args for args in self.gh_calls if args[:2] == ['pr', 'view']]
+
     def test_created_pr_at_a_moved_head_is_closed_and_refused(self):
-        moved = [{'number': 41, 'headRefOid': 'b' * 40}]
-        with self.assertRaises(task_advance._PublishRefusal) as caught:
-            self._publish_listings([[]] + [moved] * 4)
-        self.assertEqual(caught.exception.code, 'PUBLISH_HEAD_MOVED')
+        refusal = self._refused([[]] + [self.MOVED] * 4, create=self.CREATED)
+
+        self.assertEqual(refusal.code, 'PUBLISH_HEAD_MOVED')
+        self.assertEqual(len(self._views()), 1)
+        self.assertEqual(self._views()[0][2:5], ['41', '--repo', 'owner/repo'])
         closes = self._closes()
         self.assertEqual(len(closes), 1)
-        self.assertEqual(closes[0][2], '41')
+        self.assertEqual(closes[0][:6],
+                         ['pr', 'close', '41', '--repo', 'owner/repo', '--comment'])
+        self.assertEqual(len(closes[0]), 7)
+        self.assertEqual(self.gh_calls[-1], closes[0])
+        marker, record = closes[0][6].split('\n', 1)
+        self.assertEqual(marker, task_advance._PUBLISH_ACTIVITY)
+        self.assertTrue(marker.startswith('<!-- activity: '))
+        self.assertEqual(json.loads(record), refusal.operation)
+        self.assertEqual(refusal.operation['recheck'], 'PASS')
+        self.assertIs(refusal.operation['close_attempted'], True)
+        self.assertEqual(refusal.operation['outcome'], 'PUBLISH_HEAD_MOVED')
+
+    def test_the_only_mutations_are_the_create_and_the_close(self):
+        self._refused([[]] + [self.MOVED] * 4, create=self.CREATED)
+
+        mutations = [args for args in self.gh_calls if args[:2] not in self.READS]
+        self.assertEqual([args[:2] for args in mutations],
+                         [['pr', 'create'], ['pr', 'close']])
+        self.assertFalse(any('--delete-branch' in args for args in self.gh_calls))
 
     def test_created_pr_that_will_not_close_is_refused_as_open(self):
-        moved = [{'number': 41, 'headRefOid': 'b' * 40}]
         for close in (1, RuntimeError('offline')):
             with self.subTest(close=close):
-                self.gh_calls.clear()
-                with self.assertRaises(task_advance._PublishRefusal) as caught:
-                    self._publish_listings([[]] + [moved] * 4, close=close)
-                self.assertEqual(caught.exception.code, 'PUBLISH_MOVED_PR_OPEN')
+                refusal = self._refused([[]] + [self.MOVED] * 4,
+                                        create=self.CREATED, close=close)
+                self.assertEqual(refusal.code, 'PUBLISH_MOVED_PR_OPEN')
                 self.assertEqual(len(self._closes()), 1)
+                self.assertEqual(refusal.operation['pr'], 41)
+                self.assertEqual(refusal.operation['recheck'], 'PASS')
+                self.assertIs(refusal.operation['close_attempted'], True)
+                self.assertEqual(refusal.operation['outcome'], 'PUBLISH_MOVED_PR_OPEN')
 
     def test_created_pr_matching_at_any_reread_is_returned(self):
-        moved = [{'number': 41, 'headRefOid': 'b' * 40}]
-        current = [{'number': 41, 'headRefOid': HEAD}]
-        for stale_reads in range(4):
-            with self.subTest(stale_reads=stale_reads):
-                self.gh_calls.clear()
-                number = self._publish_listings([[]] + [moved] * stale_reads + [current])
-                self.assertEqual(number, 41)
-                self.assertEqual(self._closes(), [])
+        for create in (b'', self.CREATED):
+            for stale_reads in range(4):
+                with self.subTest(create=create, stale_reads=stale_reads):
+                    self.gh_calls.clear()
+                    number = self._publish_listings(
+                        [[]] + [self.MOVED] * stale_reads + [self.CURRENT], create=create)
+                    self.assertEqual(number, 41)
+                    self.assertEqual(self._closes(), [])
+                    self.assertEqual(self._views(), [])
 
     def test_pr_already_open_is_never_closed_on_a_head_mismatch(self):
-        moved = [{'number': 41, 'headRefOid': 'b' * 40}]
-        with self.assertRaises(task_advance._PublishRefusal) as caught:
-            self._publish_listings([moved] * 4)
-        self.assertEqual(caught.exception.code, 'PUBLISH_GITHUB_FAILED')
+        refusal = self._refused([self.MOVED] * 4)
+
+        self.assertEqual(refusal.code, 'PUBLISH_GITHUB_FAILED')
+        self.assertIsNone(refusal.operation)
+        self.assertEqual({tuple(args[:2]) for args in self.gh_calls}, {('pr', 'list')})
+
+    def test_creation_url_is_the_last_non_empty_line(self):
+        refusal = self._refused([[]] + [self.MOVED] * 4,
+                                create=b'Creating pull request\n' + self.CREATED + b'\n\n')
+        self.assertEqual(refusal.code, 'PUBLISH_HEAD_MOVED')
+        self.assertEqual(refusal.operation['creation_url'], self.PR_URL)
+        self.assertEqual(refusal.operation['repository'], 'owner/repo')
+
+    def test_create_with_no_url_never_closes(self):
+        for create in (b'', b'created\n', b'\xff', self.CREATED + b'a later line\n',
+                       b'https://example.com/owner/repo/pull/41\n',
+                       b'https://github.com/owner/repo/pull/0\n',
+                       b'https://github.com/owner/repo/issues/41\n',
+                       b'see https://github.com/owner/repo/pull/41\n'):
+            with self.subTest(create=create):
+                refusal = self._refused([[]] + [self.MOVED] * 4, create=create)
+                self.assertEqual(refusal.code, 'PUBLISH_GITHUB_FAILED')
+                self.assertEqual(self._closes(), [])
+                self.assertEqual(self._views(), [])
+                self.assertIsNone(refusal.operation['pr'])
+                self.assertIsNone(refusal.operation['creation_url'])
+                self.assertEqual(refusal.operation['recheck'], 'NOT_RUN')
+                self.assertEqual(refusal.operation['observed_head'], 'b' * 40)
+                self.assertEqual(self._publish_listings([[], self.CURRENT], create=create), 41)
+
+    def test_rereads_follow_the_created_number_not_the_first_listed_pr(self):
+        other = {'number': 99, 'headRefOid': HEAD}
+        moved, current = self.MOVED[0], self.CURRENT[0]
+
+        self.assertEqual(self._publish_listings([[], [other, current]], create=self.CREATED), 41)
+
+        refusal = self._refused([[]] + [[other, moved]] * 4, create=self.CREATED)
+        self.assertEqual(refusal.code, 'PUBLISH_HEAD_MOVED')
+        self.assertEqual([args[2] for args in self._closes()], ['41'])
+
+    def test_created_pr_listed_late_is_still_followed(self):
+        other = [{'number': 99, 'headRefOid': HEAD}]
+        self.assertEqual(self._publish_listings([[], [], other, self.CURRENT],
+                                                create=self.CREATED), 41)
+
+    def test_another_calls_pr_in_the_listing_is_neither_returned_nor_closed(self):
+        other = [{'number': 99, 'headRefOid': 'b' * 40}]
+        for stale in (other, [{'number': 99, 'headRefOid': HEAD}]):
+            with self.subTest(stale=stale):
+                refusal = self._refused([[]] + [stale] * 4, create=self.CREATED)
+                self.assertEqual(refusal.code, 'PUBLISH_GITHUB_FAILED')
+                self.assertEqual(self._closes(), [])
+                self.assertEqual(refusal.operation['pr'], 41)
+                self.assertEqual(refusal.operation['recheck'], 'NOT_RUN')
+
+    def test_failed_recheck_sends_no_close(self):
+        other_url = 'https://github.com/owner/repo/pull/99'
+        cases = (
+            ('another Task', {'title': 'Other Task', 'body': 'Other body'}, 'title'),
+            ('edited body', {'body': 'Other body'}, 'body'),
+            ('another call', {'number': 99, 'url': other_url}, 'number'),
+            ('number as text', {'number': '41'}, 'number'),
+            ('another url number', {'url': other_url}, 'url'),
+            ('another repository', {'url': 'https://github.com/other/repo/pull/41'}, 'url'),
+            ('another branch', {'headRefName': 'feature/other'}, 'headRefName'),
+            ('cross repository', {'isCrossRepository': True}, 'isCrossRepository'),
+            ('no cross repository flag', {'isCrossRepository': None}, 'isCrossRepository'),
+            ('closed', {'state': 'CLOSED'}, 'state'),
+            ('merged', {'state': 'MERGED'}, 'state'),
+            ('another user', {'author': {'login': 'someone-else'}}, 'author'),
+            ('no author', {'author': None}, 'author'),
+            ('no head', {'headRefOid': None}, 'headRefOid'),
+        )
+        for name, changes, field in cases:
+            with self.subTest(name):
+                refusal = self._refused([[]] + [self.MOVED] * 4, create=self.CREATED,
+                                        view=self._pr_view(**changes))
+                self.assertEqual(refusal.code, 'PUBLISH_MOVED_PR_OPEN')
+                self.assertEqual(self._closes(), [])
+                self.assertEqual(refusal.operation['recheck'], f'FAIL:{field}')
+                self.assertIs(refusal.operation['close_attempted'], False)
+                self.assertEqual(refusal.operation['pr'], 41)
+
+    def test_repository_must_equal_gh_repo_view(self):
+        refusal = self._refused([[]] + [self.MOVED] * 4, create=self.CREATED,
+                                repo={'nameWithOwner': 'other/repo'})
+        self.assertEqual(refusal.code, 'PUBLISH_MOVED_PR_OPEN')
+        self.assertEqual(refusal.operation['recheck'], 'FAIL:repository')
         self.assertEqual(self._closes(), [])
-        self.assertFalse(any(args[:2] == ['pr', 'create'] for args in self.gh_calls))
+
+    def test_view_at_the_cleared_head_is_returned_as_a_match(self):
+        number = self._publish_listings([[]] + [self.MOVED] * 4, create=self.CREATED,
+                                        view=self._pr_view(headRefOid=HEAD))
+        self.assertEqual(number, 41)
+        self.assertEqual(self._closes(), [])
+
+    def test_view_at_the_cleared_head_still_needs_the_recheck(self):
+        refusal = self._refused([[]] + [self.MOVED] * 4, create=self.CREATED,
+            view=self._pr_view(headRefOid=HEAD, author={'login': 'someone-else'}))
+        self.assertEqual(refusal.code, 'PUBLISH_MOVED_PR_OPEN')
+        self.assertEqual(self._closes(), [])
+
+    def test_failed_read_after_creation_closes_nothing(self):
+        moved_reads = [[]] + [self.MOVED] * 4
+        cases = (
+            ('failed list', [[], 1], {}, 'NOT_RUN'),
+            ('failed later list', [[], self.MOVED, RuntimeError('offline')], {}, 'NOT_RUN'),
+            ('unreadable list', [[], b'not json'], {}, 'NOT_RUN'),
+            ('list of the wrong type', [[], {'number': 41}], {}, 'NOT_RUN'),
+            ('malformed entry', [[], [{'number': '41', 'headRefOid': HEAD}]], {}, 'NOT_RUN'),
+            ('failed view', moved_reads, {'view': 1}, 'FAIL:view'),
+            ('view error', moved_reads, {'view': RuntimeError('offline')}, 'FAIL:view'),
+            ('unreadable view', moved_reads, {'view': b'not json'}, 'FAIL:view'),
+            ('view of the wrong type', moved_reads, {'view': []}, 'FAIL:view'),
+            ('failed repo view', moved_reads, {'repo': 1}, 'FAIL:repository'),
+            ('malformed repo view', moved_reads, {'repo': {}}, 'FAIL:repository'),
+            ('failed user', moved_reads, {'user': 1}, 'FAIL:author'),
+            ('malformed user', moved_reads, {'user': {}}, 'FAIL:author'),
+        )
+        for name, listings, replies, recheck in cases:
+            with self.subTest(name):
+                refusal = self._refused(listings, create=self.CREATED, **replies)
+                self.assertEqual(refusal.code, 'PUBLISH_GITHUB_FAILED')
+                self.assertEqual(self._closes(), [])
+                self.assertEqual(refusal.operation['pr'], 41)
+                self.assertEqual(refusal.operation['recheck'], recheck)
+                self.assertIs(refusal.operation['close_attempted'], False)
+
+    def test_operation_record_has_exactly_the_fixed_fields(self):
+        refusal = self._refused([[]] + [self.MOVED] * 4,
+            create=b'remote: private text\n' + self.CREATED,
+            view=self._pr_view(state='CLOSED'))
+
+        operation = refusal.operation
+        next_action = operation.pop('next_action')
+        self.assertEqual(operation, {
+            'task_id': self.record['task_id'], 'repository': 'owner/repo',
+            'branch': 'feature/task', 'pr': 41, 'creation_url': self.PR_URL,
+            'expected_head': HEAD, 'observed_head': 'b' * 40, 'recheck': 'FAIL:state',
+            'close_attempted': False, 'outcome': 'PUBLISH_MOVED_PR_OPEN'})
+        self.assertIs(type(next_action), str)
+        self.assertNotIn('private text', json.dumps(refusal.operation))
+
+    def test_advance_reports_a_failed_recheck_as_an_open_pr(self):
+        result = self._advance_publish([[]] + [self.MOVED] * 4, create=self.CREATED,
+                                       view=self._pr_view(title='Other Task'))
+
+        self.assertEqual(result['codes'], ['PUBLISH_MOVED_PR_OPEN'])
+        self.assertNotIn('pr', result)
+        self.assertEqual(result['open_pr']['number'], 41)
+        for text in ('PUBLISH_MOVED_PR_OPEN', '41', 'still open'):
+            self.assertIn(text, result['open_pr']['error'])
+        self.assertEqual(result['publish_operation']['recheck'], 'FAIL:title')
+        self.assertEqual(self._closes(), [])
+
+    def test_advance_reports_a_failed_close_as_an_open_pr(self):
+        result = self._advance_publish([[]] + [self.MOVED] * 4, create=self.CREATED, close=1)
+
+        self.assertEqual(result['codes'], ['PUBLISH_MOVED_PR_OPEN'])
+        self.assertNotIn('pr', result)
+        self.assertEqual(result['open_pr']['number'], 41)
+        self.assertIs(result['publish_operation']['close_attempted'], True)
+
+    def test_advance_reports_a_closed_pr_with_no_pr(self):
+        result = self._advance_publish([[]] + [self.MOVED] * 4, create=self.CREATED)
+
+        self.assertEqual(result['codes'], ['PUBLISH_HEAD_MOVED'])
+        self.assertNotIn('pr', result)
+        self.assertNotIn('open_pr', result)
+        self.assertEqual(result['publish_operation']['outcome'], 'PUBLISH_HEAD_MOVED')
+
+    def test_advance_reports_a_read_failure_with_the_created_number(self):
+        result = self._advance_publish([[], 1], create=self.CREATED)
+
+        self.assertEqual(result['codes'], ['PUBLISH_GITHUB_FAILED'])
+        self.assertNotIn('pr', result)
+        self.assertEqual(result['publish_operation']['pr'], 41)
+
+    def test_refusals_before_a_create_keep_the_exact_result(self):
+        expected = {'task_id': self.record['task_id'], 'codes': ['PUBLISH_GITHUB_FAILED']}
+        for name, listings, replies in (
+                ('failed first list', [1], {}),
+                ('failed create', [[]], {'create': 1}),
+                ('create error', [[]], {'create': RuntimeError('offline')}),
+                ('moved PR already open', [self.MOVED] * 4, {})):
+            with self.subTest(name):
+                self.assertEqual(self._advance_publish(listings, **replies), expected)
+
+    def test_later_publish_treats_the_left_open_pr_as_existing(self):
+        self._refused([[]] + [self.MOVED] * 4, create=self.CREATED,
+                      view=self._pr_view(author={'login': 'someone-else'}))
+
+        self.gh_calls.clear()
+        self.assertEqual(self._publish_listings([self.CURRENT]), 41)
+        self.assertEqual(self.gh_calls, [['pr', 'list', '--head', 'feature/task',
+                                          '--state', 'open', '--json', 'number,headRefOid']])
+
+    def test_later_publish_may_open_a_new_pr_after_a_close(self):
+        self._refused([[]] + [self.MOVED] * 4, create=self.CREATED)
+
+        self.gh_calls.clear()
+        replacement = [{'number': 42, 'headRefOid': HEAD}]
+        number = self._publish_listings(
+            [[], replacement], create=b'https://github.com/owner/repo/pull/42\n')
+        self.assertEqual(number, 42)
+        self.assertEqual(self._closes(), [])
 
     def _fake_publish(self, *, main_state='contained', fetch_failed=False):
         initial_head, committed_head, merged_head = 'a' * 40, 'b' * 40, 'c' * 40

@@ -28,8 +28,9 @@ _REMOTE_TEST_RETRY_CODES = frozenset((
 
 
 class _PublishRefusal(Exception):
-    def __init__(self, code):
+    def __init__(self, code, operation=None):
         self.code = code
+        self.operation = operation
 
 
 def _publish_run_git(root, args):
@@ -150,54 +151,185 @@ def _require_published_head(git_runner, root, branch, head):
         raise _PublishRefusal('PUBLISH_HEAD_MOVED')
 
 
-def _publish_pr(gh_runner, root, branch, task_id, expected_head, title, body):
-    output = _publish_command(gh_runner, root,
-        ['pr', 'list', '--head', branch, '--state', 'open',
-         '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
+_CREATED_PR_URL = re.compile(
+    r'https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]{0,18})')
+_CREATED_PR_FIELDS = ('number,url,headRefName,headRefOid,isCrossRepository,state,'
+                      'author,title,body')
+_PUBLISH_ACTIVITY = '<!-- activity: type=task actor=PM target=PR status=TRACKING -->'
+
+
+def _publish_json(gh_runner, root, args, kind):
+    """Read one gh JSON reply of the given type; any doubt refuses."""
+    output = _publish_command(gh_runner, root, args, code='PUBLISH_GITHUB_FAILED')
     try:
-        pulls = json.loads(output)
+        value = json.loads(output)
     except (ValueError, TypeError):
         raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
-    if type(pulls) is not list:
+    if type(value) is not kind:
         raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
-    created = not pulls
-    if created:
-        _publish_command(gh_runner, root,
+    return value
+
+
+def _open_prs(gh_runner, root, branch):
+    return _publish_json(gh_runner, root,
+        ['pr', 'list', '--head', branch, '--state', 'open',
+         '--json', 'number,headRefOid'], list)
+
+
+def _create_pr(gh_runner, root, branch, title, body):
+    """Open the PR and return its creation evidence, or None without a parsable URL."""
+    try:
+        output = _publish_command(gh_runner, root,
             ['pr', 'create', '--head', branch,
              '--base', 'main', '--title', title, '--body', body],
             code='PUBLISH_GITHUB_FAILED')
-        output = _publish_command(gh_runner, root,
-            ['pr', 'list', '--head', branch, '--state', 'open',
-             '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
-        try:
-            pulls = json.loads(output)
-        except (ValueError, TypeError):
-            raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
-    for attempt in range(4):
-        if type(pulls) is not list or not pulls:
-            raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
-        pull = pulls[0]
-        number = pull.get('number') if type(pull) is dict else None
+    except _PublishRefusal as exc:
+        if exc.code == 'PUBLISH_GITHUB_FAILED':
+            raise
+        output = ''  # The create succeeded; unreadable output only means no evidence.
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    match = _CREATED_PR_URL.fullmatch(lines[-1]) if lines else None
+    if match is None:
+        return None
+    return {'url': match.group(0), 'repository': match.group(1),
+            'number': int(match.group(2))}
+
+
+def _listed_pr(pulls, number):
+    """Return (number, head) of the PR to follow, or None if number is not listed.
+
+    A created number is looked up in the whole listing and no other PR stands
+    in for it. With no number the first entry is read.
+    """
+    if number is None and not pulls:
+        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+    found = None
+    for pull in (pulls[:1] if number is None else pulls):
+        listed = pull.get('number') if type(pull) is dict else None
         head = pull.get('headRefOid') if type(pull) is dict else None
-        if type(number) is not int or number < 1 or type(head) is not str:
+        if type(listed) is not int or listed < 1 or type(head) is not str:
             raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
-        if head == expected_head:
-            return number
+        if number is None or listed == number:
+            found = (listed, head)
+    return found
+
+
+def _await_pr_head(gh_runner, root, branch, pulls, expected_head, number, seen):
+    """Return the followed PR's number at expected_head, or None after four reads.
+
+    seen['observed_head'] keeps the last head read. A created PR that is still
+    unlisted at the last read refuses, because no head was seen to differ.
+    """
+    for attempt in range(4):
+        listed = _listed_pr(pulls, number)
+        if listed is not None:
+            seen['observed_head'] = listed[1]
+            if listed[1] == expected_head:
+                return listed[0]
         if attempt == 3:
-            if created:
-                # This call opened the PR, so it must not stay open at an uncleared head.
-                _publish_command(gh_runner, root, ['pr', 'close', str(number)],
-                                 code='PUBLISH_MOVED_PR_OPEN')
-                raise _PublishRefusal('PUBLISH_HEAD_MOVED')
-            raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+            if listed is None:
+                raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+            return None
         _publish_pause(2)
-        output = _publish_command(gh_runner, root,
-            ['pr', 'list', '--head', branch, '--state', 'open',
-             '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
-        try:
-            pulls = json.loads(output)
-        except (ValueError, TypeError):
-            raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
+        pulls = _open_prs(gh_runner, root, branch)
+
+
+def _recheck_created_pr(gh_runner, root, branch, creation, title, body, operation):
+    """Return the first field that does not prove this call's PR, or None.
+
+    operation['recheck'] names the read in progress, so a read that refuses
+    stays named in the record. On a pass the view's head becomes observed_head.
+    """
+    operation['recheck'] = 'FAIL:view'
+    view = _publish_json(gh_runner, root,
+        ['pr', 'view', str(creation['number']), '--repo', creation['repository'],
+         '--json', _CREATED_PR_FIELDS], dict)
+    number = view.get('number')
+    head = view.get('headRefOid')
+    for field, passed in (
+            ('number', type(number) is int and number == creation['number']),
+            ('url', view.get('url') == creation['url']),
+            ('headRefName', view.get('headRefName') == branch),
+            ('isCrossRepository', view.get('isCrossRepository') is False),
+            ('state', view.get('state') == 'OPEN'),
+            ('title', view.get('title') == title),
+            ('body', view.get('body') == body),
+            ('headRefOid', type(head) is str)):
+        if not passed:
+            return field
+    operation['recheck'] = 'FAIL:repository'
+    repository = _publish_json(gh_runner, root,
+        ['repo', 'view', '--json', 'nameWithOwner'], dict).get('nameWithOwner')
+    if type(repository) is not str or not repository:
+        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+    if repository != creation['repository']:
+        return 'repository'
+    operation['recheck'] = 'FAIL:author'
+    login = _publish_json(gh_runner, root, ['api', 'user'], dict).get('login')
+    if type(login) is not str or not login:
+        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+    author = view.get('author')
+    if type(author) is not dict or author.get('login') != login:
+        return 'author'
+    operation.update(recheck='PASS', observed_head=head)
+    return None
+
+
+def _settle_operation(operation, code):
+    next_action = ('Publish again: the branch stays pushed and a new PR may open.'
+                   if code == 'PUBLISH_HEAD_MOVED' else
+                   'Check the open PRs on this branch: a later publish treats one as existing.')
+    operation.update(outcome=code, next_action=next_action)
+    return operation
+
+
+def _close_created_pr(gh_runner, root, creation, operation):
+    """Close the proven PR by number; refuse with the code for what happened."""
+    operation['close_attempted'] = True
+    _settle_operation(operation, 'PUBLISH_HEAD_MOVED')
+    record = f'{_PUBLISH_ACTIVITY}\n{json.dumps(operation, sort_keys=True)}'
+    try:
+        closed = gh_runner(root, ['pr', 'close', str(creation['number']),
+                                  '--repo', creation['repository'], '--comment', record])
+    except Exception:
+        closed = None
+    raise _PublishRefusal('PUBLISH_HEAD_MOVED' if getattr(closed, 'returncode', 1) == 0
+                          else 'PUBLISH_MOVED_PR_OPEN')
+
+
+def _publish_pr(gh_runner, root, branch, task_id, expected_head, title, body):
+    pulls = _open_prs(gh_runner, root, branch)
+    if pulls:
+        # Open before this call, so a head mismatch refuses and nothing is closed.
+        number = _await_pr_head(gh_runner, root, branch, pulls, expected_head, None, {})
+        if number is None:
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+        return number
+    creation = _create_pr(gh_runner, root, branch, title, body)
+    operation = {
+        'task_id': task_id, 'repository': creation and creation['repository'],
+        'branch': branch, 'pr': creation and creation['number'],
+        'creation_url': creation and creation['url'], 'expected_head': expected_head,
+        'observed_head': None, 'recheck': 'NOT_RUN', 'close_attempted': False,
+        'outcome': None, 'next_action': None}
+    try:
+        number = _await_pr_head(gh_runner, root, branch, _open_prs(gh_runner, root, branch),
+                                expected_head, operation['pr'], operation)
+        if number is not None:
+            return number
+        if creation is None:
+            # Nothing proves this call created the listed PR, so it is left alone.
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+        failed = _recheck_created_pr(gh_runner, root, branch, creation, title, body, operation)
+        if failed is not None:
+            operation['recheck'] = f'FAIL:{failed}'
+            raise _PublishRefusal('PUBLISH_MOVED_PR_OPEN')
+        if operation['observed_head'] == expected_head:
+            return creation['number']
+        _close_created_pr(gh_runner, root, creation, operation)
+    except _PublishRefusal as exc:
+        exc.operation = _settle_operation(operation, exc.code)
+        raise
 
 
 def _merge_refusal(code):
@@ -1775,7 +1907,16 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             return {'task_id': task_id, 'codes': codes, 'pr': result['pr'],
                     'head': result['head']}
         except _PublishRefusal as exc:
-            return {'task_id': task_id, 'codes': [exc.code]}
+            refused = {'task_id': task_id, 'codes': [exc.code]}
+            if exc.operation is not None:
+                refused['publish_operation'] = exc.operation
+                if exc.code == 'PUBLISH_MOVED_PR_OPEN':
+                    open_number = exc.operation['pr']
+                    refused['open_pr'] = {
+                        'number': open_number,
+                        'error': f'{exc.code}: PR {open_number} is still open '
+                                 'at an uncleared head.'}
+            return refused
         except Exception:
             return {'task_id': task_id, 'codes': ['PUBLISH_FAILED']}
     elif step == 'DEVELOPER_ATTENTION':
