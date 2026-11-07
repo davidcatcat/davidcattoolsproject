@@ -1850,18 +1850,25 @@ def _record_developer_screen_refusal(store, task_id, value):
 
     If it cannot be written (or the store names no root), the delegate gate
     still refuses from the Task record and records the refusal as unlocated.
+    The record keeps a digest of the screened output and the refused Task's
+    D6, so overflow batch recovery can prove it rescreens the same output.
     """
     from . import high_debug
     root = _developer_screen_root(store)
     if root is None:
         return
     try:
-        byte_count = (len(value.encode('utf-8', 'replace'))
-                      if type(value) is str else 0)
+        screened = value.encode('utf-8', 'replace') if type(value) is str else None
+        try:
+            completion = store.get(task_id).get('completion')
+            d6 = completion.get('executor_task_id') if type(completion) is dict else None
+        except Exception:
+            d6 = None
         high_debug._write_screen_record(
             task_id, _DEVELOPER_SCREEN_FAMILY, 'DEVELOPER_OUTPUT_SENSITIVE',
-            _DEVELOPER_SCREEN_SOURCE, _developer_screen_hits(value), byte_count,
-            root=root)
+            _DEVELOPER_SCREEN_SOURCE, _developer_screen_hits(value),
+            0 if screened is None else len(screened), root=root,
+            screened=screened, d6=d6)
     except Exception:
         pass
 
