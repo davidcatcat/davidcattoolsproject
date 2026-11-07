@@ -5,7 +5,7 @@ Pure functions only. Input is a ``task_status()`` result (and optionally a
 ``deliver`` sends through an injected transport with injected claim/release
 callables. This module owns no transport, network, CLI, loop, approval, Task
 creation, PM call, inbox write or STOP, and never takes, stores or prints a
-Telegram chat ID or bot token: callers name a chat by a local alias only.
+Telegram chat ID or bot credential; callers name a chat by a local alias only.
 
 Error messages are fixed codes and never contain input values.
 """

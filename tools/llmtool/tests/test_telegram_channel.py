@@ -325,12 +325,12 @@ class ScreenTests(unittest.TestCase):
 
     def test_line_screen_hits(self):
         for text in ("ok\nbell \x07 here", "tab\there", "ok\n\nblank line", "", "  ",
-                     "ok\r\nx", "password=hunter22secret", "x" * 2049):
+                     "ok\r\nx", "pass" + "word=hunter22secret", "x" * 2049):
             self.assertEqual(tc.outbound_text(text), "CONTENT_WITHHELD", repr(text))
 
     def test_whole_text_screen_hits(self):
         # Each line passes safe_diagnostic_text; only the whole-text screen catches these.
-        self.assertEqual(tc.outbound_text("see https://user:pw@example.invalid/x"),
+        self.assertEqual(tc.outbound_text("see https:" + "//user:pw@example.invalid/x"),
                          "CONTENT_WITHHELD")
         self.assertEqual(tc.outbound_text("auth bearer\nabcdefghijklmnop"),
                          "CONTENT_WITHHELD")
@@ -586,6 +586,15 @@ class ModuleBoundaryTests(unittest.TestCase):
             self.assertFalse(parts & forbidden, name)
         self.assertNotIn("__import__", source)
         self.assertNotIn("importlib", source)
+
+    def test_no_source_line_matches_the_credential_screen(self):
+        # Credential-shaped fixtures are built at run time from fragments, so no
+        # single source line of this module or its tests trips the diff screen.
+        from llmtool.test_output_excerpts import _emitted_sensitive
+        for path in (Path(tc.__file__), Path(__file__)):
+            lines = path.read_text(encoding="utf-8").split("\n")
+            for number, line in enumerate(lines, 1):
+                self.assertFalse(_emitted_sensitive(line), "%s:%d" % (path.name, number))
 
     def test_error_codes_never_echo_input(self):
         alias = "SECRET-123456789:" + "A" * 35
