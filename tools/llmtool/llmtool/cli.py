@@ -558,6 +558,9 @@ def main(argv=None):
                 from .review_bundle import run_review_bundle
                 return run_review_bundle(args)
             if args.action == 'train':
+                if args.train_action in ('build', 'merge', 'close'):
+                    from .source_freshness import require_fresh_source
+                    require_fresh_source()
                 from . import merge_train_cli
                 return merge_train_cli.run_task_train(args)
             return run_task_review(args) if args.action == 'review' else run_task_inspect(args)

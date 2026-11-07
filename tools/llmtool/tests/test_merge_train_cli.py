@@ -13,7 +13,8 @@ import unittest
 from unittest import mock
 
 from llmtool import cli, merge_train_cli, merge_train_store, pm_caller
-from llmtool import task_advance, task_completion
+from llmtool import source_freshness, task_advance, task_completion
+from llmtool.errors import LLMToolError
 
 SESSION = '3f2b8c1e-6a4d-4e2b-9c1a-7d5e8f9a0b1c'
 OTHER_SESSION = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d'
@@ -88,6 +89,12 @@ class MergeTrainCliTest(unittest.TestCase):
                                     re.compile(r'[0-9a-f]{32}'))
         pattern.start()
         self.addCleanup(pattern.stop)
+        # cli.py checks source freshness before build, merge and close; keep the
+        # tests off the real checkout and record each check.
+        self.freshness = Recorder('OK')
+        fresh = mock.patch.object(source_freshness, 'require_fresh_source', self.freshness)
+        fresh.start()
+        self.addCleanup(fresh.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.base = temporary.name
@@ -232,6 +239,70 @@ class MergeTrainCliTest(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0].action, 'train')
         self.assertEqual(value['step'], 'STATUS')
+        # status changes nothing, so it does not need fresh source.
+        self.assertEqual(self.freshness.calls, [])
+
+    def test_fresh_source_is_checked_before_build_merge_and_close(self):
+        self._create()
+        build = Recorder({'step': 'BUILT', 'codes': [], 'result': {'train_id': TRAIN_ID}})
+        merge = Recorder({'step': 'MERGED', 'codes': [], 'result': None})
+        close = Recorder({'step': 'CLOSED', 'codes': [], 'result': None})
+        cases = [['build', '--member', TASK_A + ':101', '--member', TASK_B + ':102',
+                  '--pm-session', SESSION],
+                 ['merge', TRAIN_ID, '--pm-session', SESSION],
+                 ['close', TRAIN_ID, '--pm-session', SESSION]]
+        for argv in cases:
+            with self.subTest(argv=argv[0]):
+                self.freshness.calls.clear()
+                code, _, runs = self._main(argv, build_call=build, merge_call=merge,
+                                           close_call=close)
+                self.assertEqual(code, 0)
+                self.assertEqual(len(runs), 1)
+                self.assertEqual(self.freshness.calls, [((), {})])
+        self.assertEqual((len(build.calls), len(merge.calls), len(close.calls)), (1, 1, 1))
+
+    def test_stale_source_stops_build_merge_and_close_before_any_call(self):
+        before = self._create()
+
+        def stale():
+            error = LLMToolError('LLMTOOL_SOURCE_STALE')
+            error.completion_code = 'LLMTOOL_SOURCE_STALE'
+            raise error
+
+        self.freshness.side_effect = stale
+        build, merge, close, advance = Recorder(), Recorder(), Recorder(), Recorder()
+        adapters = self._adapters(build_call=build, merge_call=merge, close_call=close,
+                                  advance_call=advance)
+        original = merge_train_cli.run_task_train
+        cases = [['build', '--member', TASK_A + ':101', '--member', TASK_B + ':102',
+                  '--pm-session', SESSION],
+                 ['merge', TRAIN_ID, '--pm-session', SESSION],
+                 ['close', TRAIN_ID, '--pm-session', SESSION]]
+        for argv in cases:
+            with self.subTest(argv=argv[0]):
+                runs = []
+
+                def wrapped(args):
+                    runs.append(args)
+                    return original(args, **adapters)
+
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(merge_train_cli, 'run_task_train', wrapped), \
+                        contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = cli.main(['task', 'train', *argv])
+                self.assertEqual(code, 1)
+                self.assertEqual(runs, [])
+                self.assertEqual(out.getvalue(), '')
+                self.assertIn('LLMTOOL_SOURCE_STALE', err.getvalue())
+        self.assertEqual((build.calls, merge.calls, close.calls, advance.calls),
+                         ([], [], [], []))
+        self.assertEqual(self.store.calls, [])
+        self.assertEqual(merge_train_store.get(TRAIN_ID, root=self.train_root), before)
+        self.assertEqual(len(self.freshness.calls), 3)
+        # status reads only and still runs from stale source.
+        code, value, _ = self._main(['status', TRAIN_ID])
+        self.assertEqual((code, value['step']), (0, 'STATUS'))
+        self.assertEqual(len(self.freshness.calls), 3)
 
     # build
 
