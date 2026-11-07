@@ -20,6 +20,7 @@ from unittest.mock import patch
 import unittest
 
 from llmtool import active_pm_inbox
+from llmtool import pm_runtime
 from llmtool import role_config
 from llmtool import task_store as task_store_module
 from llmtool.cli import main
@@ -144,6 +145,38 @@ class ActivePMInboxTests(unittest.TestCase):
                                         **kwargs), 0)
         return json.loads(out.getvalue())
 
+    def _liveness_evidence_ready(self):
+        """Give the liveness check the account config and registry it reads."""
+        config = self.base / 'home' / '.config' / 'llmtool' / 'config.yaml'
+        config.parent.mkdir(parents=True, exist_ok=True)
+        self.claude_home.chmod(0o700)
+        config.write_text('accounts:\n  claude-one:\n    kind: claude\n    config_dir: ' +
+                          str(self.claude_home) + '\n', encoding='utf-8')
+        (self.claude_home / 'sessions').mkdir(mode=0o700, exist_ok=True)
+
+    def _stop_claude_session(self, native):
+        """Leave a Claude session stopped: its transcript stays but has gone quiet."""
+        self._liveness_evidence_ready()
+        path = active_pm_inbox.claude_session_file(native, str(self.pm_cwd))
+        stale = time.time() - 1000
+        os.utime(path, (stale, stale))
+        return path
+
+    def _adopt(self, old_key, new_key, **options):
+        options.setdefault('old_native_id', old_key[3:])
+        options.setdefault('cwd', str(self.pm_cwd))
+        options.setdefault('process_lister', lambda: '1 /sbin/launchd\n')
+        return active_pm_inbox.adopt_pm_session(self.store, old_key, new_key, **options)
+
+    def _bind_codex(self, native):
+        """A dedicated, not yet started Codex binding for an existing session ID."""
+        root = pm_runtime._ensure_state_dir(self.base / 'pm-state')
+        pm_runtime._write_json_atomic(root, pm_runtime._binding_path(root, native), {
+            'runtime': 'codex', 'account': 'codex-pm', 'native_session_id': native,
+            'cwd': str(self.pm_cwd), 'dedicated': True,
+            'created_at': '2026-11-07T00:00:00+00:00', 'session_started': False})
+        return root
+
     def test_adopt_pm_session_moves_open_inbox_events_and_is_idempotent(self):
         first = self._ready_task()
         second = self._ready_task()
@@ -159,15 +192,13 @@ class ActivePMInboxTests(unittest.TestCase):
         before = active_pm_inbox.read_inbox(self.store, 'pm-' + self.session)
         self.assertEqual({event['task_id'] for event in before['events']},
                          {first['task_id'], second['task_id']})
-        old_path = active_pm_inbox.claude_session_file(self.session, str(self.pm_cwd))
-        old_path.unlink()
+        old_path = self._stop_claude_session(self.session)
         new_native = self._claude_session()
         new_key = 'pm-' + new_native
-        result = active_pm_inbox.adopt_pm_session(
-            self.store, 'pm-' + self.session, new_key,
-            old_native_id=self.session, cwd=str(self.pm_cwd))
+        result = self._adopt('pm-' + self.session, new_key)
         self.assertEqual(set(result['moved']), {first['task_id'], second['task_id']})
         self.assertEqual(result['skipped'], [])
+        self.assertEqual(old_path.read_text(), '{}\n')
 
         after = active_pm_inbox.read_inbox(self.store, new_key)
         self.assertEqual({event['event_id'] for event in after['events']},
@@ -190,9 +221,7 @@ class ActivePMInboxTests(unittest.TestCase):
             self.assertEqual(audit['new_session_key'], new_key)
             self.assertIn('at', audit)
         snapshots = {task_id: self.store.get(task_id) for task_id in result['moved']}
-        again = active_pm_inbox.adopt_pm_session(
-            self.store, 'pm-' + self.session, new_key,
-            old_native_id=self.session, cwd=str(self.pm_cwd))
+        again = self._adopt('pm-' + self.session, new_key)
         self.assertEqual(again, {'moved': [], 'skipped': []})
         self.assertEqual({task_id: self.store.get(task_id) for task_id in result['moved']},
                          snapshots)
@@ -200,9 +229,11 @@ class ActivePMInboxTests(unittest.TestCase):
     def test_adoption_refusals_leave_records_unchanged(self):
         task = self._record_pm()
         before = self.store.get(task['task_id'])
+        self._liveness_evidence_ready()
         attempts = (
-            ('pm-' + self.session, 'pm-' + str(uuid.uuid4()), self.session,
-             'PM_SESSION_ADOPTION_OLD_SESSION_PRESENT'),
+            # The transcript was just written, so the old PM reads as active.
+            ('pm-' + self.session, 'pm-' + self._claude_session(), self.session,
+             'PM_SESSION_ADOPTION_OLD_PM_ACTIVE'),
             ('pm-' + self.session, 'pm-' + self.session, self.session,
              'PM_SESSION_ADOPTION_KEYS_EQUAL'),
             ('malformed-key', 'pm-' + str(uuid.uuid4()), self.session,
@@ -210,9 +241,7 @@ class ActivePMInboxTests(unittest.TestCase):
         )
         for old_key, new_key, native_id, code in attempts:
             with self.subTest(code=code), self.assertRaises(LLMToolError) as caught:
-                active_pm_inbox.adopt_pm_session(
-                    self.store, old_key, new_key, old_native_id=native_id,
-                    cwd=str(self.pm_cwd))
+                self._adopt(old_key, new_key, old_native_id=native_id)
             self.assertEqual(caught.exception.task_store_error_code, code)
             self.assertEqual(self.store.get(task['task_id']), before)
 
@@ -229,48 +258,49 @@ class ActivePMInboxTests(unittest.TestCase):
         old_native, old_path = self._codex_session()
         task = self._record_pm(session=old_native, runtime='codex')
         new_native, _ = self._codex_session()
-        old_path.unlink()
+        root = self._bind_codex(old_native)
         before = self.store.get(task['task_id'])
         with self.assertRaises(LLMToolError) as caught:
-            active_pm_inbox.adopt_pm_session(
-                self.store, 'pm-' + old_native, 'pm-' + new_native,
-                old_native_id=old_native, cwd=str(self.pm_cwd) + '/')
+            self._adopt('pm-' + old_native, 'pm-' + new_native, state_root=root,
+                        cwd=str(self.pm_cwd) + '/')
         self.assertEqual(caught.exception.task_store_error_code,
                          'PM_SESSION_ADOPTION_CWD_MISMATCH')
         self.assertEqual(self.store.get(task['task_id']), before)
-        result = active_pm_inbox.adopt_pm_session(
-            self.store, 'pm-' + old_native, 'pm-' + new_native,
-            old_native_id=old_native, cwd=str(self.pm_cwd))
+        result = self._adopt('pm-' + old_native, 'pm-' + new_native, state_root=root)
         self.assertEqual(result, {'moved': [task['task_id']], 'skipped': []})
         moved = self.store.get(task['task_id'])
         self.assertEqual(moved['pm_session_id'], 'pm-' + new_native)
         self.assertEqual(moved['pm_provenance']['pm_runtime'], 'codex')
         self.assertEqual(moved['pm_provenance']['pm_native_session_id'], new_native)
+        self.assertTrue(old_path.exists())
 
-    def test_codex_adoption_refuses_ambiguous_old_session_transcripts(self):
+    def test_codex_adoption_decides_by_liveness_not_by_old_session_transcripts(self):
         old_native, old_path = self._codex_session()
         task = self._record_pm(session=old_native, runtime='codex')
         duplicate = old_path.parent / ('rollout-20261030-120001-' + old_native + '.jsonl')
         duplicate.write_text(old_path.read_text())
         new_native, _ = self._codex_session()
+        root = self._bind_codex(old_native)
         before = self.store.get(task['task_id'])
+        transcripts = old_path.read_bytes()
 
         with self.assertRaises(LLMToolError) as caught:
-            active_pm_inbox.adopt_pm_session(
-                self.store, 'pm-' + old_native, 'pm-' + new_native,
-                old_native_id=old_native, cwd=str(self.pm_cwd))
-
+            self._adopt('pm-' + old_native, 'pm-' + new_native, state_root=root,
+                        process_lister=lambda: '77 codex resume ' + old_native + '\n')
         self.assertEqual(caught.exception.task_store_error_code,
-                         'PM_SESSION_ADOPTION_OLD_SESSION_AMBIGUOUS')
+                         'PM_SESSION_ADOPTION_OLD_PM_ACTIVE')
         self.assertEqual(self.store.get(task['task_id']), before)
+
+        result = self._adopt('pm-' + old_native, 'pm-' + new_native, state_root=root)
+        self.assertEqual(result, {'moved': [task['task_id']], 'skipped': []})
+        self.assertEqual(old_path.read_bytes(), transcripts)
+        self.assertEqual(duplicate.read_bytes(), transcripts)
 
     def test_adoption_refuses_task_without_session_provenance(self):
         task = self._record_pm()
         before = self.store.get(task['task_id'])
         legacy = dict(before)
         legacy.pop('pm_provenance')
-        old_path = active_pm_inbox.claude_session_file(self.session, str(self.pm_cwd))
-        old_path.unlink()
         with patch.object(self.store, 'get', return_value=legacy):
             with self.assertRaises(LLMToolError) as caught:
                 active_pm_inbox.adopt_pm_session(
@@ -298,16 +328,31 @@ class ActivePMInboxTests(unittest.TestCase):
                 self.store._write(current, create=False)
             return original_adopt(task_id, **kwargs)
 
-        old_path = active_pm_inbox.claude_session_file(self.session, str(self.pm_cwd))
-        old_path.unlink()
+        self._stop_claude_session(self.session)
         with patch.object(self.store, 'adopt_pm_session', side_effect=race):
-            result = active_pm_inbox.adopt_pm_session(
-                self.store, old_key, new_key, old_native_id=self.session,
-                cwd=str(self.pm_cwd))
+            result = self._adopt(old_key, new_key)
         self.assertEqual(result['skipped'], [conflicted['task_id']])
         self.assertEqual(result['moved'], [movable['task_id']])
         self.assertNotEqual(self.store.get(conflicted['task_id'])['pm_session_id'], old_key)
         self.assertEqual(self.store.get(movable['task_id'])['pm_session_id'], new_key)
+
+    def test_result_completed_after_adoption_reaches_only_the_new_inbox(self):
+        task = self._ready_task()
+        developer = self.store.get(task['task_id'])['developer']
+        old_key = 'pm-' + self.session
+        self._stop_claude_session(self.session)
+        new_key = 'pm-' + self._claude_session()
+        self.assertEqual(self._adopt(old_key, new_key)['moved'], [task['task_id']])
+        self.assertEqual(self.store.get(task['task_id'])['developer'], developer)
+
+        code, _ = self._complete(task)
+        self.assertEqual(code, 0)
+        (event,) = active_pm_inbox.read_inbox(self.store, new_key)['events']
+        self.assertEqual(event['task_id'], task['task_id'])
+        self.assertEqual(event['pm_session_id'], new_key)
+        self.assertEqual(active_pm_inbox.read_inbox(self.store, old_key)['events'], [])
+        with self.assertRaises(LLMToolError):
+            active_pm_inbox.ack(self.store, event['event_id'], old_key)
 
     def _ack(self, event_id, session=None):
         out = StringIO()

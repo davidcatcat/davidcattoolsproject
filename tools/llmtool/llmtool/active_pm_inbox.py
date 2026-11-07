@@ -24,6 +24,7 @@ Delivery rules:
   Run).
 """
 
+import contextlib
 import hashlib
 import json
 import os
@@ -450,32 +451,72 @@ def read_inbox(store, session_key):
     return _inbox(store, session_key, reconcile=True)
 
 
-def adopt_pm_session(store, old_session_key, new_session_key, *, old_native_id,
-                     cwd, environ=None):
-    """Move open Tasks to a replacement PM session after its old transcript is gone.
+def _refuse_adoption(code):
+    error = LLMToolError('PM session adoption refused')
+    error.task_store_error_code = code
+    raise error
 
-    Per-Task compare-and-swap conflicts are skipped and returned in ``skipped``;
-    remaining eligible Tasks are still adopted.
-    """
-    def refuse(code):
-        error = LLMToolError('PM session adoption refused')
-        error.task_store_error_code = code
-        raise error
 
-    if (type(old_native_id) is not str or
-            PM_NATIVE_SESSION_ID.fullmatch(old_native_id) is None or
-            type(old_session_key) is not str or
-            SESSION_ID.fullmatch(old_session_key) is None or
-            old_session_key != 'pm-' + old_native_id or
-            type(new_session_key) is not str or
-            SESSION_ID.fullmatch(new_session_key) is None or
-            PM_NATIVE_SESSION_ID.fullmatch(new_session_key[3:]) is None):
-        refuse('PM_SESSION_ADOPTION_KEY_INVALID')
-    if old_session_key == new_session_key:
-        refuse('PM_SESSION_ADOPTION_KEYS_EQUAL')
-    at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-    moved, skipped = [], []
-    candidates = []
+def _observe_bound_session(native_id, binding, root, environ, home):
+    """Observe a bound session in its own account's directory; raise when it is not there."""
+    from . import pm_session_liveness, role_config
+
+    runtime, account, cwd = binding['runtime'], binding.get('account'), binding['cwd']
+    if account is None and runtime == 'claude-code':
+        observe_claude_session(native_id, cwd, environ)
+        return
+    if type(account) is not str:
+        raise LLMToolError('PM binding has no account')
+    resolved = role_config.resolve_role(
+        'pm-codex-binding' if runtime == 'codex' else 'pm', environ=environ, home=home,
+        cli={'account': account})
+    config_dir = resolved.get('config_dir')
+    if (resolved.get('account') != account or not config_dir or
+            resolved.get('provider') not in (('codex',) if runtime == 'codex'
+                                             else (None, 'claude'))):
+        raise LLMToolError('PM binding account is not usable')
+    if runtime == 'claude-code':
+        observe_claude_session(native_id, cwd, {'CLAUDE_CONFIG_DIR': config_dir})
+        return
+    # A dedicated Codex session's transcript is named after its thread, not its binding.
+    thread_id = pm_session_liveness._codex_thread_id(root, native_id, binding)
+    if thread_id is None:
+        raise LLMToolError('Codex PM binding has no thread')
+    observe_codex_session(thread_id, cwd, {'CODEX_HOME': config_dir})
+
+
+def _resolve_new_session(native_id, task_runtime, cwd, root, environ, home):
+    """(runtime, account) of the replacement session, proven to exist on its own side."""
+    from . import pm_runtime, pm_session_liveness
+
+    invalid = 'PM_SESSION_ADOPTION_NEW_SESSION_INVALID'
+    try:
+        bound = pm_session_liveness._exists(pm_runtime._binding_path(root, native_id))
+        binding = (pm_runtime.current_binding(native_id, state_root=root,
+                                              resolve_legacy_account=False)
+                   if bound else None)
+    except (LLMToolError, OSError):
+        _refuse_adoption(invalid)
+    if bound and binding is None:
+        _refuse_adoption(invalid)
+    # Provenance keeps pm_cwd across a move, so another directory would break recovery.
+    if bound and binding['cwd'] != cwd:
+        _refuse_adoption('PM_SESSION_ADOPTION_CWD_MISMATCH')
+    try:
+        if bound:
+            _observe_bound_session(native_id, binding, root, environ, home)
+        elif task_runtime == 'codex':
+            observe_codex_session(native_id, cwd, environ)
+        else:
+            observe_claude_session(native_id, cwd, environ)
+    except (LLMToolError, OSError, ValueError):
+        _refuse_adoption(invalid)
+    return (binding['runtime'], binding.get('account')) if bound else (task_runtime, None)
+
+
+def _adoption_candidates(store, old_session_key, old_native_id, cwd):
+    """Every open Task of the old session and its runtime; refuse if any cannot move."""
+    candidates, runtimes = [], set()
     for task_id in store.task_ids():
         record = store.get(task_id)
         if (record.get('pm_session_id') != old_session_key or
@@ -487,46 +528,106 @@ def adopt_pm_session(store, old_session_key, new_session_key, *, old_native_id,
                      'native_session_id_status'}.issubset(provenance) or
                 provenance.get('native_session_id_status') !=
                 'LOCAL_SESSION_FILE_OBSERVED' or
-                provenance.get('pm_native_session_id') != old_native_id):
-            refuse('PM_SESSION_ADOPTION_PROVENANCE_REQUIRED')
-        runtime = provenance['pm_runtime']
-        recorded_cwd = provenance['pm_cwd']
-        # The caller-supplied directory is only a consistency check. Session
-        # presence and observation are always checked against each Task's
-        # recorded directory, and require the caller to supply that exact
-        # canonical value (normalizing here would accept a trailing-slash alias).
-        if type(cwd) is not str or cwd != recorded_cwd:
-            refuse('PM_SESSION_ADOPTION_CWD_MISMATCH')
-        if runtime == 'claude-code':
-            if claude_session_present(old_native_id, recorded_cwd, environ):
-                refuse('PM_SESSION_ADOPTION_OLD_SESSION_PRESENT')
-            observe_claude_session(new_session_key[3:], recorded_cwd, environ)
-        elif runtime == 'codex':
-            try:
-                observe_codex_session(old_native_id, recorded_cwd, environ)
-            except LLMToolError as exc:
-                if str(exc) == 'Codex PM session was found multiple times for this directory':
-                    refuse('PM_SESSION_ADOPTION_OLD_SESSION_AMBIGUOUS')
-                if str(exc) != 'Codex PM session was not found for this directory':
-                    raise
-            else:
-                refuse('PM_SESSION_ADOPTION_OLD_SESSION_PRESENT')
-            observe_codex_session(new_session_key[3:], recorded_cwd, environ)
-        else:
-            refuse('PM_SESSION_ADOPTION_PROVENANCE_REQUIRED')
+                provenance.get('pm_native_session_id') != old_native_id or
+                provenance['pm_runtime'] not in ('claude-code', 'codex')):
+            _refuse_adoption('PM_SESSION_ADOPTION_PROVENANCE_REQUIRED')
+        # The caller-supplied directory is only a consistency check, and must be
+        # each Task's exact canonical recorded value (normalizing here would
+        # accept a trailing-slash alias).
+        if type(cwd) is not str or cwd != provenance['pm_cwd']:
+            _refuse_adoption('PM_SESSION_ADOPTION_CWD_MISMATCH')
+        # Refused here, before the fence: a Task at its limit could never leave a
+        # fenced session.
+        if len(record.get('pm_session_adoptions', [])) >= 32:
+            _refuse_adoption('PM_SESSION_ADOPTION_LIMIT')
+        runtimes.add(provenance['pm_runtime'])
         candidates.append((task_id, record))
+    if len(runtimes) > 1:
+        _refuse_adoption('PM_SESSION_ADOPTION_PROVENANCE_REQUIRED')
+    return candidates, next(iter(runtimes), None)
 
+
+def _adopt_under_lock(store, old_session_key, new_session_key, old_native_id, cwd, *, root,
+                      environ, home, clock, process_lister):
+    from . import pm_runtime, pm_session_liveness
+
+    new_native_id = new_session_key[3:]
+    fence = pm_runtime.read_session_fence(old_native_id, root)
+    # An unreadable fence has no target, so it never matches.
+    if fence is not None and fence.get('new_session_key') != new_session_key:
+        _refuse_adoption('PM_SESSION_ADOPTION_FENCED_OTHER_TARGET')
+    if pm_runtime.read_session_fence(new_native_id, root) is not None:
+        _refuse_adoption('PM_SESSION_ADOPTION_TARGET_FENCED')
+    candidates, old_runtime = _adoption_candidates(store, old_session_key, old_native_id, cwd)
+    if not candidates:
+        return {'moved': [], 'skipped': []}
+    new_runtime, new_account = _resolve_new_session(new_native_id, old_runtime, cwd, root,
+                                                    environ, home)
+    # The old side's binding, if any, must match this runtime and directory: a
+    # mismatch reads as BINDING_INVALID, which is never STOPPED.
+    liveness = pm_session_liveness.check_session(
+        old_native_id, old_runtime, cwd, state_root=root, environ=environ, home=home,
+        clock=clock, process_lister=process_lister, lock_held=True)
+    if liveness['state'] == pm_session_liveness.ACTIVE:
+        _refuse_adoption('PM_SESSION_ADOPTION_OLD_PM_ACTIVE')
+    if liveness['state'] != pm_session_liveness.STOPPED:
+        _refuse_adoption('PM_SESSION_ADOPTION_LIVENESS_UNKNOWN')
+    at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    if fence is None:
+        pm_runtime.write_session_fence(old_native_id, new_session_key, at, root)
+    moved, skipped = [], []
     for task_id, record in candidates:
         try:
             store.adopt_pm_session(
                 task_id, old_session_key=old_session_key,
                 new_session_key=new_session_key, at=at,
-                expected_record_sha256=record['record_sha256'])
+                expected_record_sha256=record['record_sha256'],
+                old_runtime=old_runtime, new_runtime=new_runtime,
+                new_account=new_account, liveness=liveness['evidence'])
         except TaskStoreConflict:
             skipped.append(task_id)
         else:
             moved.append(task_id)
     return {'moved': moved, 'skipped': skipped}
+
+
+def adopt_pm_session(store, old_session_key, new_session_key, *, old_native_id,
+                     cwd, environ=None, state_root=None, clock=None, process_lister=None):
+    """Move open Tasks to a replacement PM session once the old one is verified STOPPED.
+
+    Under the old session's lock: validate every Task and both sides, check
+    liveness, write the fence, then compare-and-swap each Task. The old transcript
+    is never touched. A rerun with the same new session resumes an interrupted
+    move. Per-Task conflicts are skipped and returned in ``skipped``; remaining
+    eligible Tasks are still adopted. With no eligible Task nothing is written.
+    """
+    from . import pm_runtime
+
+    if (type(old_native_id) is not str or
+            PM_NATIVE_SESSION_ID.fullmatch(old_native_id) is None or
+            type(old_session_key) is not str or
+            SESSION_ID.fullmatch(old_session_key) is None or
+            old_session_key != 'pm-' + old_native_id or
+            type(new_session_key) is not str or
+            SESSION_ID.fullmatch(new_session_key) is None or
+            PM_NATIVE_SESSION_ID.fullmatch(new_session_key[3:]) is None):
+        _refuse_adoption('PM_SESSION_ADOPTION_KEY_INVALID')
+    if old_session_key == new_session_key:
+        _refuse_adoption('PM_SESSION_ADOPTION_KEYS_EQUAL')
+    env = os.environ if environ is None else environ
+    home = env.get('HOME') or str(Path.home())
+    with contextlib.ExitStack() as held:
+        try:
+            root = pm_runtime._session_state_root(
+                state_root or Path(home) / '.local/state/llmtool/pm-runtime')
+            held.enter_context(pm_runtime.transfer_lock(old_native_id, root))
+        except LLMToolError as exc:
+            _refuse_adoption('PM_SESSION_ADOPTION_OLD_PM_ACTIVE'
+                             if getattr(exc, 'pm_runtime_code', None) == 'PM_SESSION_BUSY'
+                             else 'PM_SESSION_ADOPTION_LIVENESS_UNKNOWN')
+        return _adopt_under_lock(store, old_session_key, new_session_key, old_native_id, cwd,
+                                 root=root, environ=environ, home=home, clock=clock,
+                                 process_lister=process_lister)
 
 
 def peek_inbox(store, session_key):
