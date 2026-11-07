@@ -19,7 +19,11 @@ gap, but a comment deleted between two page reads shifts later pages up, so
 the walk skips the comment that moved across the page boundary. A walk that
 read more than one page is therefore accepted only when a second walk agrees
 on every id the first walk could have seen; otherwise the poll is OFFLINE and
-the cursor does not move.
+the cursor does not move. ``max_pages`` bounds every page read in one poll,
+confirmation walks included: a poll that would read more pages fails with
+SYNC_CATCHUP_LIMIT and state unchanged, so a k-page catch-up needs
+``max_pages >= 2 * k``. A page whose ids are not strictly newest first is an
+invalid response (OFFLINE), so an out-of-order id never ends a walk early.
 
 Failures raise ``LLMToolError`` with a fixed ``sync_code``; a GitHub read
 failure is not raised but returned as ``OFFLINE`` with a backoff.
@@ -296,10 +300,16 @@ def init_state(path, start_after_comment_id):
 def _walk(github_get, cursor, max_pages, reads):
     """One newest-first walk: return ({id: comment} newer than cursor, pages walked).
 
-    ``reads`` is a one-item list counting every page read in this poll.
+    ``reads`` is a one-item list counting every page read in this poll; a read
+    beyond ``max_pages`` in total fails with SYNC_CATCHUP_LIMIT before it is made.
     """
     fresh = {}
-    for page in range(1, max_pages + 1):
+    page = 0
+    while True:
+        page += 1
+        if reads[0] >= max_pages:
+            # The poll would read more than max_pages pages; nothing is written.
+            _fail('SYNC_CATCHUP_LIMIT')
         reads[0] += 1
         try:
             batch = github_get('issues/comments?sort=created&direction=desc'
@@ -310,6 +320,11 @@ def _walk(github_get, cursor, max_pages, reads):
                 any(type(item) is not dict or not _is_int(item.get('id'), 1, _MAX_ID)
                     for item in batch)):
             raise _Offline(reads[0])
+        ids = [item['id'] for item in batch]
+        if any(newer <= older for newer, older in zip(ids, ids[1:])):
+            # Not strictly newest first: stopping at a low id could skip a later,
+            # higher one, so the response is invalid and the cursor stays.
+            raise _Offline(reads[0])
         for item in batch:
             if item['id'] <= cursor:
                 return fresh, page
@@ -318,8 +333,6 @@ def _walk(github_get, cursor, max_pages, reads):
             fresh.setdefault(item['id'], item)
         if len(batch) < PAGE_SIZE:
             return fresh, page
-    # Page max_pages was full and had no comment at or below the cursor.
-    _fail('SYNC_CATCHUP_LIMIT')
 
 
 def _read_new(github_get, cursor, max_pages):
@@ -331,6 +344,7 @@ def _read_new(github_get, cursor, max_pages):
     is accepted only when the next walk, limited to ids up to the walk's newest id,
     returns exactly the same ids. New comments above that id are left for the next
     poll. No agreement within MAX_WALKS walks is an unstable listing: OFFLINE.
+    All walks share one budget of ``max_pages`` reads (SYNC_CATCHUP_LIMIT).
     """
     reads = [0]
     walk, pages = _walk(github_get, cursor, max_pages, reads)
@@ -385,7 +399,10 @@ def _result(status, previous, state, pages_read, *, new_comments=0, counts=None,
 
 
 def poll_once(path, github_get, parse, max_pages=10):
-    """Run one poll step: read new comments, update the ledger, commit once."""
+    """Run one poll step: read new comments, update the ledger, commit once.
+
+    At most ``max_pages`` pages are read in this call, confirmation walks included.
+    """
     if (not callable(github_get) or not callable(parse) or
             not _is_int(max_pages, 1, MAX_PAGES_LIMIT)):
         _fail('SYNC_ARGUMENT_INVALID')

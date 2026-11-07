@@ -288,7 +288,7 @@ class PollTests(SyncTestCase):
     def test_idle_poll_reads_one_page_and_does_not_write(self):
         sync.init_state(self.path, 0)
         self.github.add(*(comment(i) for i in range(1, 251)))
-        self.poll(max_pages=3)
+        self.assertEqual(self.poll(max_pages=6)['status'], 'SYNCED')
         self.github.calls.clear()
         self.parser.seen.clear()
         before = self.snapshot()
@@ -337,10 +337,39 @@ class PollTests(SyncTestCase):
         self.assertEqual(self.parser.seen, [])
         self.assertEqual(self.snapshot(), before)
         self.assertNoTempFiles()
-        result = self.poll(max_pages=3)
+        # max_pages bounds every read in the poll, confirmation walk included: a
+        # three-page catch-up plus its confirmation walk needs six reads.
+        self.github.calls.clear()
+        self.assertCode('SYNC_CATCHUP_LIMIT', self.poll, max_pages=5)
+        self.assertEqual(self.github.pages(), [1, 2, 3, 1, 2])
+        self.assertEqual(self.parser.seen, [])
+        self.assertEqual(self.snapshot(), before)
+        self.assertNoTempFiles()
+        self.github.calls.clear()
+        result = self.poll(max_pages=6)
         self.assertEqual(result['status'], 'SYNCED')
+        self.assertEqual(self.github.pages(), [1, 2, 3, 1, 2, 3])
+        self.assertEqual(result['pages_read'], 6)
         self.assertEqual(result['cursor'], 250)
         self.assertEqual(len(self.state()['requests']), 250)
+
+    def test_unsettled_walks_within_page_limit_give_catch_up_limit(self):
+        sync.init_state(self.path, 0)
+        self.github.add(*(comment(i) for i in range(1, 151)))
+        deleted = []
+
+        def delete_once(page):
+            if page == 1 and not deleted:
+                deleted.append(self.github.remove_newest())
+        self.github.after_call = delete_once
+        before = self.snapshot()
+        # The first two walks disagree and a third walk would be read five.
+        self.assertCode('SYNC_CATCHUP_LIMIT', self.poll, max_pages=4)
+        self.github.after_call = None
+        self.assertEqual(self.github.pages(), [1, 2, 1, 2])
+        self.assertEqual(self.parser.seen, [])
+        self.assertEqual(self.snapshot(), before)
+        self.assertNoTempFiles()
 
     def test_max_pages_and_callables_are_validated(self):
         sync.init_state(self.path, 0)
@@ -684,7 +713,8 @@ class OfflineTests(SyncTestCase):
         before = self.state()
         faults = ({'message': 'Not Found'}, 'text', 42,
                   [{'id': i} for i in range(200, 99, -1)],
-                  [{'body': 'no id'}], [{'id': True}], [{'id': 0}], [{'id': '9'}], [7])
+                  [{'body': 'no id'}], [{'id': True}], [{'id': 0}], [{'id': '9'}], [7],
+                  [{'id': 5}, {'id': 9}], [{'id': 9}, {'id': 9}], [{'id': 9}, {'id': 1}, {'id': 4}])
         for count, fault in enumerate(faults, start=1):
             with self.subTest(fault=fault if type(fault) is not list else fault[:1]):
                 self.github.fault = fault
@@ -693,6 +723,35 @@ class OfflineTests(SyncTestCase):
                 self.assertEqual(result['failure_count'], count)
                 self.assertOnlyFailureCountChanged(before, count)
         self.assertEqual(self.parser.seen, [])
+
+    def test_out_of_order_page_is_offline_and_skips_nothing(self):
+        # An id at the cursor before a higher id must not end the walk early.
+        self.github.add(sync_comment(2, 'req-2', 1, 'd2'))
+        before = self.state()
+        self.github.fault = [comment(1), sync_comment(2, 'req-2', 1, 'd2')]
+        result = self.poll()
+        self.assertEqual(result['status'], 'OFFLINE')
+        self.assertEqual((result['failure_count'], result['backoff_seconds']), (1, 30))
+        self.assertEqual(result['cursor'], 1)
+        self.assertEqual(self.parser.seen, [])
+        self.assertOnlyFailureCountChanged(before, 1)
+        self.github.fault = None
+        result = self.poll()
+        self.assertEqual(result['status'], 'SYNCED')
+        self.assertEqual(self.parser.seen, [2])
+        self.assertEqual(result['new_request_keys'], ['req-2'])
+        self.assertEqual(self.state()['cursor'], 2)
+
+    def test_out_of_order_later_page_is_offline(self):
+        self.github.add(*(comment(i) for i in range(2, 152)))
+        before = self.state()
+        self.github.fault = [{'id': 40}, {'id': 1}, {'id': 45}]
+        self.github.fault_page = 2
+        result = self.poll()
+        self.assertEqual(result['status'], 'OFFLINE')
+        self.assertEqual(self.github.pages(), [1, 2])
+        self.assertEqual(self.parser.seen, [])
+        self.assertOnlyFailureCountChanged(before, 1)
 
     def test_error_on_later_page_keeps_cursor_and_ledger(self):
         self.github.add(*(sync_comment(i, f'req-{i}', 1, 'd') for i in range(2, 152)))
