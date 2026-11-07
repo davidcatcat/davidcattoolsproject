@@ -379,7 +379,10 @@ class RefusalTest(unittest.TestCase):
                 self.assertRefused(parse(envelope(kind=kind)), sync.SYNC_KIND_UNKNOWN)
 
     def test_kind_missing(self):
-        self.assertRefused(parse(envelope(kind=_MISSING)), sync.SYNC_FIELD_MISSING)
+        payload = envelope()
+        del payload['kind']
+        self.assertNotIn('kind', payload)
+        self.assertRefused(parse(payload), sync.SYNC_FIELD_MISSING)
 
     def test_field_unknown(self):
         cases = (
