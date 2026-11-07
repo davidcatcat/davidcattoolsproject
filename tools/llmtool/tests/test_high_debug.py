@@ -735,6 +735,59 @@ class HighDebugTests(unittest.TestCase):
         self.assertEqual(caught.exception.high_debug_code,
                          'HIGH_DEBUG_ARGUMENT_INVALID')
 
+    def _refuse_before_d6(self, record, *, reader_error=None, **overrides):
+        """Return the refusal code for Task ``record``; no attempt may start."""
+        store = _Store()
+        store.get = lambda _task: record
+        reader = unittest.mock.Mock(side_effect=reader_error)
+        create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+        arguments = {'executor_task': 'executor', 'family': 'family',
+                     'failed_corrections': 2}
+        arguments.update(overrides)
+        with patch.object(high_debug.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=True)):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(store=store, task_id='a' * 32, pr_number=17,
+                    runner=runner, create_d6=create, read_registration=reader,
+                    **arguments)
+        self.assertEqual(reader.call_count, 0 if reader_error is None else 1)
+        create.assert_not_called()
+        runner.assert_not_called()
+        self.assertEqual(store.entries, [])
+        self.assertEqual(store.events, [])
+        self._poster.assert_not_called()
+        return caught.exception.high_debug_code
+
+    def test_record_of_another_task_is_refused_before_d6(self):
+        record = dict(_Store().get('a' * 32), task_id='b' * 32)
+        self.assertEqual(self._refuse_before_d6(record), 'HIGH_DEBUG_TASK_INVALID')
+
+    def test_wrong_executor_or_missing_completion_is_refused_before_d6(self):
+        record = _Store().get('a' * 32)
+        no_completion = dict(record)
+        del no_completion['completion']
+        for name, task, overrides in (
+                ('other executor', record, {'executor_task': 'other-executor'}),
+                ('missing completion', no_completion, {})):
+            with self.subTest(name):
+                self.assertEqual(self._refuse_before_d6(task, **overrides),
+                                 'HIGH_DEBUG_D6_UNAVAILABLE')
+
+    def test_unreadable_registration_is_refused_before_d6(self):
+        self.assertEqual(
+            self._refuse_before_d6(_Store().get('a' * 32),
+                                   reader_error=OSError('unavailable')),
+            'HIGH_DEBUG_D6_UNAVAILABLE')
+
+    def test_failed_corrections_on_family_without_claims_is_refused_before_d6(self):
+        record = _Store().get('a' * 32)
+        for name, task, family in (
+                ('claims of another family', record, 'other-family'),
+                ('no claims', dict(record, review_repair_claims=[]), 'family')):
+            with self.subTest(name):
+                self.assertEqual(self._refuse_before_d6(task, family=family),
+                                 'HIGH_DEBUG_ARGUMENT_INVALID')
+
     def test_neither_and_both_reason_forms_are_refused(self):
         store = SimpleNamespace(get=lambda _task: {'task_id': 'a' * 32})
         with patch.object(high_debug.worker_dispatch, 'evaluate',

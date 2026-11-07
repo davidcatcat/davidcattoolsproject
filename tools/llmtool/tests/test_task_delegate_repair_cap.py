@@ -14,6 +14,9 @@ _CURRENT_TASK = 'f' * 32
 _HIGH_DEBUG_TASK = 'e' * 32
 _EXECUTOR_TASK = 'executor-d6'
 _HIGH_DEBUG_REF = 'https://github.com/example/project/issues/12/comments/34'
+# Invented comment URLs, one for each shape the cap check accepts.
+_INVENTED_REFS = (_HIGH_DEBUG_REF,
+                  'https://github.com/example/project/issues/12#issuecomment-34')
 _HEAD = 'a' * 40
 
 
@@ -230,6 +233,89 @@ class DelegateRepairCapTests(unittest.TestCase):
                     LLMToolError, 'D6_SOURCE_BINDING_MISMATCH'):
                 task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.recorded, [])
+
+    def _assert_comment_refused(self, store, **overrides):
+        """A valid-shaped comment URL at the cap must not record an override."""
+        for ref in _INVENTED_REFS:
+            with self.subTest(ref=ref):
+                with self.assertRaisesRegex(
+                        LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
+                    task_submission_cli._check_delegate_repair_cap(
+                        _args(high_debug_ref=ref, **overrides), store)
+                self.assertEqual(store.recorded, [])
+
+    def test_comment_url_given_as_high_debug_task_is_refused(self):
+        self._assert_comment_refused(
+            self._at_cap(diagnosis=_diagnosis([_entry()])),
+            high_debug_task=_HIGH_DEBUG_REF)
+
+    def test_comment_with_unknown_high_debug_task_is_refused(self):
+        self._assert_comment_refused(
+            self._at_cap(diagnosis=_diagnosis([_entry()])),
+            high_debug_task='d' * 32)
+
+    def test_comment_with_task_lacking_high_debug_key_is_refused(self):
+        self._assert_comment_refused(
+            self._at_cap(diagnosis={'task_id': _HIGH_DEBUG_TASK}))
+
+    def test_comment_with_record_of_another_task_is_refused(self):
+        self._assert_comment_refused(self._at_cap(
+            diagnosis=dict(_diagnosis([_entry()]), task_id='d' * 32)))
+
+    def test_comment_with_last_entry_not_a_dict_is_refused(self):
+        for last in ('RCA_CONFIRMED', None, [_entry()]):
+            with self.subTest(last=last):
+                self._assert_comment_refused(
+                    self._at_cap(diagnosis=_diagnosis([_entry(), last])))
+
+    def test_comment_without_high_debug_family_is_refused(self):
+        self._assert_comment_refused(
+            self._at_cap(diagnosis=_diagnosis([_entry()])),
+            high_debug_family=None)
+
+    def test_comment_with_unconfirmed_last_entry_is_refused(self):
+        for status in ('RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID', 'RUN_FAILED'):
+            for entries in ([_entry(status=status)],
+                            [_entry(), _entry(status=status)]):
+                with self.subTest(status=status, entries=len(entries)):
+                    self._assert_comment_refused(
+                        self._at_cap(diagnosis=_diagnosis(entries)))
+
+    def test_comment_with_d6_not_derived_from_examined_sha_is_refused(self):
+        from llmtool.high_debug import _d6_name
+
+        for name, d6 in (('other head', _d6_name(_EXECUTOR_TASK, 1, 'b' * 40)),
+                         ('no attempt suffix', _EXECUTOR_TASK)):
+            with self.subTest(name):
+                self._assert_comment_refused(self._at_cap(
+                    diagnosis=_diagnosis([dict(_entry(), d6=d6)])))
+
+    def test_comment_without_high_debug_task_starts_no_route(self):
+        owner_ref = 'https://github.com/example/project/issues/12#issuecomment-56'
+        acceptance = ['Fake acceptance item.']
+        routes = (
+            ('run_task_agy_delegate',
+             {'provider': 'agy', 'mode': 'direct', 'owner_ref': owner_ref,
+              'acceptance': acceptance}),
+            ('run_task_claude_delegate',
+             {'provider': 'claude', 'mode': 'direct', 'owner_ref': owner_ref,
+              'acceptance': acceptance}),
+            ('run_task_gw_agent_delegate', {'provider': 'gw-agent', 'mode': 'direct'}),
+            ('run_task_codex_delegate',
+             {'provider': 'codex', 'mode': 'direct', 'acceptance': acceptance}),
+            ('run_task_opencode_delegate',
+             {'provider': 'opencode', 'acceptance': acceptance}),
+        )
+        for route_name, fields in routes:
+            store = self._at_cap(diagnosis=_diagnosis([_entry()]))
+            with self.subTest(route=route_name), \
+                    patch.object(task_submission_cli, route_name) as route:
+                with self.assertRaisesRegex(
+                        LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_REQUIRED'):
+                    task_submission_cli.run_task_delegate(
+                        _args(high_debug_task=None, **fields), store=store)
+                route.assert_not_called()
+                self.assertEqual(store.recorded, [])
 
 
 def _record_id(number):
