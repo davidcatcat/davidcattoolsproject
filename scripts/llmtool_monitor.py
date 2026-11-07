@@ -1665,7 +1665,7 @@ GITHUB_REFRESH = 30.0
 GITHUB_BACKOFF = 300.0   # the wait doubles after each failed read, up to this
 GITHUB_JOBS_TTL = 60.0   # an unfinished run's job list is reused while its updated_at stays the same, at most this long
 GITHUB_STALE = 3 * GITHUB_REFRESH   # older runner data is shown as 未確認, never as offline
-CI_JOB_READS = 5   # finished runs' job lists, and open PR heads' check runs, read per refresh (both cached)
+CI_JOB_READS = 5   # finished runs' job lists read per refresh (cached)
 CI_RUN_READS = 10  # unfinished runs whose job lists are read per refresh (oldest first)
 GITHUB_LIMIT = 16 << 20   # one page of 100 comments; a larger page fails as a stale status
 GITHUB_PAGE = 100    # comments per request (the API maximum)
@@ -2008,10 +2008,11 @@ class GitHubSource:
         self.board_oldest_updated: float | None = None
         self.ci_runs: list | None = None    # ci_runs(); None until GitHub was read
         self.ci_heads: dict | None = None   # latest Linux/Mac run per head from same page
-        # Open PR heads' required checks (head_checks()), keyed by seven-character
-        # head; a head missing here was not read yet or its read failed.
+        # Open PR heads' checks from this refresh's one GraphQL read
+        # (pr_head_checks()), keyed by the full 40-character head SHA; None
+        # while that read failed or GitHub was not read. Never kept across
+        # refreshes, so a rerun on the same head shows on the next one.
         self.pr_checks: dict | None = None
-        self._pr_check_cache: dict = {}   # full head SHA -> head_checks() of the last good read
         self.want_ci = False   # set while a self-hosted runner is on this Mac
         self.want_main = False
         self.main_health: MainHealth | None = None
@@ -2278,7 +2279,9 @@ class GitHubSource:
             if GITHUB_IDENTITY_STATUS:
                 self.status += f"；{GITHUB_IDENTITY_STATUS}"
             self.read_failed = True
-        if not failed:
+        if failed:
+            self.pr_checks = None   # not read this refresh: unknown, never an old answer
+        else:
             self.refresh_pr_checks()
         self.refresh_ci()
         if self.want_main:
@@ -2350,37 +2353,54 @@ class GitHubSource:
             self.main_error = (str(exc)[:40] if isinstance(exc, RuntimeError)
                                else type(exc).__name__)
 
+    def _graphql(self, query: str, **variables):
+        """One read-only `gh api graphql` call through the gh runner, with
+        GITHUB_TIMEOUT and the GITHUB_LIMIT size cap. gh exits non-zero when
+        the answer carries GraphQL errors but still prints it: such an answer
+        with data is returned so the caller can judge which PRs it affects."""
+        gh = shutil.which("gh")
+        if not gh:
+            raise RuntimeError("找不到 gh 指令")
+        argv = [gh, "api", "graphql", "-f", f"query={query}"]
+        for key, value in variables.items():
+            argv += ["-f", f"{key}={value}"]
+        done = self.runner(argv, capture_output=True, timeout=GITHUB_TIMEOUT, check=False)
+        out = done.stdout or b""
+        if len(out) > GITHUB_LIMIT:
+            raise RuntimeError("回應過大")
+        try:
+            payload = json.loads(out) if out else None
+        except RecursionError:
+            raise ValueError("JSON nested too deeply") from None
+        except ValueError:
+            payload = None
+        partial = (type(payload) is dict and "errors" in payload
+                   and type(payload.get("data")) is dict)
+        if done.returncode != 0 and not partial:
+            code = re.search(rb"HTTP (\d{3})", getattr(done, "stderr", None) or b"")
+            raise RuntimeError(f"gh api 失敗（HTTP {code.group(1).decode()}）" if code
+                               else f"gh api 失敗（exit {done.returncode}）")
+        if payload is None:
+            raise ValueError("GraphQL answer is not JSON")
+        return payload
+
     def refresh_pr_checks(self) -> None:
-        """The two required checks of every open PR's exact head, from that
-        commit's check-runs page (not the newest workflow runs, which miss
-        heads pushed long ago), keyed by the full 40-character head SHA so two
-        heads sharing a seven-character prefix never share a result. Every
-        head that needs a read (never read, or a check not completed yet) goes
-        into one list, newest PR first, and at most CI_JOB_READS of them are
-        read per refresh. A head whose two checks have both completed is kept
-        and not read again while it stays the head; a new head is read fresh.
-        A failed read shows only that head as ?. A PR without a full head SHA
-        is not read and shows ?."""
-        pulls = self.board_pulls
-        if pulls is None:
+        """Every open PR's exact-head checks and changed paths from one
+        GraphQL read (PR_CHECKS_QUERY: the 100 most recently updated open PRs),
+        so no PR waits behind others. Results are keyed by the full head SHA
+        (pr_head_checks()) and replace the previous refresh's; nothing is
+        cached. A failed read leaves every PR unknown (None). Without an open
+        PR that has a full head SHA there is nothing to read."""
+        pulls = self.board_pulls or []
+        if not any(isinstance(pull, BoardPull) and pull.state == "OPEN"
+                   and type(pull.sha) is str and HEX_SHA.fullmatch(pull.sha) for pull in pulls):
+            self.pr_checks = {}
             return
-        heads: dict = {}   # full head SHA -> newest open PR number on it
-        for pull in pulls:
-            if (not isinstance(pull, BoardPull) or pull.state != "OPEN"
-                    or type(pull.sha) is not str or not HEX_SHA.fullmatch(pull.sha)):
-                continue
-            heads[pull.sha] = max(pull.number, heads.get(pull.sha, 0))
-        cache = {sha: value for sha, value in self._pr_check_cache.items() if sha in heads}
-        wanted = sorted((sha for sha in heads if not _checks_done(cache.get(sha))),
-                        key=lambda sha: -heads[sha])
-        for sha in wanted[:CI_JOB_READS]:
-            try:
-                cache[sha] = head_checks(
-                    self._get(f"repos/{self.repo}/commits/{sha}/check-runs?per_page=100"), sha)
-            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
-                cache.pop(sha, None)
-        self._pr_check_cache = cache
-        self.pr_checks = dict(cache)
+        owner, name = self.repo.split("/", 1)
+        try:
+            self.pr_checks = pr_head_checks(self._graphql(PR_CHECKS_QUERY, owner=owner, name=name))
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            self.pr_checks = None
 
     def refresh_ci(self) -> None:
         """Runners and CI, read on their own: a failure only marks them 未確認."""
@@ -3932,45 +3952,203 @@ def ci_head_runs(payload) -> dict:
             for sha, workflows in found.items()}
 
 
-REQUIRED_CHECKS = {"check (Linux 3.14)": "linux", "check (macOS 3.13)": "mac"}
+REQUIRED_CHECKS = {"check (Linux 3.14)": "linux", "check (macOS 3.13)": "mac",
+                   "check (docs)": "docs"}
+
+# One read per refresh for every open PR: its head, changed paths (which
+# checks its workflows' path filters require) and the head commit's check runs.
+PR_CHECKS_QUERY = """
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number
+        headRefOid
+        files(first: 100) { totalCount nodes { path } }
+        commits(last: 1) {
+          nodes {
+            commit {
+              oid
+              statusCheckRollup {
+                contexts(first: 100) {
+                  totalCount
+                  nodes { __typename ... on CheckRun { name status conclusion databaseId } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+""".strip()
 
 
-def head_checks(payload, sha: str) -> dict:
-    """{"linux"/"mac": (status, conclusion)} from one commit's check-runs page:
-    the required check runs on that exact head, the latest attempt (highest
-    check run id) per name, whatever order they come in. A name with no run is
-    absent. On a cut page (total_count above the runs given) both names are
-    None, unknown. A payload that is not a check-runs page raises ValueError.
-    Pure; no I/O."""
-    runs = payload.get("check_runs") if type(payload) is dict else None
-    if type(runs) is not list:
-        raise ValueError("check runs page")
-    sha = sha.lower()
+@dataclass(frozen=True)
+class HeadChecks:
+    """One open PR head: which checks its changed paths require (None when
+    the file list was cut or unreadable) and the newest run of each check
+    name on that exact commit, as (status, conclusion) in lower case (None
+    when the check list was cut or unreadable)."""
+    required: frozenset | None
+    runs: dict | None
+
+
+def _ci_path_class(path: str) -> str:
+    """classify_path() of tools/llmtool/scripts/ci_path_classes.py (copied,
+    not imported: the monitor runs on its own)."""
+    if path.startswith("tools/ai-loop/"):
+        return "ai-loop"
+    if path.startswith("tools/api-agent-gateway/"):
+        return "gateway"
+    if path.startswith(".github/workflows/"):
+        return "workflow"
+    if path.startswith("tools/llmtool/"):
+        relative = path[len("tools/llmtool/"):]
+        if "/" not in relative and relative.endswith(".md"):
+            return "docs"
+        return "runtime"
+    if (path.endswith(".md") or path in {"AGENTS.md", "CLAUDE.md"}
+            or path.startswith("skills/") or path.startswith("docs/")):
+        return "docs"
+    return "other"
+
+
+def _top_llmtool_md(path: str) -> bool:
+    relative = path[len("tools/llmtool/"):] if path.startswith("tools/llmtool/") else None
+    return relative is not None and "/" not in relative and relative.endswith(".md")
+
+
+def _mac_ci_path(path: str) -> bool:
+    """A path in llmtool-mac-ci.yml's pull_request paths filter."""
+    if path.startswith("tools/llmtool/"):
+        return not _top_llmtool_md(path)
+    return (path in {"scripts/llmtool_monitor.py", "scripts/test_llmtool_monitor.py",
+                     ".github/workflows/llmtool-mac-ci.yml"}
+            or path.startswith(("tools/mac-runner/", "tools/safe-git/")))
+
+
+def _linux_ci_path(path: str) -> bool:
+    """A path in llmtool-linux-ci.yml's pull_request paths filter (top-level
+    tools/llmtool Markdown is excluded, then included again; *.md is top level)."""
+    return (path.startswith(("tools/llmtool/", "tools/ec2-runner/", "tools/safe-git/",
+                             "tools/api-agent-gateway/", "tools/ai-loop/", "skills/", "docs/"))
+            or path in {".github/workflows/llmtool-linux-ci.yml", "AGENTS.md", "CLAUDE.md"}
+            or ("/" not in path and path.endswith(".md")))
+
+
+def required_checks(paths) -> frozenset:
+    """The checks a PR's changed paths require: macOS when the Mac workflow's
+    paths filter matches; when the Linux workflow's filter matches, Linux 3.14
+    if any path is code and docs if any is docs (ci_path_classes.linux_flags()).
+    Pure."""
+    required = set()
+    if any(_mac_ci_path(path) for path in paths):
+        required.add("mac")
+    if any(_linux_ci_path(path) for path in paths):
+        for path in paths:
+            path_class = _ci_path_class(path)
+            if path_class in ("runtime", "gateway", "workflow", "other"):
+                required.add("linux")
+            if path_class == "docs" or path.endswith(".md"):
+                required.add("docs")
+    return frozenset(required)
+
+
+def _rollup_runs(node: dict, sha: str):
+    """{key: (status, conclusion)} of the required check names on the head
+    commit, the highest databaseId per name; None when the check list was cut
+    or unreadable. A commit whose oid is not the head is ignored."""
+    commits = node.get("commits")
+    entries = commits.get("nodes") if type(commits) is dict else None
+    if type(entries) is not list:
+        return None
+    best: dict = {}
+    for entry in entries:
+        commit = entry.get("commit") if type(entry) is dict else None
+        oid = commit.get("oid") if type(commit) is dict else None
+        if type(oid) is not str or oid.lower() != sha:
+            continue
+        rollup = commit.get("statusCheckRollup")
+        if rollup is None:
+            continue   # no checks on the head at all
+        contexts = rollup.get("contexts") if type(rollup) is dict else None
+        runs = contexts.get("nodes") if type(contexts) is dict else None
+        total = contexts.get("totalCount") if type(contexts) is dict else None
+        if type(runs) is not list or type(total) is not int or total > len(runs):
+            return None
+        for run in runs:
+            if type(run) is not dict:
+                continue
+            name, run_id = run.get("name"), run.get("databaseId")
+            status, conclusion = run.get("status"), run.get("conclusion")
+            key = REQUIRED_CHECKS.get(name) if type(name) is str else None
+            if (key is None or type(run_id) is not int or type(status) is not str
+                    or (conclusion is not None and type(conclusion) is not str)):
+                continue
+            conclusion = (conclusion or "").lower()
+            if conclusion == "startup_failure":
+                conclusion = "failure"
+            if key not in best or run_id > best[key][0]:
+                best[key] = (run_id, (status.lower(), conclusion))
+    return {key: entry for key, (_, entry) in best.items()}
+
+
+def pr_head_checks(payload) -> dict:
+    """{full head SHA: HeadChecks} from one PR_CHECKS_QUERY answer. A PR
+    whose node the answer's errors name is unknown (HeadChecks(None, None));
+    an error naming no PR, or an answer without the pull request list, raises
+    ValueError. A cut file list leaves required unknown, a cut check list
+    leaves runs unknown. Two open PRs on one head share its runs and need the
+    checks either requires. Pure; no I/O."""
+    if type(payload) is not dict:
+        raise ValueError("GraphQL answer")
+    errors = payload.get("errors")
+    failed: set = set()
+    if errors is not None:
+        if type(errors) is not list:
+            raise ValueError("GraphQL errors")
+        for error in errors:
+            path = error.get("path") if type(error) is dict else None
+            if (type(path) is list and len(path) >= 4
+                    and path[:3] == ["repository", "pullRequests", "nodes"]
+                    and type(path[3]) is int):
+                failed.add(path[3])
+            else:
+                raise ValueError("GraphQL error")
+    data = payload.get("data")
+    repository = data.get("repository") if type(data) is dict else None
+    pulls = repository.get("pullRequests") if type(repository) is dict else None
+    nodes = pulls.get("nodes") if type(pulls) is dict else None
+    if type(nodes) is not list:
+        raise ValueError("GraphQL pull requests")
     found: dict = {}
-    for run in runs:
-        if type(run) is not dict:
+    for index, node in enumerate(nodes):
+        sha = node.get("headRefOid") if type(node) is dict else None
+        if type(sha) is not str or not HEX_SHA.fullmatch(sha.lower()):
             continue
-        name, run_id, head = run.get("name"), run.get("id"), run.get("head_sha")
-        status, conclusion = run.get("status"), run.get("conclusion")
-        key = REQUIRED_CHECKS.get(name) if type(name) is str else None
-        if (key is None or type(run_id) is not int or type(status) is not str
-                or (conclusion is not None and type(conclusion) is not str)
-                or type(head) is not str or not sha or not head.lower().startswith(sha)):
-            continue
-        previous = found.get(key)
-        if previous is None or run_id > previous[0]:
-            found[key] = (run_id, (status, conclusion or ""))
-    total = payload.get("total_count")
-    if type(total) is int and total > len(runs):
-        return {key: None for key in REQUIRED_CHECKS.values()}
-    return {key: entry for key, (_, entry) in found.items()}
-
-
-def _checks_done(checks) -> bool:
-    """Both required checks of a head were read and have completed."""
-    return type(checks) is dict and all(
-        type(checks.get(key)) is tuple and checks[key][0] == "completed"
-        for key in REQUIRED_CHECKS.values())
+        sha = sha.lower()
+        if index in failed:
+            result = HeadChecks(None, None)
+        else:
+            files = node.get("files")
+            listed = files.get("nodes") if type(files) is dict else None
+            total = files.get("totalCount") if type(files) is dict else None
+            paths = ([item.get("path") if type(item) is dict else None for item in listed]
+                     if type(listed) is list else None)
+            required = (required_checks(paths)
+                        if paths is not None and all(type(path) is str for path in paths)
+                        and type(total) is int and total <= len(paths) else None)
+            result = HeadChecks(required, _rollup_runs(node, sha))
+        earlier = found.get(sha)
+        if earlier is not None:
+            result = HeadChecks(
+                None if earlier.required is None or result.required is None
+                else earlier.required | result.required,
+                None if earlier.runs is None or result.runs is None else result.runs)
+        found[sha] = result
+    return found
 
 
 def ci_runs(payload) -> list:
@@ -4111,9 +4289,9 @@ def ci_queued_jobs(payload, text: str) -> list:
 def review_verdicts(comments) -> dict:
     """{pr: [(time, verdict, ids, head)]} from verdicts trusted accounts posted
     on PRs: a verdict line, the 7-character prefixes of every commit-like id the
-    comment names, the 7-character head its HEAD line names (REVIEW_HEAD; "" if
-    none), and the comment's last-edit time. The PR board binds a verdict only
-    to that head. Pure; no I/O."""
+    comment names, the head its HEAD line names as written (7 to 40 hex
+    characters, lower case; REVIEW_HEAD; "" if none), and the comment's
+    last-edit time. The PR board binds a verdict only to that head. Pure; no I/O."""
     found: dict = {}
     for comment in comments if type(comments) is list else []:
         if not _trusted_github_comment(comment):
@@ -4124,7 +4302,7 @@ def review_verdicts(comments) -> dict:
             when = max(_github_time(comment.get("created_at")), _github_time(comment.get("updated_at")))
             ids = frozenset(token[:7].lower() for token in COMMIT_ID.findall(body))
             named = REVIEW_HEAD.search(body)
-            head = named.group(1)[:7].lower() if named else ""
+            head = named.group(1).lower() if named else ""
             found.setdefault(number, []).append((when, verdict.group(1), ids, head))
     return found
 
@@ -4304,6 +4482,7 @@ class PrRow:
     ec2: str
     linux: str
     mac: str
+    docs: str
     next: str
     owner: str
     current: str = "未確認"
@@ -4330,34 +4509,52 @@ def _ci_word(entry, known: bool) -> str:
     return "?"
 
 
+CHECK_KEYS = ("linux", "mac", "docs")
+
+
 def _check_word(checks, sha: str, key: str) -> str:
-    """One required check ("linux" or "mac") on one exact head, looked up by
-    its full 40-character SHA (GitHubSource.pr_checks keys): ? while that
-    head's check runs are unread or unreadable or the full SHA is unknown, —
-    when the head has no run of that check, else its state."""
+    """One check ("linux", "mac" or "docs") on one exact head, looked up by
+    its full 40-character SHA (GitHubSource.pr_checks keys): 不需 when the
+    PR's changed paths do not require it; ? when the read failed, named this
+    PR in its errors, cut its file or check list, or the full SHA is unknown;
+    — when a required check has no run on the head; else its state."""
     found = (checks.get(sha) if type(checks) is dict and type(sha) is str
              and HEX_SHA.fullmatch(sha) else None)
-    if type(found) is not dict:
+    if not isinstance(found, HeadChecks) or found.required is None:
         return "?"
-    if key not in found:
+    if key not in found.required:
+        return "不需"
+    if found.runs is None:
+        return "?"
+    if key not in found.runs:
         return "—"
-    return _ci_word(found[key], True)
+    return _ci_word(found.runs[key], True)
 
 
-def _head_verdict(entries, head: str) -> tuple[str, str]:
+def _names_head(named: str, head: str, sha: str = "") -> bool:
+    """Whether a HEAD line's id (7 to 40 hex characters) names this head: a
+    prefix of its full SHA when that is known, else its seven characters."""
+    named, head, sha = named.lower(), head.lower(), (sha or "").lower()
+    if sha and HEX_SHA.fullmatch(sha):
+        return len(named) >= 7 and sha.startswith(named)
+    return bool(head) and named[:7] == head[:7]
+
+
+def _head_verdict(entries, head: str, sha: str = "") -> tuple[str, str]:
     """A PR's review state for its current head, from review_verdicts()
     entries. Only the head a verdict's HEAD line names counts, never another
     commit id in its body. The newest verdict whose HEAD line names any head
-    decides: ("current", verdict) when it names this head; ("stale", "") when
-    it names another (older) head, even if an earlier verdict named this one;
-    ("", "") when no verdict names a head."""
+    decides: ("current", verdict) when it names this head (_names_head(), by
+    the full SHA when known); ("stale", "") when it names another (older)
+    head, even if an earlier verdict named this one; ("", "") when no verdict
+    names a head."""
     bound = [entry for entry in entries if type(entry) in (tuple, list) and len(entry) >= 4
              and type(entry[0]) in (int, float) and type(entry[3]) is str and entry[3]
              ] if type(entries) in (tuple, list) else []
     if not bound or not head:
         return "", ""
     newest = max(bound, key=lambda entry: entry[0])
-    if newest[3] == head[:7]:
+    if _names_head(newest[3], head, sha):
         return "current", newest[1]
     return "stale", ""
 
@@ -4467,8 +4664,9 @@ def _current_person(rows, predicate, *, readable=True) -> str:
 
 def _pr_people(office, pull, checks) -> tuple[set, bool]:
     """The one person/CI answer per PR the PR table, running PR row and Issue rows share.
-    checks: GitHubSource.pr_checks; CI counts while a required check on the
-    exact head is queued or running."""
+    checks: GitHubSource.pr_checks; CI counts while a check the PR's paths
+    require is queued or running on the exact head (_check_word() says 不需
+    for any other)."""
     if not pull or not pull.head:
         return set(), True   # a PR missing from the read page has unknown head and CI
     people, uncertain = _current_people(
@@ -4477,7 +4675,7 @@ def _pr_people(office, pull, checks) -> tuple[set, bool]:
         if checks is None:
             uncertain = True
         elif any(_check_word(checks, pull.sha, key) in ("執行中", "排隊")
-                 for key in ("linux", "mac")):
+                 for key in CHECK_KEYS):
             people.add("CI")
     return people, uncertain
 
@@ -4492,8 +4690,9 @@ def _current_pr_people(office, pull, checks, *, github_known=True, office_known=
 def pr_board_rows(pulls, verdicts, checks, ec2, reviewing, pending, office=(), *, github_known=True,
                   office_known=True) -> list[PrRow]:
     """Build the read-only PR status table from already-read local/GitHub data.
-    checks: GitHubSource.pr_checks, the required check runs of each exact head
-    keyed by its full SHA (BoardPull.sha);
+    checks: GitHubSource.pr_checks, HeadChecks of each exact head keyed by its
+    full SHA (BoardPull.sha); only the checks a PR's changed paths require
+    decide its next step;
     verdicts: review_verdicts(), bound to the head their HEAD line names."""
     rows = []
     for pull in sorted((item for item in pulls or []
@@ -4504,15 +4703,16 @@ def pr_board_rows(pulls, verdicts, checks, ec2, reviewing, pending, office=(), *
         if head and (number, head) in (reviewing or set()):
             review = "審查中"
         elif head:
-            bound, verdict = _head_verdict((verdicts or {}).get(number, []), head)
+            bound, verdict = _head_verdict((verdicts or {}).get(number, []), head, pull.sha)
             if bound == "current":
                 review = {"PASS": "通過", "FAIL": "要修"}.get(verdict, "未確認")
             elif bound == "stale":
                 review = "舊審查"
         ec2_word = "?" if not head or ec2 is None else (
             ec2[0].get(head, "?") if head in ec2[0] else "?" if ec2[1] else "—")
-        linux = _check_word(checks, pull.sha, "linux")
-        mac = _check_word(checks, pull.sha, "mac")
+        linux, mac, docs = (_check_word(checks, pull.sha, key) for key in CHECK_KEYS)
+        required = [word for word in (linux, mac, docs) if word != "不需"]
+        others = [word for word in (linux, docs) if word != "不需"]   # the EC2 Linux workflow
         waiting_owner = any(type(item) is OwnerPending and item.kind == "waiting_owner"
                             and item.reference == f"#{number}" for item in pending or [])
         next_step, owner = "未確認", "PM"
@@ -4524,17 +4724,19 @@ def pr_board_rows(pulls, verdicts, checks, ec2, reviewing, pending, office=(), *
             next_step, owner = "等審查", "Reviewer"
         elif review == "要修":
             next_step, owner = "修復", "Developer"
-        elif any(word in (linux, mac) for word in ("失敗", "逾時", "取消")):
+        elif any(word in ("失敗", "逾時", "取消") for word in required):
             next_step, owner = "修 CI", "PM"
         elif ec2_word in ("FAIL", "SHA_MISMATCH", "TIMEOUT"):
             next_step, owner = "修 EC2 失敗", "PM"
         elif review == "通過":
-            # Linux runs on every PR, so no Linux run on the head is not a pass.
-            if linux in ("?", "—", "略過", "結果不明") or mac in ("?", "結果不明"):
+            # A required Linux or docs check with no passing run is not a pass;
+            # a required macOS check that did not run needs the mac-ci label.
+            if (any(word in ("?", "結果不明") for word in required)
+                    or any(word in ("—", "略過") for word in others)):
                 next_step, owner = "未確認 CI", "PM"
-            elif linux in ("執行中", "排隊"):
+            elif any(word in ("執行中", "排隊") for word in others):
                 next_step, owner = "等 CI", "CI"
-            elif mac == "成功":   # Linux is 成功 here
+            elif mac in ("成功", "不需"):   # every other required check is 成功 here
                 next_step, owner = "可合併", "PM"
             elif mac in ("執行中", "排隊"):
                 next_step, owner = "等 macOS", "CI"
@@ -4545,7 +4747,8 @@ def pr_board_rows(pulls, verdicts, checks, ec2, reviewing, pending, office=(), *
         current = _current_pr_people(office, pull, checks,
                                      github_known=github_known,
                                      office_known=office_known)
-        rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, next_step, owner, current))
+        rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, docs,
+                          next_step, owner, current))
     return rows
 
 
@@ -4574,7 +4777,7 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
             # The same head-bound rule as the PR table: a verdict counts only for
             # the head its HEAD line names.
             bound, verdict = _head_verdict((github.verdicts or {}).get(str(pull.number), []),
-                                           pull.head.lower())
+                                           pull.head.lower(), pull.sha)
             what = pull.title + (" 草稿" if pull.draft else "")
             if bound == "current" and verdict == "FAIL":
                 next_step = "Developer"
@@ -4714,7 +4917,8 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
             elif isinstance(item, PrRow):
                 ref = f"PR #{item.number}"
                 rest = (f"審查 {item.review} · EC2 {item.ec2} · Linux {item.linux} · "
-                        f"macOS {item.mac}  → {item.next}（{item.owner}） · 現在：{item.current}")
+                        f"macOS {item.mac} · Docs {item.docs}  → {item.next}（{item.owner}）"
+                        f" · 現在：{item.current}")
             elif isinstance(item, OwnerPending):
                 ref = item.reference
                 rest = f"{item.summary or item.status}  → 你"
