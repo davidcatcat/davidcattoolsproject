@@ -38,11 +38,24 @@ class RemoteTestReceiptTests(unittest.TestCase):
         self.src.mkdir()
         self.venv_py = self.root / "venv-python"
         self.venv_py.write_text("#!/bin/sh\n", encoding="utf-8")
+        self._default_tree = "c" * 40
 
-    def invoke(self, argv, *, runner=None, clock=None):
+    def _default_git(self, cmd):
+        cmd = list(cmd)
+        if "rev-parse" in cmd and "HEAD" in cmd:
+            return SimpleNamespace(returncode=0, stdout=SHA.encode("ascii"), stderr=b"")
+        if "status" in cmd:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if "rev-parse" in cmd and any(arg.endswith("^{tree}") for arg in cmd):
+            return SimpleNamespace(returncode=0, stdout=self._default_tree.encode("ascii"), stderr=b"")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    def invoke(self, argv, *, runner=None, clock=None, git=None):
+        if git is None:
+            git = self._default_git
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
-            code = remote_test_receipt.main(argv, runner=runner, clock=clock)
+            code = remote_test_receipt.main(argv, runner=runner, clock=clock, git=git)
         return code, stdout.getvalue()
 
     def test_pass_receipt_is_accepted_by_validate_remote_receipt(self):
@@ -421,6 +434,292 @@ class RemoteTestReceiptTests(unittest.TestCase):
             remote_test_receipt.SENSITIVE.pattern,
             extract_sensitive_pattern(remote_ast),
         )
+
+    def test_checkout_binding_matching_clean_checkout(self):
+        out_dir = self.root / "out-checkout-clean"
+        tree_sha = "d" * 40
+        calls = []
+
+        def custom_git(cmd):
+            cmd = list(cmd)
+            if "rev-parse" in cmd and "HEAD" in cmd:
+                return SimpleNamespace(returncode=0, stdout=SHA.encode("ascii"), stderr=b"")
+            if "status" in cmd:
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+            if "rev-parse" in cmd and any(arg.endswith("^{tree}") for arg in cmd):
+                return SimpleNamespace(returncode=0, stdout=tree_sha.encode("ascii"), stderr=b"")
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        def fake_runner(python, src, module, timeout):
+            calls.append(module)
+            return SimpleNamespace(
+                returncode=0, stdout=b"Ran 1 test in 0.001s\n\nOK\n", stderr=b"", timed_out=False
+            )
+
+        code, printed = self.invoke(
+            [
+                "run",
+                "--src", str(self.src),
+                "--python", str(self.venv_py),
+                "--out", str(out_dir),
+                "--sha", SHA,
+                "--fetch-head", SHA,
+                "test_alpha",
+            ],
+            runner=fake_runner,
+            git=custom_git,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, ["test_alpha"])
+        raw = (out_dir / "receipt.json").read_bytes()
+        validated = remote_test._validate_remote_receipt(raw, sha=SHA, modules=("test_alpha",))
+        self.assertIsNotNone(validated)
+        self.assertEqual(validated["result"], "PASS")
+        self.assertEqual(validated["tree"], tree_sha)
+        self.assertTrue(printed.endswith("PASS\n"))
+
+    def test_checkout_binding_different_head_fails_without_running_modules(self):
+        out_dir = self.root / "out-checkout-diff-head"
+        calls = []
+
+        def custom_git(cmd):
+            cmd = list(cmd)
+            if "rev-parse" in cmd and "HEAD" in cmd:
+                return SimpleNamespace(returncode=0, stdout=OTHER_SHA.encode("ascii"), stderr=b"")
+            if "status" in cmd:
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        code, printed = self.invoke(
+            [
+                "run",
+                "--src", str(self.src),
+                "--python", str(self.venv_py),
+                "--out", str(out_dir),
+                "--sha", SHA,
+                "--fetch-head", SHA,
+                "test_alpha",
+            ],
+            runner=lambda *args: calls.append(args),
+            git=custom_git,
+        )
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(calls, [])
+        raw = (out_dir / "receipt.json").read_bytes()
+        validated = remote_test._validate_remote_receipt(raw, sha=SHA, modules=("test_alpha",))
+        self.assertIsNotNone(validated)
+        self.assertEqual(validated["result"], "FAIL")
+        self.assertNotEqual(validated["exit_code"], 0)
+        self.assertIsNone(validated["tree"])
+        self.assertEqual(validated["ran_total"], 0)
+        self.assertEqual(validated["failures"], [])
+        self.assertEqual(validated["failure_excerpt"], remote_test_receipt.CHECKOUT_REASON)
+        self.assertEqual(validated["final"], [remote_test_receipt.CHECKOUT_REASON])
+        self.assertIn(remote_test_receipt.CHECKOUT_REASON, printed)
+        self.assertTrue(printed.endswith("FAIL\n"))
+
+    def test_checkout_binding_dirty_tree_fails_without_running_modules(self):
+        out_dir = self.root / "out-checkout-dirty"
+        calls = []
+
+        def custom_git(cmd):
+            cmd = list(cmd)
+            if "rev-parse" in cmd and "HEAD" in cmd:
+                return SimpleNamespace(returncode=0, stdout=SHA.encode("ascii"), stderr=b"")
+            if "status" in cmd:
+                return SimpleNamespace(returncode=0, stdout=b" M tracked_file.py\n", stderr=b"")
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        code, printed = self.invoke(
+            [
+                "run",
+                "--src", str(self.src),
+                "--python", str(self.venv_py),
+                "--out", str(out_dir),
+                "--sha", SHA,
+                "--fetch-head", SHA,
+                "test_alpha",
+            ],
+            runner=lambda *args: calls.append(args),
+            git=custom_git,
+        )
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(calls, [])
+        raw = (out_dir / "receipt.json").read_bytes()
+        validated = remote_test._validate_remote_receipt(raw, sha=SHA, modules=("test_alpha",))
+        self.assertIsNotNone(validated)
+        self.assertEqual(validated["result"], "FAIL")
+        self.assertNotEqual(validated["exit_code"], 0)
+        self.assertIsNone(validated["tree"])
+        self.assertEqual(validated["ran_total"], 0)
+        self.assertEqual(validated["failures"], [])
+        self.assertEqual(validated["failure_excerpt"], remote_test_receipt.CHECKOUT_REASON)
+        self.assertEqual(validated["final"], [remote_test_receipt.CHECKOUT_REASON])
+        self.assertIn(remote_test_receipt.CHECKOUT_REASON, printed)
+        self.assertTrue(printed.endswith("FAIL\n"))
+
+    def test_checkout_binding_git_error_fails_without_running_modules(self):
+        out_dir = self.root / "out-checkout-err"
+        calls = []
+
+        def custom_git(cmd):
+            return SimpleNamespace(returncode=128, stdout=b"", stderr=b"fatal: not a git repo")
+
+        code, printed = self.invoke(
+            [
+                "run",
+                "--src", str(self.src),
+                "--python", str(self.venv_py),
+                "--out", str(out_dir),
+                "--sha", SHA,
+                "--fetch-head", SHA,
+                "test_alpha",
+            ],
+            runner=lambda *args: calls.append(args),
+            git=custom_git,
+        )
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(calls, [])
+        raw = (out_dir / "receipt.json").read_bytes()
+        validated = remote_test._validate_remote_receipt(raw, sha=SHA, modules=("test_alpha",))
+        self.assertIsNotNone(validated)
+        self.assertEqual(validated["result"], "FAIL")
+        self.assertNotEqual(validated["exit_code"], 0)
+        self.assertIsNone(validated["tree"])
+
+    def test_checkout_binding_with_temporary_git_repository(self):
+        repo_dir = self.root / "temp-repo"
+        repo_dir.mkdir()
+        try:
+            init_res = subprocess.run(
+                ["git", "init", str(repo_dir)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if init_res.returncode != 0:
+                self.skipTest("git init unavailable")
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "config", "user.name", "Tester"],
+                stdin=subprocess.DEVNULL,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "config", "user.email", "tester@example.org"],
+                stdin=subprocess.DEVNULL,
+                check=True,
+            )
+            (repo_dir / "sample.txt").write_text("sample content\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "add", "sample.txt"],
+                stdin=subprocess.DEVNULL,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "commit", "-m", "initial"],
+                stdin=subprocess.DEVNULL,
+                check=True,
+            )
+            rev_res = subprocess.run(
+                ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            real_sha = rev_res.stdout.decode("ascii", "replace").strip()
+            tree_res = subprocess.run(
+                ["git", "-C", str(repo_dir), "rev-parse", "HEAD^{tree}"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            expected_tree = tree_res.stdout.decode("ascii", "replace").strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.skipTest(f"git operations not supported in environment: {exc}")
+
+        calls = []
+
+        def fake_runner(python, src, module, timeout):
+            calls.append(module)
+            return SimpleNamespace(
+                returncode=0, stdout=b"Ran 1 test in 0.002s\n\nOK\n", stderr=b"", timed_out=False
+            )
+
+        # 1. Matching clean checkout
+        out_clean = self.root / "out-real-clean"
+        code_clean, _ = self.invoke(
+            [
+                "run",
+                "--src", str(repo_dir),
+                "--python", str(self.venv_py),
+                "--out", str(out_clean),
+                "--sha", real_sha,
+                "--fetch-head", real_sha,
+                "test_alpha",
+            ],
+            runner=fake_runner,
+            git=remote_test_receipt.run_git,
+        )
+        self.assertEqual(code_clean, 0)
+        self.assertEqual(calls, ["test_alpha"])
+        raw_clean = (out_clean / "receipt.json").read_bytes()
+        val_clean = remote_test._validate_remote_receipt(raw_clean, sha=real_sha, modules=("test_alpha",))
+        self.assertIsNotNone(val_clean)
+        self.assertEqual(val_clean["result"], "PASS")
+        self.assertEqual(val_clean["tree"], expected_tree)
+
+        # 2. Different HEAD
+        calls.clear()
+        out_diff = self.root / "out-real-diff"
+        code_diff, _ = self.invoke(
+            [
+                "run",
+                "--src", str(repo_dir),
+                "--python", str(self.venv_py),
+                "--out", str(out_diff),
+                "--sha", OTHER_SHA,
+                "--fetch-head", OTHER_SHA,
+                "test_alpha",
+            ],
+            runner=fake_runner,
+            git=remote_test_receipt.run_git,
+        )
+        self.assertNotEqual(code_diff, 0)
+        self.assertEqual(calls, [])
+        raw_diff = (out_diff / "receipt.json").read_bytes()
+        val_diff = remote_test._validate_remote_receipt(raw_diff, sha=OTHER_SHA, modules=("test_alpha",))
+        self.assertIsNotNone(val_diff)
+        self.assertEqual(val_diff["result"], "FAIL")
+
+        # 3. Dirty tree
+        (repo_dir / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+        out_dirty = self.root / "out-real-dirty"
+        code_dirty, _ = self.invoke(
+            [
+                "run",
+                "--src", str(repo_dir),
+                "--python", str(self.venv_py),
+                "--out", str(out_dirty),
+                "--sha", real_sha,
+                "--fetch-head", real_sha,
+                "test_alpha",
+            ],
+            runner=fake_runner,
+            git=remote_test_receipt.run_git,
+        )
+        self.assertNotEqual(code_dirty, 0)
+        self.assertEqual(calls, [])
+        raw_dirty = (out_dirty / "receipt.json").read_bytes()
+        val_dirty = remote_test._validate_remote_receipt(raw_dirty, sha=real_sha, modules=("test_alpha",))
+        self.assertIsNotNone(val_dirty)
+        self.assertEqual(val_dirty["result"], "FAIL")
 
 
 if __name__ == "__main__":

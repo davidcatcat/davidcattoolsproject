@@ -30,6 +30,8 @@ _RECEIPT_FIELDS = frozenset((
     "identity", "started_at", "ended_at", "elapsed_s", "ran_total", "final",
     "failures", "log_bytes", "log_sha256", "remote_log_path",
 ))
+CHECKOUT_REASON = "CHECKOUT_INVALID"
+_CHECKOUT_REASON = CHECKOUT_REASON
 SENSITIVE = re.compile(
     r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|(?:(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b|(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]{16}(?=(?-i:[^\W\x00-\x7f])))|\bsk-[A-Za-z0-9_-]{12,}|\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|\bxox[abprs]-[A-Za-z0-9-]{20,}|\b(?:bearer|basic)\s+\S+|\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|[\"']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|client[_-]?secret|aws_secret_access_key)[\"']?\s*[:=]",
     re.I,
@@ -186,24 +188,71 @@ def run_module(python, src, module, timeout):
     )
 
 
-def _resolve_tree(src, sha):
-    for rev in (f"{sha}^{{tree}}", "HEAD^{tree}"):
+def run_git(cmd):
+    return subprocess.run(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+
+
+def _normalize_git_result(raw):
+    if isinstance(raw, tuple):
+        returncode = raw[0]
+        stdout = raw[1] if len(raw) > 1 else b""
+        stderr = raw[2] if len(raw) > 2 else b""
+    else:
+        returncode = getattr(raw, "returncode", 1)
+        stdout = getattr(raw, "stdout", b"")
+        stderr = getattr(raw, "stderr", b"")
+    if isinstance(stdout, str):
+        stdout = stdout.encode("utf-8")
+    elif stdout is None:
+        stdout = b""
+    if isinstance(stderr, str):
+        stderr = stderr.encode("utf-8")
+    elif stderr is None:
+        stderr = b""
+    return returncode, stdout, stderr
+
+
+def _resolve_tree(src, sha, git=None):
+    git_cmd = run_git if git is None else git
+    for rev in ("HEAD^{tree}", f"{sha}^{{tree}}"):
         try:
-            proc = subprocess.run(
-                ["git", "-C", src, "rev-parse", "--verify", rev],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=10,
-                check=False,
-            )
+            proc = git_cmd(["git", "-C", src, "rev-parse", "--verify", rev])
+            returncode, stdout, _ = _normalize_git_result(proc)
         except (OSError, subprocess.SubprocessError):
             continue
-        if proc.returncode == 0:
-            candidate = proc.stdout.decode("ascii", "replace").strip()
+        if returncode == 0:
+            candidate = stdout.decode("ascii", "replace").strip()
             if _SHA.fullmatch(candidate):
                 return candidate
     return hashlib.sha1(f"tree {sha}".encode("ascii")).hexdigest()
+
+
+def _verify_checkout(src, sha, git_runner):
+    try:
+        head_res = git_runner(["git", "-C", src, "rev-parse", "HEAD"])
+        rc_head, out_head, _ = _normalize_git_result(head_res)
+        if rc_head != 0:
+            return False, None
+        head = out_head.decode("ascii", "replace").strip()
+        if head != sha or _SHA.fullmatch(head) is None:
+            return False, None
+
+        status_res = git_runner(["git", "-C", src, "status", "--porcelain"])
+        rc_status, out_status, _ = _normalize_git_result(status_res)
+        if rc_status != 0 or bool(out_status.strip()):
+            return False, None
+
+        tree = _resolve_tree(src, sha, git_runner)
+        return True, tree
+    except (OSError, subprocess.SubprocessError):
+        return False, None
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -306,10 +355,11 @@ def _write_receipt(out_dir, receipt):
     (Path(out_dir) / "receipt.json").write_bytes(raw)
 
 
-def main(argv=None, *, runner=None, clock=None):
+def main(argv=None, *, runner=None, clock=None, git=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     monotonic = time.monotonic if clock is None else clock
     execute_module = run_module if runner is None else runner
+    git_runner = run_git if git is None else git
     try:
         args = _parse_and_validate(argv)
         os.makedirs(args.out, mode=0o700, exist_ok=False)
@@ -349,8 +399,38 @@ def main(argv=None, *, runner=None, clock=None):
         print("SHA_MISMATCH")
         return 41
 
+    verified, tree = _verify_checkout(args.src, args.sha, git_runner)
+    if not verified:
+        ended = _now()
+        elapsed = round(max(0.0, monotonic() - begin), 3)
+        receipt = {
+            "result": "FAIL",
+            "exit_code": 1,
+            "source_sha": args.sha,
+            "tree": None,
+            "fetch_head": args.fetch_head,
+            "modules": args.modules,
+            "identity": {"uid": uid},
+            "started_at": started,
+            "ended_at": ended,
+            "elapsed_s": elapsed,
+            "ran_total": 0,
+            "final": [CHECKOUT_REASON],
+            "failures": [],
+            "log_bytes": 0,
+            "log_sha256": hashlib.sha256(b"").hexdigest(),
+            "remote_log_path": None,
+            "failure_excerpt": CHECKOUT_REASON,
+        }
+        try:
+            _write_receipt(args.out, receipt)
+        except (OSError, ValueError):
+            return 1
+        print(CHECKOUT_REASON)
+        print("FAIL")
+        return 1
+
     deadline = begin + _TOTAL_TIMEOUT
-    tree = _resolve_tree(args.src, args.sha)
     log = b""
     result = "FAIL"
     code = 1
