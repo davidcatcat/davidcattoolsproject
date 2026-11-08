@@ -766,7 +766,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(developer['usage']['served_model'], 'authorized-model')
         self.assertEqual(seen['task']['schema_version'], 1)
         self.assertEqual(seen['task']['goal'], 'goal')
-        self.assertEqual(seen['task']['acceptance'], ['record result'])
+        self.assertEqual(seen['task']['acceptance'], ['record result', task_submission_cli.TEST_DATA_RULE])
         self.assertEqual(seen['task']['data_class'], 'synthetic')
         self.assertEqual(seen['prepared_task']['data_class'], 'synthetic')
         self.assertEqual(seen['prepared_profile']['base_url'],
