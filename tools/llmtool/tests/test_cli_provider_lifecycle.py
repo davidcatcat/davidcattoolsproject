@@ -910,6 +910,9 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
         cases = {
             'live': Mock(returncode=0, stderr='', stdout='123 123 Z\n124 123 S\n'),
             'empty': Mock(returncode=0, stderr='', stdout='77 88 S\n'),
+            'non-decimal-pid': Mock(returncode=0, stderr='', stdout='12a 123 Z\n'),
+            'non-ascii-decimal-pid': Mock(returncode=0, stderr='', stdout='\u0661\u0662\u0663 123 Z\n'),
+            'non-decimal-pgid': Mock(returncode=0, stderr='', stdout='123 12a Z\n'),
             'unknown-member': Mock(returncode=0, stderr='', stdout='123 123 Z\n999 123 Z\n'),
             'unknown-state': Mock(returncode=0, stderr='', stdout='123 123 ?\n'),
             'unknown-flags': Mock(returncode=0, stderr='', stdout='123 123 Z?\n'),
