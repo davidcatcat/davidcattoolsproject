@@ -141,7 +141,9 @@ def _valid_member(member):
             type(member['review_version']) is int and member['review_version'] >= 1 and
             _optional_run_id(member['linux_check_run_id']) and
             _optional_run_id(member['macos_check_run_id']) and
-            _hex(member['remote_test_receipt_digest'], _SHORT_HEX))
+            # None: a docs-only or scripts-only member PR with no EC2 receipt.
+            (member['remote_test_receipt_digest'] is None or
+             _hex(member['remote_test_receipt_digest'], _SHORT_HEX)))
 
 
 def _valid_excluded(item):
