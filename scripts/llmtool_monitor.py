@@ -6657,6 +6657,19 @@ def _remote_test_time(value) -> float:
     return _github_time(re.sub(r"\.\d+Z$", "Z", value))
 
 
+DISPATCH_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z$")
+
+
+def _dispatch_time(value) -> float:
+    if type(value) is not str or not DISPATCH_TIMESTAMP.fullmatch(value):
+        return 0.0
+    try:
+        fmt = "%Y-%m-%dT%H:%M:%S.%fZ" if "." in value else "%Y-%m-%dT%H:%M:%SZ"
+        return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return 0.0
+
+
 CODEX_WORK_BUDGET = 4 << 20
 DISPATCH_BUDGET = 4 << 20
 CODEX_WORK_BEFORE = 5.0
@@ -6945,8 +6958,8 @@ def _remote_test_entries(record) -> tuple:
         if type(sha) is not str or not HEX_SHA.fullmatch(sha):
             continue
         dispatched_at = item.get("dispatched_at")
-        when = _remote_test_time(dispatched_at)
-        if not when:
+        when = _dispatch_time(dispatched_at)
+        if when <= 0:
             continue
         run_id = item.get("run_id")
         if run_id is None:

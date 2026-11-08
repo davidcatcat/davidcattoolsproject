@@ -124,6 +124,50 @@ class TestChatTuiEventsHosted(unittest.TestCase):
             "hosted remote-test dispatch UNKNOWN, run pending, sha UNKNOWN",
         )
 
+    def test_dispatch_entry_with_six_fractional_digits(self):
+        record = {
+            "task_id": "0123456789abcdef0123456789abcdef",
+            "remote_test_dispatches": [
+                {
+                    "state": "DISPATCHED",
+                    "dispatched_at": "2026-11-09T01:00:00.123456Z",
+                    "sha": "b" * 40,
+                }
+            ],
+        }
+        events = task_events(record)
+        test_events = [e for e in events if e.get("kind") == "TEST"]
+        self.assertEqual(len(test_events), 1)
+        self.assertEqual(test_events[0]["time"], "2026-11-09T01:00:00.123456Z")
+        self.assertEqual(
+            test_events[0]["text"],
+            "hosted remote-test dispatch DISPATCHED, run pending, sha bbbbbbbbbbbb",
+        )
+
+    def test_dispatch_entry_rejected_fraction_lengths(self):
+        rejected = [
+            "2026-11-09T01:00:00.1Z",
+            "2026-11-09T01:00:00.1234567Z",
+            "not-a-date",
+            12345,
+            None,
+        ]
+        for bad_at in rejected:
+            with self.subTest(bad_at=bad_at):
+                item = {
+                    "state": "DISPATCHED",
+                    "sha": "b" * 40,
+                }
+                if bad_at is not None:
+                    item["dispatched_at"] = bad_at
+                record = {
+                    "task_id": "0123456789abcdef0123456789abcdef",
+                    "remote_test_dispatches": [item],
+                }
+                events = task_events(record)
+                test_events = [e for e in events if e.get("kind") == "TEST"]
+                self.assertEqual(len(test_events), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

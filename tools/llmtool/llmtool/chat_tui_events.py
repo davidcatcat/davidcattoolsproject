@@ -8,7 +8,23 @@ records missing events is never called. An event Core would record but has not
 yet stored is shown as NOT YET RECORDED and is never presented as stored.
 """
 
+from datetime import datetime, timezone
+import re
+
 from .chat_tui_task import UNKNOWN, value
+
+_DISPATCH_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z$")
+
+
+def _valid_dispatch_timestamp(value) -> bool:
+    if type(value) is not str or not _DISPATCH_TIMESTAMP.fullmatch(value):
+        return False
+    try:
+        fmt = "%Y-%m-%dT%H:%M:%S.%fZ" if "." in value else "%Y-%m-%dT%H:%M:%SZ"
+        datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+        return True
+    except ValueError:
+        return False
 
 RECENT_LIMIT = 100  # Events shown in the cross-Task pane.
 
@@ -113,8 +129,11 @@ def _other_events(record):
                              "remote test outcome " + value(item, "result") + " ("
                              + value(item, "code") + "), sha " + value(item, "sha")[:12]))
     for item in _items(record.get("remote_test_dispatches")):
+        dispatched_at = item.get("dispatched_at")
+        if not _valid_dispatch_timestamp(dispatched_at):
+            continue
         run = value(item, "run_id") if item.get("run_id") is not None else "pending"
-        events.append(_event(_time(item, "dispatched_at"), "TEST",
+        events.append(_event(dispatched_at, "TEST",
                              "hosted remote-test dispatch " + value(item, "state")
                              + ", run " + run
                              + ", sha " + value(item, "sha")[:12]))

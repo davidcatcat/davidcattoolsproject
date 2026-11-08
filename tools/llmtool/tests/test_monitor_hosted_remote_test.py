@@ -114,6 +114,22 @@ class TestMonitorHostedRemoteTest(unittest.TestCase):
         self.assertEqual(entries[0][1], "task 01234567 hosted DISPATCHED run 待定 @ddddddd")
         self.assertEqual(entries[1][1], "task 01234567 hosted RUN_FOUND run 12345 @eeeeeee")
 
+    def test_dispatches_with_six_fractional_digits(self):
+        record = {
+            "task_id": "0123456789abcdef0123456789abcdef",
+            "remote_test_dispatches": [
+                {
+                    "state": "DISPATCHED",
+                    "sha": "d" * 40,
+                    "dispatched_at": "2026-11-09T02:00:00.123456Z",
+                },
+            ],
+        }
+        entries = monitor._remote_test_entries(record)
+        self.assertEqual(len(entries), 1)
+        self.assertAlmostEqual(entries[0][0] % 1, 0.123456, places=5)
+        self.assertEqual(entries[0][1], "task 01234567 hosted DISPATCHED run 待定 @ddddddd")
+
     def test_malformed_dispatch_entries_give_nothing(self):
         malformed_list = [
             None,
@@ -127,6 +143,8 @@ class TestMonitorHostedRemoteTest(unittest.TestCase):
             {"state": "DISPATCHED", "sha": "G" * 40, "dispatched_at": "2026-11-09T02:00:00Z"},
             {"state": "DISPATCHED", "sha": "f" * 40, "dispatched_at": "not-a-date"},
             {"state": "DISPATCHED", "sha": "f" * 40, "dispatched_at": 12345},
+            {"state": "DISPATCHED", "sha": "f" * 40, "dispatched_at": "2026-11-09T02:00:00.1Z"},
+            {"state": "DISPATCHED", "sha": "f" * 40, "dispatched_at": "2026-11-09T02:00:00.1234567Z"},
             {"state": "DISPATCHED", "sha": "f" * 40, "dispatched_at": "2026-11-09T02:00:00Z", "run_id": -1},
             {"state": "DISPATCHED", "sha": "f" * 40, "dispatched_at": "2026-11-09T02:00:00Z", "run_id": 0},
             {"state": "DISPATCHED", "sha": "f" * 40, "dispatched_at": "2026-11-09T02:00:00Z", "run_id": (1 << 53) + 1},
