@@ -32,7 +32,11 @@ ARTIFACT_ID = 404
 
 JOBS_PATH = f'actions/runs/{RUN_ID}/jobs?filter=latest&per_page=100'
 CHECK_PATH = f'check-runs/{CHECK_ID}'
-ARTIFACTS_PATH = f'actions/runs/{RUN_ID}/artifacts?per_page=100'
+def artifacts_page_path(page):
+    return f'actions/runs/{RUN_ID}/artifacts?per_page=100&page={page}'
+
+
+ARTIFACTS_PATH = artifacts_page_path(1)
 ZIP_PATH = f'actions/artifacts/{ARTIFACT_ID}/zip'
 
 
@@ -313,6 +317,121 @@ class HostedArtifactTest(unittest.TestCase):
                                     FakeGet({})))
         self.assertIsNone(self.read(FakeGet({ARTIFACTS_PATH: ['x']}), FakeGet({})))
         self.assertIsNone(self.read(get, FakeGet({ZIP_PATH: LLMToolError('x')})))
+
+
+class HostedArtifactPagingTest(unittest.TestCase):
+    """The exactly-one artifact check covers the whole listing, within a page bound."""
+
+    def setUp(self):
+        self.zipped = make_zip([('receipt.json', receipt_bytes())])
+
+    def others(self, count, start=1000):
+        return [make_artifact(len(self.zipped), id=start + index,
+                              name=f'other-artifact-{index}')
+                for index in range(count)]
+
+    def match(self, **changes):
+        return make_artifact(len(self.zipped), **changes)
+
+    def read(self, pages):
+        get = FakeGet({artifacts_page_path(number): page
+                       for number, page in enumerate(pages, start=1)})
+        get_bytes = FakeGet({ZIP_PATH: self.zipped})
+        raw = remote_test._hosted_artifact(RUN_ID, NONCE, get=get, get_bytes=get_bytes)
+        return raw, get, get_bytes
+
+    def test_page_bound_constants(self):
+        self.assertEqual(remote_test._HOSTED_ARTIFACT_PAGE_SIZE, 100)
+        self.assertEqual(remote_test._HOSTED_ARTIFACT_MAX_PAGES, 3)
+
+    def test_match_on_a_later_page(self):
+        raw, get, get_bytes = self.read([
+            {'total_count': 101, 'artifacts': self.others(100)},
+            {'total_count': 101, 'artifacts': [self.match()]},
+        ])
+        self.assertEqual(raw, receipt_bytes())
+        self.assertEqual(get.calls, [artifacts_page_path(1), artifacts_page_path(2)])
+        self.assertEqual(get_bytes.calls, [ZIP_PATH])
+
+    def test_match_on_the_last_bounded_page(self):
+        raw, get, _ = self.read([
+            {'total_count': 300, 'artifacts': self.others(100)},
+            {'total_count': 300, 'artifacts': self.others(100, start=2000)},
+            {'total_count': 300, 'artifacts': self.others(99, start=3000) + [self.match()]},
+        ])
+        self.assertEqual(raw, receipt_bytes())
+        self.assertEqual(len(get.calls), 3)
+
+    def test_second_match_on_a_later_page(self):
+        raw, get, get_bytes = self.read([
+            {'total_count': 101, 'artifacts': [self.match()] + self.others(99)},
+            {'total_count': 101, 'artifacts': [self.match(id=405)]},
+        ])
+        self.assertIsNone(raw)
+        self.assertEqual(get.calls, [artifacts_page_path(1), artifacts_page_path(2)])
+        self.assertEqual(get_bytes.calls, [])
+
+    def test_listing_larger_than_the_bound(self):
+        raw, get, get_bytes = self.read([
+            {'total_count': 301, 'artifacts': [self.match()] + self.others(99)},
+        ])
+        self.assertIsNone(raw)
+        self.assertEqual(get.calls, [artifacts_page_path(1)])
+        self.assertEqual(get_bytes.calls, [])
+
+    def test_total_count_larger_than_items_seen(self):
+        cases = {
+            'short single page': [{'total_count': 2, 'artifacts': [self.match()]}],
+            'empty further page': [
+                {'total_count': 101, 'artifacts': [self.match()] + self.others(99)},
+                {'total_count': 101, 'artifacts': []}],
+            'short further page': [
+                {'total_count': 150, 'artifacts': [self.match()] + self.others(99)},
+                {'total_count': 150, 'artifacts': self.others(10, start=2000)}],
+        }
+        for name, pages in cases.items():
+            with self.subTest(name):
+                raw, _, get_bytes = self.read(pages)
+                self.assertIsNone(raw)
+                self.assertEqual(get_bytes.calls, [])
+
+    def test_unreadable_further_page(self):
+        cases = {
+            'error': LLMToolError('unreadable'),
+            'not a dict': ['artifacts'],
+            'no artifacts key': {'total_count': 101},
+        }
+        for name, page in cases.items():
+            with self.subTest(name):
+                raw, _, get_bytes = self.read([
+                    {'total_count': 101, 'artifacts': [self.match()] + self.others(99)},
+                    page])
+                self.assertIsNone(raw)
+                self.assertEqual(get_bytes.calls, [])
+        raw, get, _ = self.read([
+            {'total_count': 101, 'artifacts': [self.match()] + self.others(99)}])
+        self.assertIsNone(raw)
+        self.assertEqual(get.calls, [artifacts_page_path(1), artifacts_page_path(2)])
+
+    def test_malformed_page_metadata(self):
+        cases = {
+            'missing total': [{'artifacts': [self.match()]}],
+            'total text': [{'total_count': '1', 'artifacts': [self.match()]}],
+            'total bool': [{'total_count': True, 'artifacts': [self.match()]}],
+            'total negative': [{'total_count': -1, 'artifacts': []}],
+            'total smaller than items': [
+                {'total_count': 1, 'artifacts': [self.match()] + self.others(1)}],
+            'page over size': [
+                {'total_count': 101, 'artifacts': [self.match()] + self.others(100)}],
+            'total changes between pages': [
+                {'total_count': 101, 'artifacts': self.others(100)},
+                {'total_count': 102, 'artifacts': [self.match()]}],
+        }
+        for name, pages in cases.items():
+            with self.subTest(name):
+                raw, _, get_bytes = self.read(pages)
+                self.assertIsNone(raw)
+                self.assertEqual(get_bytes.calls, [])
 
     def test_invalid_arguments_make_no_read(self):
         get, get_bytes = self.fakes()

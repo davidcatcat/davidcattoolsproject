@@ -38,6 +38,8 @@ _HOSTED_TITLE_PREFIX = 'llmtool remote-test '
 _HOSTED_ARTIFACT_PREFIX = 'remote-test-receipt-'
 _HOSTED_ZIP_LIMIT = 65536
 _HOSTED_MEMBER_LIMIT = 32768
+_HOSTED_ARTIFACT_PAGE_SIZE = 100
+_HOSTED_ARTIFACT_MAX_PAGES = 3
 _HOSTED_POST_TIMEOUT = 10
 _HOSTED_POST_OUTPUT_LIMIT = 65536
 _HOSTED_GET_TIMEOUT = 10
@@ -716,6 +718,42 @@ def _receipt_member(raw):
     return data
 
 
+def _hosted_artifact_listing(run_id, get_fn):
+    """Read the run's whole artifact listing within a fixed page bound, or None.
+
+    Fails closed when the listing is larger than the bound, when total_count
+    changes between pages, or when it does not equal the items actually read.
+    """
+    items = []
+    total = None
+    for page in range(1, _HOSTED_ARTIFACT_MAX_PAGES + 1):
+        try:
+            response = get_fn(f'actions/runs/{run_id}/artifacts'
+                              f'?per_page={_HOSTED_ARTIFACT_PAGE_SIZE}&page={page}')
+        except Exception:
+            return None
+        if type(response) is not dict:
+            return None
+        count = response.get('total_count')
+        artifacts = response.get('artifacts')
+        if (type(count) is not int or count < 0 or type(artifacts) is not list or
+                len(artifacts) > _HOSTED_ARTIFACT_PAGE_SIZE or
+                any(type(item) is not dict for item in artifacts)):
+            return None
+        if total is None:
+            if count > _HOSTED_ARTIFACT_PAGE_SIZE * _HOSTED_ARTIFACT_MAX_PAGES:
+                return None
+            total = count
+        elif count != total:
+            return None
+        items.extend(artifacts)
+        if len(items) >= total or len(artifacts) < _HOSTED_ARTIFACT_PAGE_SIZE:
+            break
+    if len(items) != total:
+        return None
+    return items
+
+
 def _hosted_artifact(run_id, nonce, *, get=None, get_bytes=None):
     """Read the run's single receipt artifact in memory; return receipt bytes or None."""
     if (not _positive_int(run_id) or type(nonce) is not str or
@@ -723,12 +761,8 @@ def _hosted_artifact(run_id, nonce, *, get=None, get_bytes=None):
         return None
     get_fn = _github_get if get is None else get
     get_bytes_fn = _hosted_get_bytes if get_bytes is None else get_bytes
-    try:
-        response = get_fn(f'actions/runs/{run_id}/artifacts?per_page=100')
-    except Exception:
-        return None
-    artifacts = response.get('artifacts') if type(response) is dict else None
-    if type(artifacts) is not list or any(type(item) is not dict for item in artifacts):
+    artifacts = _hosted_artifact_listing(run_id, get_fn)
+    if artifacts is None:
         return None
     named = [item for item in artifacts
              if item.get('name') == _HOSTED_ARTIFACT_PREFIX + nonce]
