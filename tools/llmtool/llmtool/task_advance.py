@@ -16,7 +16,7 @@ from pathlib import Path
 from argparse import Namespace
 
 from . import active_pm_inbox, github_events, remote_test, review_dispatch, review_repair
-from . import review_result, task_completion, task_submission_cli
+from . import github_identity, review_result, task_completion, task_submission_cli
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes
 
@@ -669,7 +669,7 @@ def _owner_acceptance_code(url, number, head, github_get):
     """Check one Owner acceptance comment for this PR and head.
 
     Return None when it is valid, else one refusal code. Checks run in order:
-    reference, read, html_url, edited, marker, PR, head, time.
+    reference, read, html_url, edited, author, marker, PR, head, time.
     """
     match = _OWNER_ACCEPTANCE_URL.fullmatch(url) if type(url) is str else None
     if match is None:
@@ -688,10 +688,17 @@ def _owner_acceptance_code(url, number, head, github_get):
             type(comment.get(key)) is not str
             for key in ('body', 'html_url', 'created_at', 'updated_at')):
         return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
+    user = comment.get('user')
+    if type(user) is not dict or type(user.get('login')) is not str:
+        return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
     if comment['html_url'] != url:
         return 'MERGE_OWNER_ACCEPTANCE_REF_INVALID'
     if comment['updated_at'] != comment['created_at']:
         return 'MERGE_OWNER_ACCEPTANCE_EDITED'
+    # Only a person on a configured PM relay posting login counts; never a bot.
+    if (user.get('type') != 'User' or user['login'] not in
+            (github_identity.owner_login(), github_identity.ai_login())):
+        return 'MERGE_OWNER_ACCEPTANCE_AUTHOR'
     body = comment['body']
     first_line = body.split('\n', 1)[0]
     if first_line.endswith('\r'):

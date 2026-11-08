@@ -1,7 +1,8 @@
 """task advance --merge --owner-acceptance URL: a recorded Owner acceptance.
 
-A PM relay ANSWERED comment in this repository that names the exact PR and
-full head SHA, created after the head commit, lets a PR whose files need Owner
+A PM relay ANSWERED comment in this repository, posted by a configured
+github_identity login, that names the exact PR and full head SHA, created
+after the head commit, lets a PR whose files need Owner
 acceptance merge. Every other merge gate stays in place.
 """
 
@@ -33,6 +34,10 @@ COMMIT_TIME = '2026-11-08T09:00:00Z'
 LATER = '2026-11-08T10:00:00Z'
 COMMENT_PATH = f'issues/comments/{COMMENT_ID}'
 COMMIT_PATH = f'commits/{HEAD}'
+# Example logins; the configured github_identity logins are patched to these.
+OWNER_LOGIN = 'example-owner-login'
+AI_LOGIN = 'example-ai-login'
+PERSON = {'login': OWNER_LOGIN, 'type': 'User'}
 
 
 def run(name, conclusion='success'):
@@ -46,10 +51,10 @@ def body(*, pr='#17', head=HEAD, first=MARKER, newline='\n'):
     return f'{first}{newline}Owner accepts PR {pr} at head {head}, relayed by PM.'
 
 
-def comment(text=None, *, created=LATER, updated=None, html_url=URL):
+def comment(text=None, *, created=LATER, updated=None, html_url=URL, user=PERSON):
     return {'id': COMMENT_ID, 'body': body() if text is None else text,
             'html_url': html_url, 'created_at': created,
-            'updated_at': created if updated is None else updated}
+            'updated_at': created if updated is None else updated, 'user': user}
 
 
 def head_commit(*, author=AUTHOR_TIME, committer=COMMIT_TIME):
@@ -98,6 +103,11 @@ class OwnerAcceptanceTestCase(unittest.TestCase):
         slug = patch.object(task_advance.task_completion, '_trusted_slug', return_value=SLUG)
         slug.start()
         self.addCleanup(slug.stop)
+        identity = task_advance.github_identity
+        for name, login in (('owner_login', OWNER_LOGIN), ('ai_login', AI_LOGIN)):
+            login_patch = patch.object(identity, name, return_value=login)
+            login_patch.start()
+            self.addCleanup(login_patch.stop)
 
     def checks(self, owner_acceptance=None, *, allow_missing_macos=False, **fake):
         github_get, reads = fake_github(**fake)
@@ -164,6 +174,10 @@ class AcceptTests(OwnerAcceptanceTestCase):
     def test_pr_and_head_may_sit_next_to_punctuation(self):
         text = f'{MARKER}\nAccepted (#17), head={HEAD}.'
         self.assertIsNone(self.checks(URL, comment_value=comment(text))[0])
+
+    def test_ai_login_is_also_a_relay_login(self):
+        self.assertIsNone(self.checks(URL, comment_value=comment(
+            user={'login': AI_LOGIN, 'type': 'User'}))[0])
 
     def test_fractional_and_offset_utc_times_parse(self):
         self.assertIsNone(self.checks(URL, comment_value=comment(
@@ -245,6 +259,38 @@ class RefusalTests(OwnerAcceptanceTestCase):
         # The marker on line 2 is not accepted.
         self.assert_code('MERGE_OWNER_ACCEPTANCE_MARKER',
                          comment_value=comment('Relayed answer\n' + body()))
+
+    def test_wrong_author(self):
+        users = (
+            {'login': 'someone-else', 'type': 'User'},
+            {'login': OWNER_LOGIN.upper(), 'type': 'User'},
+            {'login': OWNER_LOGIN, 'type': 'Bot'},
+            {'login': AI_LOGIN, 'type': 'Bot'},
+            {'login': OWNER_LOGIN},
+            {'login': ''},
+        )
+        for user in users:
+            with self.subTest(user=user):
+                reads = self.assert_code('MERGE_OWNER_ACCEPTANCE_AUTHOR',
+                                         comment_value=comment(user=user))
+                self.assertNotIn(COMMIT_PATH, reads)
+
+    def test_missing_author_login_is_unavailable(self):
+        for user in (None, {}, {'type': 'User'}, {'login': None, 'type': 'User'},
+                     {'login': 7, 'type': 'User'}, 'example-owner-login'):
+            with self.subTest(user=user):
+                self.assert_code('MERGE_OWNER_ACCEPTANCE_UNAVAILABLE',
+                                 comment_value=comment(user=user))
+        no_user = comment()
+        del no_user['user']
+        self.assert_code('MERGE_OWNER_ACCEPTANCE_UNAVAILABLE', comment_value=no_user)
+
+    def test_author_is_checked_after_edited_and_before_marker(self):
+        bot = {'login': OWNER_LOGIN, 'type': 'Bot'}
+        self.assert_code('MERGE_OWNER_ACCEPTANCE_EDITED', comment_value=comment(
+            user=bot, updated='2026-11-08T11:00:00Z'))
+        self.assert_code('MERGE_OWNER_ACCEPTANCE_AUTHOR', comment_value=comment(
+            body(first='plain text'), user=bot))
 
     def test_comment_not_after_the_head_commit(self):
         for created in (COMMIT_TIME, AUTHOR_TIME, '2026-11-08T08:59:59Z'):
