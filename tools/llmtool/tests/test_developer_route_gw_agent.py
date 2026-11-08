@@ -4,6 +4,8 @@ from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -649,6 +651,217 @@ class GwAgentRouteTests(unittest.TestCase):
                 self.route.collect(temp, {'root': str(self.root),
                                           'task': {'task_id': 'task-001'}})
             self.assertEqual(caught.exception.code, 'GW_AGENT_AUDIT_INVALID')
+
+    # #120 G1a: the gateway session of one D6 is copied from its private
+    # session home into <route tmp>/state for a resume, and back after the
+    # audit check. No gateway runs here; the state files are synthetic.
+    _SESSION = 'c' * 32
+    _STATE = {'meta.json': b'{"schema_version": 1, "note": "synthetic meta"}',
+              'history.json': b'{"schema_version": 1, "note": "synthetic history"}'}
+
+    @staticmethod
+    def _private_dir(path):
+        path = Path(path)
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.chmod(0o700)
+        return path
+
+    @staticmethod
+    def _write_state(directory, payloads):
+        for name, data in payloads.items():
+            path = Path(directory) / name
+            path.write_bytes(data)
+            path.chmod(0o600)
+
+    def _no_credential(self):
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(
+            gw_agent.llm_config, 'resolve_profile_config', return_value={}))
+        stack.enter_context(mock.patch.object(gw_agent.llm_config, 'api_key',
+                                              return_value=None))
+        return stack
+
+    @staticmethod
+    def _foreign_fstat():
+        real_fstat = os.fstat
+
+        def fstat(fd):
+            info = real_fstat(fd)
+            values = list(info[:10])
+            values[4] = info.st_uid + 1
+            return os.stat_result(values)
+        return fstat
+
+    def test_build_argv_runs_without_a_session_and_resumes_the_bound_one(self):
+        request = dict(self.request(), _route_tmpdir='/private/route-tmp')
+        run_argv = self.route.build_argv(sys.executable, request)
+        resume_argv = self.route.build_argv(sys.executable,
+                                            dict(request, session_id=self._SESSION))
+        prefix = [sys.executable, '-B', '-P', '-m', 'api_agent_gateway']
+        self.assertEqual(run_argv[:6], prefix + ['run'])
+        self.assertNotIn('resume', run_argv)
+        self.assertEqual(resume_argv[:7], prefix + ['resume', self._SESSION])
+        # Everything after the command is the same for run and resume.
+        self.assertEqual(resume_argv[7:], run_argv[6:])
+        self.assertEqual(run_argv[run_argv.index('--state-dir') + 1],
+                         str(Path('/private/route-tmp') / 'state'))
+
+    def test_authorization_binds_the_resumed_session_and_null_for_run(self):
+        home = self._private_dir(Path(self.temp.name) / 'session-home')
+        self._write_state(home, self._STATE)
+        resume = dict(self.request(), session_id=self._SESSION, session_home=str(home))
+        for name, request, expected in (('run', self.request(), None),
+                                        ('resume', resume, self._SESSION)):
+            with self.subTest(command=name), tempfile.TemporaryDirectory() as tmpdir, \
+                    self._no_credential():
+                self.route.prepare_files(tmpdir, request)
+                auth = json.loads((Path(tmpdir) / 'authorization.json').read_text())
+                self.assertIn('session_id', auth)
+                self.assertEqual(auth['session_id'], expected)
+                # A run starts with no state; the gateway creates its own.
+                self.assertEqual((Path(tmpdir) / 'state').exists(), expected is not None)
+
+    def test_resume_request_needs_a_gateway_session_and_its_home(self):
+        home = self._private_dir(Path(self.temp.name) / 'session-home')
+        for name, extra in (
+                ('no-home', {'session_id': self._SESSION}),
+                ('relative-home', {'session_id': self._SESSION, 'session_home': 'home'}),
+                ('bad-session', {'session_id': 'not-a-session', 'session_home': str(home)}),
+                ('upper-session', {'session_id': 'C' * 32, 'session_home': str(home)})):
+            with self.subTest(case=name), self.assertRaises(RouteError) as caught:
+                self.route.validate_request(dict(self.request(), **extra))
+            self.assertEqual(caught.exception.code, 'GW_AGENT_SESSION_UNAVAILABLE')
+
+    def test_resume_copies_the_bound_state_into_the_route_tmp_privately(self):
+        home = self._private_dir(Path(self.temp.name) / 'session-home')
+        self._write_state(home, self._STATE)
+        request = dict(self.request(), session_id=self._SESSION, session_home=str(home))
+        with tempfile.TemporaryDirectory() as tmpdir, self._no_credential():
+            self.route.prepare_files(tmpdir, request)
+            state = Path(tmpdir) / 'state'
+            target = state / 'sessions' / self._SESSION
+            for directory in (state, state / 'sessions', target):
+                info = directory.lstat()
+                self.assertTrue(stat.S_ISDIR(info.st_mode))
+                self.assertEqual(stat.S_IMODE(info.st_mode), 0o700)
+            self.assertEqual(sorted(path.name for path in target.iterdir()),
+                             sorted(self._STATE))
+            for name, data in self._STATE.items():
+                self.assertEqual(stat.S_IMODE((target / name).lstat().st_mode), 0o600)
+                self.assertEqual((target / name).read_bytes(), data)
+        # The session home is only read.
+        for name, data in self._STATE.items():
+            self.assertEqual((home / name).read_bytes(), data)
+
+    def test_resume_refuses_a_symlinked_or_foreign_owned_session_source(self):
+        for case in ('symlink', 'foreign-owner', 'missing', 'group-readable'):
+            with self.subTest(source=case), tempfile.TemporaryDirectory() as outer, \
+                    tempfile.TemporaryDirectory() as tmpdir:
+                home = self._private_dir(Path(outer) / 'home')
+                self._write_state(home, {'meta.json': self._STATE['meta.json']})
+                if case == 'symlink':
+                    self._write_state(outer, {'elsewhere.json': self._STATE['history.json']})
+                    (home / 'history.json').symlink_to(Path(outer) / 'elsewhere.json')
+                elif case != 'missing':
+                    self._write_state(home, {'history.json': self._STATE['history.json']})
+                if case == 'group-readable':
+                    (home / 'history.json').chmod(0o640)
+                request = dict(self.request(), session_id=self._SESSION,
+                               session_home=str(home))
+                root = Path(request['root']).resolve(strict=True)
+                with ExitStack() as stack:
+                    if case == 'foreign-owner':
+                        stack.enter_context(mock.patch.object(
+                            gw_agent.os, 'fstat', side_effect=self._foreign_fstat()))
+                    with self.assertRaises(RouteError) as caught:
+                        self.route._copy_state_in(request, root, Path(tmpdir).resolve())
+                self.assertEqual(caught.exception.code, 'GW_AGENT_SESSION_UNAVAILABLE')
+                self.assertFalse((Path(tmpdir) / 'state').exists())
+
+    def _gateway_tmp(self, tmpdir, *, audit_ok=True):
+        """A route tmp as the gateway leaves it: result, audit and session state."""
+        audit_path = Path(tmpdir) / 'audit.jsonl'
+        digest = self._write_valid_audit(audit_path, changed_paths=0)
+        audit_path.chmod(0o600)
+        result = {'schema_version': 1, 'status': 'DONE', 'code': None,
+                  'run_id': 'a' * 24, 'session_id': self._SESSION, 'task_id': 'task-001',
+                  'changed_paths': [], 'summary': 'done', 'served_model': 'fake-model',
+                  'usage': {}, 'turns': 1, 'budget_used': {},
+                  'audit_sha256': digest if audit_ok else '0' * 64}
+        result_path = Path(tmpdir) / 'result.json'
+        self._write_json(result_path, result)
+        result_path.chmod(0o600)
+        state = self._private_dir(Path(tmpdir) / 'state')
+        source = self._private_dir(self._private_dir(state / 'sessions') / self._SESSION)
+        self._write_state(source, self._STATE)
+        return source
+
+    def _collect_request(self, home, session_id=None):
+        return {'root': str(self.root), 'task': {'task_id': 'task-001'},
+                'session_home': str(home), 'session_id': session_id}
+
+    def _forget_audit_copy(self):
+        if self.route.audit_copy_path is not None:
+            shutil.rmtree(Path(self.route.audit_copy_path).parent, ignore_errors=True)
+
+    def test_collect_copies_the_session_state_back_after_the_audit_check(self):
+        self.addCleanup(self._forget_audit_copy)
+        home = self._private_dir(Path(self.temp.name) / 'session-home')
+        for name, session_id in (('run', None), ('resume', self._SESSION)):
+            with self.subTest(command=name), tempfile.TemporaryDirectory() as tmpdir:
+                for path in list(home.iterdir()):
+                    path.unlink()
+                self._gateway_tmp(tmpdir)
+                self.route.collect(tmpdir, self._collect_request(home, session_id))
+                # The audit copy holds the audit only, never the session state.
+                audit_copy = Path(self.route.audit_copy_path).read_text(encoding='utf-8')
+                self.assertNotIn('synthetic history', audit_copy)
+                self._forget_audit_copy()
+                # Only the two gateway Store files, each 0600; no temp names left.
+                self.assertEqual(sorted(path.name for path in home.iterdir()),
+                                 sorted(self._STATE))
+                for state_name, data in self._STATE.items():
+                    self.assertEqual(stat.S_IMODE((home / state_name).lstat().st_mode),
+                                     0o600)
+                    self.assertEqual((home / state_name).read_bytes(), data)
+
+    def test_collect_does_not_copy_state_when_the_audit_check_fails(self):
+        self.addCleanup(self._forget_audit_copy)
+        home = self._private_dir(Path(self.temp.name) / 'session-home')
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._gateway_tmp(tmpdir, audit_ok=False)
+            with self.assertRaises(RouteError) as caught:
+                self.route.collect(tmpdir, self._collect_request(home))
+        self.assertEqual(caught.exception.code, 'GW_AGENT_AUDIT_INVALID')
+        self.assertEqual(list(home.iterdir()), [])
+
+    def test_copy_out_refuses_a_symlinked_or_foreign_owned_source(self):
+        root = self.root.resolve()
+        for case in ('symlink', 'foreign-owner', 'other-session'):
+            with self.subTest(source=case), tempfile.TemporaryDirectory() as outer, \
+                    tempfile.TemporaryDirectory() as tmpdir:
+                home = self._private_dir(Path(outer) / 'home')
+                source = self._gateway_tmp(tmpdir)
+                if case == 'symlink':
+                    (source / 'history.json').unlink()
+                    self._write_state(outer, {'elsewhere.json': self._STATE['history.json']})
+                    (source / 'history.json').symlink_to(Path(outer) / 'elsewhere.json')
+                self.route._result = {'session_id': self._SESSION}
+                requested = 'd' * 32 if case == 'other-session' else None
+                request = self._collect_request(home, requested)
+                with ExitStack() as stack:
+                    if case == 'foreign-owner':
+                        stack.enter_context(mock.patch.object(
+                            gw_agent.os, 'fstat', side_effect=self._foreign_fstat()))
+                    if case == 'other-session':
+                        # A resumed result naming another session stores nothing.
+                        self.assertIsNone(self.route._copy_state_out(tmpdir, request, root))
+                    else:
+                        with self.assertRaises(RouteError) as caught:
+                            self.route._copy_state_out(tmpdir, request, root)
+                        self.assertEqual(caught.exception.code,
+                                         'GW_AGENT_SESSION_PERSIST_FAILED')
+                self.assertEqual(list(home.iterdir()), [])
 
     def test_offline_gateway_subprocess_edits_only_authorized_file(self):
         gateway_tests = Path(self.route.package_path) / 'tests'

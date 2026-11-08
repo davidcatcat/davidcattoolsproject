@@ -255,6 +255,9 @@ def open_session_home(store_root, executor_task_id):
                 os.mkdir(directory, 0o700)
             except FileExistsError:
                 pass
+            else:
+                # Exactly 0700 whatever the umask; an existing dir is only checked.
+                os.chmod(directory, 0o700)
             _check_private_dir(directory)
         if _inside_git_worktree(home):
             raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE')
