@@ -9838,6 +9838,7 @@ class PrBoardTests(unittest.TestCase):
                 path.write_text(json.dumps(contents), encoding="utf-8")
                 path.chmod(0o600)
                 os.utime(path, (NOW + index, NOW + index))
+            move_folder_mtime(root)   # new Task files: the folder is listed again
             results, problem = mon.ec2_head_results(tasks)
             self.assertEqual((results, problem), ({"1234567": "FAIL"}, ""))
             absent = mon.pr_board_rows([self._pull(1)], {}, {}, (results, problem), set(), [])[0]
@@ -9846,6 +9847,7 @@ class PrBoardTests(unittest.TestCase):
             path.write_text("{}", encoding="utf-8")
             path.chmod(0o600)
             os.utime(path, (NOW + 31, NOW + 31))
+            move_folder_mtime(root)   # a new Task file: the folder is listed again
             results, problem = mon.ec2_head_results(tasks)
             expected = "task 僅讀最近 32 筆，未見結果未確認"
             self.assertEqual((results, problem), ({"1234567": "FAIL"}, expected))
@@ -9857,6 +9859,7 @@ class PrBoardTests(unittest.TestCase):
                  "result": "PASS"}]}), encoding="utf-8")
             path.chmod(0o600)
             os.utime(path, (NOW + 32, NOW + 32))
+            move_folder_mtime(root)   # a new Task file: the folder is listed again
             results, problem = mon.ec2_head_results(tasks)
             self.assertEqual((results, problem), ({"abcdef0": "PASS"}, expected))
             known = mon.pr_board_rows([self._pull(1)], {}, {}, (results, problem), set(), [])[0]
@@ -9889,6 +9892,7 @@ class PrBoardTests(unittest.TestCase):
                 path.write_text(json.dumps(record), encoding="utf-8")
                 path.chmod(0o600)
                 os.utime(path, (NOW + index, NOW + index))
+            move_folder_mtime(root)   # new Task files: the folder is listed again
             results, problem = mon.ec2_head_results(tasks)
             self.assertEqual((results, problem), ({"abcdef0": "PASS", "1234567": "FAIL"}, ""))
             timeout = root / "timeout.json"
@@ -9897,6 +9901,7 @@ class PrBoardTests(unittest.TestCase):
                 encoding="utf-8")
             timeout.chmod(0o600)
             os.utime(timeout, (NOW + 4, NOW + 4))
+            move_folder_mtime(root)   # a new Task file: the folder is listed again
             results, problem = mon.ec2_head_results(tasks)
             self.assertEqual((results, problem), ({"abcdef0": "TIMEOUT", "1234567": "FAIL"}, ""))
             mac = self._checks({"mac": ("completed", "success"), "linux": ("completed", "success")})
