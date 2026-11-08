@@ -128,8 +128,6 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
         # exact-head skipped check and cannot enter the merge path.
         if (merge and step == 'WAITING_CI' and
                 'CI_WORKFLOW_JOBS_INVALID' in codes):
-            if attempts >= max_steps:
-                break
             stopped = _quota_stop(task_id, read_quota, last_result, completed)
             if stopped is not None:
                 return stopped
@@ -145,6 +143,8 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
                                     steps=completed + 1)
                     if label_result.get('step') == 'WAITING_CI':
                         completion_mac_label_attempted = True
+            if attempts >= max_steps:
+                break
             pause(next_pause)
             next_pause = min(next_pause * 2, max_pause)
             continue

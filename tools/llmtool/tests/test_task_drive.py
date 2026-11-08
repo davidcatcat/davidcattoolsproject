@@ -648,6 +648,55 @@ class TaskDriveTests(unittest.TestCase):
         self.assertEqual(label_calls, [])
         self.assertEqual(pauses, [])
 
+    def test_ci_workflow_jobs_invalid_label_refusal_on_last_step_is_reported(self):
+        waiting_step = {
+            'task_id': 't',
+            'step': 'WAITING_CI',
+            'codes': ['CI_WORKFLOW_JOBS_INVALID'],
+        }
+        advance, calls = self.adapter([waiting_step])
+        label_calls = []
+        pauses = []
+
+        def label_mac_ci(**kwargs):
+            label_calls.append(kwargs)
+            return {'step': 'MERGE_REFUSED', 'codes': ['MERGE_CHECKS_NOT_GREEN']}
+
+        result = task_drive.drive(
+            task_id='t', merge=True, max_steps=1, poll_seconds=5,
+            advance_call=advance, label_mac_ci_call=label_mac_ci,
+            quota_read=self.quota_ok, sleep=pauses.append)
+
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertEqual(result['codes'], ['MERGE_CHECKS_NOT_GREEN'])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(label_calls), 1)
+        self.assertEqual(pauses, [])
+
+    def test_ci_workflow_jobs_invalid_last_step_labels_then_breaks_without_pause(self):
+        waiting_step = {
+            'task_id': 't',
+            'step': 'WAITING_CI',
+            'codes': ['CI_WORKFLOW_JOBS_INVALID'],
+        }
+        advance, calls = self.adapter([waiting_step])
+        label_calls = []
+        pauses = []
+
+        def label_mac_ci(**kwargs):
+            label_calls.append(kwargs)
+            return {'step': 'WAITING_CI', 'codes': []}
+
+        result = task_drive.drive(
+            task_id='t', merge=True, max_steps=1, poll_seconds=5,
+            advance_call=advance, label_mac_ci_call=label_mac_ci,
+            quota_read=self.quota_ok, sleep=pauses.append)
+
+        self.assertEqual(result['step'], 'MAX_STEPS')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(label_calls), 1)
+        self.assertEqual(pauses, [])
+
     def test_unknown_quota_keeps_polling(self):
         pauses = []
         quota_calls = []
