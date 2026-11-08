@@ -1,6 +1,7 @@
 """One-shot, bounded EC2 test execution for an admitted D6 Task result."""
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -10,9 +11,11 @@ import shutil
 import stat
 import subprocess
 import time
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import github_identity
 from .active_pm_inbox import record_remote_test_event, record_remote_test_outcome_event
 from .errors import LLMToolError
 from .task_completion import _GH_PATH, _github_get, _trusted_slug, read_d6_registration
@@ -30,13 +33,27 @@ _HOSTED_JOB_NAME = 'remote-test'
 _HOSTED_LABELS = ('ubuntu-24.04',)
 _HOSTED_RUNNER_GROUP = 'GitHub Actions'
 _HOSTED_APP_ID = 15368
-_HOSTED_ACTORS = ('davidcatcat', 'ddavidccatssun')
+_HOSTED_ACTORS = (github_identity.owner_login(), github_identity.ai_login())
 _HOSTED_TITLE_PREFIX = 'llmtool remote-test '
 _HOSTED_ARTIFACT_PREFIX = 'remote-test-receipt-'
 _HOSTED_ZIP_LIMIT = 65536
 _HOSTED_MEMBER_LIMIT = 32768
 _HOSTED_POST_TIMEOUT = 10
 _HOSTED_POST_OUTPUT_LIMIT = 65536
+_HOSTED_GET_TIMEOUT = 10
+_HOSTED_ARTIFACT_ZIP_PATH = re.compile(r'actions/artifacts/[0-9]{1,20}/zip\Z')
+_HOSTED_RECEIPT_MEMBER = 'receipt.json'
+_HOSTED_CHECK_RUN_URL = re.compile(
+    r'https://api\.github\.com/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/check-runs/([0-9]{1,20})\Z')
+_HOSTED_PENDING_STATES = frozenset(('queued', 'in_progress', 'waiting', 'requested', 'pending'))
+_HOSTED_INCONCLUSIVE = frozenset((
+    'cancelled', 'skipped', 'neutral', 'stale', 'action_required', 'startup_failure'))
+# A receipt is accepted only when its result agrees with the job conclusion.
+_HOSTED_RECEIPT_RESULTS = {
+    'success': frozenset(('PASS',)),
+    'failure': frozenset(('FAIL', 'SHA_MISMATCH', 'TIMEOUT')),
+    'timed_out': frozenset(('TIMEOUT',)),
+}
 _REMOTE_LIMIT = 32768
 _FAILURE_EXCERPT_LIMIT = 4096
 _FAILURE_EXCERPT_LINES = 40
@@ -544,6 +561,278 @@ def _hosted_find_run(nonce, *, get=None):
     if len(matched) > 1:
         return 'AMBIGUOUS'
     return matched[0]
+
+
+def _hosted_get_bytes(path):
+    """GET one artifact zip through gh; return at most the zip limit plus one byte."""
+    if type(path) is not str or _HOSTED_ARTIFACT_ZIP_PATH.fullmatch(path) is None:
+        raise ValueError('unsupported artifact GET request')
+    limit = _HOSTED_ZIP_LIMIT + 1
+    gh = shutil.which('gh', path=_GH_PATH)
+    if gh is None:
+        raise LLMToolError('GITHUB_ARTIFACT_UNAVAILABLE')
+    slug = _trusted_slug()
+    env = {'PATH': _GH_PATH, 'HOME': os.path.expanduser('~'), 'LC_ALL': 'C',
+           'GH_PROMPT_DISABLED': '1', 'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1'}
+    if os.environ.get('GH_CONFIG_DIR'):
+        env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
+    argv = [gh, 'api', '--method', 'GET',
+            '-H', 'Accept: application/vnd.github+json',
+            '-H', 'X-GitHub-Api-Version: 2022-11-28',
+            'repos/' + slug + '/' + path]
+    try:
+        process = subprocess.Popen(
+            argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, shell=False, close_fds=True,
+            start_new_session=True)
+    except OSError:
+        raise LLMToolError('GITHUB_ARTIFACT_UNAVAILABLE') from None
+    raw = bytearray()
+    oversized = False
+    code = None
+    deadline = time.monotonic() + _HOSTED_GET_TIMEOUT
+    selector = selectors.DefaultSelector()
+    try:
+        os.set_blocking(process.stdout.fileno(), False)
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while selector.get_map() and not oversized:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise LLMToolError('GITHUB_ARTIFACT_UNAVAILABLE')
+            for key, _ in selector.select(min(remaining, .1)):
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                raw.extend(chunk[:limit - len(raw)])
+                if len(raw) >= limit:
+                    # Stop reading; the caller rejects anything over the zip limit.
+                    oversized = True
+                    break
+        if not oversized:
+            code = process.wait(timeout=max(0, deadline - time.monotonic()))
+    except (OSError, subprocess.TimeoutExpired):
+        raise LLMToolError('GITHUB_ARTIFACT_UNAVAILABLE') from None
+    finally:
+        selector.close()
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, 9)
+            except OSError:
+                process.kill()
+            process.wait()
+        process.stdout.close()
+    if not oversized and code != 0:
+        raise LLMToolError('GITHUB_ARTIFACT_UNAVAILABLE')
+    return bytes(raw)
+
+
+def _same_int(value, expected):
+    return type(value) is int and value == expected
+
+
+def _positive_int(value):
+    return type(value) is int and value > 0
+
+
+def _job_check_run_id(job):
+    url = job.get('check_run_url') if type(job) is dict else None
+    match = _HOSTED_CHECK_RUN_URL.fullmatch(url) if type(url) is str else None
+    if match is None:
+        return None
+    value = int(match.group(1))
+    return value if value > 0 else None
+
+
+def _job_runner_trusted(job):
+    return (type(job) is dict and type(job.get('labels')) is list and
+            job['labels'] == list(_HOSTED_LABELS) and
+            job.get('runner_group_name') == _HOSTED_RUNNER_GROUP)
+
+
+def _hosted_job(run, *, get=None):
+    """Return the run's single remote-test job, or a fail-closed refusal code.
+
+    A job that is not yet completed is returned as read; a completed job is
+    returned only when its runner and check run are the GitHub-hosted ones.
+    """
+    run_id = run.get('id') if type(run) is dict else None
+    head_sha = run.get('head_sha') if type(run) is dict else None
+    if (not _positive_int(run_id) or type(head_sha) is not str or
+            _SHA.fullmatch(head_sha) is None):
+        return 'HOSTED_JOB_MISSING'
+    get_fn = _github_get if get is None else get
+    try:
+        response = get_fn(f'actions/runs/{run_id}/jobs?filter=latest&per_page=100')
+    except Exception:
+        return 'HOSTED_JOB_MISSING'
+    jobs = response.get('jobs') if type(response) is dict else None
+    if type(jobs) is not list or any(type(job) is not dict for job in jobs):
+        return 'HOSTED_JOB_MISSING'
+    named = [job for job in jobs if job.get('name') == _HOSTED_JOB_NAME]
+    if (len(named) != 1 or not _same_int(named[0].get('run_id'), run_id) or
+            not _positive_int(named[0].get('id'))):
+        return 'HOSTED_JOB_MISSING'
+    job = named[0]
+    if job.get('status') != 'completed':
+        return job
+    check_run_id = _job_check_run_id(job)
+    if (not _job_runner_trusted(job) or job.get('head_sha') != head_sha or
+            check_run_id is None):
+        return 'HOSTED_RUNNER_UNTRUSTED'
+    try:
+        check_run = get_fn(f'check-runs/{check_run_id}')
+    except Exception:
+        return 'HOSTED_RUNNER_UNTRUSTED'
+    app = check_run.get('app') if type(check_run) is dict else None
+    if (type(app) is not dict or not _same_int(app.get('id'), _HOSTED_APP_ID) or
+            not _same_int(check_run.get('id'), check_run_id) or
+            check_run.get('head_sha') != head_sha):
+        return 'HOSTED_RUNNER_UNTRUSTED'
+    return job
+
+
+def _receipt_member(raw):
+    """Return the single bounded receipt.json member of a zip, or None."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            members = archive.infolist()
+            if len(members) != 1:
+                return None
+            member = members[0]
+            # Unix file-type bits, when present, must say regular file (no symlink).
+            file_type = stat.S_IFMT(member.external_attr >> 16)
+            if (member.filename != _HOSTED_RECEIPT_MEMBER or member.is_dir() or
+                    (file_type and file_type != stat.S_IFREG) or member.flag_bits & 0x1 or
+                    member.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) or
+                    not 0 < member.file_size <= _HOSTED_MEMBER_LIMIT):
+                return None
+            with archive.open(member) as handle:
+                data = handle.read(_HOSTED_MEMBER_LIMIT + 1)
+    except Exception:
+        return None
+    if not data or len(data) > _HOSTED_MEMBER_LIMIT:
+        return None
+    return data
+
+
+def _hosted_artifact(run_id, nonce, *, get=None, get_bytes=None):
+    """Read the run's single receipt artifact in memory; return receipt bytes or None."""
+    if (not _positive_int(run_id) or type(nonce) is not str or
+            _NONCE.fullmatch(nonce) is None):
+        return None
+    get_fn = _github_get if get is None else get
+    get_bytes_fn = _hosted_get_bytes if get_bytes is None else get_bytes
+    try:
+        response = get_fn(f'actions/runs/{run_id}/artifacts?per_page=100')
+    except Exception:
+        return None
+    artifacts = response.get('artifacts') if type(response) is dict else None
+    if type(artifacts) is not list or any(type(item) is not dict for item in artifacts):
+        return None
+    named = [item for item in artifacts
+             if item.get('name') == _HOSTED_ARTIFACT_PREFIX + nonce]
+    if len(named) != 1:
+        return None
+    artifact = named[0]
+    workflow_run = artifact.get('workflow_run')
+    if (not _positive_int(artifact.get('id')) or artifact.get('expired') is not False or
+            type(artifact.get('size_in_bytes')) is not int or
+            not 0 < artifact['size_in_bytes'] <= _HOSTED_ZIP_LIMIT or
+            type(workflow_run) is not dict or
+            not _same_int(workflow_run.get('id'), run_id)):
+        return None
+    try:
+        raw = get_bytes_fn(f'actions/artifacts/{artifact["id"]}/zip')
+    except Exception:
+        return None
+    if type(raw) is not bytes or not raw or len(raw) > _HOSTED_ZIP_LIMIT:
+        return None
+    return _receipt_member(raw)
+
+
+def _hosted_outcome(run, job, raw, *, sha, modules):
+    """Map a hosted run, its job and receipt bytes to a fail-closed result.
+
+    Returns ('RECEIPT', receipt) or ('OUTCOME', result, code).
+    """
+    def outcome(result, code):
+        return ('OUTCOME', result, code)
+
+    if job == 'HOSTED_RUNNER_UNTRUSTED':
+        return outcome('UNKNOWN', 'HOSTED_RUNNER_UNTRUSTED')
+    if type(run) is not dict:
+        return outcome('UNKNOWN', 'HOSTED_RUN_UNKNOWN')
+    status = run.get('status')
+    conclusion = run.get('conclusion')
+    if status in _HOSTED_PENDING_STATES:
+        return outcome('UNAVAILABLE', 'HOSTED_PENDING')
+    if status != 'completed' or type(conclusion) is not str:
+        return outcome('UNKNOWN', 'HOSTED_RUN_UNKNOWN')
+    if conclusion in _HOSTED_INCONCLUSIVE:
+        return outcome('UNKNOWN', 'HOSTED_RUN_' + conclusion.upper())
+    if conclusion not in _HOSTED_RECEIPT_RESULTS:
+        return outcome('UNKNOWN', 'HOSTED_RUN_UNKNOWN')
+    if type(job) is not dict or job.get('status') != 'completed':
+        return outcome('UNKNOWN', 'HOSTED_RUN_UNKNOWN')
+    if not _job_runner_trusted(job):
+        return outcome('UNKNOWN', 'HOSTED_RUNNER_UNTRUSTED')
+    job_conclusion = job.get('conclusion')
+    receipt = (_validate_remote_receipt(raw, sha=sha, modules=modules)
+               if type(raw) is bytes else None)
+    if receipt is None:
+        if conclusion == 'timed_out':
+            return outcome('TIMEOUT', 'HOSTED_TIMEOUT')
+        return outcome('UNKNOWN', 'RECEIPT_INVALID')
+    if job_conclusion not in _HOSTED_RECEIPT_RESULTS:
+        return outcome('UNKNOWN', 'HOSTED_RUN_UNKNOWN')
+    if (receipt['result'] not in _HOSTED_RECEIPT_RESULTS[conclusion] or
+            receipt['result'] not in _HOSTED_RECEIPT_RESULTS[job_conclusion]):
+        return outcome('UNKNOWN', 'RECEIPT_CONFLICT')
+    return ('RECEIPT', receipt)
+
+
+def _hosted_actions_block(run, job, nonce):
+    """Return the type-checked Actions provenance for a hosted receipt, or None."""
+    if type(run) is not dict or type(job) is not dict:
+        return None
+    run_id = run.get('id')
+    run_attempt = run.get('run_attempt')
+    job_id = job.get('id')
+    check_run_id = _job_check_run_id(job)
+    workflow_path = run.get('path')
+    workflow_sha = run.get('head_sha')
+    labels = job.get('labels')
+    runner_group = job.get('runner_group_name')
+    if (not _positive_int(run_id) or not _positive_int(run_attempt) or
+            not _positive_int(job_id) or not _same_int(job.get('run_id'), run_id) or
+            check_run_id is None or
+            type(workflow_path) is not str or not workflow_path or
+            type(workflow_sha) is not str or _SHA.fullmatch(workflow_sha) is None or
+            type(labels) is not list or not labels or
+            any(type(label) is not str or not label for label in labels) or
+            type(runner_group) is not str or not runner_group or
+            type(nonce) is not str or _NONCE.fullmatch(nonce) is None):
+        return None
+    return {'run_id': run_id, 'run_attempt': run_attempt, 'job_id': job_id,
+            'check_run_id': check_run_id, 'workflow_path': workflow_path,
+            'workflow_sha': workflow_sha, 'labels': list(labels),
+            'runner_group': runner_group, 'nonce': nonce}
+
+
+def _hosted_command_digest(*, workflow_path, workflow_sha, sha, ref, modules, nonce):
+    """SHA-256 of compact sorted JSON of the workflow identity and its four inputs."""
+    if (any(type(value) is not str for value in (workflow_path, workflow_sha, sha, ref, nonce)) or
+            type(modules) not in (tuple, list) or
+            any(type(mod) is not str for mod in modules)):
+        raise ValueError('invalid hosted command digest parameters')
+    value = {
+        'workflow_path': workflow_path,
+        'workflow_sha': workflow_sha,
+        'inputs': {'sha': sha, 'ref': ref, 'modules': ' '.join(modules), 'nonce': nonce},
+    }
+    return hashlib.sha256(
+        json.dumps(value, separators=(',', ':'), sort_keys=True).encode()).hexdigest()
 
 
 def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
