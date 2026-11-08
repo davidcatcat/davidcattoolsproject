@@ -50,7 +50,7 @@ READY FOR COORDINATOR TRIAGE: YES
 - macOS 15.7.9（24G830），x86_64。
 - Python：3.13.3（`tools/llmtool/.venv`，主要的 runtime）、3.9.6（`/usr/bin/python3`）。3.14 只透過 CI 驗證。
 - PyYAML 6.0.x。
-- 公司 gateway `http://10.29.7.58:4000`：可連線（HTTP 200）。
+- 公司 gateway `http://home-llm.example:8000`：可連線（HTTP 200）。
 - 真實的 claude CLI 2.1.289、codex-cli 0.159.2：使用者既有的登入可以使用。
 - 每個 case 都在 scratchpad 內各自用 `mktemp -d` 建立、以 scratchpad 為工作目錄執行，使用 `env -i`、獨立的 `HOME` 和 `LLMTOOL_HOME`。
 

@@ -172,7 +172,7 @@ Use isolated temporary HOME/config.
 
 Required company profile exactly as preregistered:
 - openai-compatible
-- base_url `http://10.29.7.58:4000`
+- base_url `http://home-llm.example:8000`
 - model `gw`
 - timeout 120
 - null key/key-env

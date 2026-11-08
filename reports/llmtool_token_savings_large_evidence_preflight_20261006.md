@@ -128,7 +128,7 @@ active_provider: company-preflight
 providers:
   company-preflight:
     type: openai-compatible
-    base_url: http://10.29.7.58:4000
+    base_url: http://home-llm.example:8000
     model: gw
     timeout_seconds: 120
     api_key: null

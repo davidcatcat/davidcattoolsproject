@@ -17,7 +17,7 @@
   - 在**整個 process 層級封鎖網路**的條件下（scratchpad 中的 `sitecustomize`，讓所有 socket 連線直接 raise），重跑兩個 suite；
   - 用一個**獨立的 probe script**（只放在 scratchpad），重現 B1 原本的繞過方式，並對照新的 sealed path。
 - **沒有做的事：**
-  - 沒有連線到 `10.29.7.58:4000`；
+  - 沒有連線到 `home-llm.example:8000`；
   - 沒有呼叫 company 或 Codex；
   - 沒有修改 wrapper、test、manifest 或 production；
   - 沒有 merge。

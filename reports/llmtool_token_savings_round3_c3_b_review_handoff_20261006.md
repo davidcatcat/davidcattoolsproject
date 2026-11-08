@@ -90,7 +90,7 @@ Verify the freeze path really executes:
 - zero socket/DNS/connection calls.
 
 Verify Request shape:
-- endpoint exactly `http://10.29.7.58:4000/v1/chat/completions`;
+- endpoint exactly `http://home-llm.example:8000/v1/chat/completions`;
 - POST;
 - no Authorization;
 - allowed top-level fields exactly:

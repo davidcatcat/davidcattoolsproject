@@ -56,7 +56,7 @@ active_provider: company-round3-phase0
 providers:
   company-round3-phase0:
     type: openai-compatible
-    base_url: http://10.29.7.58:4000
+    base_url: http://home-llm.example:8000
     model: gw
     timeout_seconds: 120
     api_key: null
@@ -240,7 +240,7 @@ The body must prove:
 - max_tokens integer 4096 but not bool;
 - chat_template_kwargs exactly `{"enable_thinking": false}`;
 - no Authorization header;
-- URL exactly `http://10.29.7.58:4000/v1/chat/completions`;
+- URL exactly `http://home-llm.example:8000/v1/chat/completions`;
 - method POST.
 
 The frozen whole-request-body SHA-256 from this dry-run becomes the live admission

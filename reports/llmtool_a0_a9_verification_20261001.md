@@ -18,7 +18,7 @@
 - 安全邊界：
   - CLI 一律以 `env -i HOME=<暫存目錄> PATH=/usr/bin:/bin` 執行，所有檔案都放在 scratchpad 的暫存目錄。
   - 沒有讀取真實的 `~/.config/llmtool`、憑證、keychain、`.env` 或 SSH key。
-  - **唯一呼叫的網路服務是公司 gateway**（`http://10.29.7.58:4000`，route `gw`，模型回報為 `qwen3.6-35b-a3b`，openai-compatible，`enable_thinking: false`，不需要 API key）。
+  - **唯一呼叫的網路服務是公司 gateway**（`http://home-llm.example:8000`，route `gw`，模型回報為 `qwen3.6-35b-a3b`，openai-compatible，`enable_thinking: false`，不需要 API key）。
   - 真的 Claude CLI、Codex CLI 與 OpenAI API 會使用個人帳號，所以**沒有呼叫**，只用假的執行檔和 `127.0.0.1` 上的 stub server 驗證。
 - 清理：三個 worktree 的 `git status --short` 都是空的。啟動過的 stub server 都已停止，沒有刪除任何檔案。
 

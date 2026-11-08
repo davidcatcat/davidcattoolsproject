@@ -18,7 +18,7 @@
   - **在整個 process 層級封鎖網路**：用 scratchpad 中的 `sitecustomize`，讓 `socket.connect`、`create_connection`、`getaddrinfo` 都直接 raise。在這個條件下，重跑了兩個 test suite。
   - 用一個獨立的 probe script（只放在 scratchpad），重現 digest、manifest pin、gold 隔離、CE10 和 usage 的檢查。
 - **沒有做的事：**
-  - 沒有連線到 `10.29.7.58:4000`；
+  - 沒有連線到 `home-llm.example:8000`；
   - 沒有呼叫 company 或 Codex；
   - 沒有修改 wrapper、test、instructions、preregistration 或 production；
   - 沒有 merge。
@@ -71,7 +71,7 @@
 
   `offline_guard` 另外把 `socket.socket`、`create_connection`、`getaddrinfo`、`subprocess.Popen`、`OpenerDirector.open` 都換成 fail-closed。
 - **我重現的實際 Request（L03）：**
-  - `POST http://10.29.7.58:4000/v1/chat/completions`；
+  - `POST http://home-llm.example:8000/v1/chat/completions`；
   - 沒有 Authorization；
   - `timeout` 是 120.0；
   - body 的欄位**完全等於** `{chat_template_kwargs, max_tokens, messages, model, temperature}`；

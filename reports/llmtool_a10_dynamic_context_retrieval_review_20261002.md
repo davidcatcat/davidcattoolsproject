@@ -11,7 +11,7 @@
   - **唯讀**，在 canonical repo `/Users/davidsun/git/davidcataiporject/davidcattoolsproject` 進行。canonical repo 當時就 checkout 在這個分支，review 時沒有切換分支，也沒有使用 worktree、clone 或專案副本。
   - Lead 逐行閱讀 `retrieval.py`、`retrieval_files.py`、`retrieval_cli.py`。
   - CLI 以 `env -i HOME=<暫存目錄>` 執行，暫存設定只有一個公司 gateway profile `company`，planner 與 synthesizer 都使用它。
-  - 唯一的網路服務是公司 gateway（`http://10.29.7.58:4000`，route `gw`，`enable_thinking: false`），共呼叫 14 次。
+  - 唯一的網路服務是公司 gateway（`http://home-llm.example:8000`，route `gw`，`enable_thinking: false`），共呼叫 14 次。
   - 實測對象是 llmtool 自己的原始碼與 `reports/`（唯讀），以及 scratchpad 裡的合成 fixture。
 
 ## 結論：APPROVE WITH CHANGES

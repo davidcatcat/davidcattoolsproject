@@ -24,7 +24,7 @@ This was a read-only network check. No repository files, DNS, routes, VPN, proxy
 The VPN appears to be split-tunnel.
 
 - The default route uses `en0`, gateway 192.168.1.1.
-- The route to `10.29.7.58` uses the VPN interface `utun4`, gateway 10.123.144.1.
+- The route to `home-llm.example` uses the VPN interface `utun4`, gateway 192.0.2.1.
 
 ## Notes
 

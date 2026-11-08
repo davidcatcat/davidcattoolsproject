@@ -67,7 +67,7 @@ Exactly the reviewed Round-2 company path:
 - llmtool only;
 - isolated temporary HOME;
 - openai-compatible;
-- base_url `http://10.29.7.58:4000`;
+- base_url `http://home-llm.example:8000`;
 - requested model `gw`;
 - timeout 120;
 - null api_key/api_key_env;

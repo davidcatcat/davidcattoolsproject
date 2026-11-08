@@ -350,7 +350,7 @@ Mac live verification.
 
 ### Required company verification and LLMTOOL_HOME
 
-Expected existing profile: openai-compatible / `http://10.29.7.58:4000` / `gw`.
+Expected existing profile: openai-compatible / `http://home-llm.example:8000` / `gw`.
 These are the requested target endpoint/model, not a claim that the profile exists.
 Both the trusted-user view and current runtime redacted config show only active
 default, type openai-compatible, base_url=null and model=null. Matching profile:
@@ -424,9 +424,9 @@ runtime target without modifying user configuration.
 - Preflight tracked tree clean; unrelated benchmark/reasoning artifacts preserved.
 - Successful fetch: origin/main `b719aadd99948596b683292ee0e37756406f48f7`;
   preflight HEAD/main ahead 4 / behind 0, HEAD/upstream ahead 0 / behind 0.
-- Company VPN enabled by user. Actual route to `10.29.7.58` selects `utun4`,
-  gateway `10.123.144.1`; route query is read-only, no VPN/route modification.
-- Provider type `openai-compatible`, endpoint `http://10.29.7.58:4000`, requested
+- Company VPN enabled by user. Actual route to `home-llm.example` selects `utun4`,
+  gateway `192.0.2.1`; route query is read-only, no VPN/route modification.
+- Provider type `openai-compatible`, endpoint `http://home-llm.example:8000`, requested
   model alias `gw`. No persisted profile was created or active profile changed.
 
 ### Commands and live evidence
@@ -436,16 +436,16 @@ All requests use the same synthetic input and a 20-second timeout:
 ```sh
 tools/llmtool/.venv/bin/llmtool ask \
   'Reply with exactly: A11A3_COMPANY_LIVE_OK' \
-  --base-url http://10.29.7.58:4000 --model gw --timeout 20
+  --base-url http://home-llm.example:8000 --model gw --timeout 20
 
 tools/llmtool/.venv/bin/llmtool ask \
   'Reply with exactly: A11A3_COMPANY_LIVE_OK' \
-  --base-url http://10.29.7.58:4000 --model gw --timeout 20 --verbose
+  --base-url http://home-llm.example:8000 --model gw --timeout 20 --verbose
 
 LLMTOOL_HOME=/private/tmp/llmtool-a11a3-live-home-4aaf80975ad44d52afde482b9579fe04 \
 tools/llmtool/.venv/bin/llmtool ask \
   'Reply with exactly: A11A3_COMPANY_LIVE_OK' \
-  --base-url http://10.29.7.58:4000 --model gw --timeout 20 --debug
+  --base-url http://home-llm.example:8000 --model gw --timeout 20 --debug
 ```
 
 The commands were launched once each by a temporary capture helper from canonical

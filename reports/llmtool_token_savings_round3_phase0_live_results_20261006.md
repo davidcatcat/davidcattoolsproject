@@ -47,7 +47,7 @@ L03-1 proves target recall was below 7/7; the exact recall numerator is not avai
 
 Every emitted request proof recorded model `gw`, temperature `0`, max_tokens `4096`, enable_thinking `false`, Authorization absent, and observer_changed_request `false`. The reviewed admission path verified the pinned body/user-message identity, exact field set, POST method, and endpoint before delegation.
 
-Endpoint: `http://10.29.7.58:4000/v1/chat/completions`. Each invocation used the frozen isolated temporary HOME/config; real user config was not modified.
+Endpoint: `http://home-llm.example:8000/v1/chat/completions`. Each invocation used the frozen isolated temporary HOME/config; real user config was not modified.
 
 ### L02-1
 

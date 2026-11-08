@@ -191,7 +191,7 @@ originates from installed target package bytes, not source checkout; 45/45 PASS.
 ## Initial implementation company-gateway smoke (historical)
 
 Gateway already reachable without credential/VPN/login changes:
-http://10.29.7.58:4000, route/model gw, enable_thinking=false.
+http://home-llm.example:8000, route/model gw, enable_thinking=false.
 Test helper launched from canonical repository, importing canonical A10 source;
 isolated temporary HOME/config and synthetic evidence directory only. No real user
 config/auth files, project source or personal Claude/Codex/OpenAI were used.
@@ -323,7 +323,7 @@ test still checks its defense even though internal manifests now exclude oversiz
 Eight new regression tests cover A/B/C/F/G; no old tests were weakened to hide a failure.
 
 Live follow-up used isolated temporary HOME/config and synthetic files only,
-company http://10.29.7.58:4000 route gw, enable_thinking=false, no credentials or
+company http://home-llm.example:8000 route gw, enable_thinking=false, no credentials or
 VPN/login changes. Three cases, FOUR total model requests (not fourteen), no retries:
 
 | Case | Manifest / selected | Provider calls | rc / stdout bytes | Result |
@@ -403,7 +403,7 @@ Claude re-review remain pending; no final-head remote CI result claimed.
 Validated the real canonical-source `llmtool retrieve-context` CLI/runtime on
 `feat/a10-dynamic-context-retrieval` at
 `660e389e3707bcd4e480755728cf32112afa55b0`. Company VPN gateway
-`http://10.29.7.58:4000` was reachable. Requests used the persisted isolated
+`http://home-llm.example:8000` was reachable. Requests used the persisted isolated
 `company` openai-compatible profile, model `gw`, and
 `provider_options: {enable_thinking: false}`. No API key or Authorization header
 was used. Temporary HOME/config and synthetic evidence were created under a

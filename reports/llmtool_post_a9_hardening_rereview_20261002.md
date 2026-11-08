@@ -9,7 +9,7 @@
 - 方式：
   - **唯讀**，在 canonical repo `/Users/davidsun/git/davidcataiporject/davidcattoolsproject` 進行。canonical repo 當時就 checkout 在這個分支，review 時沒有切換分支，也沒有使用 worktree、clone 或專案副本。
   - CLI 一律以 `env -i HOME=<暫存目錄>` 執行，沒有讀取真實的憑證或設定。
-  - 唯一的網路服務是公司 gateway（`http://10.29.7.58:4000`，route `gw`，`enable_thinking: false`），共呼叫 10 次。
+  - 唯一的網路服務是公司 gateway（`http://home-llm.example:8000`，route `gw`，`enable_thinking: false`），共呼叫 10 次。
 
 ## 結論：APPROVE（可以 merge），並建議 1 項 follow-up
 
