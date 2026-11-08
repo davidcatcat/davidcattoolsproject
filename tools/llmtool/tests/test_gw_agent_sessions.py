@@ -36,6 +36,7 @@ CLOSED = {'task_id': 'root-closed', 'completion_events': [
     {'source': 'GITHUB', 'marker_type': 'merge', 'marker_status': 'MERGED'}]}
 ABANDONED = {'task_id': 'root-abandoned', 'abandonment': {'reason': 'synthetic'}}
 OPEN = {'task_id': 'root-open', 'state': 'PM_PENDING'}
+MISSING = object()  # make_home: leave session_id out of binding.json
 
 
 class FakeStore:
@@ -83,14 +84,17 @@ class SweepTests(unittest.TestCase):
                         'root-open': OPEN}
         self.store = FakeStore(self.root, self.records)
 
-    def make_home(self, executor, root_task, *, age=None, binding=True, history=True):
+    def make_home(self, executor, root_task, *, age=None, binding=True, history=True,
+                  session_id=SESSION):
         home = self.base / executor
         home.mkdir(mode=0o700)
         if binding:
-            self.write(home / 'binding.json', json.dumps({
-                'schema_version': 1, 'root_task_id': root_task,
-                'executor_task_id': executor, 'session_id': SESSION,
-                'data_class': 'synthetic', 'scope_digest': DIGEST}))
+            value = {'schema_version': 1, 'root_task_id': root_task,
+                     'executor_task_id': executor, 'session_id': session_id,
+                     'data_class': 'synthetic', 'scope_digest': DIGEST}
+            if session_id is MISSING:
+                del value['session_id']
+            self.write(home / 'binding.json', json.dumps(value))
         self.write(home / 'lock', '')
         session = home / 'sessions' / SESSION
         session.mkdir(mode=0o700, parents=True)
@@ -216,6 +220,35 @@ class SweepTests(unittest.TestCase):
                                     'outcome': gw_agent_sessions.SKIPPED_OPEN}])
         self.assertTrue(home.is_dir())
 
+    def test_terminal_task_with_null_session_id_is_an_orphan_never_ended_early(self):
+        young = self.make_home('executor-null-young', 'root-closed', session_id=None,
+                               age=DAY)
+        old = self.make_home('executor-null-old', 'root-closed', session_id=None,
+                             age=8 * DAY)
+        results, runner = self.sweep()
+        outcomes = {item['executor_task_id']: item['outcome'] for item in results}
+        self.assertEqual(outcomes, {
+            'executor-null-young': gw_agent_sessions.SKIPPED_OPEN,
+            'executor-null-old': gw_agent_sessions.ORPHAN_REMOVED})
+        self.assertEqual(runner.calls, [])
+        self.assertTrue((young / 'sessions' / SESSION / 'history.json').is_file())
+        self.assertFalse(os.path.lexists(old))
+
+    def test_missing_or_malformed_session_id_is_an_orphan(self):
+        for index, session_id in enumerate((MISSING, '', 'not-a-session-id',
+                                            SESSION.upper(), SESSION + '0', 42)):
+            with self.subTest(index=index):
+                executor = f'executor-bad-session-{index}'
+                home = self.make_home(executor, 'root-closed', session_id=session_id,
+                                      age=DAY)
+                results, runner = self.sweep()
+                self.assertIn({'executor_task_id': executor,
+                               'outcome': gw_agent_sessions.SKIPPED_OPEN}, results)
+                self.assertNotIn(gw_agent_sessions.ENDED,
+                                 [item['outcome'] for item in results])
+                self.assertEqual(runner.calls, [])
+                self.assertTrue(home.is_dir())
+
     def test_unknown_task_list_never_makes_a_bound_home_an_orphan(self):
         class NoListStore(FakeStore):
             def task_ids(self):
@@ -322,14 +355,33 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(runner.calls, [])
 
     def test_gateway_env_holds_no_credential(self):
-        self.make_home('executor-closed', 'root-closed')
-        with patch.dict(os.environ, {'LLMTOOL_SWEEP_SYNTHETIC_MARKER': 'marker'}):
-            _, runner = self.sweep()
-        env = runner.calls[0]['env']
-        self.assertLessEqual(set(env), {'PATH', 'HOME', 'LANG', 'PYTHONPATH'})
-        self.assertEqual(env['PYTHONPATH'], str(self.package))
-        self.assertNotIn('LLMTOOL_SWEEP_SYNTHETIC_MARKER', env)
-        self.assertNotIn('GW_AGENT_API_KEY', env)
+        # The parent environment is replaced: the full one, then one without HOME
+        # and LANG. Both must give exactly the four keys and no credential variable.
+        environments = (
+            {'PATH': '/usr/bin:/bin', 'HOME': str(self.tmp), 'LANG': 'C',
+             'LLMTOOL_SWEEP_SYNTHETIC_MARKER': 'marker'},
+            {'PATH': '/usr/bin:/bin', 'LLMTOOL_SWEEP_SYNTHETIC_MARKER': 'marker'},
+        )
+        for index, environment in enumerate(environments):
+            with self.subTest(index=index):
+                self.make_home(f'executor-closed-{index}', 'root-closed')
+                with patch.dict(os.environ, environment, clear=True):
+                    _, runner = self.sweep()
+                self.assertEqual(len(runner.calls), 1)
+                env = runner.calls[0]['env']
+                self.assertEqual(set(env), {'PATH', 'HOME', 'LANG', 'PYTHONPATH'})
+                self.assertEqual(env['PYTHONPATH'], str(self.package))
+                self.assertEqual(env['PATH'], '/usr/bin:/bin')
+                self.assertTrue(os.path.isabs(env['HOME']))
+                self.assertTrue(env['LANG'])
+                self.assertNotIn('LLMTOOL_SWEEP_SYNTHETIC_MARKER', env)
+                self.assertNotIn('GW_AGENT_API_KEY', env)
+                for key in env:
+                    for word in ('KEY', 'TOKEN', 'SECRET', 'PASSWORD', 'CREDENTIAL', 'AUTH'):
+                        self.assertNotIn(word, key.upper())
+                if 'HOME' in environment:
+                    self.assertEqual(env['HOME'], str(self.tmp))
+                    self.assertEqual(env['LANG'], 'C')
 
     def test_results_hold_no_session_content(self):
         self.make_home('executor-closed', 'root-closed')

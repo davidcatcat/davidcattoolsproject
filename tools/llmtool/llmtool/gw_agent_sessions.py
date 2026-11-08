@@ -141,7 +141,8 @@ def _sweep_home(store, base, base_fd, name, now, task_ids, runner, package_path,
         if lock_fd is None:
             return SKIPPED_LOCKED, package
         try:
-            session_id = binding.get('session_id') if binding is not None else None
+            # A valid binding always holds a valid session_id; an invalid one is None.
+            session_id = binding['session_id'] if binding is not None else None
             ended = True
             if state == 'ENDED' and session_id is not None:
                 if package is _UNRESOLVED:
@@ -201,13 +202,14 @@ def _read_binding(home_fd, name):
         return None
     if type(value) is not dict:
         return None
-    session_id = value.get('session_id')
+    # A missing, null or malformed session_id makes the binding invalid, so the
+    # home is an orphan: removed only after the TTL and never ended early.
     if (type(value.get('schema_version')) is not int or value['schema_version'] != 1 or
             type(value.get('root_task_id')) is not str or
             _TASK_ID.fullmatch(value['root_task_id']) is None or
             value.get('executor_task_id') != name or
-            (session_id is not None and
-             (type(session_id) is not str or _SESSION_ID.fullmatch(session_id) is None)) or
+            type(value.get('session_id')) is not str or
+            _SESSION_ID.fullmatch(value['session_id']) is None or
             type(value.get('data_class')) is not str or not value['data_class'] or
             type(value.get('scope_digest')) is not str or
             _DIGEST.fullmatch(value['scope_digest']) is None):
@@ -355,15 +357,35 @@ def _gateway_package(package_path=None):
 
 
 def gateway_env(package):
-    """The gateway end environment: PATH, HOME, LANG and the package path only.
+    """The gateway end environment: exactly PATH, HOME, LANG and PYTHONPATH.
 
-    PYTHONPATH names the configured package so ``python -P -m`` can import it;
-    it is a directory path, never a credential.
+    PATH, HOME and LANG come from this process, with a fixed default when one is
+    unset, so the key set never changes. PYTHONPATH names the configured package
+    so ``python -P -m`` can import it; it is a directory path, never a credential.
+    Nothing else from this process's environment is passed on.
     """
-    env = {key: os.environ[key] for key in _GATEWAY_ENV_KEYS if key in os.environ}
-    env.setdefault('PATH', '/usr/bin:/bin')
+    env = {}
+    for key in _GATEWAY_ENV_KEYS:
+        value = os.environ.get(key)
+        if type(value) is not str or not value or '\x00' in value:
+            value = _gateway_env_default(key)
+        env[key] = value
     env['PYTHONPATH'] = package
     return env
+
+
+def _gateway_env_default(key):
+    if key == 'PATH':
+        return '/usr/bin:/bin'
+    if key == 'LANG':
+        return 'C'
+    try:
+        home = os.path.expanduser('~')
+    except Exception:
+        home = None
+    if type(home) is str and os.path.isabs(home) and '\x00' not in home:
+        return home
+    return '/'
 
 
 def _end_session(home, session_id, package, runner):
