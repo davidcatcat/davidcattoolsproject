@@ -212,7 +212,8 @@ class PMCallerDriveTests(unittest.TestCase):
         with _environment(claude=OWNER), redirect_stdout(output):
             code = task_submission_cli.run_task_drive(
                 args, store=store, sleep=lambda _seconds: None,
-                advance_call=advance, label_mac_ci_call=label)
+                advance_call=advance, label_mac_ci_call=label,
+                quota_read=lambda: None)
         lines = output.getvalue().splitlines()
         self.assertEqual(len(lines), 1)
         return code, json.loads(lines[0])

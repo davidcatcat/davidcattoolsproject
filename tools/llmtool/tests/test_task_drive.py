@@ -103,9 +103,10 @@ class TaskDriveTests(unittest.TestCase):
             {'task_id': 't', 'step': 'REFUSED', 'codes': ['PUBLISH_REFUSED']},
         ])
         result = task_drive.drive(task_id='t', poll_seconds=1,
-                                  advance_call=advance, sleep=pauses.append)
+                                  advance_call=advance, quota_read=self.quota_ok,
+                                  sleep=pauses.append)
         self.assertEqual(result['step'], 'REFUSED')
-        self.assertEqual(pauses, [1, 1])
+        self.assertEqual(pauses, [1, 2])
 
     def test_pending_review_not_ready_waits_without_counting_a_workflow_step(self):
         pauses = []
@@ -119,7 +120,8 @@ class TaskDriveTests(unittest.TestCase):
              'codes': ['WAITING_INTEGRATION']},
         ])
         result = task_drive.drive(task_id='t', poll_seconds=0.25,
-                                  advance_call=advance, sleep=pauses.append)
+                                  advance_call=advance, quota_read=self.quota_ok,
+                                  sleep=pauses.append)
         self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
         self.assertEqual(result['steps'], 3)
         self.assertEqual(len(calls), 4)
@@ -161,7 +163,7 @@ class TaskDriveTests(unittest.TestCase):
 
         result = task_drive.drive(task_id='t', merge=True, max_steps=5,
                                   poll_seconds=0.25, advance_call=advance,
-                                  sleep=pauses.append)
+                                  quota_read=self.quota_ok, sleep=pauses.append)
 
         self.assertEqual(result['step'], 'MERGE_REFUSED')
         self.assertEqual(result['codes'], ['MERGE_CHECKS_NOT_GREEN'])
@@ -192,6 +194,7 @@ class TaskDriveTests(unittest.TestCase):
 
         result = task_drive.drive(task_id='t', merge=True, max_steps=4,
                                   advance_call=advance, label_mac_ci_call=label_mac_ci,
+                                  quota_read=self.quota_ok,
                                   sleep=lambda _seconds: None)
 
         self.assertEqual(result['step'], 'MERGE_REFUSED')
@@ -226,6 +229,7 @@ class TaskDriveTests(unittest.TestCase):
 
         result = task_drive.drive(task_id='t', merge=True, max_steps=4,
                                   advance_call=advance, label_mac_ci_call=label_mac_ci,
+                                  quota_read=self.quota_ok,
                                   sleep=lambda _seconds: None)
 
         self.assertEqual(result['step'], 'MERGE_REFUSED')
@@ -292,7 +296,7 @@ class TaskDriveTests(unittest.TestCase):
             result = task_drive.drive(task_id='t', store=Store(), pr_number=17,
                 merge=True, max_steps=4, advance_call=advance,
                 github_get=github_get, merge_gh_runner=runner,
-                sleep=lambda _seconds: None)
+                quota_read=self.quota_ok, sleep=lambda _seconds: None)
 
         self.assertEqual(result['step'], 'MERGE_REFUSED')
         self.assertEqual([call['merge'] for call in calls], [False, False, False, True])
@@ -319,6 +323,7 @@ class TaskDriveTests(unittest.TestCase):
 
         result = task_drive.drive(task_id='t', merge=True, max_steps=3,
                                   advance_call=advance, label_mac_ci_call=label_mac_ci,
+                                  quota_read=self.quota_ok,
                                   sleep=lambda _seconds: None)
 
         self.assertEqual(result['step'], 'MERGED')
@@ -340,6 +345,7 @@ class TaskDriveTests(unittest.TestCase):
 
         result = task_drive.drive(task_id='t', merge=True, max_steps=2,
                                   advance_call=advance, label_mac_ci_call=label_mac_ci,
+                                  quota_read=self.quota_ok,
                                   sleep=lambda _seconds: None)
 
         self.assertEqual(result['step'], 'MAX_STEPS')
@@ -357,6 +363,7 @@ class TaskDriveTests(unittest.TestCase):
         ])
         result = task_drive.drive(task_id='t', merge=True, max_steps=4,
                                   advance_call=pending_advance,
+                                  quota_read=self.quota_ok,
                                   sleep=lambda _seconds: None)
         self.assertEqual(result['step'], 'MERGE_REFUSED')
         self.assertEqual(result['codes'], ['MERGE_MACOS_CHECK_REQUIRED'])
@@ -370,6 +377,7 @@ class TaskDriveTests(unittest.TestCase):
         ])
         result = task_drive.drive(task_id='t', merge=True, max_steps=8,
                                   advance_call=failed_advance,
+                                  quota_read=self.quota_ok,
                                   sleep=lambda _seconds: None)
         self.assertEqual(result['step'], 'MERGE_REFUSED')
         self.assertEqual(result['codes'], ['MERGE_CHECKS_NOT_GREEN'])
@@ -430,7 +438,8 @@ class TaskDriveTests(unittest.TestCase):
              'result': {'state': 'NOT_READY'}, 'codes': []},
         ])
         result = task_drive.drive(task_id='t', max_steps=2, poll_seconds=1,
-                                  advance_call=advance, sleep=pauses.append)
+                                  advance_call=advance, quota_read=self.quota_ok,
+                                  sleep=pauses.append)
         self.assertEqual(result['step'], 'MAX_STEPS')
         self.assertEqual(result['steps'], 0)
         self.assertEqual(len(calls), 2)
@@ -523,7 +532,8 @@ class TaskDriveTests(unittest.TestCase):
             {'task_id': 't', 'step': 'REVIEW_OUTCOME_UNKNOWN', 'codes': []},
         ])
         result = task_drive.drive(task_id='t', max_steps=4, poll_seconds=2,
-                                  advance_call=advance, sleep=pauses.append)
+                                  advance_call=advance, quota_read=self.quota_ok,
+                                  sleep=pauses.append)
         self.assertEqual(result['step'], 'REVIEW_OUTCOME_UNKNOWN')
         self.assertEqual(pauses, [2])
 
@@ -532,6 +542,154 @@ class TaskDriveTests(unittest.TestCase):
              'codes': ['MERGE_OWNER_ACCEPTANCE_MANUAL']}])
         result = task_drive.drive(task_id='t', merge=True, advance_call=advance)
         self.assertEqual(result['codes'], ['MERGE_OWNER_ACCEPTANCE_MANUAL'])
+
+    def test_low_quota_stops_before_next_advance_with_waiting_github_quota(self):
+        waiting_step = {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']}
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'RUN_REMOTE_TEST', 'codes': []},
+            waiting_step,
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+        ])
+        quota_calls = []
+        pauses = []
+
+        def low_core():
+            quota_calls.append(len(calls))
+            return {
+                'core': {'remaining': 299, 'reset': 1700000100},
+                'graphql': {'remaining': 5000, 'reset': 1700000200},
+            }
+
+        result = task_drive.drive(task_id='t', poll_seconds=5,
+                                  advance_call=advance, quota_read=low_core,
+                                  sleep=pauses.append)
+        self.assertEqual(result, {
+            'task_id': 't',
+            'step': 'WAITING_GITHUB_QUOTA',
+            'result': {
+                'resource': 'core',
+                'remaining': 299,
+                'reset': 1700000100,
+                'last_result': waiting_step,
+            },
+            'codes': ['GITHUB_QUOTA_LOW'],
+            'steps': 1,
+        })
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(quota_calls, [2])
+        self.assertEqual(pauses, [])
+
+        merge_waiting = {'task_id': 't', 'step': 'WAITING_CI', 'codes': []}
+        merge_advance, merge_calls = self.adapter([
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            merge_waiting,
+            {'task_id': 't', 'step': 'MERGED', 'codes': []},
+        ])
+        result = task_drive.drive(
+            task_id='t', merge=True, advance_call=merge_advance,
+            quota_read=lambda: {
+                'core': {'remaining': 300, 'reset': 1700000100},
+                'graphql': {'remaining': 299, 'reset': 1700000200},
+            },
+            sleep=pauses.append)
+        self.assertEqual(result, {
+            'task_id': 't',
+            'step': 'WAITING_GITHUB_QUOTA',
+            'result': {
+                'resource': 'graphql',
+                'remaining': 299,
+                'reset': 1700000200,
+                'last_result': merge_waiting,
+            },
+            'codes': ['GITHUB_QUOTA_LOW'],
+            'steps': 2,
+        })
+        self.assertEqual(len(merge_calls), 2)
+        self.assertEqual(pauses, [])
+
+    def test_unknown_quota_keeps_polling(self):
+        pauses = []
+        quota_calls = []
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']},
+            {'task_id': 't', 'step': 'RECORD_REVIEW_RESULT',
+             'result': {'state': 'NOT_READY'}, 'codes': []},
+            {'task_id': 't', 'step': 'REFUSED', 'codes': ['GITHUB_EVIDENCE_UNAVAILABLE']},
+        ])
+
+        def unknown_quota():
+            quota_calls.append(len(calls))
+            return None
+
+        result = task_drive.drive(task_id='t', poll_seconds=3,
+                                  advance_call=advance, quota_read=unknown_quota,
+                                  sleep=pauses.append)
+        self.assertEqual(result['step'], 'REFUSED')
+        self.assertEqual(result['codes'], ['GITHUB_EVIDENCE_UNAVAILABLE'])
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(quota_calls, [1, 2])
+        self.assertEqual(pauses, [3, 6])
+
+    def test_waiting_pauses_back_off_to_cap_and_reset_after_non_waiting_step(self):
+        pauses = []
+        advance, _calls = self.adapter([
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']},
+            {'task_id': 't', 'step': 'RECORD_REVIEW_RESULT',
+             'result': {'state': 'NOT_READY'}, 'codes': []},
+            {'task_id': 't', 'step': 'WAITING_CI',
+             'codes': ['CI_WORKFLOW_JOBS_INVALID']},
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']},
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']},
+            {'task_id': 't', 'step': 'RUN_REMOTE_TEST', 'codes': []},
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']},
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': []},
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': []},
+            {'task_id': 't', 'step': 'MERGED', 'codes': []},
+        ])
+        result = task_drive.drive(
+            task_id='t', merge=True, max_steps=20, poll_seconds=10,
+            advance_call=advance,
+            label_mac_ci_call=lambda **_kwargs: {'step': 'WAITING_CI', 'codes': []},
+            quota_read=self.quota_ok, sleep=pauses.append)
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual(pauses, [10, 20, 40, 60, 60, 10, 20, 10, 20])
+
+        large_pauses = []
+        large_advance, _calls = self.adapter([
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']},
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']},
+            {'task_id': 't', 'step': 'CLOSED', 'codes': []},
+        ])
+        result = task_drive.drive(task_id='t', poll_seconds=75,
+                                  advance_call=large_advance,
+                                  quota_read=self.quota_ok,
+                                  sleep=large_pauses.append)
+        self.assertEqual(result['step'], 'CLOSED')
+        self.assertEqual(large_pauses, [75, 75])
+
+    def test_quota_read_is_not_called_when_no_pause_follows(self):
+        quota_calls = []
+        advance, _calls = self.adapter([
+            {'task_id': 't', 'pr': 17, 'head': 'a' * 40, 'codes': []},
+            {'task_id': 't', 'step': 'RUN_REMOTE_TEST', 'codes': []},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'MERGED', 'codes': []},
+        ])
+        result = task_drive.drive(task_id='t', merge=True, advance_call=advance,
+                                  quota_read=lambda: quota_calls.append(1))
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual(quota_calls, [])
+
+        waiting_advance, _calls = self.adapter([
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']},
+        ])
+        result = task_drive.drive(task_id='t', max_steps=1,
+                                  advance_call=waiting_advance,
+                                  quota_read=lambda: quota_calls.append(1))
+        self.assertEqual(result['step'], 'MAX_STEPS')
+        self.assertEqual(quota_calls, [])
 
     def test_stops_at_max_steps_and_finished_tasks_are_not_advanced_again(self):
         advance, calls = self.adapter([
