@@ -16,7 +16,8 @@ from pathlib import Path
 from argparse import Namespace
 
 from . import active_pm_inbox, github_events, remote_test, review_dispatch, review_repair
-from . import github_identity, review_result, task_completion, task_submission_cli
+from . import github_identity, review_result, sensitive_paths, task_completion
+from . import task_submission_cli
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes
 
@@ -400,7 +401,12 @@ def _scripts_only_ci(paths):
 
 
 def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False,
-                  owner_acceptance=None):
+                  owner_acceptance=None, acceptance_out=None):
+    """Check every exact-head merge gate; return None or one refusal code.
+
+    acceptance_out, when given, is a dict that gets the carried-acceptance
+    evidence on a carry pass (#1237). Without it carry mode never runs.
+    """
     try:
         checks = github_get(f'commits/{head}/check-runs?per_page=100')
         files = github_get(f'pulls/{number}/files?per_page=100')
@@ -451,9 +457,17 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
            for name in required_checks if name != 'check (macOS 3.13)'):
         return 'MERGE_REQUIRED_CHECK_SKIPPED'
     if owner_acceptance is not None:
-        acceptance_code = _owner_acceptance_code(owner_acceptance, number, head, github_get)
+        carry = {} if type(acceptance_out) is dict else None
+        acceptance_code = _owner_acceptance_code(owner_acceptance, number, head, github_get,
+                                                 carry_out=carry)
         if acceptance_code:
             return acceptance_code
+        if carry:
+            # The carry passed; record it with every exact-head H1 check run.
+            acceptance_out['original'] = owner_acceptance
+            acceptance_out.update(carry)
+            acceptance_out['h1_checks'] = sorted(
+                f"{item['name']}={item.get('conclusion')}" for item in check_runs)
     elif _owner_acceptance_required(files):
         return 'MERGE_OWNER_ACCEPTANCE_MANUAL'
     if not docs_only:
@@ -665,11 +679,177 @@ def _utc_time(value):
         return None
 
 
-def _owner_acceptance_code(url, number, head, github_get):
+def _comment_after_commit_code(sha, created_at, github_get):
+    """Require the comment to be created strictly after the commit sha.
+
+    Return None, MERGE_OWNER_ACCEPTANCE_UNAVAILABLE or MERGE_OWNER_ACCEPTANCE_STALE.
+    """
+    try:
+        commit = github_get(f'commits/{sha}')
+    except Exception:
+        return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
+    detail = commit.get('commit') if type(commit) is dict else None
+    commit_times = []
+    for role in ('author', 'committer'):
+        person = detail.get(role) if type(detail) is dict else None
+        moment = _utc_time(person.get('date') if type(person) is dict else None)
+        if moment is None:
+            return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
+        commit_times.append(moment)
+    created = _utc_time(created_at)
+    if created is None:
+        return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
+    # The acceptance must come strictly after the commit.
+    if created <= max(commit_times):
+        return 'MERGE_OWNER_ACCEPTANCE_STALE'
+    return None
+
+
+# Carry checks, in the order they run and are reported (#1237).
+_CARRY_CHECKS = ('descendant', 'non_test', 'new_file', 'test_deleted',
+                 'assertion_removed', 'skip_added')
+_CARRY_TEST_HELPERS = frozenset(
+    f'tools/llmtool/tests/{name}' for name in
+    ('tui_pty_driver.py', 'notification_fixture.py', 'review_trust_fixture.py'))
+_CARRY_TEST_DEF = re.compile(r'\bdef\s+(test\w*)')
+_CARRY_REMOVED_BAD = re.compile(r'assert|skip|expectedfailure', re.IGNORECASE)
+_CARRY_ADDED_BAD = re.compile(r'skip|expectedfailure', re.IGNORECASE)
+
+
+def _carry_test_file(path):
+    """Return whether path is a plain test file a carry may touch."""
+    if type(path) is not str:
+        return False
+    if (re.fullmatch(r'(?:tools/llmtool/tests|scripts)/test_[^/]*\.py', path) is None and
+            path not in _CARRY_TEST_HELPERS):
+        return False
+    try:
+        # Any doubt about the rule list counts as sensitive.
+        return sensitive_paths.is_sensitive(path) is False
+    except Exception:
+        return False
+
+
+def _carry_compare(base, target, github_get):
+    """Read one compare; return (answer, entries) or None when unknown."""
+    try:
+        answer = github_get(f'compare/{base}...{target}?per_page=100')
+    except Exception:
+        return None
+    files = answer.get('files') if type(answer) is dict else None
+    if type(files) is not list or len(files) >= 100:
+        return None
+    for entry in files:
+        if (type(entry) is not dict or type(entry.get('filename')) is not str or
+                type(entry.get('status')) is not str):
+            return None
+        if 'previous_filename' in entry and type(entry['previous_filename']) is not str:
+            return None
+    return answer, files
+
+
+def _carry_paths(entries):
+    paths = set()
+    for entry in entries:
+        paths.add(entry['filename'])
+        if 'previous_filename' in entry:
+            paths.add(entry['previous_filename'])
+    return paths
+
+
+def _carry_patch_lines(patch):
+    """Split a patch into (removed, added) line texts; '@@' lines are skipped."""
+    removed, added = [], []
+    for line in patch.split('\n'):
+        if line.startswith('@@'):
+            continue
+        if line.startswith('-'):
+            removed.append(line[1:])
+        elif line.startswith('+'):
+            added.append(line[1:])
+    return removed, added
+
+
+def _acceptance_carry_code(h0, head, created_at, github_get, carry_out):
+    """Check that the acceptance at old head h0 may carry to head (#1237).
+
+    Return None and fill carry_out when the PR's own changes from h0 to head
+    only edit test files already in the PR, else one refusal code.
+    """
+    time_code = _comment_after_commit_code(h0, created_at, github_get)
+    if time_code:
+        return time_code
+    try:
+        branch = github_get('branches/main')
+    except Exception:
+        return 'MERGE_ACCEPTANCE_CARRY_DIFF_UNKNOWN'
+    commit = branch.get('commit') if type(branch) is dict else None
+    main_sha = commit.get('sha') if type(commit) is dict else None
+    if type(main_sha) is not str or _HEX40.fullmatch(main_sha) is None:
+        return 'MERGE_ACCEPTANCE_CARRY_DIFF_UNKNOWN'
+    reads = [_carry_compare(main_sha, h0, github_get),
+             _carry_compare(main_sha, head, github_get),
+             _carry_compare(h0, head, github_get)]
+    if any(item is None for item in reads):
+        return 'MERGE_ACCEPTANCE_CARRY_DIFF_UNKNOWN'
+    (main_h0, s0_entries), (_main_h1, s1_entries), (h0_h1, d_entries) = reads
+    if main_h0.get('status') not in ('ahead', 'diverged'):
+        return 'MERGE_ACCEPTANCE_CARRY_DIFF_UNKNOWN'
+    base = h0_h1.get('merge_base_commit')
+    if (h0_h1.get('status') != 'ahead' or type(base) is not dict or
+            base.get('sha') != h0):
+        return 'MERGE_ACCEPTANCE_CARRY_NOT_DESCENDANT'
+    s0 = _carry_paths(s0_entries)
+    s1 = _carry_paths(s1_entries)
+    # A D entry that touches no PR path came only from merging main.
+    own = sorted((entry for entry in d_entries
+                  if entry['filename'] in s0 or entry['filename'] in s1 or
+                  entry.get('previous_filename') in s0 or
+                  entry.get('previous_filename') in s1),
+                 key=lambda entry: entry['filename'])
+    own_paths = sorted(_carry_paths(own) | (s1 - s0))
+    if any(not _carry_test_file(path) for path in own_paths):
+        return 'MERGE_ACCEPTANCE_CARRY_NON_TEST'
+    if any(path not in s0 for path in own_paths):
+        return 'MERGE_ACCEPTANCE_CARRY_NEW_FILE'
+    if any(entry['status'] == 'removed' for entry in own):
+        return 'MERGE_ACCEPTANCE_CARRY_TEST_DELETED'
+    if any(entry['status'] != 'modified' or type(entry.get('patch')) is not str or
+           type(entry.get('additions')) is not int or
+           type(entry.get('deletions')) is not int for entry in own):
+        return 'MERGE_ACCEPTANCE_CARRY_DIFF_UNKNOWN'
+    patches = [_carry_patch_lines(entry['patch']) for entry in own]
+    for removed, added in patches:
+        kept = {match.group(1) for line in added
+                for match in [_CARRY_TEST_DEF.search(line)] if match}
+        if any(match.group(1) not in kept for line in removed
+               for match in [_CARRY_TEST_DEF.search(line)] if match):
+            return 'MERGE_ACCEPTANCE_CARRY_TEST_DELETED'
+    # Fail closed: a moved or reworded assertion line also refuses.
+    if any(_CARRY_REMOVED_BAD.search(line) for removed, _added in patches
+           for line in removed):
+        return 'MERGE_ACCEPTANCE_CARRY_ASSERTION_REMOVED'
+    if any(_CARRY_ADDED_BAD.search(line) for _removed, added in patches
+           for line in added):
+        return 'MERGE_ACCEPTANCE_CARRY_SKIP_ADDED'
+    carry_out.update({
+        'h0': h0,
+        'h1': head,
+        'files': [{'path': entry['filename'], 'additions': entry['additions'],
+                   'deletions': entry['deletions']} for entry in own],
+        'checks': {name: 'PASS' for name in _CARRY_CHECKS},
+    })
+    return None
+
+
+def _owner_acceptance_code(url, number, head, github_get, *, carry_out=None):
     """Check one Owner acceptance comment for this PR and head.
 
     Return None when it is valid, else one refusal code. Checks run in order:
     reference, read, html_url, edited, author, marker, PR, head, time.
+    When the body does not name head but names exactly one other full SHA
+    and carry_out is a dict, carry mode replaces the head step (#1237); on a
+    carry pass carry_out gets the evidence.
     """
     match = _OWNER_ACCEPTANCE_URL.fullmatch(url) if type(url) is str else None
     if match is None:
@@ -710,29 +890,21 @@ def _owner_acceptance_code(url, number, head, github_get):
             found.start() == 0 or not body[found.start() - 1].isalnum()
             for found in re.finditer(rf'#{number}(?!\d)', body)):
         return 'MERGE_OWNER_ACCEPTANCE_PR_MISMATCH'
-    # The full lowercase head, not part of a longer hex run.
-    if (type(head) is not str or _HEX40.fullmatch(head) is None or
-            re.search(rf'(?<![0-9a-fA-F]){head}(?![0-9a-fA-F])', body) is None):
+    if type(head) is not str or _HEX40.fullmatch(head) is None:
         return 'MERGE_OWNER_ACCEPTANCE_HEAD_MISMATCH'
-    try:
-        commit = github_get(f'commits/{head}')
-    except Exception:
-        return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
-    detail = commit.get('commit') if type(commit) is dict else None
-    commit_times = []
-    for role in ('author', 'committer'):
-        person = detail.get(role) if type(detail) is dict else None
-        moment = _utc_time(person.get('date') if type(person) is dict else None)
-        if moment is None:
-            return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
-        commit_times.append(moment)
-    created = _utc_time(comment['created_at'])
-    if created is None:
-        return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
-    # The acceptance must come strictly after the head commit.
-    if created <= max(commit_times):
-        return 'MERGE_OWNER_ACCEPTANCE_STALE'
-    return None
+    # The full lowercase head, not part of a longer hex run.
+    if re.search(rf'(?<![0-9a-fA-F]){head}(?![0-9a-fA-F])', body) is not None:
+        return _comment_after_commit_code(head, comment['created_at'], github_get)
+    # Without a place for its evidence, carry mode does not run.
+    if type(carry_out) is not dict:
+        return 'MERGE_OWNER_ACCEPTANCE_HEAD_MISMATCH'
+    named = set(re.findall(r'(?<![0-9a-fA-F])[0-9a-f]{40}(?![0-9a-fA-F])', body))
+    if not named:
+        return 'MERGE_OWNER_ACCEPTANCE_HEAD_MISMATCH'
+    if len(named) > 1:
+        return 'MERGE_ACCEPTANCE_CARRY_HEAD_AMBIGUOUS'
+    return _acceptance_carry_code(named.pop(), head, comment['created_at'], github_get,
+                                  carry_out)
 
 
 def _merge_once(*, store, record, number, head, pr, events, github_get,
@@ -750,8 +922,11 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     review_version = _merge_pass_claim(record, number, head, events)
     if type(review_version) is not int:
         return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
+    acceptance_out = {}
     code = _merge_checks(record, number, head, pr, github_get,
-                         allow_missing_macos=True, owner_acceptance=owner_acceptance)
+                         allow_missing_macos=True, owner_acceptance=owner_acceptance,
+                         acceptance_out=acceptance_out)
+    acceptance_carry = acceptance_out or None
     if code and code not in ('MERGE_MACOS_CHECK_MISSING', 'MERGE_MACOS_CHECK_SKIPPED'):
         if code == 'MERGE_CHECKS_NOT_GREEN':
             # Preserve the merge refusal while identifying an exact-head
@@ -861,7 +1036,8 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
                 except Exception:
                     warning_codes.append('MERGE_RESULT_RECORD_FAILED')
             return _merge_success(record, number, head, review_version, gh_runner, root,
-                                  warning_codes, owner_acceptance=owner_acceptance)
+                                  warning_codes, owner_acceptance=owner_acceptance,
+                                  acceptance_carry=acceptance_carry)
         claim['state'] = 'UNKNOWN'
         try:
             store.compare_and_update(record['task_id'], expected={'merge_attempt':
@@ -884,15 +1060,26 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
             pass
         warning_codes.append('MERGE_RESULT_RECORD_FAILED')
     return _merge_success(record, number, head, review_version, gh_runner, root,
-                          warning_codes, owner_acceptance=owner_acceptance)
+                          warning_codes, owner_acceptance=owner_acceptance,
+                          acceptance_carry=acceptance_carry)
 
 
 def _merge_success(record, number, head, review_version, gh_runner, root, warning_codes,
-                   *, owner_acceptance=None):
+                   *, owner_acceptance=None, acceptance_carry=None):
     body = (f'llmtool task advance merge provenance: task={record["task_id"]} '
             f'head={head} review_version={review_version} checks=exact-head-success-or-skipped')
     if owner_acceptance is not None:
         body += f' owner_acceptance={owner_acceptance}'
+    if acceptance_carry:
+        acceptance_carry = dict(acceptance_carry, h1_review_version=review_version)
+        files = ','.join(f"{item['path']}(+{item['additions']}/-{item['deletions']})"
+                         for item in acceptance_carry['files'])
+        checks = ','.join(f'{name}:{value}'
+                          for name, value in acceptance_carry['checks'].items())
+        body += (f" owner_acceptance_carry: original={acceptance_carry['original']} "
+                 f"h0={acceptance_carry['h0']} h1={acceptance_carry['h1']} "
+                 f'files={files} checks={checks} h1_review_version={review_version} '
+                 f"h1_checks={','.join(acceptance_carry['h1_checks'])}")
     try:
         comment = gh_runner(root, ['pr', 'comment', str(number), '--body', body])
         if getattr(comment, 'returncode', 1) != 0:
@@ -902,6 +1089,8 @@ def _merge_success(record, number, head, review_version, gh_runner, root, warnin
     result = {'pr': number, 'head': head}
     if owner_acceptance is not None:
         result['owner_acceptance'] = owner_acceptance
+    if acceptance_carry:
+        result['owner_acceptance_carry'] = acceptance_carry
     return {'step': 'MERGED', 'codes': warning_codes, 'result': result}
 
 
