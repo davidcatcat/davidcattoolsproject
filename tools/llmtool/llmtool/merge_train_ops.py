@@ -46,6 +46,7 @@ TRAIN_PROVENANCE_COMMENT_FAILED = 'TRAIN_PROVENANCE_COMMENT_FAILED'
 TRAIN_NOT_MERGED = 'TRAIN_NOT_MERGED'
 TRAIN_MEMBERS_OPEN = 'TRAIN_MEMBERS_OPEN'
 TRAIN_OPERATION_BUSY = 'TRAIN_OPERATION_BUSY'
+TRAIN_MEMBER_PR_CLOSE_FAILED = 'TRAIN_MEMBER_PR_CLOSE_FAILED'
 
 # The two train-head macOS codes that _merge_once answers with the mac-ci label.
 _MACOS_LABEL_CODES = frozenset(('MERGE_MACOS_CHECK_MISSING', 'MERGE_MACOS_CHECK_SKIPPED'))
@@ -414,11 +415,56 @@ def _merge_locked(train_id, store, github_get, gh_runner, root, train_root):
                           gh_runner, root, train_root)
 
 
-def close_train(train_id, *, store, advance_call, train_root=None):
+def _member_pr_comment(record):
+    """The one fixed pointer comment left on a member PR that is closed."""
+    return (f'Closed by llmtool merge train {record["train_id"]}: this change was merged '
+            f'in train PR #{record["train_pr"]} as squash commit {record["merge_sha"]}.')
+
+
+def _close_member_prs(record, github_get, gh_runner, root):
+    """Close each member PR that is still open and not merged; return (closed, failed).
+
+    One fresh read per PR. A PR already closed or merged is left alone. A
+    failed or malformed read, or a failed close, is listed in ``failed``.
+    Each open PR gets one close command, never a retry.
+    """
+    closed, failed = [], []
+    comment = _member_pr_comment(record)
+    for member in record['members']:
+        number = member['pr']
+        pr = _read_pr(github_get, number)
+        if (type(pr) is not dict or type(pr.get('state')) is not str or
+                type(pr.get('merged')) is not bool):
+            failed.append(number)
+            continue
+        if pr['state'] != 'open' or pr['merged']:
+            continue
+        try:
+            outcome = gh_runner(root, ['pr', 'close', str(number), '--comment', comment])
+        except Exception:
+            outcome = None
+        if outcome is None or getattr(outcome, 'returncode', 1) != 0:
+            failed.append(number)
+        else:
+            closed.append(number)
+    return closed, failed
+
+
+def close_train(train_id, *, store, advance_call, github_get, gh_runner, root,
+                train_root=None):
     """Close every member Task of a MERGED train in record order; one step.
 
     ``store`` is the TaskStore the caller binds into ``advance_call``; this
     function reads no Task record itself.
+
+    Once every member Task is CLOSED and the record is written CLOSED, each
+    member PR is read once through ``github_get``. A PR still open and not
+    merged is closed once through ``gh_runner`` (``gh pr close N --comment``)
+    with one fixed comment naming the train id, the train PR and the squash
+    SHA. A PR already closed or merged is left alone. A failed read or close
+    keeps step CLOSED (the record stays CLOSED) and adds
+    TRAIN_MEMBER_PR_CLOSE_FAILED. The result lists ``closed_prs`` and
+    ``failed_prs``. A refused or WAITING_MEMBERS close never touches a PR.
     """
     record, code = _read_record(train_id, train_root)
     if record is None:
@@ -442,5 +488,8 @@ def close_train(train_id, *, store, advance_call, train_root=None):
             train_id, record['record_sha256'], root=train_root, state='CLOSED')
     except Exception as exc:
         return _close_refused(_store_code(exc))
-    return _result('CLOSED', [], {'train_id': train_id,
-                                  'tasks': [member['task_id'] for member in record['members']]})
+    closed, failed = _close_member_prs(record, github_get, gh_runner, root)
+    return _result('CLOSED', [TRAIN_MEMBER_PR_CLOSE_FAILED] if failed else [],
+                   {'train_id': train_id,
+                    'tasks': [member['task_id'] for member in record['members']],
+                    'closed_prs': closed, 'failed_prs': failed})

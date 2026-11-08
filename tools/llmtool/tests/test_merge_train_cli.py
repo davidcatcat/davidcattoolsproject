@@ -606,11 +606,46 @@ class MergeTrainCliTest(unittest.TestCase):
             TRAIN_ID, claimed['record_sha256'], root=self.train_root, state='MERGED',
             merge_sha='f' * 40, merge_attempt=dict(attempt, state='MERGED'))
 
+    @staticmethod
+    def _open_member_pr(path):
+        """A fake GitHub read: every member PR is still open and not merged."""
+        number = int(path.split('/')[1])
+        return {'number': number, 'state': 'open', 'merged': False}
+
+    @staticmethod
+    def _member_pr_comment():
+        return (f'Closed by llmtool merge train {TRAIN_ID}: this change was merged in '
+                f'train PR #{TRAIN_PR} as squash commit {"f" * 40}.')
+
+    def test_close_wiring_reports_a_failed_member_pr_close(self):
+        self._merged((TASK_A, TASK_B))
+        advance = Recorder({'step': 'CLOSED', 'codes': []})
+
+        def runner(root, args):
+            return types.SimpleNamespace(returncode=1 if args[2] == '101' else 0)
+
+        gh_runner = Recorder(side_effect=runner)
+        code, value, _ = self._main(['close', TRAIN_ID, '--pm-session', SESSION],
+                                    advance_call=advance,
+                                    github_get=Recorder(side_effect=self._open_member_pr),
+                                    gh_runner=gh_runner)
+        # The train is still CLOSED; the failed PR close is reported, not retried.
+        self.assertEqual(code, 0)
+        self.assertEqual(value, {
+            'train_id': TRAIN_ID, 'step': 'CLOSED',
+            'codes': [merge_train_ops.TRAIN_MEMBER_PR_CLOSE_FAILED],
+            'result': {'train_id': TRAIN_ID, 'tasks': [TASK_A, TASK_B],
+                       'closed_prs': [102], 'failed_prs': [101]}})
+        self.assertEqual(len(gh_runner.calls), 2)
+        self.assertEqual(merge_train_store.get(TRAIN_ID, root=self.train_root)['state'],
+                         'CLOSED')
+
     def test_close_passes_train_id_and_owner_checked_advance(self):
         self._create(state='BUILT')
         advance = Recorder({'step': 'CLOSED', 'codes': []})
 
-        def close_step(train_id, *, store, advance_call, train_root):
+        def close_step(train_id, *, store, advance_call, github_get, gh_runner, root,
+                       train_root):
             first = advance_call(task_id=TASK_A, pr_number=101, integration_pr=TRAIN_PR)
             second = advance_call(task_id=TASK_B, pr_number=102, integration_pr=TRAIN_PR)
             return {'step': 'CLOSED', 'codes': [],
@@ -626,6 +661,10 @@ class MergeTrainCliTest(unittest.TestCase):
         self.assertEqual(args, (TRAIN_ID,))
         self.assertIs(kwargs['store'], self.store)
         self.assertEqual(kwargs['train_root'], self.train_root)
+        # The close step gets the same GitHub reader, gh runner and root.
+        self.assertIs(kwargs['github_get'], self.github_get)
+        self.assertIs(kwargs['gh_runner'], self.gh_runner)
+        self.assertEqual(kwargs['root'], self.root)
         self.assertEqual(advance.calls, [
             ((), {'task_id': TASK_A, 'pr_number': 101, 'integration_pr': TRAIN_PR}),
             ((), {'task_id': TASK_B, 'pr_number': 102, 'integration_pr': TRAIN_PR})])
@@ -651,7 +690,8 @@ class MergeTrainCliTest(unittest.TestCase):
     def test_close_refusal_holds_when_the_step_swallows_it(self):
         self._create()
 
-        def swallowing(train_id, *, store, advance_call, train_root):
+        def swallowing(train_id, *, store, advance_call, github_get, gh_runner, root,
+                       train_root):
             self.store.records[TASK_A]['pm_session_id'] = self.other
             for task_id in (TASK_A, TASK_B):
                 try:
@@ -685,7 +725,8 @@ class MergeTrainCliTest(unittest.TestCase):
         self._create()
         advance = Recorder({'step': 'CLOSED', 'codes': []})
 
-        def close_step(train_id, *, store, advance_call, train_root):
+        def close_step(train_id, *, store, advance_call, github_get, gh_runner, root,
+                       train_root):
             outcome = advance_call(task_id=TASK_A, pr_number=101, integration_pr=TRAIN_PR)
             return {'step': 'CLOSED', 'codes': [], 'result': {'first': outcome['step']}}
 
@@ -696,6 +737,10 @@ class MergeTrainCliTest(unittest.TestCase):
                                     store=self.store, train_root=self.train_root)
         self.assertEqual(code, 0)
         self.assertEqual(value['result'], {'first': 'CLOSED'})
+        close_kwargs = close.calls[0][1]
+        self.assertIs(close_kwargs['github_get'], task_completion._github_get)
+        self.assertIs(close_kwargs['gh_runner'], task_advance._publish_run_gh)
+        self.assertEqual(close_kwargs['root'], os.getcwd())
         kwargs = advance.calls[0][1]
         self.assertIs(kwargs['store'], self.store)
         self.assertEqual((kwargs['task_id'], kwargs['pr_number'], kwargs['integration_pr']),
@@ -870,11 +915,20 @@ class MergeTrainCliTest(unittest.TestCase):
             return {'step': 'CLOSED', 'codes': []}
 
         advance = Recorder(side_effect=advance_step)
+        # After the record is CLOSED the real step reads and closes each open member PR.
+        github_get = Recorder(side_effect=self._open_member_pr)
+        gh_runner = Recorder(types.SimpleNamespace(returncode=0))
         code, value, _ = self._main(['close', TRAIN_ID, '--pm-session', SESSION],
-                                    advance_call=advance)
+                                    advance_call=advance, github_get=github_get,
+                                    gh_runner=gh_runner)
         self.assertEqual(code, 0)
         self.assertEqual(value, {'train_id': TRAIN_ID, 'step': 'CLOSED', 'codes': [],
-                                 'result': {'train_id': TRAIN_ID, 'tasks': [TASK_B, TASK_A]}})
+                                 'result': {'train_id': TRAIN_ID, 'tasks': [TASK_B, TASK_A],
+                                            'closed_prs': [101, 102], 'failed_prs': []}})
+        self.assertEqual([args[0] for args, _ in github_get.calls], ['pulls/101', 'pulls/102'])
+        self.assertEqual(gh_runner.calls, [
+            ((self.root, ['pr', 'close', str(pr), '--comment', self._member_pr_comment()]), {})
+            for pr in (101, 102)])
         self.assertEqual(merge_train_store.get(TRAIN_ID, root=self.train_root)['state'],
                          'CLOSED')
         self.assertEqual(advance.calls, [
