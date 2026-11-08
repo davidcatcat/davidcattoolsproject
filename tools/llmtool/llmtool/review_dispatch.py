@@ -31,7 +31,9 @@ REVIEW_FAILURE_REASONS = _D6_CREATE_FAILURE_REASONS | frozenset((
     'NO_FINAL_MESSAGE', 'NO_THREAD_ID', 'VERDICT_NOT_JSON', 'VERDICT_WRONG_FIELDS',
     'VERDICT_BINDING_MISMATCH', 'VERDICT_STATUS_INVALID', 'VERDICT_TEXT_INVALID',
     'REVIEW_HEADER_MISMATCH', 'REVIEW_BINDING_LINE_MISSING',
-    'REVIEW_CLASSIFIER_REJECTED'))
+    'REVIEW_CLASSIFIER_REJECTED',
+    # The review prompt was refused before any Reviewer session started.
+    'REVIEW_PROMPT_REFUSED'))
 
 
 def _unique_json_object(pairs):
@@ -582,16 +584,27 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         create(task_id=reviewer_task, base_sha=head, repo_root=repo_root,
                executor_task=executor_task, github_login=github_login,
                reviewer_key=reviewer_key)
-        if prompt_renderer is None:
-            from . import task_submission_cli
-            args = type('ReviewArgs', (), {'task_id': task_id, 'executor_task': executor_task,
-                    'reviewer_task': reviewer_task, 'pr': pr_number, 'version': version})()
-            output = io.StringIO()
-            with redirect_stdout(output):
-                task_submission_cli.run_task_review_prompt(args, store=store)
-            prompt = output.getvalue()
-        else:
-            prompt = prompt_renderer(task_id, executor_task, reviewer_task, pr_number, version)
+        try:
+            if prompt_renderer is None:
+                from . import task_submission_cli
+                args = type('ReviewArgs', (), {'task_id': task_id, 'executor_task': executor_task,
+                        'reviewer_task': reviewer_task, 'pr': pr_number, 'version': version})()
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    task_submission_cli.run_task_review_prompt(args, store=store)
+                prompt = output.getvalue()
+            else:
+                prompt = prompt_renderer(task_id, executor_task, reviewer_task, pr_number,
+                                         version)
+        except LLMToolError as exc:
+            # No Reviewer session has started, so the claim may name this fixed
+            # reason. Only an upper-case code is kept; the message never is.
+            code = next((value for value in (getattr(exc, 'completion_code', None),
+                                             getattr(exc, 'review_dispatch_code', None))
+                         if type(value) is str and
+                         re.fullmatch(r'[A-Z][A-Z0-9_]*', value) is not None),
+                        'REVIEW_PROMPT_REFUSED')
+            _refuse(code, reason='REVIEW_PROMPT_REFUSED')
         # Detect a moved PR/head before starting the Reviewer session.
         _, _, current_head, _, _ = _preflight(
             store, task_id, executor_task, pr_number, version, reviewer=reviewer_key)
