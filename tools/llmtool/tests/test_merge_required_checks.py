@@ -80,9 +80,25 @@ class MergeRequiredCheckSkippedTests(unittest.TestCase):
         runs = [run(LINUX, 'skipped'), run(LINUX), run(MACOS)]
         self.assertIsNone(merge_checks(CODE_FILES, runs))
 
-    def test_scripts_only_pr_with_skipped_or_absent_linux_is_allowed(self):
-        self.assertIsNone(merge_checks(SCRIPTS_FILES, [run(LINUX, 'skipped'), run(MACOS)]))
-        self.assertIsNone(merge_checks(SCRIPTS_FILES, [run(MACOS)]))
+    def test_scripts_only_pr_with_skipped_linux_is_refused(self):
+        # #1208: a scripts/-only PR is code and needs a Linux success run.
+        runs = [run(LINUX, 'skipped'), run(MACOS)]
+        self.assertEqual(merge_checks(SCRIPTS_FILES, runs), 'MERGE_REQUIRED_CHECK_SKIPPED')
+        self.assertEqual(merge_checks(SCRIPTS_FILES, runs, allow_missing_macos=True),
+                         'MERGE_REQUIRED_CHECK_SKIPPED')
+
+    def test_scripts_only_pr_without_linux_is_refused(self):
+        self.assertEqual(merge_checks(SCRIPTS_FILES, [run(MACOS)]),
+                         'MERGE_REQUIRED_CHECK_MISSING')
+        self.assertEqual(merge_checks(SCRIPTS_FILES, [run(MACOS)], allow_missing_macos=True),
+                         'MERGE_REQUIRED_CHECK_MISSING')
+        self.assertEqual(merge_checks(SCRIPTS_FILES, [run(LINUX, head='b' * 40), run(MACOS)]),
+                         'MERGE_CHECKS_NOT_GREEN')
+
+    def test_scripts_only_pr_with_green_linux_and_macos_is_allowed(self):
+        self.assertIsNone(merge_checks(SCRIPTS_FILES, [run(LINUX), run(MACOS)]))
+        self.assertIsNone(merge_checks(SCRIPTS_FILES, [run(LINUX, 'skipped'), run(LINUX),
+                                                       run(MACOS)]))
 
     def test_extra_skipped_check_that_is_not_required_is_allowed(self):
         runs = [run(LINUX), run(MACOS), run('lint (optional)', 'skipped'),
@@ -125,7 +141,7 @@ class MergeRequiredCheckSkippedTests(unittest.TestCase):
                          'MERGE_MACOS_CHECK_SKIPPED')
         self.assertEqual(merge_checks(CODE_FILES, [run(LINUX)], allow_missing_macos=True),
                          'MERGE_MACOS_CHECK_MISSING')
-        self.assertEqual(merge_checks(SCRIPTS_FILES, [run(MACOS, 'skipped')]),
+        self.assertEqual(merge_checks(SCRIPTS_FILES, [run(LINUX), run(MACOS, 'skipped')]),
                          'MERGE_MACOS_CHECK_REQUIRED')
         self.assertIsNone(merge_checks(CODE_FILES, [run(LINUX), run(MACOS),
                                                     run(MACOS, 'skipped')]))
