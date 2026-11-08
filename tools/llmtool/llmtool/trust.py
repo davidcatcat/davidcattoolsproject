@@ -124,12 +124,12 @@ def _hosted_label(item):
 
 def _hosted_runner_labels(labels):
     """github-hosted runner_labels: a flat list of 1-8 labels, or 1-4 alternatives,
-    each a flat list of 1-8 labels (#1253). No deeper nesting, no mixed forms."""
+    each a flat list of 1-8 labels (#1253). No deeper nesting, no mixed forms.
+    Alternatives need not be distinct; labels within one alternative must be."""
     if _list(labels, 1, 8, _hosted_label):
         return True
     return (type(labels) is list and 1 <= len(labels) <= 4 and
-            all(_list(alternative, 1, 8, _hosted_label) for alternative in labels) and
-            len({frozenset(alternative) for alternative in labels}) == len(labels))
+            all(_list(alternative, 1, 8, _hosted_label) for alternative in labels))
 
 
 def _validate_schema(value):

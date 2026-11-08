@@ -362,6 +362,21 @@ class TrustTest(unittest.TestCase):
                          (("macos-15",), ("macos-15-intel",)))
         self.assertEqual(loaded.ci_trust["workflows"][1]["runner_labels"], ("ubuntu-latest",))
 
+    def test_github_hosted_repeated_label_alternatives_load(self):
+        # Review finding (PR #1289 at b313761d): the contract permits 1 to 4
+        # alternatives and does not require them to be distinct.
+        cases = {
+            "repeated alternative": [["macos-15"], ["macos-15"]],
+            "repeated alternative among others": [["macos-15"], ["macos-15-intel"], ["macos-15"]],
+            "reordered repeated alternative": [["macos-15", "arm64"], ["arm64", "macos-15"]],
+        }
+        for name, labels in cases.items():
+            with self.subTest(case=name):
+                self._write(self._hosted_value(labels))
+                loaded = load_trust(home=str(self.home), _allow_root=self.allow_root)
+                self.assertEqual(loaded.ci_trust["workflows"][0]["runner_labels"],
+                                 tuple(tuple(alternative) for alternative in labels))
+
     def test_github_hosted_invalid_runner_labels_are_refused(self):
         cases = {
             "null": None,
@@ -382,10 +397,7 @@ class TrustTest(unittest.TestCase):
             "self-hosted in second alternative": [["macos-15"], ["macos-15-intel", "self-hosted"]],
             "pattern mismatch in alternative": [["macos-15"], ["macos 15"]],
             "alternative not a list": [{"label": "macos-15"}],
-            # Review finding (PR #1289): alternatives must be distinct label sets.
-            "repeated alternative": [["macos-15"], ["macos-15"]],
-            "repeated alternative among others": [["macos-15"], ["macos-15-intel"], ["macos-15"]],
-            "reordered repeated alternative": [["macos-15", "arm64"], ["arm64", "macos-15"]],
+            # A repeated label inside one alternative stays refused by the _list rule.
             "repeated label in alternative": [["macos-15", "macos-15"]],
         }
         for name, labels in cases.items():
