@@ -1071,6 +1071,49 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
         self.assertNotEqual(stored_result['verdict'], 'PASS')
         self.assertEqual(calls, ['called'])
 
+    def test_binding_mismatch_unknown_claim_is_stored_by_a_real_task_store(self):
+        executor = SimpleNamespace(root='/repo/executor', common_dir='/repo/.git')
+        preflight = (self.task_id, executor, HEAD, 'e' * 40, 'codex-reviewer')
+        reviewer = SimpleNamespace(root='/repo/reviewer')
+        task = self.store.get(self.task_id)
+        run_id = task['run_id']
+        digest = task['task_binding']['contract_digest']
+        wrong_head = 'f' * 40
+        review_text = _codex_review_text(run_id=run_id, contract=digest)
+        raw = _codex_event_stream(review_text, run_id=run_id, head=wrong_head)
+
+        def run_codex(**_kw):
+            # The real parser checks the reply against this Task's binding.
+            return review_dispatch._parse_codex_review(
+                raw, task_id=self.task_id, run_id=run_id,
+                contract_digest=digest, head=HEAD)
+
+        with patch.object(review_dispatch, '_preflight', side_effect=[preflight, preflight]), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                             return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                patch.object(review_dispatch, '_resolve_github_login',
+                             return_value='reviewer-user'), \
+                patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                             return_value=reviewer), \
+                self.assertRaises(LLMToolError) as raised:
+            review_dispatch.dispatch_review(
+                store=self.store, task_id=self.task_id, executor_task='executor-d6',
+                pr_number=42, create_d6=lambda **_: None,
+                bind_session=lambda **_: None, prompt_renderer=lambda *_: 'prompt',
+                codex_runner=run_codex)
+        self.assertEqual(raised.exception.review_failure_reason, 'VERDICT_BINDING_MISMATCH')
+        self.assertNotIn(wrong_head, str(raised.exception))
+        # Reopen from disk: the real store kept the UNKNOWN claim and its key names.
+        reopened = task_store.TaskStore(Path(self.temp.name).resolve())
+        claims = reopened.get(self.task_id)['review_dispatch_claim']
+        self.assertEqual(len(claims), 1)
+        claim = claims[0]
+        self.assertEqual(claim['state'], 'UNKNOWN')
+        self.assertEqual(claim['failure_reason'], 'VERDICT_BINDING_MISMATCH')
+        self.assertEqual(claim['binding_mismatch_keys'], ['head'])
+        self.assertNotIn('review_result', claim)
+        self.assertNotIn(wrong_head, json.dumps(claim))
+
 
 if __name__ == '__main__':
     unittest.main()
