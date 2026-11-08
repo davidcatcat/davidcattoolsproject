@@ -940,14 +940,6 @@ def _validate_publish_operations(record):
         _fail('TASK_PUBLISH_OPERATION_INVALID')
 
 
-def _known_review_failure_reason(value):
-    """Return whether ``value`` is one fixed unusable-review reason name."""
-    # Imported here, like worker_dispatch: the store must not load the
-    # dispatcher at import time. The dispatcher owns the one fixed set.
-    from .review_dispatch import REVIEW_FAILURE_REASONS
-    return type(value) is str and value in REVIEW_FAILURE_REASONS
-
-
 def _completion_docs_paths(result):
     """Return the paths a completion docs-only test is checked against (#1169).
 
@@ -968,6 +960,14 @@ def _completion_docs_paths(result):
             any(path not in changed for path in paths)):
         _fail()
     return paths
+
+
+def _known_review_failure_reason(value):
+    """Return whether ``value`` is one fixed unusable-review reason name."""
+    # Imported here, like worker_dispatch: the store must not load the
+    # dispatcher at import time. The dispatcher owns the one fixed set.
+    from .review_dispatch import REVIEW_FAILURE_REASONS
+    return type(value) is str and value in REVIEW_FAILURE_REASONS
 
 
 def _validate(record):
