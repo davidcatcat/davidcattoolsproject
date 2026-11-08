@@ -38,7 +38,7 @@ For D8 Host/Worker admission and review controls, see the [D8 Host/Worker refere
 | Codex Reviewer (`codex-reviewer`) | Formal independent Reviewer | PM, after a pinned candidate is ready | Separate read-only context and D6 reviewer record; exact-head review; never reviews own change; must be qualified and cross-family |
 | EC2 remote-test runner | Runs focused remote test modules and returns a receipt via `llmtool task remote-test` | PM dispatches the task for selected focused modules | Focused modules only; receipt is required evidence and does not replace formal review or CI |
 | Self-hosted Mac CI | Runs Mac-relevant CI checks | PR workflow for PRs; PM adds `mac-ci` after formal PASS and manually dispatches the full suite after each merge train | Two runners on one host; 45-minute job limit set in the workflow; exact-head PR check; without `mac-ci`, the PR check is `NOT_RUN` |
-| Linux CI on EC2 | Runs the full Linux suite, sharded across runners | Automatically on each PR and main push | Three EC2 runners; exact-head `check (Linux 3.14)`; Linux 3.9 is manual pre-release only |
+| Linux CI on EC2 | Runs the full Linux suite, sharded across runners | Automatically on each PR and main push | Four EC2 runners; exact-head `check (Linux 3.14)`; Linux 3.9 is manual pre-release only |
 
 The EC2 remote-test runner is invoked by the PM with `llmtool task remote-test` for selected focused modules; its receipt is required evidence and does not replace formal review or CI.
 
