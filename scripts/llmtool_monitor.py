@@ -173,6 +173,9 @@ class Process:
     owner: str = ""   # nearest agent this process belongs to / was started by
     job: tuple = ()   # a remote-test run: (source, task, sha, modules), validated tokens only
     codex_exec: bool = False   # a Codex CLI started as `codex exec` (a one-shot run)
+    # A company LLM run (#763): ("gw", work folder, audit file) of a gw-agent
+    # gateway; checked tokens only.
+    gw: tuple = ()
 
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._+-]")
@@ -274,6 +277,11 @@ def _codex_exec_command(command: str) -> bool:
     return "exec" in command.split()[1:]
 
 
+# The gw-agent route runs `python -B -P -m api_agent_gateway run ...`
+# (tools/llmtool/llmtool/developer_routes/gw_agent.py, build_argv).
+GW_AGENT_ROLE = "gw agent run"
+
+
 def classify(command: str) -> str | None:
     """Never return the command text; it might contain secrets."""
     if command.startswith("(") and command.endswith(")"):
@@ -292,6 +300,8 @@ def classify(command: str) -> str | None:
         target = _python_target(args)
         if target == ("module", "llmtool"):
             return "llmtool CLI"
+        if target == ("module", "api_agent_gateway") and "run" in args:
+            return GW_AGENT_ROLE
         if target is not None and target[0] == "script":
             name = target[1]
             if name in ("invoke_once.py", "live_once.py"):
@@ -364,6 +374,24 @@ def _remote_test_job(command: str) -> tuple:
     return ("cli", task, sha, tuple(modules))
 
 
+GW_PATH = re.compile(r"/[A-Za-z0-9_.+/-]{0,1023}")
+
+
+def _gw_run_job(command: str, role: str | None) -> tuple:
+    """What a company LLM run's command line says (see Process.gw). A path is
+    kept only when it is a plain absolute path; nothing else of argv is."""
+    if role != GW_AGENT_ROLE:
+        return ()
+    parts = command.split()
+    found = dict.fromkeys(("--workdir", "--audit-file"), "")
+    for flag, value in zip(parts, parts[1:]):
+        if (flag in found and not found[flag] and GW_PATH.fullmatch(value)
+                and ".." not in value.split("/")):
+            found[flag] = value
+    audit = found["--audit-file"]
+    return ("gw", found["--workdir"], audit if audit.endswith("/audit.jsonl") else "")
+
+
 # What snapshot_from derives from a command line (role, executable name,
 # remote-test job, `codex exec` bit), computed once per distinct command and
 # reused on every later poll (~500 rows a second). The key is a keyed BLAKE2b
@@ -384,11 +412,13 @@ def _argv_digest(command: str) -> bytes:
 
 
 def _row_facts(command: str) -> tuple:
-    """(role, safe name, remote-test job, codex exec) of a command line; only
-    these sanitized results are ever stored."""
+    """(role, safe name, remote-test job, codex exec, gw run) of a command
+    line; only these sanitized results are ever stored."""
     role = classify(command)
-    return (role, safe_name(command), _remote_test_job(command),
-            role is not None and role.startswith("Codex CLI") and _codex_exec_command(command))
+    job = _remote_test_job(command)
+    return (role, safe_name(command), job,
+            role is not None and role.startswith("Codex CLI") and _codex_exec_command(command),
+            _gw_run_job(command, role))
 
 
 def parse_processes(output: str, self_pid: int, remembered: dict | None = None) -> Snapshot:
@@ -478,7 +508,7 @@ def snapshot_from(entries, self_pid: int, remembered: dict | None = None) -> Sna
         if stat.startswith("Z"):
             role += " (zombie)"
         result.append(Process(pid, ppid, pgid, elapsed, stat, role, facts[1], owner, facts[2],
-                              facts[3]))
+                              facts[3], facts[4]))
     watched = {g: {pid for pid, row in rows.items() if row[1] == g} for g in groups}
     watched.update(orphans)
     lingering = sorted(
@@ -1676,7 +1706,7 @@ GITHUB_REFRESH = 30.0
 GITHUB_BACKOFF = 300.0   # the wait doubles after each failed read, up to this
 GITHUB_JOBS_TTL = 60.0   # an unfinished run's job list is reused while its updated_at stays the same, at most this long
 GITHUB_STALE = 3 * GITHUB_REFRESH   # older runner data is shown as 未確認, never as offline
-CI_JOB_READS = 5   # finished runs' job lists read per refresh (they are cached)
+CI_JOB_READS = 5   # finished runs' job lists read per refresh (cached)
 CI_RUN_READS = 10  # unfinished runs whose job lists are read per refresh (oldest first)
 GITHUB_LIMIT = 16 << 20   # one page of 100 comments; a larger page fails as a stale status
 GITHUB_PAGE = 100    # comments per request (the API maximum)
@@ -2019,6 +2049,13 @@ class GitHubSource:
         self.board_oldest_updated: float | None = None
         self.ci_runs: list | None = None    # ci_runs(); None until GitHub was read
         self.ci_heads: dict | None = None   # latest Linux/Mac run per head from same page
+        # Open PRs' checks from this refresh's one GraphQL read
+        # (pr_head_checks()), keyed by (PR number, full 40-character head
+        # SHA); its keys are also the open PRs the PR board shows
+        # (board_open_pulls()). None while that read failed or GitHub was not
+        # read. Never kept across refreshes, so a rerun on the same head shows
+        # on the next one.
+        self.pr_checks: dict | None = None
         self.want_ci = False   # set while a self-hosted runner is on this Mac
         self.want_main = False
         self.main_health: MainHealth | None = None
@@ -2285,6 +2322,10 @@ class GitHubSource:
             if GITHUB_IDENTITY_STATUS:
                 self.status += f"；{GITHUB_IDENTITY_STATUS}"
             self.read_failed = True
+        if failed:
+            self.pr_checks = None   # not read this refresh: unknown, never an old answer
+        else:
+            self.refresh_pr_checks()
         self.refresh_ci()
         if self.want_main:
             self.refresh_main()
@@ -2354,6 +2395,59 @@ class GitHubSource:
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             self.main_error = (str(exc)[:40] if isinstance(exc, RuntimeError)
                                else type(exc).__name__)
+
+    def _graphql(self, query: str, **variables):
+        """One read-only `gh api graphql` call through the gh runner, with
+        GITHUB_TIMEOUT and the GITHUB_LIMIT size cap. gh exits non-zero when
+        the answer carries GraphQL errors but still prints it: such an answer
+        with data is returned so the caller can judge which PRs it affects."""
+        gh = shutil.which("gh")
+        if not gh:
+            raise RuntimeError("找不到 gh 指令")
+        argv = [gh, "api", "graphql", "-f", f"query={query}"]
+        for key, value in variables.items():
+            argv += ["-f", f"{key}={value}"]
+        done = self.runner(argv, capture_output=True, timeout=GITHUB_TIMEOUT, check=False)
+        out = done.stdout or b""
+        if len(out) > GITHUB_LIMIT:
+            raise RuntimeError("回應過大")
+        try:
+            payload = json.loads(out) if out else None
+        except RecursionError:
+            raise ValueError("JSON nested too deeply") from None
+        except ValueError:
+            payload = None
+        partial = (type(payload) is dict and "errors" in payload
+                   and type(payload.get("data")) is dict)
+        if done.returncode != 0 and not partial:
+            code = re.search(rb"HTTP (\d{3})", getattr(done, "stderr", None) or b"")
+            raise RuntimeError(f"gh api 失敗（HTTP {code.group(1).decode()}）" if code
+                               else f"gh api 失敗（exit {done.returncode}）")
+        if payload is None:
+            raise ValueError("GraphQL answer is not JSON")
+        return payload
+
+    def refresh_pr_checks(self) -> None:
+        """Every open PR's exact-head checks and changed paths from one
+        GraphQL read (PR_CHECKS_QUERY: the 100 most recently updated open PRs),
+        so no PR waits behind others. Results are keyed by PR number and full
+        head SHA (pr_head_checks()) and replace the previous refresh's; nothing
+        is cached. A failed read leaves every PR unknown (None). The read is
+        skipped only when the pulls page is not full and lists no open PR with
+        a full head SHA: that page then holds every PR, so none is open. A full
+        page may leave older open PRs out; the GraphQL read finds them."""
+        pulls = self.board_pulls or []
+        page_full = type(self.board_page_count) is int and self.board_page_count >= 100
+        if not page_full and not any(
+                isinstance(pull, BoardPull) and pull.state == "OPEN"
+                and type(pull.sha) is str and HEX_SHA.fullmatch(pull.sha) for pull in pulls):
+            self.pr_checks = {}
+            return
+        try:
+            owner, name = self.repo.split("/", 1)
+            self.pr_checks = pr_head_checks(self._graphql(PR_CHECKS_QUERY, owner=owner, name=name))
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            self.pr_checks = None
 
     def refresh_ci(self) -> None:
         """Runners and CI, read on their own: a failure only marks them 未確認."""
@@ -2981,8 +3075,8 @@ def d6_task_lines(canonical: str, office: list, now: float,
         reviewer_done = False
         match = _review_task(task_id)
         if match and task_id not in running:
-            reviewer_done = any(match[1].lower() in ids
-                                for _, _, ids in (verdicts or {}).get(match[0], []))
+            reviewer_done = any(match[1].lower() in entry[2]
+                                for entry in (verdicts or {}).get(match[0], []))
         if task_id not in running and not prs:
             phase = D6_STATES.get(state, state)
         elif match and task_id not in running:
@@ -3905,6 +3999,219 @@ def ci_head_runs(payload) -> dict:
             for sha, workflows in found.items()}
 
 
+REQUIRED_CHECKS = {"check (Linux 3.14)": "linux", "check (macOS 3.13)": "mac",
+                   "check (docs)": "docs"}
+
+# One read per refresh for every open PR: its head, changed paths (which
+# checks its workflows' path filters require) and the head commit's check runs.
+# isDraft and isCrossRepository keep the board's draft step and fork filter
+# for open PRs the REST pulls page does not list.
+PR_CHECKS_QUERY = """
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number
+        headRefOid
+        isDraft
+        isCrossRepository
+        files(first: 100) { totalCount nodes { path } }
+        commits(last: 1) {
+          nodes {
+            commit {
+              oid
+              statusCheckRollup {
+                contexts(first: 100) {
+                  totalCount
+                  nodes { __typename ... on CheckRun { name status conclusion databaseId } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+""".strip()
+
+
+@dataclass(frozen=True)
+class HeadChecks:
+    """One open PR at its head: which checks its changed paths require (None
+    when the file list was cut or unreadable), the newest run of each check
+    name on that exact commit, as (status, conclusion) in lower case (None
+    when the check list was cut or unreadable), and whether GitHub calls the
+    PR a draft."""
+    required: frozenset | None
+    runs: dict | None
+    draft: bool = False
+
+
+def _ci_path_class(path: str) -> str:
+    """classify_path() of tools/llmtool/scripts/ci_path_classes.py (copied,
+    not imported: the monitor runs on its own)."""
+    if path.startswith("tools/ai-loop/"):
+        return "ai-loop"
+    if path.startswith("tools/api-agent-gateway/"):
+        return "gateway"
+    if path.startswith(".github/workflows/"):
+        return "workflow"
+    if path.startswith("tools/llmtool/"):
+        relative = path[len("tools/llmtool/"):]
+        if "/" not in relative and relative.endswith(".md"):
+            return "docs"
+        return "runtime"
+    if (path.endswith(".md") or path in {"AGENTS.md", "CLAUDE.md"}
+            or path.startswith("skills/") or path.startswith("docs/")):
+        return "docs"
+    return "other"
+
+
+def _top_llmtool_md(path: str) -> bool:
+    relative = path[len("tools/llmtool/"):] if path.startswith("tools/llmtool/") else None
+    return relative is not None and "/" not in relative and relative.endswith(".md")
+
+
+def _mac_ci_path(path: str) -> bool:
+    """A path in llmtool-mac-ci.yml's pull_request paths filter."""
+    if path.startswith("tools/llmtool/"):
+        return not _top_llmtool_md(path)
+    return (path in {"scripts/llmtool_monitor.py", "scripts/test_llmtool_monitor.py",
+                     ".github/workflows/llmtool-mac-ci.yml"}
+            or path.startswith(("tools/mac-runner/", "tools/safe-git/")))
+
+
+def _linux_ci_path(path: str) -> bool:
+    """A path in llmtool-linux-ci.yml's pull_request paths filter (top-level
+    tools/llmtool Markdown is excluded, then included again; *.md is top level)."""
+    return (path.startswith(("tools/llmtool/", "tools/ec2-runner/", "tools/safe-git/",
+                             "tools/api-agent-gateway/", "tools/ai-loop/", "skills/", "docs/"))
+            or path in {".github/workflows/llmtool-linux-ci.yml", "AGENTS.md", "CLAUDE.md"}
+            or ("/" not in path and path.endswith(".md")))
+
+
+def required_checks(paths) -> frozenset:
+    """The checks a PR's changed paths require: macOS when the Mac workflow's
+    paths filter matches; when the Linux workflow's filter matches, Linux 3.14
+    if any path is code and docs if any is docs (ci_path_classes.linux_flags()).
+    Pure."""
+    required = set()
+    if any(_mac_ci_path(path) for path in paths):
+        required.add("mac")
+    if any(_linux_ci_path(path) for path in paths):
+        for path in paths:
+            path_class = _ci_path_class(path)
+            if path_class in ("runtime", "gateway", "workflow", "other"):
+                required.add("linux")
+            if path_class == "docs" or path.endswith(".md"):
+                required.add("docs")
+    return frozenset(required)
+
+
+def _rollup_runs(node: dict, sha: str):
+    """{key: (status, conclusion)} of the required check names on the head
+    commit, the highest databaseId per name; None when the check list was cut
+    or unreadable. A commit whose oid is not the head is ignored."""
+    commits = node.get("commits")
+    entries = commits.get("nodes") if type(commits) is dict else None
+    if type(entries) is not list:
+        return None
+    best: dict = {}
+    for entry in entries:
+        commit = entry.get("commit") if type(entry) is dict else None
+        oid = commit.get("oid") if type(commit) is dict else None
+        if type(oid) is not str or oid.lower() != sha:
+            continue
+        rollup = commit.get("statusCheckRollup")
+        if rollup is None:
+            continue   # no checks on the head at all
+        contexts = rollup.get("contexts") if type(rollup) is dict else None
+        runs = contexts.get("nodes") if type(contexts) is dict else None
+        total = contexts.get("totalCount") if type(contexts) is dict else None
+        if type(runs) is not list or type(total) is not int or total > len(runs):
+            return None
+        for run in runs:
+            if type(run) is not dict:
+                continue
+            name, run_id = run.get("name"), run.get("databaseId")
+            status, conclusion = run.get("status"), run.get("conclusion")
+            key = REQUIRED_CHECKS.get(name) if type(name) is str else None
+            if (key is None or type(run_id) is not int or type(status) is not str
+                    or (conclusion is not None and type(conclusion) is not str)):
+                continue
+            conclusion = (conclusion or "").lower()
+            if conclusion == "startup_failure":
+                conclusion = "failure"
+            if key not in best or run_id > best[key][0]:
+                best[key] = (run_id, (status.lower(), conclusion))
+    return {key: entry for key, (_, entry) in best.items()}
+
+
+def pr_head_checks(payload) -> dict:
+    """{(PR number, full head SHA): HeadChecks} from one PR_CHECKS_QUERY
+    answer, newest updated first; PRs from forks are left out, as on the
+    pulls page (board_pulls()). Each PR has its own entry, so two open PRs on
+    one head never share required checks or read errors. A PR whose node the
+    answer's errors name is unknown (HeadChecks(None, None)); an error naming
+    no PR, or a PR node the answer cannot identify by number and full head,
+    or an answer without the pull request list, raises ValueError. A cut file
+    list leaves required unknown, a cut check list leaves runs unknown. Pure;
+    no I/O."""
+    if type(payload) is not dict:
+        raise ValueError("GraphQL answer")
+    errors = payload.get("errors")
+    failed: set = set()
+    if errors is not None:
+        if type(errors) is not list:
+            raise ValueError("GraphQL errors")
+        for error in errors:
+            path = error.get("path") if type(error) is dict else None
+            if (type(path) is list and len(path) >= 4
+                    and path[:3] == ["repository", "pullRequests", "nodes"]
+                    and type(path[3]) is int):
+                failed.add(path[3])
+            else:
+                raise ValueError("GraphQL error")
+    data = payload.get("data")
+    repository = data.get("repository") if type(data) is dict else None
+    pulls = repository.get("pullRequests") if type(repository) is dict else None
+    nodes = pulls.get("nodes") if type(pulls) is dict else None
+    if type(nodes) is not list:
+        raise ValueError("GraphQL pull requests")
+    if any(index >= len(nodes) for index in failed):
+        raise ValueError("GraphQL error")
+    found: dict = {}
+    for index, node in enumerate(nodes):
+        number = node.get("number") if type(node) is dict else None
+        sha = node.get("headRefOid") if type(node) is dict else None
+        sha = sha.lower() if type(sha) is str else ""
+        if type(number) is not int or number < 1 or not HEX_SHA.fullmatch(sha):
+            if index in failed:
+                raise ValueError("GraphQL error")   # a failed PR the answer cannot name
+            continue
+        draft = node.get("isDraft") is True
+        if index in failed:
+            # Only a known fork is left out; the error may be on that field.
+            if node.get("isCrossRepository") is True:
+                continue
+            result = HeadChecks(None, None, draft)
+        elif node.get("isCrossRepository") is not False:
+            continue
+        else:
+            files = node.get("files")
+            listed = files.get("nodes") if type(files) is dict else None
+            total = files.get("totalCount") if type(files) is dict else None
+            paths = ([item.get("path") if type(item) is dict else None for item in listed]
+                     if type(listed) is list else None)
+            required = (required_checks(paths)
+                        if paths is not None and all(type(path) is str for path in paths)
+                        and type(total) is int and total <= len(paths) else None)
+            result = HeadChecks(required, _rollup_runs(node, sha), draft)
+        found[(number, sha)] = result
+    return found
+
+
 def ci_runs(payload) -> list:
     """Workflow runs not finished yet, oldest first: (status, text, started,
     runner, run id); runner is None until ci_runner_names() fills it in.
@@ -4041,9 +4348,11 @@ def ci_queued_jobs(payload, text: str) -> list:
 
 
 def review_verdicts(comments) -> dict:
-    """{pr: [(time, verdict, ids)]} from verdicts trusted accounts posted on
-    PRs: a verdict line, the 7-character prefixes of every commit-like id the
-    comment names, and the comment's last-edit time. Pure; no I/O."""
+    """{pr: [(time, verdict, ids, head)]} from verdicts trusted accounts posted
+    on PRs: a verdict line, the 7-character prefixes of every commit-like id the
+    comment names, the head its HEAD line names as written (7 to 40 hex
+    characters, lower case; REVIEW_HEAD; "" if none), and the comment's
+    last-edit time. The PR board binds a verdict only to that head. Pure; no I/O."""
     found: dict = {}
     for comment in comments if type(comments) is list else []:
         if not _trusted_github_comment(comment):
@@ -4053,7 +4362,9 @@ def review_verdicts(comments) -> dict:
         if verdict:
             when = max(_github_time(comment.get("created_at")), _github_time(comment.get("updated_at")))
             ids = frozenset(token[:7].lower() for token in COMMIT_ID.findall(body))
-            found.setdefault(number, []).append((when, verdict.group(1), ids))
+            named = REVIEW_HEAD.search(body)
+            head = named.group(1).lower() if named else ""
+            found.setdefault(number, []).append((when, verdict.group(1), ids, head))
     return found
 
 
@@ -4093,6 +4404,7 @@ class BoardPull:
     head: str
     draft: bool
     closes: tuple[int, ...] = ()
+    sha: str = ""   # the full 40-character head, when GitHub gave one
 
 
 @dataclass(frozen=True)
@@ -4211,6 +4523,7 @@ def board_pulls(pulls, repo: str) -> list[BoardPull]:
             continue
         sha = head_data.get("sha")
         head = sha[:7].lower() if type(sha) is str and re.fullmatch(r"[0-9a-fA-F]+", sha) else ""
+        full = sha.lower() if head and HEX_SHA.fullmatch(sha.lower()) else ""
         title = re.sub(r"#(?=[0-9])", "", title)
         body = pull.get("body")
         closes = tuple(sorted({int(match.group(1)) for match in re.finditer(
@@ -4218,7 +4531,7 @@ def board_pulls(pulls, repo: str) -> list[BoardPull]:
             body if type(body) is str else "")}))
         out.append(BoardPull(pull["number"], _label(title, 60), state,
                              _github_time(pull.get("merged_at")), _github_time(pull.get("updated_at")),
-                             head, pull.get("draft") is True, closes))
+                             head, pull.get("draft") is True, closes, full))
     return out
 
 
@@ -4230,6 +4543,7 @@ class PrRow:
     ec2: str
     linux: str
     mac: str
+    docs: str
     next: str
     owner: str
     current: str = "未確認"
@@ -4254,6 +4568,81 @@ def _ci_word(entry, known: bool) -> str:
     if status == "completed":
         return CI_CONCLUSIONS.get(conclusion, "結果不明")
     return "?"
+
+
+CHECK_KEYS = ("linux", "mac", "docs")
+
+
+def _check_word(checks, number: int, sha: str, key: str) -> str:
+    """One check ("linux", "mac" or "docs") of one PR at its exact head,
+    looked up by PR number and full 40-character SHA (GitHubSource.pr_checks
+    keys): 不需 when the PR's changed paths do not require it; ? when the read
+    failed, did not return this PR at this head, named this PR in its errors,
+    cut its file or check list, or the full SHA is unknown; — when a required
+    check has no run on the head; else its state."""
+    found = (checks.get((number, sha)) if type(checks) is dict and type(number) is int
+             and type(sha) is str and HEX_SHA.fullmatch(sha) else None)
+    if not isinstance(found, HeadChecks) or found.required is None:
+        return "?"
+    if key not in found.required:
+        return "不需"
+    if found.runs is None:
+        return "?"
+    if key not in found.runs:
+        return "—"
+    return _ci_word(found.runs[key], True)
+
+
+def board_open_pulls(pulls, checks) -> list[BoardPull]:
+    """The open PRs the PR board shows, by number: every open PR the GraphQL
+    read returned (GitHubSource.pr_checks keys), plus open PRs on the pulls
+    page it did not return (their checks then show ?). The GraphQL read comes
+    after the pulls page, so its head wins. Title, draft flag and closing
+    references come from the pulls page when it lists the PR, else the draft
+    flag from the GraphQL read. Pure."""
+    found = {pull.number: pull for pull in pulls or []
+             if isinstance(pull, BoardPull) and pull.state == "OPEN"}
+    for key, result in (checks.items() if type(checks) is dict else ()):
+        if not (type(key) is tuple and len(key) == 2 and type(key[0]) is int
+                and type(key[1]) is str and HEX_SHA.fullmatch(key[1])):
+            continue
+        number, sha = key
+        known = found.get(number)
+        if known is not None:
+            found[number] = replace(known, head=sha[:7], sha=sha)
+        else:
+            found[number] = BoardPull(number, "", "OPEN", 0.0, 0.0, sha[:7],
+                                      isinstance(result, HeadChecks) and result.draft is True,
+                                      (), sha)
+    return sorted(found.values(), key=lambda pull: pull.number)
+
+
+def _names_head(named: str, head: str, sha: str = "") -> bool:
+    """Whether a HEAD line's id (7 to 40 hex characters) names this head: a
+    prefix of its full SHA when that is known, else its seven characters."""
+    named, head, sha = named.lower(), head.lower(), (sha or "").lower()
+    if sha and HEX_SHA.fullmatch(sha):
+        return len(named) >= 7 and sha.startswith(named)
+    return bool(head) and named[:7] == head[:7]
+
+
+def _head_verdict(entries, head: str, sha: str = "") -> tuple[str, str]:
+    """A PR's review state for its current head, from review_verdicts()
+    entries. Only the head a verdict's HEAD line names counts, never another
+    commit id in its body. The newest verdict whose HEAD line names any head
+    decides: ("current", verdict) when it names this head (_names_head(), by
+    the full SHA when known); ("stale", "") when it names another (older)
+    head, even if an earlier verdict named this one; ("", "") when no verdict
+    names a head."""
+    bound = [entry for entry in entries if type(entry) in (tuple, list) and len(entry) >= 4
+             and type(entry[0]) in (int, float) and type(entry[3]) is str and entry[3]
+             ] if type(entries) in (tuple, list) else []
+    if not bound or not head:
+        return "", ""
+    newest = max(bound, key=lambda entry: entry[0])
+    if _names_head(newest[3], head, sha):
+        return "current", newest[1]
+    return "stale", ""
 
 
 def _work_names(row: OfficeRow) -> str:
@@ -4359,52 +4748,57 @@ def _current_person(rows, predicate, *, readable=True) -> str:
     return _people_text(*_current_people(rows, predicate))
 
 
-def _pr_people(office, pull, ci_heads) -> tuple[set, bool]:
-    """The one person/CI answer per PR the PR table, running PR row and Issue rows share."""
+def _pr_people(office, pull, checks) -> tuple[set, bool]:
+    """The one person/CI answer per PR the PR table, running PR row and Issue rows share.
+    checks: GitHubSource.pr_checks; CI counts while a check the PR's paths
+    require is queued or running on the exact head (_check_word() says 不需
+    for any other). Check data missing or unreadable for this PR (any ?)
+    leaves it uncertain."""
     if not pull or not pull.head:
         return set(), True   # a PR missing from the read page has unknown head and CI
     people, uncertain = _current_people(
         office, lambda row: _names_pr(row, pull.number, pull.head))
     if pull.state == "OPEN":
-        if ci_heads is None:
+        words = [_check_word(checks, pull.number, pull.sha, key) for key in CHECK_KEYS]
+        if "?" in words:
             uncertain = True
-        else:
-            ci = ci_heads.get(pull.head.lower(), {})
-            if any(_ci_word(ci.get(key), True) in ("執行中", "排隊") for key in ("linux", "mac")):
-                people.add("CI")
+        if any(word in ("執行中", "排隊") for word in words):
+            people.add("CI")
     return people, uncertain
 
 
-def _current_pr_people(office, pull, ci_heads, *, github_known=True, office_known=True):
+def _current_pr_people(office, pull, checks, *, github_known=True, office_known=True):
     """One shared person/CI answer for a PR and its issue-board aliases."""
     if not github_known or not office_known:
         return "未確認"
-    return _people_text(*_pr_people(office, pull, ci_heads))
+    return _people_text(*_pr_people(office, pull, checks))
 
 
-def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending, office=(), *, github_known=True,
+def pr_board_rows(pulls, verdicts, checks, ec2, reviewing, pending, office=(), *, github_known=True,
                   office_known=True) -> list[PrRow]:
-    """Build the read-only PR status table from already-read local/GitHub data."""
+    """Build the read-only PR status table from already-read local/GitHub data.
+    checks: GitHubSource.pr_checks, HeadChecks of each open PR keyed by its
+    number and full head SHA; the rows are board_open_pulls(), so every open
+    PR that read returned has a row even when the pulls page misses it; only
+    the checks a PR's changed paths require decide its next step;
+    verdicts: review_verdicts(), bound to the head their HEAD line names."""
     rows = []
-    for pull in sorted((item for item in pulls or []
-                        if isinstance(item, BoardPull) and item.state == "OPEN"),
-                       key=lambda item: item.number):
+    for pull in board_open_pulls(pulls, checks):
         number, head = str(pull.number), pull.head.lower()
         review = "未審" if head else "?"
         if head and (number, head) in (reviewing or set()):
             review = "審查中"
-        else:
-            matches = [entry for entry in (verdicts or {}).get(number, [])
-                       if type(entry) in (tuple, list) and len(entry) >= 3
-                       and head and head in entry[2]]
-            if matches:
-                verdict = max(matches, key=lambda entry: entry[0])[1]
+        elif head:
+            bound, verdict = _head_verdict((verdicts or {}).get(number, []), head, pull.sha)
+            if bound == "current":
                 review = {"PASS": "通過", "FAIL": "要修"}.get(verdict, "未確認")
+            elif bound == "stale":
+                review = "舊審查"
         ec2_word = "?" if not head or ec2 is None else (
             ec2[0].get(head, "?") if head in ec2[0] else "?" if ec2[1] else "—")
-        ci = (ci_heads or {}).get(head, {}) if head else {}
-        linux = _ci_word(ci.get("linux"), ci_heads is not None)
-        mac = _ci_word(ci.get("mac"), ci_heads is not None)
+        linux, mac, docs = (_check_word(checks, pull.number, pull.sha, key) for key in CHECK_KEYS)
+        required = [word for word in (linux, mac, docs) if word != "不需"]
+        others = [word for word in (linux, docs) if word != "不需"]   # the EC2 Linux workflow
         waiting_owner = any(type(item) is OwnerPending and item.kind == "waiting_owner"
                             and item.reference == f"#{number}" for item in pending or [])
         next_step, owner = "未確認", "PM"
@@ -4416,27 +4810,33 @@ def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending, office=(),
             next_step, owner = "等審查", "Reviewer"
         elif review == "要修":
             next_step, owner = "修復", "Developer"
-        elif any(word in (linux, mac) for word in ("失敗", "逾時", "取消")):
+        elif review == "舊審查":   # a stale verdict needs a new review before CI work
+            next_step, owner = "派審查", "PM"
+        elif any(word in ("失敗", "逾時", "取消") for word in required):
             next_step, owner = "修 CI", "PM"
         elif ec2_word in ("FAIL", "SHA_MISMATCH", "TIMEOUT"):
             next_step, owner = "修 EC2 失敗", "PM"
         elif review == "通過":
-            if linux in ("略過", "結果不明") or mac in ("?", "結果不明"):
+            # A required Linux or docs check with no passing run is not a pass;
+            # a required macOS check that did not run needs the mac-ci label.
+            if (any(word in ("?", "結果不明") for word in required)
+                    or any(word in ("—", "略過") for word in others)):
                 next_step, owner = "未確認 CI", "PM"
-            elif linux in ("執行中", "排隊"):
+            elif any(word in ("執行中", "排隊") for word in others):
                 next_step, owner = "等 CI", "CI"
-            elif mac == "成功" and linux in ("成功", "?"):
+            elif mac in ("成功", "不需"):   # every other required check is 成功 here
                 next_step, owner = "可合併", "PM"
             elif mac in ("執行中", "排隊"):
                 next_step, owner = "等 macOS", "CI"
-            else:
+            else:   # macOS 略過 or —
                 next_step, owner = "加 mac-ci", "PM"
         elif review == "未審":
             next_step, owner = "派審查", "PM"
-        current = _current_pr_people(office, pull, ci_heads,
+        current = _current_pr_people(office, pull, checks,
                                      github_known=github_known,
                                      office_known=office_known)
-        rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, next_step, owner, current))
+        rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, docs,
+                          next_step, owner, current))
     return rows
 
 
@@ -4458,21 +4858,30 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
     refs = {_board_ref_number(item.ref) for item in file_items}
     # Queue and blocked assignments take an open PR out of the running column.
     queued_blocked = {_board_ref_number(item.ref) for item in queue + blocked}
+    checks = getattr(github, "pr_checks", None) if github is not None else None
+    # Open PRs at the heads the PR table uses (the GraphQL read wins).
+    open_pulls = ({pull.number: pull for pull in board_open_pulls(pulls, checks)}
+                  if github_known and pulls is not None else {})
     if github_known:
         for pull in pulls or []:
             if pull.state != "OPEN" or pull.number in refs or pull.number in queued_blocked:
                 continue
-            verdicts = (github.verdicts or {}).get(str(pull.number), [])
-            matching = [entry for entry in verdicts if pull.head and pull.head in entry[2]]
-            matching.sort(key=lambda entry: entry[0], reverse=True)
+            # The same head-bound rule as the PR table: a verdict counts only for
+            # the head its HEAD line names.
+            at = open_pulls.get(pull.number, pull)
+            bound, verdict = _head_verdict((github.verdicts or {}).get(str(pull.number), []),
+                                           at.head.lower(), at.sha)
             what = pull.title + (" 草稿" if pull.draft else "")
-            if matching and matching[0][1] == "FAIL":
+            if bound == "current" and verdict == "FAIL":
                 next_step = "Developer"
-            elif matching and matching[0][1] == "PASS":
+            elif bound == "current" and verdict == "PASS":
                 next_step = "PM"
-            elif matching:
+            elif bound == "current":
                 next_step = "未確認"
                 what += "「已見審查結論，下一步未確認」"
+            elif bound == "stale":
+                next_step = "PM"
+                what += "「只有舊版本的審查結論，要重新審查」"
             else:
                 next_step = "未確認"
                 what += "「未見審查結論」"
@@ -4481,8 +4890,8 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
     # PR page. An issue may be worked through an open PR whose body closes it.
     # Issue aliases need a readable pulls page and come from open PRs only.
     snapshot_known = github_known and pulls is not None
-    ci_heads = getattr(github, "ci_heads", None) if github is not None else None
     pulls_by_number = {pull.number: pull for pull in (pulls or [])}
+    pulls_by_number.update(open_pulls)
     issue_prs = {}
     if snapshot_known:
         for pull in pulls:
@@ -4495,12 +4904,12 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
         if not office_known or not snapshot_known:
             current = "未確認"
         elif re.match(r"PR\s", item.ref):
-            current = _people_text(*_pr_people(office, pulls_by_number.get(number), ci_heads))
+            current = _people_text(*_pr_people(office, pulls_by_number.get(number), checks))
         else:
             people, uncertain = _current_people(
                 office, lambda row, issue=number: _names_issue(row, issue))
             for pr in sorted(issue_prs.get(number, ())):
-                more, unsure = _pr_people(office, pulls_by_number[pr], ci_heads)
+                more, unsure = _pr_people(office, pulls_by_number[pr], checks)
                 people |= more
                 uncertain = uncertain or unsure
             current = _people_text(people, uncertain)
@@ -4533,7 +4942,7 @@ def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None, office=
     if github is not None and GITHUB_IDENTITY_STATUS:
         github_status = "；".join(
             part for part in (github_status, GITHUB_IDENTITY_STATUS) if part)
-    prs = (pr_board_rows(pulls, github.verdicts, getattr(github, "ci_heads", None),
+    prs = (pr_board_rows(pulls, github.verdicts, checks,
                          ec2, reviewing, github.pending, office, github_known=github_known,
                          office_known=office_known) if github_known else [])
     return WorkBoard(owner, running, queue, blocked, done, github_known, board_known,
@@ -4601,7 +5010,8 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
             elif isinstance(item, PrRow):
                 ref = f"PR #{item.number}"
                 rest = (f"審查 {item.review} · EC2 {item.ec2} · Linux {item.linux} · "
-                        f"macOS {item.mac}  → {item.next}（{item.owner}） · 現在：{item.current}")
+                        f"macOS {item.mac} · Docs {item.docs}  → {item.next}（{item.owner}）"
+                        f" · 現在：{item.current}")
             elif isinstance(item, OwnerPending):
                 ref = item.reference
                 rest = f"{item.summary or item.status}  → 你"
@@ -6301,6 +6711,15 @@ def _dispatch_entry(record) -> DispatchRecord | None:
     return DispatchRecord(created, provider, found.group(1) if found else "")
 
 
+def _task_load(path: str, budget: int):
+    """(file key, whole parsed record, bytes read), or None when it was not read."""
+    opened = _remote_test_open(path, budget)
+    if opened is None or opened[1] is False:
+        return None
+    key, raw = opened
+    return key, _remote_test_json(raw) if raw else None, len(raw or b"")
+
+
 def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
     """Read bounded, unchanged-cached Task records through a field extractor."""
     paths, capped = _remote_test_paths(root)
@@ -6325,16 +6744,12 @@ def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
         if cached and cached[0] == key:
             record_entries = cached[1]
         else:
-            opened = _remote_test_open(path, budget)
-            if opened is None:
+            loaded = _task_load(path, budget)
+            if loaded is None:
                 short = True
                 continue
-            key, raw = opened
-            if raw is False:
-                short = True
-                continue
-            budget -= len(raw or b"")
-            record = _remote_test_json(raw) if raw else None
+            key, record, used = loaded
+            budget -= used
             entry = extract(record)
             record_entries = (tuple(entry) if type(entry) in (tuple, list)
                               else (entry,) if entry is not None else ())
@@ -6617,6 +7032,106 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
                          evidence="llmtool 紀錄")
     return OfficeRow("EC2 遠端測試", IDLE, f"最近一次：{latest[1]}", max(0.0, now - latest[0]),
                      80, kind="worker", evidence="llmtool 紀錄")
+
+
+# Company LLM runs (#763 Owner): while a gw-agent Developer run is under way it
+# gets a live row like the Claude and Codex rows, then a 完成 row for
+# OFFICE_DONE_WINDOW; otherwise only its status row stays. No Task file is
+# opened for these rows: it holds the prompt and model output. A run is live
+# only on its gateway process. Its Task id comes from the authorization.json
+# beside its audit file (ids, scope digest, egress basis; no prompt, no
+# credential), and a finished run from the time of the audit copy llmtool keeps
+# (developer_routes/gw_agent.py, collect). A company gw run is an API call
+# inside llmtool and leaves neither, so it has no row here.
+GW_ROSTER = {"gw-agent developer": "公司 gw agent"}
+GW_AUDIT_ROOT = None   # None: the temp directory, resolved in _gw_finished (it may not exist)
+GW_AUDIT_PREFIX = "llmtool-gw-agent-audit-"
+GW_AUDIT_ID = re.compile(r"[A-Za-z0-9_]{1,16}")   # the random end of a mkdtemp name
+GW_AUTH_MAX = 64 << 10
+
+
+def _gw_auth_task(audit: str) -> str:
+    """The Task id in the authorization.json llmtool wrote beside a running
+    gateway's audit file, else ""."""
+    if not audit:
+        return ""
+    opened = _remote_test_open(os.path.join(os.path.dirname(audit), "authorization.json"),
+                               GW_AUTH_MAX)
+    record = _remote_test_json(opened[1]) if opened and opened[1] else None
+    task = record.get("task_id") if type(record) is dict else None
+    return task if type(task) is str and DISPATCH_TASK_ID.fullmatch(task) else ""
+
+
+def _gw_finished(now: float) -> list[tuple[float, str]]:
+    """[(age, id)], newest first, of gw-agent runs that ended within
+    OFFICE_DONE_WINDOW. llmtool copies the audit file when a run ends, so the
+    copy's time is the end, and its folder's random name tells runs apart. Only
+    file times are read, and only the user's own plain files count, as in
+    cleanup_audit_copies (developer_routes/gw_agent.py). Without a temp
+    directory there are no finished runs to show."""
+    try:
+        root = tempfile.gettempdir() if GW_AUDIT_ROOT is None else GW_AUDIT_ROOT
+        with os.scandir(root) as entries:
+            names = [entry.name for entry in entries if entry.name.startswith(GW_AUDIT_PREFIX)]
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        run = name[len(GW_AUDIT_PREFIX):]
+        folder = os.path.join(root, name)
+        try:
+            folder_info, info = os.lstat(folder), os.lstat(os.path.join(folder, "audit.jsonl"))
+        except OSError:
+            continue
+        age = now - info.st_mtime
+        if (GW_AUDIT_ID.fullmatch(run) and stat.S_ISDIR(folder_info.st_mode)
+                and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                and folder_info.st_uid == info.st_uid == os.getuid()
+                and -REMOTE_TEST_SKEW <= age <= OFFICE_DONE_WINDOW):
+            found.append((max(0.0, age), run))
+    return sorted(found)
+
+
+def _gw_activity(audit: str, now: float, elapsed: float | None) -> float:
+    """Seconds since the gateway last wrote its audit file: only the file's
+    time is read, never its content. Without it, the process age."""
+    try:
+        if audit:
+            return max(0.0, now - os.lstat(audit).st_mtime)
+    except (OSError, ValueError):
+        pass
+    return elapsed or 0.0
+
+
+def _gw_row(state: str, words: str, age: float, d6: str, registered: dict, task: str,
+            sid: str, evidence: str) -> OfficeRow:
+    """A registered D6 is named by the PR binding (_bind_d6_pr_rows) like other
+    D6 rows; any other place is named here."""
+    parts = [f"task {task[:8]}"] if task else ["未綁定 Task"]
+    if d6 not in registered:
+        parts.append(f"D6 {d6}（未登記）" if d6 else "未綁定 D6")
+    return OfficeRow("gw-agent developer", state, " · ".join(parts + [words]), age, 10,
+                     role="developer", task=f"task {d6}" if d6 in registered else "",
+                     evidence=evidence, sid=sid)
+
+
+def gw_rows(processes: list[Process], now: float, canonical: str) -> list[OfficeRow]:
+    """Live and recently finished gw-agent Developer runs."""
+    registered = registered_tasks(canonical)
+    rows = []
+    for proc in sorted(processes, key=lambda p: p.pid):
+        if proc.role != GW_AGENT_ROLE or len(proc.gw) != 3:
+            continue
+        workdir = os.path.realpath(proc.gw[1]) if proc.gw[1] else ""
+        d6 = next((task_id for task_id, (place, _) in registered.items() if place == workdir), "")
+        if not d6 and AGENT_PATH.fullmatch(os.path.basename(workdir)):
+            d6 = os.path.basename(workdir)
+        age = _gw_activity(proc.gw[2], now, _elapsed_seconds(proc.elapsed))
+        rows.append(_gw_row(WORKING, "執行中", age, d6, registered, _gw_auth_task(proc.gw[2]),
+                            f"pid {proc.pid}", "程序"))
+    for age, run in _gw_finished(now):
+        rows.append(_gw_row(DONE, "已結束", age, "", registered, "", run, "llmtool 稽核檔"))
+    return rows
 
 
 # Codex reviewers are not a standing Worker: they run as sessions the PM starts
@@ -7417,10 +7932,17 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         mac.append(ci_queue_row(mac_waiting, runner_count))
     rows += agy + mac + github_runner_rows(ci_view, now, local_names, ci)
     rows.append(remote_test_row(processes, now, llmtool_tasks))
+    gw_runs = gw_rows(processes, now, canonical)
+    rows += gw_runs
+    gw_live: dict = {}
+    for row in gw_runs:
+        if row.state == WORKING:
+            gw_live.setdefault(GW_ROSTER[row.name], []).append(row)
     raw, source = load_dispatch(canonical, dispatch)
     switches, problem = worker_dispatch(raw)
     for name, key, order in WORKER_ROSTER:
-        live = opencode if name == "opencode developer" else agy if name == "agy" else []
+        live = (opencode if name == "opencode developer" else agy if name == "agy"
+                else gw_live.get(name, []))
         switch = switches.get(key)
         trouble = problem
         paused = not trouble and switch[0] == "PAUSED"
@@ -7446,7 +7968,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 notes.append(f"本機 llmtool 紀錄（不分 repo）最近一次：{gw[3]}"
                              f"（近 7 天 {gw[1]} 次，成功 {gw[2]} 次）")
         if live:
-            notes.append(f"有 {len(live)} 個 CLI 開著（非派工）")
+            notes.append(f"有 {len(live)} 個執行中" if name in gw_live
+                         else f"有 {len(live)} 個 CLI 開著（非派工）")
         if trouble:
             label, state, authority = DISPATCH_PROBLEMS[trouble], UNCHECKED, ""
         else:
