@@ -32,6 +32,10 @@ _RECEIPT_FIELDS = frozenset((
 ))
 CHECKOUT_REASON = "CHECKOUT_INVALID"
 _CHECKOUT_REASON = CHECKOUT_REASON
+LAUNCH_REASON = "LAUNCH_FAILED"
+_LAUNCH_REASON = LAUNCH_REASON
+LAUNCH_FAILED = LAUNCH_REASON
+LAUNCH_ERROR = LAUNCH_REASON
 SENSITIVE = re.compile(
     r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|(?:(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b|(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]{16}(?=(?-i:[^\W\x00-\x7f])))|\bsk-[A-Za-z0-9_-]{12,}|\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|\bxox[abprs]-[A-Za-z0-9-]{20,}|\b(?:bearer|basic)\s+\S+|\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|[\"']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|client[_-]?secret|aws_secret_access_key)[\"']?\s*[:=]",
     re.I,
@@ -156,21 +160,30 @@ def run_module(python, src, module, timeout):
     stdout = b""
     stderr = b""
     try:
-        proc = subprocess.Popen(
-            argv,
-            cwd=src,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
         try:
-            stdout, stderr = proc.communicate(timeout=max(0.1, float(timeout)))
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _kill_session(proc.pid)
-            stdout, stderr = proc.communicate()
+            proc = subprocess.Popen(
+                argv,
+                cwd=src,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            try:
+                stdout, stderr = proc.communicate(timeout=max(0.1, float(timeout)))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _kill_session(proc.pid)
+                stdout, stderr = proc.communicate()
+        except OSError:
+            return SimpleNamespace(
+                returncode=1,
+                stdout=b"",
+                stderr=f"ERROR: {module}\n{LAUNCH_REASON}\n".encode("utf-8"),
+                timed_out=False,
+                home=home_dir,
+            )
     finally:
         if proc is not None:
             _kill_session(proc.pid)
@@ -459,6 +472,12 @@ def main(argv=None, *, runner=None, clock=None, git=None):
             stderr = exc.stderr.encode("utf-8") if isinstance(exc.stderr, str) else (exc.stderr or b"")
             returncode = 124
             timed_out = True
+            mod_home = None
+        except OSError:
+            returncode = 1
+            stdout = b""
+            stderr = f"ERROR: {mod}\n{LAUNCH_REASON}\n".encode("utf-8")
+            timed_out = False
             mod_home = None
 
         if mod_home:

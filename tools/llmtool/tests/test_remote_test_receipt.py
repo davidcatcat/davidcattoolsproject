@@ -721,6 +721,49 @@ class RemoteTestReceiptTests(unittest.TestCase):
         self.assertIsNotNone(val_dirty)
         self.assertEqual(val_dirty["result"], "FAIL")
 
+    def test_launch_oserror_writes_fail_receipt_with_module_in_failures_and_reason_line(self):
+        out_dir = self.root / "out-launch-oserror"
+        calls = []
+
+        def oserror_runner(python, src, module, timeout):
+            calls.append(module)
+            raise OSError("cannot execute binary")
+
+        code, printed = self.invoke(
+            [
+                "run",
+                "--src", str(self.src),
+                "--python", str(self.venv_py),
+                "--out", str(out_dir),
+                "--sha", SHA,
+                "--fetch-head", SHA,
+                "test_alpha",
+            ],
+            runner=oserror_runner,
+        )
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(calls, ["test_alpha"])
+        receipt_path = out_dir / "receipt.json"
+        self.assertTrue(receipt_path.exists())
+        raw = receipt_path.read_bytes()
+        validated = remote_test._validate_remote_receipt(
+            raw, sha=SHA, modules=("test_alpha",)
+        )
+        self.assertIsNotNone(validated)
+        self.assertEqual(validated["result"], "FAIL")
+        self.assertNotEqual(validated["exit_code"], 0)
+        self.assertEqual(validated["failures"], ["test_alpha"])
+        self.assertIn(remote_test_receipt.LAUNCH_REASON, validated["final"])
+        self.assertIn(remote_test_receipt.LAUNCH_REASON, printed)
+        self.assertTrue(printed.endswith("FAIL\n"))
+
+    def test_run_module_oserror_on_non_executable_python(self):
+        res = remote_test_receipt.run_module(str(self.venv_py), str(self.src), "test_alpha", 120)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertFalse(res.timed_out)
+        self.assertIn(remote_test_receipt.LAUNCH_REASON.encode("utf-8"), res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
