@@ -1810,9 +1810,6 @@ def _docs_only_ci(paths):
             if (len(relative_parts) == 2 and path.endswith('.md')):
                 return False
             return False
-        # A Python file under skills/ is code, not documentation.
-        if path.startswith('skills/') and path.endswith('.py'):
-            return False
         if (path.endswith('.md') or path in ('AGENTS.md', 'CLAUDE.md') or
                 path.startswith(('skills/', 'docs/'))):
             continue

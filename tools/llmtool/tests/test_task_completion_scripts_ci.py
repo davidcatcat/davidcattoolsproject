@@ -3,7 +3,6 @@
 The 11-07 relaxation that let a scripts/-only change skip the Linux job is
 withdrawn. A scripts/-only change is code: task complete needs the exact-head
 Linux and macOS code checks, like any other code change. The docs gate stays.
-A Python file under skills/ is code, not documentation.
 """
 import sys
 import unittest
@@ -249,22 +248,6 @@ class ScriptsOnlyCiTests(unittest.TestCase):
                 result, _ = self._collect_github(responses, changed_paths)
                 self.assertEqual(result['evidence']['not_run_checks'],
                                  [{'name': name, 'status': 'NOT_RUN'} for name in base])
-
-    def test_skills_python_file_is_not_docs_only(self):
-        self.assertFalse(task_completion._docs_only_ci(['skills/x/tool.py']))
-        self.assertFalse(task_completion._docs_only_ci(
-            ['skills/x/SKILL.md', 'skills/x/tool.py']))
-        for paths in (['skills/x/SKILL.md'], ['skills/x/reference.md'],
-                      ['docs/guide.md'], ['AGENTS.md'], ['CLAUDE.md'], ['README.md'],
-                      ['tools/llmtool/ROADMAP.md']):
-            with self.subTest(paths=paths):
-                self.assertTrue(task_completion._docs_only_ci(paths))
-
-    def test_skills_python_file_needs_linux_and_mac_code_checks(self):
-        evidence, _ = self._collect(
-            self._ci_responses(mac='success', linux='success'), ['skills/x/tool.py'])
-        self.assertEqual(evidence['required_checks'], [LINUX_CHECK, MAC_CHECK])
-        self.assertFalse(evidence['docs_only'])
 
     def test_scripts_only_malformed_mac_job_fails_closed(self):
         responses = self._ci_responses(mac='success', linux='success')

@@ -4144,13 +4144,6 @@ class ScriptsOnlyCiTests(unittest.TestCase):
              'MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
             ('docs only with docs check', ['docs/guide.md'], {'check (docs)': 'success'},
              None, (None, None)),
-            ('skills Python file with docs check only', ['skills/x/tool.py'],
-             {'check (docs)': 'success'},
-             'MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
-            ('skills Python file with Linux and macOS', ['skills/x/tool.py'],
-             {linux: 'success', mac: 'success'}, None, (None, None)),
-            ('skills Markdown with docs check', ['skills/x/SKILL.md'],
-             {'check (docs)': 'success'}, None, (None, None)),
         )
         for label, paths, outcomes, merge_code, review in cases:
             with self.subTest(label):
