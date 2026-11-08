@@ -824,6 +824,9 @@ def add_task_submission_parsers(actions):
     advance.add_argument('--pr', type=int, help='public GitHub pull request number')
     advance.add_argument('--merge', action='store_true',
                          help='merge the bound PR after exact-head review and check gates pass')
+    advance.add_argument('--owner-acceptance', metavar='URL',
+                         help=('with --merge only: PM relay ANSWERED issue comment URL that '
+                               'records Owner acceptance of this PR and full head SHA'))
     advance.add_argument('--integration-pr', type=int,
                          help='merged integration PR containing the reviewed head')
     advance.add_argument('--reviewer-session-done', action='store_true',
@@ -1314,12 +1317,21 @@ def run_task_advance(args, *, store=None, **adapters):
     """
     from .task_advance import advance
     from . import pm_caller
+    owner_acceptance = getattr(args, 'owner_acceptance', None)
+    if owner_acceptance is not None and not getattr(args, 'merge', False):
+        # --owner-acceptance is only for a merge; nothing else runs.
+        _print({'task_id': args.task_id, 'step': 'REFUSED', 'result': None,
+                'next': 'REFUSED', 'codes': ['OWNER_ACCEPTANCE_REQUIRES_MERGE'],
+                'acked': []})
+        return 1
     store = TaskStore() if store is None else store
     try:
         pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
     except pm_caller.PMCallerRefused as exc:
         _print(pm_caller.refusal(args.task_id, exc.code))
         return 1
+    if owner_acceptance is not None:
+        adapters = dict(adapters, owner_acceptance=owner_acceptance)
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured):
         result = advance(task_id=args.task_id, store=store,
