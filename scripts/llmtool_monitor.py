@@ -5443,12 +5443,16 @@ QUOTA_WARN_PERCENT = 80
 
 def _quota_timestamp(value):
     if type(value) in (int, float):
-        return float(value)
+        try:
+            return float(value)
+        except OverflowError:
+            # An integer too big for a float is not a time.
+            return None
     if type(value) is str:
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
             return parsed.timestamp() if parsed.tzinfo else None
-        except (ValueError, OverflowError):
+        except (ValueError, OverflowError, OSError):
             return None
     return None
 
@@ -5457,18 +5461,30 @@ CODEX_QUOTA_MAX_BYTES = 4096
 CODEX_QUOTA_WINDOW_FIELDS = frozenset({"used_percent", "window_minutes", "resets_at"})
 # A read time this far ahead of the clock is not trusted.
 CODEX_QUOTA_CLOCK_SLACK = 300
+# Sane limits for each stored figure. Anything outside reads as UNKNOWN.
+CODEX_QUOTA_RANGES = {"used_percent": (0, 1000), "window_minutes": (1, 525600)}
+CODEX_QUOTA_TEN_YEARS = 3653 * 86400
 
 
 def _quota_figure(value) -> bool:
-    # A plain finite int or float; bool, text and NaN do not count.
-    return type(value) in (int, float) and math.isfinite(value)
+    # A plain int or finite float; bool, text and NaN do not count.
+    # Ints are not turned into floats here, so a huge int cannot raise.
+    if type(value) is int:
+        return True
+    return type(value) is float and math.isfinite(value)
+
+
+def _quota_in_range(value, low, high) -> bool:
+    # Only compares; int and float compare exactly, so this never overflows.
+    return _quota_figure(value) and low <= value <= high
 
 
 def read_codex_quota(now, path=None) -> dict:
     """The private Codex quota file as FRESH plus its figures, else UNKNOWN.
 
     UNKNOWN when the file is missing, unreadable, malformed, not a private
-    (0600, own) regular file, or older than any stored window."""
+    (0600, own) regular file, has a figure out of its sane range, or is
+    older than any stored window. Never raises for bad file content."""
     path = CODEX_QUOTA_FILE if path is None else path
 
     def unknown(reason):
@@ -5504,8 +5520,7 @@ def read_codex_quota(now, path=None) -> dict:
     if (type(value) is not dict
             or not set(value) <= {"schema_version", "read_at", "primary", "secondary"}
             or type(value.get("schema_version")) is not int or value["schema_version"] != 1
-            or not _quota_figure(value.get("read_at"))
-            or value["read_at"] > now + CODEX_QUOTA_CLOCK_SLACK):
+            or not _quota_figure(value.get("read_at"))):
         return unknown("malformed")
     windows = {}
     for name in ("primary", "secondary"):
@@ -5513,26 +5528,44 @@ def read_codex_quota(now, path=None) -> dict:
             continue
         data = value[name]
         if (type(data) is not dict or set(data) != CODEX_QUOTA_WINDOW_FIELDS
-                or not all(_quota_figure(data[field]) for field in CODEX_QUOTA_WINDOW_FIELDS)
-                or data["window_minutes"] <= 0):
+                or not all(_quota_figure(data[field]) for field in CODEX_QUOTA_WINDOW_FIELDS)):
             return unknown("malformed")
         windows[name] = {field: data[field] for field in sorted(CODEX_QUOTA_WINDOW_FIELDS)}
     if not windows:
         return unknown("malformed")
     read_at = value["read_at"]
-    if any(now - read_at > data["window_minutes"] * 60 for data in windows.values()):
-        return unknown("stale")
+    try:
+        # Range checks only compare, so 1e300 or a huge int cannot raise.
+        if not _quota_in_range(read_at, now - CODEX_QUOTA_TEN_YEARS,
+                               now + CODEX_QUOTA_CLOCK_SLACK):
+            return unknown("range")
+        for data in windows.values():
+            if (not all(_quota_in_range(data[field], *limits)
+                        for field, limits in CODEX_QUOTA_RANGES.items())
+                    or not _quota_in_range(data["resets_at"], now - CODEX_QUOTA_TEN_YEARS,
+                                           now + CODEX_QUOTA_TEN_YEARS)):
+                return unknown("range")
+        # All figures are bounded now, so this sum cannot overflow.
+        if any(now - read_at > data["window_minutes"] * 60 for data in windows.values()):
+            return unknown("stale")
+    except (ArithmeticError, ValueError, TypeError):
+        return unknown("malformed")
     return {"state": "FRESH", "read_at": read_at, **windows}
 
 
-def _codex_quota_line(used, window, reset, recorded, now) -> str:
-    window_text = ("5 小時額度" if window == 300 else
-                   "7 天額度" if window == 10080 else f"{window:g} 分鐘額度")
-    age = max(0, int((now - recorded) // 60))
-    reset_local = datetime.fromtimestamp(reset)
-    reset_format = "%H:%M" if reset_local.date() == datetime.fromtimestamp(now).date() else "%m-%d %H:%M"
-    return (f"Codex {window_text}已用 {used:g}%，{reset_local:{reset_format}} 重置"
-            f"（紀錄 {age} 分鐘前）")
+def _codex_quota_line(used, window, reset, recorded, now):
+    """One warning line, or None when a figure cannot be shown as a time or number."""
+    try:
+        window_text = ("5 小時額度" if window == 300 else
+                       "7 天額度" if window == 10080 else f"{window:g} 分鐘額度")
+        age = max(0, int((now - recorded) // 60))
+        reset_local = datetime.fromtimestamp(reset)
+        reset_format = ("%H:%M" if reset_local.date() == datetime.fromtimestamp(now).date()
+                        else "%m-%d %H:%M")
+        return (f"Codex {window_text}已用 {used:g}%，{reset_local:{reset_format}} 重置"
+                f"（紀錄 {age} 分鐘前）")
+    except (OverflowError, ValueError, OSError):
+        return None
 
 
 def quota_warnings(now, codex_root=None, claude_root=None, quota_path=None) -> list[str]:
@@ -5583,7 +5616,7 @@ def quota_warnings(now, codex_root=None, claude_root=None, quota_path=None) -> l
                         or reset is None or reset <= now or used < QUOTA_WARN_PERCENT):
                     continue
                 line = _codex_quota_line(used, window, reset, rate_modified, now)
-                if line not in out:
+                if line is not None and line not in out:
                     out.append(line)
 
     # The quota file adds a window only when the session tails gave no line
@@ -5598,6 +5631,8 @@ def quota_warnings(now, codex_root=None, claude_root=None, quota_path=None) -> l
             if reset <= now or used < QUOTA_WARN_PERCENT:
                 continue
             line = _codex_quota_line(used, data["window_minutes"], reset, quota["read_at"], now)
+            if line is None:
+                continue
             prefix = line.split("已用", 1)[0] + "已用"
             if not any(old.startswith(prefix) for old in out):
                 out.append(line)

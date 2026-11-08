@@ -478,6 +478,82 @@ class QuotaWarningTests(unittest.TestCase):
             self.assertEqual(len(lines), 1)
             self.assertIn("已用 85%", lines[0])
 
+    def test_read_codex_quota_out_of_range_or_huge_figures_are_unknown(self):
+        huge = 10 ** 400
+        eleven_years = 11 * 365 * 86400
+        with tempfile.TemporaryDirectory() as temp:
+            missing = temp + "/missing"
+
+            def record(read_at=None, **primary):
+                value = self._quota_record(read_at=read_at)
+                value["primary"].update(primary)
+                return value
+
+            cases = {
+                "percent 1e300": record(used_percent=1e300),
+                "percent huge int": record(used_percent=huge),
+                "percent below 0": record(used_percent=-1),
+                "percent above 1000": record(used_percent=1000.5),
+                "window 0": record(window_minutes=0),
+                "window above one year": record(window_minutes=525601),
+                "window 1e300": record(window_minutes=1e300),
+                "window huge int": record(window_minutes=huge),
+                "reset 1e300": record(resets_at=1e300),
+                "reset -1e300": record(resets_at=-1e300),
+                "reset huge int": record(resets_at=huge),
+                "reset in eleven years": record(resets_at=self.NOW + eleven_years),
+                "reset eleven years ago": record(resets_at=self.NOW - eleven_years),
+                "read 1e300": record(read_at=1e300),
+                "read -1e300": record(read_at=-1e300),
+                "read huge int": record(read_at=huge),
+                "read eleven years ago": record(read_at=self.NOW - eleven_years),
+                "read ahead of the clock": record(read_at=self.NOW + 3600),
+            }
+            for label, bad in cases.items():
+                with self.subTest(label):
+                    path = self._quota_file(temp, bad)
+                    self.assertEqual(mon.read_codex_quota(self.NOW, path),
+                                     {"state": "UNKNOWN", "reason": "range"})
+                    self.assertEqual(mon.quota_warnings(self.NOW, missing, [], quota_path=path),
+                                     [])
+            # The edge of each range still reads as FRESH and warns once.
+            edge = record(used_percent=1000, window_minutes=525600,
+                          resets_at=self.NOW + 9 * 365 * 86400)
+            path = self._quota_file(temp, edge)
+            self.assertEqual(mon.read_codex_quota(self.NOW, path)["state"], "FRESH")
+            lines = mon.quota_warnings(self.NOW, missing, [], quota_path=path)
+            self.assertEqual(len(lines), 1)
+            self.assertIn("已用 1000%", lines[0])
+            low = record(used_percent=0, window_minutes=1)
+            self.assertEqual(mon.read_codex_quota(self.NOW, self._quota_file(temp, low))["state"],
+                             "FRESH")
+
+    def test_codex_quota_line_conversion_errors_give_no_line(self):
+        huge = 10 ** 400
+        later = self.NOW + 3600
+        self.assertIsNone(mon._codex_quota_line(85, 300, 1e300, self.NOW, self.NOW))
+        self.assertIsNone(mon._codex_quota_line(huge, 300, later, self.NOW, self.NOW))
+        self.assertIsNone(mon._codex_quota_line(85, huge, later, self.NOW, self.NOW))
+        with patch.object(mon, "datetime") as clock:
+            clock.fromtimestamp.side_effect = OSError("time out of range")
+            self.assertIsNone(mon._codex_quota_line(85, 300, later, self.NOW, self.NOW))
+        self.assertIsNotNone(mon._codex_quota_line(85, 300, later, self.NOW, self.NOW))
+
+    def test_session_tail_huge_figures_give_no_line_and_no_error(self):
+        huge = 10 ** 400
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / time.strftime("%Y/%m/%d", time.localtime(self.NOW))
+            path = folder / "rollout-a.jsonl"
+            figures = ({"used_percent": 85, "resets_at": 1e300},
+                       {"used_percent": 85, "resets_at": huge},
+                       {"used_percent": huge, "resets_at": self.NOW + 3600})
+            for primary in figures:
+                with self.subTest(primary=str(primary)[:60]):
+                    self._write(path, [{"type": "event_msg", "payload": {"rate_limits": {
+                        "primary": dict(primary, window_minutes=300)}}}])
+                    self.assertEqual(mon.quota_warnings(self.NOW, temp, [],
+                                                        quota_path=temp + "/none"), [])
+
     def test_claude_quota_hit_cleared_expired_and_reset_text_only(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".claude-account" / "projects"
