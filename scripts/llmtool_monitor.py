@@ -1974,6 +1974,11 @@ class CiView:
     error: str = ""         # why the last read failed ("" = it did not)
     finished: dict | None = None   # runner -> (job text, result, end time) of its last job
     queued: tuple = ()      # ci_queued_jobs() of runs waiting for a runner
+    # Workflow runs, read on every refresh (hosted runners need no local runner):
+    ci_at: float = 0.0      # clock time of the last good runs read (0 = never)
+    ci_error: str = ""      # why the last runs read failed ("" = it did not)
+    active: dict | None = None     # ci_active_runs() of that read; None = not read
+    last_done: dict | None = None  # ci_last_results() of that read; None = not read
 
 
 def _gh_error(exc: Exception) -> str:
@@ -2045,7 +2050,7 @@ class GitHubSource:
         # read. Never kept across refreshes, so a rerun on the same head shows
         # on the next one.
         self.pr_checks: dict | None = None
-        self.want_ci = False   # set while a self-hosted runner is on this Mac
+        self.want_ci = False   # set while a self-hosted runner is on this Mac; CI is read either way
         self.want_main = False
         self.main_health: MainHealth | None = None
         self.main_error = ""
@@ -2449,47 +2454,53 @@ class GitHubSource:
         else:
             view = replace(view, runners=runners, seen_at=self.clock(), error="")
         self.ci_view = view   # the runners show now; their jobs follow below
-        if self.want_ci or view.runners:
-            stamps: dict = {}   # run id -> updated_at from the runs list
-            read: dict = {}     # run id -> job list read during this refresh
+        # Runs and jobs are read on every refresh, whether or not a runner is
+        # registered or runs on this Mac: llmtool CI uses GitHub-hosted runners.
+        stamps: dict = {}   # run id -> updated_at from the runs list
+        read: dict = {}     # run id -> job list read during this refresh
 
-            def jobs_of(run):
-                # An unfinished run's job list is read again only once the
-                # run itself changed (or the cached list is a minute old).
-                cached, stamp = self._jobs.get(run), stamps.get(run)
-                if (cached is not None and stamp is not None and cached[0] == stamp
-                        and self.clock() - cached[1] < GITHUB_JOBS_TTL):
-                    return cached[2]
-                if run not in read:
-                    read[run] = self._get(f"repos/{self.repo}/actions/runs/{run}/jobs")
-                found = read[run]
-                if stamp is not None:
-                    self._jobs[run] = (stamp, self.clock(), found)
-                return found
-            try:
-                payload = self._get(f"repos/{self.repo}/actions/runs?per_page=30")
-                self.ci_heads = ci_head_runs(payload)
-                stamps = {run.get("id"): str(run.get("updated_at") or "")
-                          for run in (payload.get("workflow_runs") if type(payload) is dict else None) or []
-                          if type(run) is dict and type(run.get("id")) is int and run.get("status") in CI_ACTIVE}
-                self._jobs = {run: item for run, item in self._jobs.items() if run in stamps}
-                queued, active = [], ci_runs(payload)
-                self.ci_runs = (ci_runner_names(active[:CI_RUN_READS], jobs_of, queued)
-                                + active[CI_RUN_READS:])
-                done = ci_finished_runs(payload)
-                self._finished = {run: self._finished[run] for run, _ in done if run in self._finished}
-                for run, text in [item for item in done if item[0] not in self._finished][:CI_JOB_READS]:
-                    self._finished[run] = ci_finished_jobs(jobs_of(run), text)
-            except errors:
-                self.ci_runs = None
-                self.ci_heads = None
-                queued = []
-            last: dict = {}
-            for jobs in self._finished.values():
-                for runner, text, result, end in jobs:
-                    if end and end > last.get(runner, ("", "", 0.0))[2]:
-                        last[runner] = (text, result, end)
-            view = replace(view, finished=last, queued=tuple(queued))
+        def jobs_of(run):
+            # An unfinished run's job list is read again only once the
+            # run itself changed (or the cached list is a minute old).
+            cached, stamp = self._jobs.get(run), stamps.get(run)
+            if (cached is not None and stamp is not None and cached[0] == stamp
+                    and self.clock() - cached[1] < GITHUB_JOBS_TTL):
+                return cached[2]
+            if run not in read:
+                read[run] = self._get(f"repos/{self.repo}/actions/runs/{run}/jobs")
+            found = read[run]
+            if stamp is not None:
+                self._jobs[run] = (stamp, self.clock(), found)
+            return found
+        try:
+            payload = self._get(f"repos/{self.repo}/actions/runs?per_page=30")
+            self.ci_heads = ci_head_runs(payload)
+            stamps = {run.get("id"): str(run.get("updated_at") or "")
+                      for run in (payload.get("workflow_runs") if type(payload) is dict else None) or []
+                      if type(run) is dict and type(run.get("id")) is int and run.get("status") in CI_ACTIVE}
+            self._jobs = {run: item for run, item in self._jobs.items() if run in stamps}
+            queued, active, counts = [], ci_runs(payload), {}
+            self.ci_runs = (ci_runner_names(active[:CI_RUN_READS], jobs_of, queued, counts)
+                            + active[CI_RUN_READS:])
+            done = ci_finished_runs(payload)
+            self._finished = {run: self._finished[run] for run, _ in done if run in self._finished}
+            for run, text in [item for item in done if item[0] not in self._finished][:CI_JOB_READS]:
+                self._finished[run] = ci_finished_jobs(jobs_of(run), text)
+            runs_now, last_done = ci_active_runs(payload, counts), ci_last_results(payload)
+            ci_at, ci_error = self.clock(), ""
+        except errors as exc:
+            # Unknown, never the older answer.
+            self.ci_runs = None
+            self.ci_heads = None
+            queued, runs_now, last_done = [], None, None
+            ci_at, ci_error = view.ci_at, _gh_error(exc) or "讀取失敗"
+        last: dict = {}
+        for jobs in self._finished.values():
+            for runner, text, result, end in jobs:
+                if end and end > last.get(runner, ("", "", 0.0))[2]:
+                    last[runner] = (text, result, end)
+        view = replace(view, finished=last, queued=tuple(queued), ci_at=ci_at,
+                       ci_error=ci_error, active=runs_now, last_done=last_done)
         self.ci_view = view
 
 
@@ -4229,13 +4240,17 @@ def ci_finished_runs(payload) -> list:
             if type(run) is dict and run.get("status") == "completed" and type(run.get("id")) is int]
 
 
-def ci_runner_names(runs: list, jobs_of, queued: list | None = None) -> list:
+def ci_runner_names(runs: list, jobs_of, queued: list | None = None,
+                    counts: dict | None = None) -> list:
     """Fill in which runner runs each unfinished workflow: one entry per
     in-progress job, so a run with jobs on two runners shows on both. Job
     states decide, not the run's: GitHub calls a run "queued" while any of
     its jobs waits, even with another job already running. The run itself
     stays listed while it has jobs waiting; those go to `queued`
-    (ci_queued_jobs())."""
+    (ci_queued_jobs()). A job on a GitHub-hosted runner is kept like any
+    other; an in-progress job with no runner name yet still runs (runner
+    None). `counts` gets run id -> (running job names, waiting job count)
+    for each run whose job list was read."""
     named = []
     for status, text, started, runner, run_id in runs:
         jobs, waiting = [], status != "in_progress"
@@ -4243,19 +4258,23 @@ def ci_runner_names(runs: list, jobs_of, queued: list | None = None) -> list:
             try:
                 payload = jobs_of(run_id)
                 found = [job for job in payload.get("jobs") or [] if type(job) is dict]
-            except (OSError, ValueError, RuntimeError, AttributeError, subprocess.SubprocessError):
+            except (OSError, ValueError, RuntimeError, AttributeError, TypeError,
+                    subprocess.SubprocessError):
                 found = None
             if found is not None:
-                jobs = [job for job in found if job.get("status") == "in_progress" and job.get("runner_name")]
-                waiting = any(job.get("status") in CI_ACTIVE and job.get("status") != "in_progress"
-                              for job in found) or (waiting and not found)
+                jobs = [job for job in found if job.get("status") == "in_progress"]
+                waiting_jobs = sum(job.get("status") in CI_ACTIVE and job.get("status") != "in_progress"
+                                   for job in found)
+                waiting = bool(waiting_jobs) or (waiting and not found)
                 if queued is not None:
                     queued += ci_queued_jobs(payload, text)
+                if counts is not None:
+                    counts[run_id] = (tuple(_ci_clean(job.get("name"), 40) for job in jobs), waiting_jobs)
         for job in jobs:
             job_name = str(job.get("name") or "")[:40]
             named.append(("in_progress", text + (f"：{job_name}" if job_name else ""),
                           _github_time(job.get("started_at")) or started,
-                          str(job["runner_name"]), run_id))
+                          ci_job_runner(job) or None, run_id))
         if not jobs:   # nothing runs yet, whatever the run says
             named.append(("queued" if waiting else status, text, started, runner, run_id))
         elif waiting:
@@ -4266,6 +4285,25 @@ def ci_runner_names(runs: list, jobs_of, queued: list | None = None) -> list:
 RUNNER_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 CI_CONCLUSIONS = {"success": "成功", "failure": "失敗", "cancelled": "取消",
                   "timed_out": "逾時", "skipped": "略過"}
+# Control and direction characters, removed from names GitHub sends.
+CI_CONTROL = re.compile("[" + "".join(re.escape(chr(low)) + "-" + re.escape(chr(high)) for low, high in (
+    (0x00, 0x1F), (0x7F, 0x9F), (0x200B, 0x200F), (0x2028, 0x202E), (0x2066, 0x2069))) + "]")
+
+
+def _ci_clean(value, limit: int) -> str:
+    """A name GitHub sent, as plain text: no control characters, at most `limit` characters."""
+    return CI_CONTROL.sub("", value).strip()[:limit] if type(value) is str else ""
+
+
+def ci_job_runner(job) -> str:
+    """The runner a job ran or runs on, self-hosted or GitHub-hosted (whose
+    names have spaces, e.g. "GitHub Actions 3"); "" when it has none yet."""
+    return _ci_clean(job.get("runner_name"), 64) if type(job) is dict else ""
+
+
+def ci_result_word(conclusion) -> str:
+    """CI_CONCLUSIONS word; any other or missing conclusion is 結果不明."""
+    return CI_CONCLUSIONS.get(conclusion, "結果不明") if type(conclusion) is str else "結果不明"
 
 
 def main_health_line(health, error, now) -> tuple[str, str]:
@@ -4313,26 +4351,62 @@ def ci_runners(payload) -> list:
 
 
 def ci_finished_jobs(payload, text: str) -> list:
-    """Finished jobs of one workflow run as (runner, job text, result, end time)."""
+    """Finished jobs of one workflow run as (runner, job text, result, end
+    time), on self-hosted and GitHub-hosted runners alike; a job that never
+    got a runner (e.g. skipped before start) is left out."""
     found = []
     for job in (payload.get("jobs") if type(payload) is dict else None) or []:
-        if (type(job) is dict and job.get("status") == "completed"
-                and RUNNER_NAME.fullmatch(str(job.get("runner_name") or ""))):
+        runner = ci_job_runner(job)
+        if type(job) is dict and job.get("status") == "completed" and runner:
             name = str(job.get("name") or "")[:40]
-            found.append((job["runner_name"], text + (f"：{name}" if name else ""),
-                          CI_CONCLUSIONS.get(job.get("conclusion"), "結果不明"),
+            found.append((runner, text + (f"：{name}" if name else ""),
+                          ci_result_word(job.get("conclusion")),
                           _github_time(job.get("completed_at"))))
     return found
 
 
 def ci_queued_jobs(payload, text: str) -> list:
-    """Jobs still waiting for a runner, as (labels they ask for, text)."""
+    """Jobs still waiting for a runner, as (labels they ask for, text);
+    jobs waiting for a GitHub-hosted runner (e.g. ubuntu-24.04) included."""
     found = []
     for job in (payload.get("jobs") if type(payload) is dict else None) or []:
         if type(job) is dict and job.get("status") in CI_ACTIVE and job.get("status") != "in_progress":
             name = str(job.get("name") or "")[:40]
             labels = frozenset(str(label).lower() for label in job.get("labels") or [])
             found.append((labels, text + (f"：{name}" if name else "")))
+    return found
+
+
+LLMTOOL_CI_WORKFLOWS = ("llmtool Linux CI", "llmtool Mac CI")
+
+
+def ci_active_runs(payload, counts: dict) -> dict:
+    """Unfinished runs as run id -> (workflow, text, started, running job
+    names, waiting job count). The last two come from `counts`
+    (ci_runner_names()) and are None when the run's job list was not read."""
+    found = {}
+    for run in (payload.get("workflow_runs") if type(payload) is dict else None) or []:
+        if type(run) is not dict or run.get("status") not in CI_ACTIVE or type(run.get("id")) is not int:
+            continue
+        running, waiting = (counts or {}).get(run["id"], (None, None))
+        found[run["id"]] = (_ci_clean(run.get("name"), 40), _ci_text(run),
+                            _github_time(run.get("run_started_at") or run.get("created_at")) or None,
+                            running, waiting)
+    return found
+
+
+def ci_last_results(payload) -> dict:
+    """Newest finished run of each workflow as workflow -> (result word,
+    end time or None). Only success reads 成功 (ci_result_word())."""
+    found, newest = {}, {}
+    for run in (payload.get("workflow_runs") if type(payload) is dict else None) or []:
+        if type(run) is not dict or run.get("status") != "completed" or type(run.get("id")) is not int:
+            continue
+        name = _ci_clean(run.get("name"), 40)
+        if not name or run["id"] <= newest.get(name, -1):
+            continue
+        newest[name] = run["id"]
+        found[name] = (ci_result_word(run.get("conclusion")), _github_time(run.get("updated_at")) or None)
     return found
 
 
@@ -6283,6 +6357,54 @@ def github_runner_rows(view: CiView | None, now: float, local=(), ci: list | Non
     return rows
 
 
+QUEUED = "排隊中"
+HOSTED_CI_ORDER = 88
+
+
+def hosted_ci_rows(ci_runs: list | None, view: CiView | None, now: float) -> list[OfficeRow]:
+    """One row per unfinished llmtool CI run (LLMTOOL_CI_WORKFLOWS), on any
+    runner: its workflow with PR or head, elapsed time, running jobs by name
+    and the waiting job count. A run with no visible running job is QUEUED,
+    never running or done. Runs not read, a failed read, or GitHub data
+    older than GITHUB_STALE give one UNCHECKED row instead. Pure; no I/O."""
+    reason = ""
+    if ci_runs is None or view is None or view.active is None or view.ci_error:
+        error = view.ci_error if view is not None else ""
+        reason = f"讀不到 GitHub 的 CI 清單（{error}）" if error else "還沒讀到 GitHub 的 CI 清單"
+    elif not view.ci_at:
+        reason = "還沒讀到 GitHub 的 CI 清單"
+    elif now - view.ci_at > GITHUB_STALE:
+        reason = f"GitHub 資料 {_ago(now - view.ci_at)[:-1]}沒更新"
+    if reason:
+        return [OfficeRow("llmtool CI", UNCHECKED, f"未確認：{reason}；CI 執行狀態不明",
+                          None, HOSTED_CI_ORDER, key="llmtool-ci", kind="worker", evidence="GitHub")]
+    rows, seen, last = [], set(), view.last_done or {}
+    for entry in ci_runs:
+        run_id = entry[4] if type(entry) in (tuple, list) and len(entry) == 5 else None
+        info = view.active.get(run_id) if type(run_id) is int else None
+        if info is None or run_id in seen or info[0] not in LLMTOOL_CI_WORKFLOWS:
+            continue
+        seen.add(run_id)
+        workflow, text, started, running, waiting = info
+        age = max(0.0, now - started) if started else None
+        notes = [] if age is None else [f"已過 {int(age // 60)} 分鐘"]
+        if running:
+            state = WORKING
+            notes.append(f"執行中 {len(running)} 個：" + "、".join(name or "?" for name in running[:3])
+                         + ("…" if len(running) > 3 else ""))
+        else:   # nothing seen running: queued, whatever the run says
+            state = QUEUED
+            notes.append("排隊中：還沒有工作在跑" if running is not None else "排隊中：工作清單沒讀到")
+        notes.append(f"排隊 {waiting} 個" if waiting is not None else "排隊工作數未確認")
+        prior = last.get(workflow)
+        if prior:
+            notes.append(f"上一次結果：{prior[0]}"
+                         + (f"（{_ago(max(0.0, now - prior[1]))}）" if prior[1] else ""))
+        rows.append(OfficeRow(text, state, "；".join(notes), age, HOSTED_CI_ORDER,
+                              key=f"ci-run:{run_id}", kind="worker", evidence="GitHub"))
+    return rows
+
+
 LLMTOOL_TASKS = os.path.expanduser("~/.local/state/llmtool/tasks")
 LLMTOOL_EVIDENCE_WINDOW = 7 * 86400
 PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}")
@@ -7920,6 +8042,9 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     if mac_waiting:
         mac.append(ci_queue_row(mac_waiting, runner_count))
     rows += agy + mac + github_runner_rows(ci_view, now, local_names, ci)
+    # Hosted CI rows once a runs read was tried (refresh_ci sets ci_at or ci_error).
+    if ci_view is not None and (ci_view.ci_at or ci_view.ci_error):
+        rows += hosted_ci_rows(ci, ci_view, now)
     rows.append(remote_test_row(processes, now, llmtool_tasks))
     gw_runs = gw_rows(processes, now, canonical)
     rows += gw_runs
