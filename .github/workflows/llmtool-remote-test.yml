@@ -109,10 +109,11 @@ jobs:
         run: |
           set -euo pipefail
           export LC_ALL=C
-          case "$REF" in
-            refs/pull/*/head|refs/heads/*) full_ref="$REF" ;;
-            *) full_ref="refs/heads/$REF" ;;
-          esac
+          if [[ "$REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
+            full_ref="$REF"
+          else
+            full_ref="refs/heads/$REF"
+          fi
           read -r -a mods <<< "$MODULES"
           ls_out=$(cd trusted && git ls-remote origin "$full_ref")
           fetch_head=none
@@ -168,7 +169,7 @@ jobs:
           set -euo pipefail
           read -r -a mods <<< "$MODULES"
           python -I -B trusted/tools/llmtool/scripts/remote_test_receipt.py run \
-            --src src/tools/llmtool \
+            --src "$GITHUB_WORKSPACE/src/tools/llmtool" \
             --python "$RUNNER_TEMP/venv/bin/python" \
             --out "$RUNNER_TEMP/remote-test-receipt" \
             --sha "$SHA" \

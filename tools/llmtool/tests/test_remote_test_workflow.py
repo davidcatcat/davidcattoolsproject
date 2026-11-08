@@ -181,31 +181,38 @@ class RemoteTestWorkflowTests(unittest.TestCase):
             "INPUT_NONCE": "c" * 32,
         }
         with tempfile.TemporaryDirectory() as tmp:
-            out_file = Path(tmp) / "github_output"
-            res = subprocess.run(
-                ["bash", "-c", input_step["run"]],
-                env={**valid_env, "GITHUB_OUTPUT": str(out_file)},
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(res.returncode, 0, res.stderr or res.stdout)
-            outputs = dict(line.split("=", 1) for line in out_file.read_text(encoding="utf-8").splitlines())
-            self.assertEqual(
-                outputs,
-                {
-                    "sha": "a" * 40,
-                    "ref": "refs/pull/42/head",
-                    "modules": "test_alpha test_beta",
-                    "nonce": "c" * 32,
-                },
-            )
+            for accepted_ref in ("refs/pull/42/head", "feature/branch-1", "refs/pull/notanumber/head"):
+                with self.subTest(accepted_ref=accepted_ref):
+                    out_file = Path(tmp) / "github_output"
+                    if out_file.exists():
+                        out_file.unlink()
+                    res = subprocess.run(
+                        ["bash", "-c", input_step["run"]],
+                        env={**valid_env, "INPUT_REF": accepted_ref, "GITHUB_OUTPUT": str(out_file)},
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(res.returncode, 0, res.stderr or res.stdout)
+                    outputs = dict(
+                        line.split("=", 1) for line in out_file.read_text(encoding="utf-8").splitlines()
+                    )
+                    self.assertEqual(
+                        outputs,
+                        {
+                            "sha": "a" * 40,
+                            "ref": accepted_ref,
+                            "modules": "test_alpha test_beta",
+                            "nonce": "c" * 32,
+                        },
+                    )
 
             invalid_cases = [
                 {"INPUT_SHA": "a" * 39},
                 {"INPUT_SHA": "A" * 40},
+                {"INPUT_REF": ""},
                 {"INPUT_REF": "-invalid"},
-                {"INPUT_REF": "refs/pull/notanumber/head"},
+                {"INPUT_REF": "branch~1"},
                 {"INPUT_REF": "b" * 101},
                 {"INPUT_NONCE": "c" * 31},
                 {"INPUT_NONCE": "C" * 32},
@@ -297,6 +304,10 @@ class RemoteTestWorkflowTests(unittest.TestCase):
                 "MODULES": "${{ steps.inputs.outputs.modules }}",
             },
         )
+        self.assertIn('--out "$RUNNER_TEMP/remote-test-receipt"', ref_step["run"])
+        self.assertIn('--src "$GITHUB_WORKSPACE/src/tools/llmtool"', run_step["run"])
+        self.assertIn('--python "$RUNNER_TEMP/venv/bin/python"', run_step["run"])
+        self.assertIn('--out "$RUNNER_TEMP/remote-test-receipt"', run_step["run"])
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -332,6 +343,7 @@ class RemoteTestWorkflowTests(unittest.TestCase):
             other_sha = "b" * 40
             base_env = {
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
+                "GITHUB_WORKSPACE": str(root),
                 "RUNNER_TEMP": str(root / "temp"),
                 "GIT_LOG": str(git_log),
                 "PY_LOG": str(py_log),
@@ -378,7 +390,7 @@ class RemoteTestWorkflowTests(unittest.TestCase):
                     "trusted/tools/llmtool/scripts/remote_test_receipt.py",
                     "run",
                     "--src",
-                    "src/tools/llmtool",
+                    f"{root}/src/tools/llmtool",
                     "--python",
                     f"{root / 'temp'}/venv/bin/python",
                     "--out",
@@ -429,13 +441,14 @@ class RemoteTestWorkflowTests(unittest.TestCase):
                 ],
             )
 
-            # Missing remote ref invokes builder mismatch with fetch-head none.
+            # Missing remote ref (including branch-shaped refs/pull/notanumber/head) invokes builder mismatch with fetch-head none.
             py_log.unlink()
             missing_res = subprocess.run(
                 ["bash", "-c", ref_step["run"]],
                 cwd=root,
                 env={
                     **base_env,
+                    "REF": "refs/pull/notanumber/head",
                     "GITHUB_OUTPUT": str(root / "missing_out"),
                     "GIT_LS_REMOTE_OUT": "",
                     "PY_EXIT": "41",
@@ -445,6 +458,11 @@ class RemoteTestWorkflowTests(unittest.TestCase):
                 check=False,
             )
             self.assertNotEqual(missing_res.returncode, 0)
+            git_call = json.loads(git_log.read_text(encoding="utf-8"))
+            self.assertEqual(
+                git_call["argv"],
+                ["ls-remote", "origin", "refs/heads/refs/pull/notanumber/head"],
+            )
             self.assertEqual(
                 json.loads(py_log.read_text(encoding="utf-8")),
                 [
