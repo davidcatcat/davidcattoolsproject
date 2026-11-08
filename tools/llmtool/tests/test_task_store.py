@@ -53,6 +53,30 @@ def record(request='Implement a small tested feature'):
     }
 
 
+def remote_test_receipt(task, pm_session=None, **overrides):
+    """One valid PASS remote-test receipt for ``task`` with its receipt_digest.
+
+    ``pm_session`` defaults to the Task's current PM session.
+    """
+    receipt = {
+        'result': 'PASS', 'exit_code': 0, 'source_sha': 'a' * 40,
+        'tree': 'b' * 40, 'fetch_head': 'a' * 40,
+        'modules': ['test_task_store'], 'identity': {'uid': 65534},
+        'started_at': '2026-10-27T00:00:00Z', 'ended_at': '2026-10-27T00:00:01Z',
+        'elapsed_s': 1.0, 'ran_total': 1, 'final': ['OK'], 'failures': [],
+        'log_bytes': 0, 'log_sha256': 'c' * 64, 'remote_log_path': None,
+        'task_id': task['task_id'], 'run_id': task['run_id'],
+        'executor_task': 'd6-task',
+        'pm_session': task['pm_session_id'] if pm_session is None else pm_session,
+        'command_digest': 'd' * 64,
+    }
+    receipt.update(overrides)
+    receipt['receipt_digest'] = hashlib.sha256(json.dumps(
+        receipt, ensure_ascii=False, sort_keys=True, separators=(',', ':'),
+        allow_nan=False).encode() + b'\n').hexdigest()
+    return receipt
+
+
 import review_trust_fixture
 
 
@@ -322,6 +346,23 @@ class TaskStoreTests(unittest.TestCase):
             allow_nan=False).encode() + b'\n').hexdigest()
         with self.assertRaises(LLMToolError):
             self.store.append_remote_test_receipt(task['task_id'], invalid)
+
+    def test_remote_test_receipt_of_an_unrelated_pm_session_is_refused(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        before = self.store.get(task['task_id'])
+        unrelated = remote_test_receipt(task, 'pm-' + new_id())
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.append_remote_test_receipt(task['task_id'], unrelated)
+        self.assertEqual(caught.exception.task_store_error_code, 'REMOTE_TEST_RECEIPT_INVALID')
+        self.assertEqual(self.store.get(task['task_id']), before)
+        with self.assertRaises(LLMToolError) as caught:
+            task_store_module._validate_remote_test_receipts(
+                dict(before, remote_test_receipts=[unrelated]))
+        self.assertEqual(caught.exception.task_store_error_code, 'REMOTE_TEST_RECEIPT_INVALID')
+        # With no adoption history only the current session is accepted.
+        task_store_module._validate_remote_test_receipts(
+            dict(before, remote_test_receipts=[remote_test_receipt(task)]))
 
     def test_published_pr_is_idempotent_replaceable_and_validated(self):
         task = self._codex_dispatch_task()
