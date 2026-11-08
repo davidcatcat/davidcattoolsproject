@@ -16,7 +16,7 @@ from pathlib import Path
 from argparse import Namespace
 
 from . import active_pm_inbox, github_events, remote_test, review_dispatch, review_repair
-from . import review_result, task_completion, task_submission_cli
+from . import github_identity, review_result, task_completion, task_submission_cli
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes
 
@@ -399,7 +399,8 @@ def _scripts_only_ci(paths):
             not task_completion._docs_only_ci(paths))
 
 
-def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False):
+def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False,
+                  owner_acceptance=None):
     try:
         checks = github_get(f'commits/{head}/check-runs?per_page=100')
         files = github_get(f'pulls/{number}/files?per_page=100')
@@ -449,7 +450,11 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
                    for item in check_runs)
            for name in required_checks if name != 'check (macOS 3.13)'):
         return 'MERGE_REQUIRED_CHECK_SKIPPED'
-    if _owner_acceptance_required(files):
+    if owner_acceptance is not None:
+        acceptance_code = _owner_acceptance_code(owner_acceptance, number, head, github_get)
+        if acceptance_code:
+            return acceptance_code
+    elif _owner_acceptance_required(files):
         return 'MERGE_OWNER_ACCEPTANCE_MANUAL'
     if not docs_only:
         mac_runs = [item for item in check_runs if item.get('name') == 'check (macOS 3.13)']
@@ -636,8 +641,102 @@ def _merge_pass_claim(record, number, head, events):
     return top
 
 
+# A recorded Owner acceptance is a PM relay comment in this repository.
+_OWNER_ACCEPTANCE_MARKER = ('<!-- activity: type=pm_progress actor=PM target=Owner '
+                            'status=ANSWERED -->')
+_OWNER_ACCEPTANCE_URL = re.compile(
+    r'https://github\.com/([^/#?\s]+/[^/#?\s]+)/(?:issues|pull)/([1-9][0-9]*)'
+    r'#issuecomment-([1-9][0-9]*)')
+_UTC_TIME = re.compile(
+    r'([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})'
+    r'(?:\.([0-9]{1,6}))?(?:Z|\+00:00)')
+
+
+def _utc_time(value):
+    """Parse an ISO 8601 UTC time; return None when it does not parse."""
+    match = _UTC_TIME.fullmatch(value) if type(value) is str else None
+    if match is None:
+        return None
+    fraction = (match.group(7) or '').ljust(6, '0')
+    try:
+        return datetime(*(int(part) for part in match.groups()[:6]), int(fraction),
+                        tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _owner_acceptance_code(url, number, head, github_get):
+    """Check one Owner acceptance comment for this PR and head.
+
+    Return None when it is valid, else one refusal code. Checks run in order:
+    reference, read, html_url, edited, author, marker, PR, head, time.
+    """
+    match = _OWNER_ACCEPTANCE_URL.fullmatch(url) if type(url) is str else None
+    if match is None:
+        return 'MERGE_OWNER_ACCEPTANCE_REF_INVALID'
+    try:
+        slug = task_completion._trusted_slug()
+    except Exception:
+        return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
+    if type(slug) is not str or match.group(1) != slug:
+        return 'MERGE_OWNER_ACCEPTANCE_REF_INVALID'
+    try:
+        comment = github_get(f'issues/comments/{match.group(3)}')
+    except Exception:
+        return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
+    if type(comment) is not dict or any(
+            type(comment.get(key)) is not str
+            for key in ('body', 'html_url', 'created_at', 'updated_at')):
+        return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
+    user = comment.get('user')
+    if type(user) is not dict or type(user.get('login')) is not str:
+        return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
+    if comment['html_url'] != url:
+        return 'MERGE_OWNER_ACCEPTANCE_REF_INVALID'
+    if comment['updated_at'] != comment['created_at']:
+        return 'MERGE_OWNER_ACCEPTANCE_EDITED'
+    # Only a person on a configured PM relay posting login counts; never a bot.
+    if (user.get('type') != 'User' or user['login'] not in
+            (github_identity.owner_login(), github_identity.ai_login())):
+        return 'MERGE_OWNER_ACCEPTANCE_AUTHOR'
+    body = comment['body']
+    first_line = body.split('\n', 1)[0]
+    if first_line.endswith('\r'):
+        first_line = first_line[:-1]
+    if first_line != _OWNER_ACCEPTANCE_MARKER:
+        return 'MERGE_OWNER_ACCEPTANCE_MARKER'
+    # '#17' must not match '#170' or 'x#17'.
+    if type(number) is not int or not any(
+            found.start() == 0 or not body[found.start() - 1].isalnum()
+            for found in re.finditer(rf'#{number}(?!\d)', body)):
+        return 'MERGE_OWNER_ACCEPTANCE_PR_MISMATCH'
+    # The full lowercase head, not part of a longer hex run.
+    if (type(head) is not str or _HEX40.fullmatch(head) is None or
+            re.search(rf'(?<![0-9a-fA-F]){head}(?![0-9a-fA-F])', body) is None):
+        return 'MERGE_OWNER_ACCEPTANCE_HEAD_MISMATCH'
+    try:
+        commit = github_get(f'commits/{head}')
+    except Exception:
+        return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
+    detail = commit.get('commit') if type(commit) is dict else None
+    commit_times = []
+    for role in ('author', 'committer'):
+        person = detail.get(role) if type(detail) is dict else None
+        moment = _utc_time(person.get('date') if type(person) is dict else None)
+        if moment is None:
+            return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
+        commit_times.append(moment)
+    created = _utc_time(comment['created_at'])
+    if created is None:
+        return 'MERGE_OWNER_ACCEPTANCE_UNAVAILABLE'
+    # The acceptance must come strictly after the head commit.
+    if created <= max(commit_times):
+        return 'MERGE_OWNER_ACCEPTANCE_STALE'
+    return None
+
+
 def _merge_once(*, store, record, number, head, pr, events, github_get,
-                gh_runner, root):
+                gh_runner, root, owner_acceptance=None):
     if type(number) is not int or number < 1:
         return _merge_refusal('MERGE_PR_UNAVAILABLE')
     if type(pr) is not dict or pr.get('number', number) != number:
@@ -652,7 +751,7 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     if type(review_version) is not int:
         return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
     code = _merge_checks(record, number, head, pr, github_get,
-                         allow_missing_macos=True)
+                         allow_missing_macos=True, owner_acceptance=owner_acceptance)
     if code and code not in ('MERGE_MACOS_CHECK_MISSING', 'MERGE_MACOS_CHECK_SKIPPED'):
         if code == 'MERGE_CHECKS_NOT_GREEN':
             # Preserve the merge refusal while identifying an exact-head
@@ -762,7 +861,7 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
                 except Exception:
                     warning_codes.append('MERGE_RESULT_RECORD_FAILED')
             return _merge_success(record, number, head, review_version, gh_runner, root,
-                                  warning_codes)
+                                  warning_codes, owner_acceptance=owner_acceptance)
         claim['state'] = 'UNKNOWN'
         try:
             store.compare_and_update(record['task_id'], expected={'merge_attempt':
@@ -785,19 +884,25 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
             pass
         warning_codes.append('MERGE_RESULT_RECORD_FAILED')
     return _merge_success(record, number, head, review_version, gh_runner, root,
-                          warning_codes)
+                          warning_codes, owner_acceptance=owner_acceptance)
 
 
-def _merge_success(record, number, head, review_version, gh_runner, root, warning_codes):
+def _merge_success(record, number, head, review_version, gh_runner, root, warning_codes,
+                   *, owner_acceptance=None):
     body = (f'llmtool task advance merge provenance: task={record["task_id"]} '
             f'head={head} review_version={review_version} checks=exact-head-success-or-skipped')
+    if owner_acceptance is not None:
+        body += f' owner_acceptance={owner_acceptance}'
     try:
         comment = gh_runner(root, ['pr', 'comment', str(number), '--body', body])
         if getattr(comment, 'returncode', 1) != 0:
             warning_codes.append('MERGE_PROVENANCE_COMMENT_FAILED')
     except Exception:
         warning_codes.append('MERGE_PROVENANCE_COMMENT_FAILED')
-    return {'step': 'MERGED', 'codes': warning_codes, 'result': {'pr': number, 'head': head}}
+    result = {'pr': number, 'head': head}
+    if owner_acceptance is not None:
+        result['owner_acceptance'] = owner_acceptance
+    return {'step': 'MERGED', 'codes': warning_codes, 'result': result}
 
 
 def label_mac_ci_for_skipped_check(*, task_id, store=None, pr_number=None,
@@ -1778,8 +1883,14 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             record_review_result_call=None, repair_review_call=None,
             run_task_complete_call=None, record_github_event_call=None,
             github_get=None, cwd=None, publish_git_runner=None,
-            publish_gh_runner=None, record_result_call=None, merge_gh_runner=None):
+            publish_gh_runner=None, record_result_call=None, merge_gh_runner=None,
+            owner_acceptance=None):
     """Perform one selected action and return a bounded JSON-ready summary."""
+    if owner_acceptance is not None and not merge:
+        # An Owner acceptance is only for a merge; refuse before anything runs.
+        return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
+                'next': 'REFUSED', 'codes': ['OWNER_ACCEPTANCE_REQUIRES_MERGE'],
+                'acked': []}
     store = TaskStore() if store is None else store
     try:
         record = store.get(task_id)
@@ -1868,7 +1979,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         merge_result = _merge_once(store=store, record=record, number=number,
             head=d6['result_head'], pr=pr, events=related['events'], github_get=get,
             gh_runner=_publish_run_gh if merge_gh_runner is None else merge_gh_runner,
-            root=d6.get('root') or cwd or os.getcwd())
+            root=d6.get('root') or cwd or os.getcwd(), owner_acceptance=owner_acceptance)
         merge_result.update(task_id=task_id, next=merge_result['step'])
         return _ack_consumed_events(merge_result, record, store, d6['result_head'])
     if type(d6) is dict and d6.get('state') == 'D6_BINDING_UNAVAILABLE':
