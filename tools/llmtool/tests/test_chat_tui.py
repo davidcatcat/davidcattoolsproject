@@ -364,16 +364,32 @@ class WidgetTests(Base):
     def test_pm_ghost_hints_render_after_the_cursor_without_editing_input(self):
         seen = {}
 
-        def capture(ui, key):
+        def screen_text(ui):
             screen = ui.app.renderer.last_rendered_screen
+            if screen is None:
+                return ''
             size = ui.app.output.get_size()
-            seen[key] = "".join(screen.data_buffer[y][x].char
-                                for y in range(size.rows) for x in range(size.columns))
-            seen[key + "_draft"] = ui.input.text
+            return "".join(screen.data_buffer[y][x].char
+                           for y in range(size.rows) for x in range(size.columns))
 
-        ui, _ = self.drive(['/pm ', lambda ui: capture(ui, 'subcommands'),
-                            'new ', lambda ui: capture(ui, 'new'),
-                            '--runtime', lambda ui: capture(ui, 'argument')])
+        def capture(key, draft, hint=None):
+            # Wait for the typed draft, then a render after it, then the hint (if any).
+            # No fixed sleep decides what the screen shows.
+            async def step(ui):
+                await self.until(ui, lambda ui: ui.input.text == draft, 'draft ' + repr(draft))
+                start = ui.app.render_counter
+                await self.until(ui, lambda ui: ui.app.render_counter > start,
+                                 'render after ' + repr(draft))
+                if hint is not None:
+                    await self.until(ui, lambda ui: hint in screen_text(ui), 'hint ' + repr(hint))
+                seen[key] = screen_text(ui)
+                seen[key + "_draft"] = ui.input.text
+            return step
+
+        ui, _ = self.drive(['/pm ', capture('subcommands', '/pm ', 'new | list [--all] | use N|SESSION'),
+                            'new ', capture('new', '/pm new ',
+                                            '[--runtime claude|codex] [--account NAME] [CWD]'),
+                            '--runtime', capture('argument', '/pm new --runtime')])
         self.assertIn('new | list [--all] | use N|SESSION', seen['subcommands'])
         self.assertIn('[--runtime claude|codex] [--account NAME] [CWD]', seen['new'])
         self.assertNotIn('[--runtime claude|codex]', seen['argument'])
