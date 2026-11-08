@@ -59,6 +59,8 @@ def _developer_record(family):
                           'gw-agent': 'openai-compatible',
                           'opencode': 'opencode-cli', 'agy': 'agy-cli'}[family],
         'model': ('claude-sonnet-5-5-medium' if family == 'agy' else
+                  'opencode/deepseek-v4.1-flash-free' if family == 'opencode' else
+                  'qwen3.8-27b' if family == 'gw-agent' else
                   None if family in ('claude', 'company-gw') else 'gpt-6-luna'),
         'backend_session_semantics': ('CLI_REPORTED_SESSION_ID' if cli_family
                                       else 'NO_NATIVE_SESSION_ID_EXPOSED'),
