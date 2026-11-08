@@ -1,5 +1,7 @@
 # EC2 deterministic development work inventory
 
+> **Note (2026-11-09):** llmtool Linux CI no longer runs on EC2; it runs on GitHub-hosted `ubuntu-24.04` ([#1253](https://github.com/davidcatcat/davidcattoolsproject/issues/1253), [#1256](https://github.com/davidcatcat/davidcattoolsproject/issues/1256)). EC2 remains for `llmtool task remote-test`, a PM pre-review tool on private infrastructure, not CI. The inventory below is historical.
+
 Scope: identify repeated development-time work that can be run or summarized deterministically, using existing llmtool code and the approved EC2 Linux execution route. This is an inventory, not evidence that a remote job ran. The available sources document no measured model-call or token savings; those remain **UNKNOWN** until matched work and usage are measured.
 
 The current Linux workflow checks out the requested immutable PR-head/commit SHA only after its admission and runner-boundary checks, then runs `make -C tools/llmtool check` on Python 3.14. Python 3.9 is a manually started pre-release matrix option. The Mac workflow keeps the macOS 3.13 and native gates on Mac. Skipped jobs are not passes. See [.github/workflows/llmtool-linux-ci.yml](../../.github/workflows/llmtool-linux-ci.yml) and [.github/workflows/llmtool-mac-ci.yml](../../.github/workflows/llmtool-mac-ci.yml).
