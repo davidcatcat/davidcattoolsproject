@@ -484,11 +484,18 @@ class TaskDriveTests(unittest.TestCase):
         self.assertEqual(state['effects'], 0)
 
     def test_drive_adapter_prints_one_machine_readable_result(self):
-        args = parser_for_cli().parse_args(['task', 'drive', 'task-1'])
+        # #1124: the adapter runs only for the Task's own PM session.
+        native = '3f2b8c1e-4d5a-4b6c-8d7e-9f0a1b2c3d4e'
+        args = parser_for_cli().parse_args(['task', 'drive', 'task-1',
+                                            '--pm-session', native])
+        owner_store = type('Store', (), {
+            'get': lambda self, _task_id: {'pm_session_id': 'pm-' + native}})()
         output = []
-        with patch.object(task_submission_cli, '_print', side_effect=output.append):
+        with patch.object(task_submission_cli, '_print', side_effect=output.append), \
+                patch.dict('os.environ', {'CLAUDE_CODE_SESSION_ID': '',
+                                          'CODEX_THREAD_ID': ''}):
             code = task_submission_cli.run_task_drive(
-                args, store=object(), advance_call=lambda **_kwargs: {
+                args, store=owner_store, advance_call=lambda **_kwargs: {
                     'task_id': 'task-1', 'step': 'CLOSED', 'codes': []})
         self.assertEqual(code, 0)
         self.assertEqual(output, [{'task_id': 'task-1', 'step': 'CLOSED',
