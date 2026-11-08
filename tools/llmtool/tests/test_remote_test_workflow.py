@@ -90,8 +90,8 @@ class RemoteTestWorkflowTests(unittest.TestCase):
     def test_no_forbidden_network_or_privilege_commands(self):
         raw, parsed = _load_workflow()
         self.assertNotIn("secrets.", raw)
-        for word in ("sudo", "ssh", "curl", "wget"):
-            self.assertIsNone(re.search(rf"\b{word}\b", raw))
+        for word in ("sudo", "ssh", "curl", "wget", "vpn", "wireguard", "tailscale"):
+            self.assertIsNone(re.search(rf"\b{word}\b", raw, re.IGNORECASE))
         for step in parsed["jobs"]["remote-test"]["steps"]:
             if "run" in step:
                 self.assertNotIn("inputs.", step["run"])
@@ -282,6 +282,11 @@ class RemoteTestWorkflowTests(unittest.TestCase):
             install_step["run"],
         )
 
+        run_step = steps[8]
+        self.assertIn("trusted/tools/llmtool/scripts/remote_test_receipt.py", ref_step["run"])
+        self.assertIn("trusted/tools/llmtool/scripts/remote_test_receipt.py", run_step["run"])
+        self.assertNotIn("src/tools/llmtool/scripts/remote_test_receipt.py", run_step["run"])
+
     def test_ref_check_and_builder_argv_contract(self):
         _, parsed = _load_workflow()
         steps = parsed["jobs"]["remote-test"]["steps"]
@@ -323,7 +328,8 @@ class RemoteTestWorkflowTests(unittest.TestCase):
                 "import json, os, sys\n"
                 "with open(os.environ['GIT_LOG'], 'w', encoding='utf-8') as f:\n"
                 "    json.dump({'cwd': os.getcwd(), 'argv': sys.argv[1:]}, f)\n"
-                "sys.stdout.write(os.environ.get('GIT_LS_REMOTE_OUT', ''))\n",
+                "sys.stdout.write(os.environ.get('GIT_LS_REMOTE_OUT', ''))\n"
+                "sys.exit(int(os.environ.get('GIT_EXIT', '0')))\n",
                 encoding="utf-8",
             )
             git_stub.chmod(0o755)
@@ -440,6 +446,51 @@ class RemoteTestWorkflowTests(unittest.TestCase):
                     "test_two",
                 ],
             )
+
+            # Failing git ls-remote (non-zero exit) is handled as empty listing; runs builder mismatch with fetch-head none.
+            py_log.unlink()
+            fail_ls_res = subprocess.run(
+                ["bash", "-c", ref_step["run"]],
+                cwd=root,
+                env={
+                    **base_env,
+                    "REF": "feature/branch-1",
+                    "GITHUB_OUTPUT": str(root / "fail_ls_out"),
+                    "GIT_LS_REMOTE_OUT": "fatal: remote error\n",
+                    "GIT_EXIT": "128",
+                    "PY_EXIT": "41",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(fail_ls_res.returncode, 0)
+            git_call = json.loads(git_log.read_text(encoding="utf-8"))
+            self.assertEqual(
+                git_call["argv"],
+                ["ls-remote", "origin", "refs/heads/feature/branch-1"],
+            )
+            self.assertEqual(
+                json.loads(py_log.read_text(encoding="utf-8")),
+                [
+                    "-I",
+                    "-B",
+                    "trusted/tools/llmtool/scripts/remote_test_receipt.py",
+                    "mismatch",
+                    "--out",
+                    f"{root / 'temp'}/remote-test-receipt",
+                    "--sha",
+                    sha,
+                    "--fetch-head",
+                    "none",
+                    "test_one",
+                    "test_two",
+                ],
+            )
+
+            # Static check: git ls-remote failure cannot end the step before the mismatch builder.
+            self.assertIn("if ! ls_out=$(cd trusted && git ls-remote origin \"$full_ref\"); then", ref_step["run"])
+            self.assertIn('ls_out=""', ref_step["run"])
 
             # Missing remote ref (including branch-shaped refs/pull/notanumber/head) invokes builder mismatch with fetch-head none.
             py_log.unlink()

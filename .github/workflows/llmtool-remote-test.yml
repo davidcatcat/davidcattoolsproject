@@ -115,7 +115,9 @@ jobs:
             full_ref="refs/heads/$REF"
           fi
           read -r -a mods <<< "$MODULES"
-          ls_out=$(cd trusted && git ls-remote origin "$full_ref")
+          if ! ls_out=$(cd trusted && git ls-remote origin "$full_ref"); then
+            ls_out=""
+          fi
           fetch_head=none
           if [ -n "$ls_out" ]; then
             line_count=$(printf '%s\n' "$ls_out" | wc -l | tr -d ' ')
