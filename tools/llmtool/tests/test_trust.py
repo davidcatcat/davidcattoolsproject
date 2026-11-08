@@ -382,6 +382,11 @@ class TrustTest(unittest.TestCase):
             "self-hosted in second alternative": [["macos-15"], ["macos-15-intel", "self-hosted"]],
             "pattern mismatch in alternative": [["macos-15"], ["macos 15"]],
             "alternative not a list": [{"label": "macos-15"}],
+            # Review finding (PR #1289): alternatives must be distinct label sets.
+            "repeated alternative": [["macos-15"], ["macos-15"]],
+            "repeated alternative among others": [["macos-15"], ["macos-15-intel"], ["macos-15"]],
+            "reordered repeated alternative": [["macos-15", "arm64"], ["arm64", "macos-15"]],
+            "repeated label in alternative": [["macos-15", "macos-15"]],
         }
         for name, labels in cases.items():
             with self.subTest(case=name):
