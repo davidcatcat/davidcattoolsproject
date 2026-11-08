@@ -36,11 +36,11 @@ For D8 Host/Worker admission and review controls, see the [D8 Host/Worker refere
 | Company `gw` Developer | Proposes patches, tests and self-review; cannot execute them | PM, through llmtool for eligible small, low-risk Tasks | No shell, filesystem, Git, credentials or approval authority; authorized environment applies patches and checks; independent review and CI |
 | Claude Reviewer | Formal independent Reviewer for Codex-authored changes | PM, after a pinned candidate is ready | Separate read-only context and D6 reviewer record; exact-head review; never reviews own change |
 | Codex Reviewer (`codex-reviewer`) | Formal independent Reviewer | PM, after a pinned candidate is ready | Separate read-only context and D6 reviewer record; exact-head review; never reviews own change; must be qualified and cross-family |
-| EC2 remote-test runner | Runs focused remote test modules and returns a receipt via `llmtool task remote-test` | PM dispatches the task for selected focused modules | Focused modules only; receipt is required evidence and does not replace formal review or CI |
-| Self-hosted Mac CI | Runs Mac-relevant CI checks | PR workflow for PRs; PM adds `mac-ci` after formal PASS and manually dispatches the full suite after each merge train | Two runners on one host; 45-minute job limit set in the workflow; exact-head PR check; without `mac-ci`, the PR check is `NOT_RUN` |
-| Linux CI on EC2 | Runs the full Linux suite, sharded across runners | Automatically on each PR and main push | Three EC2 runners; exact-head `check (Linux 3.14)`; Linux 3.9 is manual pre-release only |
+| EC2 remote-test runner | Runs focused remote test modules and returns a receipt via `llmtool task remote-test` | PM dispatches the task for selected focused modules | Focused modules only; a PM pre-review tool on private infrastructure, not CI; receipt is required evidence and does not replace formal review or CI |
+| Mac CI (GitHub-hosted) | Runs Mac-relevant CI checks | PR workflow for PRs; PM adds `mac-ci` after formal PASS and manually dispatches the full suite after each merge train | GitHub-hosted `macos-15-intel`; 120-minute job limit set in the workflow (#1253); exact-head PR check; without `mac-ci`, the PR check is `NOT_RUN` |
+| Linux CI (GitHub-hosted) | Runs the full Linux suite, sharded across parallel jobs on GitHub-hosted `ubuntu-24.04` | Automatically on each PR and main push | Exact-head `check (Linux 3.14)`; Linux 3.9 is manual pre-release only |
 
-The EC2 remote-test runner is invoked by the PM with `llmtool task remote-test` for selected focused modules; its receipt is required evidence and does not replace formal review or CI.
+The EC2 remote-test runner is invoked by the PM with `llmtool task remote-test` for selected focused modules; it is a PM pre-review tool on private infrastructure, not CI. Its receipt is required evidence and does not replace formal review or CI.
 
 ## Developer convergence and formal review
 
