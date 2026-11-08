@@ -168,12 +168,18 @@ class TaskAdvanceTests(unittest.TestCase):
         with patch('llmtool.task_submission_cli.run_task_advance', return_value=0) as handler:
             self.assertEqual(main(['task', 'advance', '1' * 32, '--pr', '17', '--merge']), 0)
         self.assertTrue(handler.call_args.args[0].merge)
+        # #1124: the adapter runs only for the Task's own PM session.
+        native = '3f2b8c1e-4d5a-4b6c-8d7e-9f0a1b2c3d4e'
+        owner_store = type('Store', (), {
+            'get': lambda self, _task_id: {'pm_session_id': 'pm-' + native}})()
         for argv, expected in ((['task', 'advance', '1' * 32], False),
                                (['task', 'advance', '1' * 32, '--merge'], True)):
-            args = parser_for_cli().parse_args(argv)
+            args = parser_for_cli().parse_args(argv + ['--pm-session', native])
             with patch('llmtool.task_advance.advance', return_value={'codes': []}) as advance, \
+                    patch.dict(os.environ, {'CLAUDE_CODE_SESSION_ID': '',
+                                            'CODEX_THREAD_ID': ''}), \
                     redirect_stdout(io.StringIO()):
-                task_submission_cli.run_task_advance(args, store=object())
+                task_submission_cli.run_task_advance(args, store=owner_store)
             self.assertEqual(advance.call_args.kwargs['merge'], expected)
 
     def test_claude_result_route_and_advance(self):
@@ -1344,16 +1350,22 @@ class TaskAdvanceTests(unittest.TestCase):
                                         'github_get': green_linux_ci},
                       'DISPATCH_REVIEW', None))
 
+        # #1124: each case runs as the Task's own PM session.
+        native = '3f2b8c1e-4d5a-4b6c-8d7e-9f0a1b2c3d4e'
         for record, adapters, expected_step, custom_store in cases:
             with self.subTest(step=expected_step):
+                record['pm_session_id'] = 'pm-' + native
                 store = custom_store or type('Store', (), {
                     'get': lambda self, _task_id: record})()
                 with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
                      patch.object(task_advance, '_pr_snapshot', return_value=PR), \
-                     patch.object(task_advance, '_review_outcomes', return_value=[]):
+                     patch.object(task_advance, '_review_outcomes', return_value=[]), \
+                     patch.dict(os.environ, {'CLAUDE_CODE_SESSION_ID': '',
+                                             'CODEX_THREAD_ID': ''}):
                     adapters.setdefault('github_get', lambda _path: [])
                     args = parser_for_cli().parse_args([
-                        'task', 'advance', record['task_id'], '--pr', '17'])
+                        'task', 'advance', record['task_id'], '--pr', '17',
+                        '--pm-session', native])
                     output = io.StringIO()
                     with redirect_stdout(output):
                         task_submission_cli.run_task_advance(args, store=store,
@@ -3580,7 +3592,8 @@ class CodexReviewFailureReasonTests(unittest.TestCase):
             rejected = self._reason(codex_jsonl(thread_started(),
                                                 agent_message(bound_verdict())))
         self.assertEqual(rejected, 'REVIEW_CLASSIFIER_REJECTED')
-        self.assertEqual(set(cases) | {rejected} | review_dispatch._D6_CREATE_FAILURE_REASONS,
+        self.assertEqual(set(cases) | {rejected} | review_dispatch._D6_CREATE_FAILURE_REASONS |
+                         {'REVIEW_PROMPT_REFUSED'},
                          review_dispatch.REVIEW_FAILURE_REASONS)
 
     def _dispatch(self, runner):
