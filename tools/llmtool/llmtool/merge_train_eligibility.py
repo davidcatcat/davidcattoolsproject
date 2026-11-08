@@ -4,9 +4,15 @@
 reuses the existing ``task advance`` merge gates. It returns the member fields a
 merge-train record stores, or one refusal code; the first failed check decides.
 It never writes to GitHub, Git, the TaskStore or the train store.
+
+When GitHub has not yet computed a PR's ``mergeable`` (not a bool), the check
+waits once and reads the PR once more; every later gate judges that second read.
+The EC2 remote-test rule follows the PR route: docs-only and scripts-only PRs
+need no receipt, every other PR needs an exact-head PASS receipt.
 """
 
 import re
+import time
 
 from . import merge_train_store, sensitive_paths, task_advance, task_completion
 
@@ -19,6 +25,7 @@ TRAIN_MEMBER_REVIEW_NOT_PASS = 'TRAIN_MEMBER_REVIEW_NOT_PASS'
 TRAIN_MEMBER_RULE_FILE = 'TRAIN_MEMBER_RULE_FILE'
 TRAIN_MEMBER_REMOTE_TEST_MISSING = 'TRAIN_MEMBER_REMOTE_TEST_MISSING'
 TRAIN_MEMBER_IN_LIVE_TRAIN = 'TRAIN_MEMBER_IN_LIVE_TRAIN'
+TRAIN_MEMBER_MERGEABLE_UNKNOWN = 'TRAIN_MEMBER_MERGEABLE_UNKNOWN'
 TRAIN_STORE_UNAVAILABLE = 'TRAIN_STORE_UNAVAILABLE'
 # An exact-head success run whose id is not a positive int: the check data is
 # malformed, reported with the existing merge-gate code.
@@ -29,6 +36,8 @@ READY_STATE = 'PM_EVIDENCE_READY'
 LINUX_CHECK = 'check (Linux 3.14)'
 MACOS_CHECK = 'check (macOS 3.13)'
 MAX_PR_FILES = 100
+# One bounded wait before the single PR re-read when mergeable is not yet known.
+MERGEABLE_WAIT_SECONDS = 5.0
 
 _TASK_ID = re.compile(r'[0-9a-f]{32}')
 _SHA40 = re.compile(r'[0-9a-f]{40}')
@@ -55,6 +64,14 @@ class _Snapshot:
         if path not in self._values:
             self._values[path] = self._get(path)
         return self._values[path]
+
+    def refresh(self, path):
+        """Read ``path`` again past the cache; later reads see the new value.
+
+        The old value is dropped first, so a failed re-read leaves nothing cached.
+        """
+        self._values.pop(path, None)
+        return self(path)
 
 
 def _pr_snapshot(pr, github_get):
@@ -166,6 +183,37 @@ def _receipt_digest(record, head):
     return None
 
 
+def _scripts_only(paths):
+    """True when every path is under scripts/ and the PR is not docs-only.
+
+    A local copy of the CI route rule, so this module does not depend on the
+    scripts-only helpers in task_advance or task_completion.
+    """
+    return (type(paths) is list and bool(paths) and
+            all(type(path) is str and path.startswith('scripts/') for path in paths) and
+            not task_completion._docs_only_ci(paths))
+
+
+def _receipt_optional(paths):
+    """True when the PR route needs no EC2 receipt: docs-only or scripts-only."""
+    return task_completion._docs_only_ci(paths) or _scripts_only(paths)
+
+
+def _has_head_receipt(record, head):
+    """True when the record holds any receipt for ``head``.
+
+    A receipt list that is present but not a list is a doubt and counts as a
+    receipt, so the full receipt check then judges (and refuses) it.
+    """
+    receipts = record.get('remote_test_receipts')
+    if receipts is None:
+        return False
+    if type(receipts) is not list:
+        return True
+    return any(type(receipt) is dict and receipt.get('source_sha') == head
+               for receipt in receipts)
+
+
 def _live_train_code(task_id, pr, train_root):
     try:
         records = merge_train_store.list_records(train_root)
@@ -180,13 +228,15 @@ def _live_train_code(task_id, pr, train_root):
     return None
 
 
-def member_check(store, task_id, pr, github_get, train_root=None):
+def member_check(store, task_id, pr, github_get, train_root=None, sleep=None):
     """Return whether Task ``task_id`` with PR ``pr`` may join a merge train.
 
     Returns ``{'eligible': True, 'code': None, 'member': {...}}`` with exactly
     the merge_train_store member fields, or ``{'eligible': False, 'code': CODE,
     'member': None}``. ``train_root`` is the TaskStore root whose sibling
-    ``merge-trains`` directory holds the train records.
+    ``merge-trains`` directory holds the train records. ``sleep`` is called
+    at most once, with MERGEABLE_WAIT_SECONDS, before the one PR re-read;
+    it defaults to ``time.sleep``.
     """
     get = _Snapshot(task_completion._github_get if github_get is None else github_get)
 
@@ -220,6 +270,20 @@ def member_check(store, task_id, pr, github_get, train_root=None):
     if pull.get('state') != 'open' or pull.get('merged') is True:
         return _refused(TRAIN_MEMBER_PR_NOT_OPEN)
 
+    # 4b. GitHub may not have computed mergeable yet. Wait once, then read the
+    # PR once more past the snapshot cache; every later gate judges this read.
+    # A bool on the first read never waits; false is refused by the CI gate.
+    if type(pull.get('mergeable')) is not bool:
+        (time.sleep if sleep is None else sleep)(MERGEABLE_WAIT_SECONDS)
+        snapshot = _pr_snapshot(pr, get.refresh)
+        if snapshot is None or snapshot[1] != head:
+            return _refused(TRAIN_MEMBER_PR_UNAVAILABLE)
+        pull = snapshot[0]
+        if pull.get('state') != 'open' or pull.get('merged') is True:
+            return _refused(TRAIN_MEMBER_PR_NOT_OPEN)
+        if type(pull.get('mergeable')) is not bool:
+            return _refused(TRAIN_MEMBER_MERGEABLE_UNKNOWN)
+
     # 5. No merge already claimed for this Task.
     if record.get('merge_attempt') is not None:
         return _refused(TRAIN_MEMBER_MERGE_CLAIMED)
@@ -244,12 +308,18 @@ def member_check(store, task_id, pr, github_get, train_root=None):
     if code is not None:
         return _refused(code)
 
-    # 9. EC2 remote-test PASS for this head.
-    summary = task_advance._remote_test_receipt_summary(record, head)
-    digest = _receipt_digest(record, head)
-    if (type(summary) is not dict or summary.get('result') != 'PASS' or digest is None or
-            summary.get('receipt_digest') != digest[:8]):
-        return _refused(TRAIN_MEMBER_REMOTE_TEST_MISSING)
+    # 9. EC2 remote-test PASS for this head, by PR route. A docs-only or
+    # scripts-only PR needs no receipt; if it has one for this head, the
+    # newest must still PASS. Every other PR needs the PASS receipt.
+    paths = [item['filename'] for item in files]
+    if _receipt_optional(paths) and not _has_head_receipt(record, head):
+        digest = None
+    else:
+        summary = task_advance._remote_test_receipt_summary(record, head)
+        digest = _receipt_digest(record, head)
+        if (type(summary) is not dict or summary.get('result') != 'PASS' or
+                digest is None or summary.get('receipt_digest') != digest[:8]):
+            return _refused(TRAIN_MEMBER_REMOTE_TEST_MISSING)
 
     # 10. Not already in a live train.
     code = _live_train_code(task_id, pr, train_root)
