@@ -250,17 +250,14 @@ class AgyRouteWiringTests(unittest.TestCase):
                 raise AssertionError('store must not be read before owner-ref validation')
 
         # #785 M18: a missing ref is optional, but a supplied malformed ref is
-        # still refused before any store read.
+        # still refused before any store read. run_task_delegate leaves this
+        # check to run_task_agy_delegate so the repair-cap and High Debug
+        # refusals come first; call the AGY runner directly here.
         for owner_ref in ('https://example.invalid/x', 7):
             with self.subTest(owner_ref=owner_ref):
                 args = Namespace(provider='agy', mode='direct', owner_ref=owner_ref,
                                  task_id='a' * 32, background=False,
                                  acceptance=['the result is recorded'])
-                with self.assertRaises(LLMToolError) as caught:
-                    task_submission_cli.run_task_delegate(args, store=UnreadStore())
-                self.assertEqual(
-                    str(caught.exception),
-                    '--provider agy requires a valid --owner-ref before Task mutation')
                 with self.assertRaises(LLMToolError) as caught:
                     task_submission_cli.run_task_agy_delegate(args, store=UnreadStore())
                 self.assertEqual(

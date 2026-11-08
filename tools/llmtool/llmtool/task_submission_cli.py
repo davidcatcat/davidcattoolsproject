@@ -5516,7 +5516,9 @@ def run_task_delegate(args, *, store=None):
     if args.provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider agy requires --mode direct')
-        _optional_agy_owner_ref(args)
+        # #785 M18: no owner-ref check here. The repair cap and High Debug
+        # refusals come first; run_task_agy_delegate validates a supplied ref
+        # (None accepted) before any store read or Task mutation.
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         _check_delegate_repair_cap(args, store)
         return run_task_agy_delegate(args, store=store)
