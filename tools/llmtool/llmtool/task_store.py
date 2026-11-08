@@ -791,10 +791,33 @@ def _validate_completion_tombstones(record):
         positions.add(position)
 
 
+def _verified_earlier_pm_sessions(record):
+    """Earlier PM session keys of a verified adoption chain, else an empty set.
+
+    Verified: a non-empty list whose entries each continue from the previous
+    entry's new session, the last ending at the record's current session.
+    """
+    adoptions = record.get('pm_session_adoptions')
+    if (type(adoptions) is not list or not adoptions or
+            any(type(item) is not dict or
+                type(item.get('old_session_key')) is not str or
+                type(item.get('new_session_key')) is not str for item in adoptions)):
+        return frozenset()
+    for previous, item in zip(adoptions, adoptions[1:]):
+        if item['old_session_key'] != previous['new_session_key']:
+            return frozenset()
+    if adoptions[-1]['new_session_key'] != record.get('pm_session_id'):
+        return frozenset()
+    return frozenset(item['old_session_key'] for item in adoptions)
+
+
 def _validate_remote_test_receipts(record):
     receipts = record.get('remote_test_receipts', [])
     if type(receipts) is not list or len(receipts) > 32:
         _fail('REMOTE_TEST_RECEIPT_INVALID')
+    # A receipt stays bound to the PM session that ran the test; after adoption
+    # that session is accepted only through the record's verified chain.
+    earlier_sessions = _verified_earlier_pm_sessions(record)
     for receipt in receipts:
         if (type(receipt) is not dict or set(receipt) not in (
                 _REMOTE_TEST_RECEIPT_FIELDS, _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT) or
@@ -811,7 +834,9 @@ def _validate_remote_test_receipts(record):
                 receipt.get('run_id') != record.get('run_id') or
                 type(receipt.get('executor_task')) is not str or
                 re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', receipt['executor_task']) is None or
-                receipt.get('pm_session') != record.get('pm_session_id') or
+                (receipt.get('pm_session') != record.get('pm_session_id') and
+                 (type(receipt.get('pm_session')) is not str or
+                  receipt['pm_session'] not in earlier_sessions)) or
                 type(receipt.get('modules')) is not list or
                 not 1 <= len(receipt['modules']) <= 32 or
                 any(type(item) is not str or
@@ -3120,6 +3145,10 @@ class TaskStore:
                 if existing != receipt:
                     _fail('REMOTE_TEST_RECEIPT_CONFLICT')
                 return existing
+            # Only the current PM session records new receipts; earlier
+            # sessions of an adoption chain are accepted on read only.
+            if receipt.get('pm_session') != current.get('pm_session_id'):
+                _fail('REMOTE_TEST_RECEIPT_INVALID')
             if len(receipts) >= 32:
                 _fail('REMOTE_TEST_RECEIPT_LIMIT')
             try:
