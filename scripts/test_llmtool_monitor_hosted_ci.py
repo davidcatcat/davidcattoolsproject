@@ -4,6 +4,7 @@ as office rows that never call an unfinished, unread or unknown result 成功.
 
 Synthetic payloads and a fake gh runner only; no network."""
 import json
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -72,14 +73,17 @@ class FakeGh:
                                stderr=b"")
 
 
-def answers(runs=RUNS) -> dict:
-    found = {RUNNERS_PATH: {"total_count": 0, "runners": []}, RUNS_PATH: runs}
+def answers(runs=RUNS, runners=()) -> dict:
+    found = {RUNNERS_PATH: {"total_count": len(runners), "runners": list(runners)}, RUNS_PATH: runs}
     found.update({jobs_path(run_id): payload for run_id, payload in JOBS.items()})
     return found
 
 
-def refreshed(fake: FakeGh, source=None):
-    source = source or monitor.GitHubSource(REPO, runner=fake, clock=lambda: NOW)
+def refreshed(fake: FakeGh, source=None, hosted=True):
+    """refresh_ci() once; a new source has want_hosted_ci set as the app sets it."""
+    if source is None:
+        source = monitor.GitHubSource(REPO, runner=fake, clock=lambda: NOW)
+        source.want_hosted_ci = hosted
     with mock.patch.object(monitor.shutil, "which", return_value="/usr/bin/gh"):
         source.refresh_ci()
     return source
@@ -98,6 +102,7 @@ class ReadEveryRefreshTest(unittest.TestCase):
     def test_runs_and_jobs_read_without_want_ci_or_runners(self):
         fake = FakeGh(answers())
         source = refreshed(fake)
+        self.assertTrue(source.want_hosted_ci)
         self.assertFalse(source.want_ci)
         self.assertEqual(source.ci_view.runners, [])
         self.assertIn(RUNS_PATH, fake.paths)
@@ -122,6 +127,47 @@ class ReadEveryRefreshTest(unittest.TestCase):
         rows = monitor.hosted_ci_rows(good.ci_runs, good.ci_view, NOW)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].state, monitor.UNCHECKED)
+
+    def test_direct_constructor_reads_no_runs_without_the_flag(self):
+        fake = FakeGh(answers())
+        source = refreshed(fake, hosted=False)
+        self.assertFalse(source.want_hosted_ci)
+        self.assertEqual(fake.paths, [RUNNERS_PATH])
+        self.assertIsNone(source.ci_runs)   # not read: unknown, not "no runs"
+        self.assertIsNone(source.ci_view.active)
+        self.assertEqual(source.ci_view.ci_at, 0.0)
+        self.assertEqual(source.ci_view.ci_error, "")
+
+    def test_registered_runner_still_reads_runs_without_the_flag(self):
+        runner = {"name": "ec2-self-runner", "os": "Linux", "status": "online",
+                  "busy": False, "labels": [{"name": "self-hosted"}]}
+        fake = FakeGh(answers(runners=[runner]))
+        source = refreshed(fake, hosted=False)
+        self.assertIn(RUNS_PATH, fake.paths)
+        self.assertIn(jobs_path(501), fake.paths)
+        self.assertIsNotNone(source.ci_runs)
+
+    def test_app_poll_turns_hosted_ci_on(self):
+        source = monitor.GitHubSource(REPO, runner=FakeGh(answers()), clock=lambda: NOW)
+        self.assertFalse(source.want_hosted_ci)   # off by default
+        mon = monitor.Monitor()
+        mon.github = source
+        mon.polls = 1   # past the first-poll summary line
+        mon.disk_due = mon.pm_board_due = mon.office_due = math.inf   # no local scans
+        snapshot = SimpleNamespace(processes=[], lingering=[], hosts=frozenset(),
+                                   watched_groups={})
+        with mock.patch.object(monitor, "collect", return_value=snapshot), \
+                mock.patch.object(monitor, "scan_tasks", return_value=[]), \
+                mock.patch.object(monitor, "track_one_shot", return_value=({}, [], [])):
+            mon.poll()
+        self.assertTrue(source.want_hosted_ci)
+        self.assertFalse(source.want_ci)   # no self-hosted runner on this Mac
+        fake = FakeGh(answers())
+        source.runner = fake
+        refreshed(fake, source)
+        self.assertIn(RUNS_PATH, fake.paths)
+        self.assertIn(jobs_path(501), fake.paths)
+        self.assertEqual(len(monitor.hosted_ci_rows(source.ci_runs, source.ci_view, NOW)), 2)
 
 
 class HostedRunnerNameTest(unittest.TestCase):

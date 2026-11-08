@@ -1096,6 +1096,7 @@ class Monitor:
         self.one_shot, finished, ended = track_one_shot(self.one_shot, result.processes, time.time())
         if self.github is not None:
             self.github.want_ci = any(p.role == "Actions runner" for p in result.processes)
+            self.github.want_hosted_ci = True   # hosted CI needs no runner on this Mac
         new += [(stamp, "i", text) for text in ended]
         if time.monotonic() >= self.office_due:
             # Session scans, tails, sqlite and AGY lookups are the costly part of a
@@ -1974,7 +1975,7 @@ class CiView:
     error: str = ""         # why the last read failed ("" = it did not)
     finished: dict | None = None   # runner -> (job text, result, end time) of its last job
     queued: tuple = ()      # ci_queued_jobs() of runs waiting for a runner
-    # Workflow runs, read on every refresh (hosted runners need no local runner):
+    # Workflow runs, read on every app refresh (hosted runners need no local runner):
     ci_at: float = 0.0      # clock time of the last good runs read (0 = never)
     ci_error: str = ""      # why the last runs read failed ("" = it did not)
     active: dict | None = None     # ci_active_runs() of that read; None = not read
@@ -2050,7 +2051,10 @@ class GitHubSource:
         # read. Never kept across refreshes, so a rerun on the same head shows
         # on the next one.
         self.pr_checks: dict | None = None
-        self.want_ci = False   # set while a self-hosted runner is on this Mac; CI is read either way
+        self.want_ci = False   # set while a self-hosted runner is on this Mac
+        # The monitor app sets this whenever GitHub is read, so runs and jobs
+        # on GitHub-hosted runners are read on every refresh. Off by default.
+        self.want_hosted_ci = False
         self.want_main = False
         self.main_health: MainHealth | None = None
         self.main_error = ""
@@ -2454,8 +2458,15 @@ class GitHubSource:
         else:
             view = replace(view, runners=runners, seen_at=self.clock(), error="")
         self.ci_view = view   # the runners show now; their jobs follow below
-        # Runs and jobs are read on every refresh, whether or not a runner is
-        # registered or runs on this Mac: llmtool CI uses GitHub-hosted runners.
+        # Runs and jobs are read when the app asks for hosted CI (every
+        # refresh: llmtool CI uses GitHub-hosted runners), when a runner runs
+        # on this Mac, or when GitHub lists a self-hosted runner.
+        if not (self.want_hosted_ci or self.want_ci or view.runners):
+            # Not read this refresh: unknown, never an older answer.
+            self.ci_runs = None
+            self.ci_heads = None
+            self.ci_view = replace(view, queued=(), ci_error="", active=None, last_done=None)
+            return
         stamps: dict = {}   # run id -> updated_at from the runs list
         read: dict = {}     # run id -> job list read during this refresh
 
