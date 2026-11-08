@@ -321,8 +321,11 @@ jobs:
               test_started=$SECONDS
               set +e
               "$JOB_PYTHON" -I -B -c 'import sys,unittest; sys.path[:0]=["tools/llmtool/tests","tools/llmtool"]; suite=unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(not result.wasSuccessful())' "$test_id" 2>&1 | tee "$output"
-              status=${PIPESTATUS[0]}
+              pipe_status=("${PIPESTATUS[@]}")
               set -e
+              # The test command's status wins; a failing tee also fails.
+              status=${pipe_status[0]}
+              if [ "$status" -eq 0 ]; then status=${pipe_status[1]}; fi
               collect_count "$output"
               printf 'canonical test ID: %s\ncanonical test ID elapsed seconds: %s\n' "$test_id" "$((SECONDS - test_started))"
               test "$status" -eq 0 || exit "$status"
@@ -331,8 +334,11 @@ jobs:
             output="$RUNNER_TEMP/mac-test-output"
             set +e
             make -C tools/llmtool check PYTHON="$JOB_PYTHON" 2>&1 | tee "$output"
-            status=${PIPESTATUS[0]}
+            pipe_status=("${PIPESTATUS[@]}")
             set -e
+            # The test command's status wins; a failing tee also fails.
+            status=${pipe_status[0]}
+            if [ "$status" -eq 0 ]; then status=${pipe_status[1]}; fi
             collect_count "$output"
             test "$status" -eq 0 || exit "$status"
           fi

@@ -669,7 +669,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
         self.assertIn('"$test_id" 2>&1 | tee "$output"', workflow)
         self.assertIn("while IFS= read -r test_id <&3; do", workflow)
         self.assertIn('done 3< "$RUNNER_TEMP/mac-test-ids" < /dev/null', workflow)
-        self.assertIn("status=${PIPESTATUS[0]}", workflow)
+        self.assertIn('pipe_status=("${PIPESTATUS[@]}")', workflow)
         self.assertIn("canonical exact HEAD:", workflow)
         self.assertIn("canonical test ID elapsed seconds:", workflow)
         self.assertIn("canonical unittest test-case count:", workflow)
@@ -702,6 +702,10 @@ FAKE_TOOLS = {
            '[ "$1 $2" = "rev-parse HEAD" ] || exit 2\n'
            f"echo {SYNTHETIC_HEAD}\n",
 }
+# Installed only when a test asks for it: records and prints its input,
+# then fails with FAKE_TEE_STATUS.
+FAKE_TEE = ("#!/bin/sh\n# Synthetic tee that fails after it records its input.\n"
+            'cat > "$1"\ncat "$1"\nexit "$FAKE_TEE_STATUS"\n')
 SUBSET_IDS = ("test_alpha.AlphaTests", "test_beta")
 REPORT_BLOCK = re.compile(
     r"^canonical exact HEAD: (.*)\n"
@@ -765,18 +769,21 @@ class CanonicalStepStructureTests(unittest.TestCase):
 class CanonicalStepRunTests(unittest.TestCase):
     """Run the real canonical step script with fake make, python3 and git."""
 
-    def run_step(self, mode, *, ran="2 3", status=0, terminate=False):
+    def run_step(self, mode, *, ran="2 3", status=0, terminate=False, tee_status=None):
         bash = shutil.which("bash")
         self.assertIsNotNone(bash, "bash is required on POSIX systems")
         script = canonical_script()
         self.assertEqual(script.count(MODE_EXPRESSION), 1)
         script = script.replace(MODE_EXPRESSION, mode)
         self.assertNotIn("${{", script)
+        tools = dict(FAKE_TOOLS)
+        if tee_status is not None:
+            tools["tee"] = FAKE_TEE
         with tempfile.TemporaryDirectory(prefix="mac-ci-step-") as temporary:
             root = Path(temporary)
             bin_dir = root / "bin"
             bin_dir.mkdir()
-            for name, body in FAKE_TOOLS.items():
+            for name, body in tools.items():
                 tool = bin_dir / name
                 tool.write_text(body, encoding="utf-8")
                 tool.chmod(0o755)
@@ -795,6 +802,8 @@ class CanonicalStepRunTests(unittest.TestCase):
             }
             if terminate:
                 env["FAKE_STARTED"] = str(started)
+            if tee_status is not None:
+                env["FAKE_TEE_STATUS"] = str(tee_status)
             output_path = root / "output"
             with output_path.open("wb") as output:
                 process = subprocess.Popen(
@@ -858,6 +867,22 @@ class CanonicalStepRunTests(unittest.TestCase):
                 if mode == "mac-subset":
                     self.assertIn(f"canonical test ID: {SUBSET_IDS[0]}\n", text)
                     self.assertNotIn(f"canonical test ID: {SUBSET_IDS[1]}\n", text)
+
+    def test_failing_tee_is_not_a_pass(self):
+        # The fake tee records the "Ran N tests" lines and then fails.
+        for mode in ("full", "mac-subset"):
+            with self.subTest(mode=mode, command_status=0):
+                returncode, text = self.run_step(mode, tee_status=4)
+                self.assertEqual(returncode, 4, text)
+                self.assertEqual(self.report(text), (5, "FAIL"))
+                if mode == "mac-subset":
+                    self.assertIn(f"canonical test ID: {SUBSET_IDS[0]}\n", text)
+                    self.assertNotIn(f"canonical test ID: {SUBSET_IDS[1]}\n", text)
+            with self.subTest(mode=mode, command_status=3):
+                # When both fail, the step exits with the command's own status.
+                returncode, text = self.run_step(mode, status=3, tee_status=4)
+                self.assertEqual(returncode, 3, text)
+                self.assertEqual(self.report(text), (5, "FAIL"))
 
     def test_zero_test_cases_is_not_a_pass(self):
         for mode in ("full", "mac-subset"):
