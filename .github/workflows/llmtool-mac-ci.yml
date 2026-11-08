@@ -3,11 +3,14 @@ name: llmtool Mac CI
 # Feature branches are tested through their pull request, not again on push:
 # a branch push plus its PR used to run the same commit twice (Issue #99).
 # The PM triggers workflow_dispatch after each merge train for main's full
-# suite. Jobs run on the Owner's Mac as the dedicated non-admin
-# account from tools/mac-runner (installed outside the repo, so a PR cannot
-# turn it off); its job-started hook fails any job from a runner running as
-# the Owner, a fork or an untrusted actor. MAC_CI_ENABLED is the kill switch:
-# anything but 'true' skips the job, and a skipped job is NOT_RUN, not PASS.
+# suite. Jobs run on GitHub-hosted macos-15-intel (#1253, Owner 2026-11-09:
+# the repository is public; the Owner's Mac no longer takes CI jobs). Python
+# 3.13 comes from actions/setup-python (pinned by SHA) and is copied into a
+# job-owned venv that the verified-Python step checks byte for byte. The
+# company LLM, its VPN and any company configuration are never used here; all
+# tests are offline. HOSTED_CI_ENABLED is the kill switch: anything but 'true'
+# skips the job (MAC_CI_ENABLED, the old self-hosted switch, stays 'false' so
+# older self-hosted copies of this file on other branches never run), and a skipped job is NOT_RUN, not PASS.
 # Use workflow_dispatch after each merge train so the full suite runs.
 on:
   pull_request:
@@ -30,12 +33,13 @@ permissions:
 jobs:
   check:
     name: check (macOS 3.13)
-    if: vars.MAC_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci')
+    if: vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci')
     concurrency:
       group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
       cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
-    runs-on: [self-hosted, macOS, X64, local-mac-ci]
-    timeout-minutes: 45
+    runs-on: macos-15-intel
+    # Owner #1253: up to 120 minutes while the hosted full suite is measured (#1220).
+    timeout-minutes: 120
     steps:
       # Test the PR's own head commit, not GitHub's temporary merge commit
       # (GITHUB_SHA), so a run is exact evidence for the SHA it reports.
@@ -165,7 +169,21 @@ jobs:
             echo "::error::unexpected full-suite gate result"
             exit 1
           fi
-      # Use the Mac's Python 3.13 in a job-owned venv with a copied executable.
+      - name: Set up Python 3.13
+        if: steps.full-due.outputs.run != 'false'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+      - name: Check GitHub-hosted runner boundary
+        run: |
+          fail() { echo "::error::hosted runner boundary failed: $1"; exit 1; }
+          test "$RUNNER_ENVIRONMENT" = github-hosted || fail "not a GitHub-hosted runner"
+          test "$(id -u)" -ne 0 || fail "job runs as root"
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GW_AGENT_API_KEY; do
+            test -z "${!name+x}" || fail "credential environment $name present"
+          done
+          echo "Runner: $RUNNER_NAME ($RUNNER_ENVIRONMENT, $RUNNER_OS $RUNNER_ARCH); user: $(id -un)"
+      # Use setup-python's 3.13 in a job-owned venv with a copied executable.
       # The trusted-runtime check refuses a group/other-writable interpreter;
       # the copy is checked byte-for-byte without changing the shared Python.
       - name: Job-owned verified Python
