@@ -14,6 +14,8 @@ from llmtool.errors import LLMToolError
 
 TASK = 'a' * 32
 HEAD = 'b' * 40
+# What the fake screen returns in refusal-flow tests.
+SCREENED_EXCERPT = 'screened reply excerpt'
 
 
 def _runtime_parts(*pieces):
@@ -606,26 +608,47 @@ class ReviewDispatchTests(unittest.TestCase):
         return review_dispatch._parse_codex_review(
             raw, task_id=TASK, run_id='c' * 32, contract_digest='d' * 64, head=HEAD)
 
+    def _fake_screen(self):
+        # A fake screen: these tests check the refusal flow, not the detector.
+        return patch.object(task_submission_cli, '_screen_text',
+                            return_value=SCREENED_EXCERPT)
+
     def _refusal(self, raw):
-        with self.assertRaises(LLMToolError) as raised:
+        """Parse a refused reply with a fake screen; return the error and the fake."""
+        with self._fake_screen() as screen, self.assertRaises(LLMToolError) as raised:
             self._parse(raw)
         self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
-        return raised.exception
+        return raised.exception, screen
+
+    def assert_screened_excerpt_only(self, exc, screen, raw):
+        # The excerpt goes through the screen once, bounded, and only the
+        # screened text reaches the message.
+        screen.assert_called_once()
+        excerpt, limit = screen.call_args.args
+        self.assertEqual(limit, 2048)
+        self.assertTrue(review_dispatch._codex_final_message(raw).startswith(excerpt))
+        self.assertEqual(str(exc), 'Reviewer dispatch refused: ' + SCREENED_EXCERPT)
 
     def test_wrong_or_missing_binding_line_refuses_with_a_right_json_reply(self):
         text = _codex_review_text()
         binding = text.splitlines()[-1]
         cases = {
-            'wrong digest': text.replace('contract=' + 'd' * 64, 'contract=' + 'e' * 64),
-            'truncated digest': text.replace('contract=' + 'd' * 64, 'contract=' + 'd' * 63),
-            'missing line': text.replace('\n' + binding, ''),
+            'wrong digest': (text.replace('contract=' + 'd' * 64, 'contract=' + 'e' * 64),
+                             'e' * 64),
+            'truncated digest': (text.replace('contract=' + 'd' * 64,
+                                              'contract=' + 'd' * 63), 'd' * 63),
+            'missing line': (text.replace('\n' + binding, ''), 'Verdict: PASS'),
         }
-        for name, review_text in cases.items():
+        for name, (review_text, returned) in cases.items():
             for changes in ({}, {'contract_digest': 'd' * 64}):
                 with self.subTest(case=name, json=changes):
-                    exc = self._refusal(_codex_event_stream(review_text, **changes))
+                    raw = _codex_event_stream(review_text, **changes)
+                    exc, screen = self._refusal(raw)
                     self.assertEqual(exc.review_failure_reason,
                                      'REVIEW_BINDING_LINE_MISSING')
+                    self.assert_screened_excerpt_only(exc, screen, raw)
+                    for value in (returned, TASK, 'c' * 32, HEAD):
+                        self.assertNotIn(value, str(exc))
 
     def test_json_contract_digest_value_is_ignored_when_the_binding_line_is_exact(self):
         for value in ('d' * 63, 'd' * 64 + 'x', 'e' * 64, '', None, 7, ['d']):
@@ -642,14 +665,19 @@ class ReviewDispatchTests(unittest.TestCase):
         expected = {'task_id': TASK, 'run_id': 'c' * 32, 'head': HEAD}
         for key, value in returned.items():
             with self.subTest(key=key):
-                exc = self._refusal(_codex_event_stream(_codex_review_text(), **{key: value}))
+                exc, screen = self._refusal(
+                    _codex_event_stream(_codex_review_text(), **{key: value}))
                 self.assertEqual(exc.review_failure_reason, 'VERDICT_BINDING_MISMATCH')
                 self.assertEqual(exc.review_binding_mismatch_keys, (key,))
                 self.assertEqual(str(exc), 'Reviewer dispatch refused: JSON binding keys '
                                            'differ: ' + key)
                 self.assertNotIn(value, str(exc))
                 self.assertNotIn(expected[key], str(exc))
-        exc = self._refusal(_codex_event_stream(_codex_review_text(), **returned))
+                # A mismatch adds no reply excerpt, so nothing is screened.
+                screen.assert_not_called()
+        exc, screen = self._refusal(_codex_event_stream(_codex_review_text(), **returned))
+        screen.assert_not_called()
+        self.assertEqual(exc.review_failure_reason, 'VERDICT_BINDING_MISMATCH')
         self.assertEqual(exc.review_binding_mismatch_keys, ('task_id', 'run_id', 'head'))
         self.assertEqual(str(exc), 'Reviewer dispatch refused: JSON binding keys differ: '
                                    'task_id, run_id, head')
@@ -661,10 +689,13 @@ class ReviewDispatchTests(unittest.TestCase):
                               ((), {'note': 'extra'}),
                               ((), {'contract_digest': 'd' * 64, 'note': 'extra'})):
             with self.subTest(drop=drop, changes=changes):
-                exc = self._refusal(_codex_event_stream(
-                    _codex_review_text(), drop=drop, **changes))
+                raw = _codex_event_stream(_codex_review_text(), drop=drop, **changes)
+                exc, screen = self._refusal(raw)
                 self.assertEqual(exc.review_failure_reason, 'VERDICT_WRONG_FIELDS')
                 self.assertIsNone(getattr(exc, 'review_binding_mismatch_keys', None))
+                self.assert_screened_excerpt_only(exc, screen, raw)
+                for value in ('extra', TASK, 'c' * 32, HEAD, 'd' * 64):
+                    self.assertNotIn(value, str(exc))
 
     def test_binding_mismatch_claim_is_unknown_and_holds_no_returned_value(self):
         self.store.data.update({
@@ -702,17 +733,22 @@ class ReviewDispatchTests(unittest.TestCase):
                                                'contract=' + 'e' * 64))
         with patch.object(review_dispatch.task_completion, 'read_d6_registration',
                           return_value=SimpleNamespace(root='/repo/reviewer-d6')), \
+                self._fake_screen() as screen, \
                 self.assertRaises(LLMToolError) as raised:
             self.invoke(
                 preflight=[(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer'),
                            (TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')],
                 codex_runner=lambda **_kw: self._parse(raw))
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
         self.assertEqual(raised.exception.review_failure_reason,
                          'REVIEW_BINDING_LINE_MISSING')
+        self.assert_screened_excerpt_only(raised.exception, screen, raw)
+        self.assertNotIn('e' * 64, str(raised.exception))
         claim = self.store.get(TASK)['review_dispatch_claim'][0]
         self.assertEqual(claim['state'], 'UNKNOWN')
         self.assertEqual(claim['failure_reason'], 'REVIEW_BINDING_LINE_MISSING')
         self.assertNotIn('binding_mismatch_keys', claim)
+        self.assertNotIn('e' * 64, json.dumps(claim))
 
     def test_reviewer_selection_is_cross_family_and_unknown_is_refused(self):
         executor = SimpleNamespace(
