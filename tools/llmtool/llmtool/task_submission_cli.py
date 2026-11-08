@@ -1050,13 +1050,20 @@ def _review_original_task(store, task, task_id, executor_task):
     names the same executor D6, created before the reviewed Task; ties go to
     the lower task_id. This is the D6 rule of _check_delegate_repair_cap.
     A store without task_ids has no original. A failing read raises.
+
+    A store with completion_d6_task_ids narrows the scan to the Tasks whose
+    stored completion names this D6, without validating unrelated records;
+    each match is then read through get(), so only validated records are
+    used. A store without it is scanned in full, as before.
     """
     list_ids = getattr(store, 'task_ids', None)
     if list_ids is None:
         return None
+    on_d6 = getattr(store, 'completion_d6_task_ids', None)
+    other_ids = list_ids() if on_d6 is None else on_d6(executor_task)
     reviewed_at = task.get('created_at')
     candidates = []
-    for other_id in list_ids():
+    for other_id in other_ids:
         if other_id == task_id:
             continue
         record = store.get(other_id)
