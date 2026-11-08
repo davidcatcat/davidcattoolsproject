@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 import unittest
 
@@ -91,11 +92,58 @@ class CIPathClassTests(unittest.TestCase):
                        "tools/ai-loop/helper.py"],
              (True, True, True, True)),
             ("unknown", ["src/unknown.py"], (True, False, False, False)),
+            ("monitor script", ["scripts/llmtool_monitor.py"],
+             (True, False, False, False)),
+            ("skills Python", ["skills/x/tool.py"], (True, False, False, False)),
+            ("skills Markdown", ["skills/x/SKILL.md"], (False, True, False, False)),
+            ("Mac workflow", [".github/workflows/llmtool-mac-ci.yml"],
+             (True, False, False, False)),
         )
         for label, paths, expected in cases:
             with self.subTest(paths=label):
                 path_bytes = b"\0".join(path.encode() for path in paths) + b"\0"
                 self.assertEqual(ci_path_classes.linux_flags(path_bytes), expected)
+
+    def test_scripts_and_skills_python_are_code_and_skills_markdown_is_docs(self):
+        cases = (
+            ("scripts/llmtool_monitor.py", "other"),
+            ("scripts/test_llmtool_monitor.py", "other"),
+            ("skills/x/tool.py", "other"),
+            ("skills/x/test_tool.py", "other"),
+            ("skills/x/SKILL.md", "docs"),
+            ("skills/x/notes.txt", "docs"),
+            (".github/workflows/llmtool-mac-ci.yml", "workflow"),
+        )
+        for path, expected in cases:
+            with self.subTest(path=path):
+                self.assertEqual(ci_path_classes.classify_path(path), expected)
+
+    def test_linux_workflow_triggers_on_scripts_and_all_workflows(self):
+        workflow = (Path(__file__).resolve().parents[3] / ".github" / "workflows"
+                    / "llmtool-linux-ci.yml").read_text(encoding="utf-8")
+        for event in ("push", "pull_request"):
+            with self.subTest(event=event):
+                match = re.search(
+                    rf"(?ms)^  {event}:\n.*?^    paths:\n(?P<body>(?:^      - [^\n]*\n)+)",
+                    workflow,
+                )
+                self.assertIsNotNone(match)
+                entries = re.findall(r"^      - '([^']*)'$", match.group("body"), re.M)
+                self.assertIn("scripts/**", entries)
+                self.assertIn(".github/workflows/**", entries)
+                # Every older entry stays, and the negation still follows its include.
+                for entry in ("tools/llmtool/**", "!tools/llmtool/*.md",
+                              ".github/workflows/llmtool-linux-ci.yml",
+                              "tools/ec2-runner/**", "tools/safe-git/**",
+                              "tools/api-agent-gateway/**", "tools/ai-loop/**",
+                              "AGENTS.md", "CLAUDE.md", "skills/**", "docs/**",
+                              "tools/llmtool/*.md", "*.md"):
+                    self.assertIn(entry, entries)
+                self.assertEqual(entries.index("!tools/llmtool/*.md"),
+                                 entries.index("tools/llmtool/**") + 1)
+                self.assertLess(entries.index("!tools/llmtool/*.md"),
+                                entries.index("tools/llmtool/*.md"))
+        self.assertIn("-m unittest discover -s scripts -p 'test_*.py' < /dev/null", workflow)
 
     def test_historical_and_boundary_path_sets_keep_mac_levels(self):
         cases = (

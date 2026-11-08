@@ -94,6 +94,10 @@ class CiTestShardsTests(unittest.TestCase):
                 ["tools/llmtool/llmtool/cli.py", "tools/llmtool/README.md"],
                 (True, True),
             ),
+            (["scripts/llmtool_monitor.py"], (True, False)),
+            (["skills/x/tool.py"], (True, False)),
+            (["skills/x/SKILL.md"], (False, True)),
+            ([".github/workflows/llmtool-mac-ci.yml"], (True, False)),
         ]
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
@@ -136,6 +140,98 @@ class CiTestShardsTests(unittest.TestCase):
             'unittest discover -s tools/llmtool/tests -p "$module" < /dev/null',
             workflow,
         )
+
+    def _script_test_step(self):
+        workflow = (TOOLS_ROOT.parent.parent / ".github/workflows/llmtool-linux-ci.yml").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(
+            r"(?ms)^      - name: Repository script tests\n(?P<head>.*?)^        run: \|\n"
+            r"(?P<script>(?:^          [^\n]*\n|^          \n)*)",
+            workflow,
+        )
+        self.assertIsNotNone(match)
+        return workflow, match.group("head"), textwrap.dedent(match.group("script"))
+
+    def test_shard_one_runs_script_tests_on_3_14_before_clean_tree_check(self):
+        workflow, head, script = self._script_test_step()
+        self.assertIn("if: matrix.shard == 1 && matrix.python == '3.14'", head)
+        self.assertIn("PYTHONDONTWRITEBYTECODE: '1'", head)
+        self.assertIn("shell: bash", head)
+        self.assertIn(
+            "\"$JOB_PYTHON\" -B -m unittest discover -s scripts -p 'test_*.py' < /dev/null",
+            script,
+        )
+        self.assertLess(workflow.index("- name: Repository script tests"),
+                        workflow.index("- name: Working tree is clean"))
+        shards_job = workflow[workflow.index("\n  shards:\n"):workflow.index("\n  check:\n")]
+        self.assertIn("- name: Repository script tests", shards_job)
+        comment = workflow[:workflow.index("- name: Repository script tests")]
+        comment = comment[comment.rindex("- name: Safe-git preflight tests"):]
+        self.assertIn("#1174", comment)
+        self.assertIn("3.9", comment)
+
+    def test_script_test_step_runs_scripts_and_skills_and_fails_on_failure(self):
+        _, _, script = self._script_test_step()
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            stub = temp / "python-stub"
+            log = temp / "calls.log"
+            # The stub records its arguments, then fails when the start dir is listed
+            # in STUB_FAIL_DIR, standing in for a failing unittest run.
+            stub.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$STUB_LOG\"\n"
+                "case \" $* \" in *\" -s $STUB_FAIL_DIR \"*) exit 1 ;; esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            stub.chmod(0o755)
+            repo = temp / "repo"
+            (repo / "scripts").mkdir(parents=True)
+            (repo / "skills" / "x").mkdir(parents=True)
+            (repo / "skills" / "x" / "SKILL.md").write_text("skill\n", encoding="utf-8")
+
+            def run(fail_dir="none"):
+                log.write_text("", encoding="utf-8")
+                env = os.environ.copy()
+                env.update({"JOB_PYTHON": str(stub), "STUB_LOG": str(log),
+                            "STUB_FAIL_DIR": fail_dir})
+                result = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+                    cwd=repo, env=env, capture_output=True, text=True,
+                    stdin=subprocess.DEVNULL,
+                )
+                return result, log.read_text(encoding="utf-8").splitlines()
+
+            with self.subTest(case="no skills tests"):
+                result, calls = run()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(calls, ["-B -m unittest discover -s scripts -p test_*.py"])
+                self.assertIn("nothing to run", result.stdout)
+
+            with self.subTest(case="scripts failure"):
+                result, calls = run("scripts")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(len(calls), 1)
+
+            (repo / "skills" / "x" / "test_tool.py").write_text("", encoding="utf-8")
+            (repo / "skills" / "y" / "deep").mkdir(parents=True)
+            (repo / "skills" / "y" / "deep" / "test_more.py").write_text("", encoding="utf-8")
+
+            with self.subTest(case="skills tests present"):
+                result, calls = run()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(calls, [
+                    "-B -m unittest discover -s scripts -p test_*.py",
+                    "-B -m unittest discover -s skills/x -p test_*.py",
+                    "-B -m unittest discover -s skills/y/deep -p test_*.py",
+                ])
+
+            with self.subTest(case="skills failure"):
+                result, calls = run("skills/x")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("-B -m unittest discover -s skills/x -p test_*.py", calls)
 
 
 if __name__ == "__main__":
