@@ -28,8 +28,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from llmtool import board_check, task_status, worker_dispatch  # noqa: E402
-from llmtool.task_store import TaskStore, _json_bytes  # noqa: E402
+from llmtool import board_check, task_status, task_submission_cli, worker_dispatch  # noqa: E402
+from llmtool.task_store import TaskStore, _json_bytes, new_id  # noqa: E402
 
 _MODULE_HOME = []
 
@@ -1144,31 +1144,15 @@ _CLAIM_SCRIPT = (
     'sys.exit(board_check.run_claim(args))\n')
 
 
-class DiskStore(FakeStore):
-    """TaskStore stand-in kept as files under the test HOME.
+def submitted(task_id):
+    """A schema-valid new Task, built by the factory that ``task submit`` uses.
 
-    Every read goes to disk, so a new object in a later session sees the Tasks
-    an earlier one saw. As with FakeStore, a write from board-check or a claim
-    fails the test; ``put`` stands in for the scheduler creating a Task.
+    The scheduler stores it with ``TaskStore.create``; the request is plain text.
     """
-
-    def __init__(self, root):
-        super().__init__()
-        self.root = Path(root)
-
-    def put(self, record):
-        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        path = self.root / f"{record['task_id']}.json"
-        path.write_text(json.dumps(record), encoding='utf-8')
-        os.chmod(path, 0o600)
-
-    def task_ids(self):
-        if not self.root.is_dir():
-            return []
-        return sorted(path.stem for path in self.root.glob('*.json'))
-
-    def get(self, task_id):
-        return json.loads((self.root / f'{task_id}.json').read_text(encoding='utf-8'))
+    prompt = 'Plan the work row on the PM board.'
+    digest = hashlib.sha256(prompt.encode('utf-8')).hexdigest()
+    return task_submission_cli._record(task_id, new_id(), 'pm-' + new_id(), 'claude',
+                                       prompt, request_sha=digest)
 
 
 def ledger_claim(row, holder=HOLDER_A, task_id=None, *,
@@ -1527,20 +1511,60 @@ class ClaimLivenessTests(LedgerCase):
                 self.assertEqual(claims[1], again)
 
     def test_dead_claim_task_never_classifies_the_row(self):
-        # Review finding 2 (PR #1218): the merged Task of a dead claim must not
-        # reach _classify_task, so the row is not DONE and lists no next item.
+        # Review finding 2 (PR #1218) and High Debug finding 1: when a row has
+        # claims and none is live, the row is ANOMALY before any Task is read,
+        # whatever the board task_id says. No Task, not even a merged one,
+        # makes the row DONE or lists its next item.
         self.write_ledger([ledger_claim('work', task_id=TASK_BOUND)])
-        for end in (merged, abandoned, failed):
-            with self.subTest(end=end.__name__):
-                store = FakeStore(end(pending(TASK_BOUND)))
-                with mock.patch.object(board_check, '_classify_task',
-                                       wraps=board_check._classify_task) as classify:
-                    result = self.check([{'id': 'work', 'next': ['second']}], store=store)
-                classify.assert_not_called()
-                self.assertEqual(states(result), {'work': board_check.ANOMALY}, result)
-                self.assertRow(result, 'work', board_check.ANOMALY, 'stale ledger claim')
+        ends = (('merged', merged, 'is merged'), ('failed', failed, 'is FAILED'),
+                ('abandoned', abandoned, 'is ABANDONED'),
+                ('missing', None, 'is not in TaskStore'))
+        boards = (('absent', None), ('matching', TASK_BOUND), ('different', TASK_OTHER))
+        for end_label, end, evidence in ends:
+            for board_label, board_task in boards:
+                with self.subTest(end=end_label, board_task_id=board_label):
+                    records = [pending(TASK_OTHER)]
+                    if end is not None:
+                        records.append(end(pending(TASK_BOUND)))
+                    row = {'id': 'work', 'next': ['second']}
+                    if board_task is not None:
+                        row['task_id'] = board_task
+                    with mock.patch.object(board_check, '_classify_task',
+                                           wraps=board_check._classify_task) as classify:
+                        result = self.check([row], store=FakeStore(*records))
+                    classify.assert_not_called()
+                    self.assertEqual(states(result), {'work': board_check.ANOMALY}, result)
+                    self.assertRow(result, 'work', board_check.ANOMALY, 'stale ledger claim')
+                    self.assertRow(result, 'work', board_check.ANOMALY, evidence)
+                    self.assertNotIn('next:second', states(result))
+                    self.assertEqual(idle_rows(result), set())
+                    self.assertEqual((result['result'], result['exit_code']), ('FLAGGED', 2))
+
+    def test_expired_reservation_on_a_row_with_task_id_is_anomaly(self):
+        self.write_ledger([ledger_claim('work', claimed_at='2026-11-07T11:00:00Z')])
+        with mock.patch.object(board_check, '_classify_task',
+                               wraps=board_check._classify_task) as classify:
+            result = self.check([{'id': 'work', 'task_id': TASK_BOUND}])
+        classify.assert_not_called()
+        self.assertRow(result, 'work', board_check.ANOMALY, 'expired')
+        self.assertEqual(result['exit_code'], 2)
+
+    def test_newer_live_claim_wins_over_older_dead_ones(self):
+        dead = [ledger_claim('work', task_id=TASK_UNKNOWN, claimed_at='2026-11-07T10:00:00Z'),
+                ledger_claim('work', claimed_at='2026-11-07T11:00:00Z')]
+        self.write_ledger(dead + [ledger_claim('work', HOLDER_B)])
+        result = self.check([{'id': 'work'}])
+        self.assertRow(result, 'work', board_check.CLAIMED, 'reservation by pm-b')
+        self.assertEqual((result['result'], result['exit_code']), ('CLEAN', 0))
+
+        self.write_ledger(dead + [ledger_claim('work', HOLDER_B, task_id=TASK_BOUND)])
+        for board_task in (None, TASK_BOUND):
+            with self.subTest(board_task_id=board_task):
+                row = {'id': 'work'} if board_task is None else {'id': 'work',
+                                                                  'task_id': board_task}
+                result = self.check([row])
+                self.assertRow(result, 'work', board_check.ACTIONABLE, 'DEVELOPER_ATTENTION')
                 self.assertEqual(idle_rows(result), set())
-                self.assertEqual(result['exit_code'], 2)
 
     def test_fake_bound_task_in_the_ledger_is_never_live(self):
         self.write_ledger([ledger_claim('work', task_id=TASK_UNKNOWN)])
@@ -1586,12 +1610,18 @@ class LedgerBoardStateTests(LedgerCase):
         self.assertRow(result, 'work', board_check.ACTIONABLE, 'DEVELOPER_ATTENTION')
         self.assertEqual(idle_rows(result), set())
 
-    def test_stale_claim_on_a_row_with_task_id_is_history(self):
+    def test_stale_claim_on_a_row_with_task_id_is_anomaly(self):
+        # High Debug finding 1: a stale claim is not history the board task_id
+        # can hide. The row is ANOMALY, not ACTIONABLE, and the claim stays.
         self.write_ledger([ledger_claim('work', task_id=TASK_UNKNOWN)])
         result = self.check([{'id': 'work', 'task_id': TASK_BOUND}],
                             store=FakeStore(pending(TASK_BOUND)))
-        self.assertRow(result, 'work', board_check.ACTIONABLE, 'DEVELOPER_ATTENTION')
-        self.assertEqual(idle_rows(result), {'work'})
+        self.assertRow(result, 'work', board_check.ANOMALY,
+                       f'stale ledger claim: Task {TASK_UNKNOWN} bound by pm-a is not in '
+                       'TaskStore; the row can be claimed again')
+        self.assertEqual(idle_rows(result), set())
+        self.assertEqual((result['result'], result['exit_code']), ('FLAGGED', 2))
+        self.assertEqual(self.claims(), [ledger_claim('work', task_id=TASK_UNKNOWN)])
 
 
 class LedgerAuthorizationTests(LedgerCase):
@@ -1622,9 +1652,17 @@ class LedgerAuthorizationTests(LedgerCase):
                 self.assertEqual((result['result'], result['exit_code']), ('CLEAN', 0))
 
     def test_fake_or_stale_claim_never_authorizes(self):
+        # Dead claims on the row itself make it ANOMALY before any Task read.
         claims = [ledger_claim('task', task_id=TASK_UNKNOWN),
                   ledger_claim('task', HOLDER_B, claimed_at='2026-11-07T11:00:00Z'),
                   ledger_claim('elsewhere', task_id=TASK_UNKNOWN)]
+        result = self.check_codex(claims, 'WORKER_UNKNOWN')
+        self.assertRow(result, 'task', board_check.ANOMALY, 'stale ledger claim')
+        self.assertNotEqual(states(result)['task'], board_check.RUNNING)
+
+        # Dead claims on other rows never authorize this row's attempt.
+        claims = [ledger_claim('elsewhere', task_id=TASK_UNKNOWN),
+                  ledger_claim('other', HOLDER_B, claimed_at='2026-11-07T11:00:00Z')]
         result = self.check_codex(claims, 'WORKER_UNKNOWN')
         self.assertRow(result, 'task', board_check.ANOMALY, 'no live ledger claim binds')
         self.assertNotEqual(states(result)['task'], board_check.RUNNING)
@@ -1652,12 +1690,12 @@ class IdleRunnableTests(LedgerCase):
         self.assertEqual(result['anomalies'], [])
 
     def test_expired_reservation_does_not_hide_idle_work(self):
+        # The row with only a dead claim is ANOMALY, so it stays flagged.
         self.write_ledger([ledger_claim('work', claimed_at='2026-11-07T11:00:00Z')])
         result = self.check([{'id': 'work', 'task_id': TASK_BOUND}],
                             store=FakeStore(pending(TASK_BOUND)))
-        self.assertRow(result, 'work', board_check.ACTIONABLE)
-        self.assertEqual(idle_rows(result), {'work'})
-        self.assertEqual(result['exit_code'], 2)
+        self.assertRow(result, 'work', board_check.ANOMALY, 'expired')
+        self.assertEqual((result['result'], result['exit_code']), ('FLAGGED', 2))
 
 
 class NextItemTests(LedgerCase):
@@ -1727,15 +1765,24 @@ class NextItemTests(LedgerCase):
 
 
 class ScheduleRunTests(LedgerCase):
-    """Owner tests 6 and 8, and two claim processes racing for one row."""
+    """Owner tests 6 and 8, and two claim processes racing for one row.
+
+    Owner tests 6 and 8 use the real TaskStore under the temp HOME. Tasks are
+    built by the production record factory and stored with TaskStore.create,
+    and every Task assertion reads the persisted files.
+    """
+
+    def task_file(self, task_id):
+        return self.state / 'tasks' / f'{task_id}.json'
 
     def test_two_schedule_runs_give_one_claim_and_one_bound_task(self):
         rows = self.set_board({'id': 'work'})
-        store = FakeStore()
+        store = TaskStore()
+        self.assertEqual(store.root, self.state / 'tasks')
         # Both runs read the board before either claims.
         for _ in range(2):
             self.assertIn('work', idle_rows(self.check(rows, store=store)))
-        outcomes = []
+        outcomes, persisted = [], {}
         for holder, task_id in ((HOLDER_A, TASK_BOUND), (HOLDER_B, TASK_OTHER)):
             try:
                 self.claim('work', holder, store=store)
@@ -1743,39 +1790,56 @@ class ScheduleRunTests(LedgerCase):
                 outcomes.append(exc.code)
                 continue
             # Only the run that won the claim creates its Task.
-            store.records[task_id] = pending(task_id)
+            store.create(submitted(task_id))
+            persisted[task_id] = self.task_file(task_id).read_bytes()
             self.claim('work', holder, task_id, store=store)
             outcomes.append('BOUND')
         self.assertEqual(outcomes, ['BOUND', 'CLAIM_ROW_HELD'])
-        self.assertEqual(store.task_ids(), [TASK_BOUND])
+        self.assertEqual(TaskStore().task_ids(), [TASK_BOUND])
+        self.assertFalse(self.task_file(TASK_OTHER).exists())
+        record = json.loads(persisted[TASK_BOUND].decode('utf-8'))
+        self.assertEqual((record['task_id'], record['state'], record['developer']),
+                         (TASK_BOUND, 'PM_PENDING', None))
         self.assertEqual([(item['holder'], item['task_id']) for item in self.claims()],
                          [(HOLDER_A, TASK_BOUND)])
-        # A later run sees the bound Task and no idle work.
-        result = self.check(rows, store=store, now=at(12, 30))
+        # A later run, with a new store object, sees the bound Task and no idle work.
+        result = self.check(rows, store=TaskStore(), now=at(12, 30))
         self.assertRow(result, 'work', board_check.ACTIONABLE, f'binds Task {TASK_BOUND}')
         self.assertEqual(idle_rows(result), set())
-        self.assertEqual(store.writes, [])
+        # Claims and board-check never wrote the Task file.
+        self.assertEqual(self.task_file(TASK_BOUND).read_bytes(), persisted[TASK_BOUND])
 
     def test_fresh_session_reads_the_persisted_ledger(self):
         rows = self.set_board({'id': 'work'})
-        tasks = self.home / 'task-files'
-        first = DiskStore(tasks)
-        self.claim('work', HOLDER_A, store=first)
-        first.put(pending(TASK_BOUND))
-        self.claim('work', HOLDER_A, TASK_BOUND, store=first, now=at(12, 5))
+        first_store, first_ledger = TaskStore(), board_check.BoardLedger()
+        board_check.claim_row(board_path=self.board, ledger=first_ledger, store=first_store,
+                              row_id='work', holder=HOLDER_A, now=NOW)
+        first_store.create(submitted(TASK_BOUND))
+        board_check.claim_row(board_path=self.board, ledger=first_ledger, store=first_store,
+                              row_id='work', holder=HOLDER_A, task_id=TASK_BOUND,
+                              now=at(12, 5))
+        persisted = self.task_file(TASK_BOUND).read_bytes()
+        del first_store, first_ledger
 
-        # A fresh session: new store and ledger objects over the same files.
-        store, ledger = DiskStore(tasks), board_check.BoardLedger()
+        # A fresh session: new store and ledger objects over the same paths.
+        store, ledger = TaskStore(), board_check.BoardLedger()
+        self.assertEqual((store.root, ledger.path), (self.state / 'tasks', self.ledger_path))
         with self.assertRaises(board_check.ClaimRefused) as caught:
             board_check.claim_row(board_path=self.board, ledger=ledger, store=store,
                                   row_id='work', holder=HOLDER_B, now=at(13))
         self.assertEqual(caught.exception.code, 'CLAIM_ROW_HELD')
-        result = run_ledger(rows, store=store, ledger=board_check.BoardLedger(), now=at(13))
+        result = run_ledger(rows, store=TaskStore(), ledger=board_check.BoardLedger(),
+                            now=at(13))
         self.assertRow(result, 'work', board_check.ACTIONABLE,
                        f'ledger claim by pm-a binds Task {TASK_BOUND}')
-        self.assertRow(result, 'work', board_check.ACTIONABLE, 'next step DEVELOPER_ATTENTION')
+        # The next step reported is the one for the persisted Task file.
+        record = json.loads(persisted.decode('utf-8'))
+        self.assertEqual(record['task_id'], TASK_BOUND)
+        step = board_check.task_advance.decide(record, None, None, {})
+        self.assertRow(result, 'work', board_check.ACTIONABLE,
+                       f'Developer state none; next step {step}')
         self.assertEqual(idle_rows(result), set())
-        self.assertEqual(store.writes, [])
+        self.assertEqual(self.task_file(TASK_BOUND).read_bytes(), persisted)
 
     def test_two_concurrent_claim_processes_give_one_winner(self):
         self.set_board({'id': 'work'})

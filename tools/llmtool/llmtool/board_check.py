@@ -26,7 +26,8 @@ claim exits 0 when recorded and 3 when refused, with a named code.
 
 A claim is live while it is a reservation under 15 minutes old with no Task,
 or its bound Task is in TaskStore and is not ABANDONED, FAILED or merged.
-Anything else is history: the row can be claimed again.
+Anything else is history: the row can be claimed again. A row whose claims
+are all dead is ANOMALY, whatever its board task_id.
 """
 
 import contextlib
@@ -1257,10 +1258,10 @@ def _classify_ledger(ctx, row, gates, rows_by_id):
     """Apply the row's ledger claims; return (state, evidence), or None for board rules.
 
     Only a live claim counts. A row without task_id follows its live ledger Task;
-    a live reservation without a Task is CLAIMED. When nothing is live, a row
-    without task_id has only dead claims: it is ANOMALY and the claims stay as
-    history. A dead claim's Task, even a merged one, never classifies the row,
-    so it can never make the row DONE.
+    a live reservation without a Task is CLAIMED. When the row has claims and
+    none is live, it is ANOMALY before any Task is read, whatever the board
+    task_id says; the claims stay as history. So no Task, not even a merged
+    one, can make such a row DONE or hide the stale claim.
     """
     claims = [item for item in ctx.claims() if item['row'] == row['id']]
     if not claims:
@@ -1285,9 +1286,7 @@ def _classify_ledger(ctx, row, gates, rows_by_id):
             return ANOMALY, [f"board task_id differs from the live ledger Task "
                              f"{item['task_id']} claimed by {item['holder']}"]
         return None
-    if row.get('task_id') is not None:
-        # The board names the Task; stale claims on the row are only history.
-        return None
+    # Nothing is live: the row is ANOMALY even when the board names a Task.
     _, _, reason = statuses[-1]
     return ANOMALY, [f'stale ledger claim: {reason}; the row can be claimed again']
 
