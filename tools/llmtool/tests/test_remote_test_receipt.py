@@ -168,11 +168,13 @@ class RemoteTestReceiptTests(unittest.TestCase):
     def test_excerpt_screening_uses_patched_screen_function(self):
         out_dir = self.root / "out-screened"
         raw_output = (
+            "======================================================================\n"
             "FAIL: test_safe (pkg.part.Case)\n"
             "----------------------------------------------------------------------\n"
             "Traceback (most recent call last):\n"
             "AssertionError: keep this line\n"
             "DROP_MARKER_LINE should be removed\n"
+            "======================================================================\n"
             "FAIL: test_unsafe DROP_MARKER_LINE (pkg.part.Case)\n"
             "----------------------------------------------------------------------\n"
             "AssertionError: retained after unsafe header\n"
