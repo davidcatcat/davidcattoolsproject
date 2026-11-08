@@ -602,6 +602,93 @@ class ReviewDispatchTests(unittest.TestCase):
                 raw, task_id=TASK, run_id='run', contract_digest='digest', head=HEAD)
         self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
 
+    def _parse(self, raw):
+        return review_dispatch._parse_codex_review(
+            raw, task_id=TASK, run_id='c' * 32, contract_digest='d' * 64, head=HEAD)
+
+    def _refusal(self, raw):
+        with self.assertRaises(LLMToolError) as raised:
+            self._parse(raw)
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        return raised.exception
+
+    def test_wrong_or_missing_binding_line_refuses_with_a_right_json_reply(self):
+        text = _codex_review_text()
+        binding = text.splitlines()[-1]
+        cases = {
+            'wrong digest': text.replace('contract=' + 'd' * 64, 'contract=' + 'e' * 64),
+            'truncated digest': text.replace('contract=' + 'd' * 64, 'contract=' + 'd' * 63),
+            'missing line': text.replace('\n' + binding, ''),
+        }
+        for name, review_text in cases.items():
+            for changes in ({}, {'contract_digest': 'd' * 64}):
+                with self.subTest(case=name, json=changes):
+                    exc = self._refusal(_codex_event_stream(review_text, **changes))
+                    self.assertEqual(exc.review_failure_reason,
+                                     'REVIEW_BINDING_LINE_MISSING')
+
+    def test_json_contract_digest_value_is_ignored_when_the_binding_line_is_exact(self):
+        for value in ('d' * 63, 'd' * 64 + 'x', 'e' * 64, '', None, 7, ['d']):
+            with self.subTest(value=value):
+                parsed = self._parse(_codex_event_stream(
+                    _codex_review_text(), contract_digest=value))
+                self.assertEqual(parsed['verdict'], 'PASS')
+                self.assertEqual(parsed['review_text'], _codex_review_text())
+        parsed = self._parse(_codex_event_stream(_codex_review_text()))
+        self.assertEqual(parsed['verdict'], 'PASS')
+
+    def test_wrong_json_binding_key_refuses_and_names_only_that_key(self):
+        returned = {'task_id': 'e' * 32, 'run_id': 'f' * 32, 'head': 'e' * 40}
+        expected = {'task_id': TASK, 'run_id': 'c' * 32, 'head': HEAD}
+        for key, value in returned.items():
+            with self.subTest(key=key):
+                exc = self._refusal(_codex_event_stream(_codex_review_text(), **{key: value}))
+                self.assertEqual(exc.review_failure_reason, 'VERDICT_BINDING_MISMATCH')
+                self.assertEqual(exc.review_binding_mismatch_keys, (key,))
+                self.assertEqual(str(exc), 'Reviewer dispatch refused: JSON binding keys '
+                                           'differ: ' + key)
+                self.assertNotIn(value, str(exc))
+                self.assertNotIn(expected[key], str(exc))
+        exc = self._refusal(_codex_event_stream(_codex_review_text(), **returned))
+        self.assertEqual(exc.review_binding_mismatch_keys, ('task_id', 'run_id', 'head'))
+        self.assertEqual(str(exc), 'Reviewer dispatch refused: JSON binding keys differ: '
+                                   'task_id, run_id, head')
+        for value in (*returned.values(), *expected.values(), 'd' * 64):
+            self.assertNotIn(value, str(exc))
+
+    def test_missing_or_extra_json_key_still_refuses_wrong_fields(self):
+        for drop, changes in ((('head',), {}), (('task_id',), {'contract_digest': 'd' * 64}),
+                              ((), {'note': 'extra'}),
+                              ((), {'contract_digest': 'd' * 64, 'note': 'extra'})):
+            with self.subTest(drop=drop, changes=changes):
+                exc = self._refusal(_codex_event_stream(
+                    _codex_review_text(), drop=drop, **changes))
+                self.assertEqual(exc.review_failure_reason, 'VERDICT_WRONG_FIELDS')
+                self.assertIsNone(getattr(exc, 'review_binding_mismatch_keys', None))
+
+    def test_binding_mismatch_claim_is_unknown_and_holds_no_returned_value(self):
+        self.store.data.update({
+            'developer': {'provider_profile': 'claude'},
+            'run_id': 'c' * 32,
+            'task_binding': {'contract_digest': 'd' * 64},
+        })
+        wrong_head = 'e' * 40
+        raw = _codex_event_stream(_codex_review_text(), head=wrong_head)
+        with patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                          return_value=SimpleNamespace(root='/repo/reviewer-d6')), \
+                self.assertRaises(LLMToolError) as raised:
+            self.invoke(
+                preflight=[(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer'),
+                           (TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')],
+                codex_runner=lambda **_kw: self._parse(raw))
+        self.assertEqual(raised.exception.review_failure_reason, 'VERDICT_BINDING_MISMATCH')
+        self.assertNotIn(wrong_head, str(raised.exception))
+        claim = self.store.get(TASK)['review_dispatch_claim'][0]
+        self.assertEqual(claim['state'], 'UNKNOWN')
+        self.assertEqual(claim['failure_reason'], 'VERDICT_BINDING_MISMATCH')
+        self.assertNotIn(wrong_head, json.dumps(claim))
+        self.assertNotIn('review_result', claim)
+
     def test_reviewer_selection_is_cross_family_and_unknown_is_refused(self):
         executor = SimpleNamespace(
             result_sha=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task')
@@ -781,10 +868,13 @@ def _codex_review_text(*, run_id='c' * 32, contract='d' * 64, version=1):
             f'contract={contract} head={HEAD}')
 
 
-def _codex_event_stream(review_text):
-    verdict = {'task_id': TASK, 'run_id': 'c' * 32,
-               'contract_digest': 'd' * 64, 'head': HEAD,
+def _codex_event_stream(review_text, *, drop=(), **changes):
+    """Codex JSONL with the current reply shape; changes add or replace JSON keys."""
+    verdict = {'task_id': TASK, 'run_id': 'c' * 32, 'head': HEAD,
                'verdict': 'PASS', 'review': review_text}
+    verdict.update(changes)
+    for key in drop:
+        del verdict[key]
     events = [
         {'type': 'thread.started', 'thread_id': '0123456789abcdef'},
         {'type': 'item.completed', 'item': {

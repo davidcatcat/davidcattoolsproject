@@ -1274,11 +1274,13 @@ def run_task_review_prompt(args, *, store=None):
             f'Verdict: FAIL | Version: v{version} | HEAD: {expected_head}',
             binding_line,
             'Return one JSON object with exactly these keys: task_id, run_id, '
-            'contract_digest, head, verdict, review.',
+            'head, verdict, review.',
+            'The contract digest is bound only through the LLMTOOL-REVIEW-BINDING line; '
+            'copy that line unchanged into the review text.',
             'Set verdict to PASS, FIX, FAIL, or BLOCKED. Set review to the exact '
             'review text using the lines above, with no changes to their binding values.',
             json.dumps({'task_id': task['task_id'], 'run_id': task['run_id'],
-                        'contract_digest': binding['contract_digest'], 'head': expected_head},
+                        'head': expected_head},
                        sort_keys=True, separators=(',', ':')),
         ))
     else:
