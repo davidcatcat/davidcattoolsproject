@@ -1,18 +1,20 @@
 name: llmtool Linux CI
 
-# Linux Python CI on the Owner's EC2 (Issue #99): 3.14, the daily Linux
-# version, runs the full offline suite on every PR and main push. 3.9, the
-# oldest pyproject.toml declares (requires-python >=3.9), runs only before a
-# release: start this workflow by hand on main with `python39` (Owner
-# 2026-10-25). All four runners carry the same label, so each can take a job
-# and four jobs run at the same time. Each runner runs under its own non-admin
-# account with the instance metadata service blocked for its service; the
-# root-owned job-started hook on the host
-# (tools/ec2-runner, installed in /opt/llmtool-ci) refuses any job that is
-# not this workflow, from the Owner, on this repository. The boundary step
-# below is a second check, not the only one. LINUX_CI_ENABLED is the kill
-# switch: anything but 'true' skips the jobs, and a skipped job is NOT_RUN,
-# not PASS. Windows is not covered here (NOT_RUN).
+# Linux Python CI on GitHub-hosted ubuntu-24.04 (#1253, Owner 2026-11-09: the
+# repository is public; the EC2 self-hosted runners no longer take CI jobs).
+# 3.14, the daily Linux version, runs the full offline suite on every PR and
+# main push. 3.9, the oldest pyproject.toml declares (requires-python >=3.9),
+# runs only before a release: start this workflow by hand on main with
+# `python39` (Owner 2026-10-25). Python comes from actions/setup-python
+# (pinned by SHA) into a job-owned venv. The hosted-runner boundary step checks
+# that the job runs on a GitHub-hosted runner, not as root, with no cloud
+# credential environment. Only the Owner and the AI machine account trigger
+# jobs; fork PRs also need Owner approval in the repository settings. The
+# company LLM, its VPN and any company configuration are never used here; all
+# tests are offline. HOSTED_CI_ENABLED is the kill switch: anything but 'true'
+# skips the jobs (LINUX_CI_ENABLED, the old self-hosted switch, stays 'false' so
+# older self-hosted copies of this file on other branches never run), and a skipped job is NOT_RUN, not PASS. Windows is not
+# covered here (NOT_RUN).
 on:
   push:
     branches:
@@ -70,10 +72,10 @@ jobs:
   changes:
     name: classify changed paths
     if: >-
-      vars.LINUX_CI_ENABLED == 'true'
+      vars.HOSTED_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
       && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
-    runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
+    runs-on: ubuntu-24.04
     outputs:
       code: ${{ steps.classify.outputs.code }}
       docs: ${{ steps.classify.outputs.docs }}
@@ -112,11 +114,11 @@ jobs:
     name: ai-loop helper tests (Python 3.14)
     needs: changes
     if: >-
-      vars.LINUX_CI_ENABLED == 'true'
+      vars.HOSTED_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
       && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
       && needs.changes.outputs.ai_loop == 'true'
-    runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -124,70 +126,57 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Set up Python 3.14
+        id: setup-python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.14'
       - name: Offline ai-loop helper tests
         env:
           PYTHONDONTWRITEBYTECODE: '1'
-        run: /usr/bin/python3.14 -B -m unittest discover -s tools/ai-loop
+          SETUP_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          "$SETUP_PYTHON" -B -m unittest discover -s tools/ai-loop
 
   gateway:
     name: gateway tests (Linux 3.14)
     needs: changes
     if: >-
-      vars.LINUX_CI_ENABLED == 'true'
+      vars.HOSTED_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
       && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
       && needs.changes.outputs.gateway == 'true'
-    runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - name: Check EC2 runner boundary
+      - name: Check GitHub-hosted runner boundary
         shell: bash
         run: |
-          fail() { echo "::error::EC2 runner boundary failed: $1"; exit 1; }
-          case "$RUNNER_NAME" in
-            ec2-self-runner) account=ghrunner ;;
-            ec2-self-runner-2) account=ghrunner2 ;;
-            ec2-self-runner-3) account=ghrunner3 ;;
-            ec2-self-runner-4) account=ghrunner4 ;;
-            *) fail "unexpected runner" ;;
-          esac
-          user=$(id -un) || fail "cannot identify job user"
-          test "$user" = "$account" || fail "runner $RUNNER_NAME runs as $user, expected $account"
+          fail() { echo "::error::hosted runner boundary failed: $1"; exit 1; }
+          test "$RUNNER_ENVIRONMENT" = github-hosted || fail "not a GitHub-hosted runner"
           test "$(id -u)" -ne 0 || fail "job runs as root"
-          groups=$(id -nG) || fail "cannot identify job groups"
-          test "$groups" = "$account" || fail "job user has extra groups: $groups"
-          python=/usr/bin/python3.14
-          test -x "$python" || fail "no $python on this host"
-          "$python" -B - <<'PY'
-          import os
-          from pathlib import Path
-          import socket
-          import sys
-          if '%d.%d' % sys.version_info[:2] != '3.14':
-              raise SystemExit('EC2 runner boundary failed: wrong Python')
-          credential_names = ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
-                              'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_SHARED_CREDENTIALS_FILE')
-          if any(name in os.environ for name in credential_names) or (Path.home() / '.aws').exists():
-              raise SystemExit('EC2 runner boundary failed: AWS credential configuration present')
-          for address in ('169.254.169.254', 'fd00:ec2::254'):
-              try:
-                  with socket.create_connection((address, 80), timeout=2):
-                      raise SystemExit('EC2 runner boundary failed: instance metadata reachable')
-              except OSError:
-                  pass
-          print('EC2_RUNNER_BOUNDARY_PASS Python ' + sys.version.split()[0])
-          PY
-          echo "Runner: $RUNNER_NAME; account: $user; architecture: $(uname -m)"
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+                      AWS_WEB_IDENTITY_TOKEN_FILE AWS_SHARED_CREDENTIALS_FILE GW_AGENT_API_KEY; do
+            test -z "${!name+x}" || fail "credential environment $name present"
+          done
+          echo "Runner: $RUNNER_NAME ($RUNNER_ENVIRONMENT, $RUNNER_OS $RUNNER_ARCH); user: $(id -un)"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Set up Python 3.14
+        id: setup-python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.14'
       - name: Verify Python 3.14
         shell: bash
+        env:
+          SETUP_PYTHON: ${{ steps.setup-python.outputs.python-path }}
         run: |
-          python=/usr/bin/python3.14
+          python=$SETUP_PYTHON
           test -x "$python" || { echo "::error::no $python on this runner"; exit 1; }
           "$python" -B - <<'PY'
           import sys
@@ -224,12 +213,14 @@ jobs:
         working-directory: tools/api-agent-gateway
         env:
           PYTHONDONTWRITEBYTECODE: '1'
-        run: /usr/bin/python3.14 -B -m unittest discover -s tests -v
+          SETUP_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          "$SETUP_PYTHON" -B -m unittest discover -s tests -v
 
   shards:
     name: linux shard ${{ matrix.shard }}/3 (${{ matrix.python }})
     if: >-
-      vars.LINUX_CI_ENABLED == 'true'
+      vars.HOSTED_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
       && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
       && (needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch')
@@ -239,55 +230,23 @@ jobs:
       matrix:
         python: ${{ fromJSON(inputs.python39 && '["3.14", "3.9"]' || '["3.14"]') }}
         shard: [1, 2, 3]
-    runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
       PYTHON_VERSION: ${{ matrix.python }}
     steps:
       # Trusted inline checks only, before any repository code is checked out.
-      - name: Check EC2 runner boundary
+      - name: Check GitHub-hosted runner boundary
         shell: bash
         run: |
-          fail() { echo "::error::EC2 runner boundary failed: $1"; exit 1; }
-          case "$RUNNER_NAME" in
-            ec2-self-runner) account=ghrunner ;;
-            ec2-self-runner-2) account=ghrunner2 ;;
-            ec2-self-runner-3) account=ghrunner3 ;;
-            ec2-self-runner-4) account=ghrunner4 ;;
-            *) fail "unexpected runner" ;;
-          esac
-          user=$(id -un) || fail "cannot identify job user"
-          test "$user" = "$account" || fail "runner $RUNNER_NAME runs as $user, expected $account"
+          fail() { echo "::error::hosted runner boundary failed: $1"; exit 1; }
+          test "$RUNNER_ENVIRONMENT" = github-hosted || fail "not a GitHub-hosted runner"
           test "$(id -u)" -ne 0 || fail "job runs as root"
-          groups=$(id -nG) || fail "cannot identify job groups"
-          test "$groups" = "$account" || fail "job user has extra groups: $groups"
-          python=/usr/bin/python$PYTHON_VERSION
-          test -x "$python" || fail "no $python on this host"
-          "$python" -B - <<'PY'
-          import os
-          from pathlib import Path
-          import socket
-          import sys
-
-          if '%d.%d' % sys.version_info[:2] != os.environ['PYTHON_VERSION']:
-              raise SystemExit('EC2 runner boundary failed: wrong Python')
-          credential_names = (
-              'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
-              'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_SHARED_CREDENTIALS_FILE',
-          )
-          if any(name in os.environ for name in credential_names):
-              raise SystemExit('EC2 runner boundary failed: AWS credential environment present')
-          if (Path.home() / '.aws').exists():
-              raise SystemExit('EC2 runner boundary failed: job home has AWS configuration')
-          for address in ('169.254.169.254', 'fd00:ec2::254'):
-              try:
-                  with socket.create_connection((address, 80), timeout=2):
-                      raise SystemExit('EC2 runner boundary failed: instance metadata reachable')
-              except OSError:
-                  pass
-          print('EC2_RUNNER_BOUNDARY_PASS Python ' + sys.version.split()[0])
-          PY
-          echo "Runner: $RUNNER_NAME; account: $user; architecture: $(uname -m)"
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+                      AWS_WEB_IDENTITY_TOKEN_FILE AWS_SHARED_CREDENTIALS_FILE GW_AGENT_API_KEY; do
+            test -z "${!name+x}" || fail "credential environment $name present"
+          done
+          echo "Runner: $RUNNER_NAME ($RUNNER_ENVIRONMENT, $RUNNER_OS $RUNNER_ARCH); user: $(id -un)"
       # Test the PR's own head commit, not GitHub's temporary merge commit, as
       # the Mac CI does, so a run is exact evidence for the SHA it reports.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -317,14 +276,22 @@ jobs:
               fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
             fi
           fi
-      # A job-owned venv in RUNNER_TEMP; the host's Python is never changed.
+      # A job-owned venv in RUNNER_TEMP, built from the setup-python interpreter.
       # setuptools is pinned to meet pyproject's build requirement (>=68), so
       # the wheel/sdist packaging test runs on both versions: 3.9's bundled
       # setuptools is too old and 3.14's venv has none.
+      - name: Set up Python ${{ matrix.python }}
+        id: setup-python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '${{ matrix.python }}'
       - name: Install llmtool
         shell: bash
+        env:
+          SETUP_PYTHON: ${{ steps.setup-python.outputs.python-path }}
         run: |
-          "/usr/bin/python$PYTHON_VERSION" -m venv "$RUNNER_TEMP/venv"
+          "$SETUP_PYTHON" -c 'import os,sys; assert "%d.%d" % sys.version_info[:2] == os.environ["PYTHON_VERSION"], sys.version'
+          "$SETUP_PYTHON" -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet setuptools==80.9.0
           "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet --requirement tools/llmtool/requirements-ci.txt
           "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet --no-deps -e tools/llmtool
@@ -387,7 +354,7 @@ jobs:
     needs: [changes, shards]
     if: >-
       always()
-      && vars.LINUX_CI_ENABLED == 'true'
+      && vars.HOSTED_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
       && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
       && (needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch')
@@ -395,7 +362,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ${{ fromJSON(inputs.python39 && '["3.14", "3.9"]' || '["3.14"]') }}
-    runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
+    runs-on: ubuntu-24.04
     steps:
       - name: Require every Linux shard to pass
         env:
@@ -412,50 +379,23 @@ jobs:
     needs: changes
     if: >-
       needs.changes.outputs.docs == 'true'
-      && vars.LINUX_CI_ENABLED == 'true'
+      && vars.HOSTED_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
       && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
-    runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
+    runs-on: ubuntu-24.04
     steps:
       # Trusted inline checks before checkout, identical to the shards.
-      - name: Check EC2 runner boundary
+      - name: Check GitHub-hosted runner boundary
         shell: bash
         run: |
-          fail() { echo "::error::EC2 runner boundary failed: $1"; exit 1; }
-          case "$RUNNER_NAME" in
-            ec2-self-runner) account=ghrunner ;;
-            ec2-self-runner-2) account=ghrunner2 ;;
-            ec2-self-runner-3) account=ghrunner3 ;;
-            ec2-self-runner-4) account=ghrunner4 ;;
-            *) fail "unexpected runner" ;;
-          esac
-          user=$(id -un) || fail "cannot identify job user"
-          test "$user" = "$account" || fail "runner $RUNNER_NAME runs as $user, expected $account"
+          fail() { echo "::error::hosted runner boundary failed: $1"; exit 1; }
+          test "$RUNNER_ENVIRONMENT" = github-hosted || fail "not a GitHub-hosted runner"
           test "$(id -u)" -ne 0 || fail "job runs as root"
-          groups=$(id -nG) || fail "cannot identify job groups"
-          test "$groups" = "$account" || fail "job user has extra groups: $groups"
-          python=/usr/bin/python3.14
-          test -x "$python" || fail "no $python on this host"
-          "$python" -B - <<'PY'
-          import os
-          from pathlib import Path
-          import socket
-          import sys
-          if '%d.%d' % sys.version_info[:2] != '3.14':
-              raise SystemExit('EC2 runner boundary failed: wrong Python')
-          credential_names = ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
-                              'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_SHARED_CREDENTIALS_FILE')
-          if any(name in os.environ for name in credential_names) or (Path.home() / '.aws').exists():
-              raise SystemExit('EC2 runner boundary failed: AWS credential configuration present')
-          for address in ('169.254.169.254', 'fd00:ec2::254'):
-              try:
-                  with socket.create_connection((address, 80), timeout=2):
-                      raise SystemExit('EC2 runner boundary failed: instance metadata reachable')
-              except OSError:
-                  pass
-          print('EC2_RUNNER_BOUNDARY_PASS Python ' + sys.version.split()[0])
-          PY
-          echo "Runner: $RUNNER_NAME; account: $user; architecture: $(uname -m)"
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+                      AWS_WEB_IDENTITY_TOKEN_FILE AWS_SHARED_CREDENTIALS_FILE GW_AGENT_API_KEY; do
+            test -z "${!name+x}" || fail "credential environment $name present"
+          done
+          echo "Runner: $RUNNER_NAME ($RUNNER_ENVIRONMENT, $RUNNER_OS $RUNNER_ARCH); user: $(id -un)"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -483,5 +423,13 @@ jobs:
               fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
             fi
           fi
+      - name: Set up Python 3.14
+        id: setup-python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.14'
       - name: Check changed Markdown
-        run: python3 -I -B tools/llmtool/scripts/docs_check.py --base "${{ github.event.pull_request.base.sha || github.event.before || 'HEAD^' }}" --head "${{ github.event.pull_request.head.sha || github.sha }}"
+        env:
+          SETUP_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          "$SETUP_PYTHON" -I -B tools/llmtool/scripts/docs_check.py --base "${{ github.event.pull_request.base.sha || github.event.before || 'HEAD^' }}" --head "${{ github.event.pull_request.head.sha || github.sha }}"
