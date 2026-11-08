@@ -3802,6 +3802,20 @@ class CompletionDocsOnlyAttributedPathsTests(unittest.TestCase):
             with self.subTest(overrides=overrides):
                 self.assert_refused(self.MERGED, developer, [dict(executed, **overrides)])
 
+    def test_invalid_developer_paths_fail_with_executed_tests_only(self):
+        # Codex review v1: a present developer_changed_paths is checked in
+        # every completion record, not only when a docs-only test exists.
+        executed = {'status': 'PASS', 'source_sha': self.HEAD, 'exit_code': 0}
+        for developer in ([], None, 'docs/guide.md', ['docs/guide.md', 1],
+                          ['docs/guide.md', 'docs/guide.md'],
+                          ['docs/guide.md', 'docs/other.md']):
+            with self.subTest(developer=developer):
+                self.assert_refused(self.MERGED, developer, [executed])
+        saved = self.save(self.MERGED, _NO_DEVELOPER_PATHS, [executed])
+        self.assertEqual(saved['completion']['evidence']['tests'], [executed])
+        self.assertNotIn('developer_changed_paths',
+                         saved['completion']['evidence']['result'])
+
 
 if __name__ == '__main__':
     unittest.main()

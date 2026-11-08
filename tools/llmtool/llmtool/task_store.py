@@ -2250,11 +2250,9 @@ def _validate(record):
                 result_head = evidence['result'].get('result_head')
                 review_ci = evidence['review_pr_ci']
                 # A docs-only test is checked against Developer-attributed
-                # paths, so files from a clean main merge do not fail it.
-                docs_paths = (_completion_docs_paths(evidence['result'])
-                              if any(type(test) is dict and
-                                     test.get('status') == 'NOT_APPLICABLE_DOCS_ONLY'
-                                     for test in evidence['tests']) else None)
+                # paths, so files from a clean main merge do not fail it. A
+                # present developer_changed_paths is checked in every record.
+                docs_paths = _completion_docs_paths(evidence['result'])
                 if (type(result_head) is not str or
                         re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
                         evidence['result'].get('task_id') != record['task_id'] or
