@@ -94,6 +94,16 @@ def _routes(**changes):
     return routes
 
 
+class _Reads:
+    """A route that answers successive reads in order; the last answer repeats."""
+
+    def __init__(self, *values):
+        self.values = list(values)
+
+    def next(self):
+        return self.values.pop(0) if len(self.values) > 1 else self.values[0]
+
+
 class FakeGitHub:
     """Read-only fake: a route value is returned, an Exception value is raised."""
 
@@ -106,6 +116,8 @@ class FakeGitHub:
         if path not in self.routes:
             raise LookupError('unrouted read')
         value = self.routes[path]
+        if isinstance(value, _Reads):
+            value = value.next()
         if isinstance(value, Exception):
             raise value
         return copy.deepcopy(value)
@@ -160,13 +172,16 @@ class _Base(unittest.TestCase):
         # The train store lives beside the TaskStore root: <parent>/merge-trains.
         self.train_root = self.home / 'tasks'
         self.train_dir = self.home / merge_train_store.DIRECTORY_NAME
+        # The mergeable wait is injected as a no-op that records each call.
+        self.sleeps = []
 
     def check(self, record=None, routes=None, task_id=TASK_ID, pr=PR):
         record = _record() if record is None else record
         self.store = MemoryStore({TASK_ID: record})
         self.github = FakeGitHub(_routes() if routes is None else routes)
         return eligibility.member_check(self.store, task_id, pr, self.github,
-                                        train_root=self.train_root)
+                                        train_root=self.train_root,
+                                        sleep=self.sleeps.append)
 
     def assertRefused(self, result, code):
         self.assertEqual(result, {'eligible': False, 'code': code, 'member': None})
@@ -427,8 +442,10 @@ class CiRefusalTests(_Base):
                       files=[{'filename': 'tools/llmtool/llmtool/chat_tui.py'}])
 
     def test_not_mergeable(self):
+        # A non-bool mergeable now gets one re-read (MergeableRereadTests);
+        # mergeable false is refused by the CI gate as before.
         self.assertCi(_checks(_run(101, LINUX), _run(120, MACOS)),
-                      'MERGE_PR_NOT_MERGEABLE', pull=_pull(mergeable=None))
+                      'MERGE_PR_NOT_MERGEABLE', pull=_pull(mergeable=False))
 
     def test_invalid_success_run_id(self):
         self.assertCi(_checks(_run('x', LINUX), _run(120, MACOS)),
@@ -489,6 +506,210 @@ class RemoteTestRefusalTests(_Base):
         receipt['ran_total'] = 99
         record = _record(remote_test_receipts=[receipt])
         self.assertRefused(self.check(record=record), 'TRAIN_MEMBER_REMOTE_TEST_MISSING')
+
+
+class MergeableRereadTests(_Base):
+    """GitHub may not have computed mergeable yet: one wait, one fresh re-read."""
+
+    def assertPullReads(self, count):
+        self.assertEqual(self.github.calls.count(PULL), count)
+
+    def test_wait_bound_is_at_most_five_seconds(self):
+        self.assertGreater(eligibility.MERGEABLE_WAIT_SECONDS, 0)
+        self.assertLessEqual(eligibility.MERGEABLE_WAIT_SECONDS, 5)
+
+    def test_null_then_true_is_eligible_after_one_reread(self):
+        routes = _routes(**{PULL: _Reads(_pull(mergeable=None), _pull())})
+        result = self.check(routes=routes)
+        self.assertTrue(result['eligible'], result)
+        self.assertEqual(result['member']['head'], HEAD)
+        self.assertPullReads(2)
+        self.assertEqual(self.sleeps, [eligibility.MERGEABLE_WAIT_SECONDS])
+        # The wait comes between the two PR reads.
+        self.assertEqual(self.github.calls[:2], [PULL, PULL])
+
+    def test_missing_mergeable_then_true_is_eligible(self):
+        first = _pull()
+        del first['mergeable']
+        result = self.check(routes=_routes(**{PULL: _Reads(first, _pull())}))
+        self.assertTrue(result['eligible'], result)
+        self.assertPullReads(2)
+        self.assertEqual(len(self.sleeps), 1)
+
+    def test_null_twice_is_mergeable_unknown(self):
+        routes = _routes(**{PULL: _Reads(_pull(mergeable=None), _pull(mergeable=None))})
+        self.assertRefused(self.check(routes=routes),
+                           eligibility.TRAIN_MEMBER_MERGEABLE_UNKNOWN)
+        self.assertEqual(eligibility.TRAIN_MEMBER_MERGEABLE_UNKNOWN,
+                         'TRAIN_MEMBER_MERGEABLE_UNKNOWN')
+        self.assertPullReads(2)
+        self.assertEqual(len(self.sleeps), 1)
+        # Refused before any later gate reads.
+        self.assertEqual(self.github.calls, [PULL, PULL])
+
+    def test_non_bool_values_trigger_one_reread(self):
+        for value in (None, 'unknown', 0, 1):
+            with self.subTest(mergeable=value):
+                self.sleeps.clear()
+                routes = _routes(**{PULL: _Reads(_pull(mergeable=value),
+                                                 _pull(mergeable=value))})
+                self.assertRefused(self.check(routes=routes),
+                                   eligibility.TRAIN_MEMBER_MERGEABLE_UNKNOWN)
+                self.assertPullReads(2)
+                self.assertEqual(len(self.sleeps), 1)
+
+    def test_false_never_rereads(self):
+        routes = _routes(**{PULL: _Reads(_pull(mergeable=False), _pull())})
+        self.assertRefused(self.check(routes=routes), 'MERGE_PR_NOT_MERGEABLE')
+        self.assertPullReads(1)
+        self.assertEqual(self.sleeps, [])
+
+    def test_true_on_first_read_never_waits(self):
+        routes = _routes(**{PULL: _Reads(_pull(), _pull(mergeable=None))})
+        self.assertTrue(self.check(routes=routes)['eligible'])
+        self.assertPullReads(1)
+        self.assertEqual(self.sleeps, [])
+
+    def test_later_gates_judge_the_second_read(self):
+        # The second read says false: the CI gate refuses on it, not on the first.
+        routes = _routes(**{PULL: _Reads(_pull(mergeable=None), _pull(mergeable=False))})
+        self.assertRefused(self.check(routes=routes), 'MERGE_PR_NOT_MERGEABLE')
+        self.assertPullReads(2)
+
+    def test_second_read_bypasses_the_snapshot_cache_once(self):
+        routes = _routes(**{PULL: _Reads(_pull(mergeable=None), _pull(), _pull(mergeable=None))})
+        self.assertTrue(self.check(routes=routes)['eligible'])
+        # No third read: later gates see the cached second read.
+        self.assertPullReads(2)
+
+    def test_malformed_second_read_is_unavailable(self):
+        for second in ([], OSError('down'), _pull(number=PR + 1), _pull(merged='no'),
+                       _pull(head={'sha': 'xyz'})):
+            with self.subTest(second=second):
+                routes = _routes(**{PULL: _Reads(_pull(mergeable=None), second)})
+                self.assertRefused(self.check(routes=routes),
+                                   'TRAIN_MEMBER_PR_UNAVAILABLE')
+                self.assertPullReads(2)
+
+    def test_second_read_with_other_head_is_unavailable(self):
+        routes = _routes(**{PULL: _Reads(_pull(mergeable=None),
+                                         _pull(head={'sha': OTHER_HEAD}))})
+        self.assertRefused(self.check(routes=routes), 'TRAIN_MEMBER_PR_UNAVAILABLE')
+        self.assertEqual(self.github.calls, [PULL, PULL])
+
+    def test_second_read_closed_is_not_open(self):
+        routes = _routes(**{PULL: _Reads(_pull(mergeable=None),
+                                         _pull(state='closed', mergeable=None))})
+        self.assertRefused(self.check(routes=routes), 'TRAIN_MEMBER_PR_NOT_OPEN')
+
+    def test_closed_first_read_never_waits(self):
+        routes = _routes(**{PULL: _pull(state='closed', mergeable=None)})
+        self.assertRefused(self.check(routes=routes), 'TRAIN_MEMBER_PR_NOT_OPEN')
+        self.assertPullReads(1)
+        self.assertEqual(self.sleeps, [])
+
+    def test_default_sleep_is_time_sleep(self):
+        store = MemoryStore({TASK_ID: _record()})
+        fake = FakeGitHub(_routes(**{PULL: _Reads(_pull(mergeable=None), _pull())}))
+        with mock.patch.object(eligibility.time, 'sleep') as sleep:
+            result = eligibility.member_check(store, TASK_ID, PR, fake,
+                                              train_root=self.train_root)
+        self.assertTrue(result['eligible'], result)
+        sleep.assert_called_once_with(eligibility.MERGEABLE_WAIT_SECONDS)
+
+
+class RouteRemoteTestTests(_Base):
+    """The member EC2 rule follows the PR route (docs-only, scripts-only, code)."""
+
+    DOCS_ROUTES = {CHECKS: _checks(_run(55, DOCS)), FILES: [{'filename': 'docs/guide.md'}]}
+    SCRIPTS_ROUTES = {CHECKS: _checks(_run(77, MACOS)),
+                      FILES: [{'filename': 'scripts/tool.sh'}]}
+
+    def assertNullDigestMember(self, result):
+        self.assertTrue(result['eligible'], result)
+        member = result['member']
+        self.assertIsNone(member['remote_test_receipt_digest'])
+        self.assertEqual(set(member), merge_train_store.MEMBER_FIELDS)
+        self.assertTrue(merge_train_store._valid_member(member))
+
+    def test_docs_only_member_without_receipt_is_eligible(self):
+        result = self.check(record=_record(remote_test_receipts=[]),
+                            routes=_routes(**self.DOCS_ROUTES))
+        self.assertNullDigestMember(result)
+
+    def test_docs_only_member_without_receipt_field_is_eligible(self):
+        record = _record()
+        del record['remote_test_receipts']
+        self.assertNullDigestMember(self.check(record=record,
+                                               routes=_routes(**self.DOCS_ROUTES)))
+
+    def test_scripts_only_member_without_receipt_is_eligible(self):
+        result = self.check(record=_record(remote_test_receipts=[]),
+                            routes=_routes(**self.SCRIPTS_ROUTES))
+        self.assertNullDigestMember(result)
+        self.assertEqual(result['member']['macos_check_run_id'], 77)
+
+    def test_scripts_only_member_with_other_head_receipt_only_is_eligible(self):
+        record = _record(remote_test_receipts=[_receipt(OTHER_HEAD)])
+        self.assertNullDigestMember(self.check(record=record,
+                                               routes=_routes(**self.SCRIPTS_ROUTES)))
+
+    def test_docs_only_member_with_pass_receipt_records_digest(self):
+        result = self.check(routes=_routes(**self.DOCS_ROUTES))
+        self.assertTrue(result['eligible'], result)
+        self.assertEqual(result['member']['remote_test_receipt_digest'],
+                         _receipt(HEAD)['receipt_digest'])
+
+    def test_scripts_only_member_with_pass_receipt_records_digest(self):
+        record = _record(remote_test_receipts=[_receipt(HEAD)])
+        result = self.check(record=record, routes=_routes(**self.SCRIPTS_ROUTES))
+        self.assertTrue(result['eligible'], result)
+        self.assertEqual(result['member']['remote_test_receipt_digest'],
+                         _receipt(HEAD)['receipt_digest'])
+
+    def test_receipt_optional_member_with_newest_receipt_not_pass_refuses(self):
+        record = _record(remote_test_receipts=[_receipt(HEAD), _receipt(HEAD, 'FAIL')])
+        for routes in (self.DOCS_ROUTES, self.SCRIPTS_ROUTES):
+            with self.subTest(files=routes[FILES]):
+                self.assertRefused(self.check(record=record, routes=_routes(**routes)),
+                                   'TRAIN_MEMBER_REMOTE_TEST_MISSING')
+
+    def test_receipt_optional_member_with_tampered_receipt_refuses(self):
+        receipt = _receipt(HEAD)
+        receipt['ran_total'] = 99
+        record = _record(remote_test_receipts=[receipt])
+        self.assertRefused(self.check(record=record, routes=_routes(**self.DOCS_ROUTES)),
+                           'TRAIN_MEMBER_REMOTE_TEST_MISSING')
+
+    def test_receipt_optional_member_with_malformed_receipt_list_refuses(self):
+        record = _record(remote_test_receipts={'source_sha': HEAD})
+        self.assertRefused(self.check(record=record, routes=_routes(**self.SCRIPTS_ROUTES)),
+                           'TRAIN_MEMBER_REMOTE_TEST_MISSING')
+
+    def test_code_member_without_receipt_refuses(self):
+        routes = _routes(**{FILES: [{'filename': 'tools/llmtool/llmtool/example.py'}]})
+        self.assertRefused(self.check(record=_record(remote_test_receipts=[]), routes=routes),
+                           'TRAIN_MEMBER_REMOTE_TEST_MISSING')
+
+    def test_mixed_scripts_and_docs_member_without_receipt_refuses(self):
+        # Neither docs-only nor scripts-only: the full code route needs a receipt.
+        routes = _routes(**{FILES: [{'filename': 'scripts/tool.sh'},
+                                    {'filename': 'docs/guide.md'}]})
+        self.assertRefused(self.check(record=_record(remote_test_receipts=[]), routes=routes),
+                           'TRAIN_MEMBER_REMOTE_TEST_MISSING')
+
+    def test_scripts_only_helper(self):
+        self.assertTrue(eligibility._scripts_only(['scripts/a.py']))
+        self.assertTrue(eligibility._scripts_only(['scripts/a.py', 'scripts/b.md']))
+        for paths in ([], None, 'scripts/a.py', ['scripts/a.md'], ['scripts/a.py', 'a.py'],
+                      ['tools/llmtool/llmtool/a.py'], [None]):
+            with self.subTest(paths=paths):
+                self.assertFalse(eligibility._scripts_only(paths))
+
+    def test_scripts_only_helper_is_local(self):
+        # A parallel PR removes the task_advance and task_completion copies.
+        source = Path(eligibility.__file__).read_text(encoding='utf-8')
+        self.assertNotIn('_scripts_only_ci', source)
 
 
 class LiveTrainTests(_Base):
