@@ -268,7 +268,9 @@ class HostedJobTest(unittest.TestCase):
                                  'HOSTED_RUNNER_UNTRUSTED')
 
 
-class HostedArtifactTest(unittest.TestCase):
+class HostedArtifactFakes:
+    """Shared single-page artifact fakes for the artifact read-back test classes."""
+
     def fakes(self, zipped=None, artifacts=None, **changes):
         zipped = make_zip([('receipt.json', receipt_bytes())]) if zipped is None else zipped
         if artifacts is None:
@@ -280,6 +282,8 @@ class HostedArtifactTest(unittest.TestCase):
     def read(self, get, get_bytes, run_id=RUN_ID, nonce=NONCE):
         return remote_test._hosted_artifact(run_id, nonce, get=get, get_bytes=get_bytes)
 
+
+class HostedArtifactTest(HostedArtifactFakes, unittest.TestCase):
     def test_valid_artifact_is_read_in_memory(self):
         get, get_bytes = self.fakes()
         with patch('builtins.open', side_effect=AssertionError('disk write')), \
@@ -319,8 +323,12 @@ class HostedArtifactTest(unittest.TestCase):
         self.assertIsNone(self.read(get, FakeGet({ZIP_PATH: LLMToolError('x')})))
 
 
-class HostedArtifactPagingTest(unittest.TestCase):
-    """The exactly-one artifact check covers the whole listing, within a page bound."""
+class HostedArtifactPagingTest(HostedArtifactFakes, unittest.TestCase):
+    """The exactly-one artifact check covers the whole listing, within a page bound.
+
+    Uses the shared ``fakes``/``read`` fixture for single-listing reads and
+    ``read_pages`` for multi-page listings.
+    """
 
     def setUp(self):
         self.zipped = make_zip([('receipt.json', receipt_bytes())])
@@ -333,7 +341,7 @@ class HostedArtifactPagingTest(unittest.TestCase):
     def match(self, **changes):
         return make_artifact(len(self.zipped), **changes)
 
-    def read(self, pages):
+    def read_pages(self, pages):
         get = FakeGet({artifacts_page_path(number): page
                        for number, page in enumerate(pages, start=1)})
         get_bytes = FakeGet({ZIP_PATH: self.zipped})
@@ -345,7 +353,7 @@ class HostedArtifactPagingTest(unittest.TestCase):
         self.assertEqual(remote_test._HOSTED_ARTIFACT_MAX_PAGES, 3)
 
     def test_match_on_a_later_page(self):
-        raw, get, get_bytes = self.read([
+        raw, get, get_bytes = self.read_pages([
             {'total_count': 101, 'artifacts': self.others(100)},
             {'total_count': 101, 'artifacts': [self.match()]},
         ])
@@ -354,7 +362,7 @@ class HostedArtifactPagingTest(unittest.TestCase):
         self.assertEqual(get_bytes.calls, [ZIP_PATH])
 
     def test_match_on_the_last_bounded_page(self):
-        raw, get, _ = self.read([
+        raw, get, _ = self.read_pages([
             {'total_count': 300, 'artifacts': self.others(100)},
             {'total_count': 300, 'artifacts': self.others(100, start=2000)},
             {'total_count': 300, 'artifacts': self.others(99, start=3000) + [self.match()]},
@@ -363,7 +371,7 @@ class HostedArtifactPagingTest(unittest.TestCase):
         self.assertEqual(len(get.calls), 3)
 
     def test_second_match_on_a_later_page(self):
-        raw, get, get_bytes = self.read([
+        raw, get, get_bytes = self.read_pages([
             {'total_count': 101, 'artifacts': [self.match()] + self.others(99)},
             {'total_count': 101, 'artifacts': [self.match(id=405)]},
         ])
@@ -372,7 +380,7 @@ class HostedArtifactPagingTest(unittest.TestCase):
         self.assertEqual(get_bytes.calls, [])
 
     def test_listing_larger_than_the_bound(self):
-        raw, get, get_bytes = self.read([
+        raw, get, get_bytes = self.read_pages([
             {'total_count': 301, 'artifacts': [self.match()] + self.others(99)},
         ])
         self.assertIsNone(raw)
@@ -391,7 +399,7 @@ class HostedArtifactPagingTest(unittest.TestCase):
         }
         for name, pages in cases.items():
             with self.subTest(name):
-                raw, _, get_bytes = self.read(pages)
+                raw, _, get_bytes = self.read_pages(pages)
                 self.assertIsNone(raw)
                 self.assertEqual(get_bytes.calls, [])
 
@@ -403,12 +411,12 @@ class HostedArtifactPagingTest(unittest.TestCase):
         }
         for name, page in cases.items():
             with self.subTest(name):
-                raw, _, get_bytes = self.read([
+                raw, _, get_bytes = self.read_pages([
                     {'total_count': 101, 'artifacts': [self.match()] + self.others(99)},
                     page])
                 self.assertIsNone(raw)
                 self.assertEqual(get_bytes.calls, [])
-        raw, get, _ = self.read([
+        raw, get, _ = self.read_pages([
             {'total_count': 101, 'artifacts': [self.match()] + self.others(99)}])
         self.assertIsNone(raw)
         self.assertEqual(get.calls, [artifacts_page_path(1), artifacts_page_path(2)])
@@ -429,7 +437,7 @@ class HostedArtifactPagingTest(unittest.TestCase):
         }
         for name, pages in cases.items():
             with self.subTest(name):
-                raw, _, get_bytes = self.read(pages)
+                raw, _, get_bytes = self.read_pages(pages)
                 self.assertIsNone(raw)
                 self.assertEqual(get_bytes.calls, [])
 
