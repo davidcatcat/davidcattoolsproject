@@ -1811,37 +1811,39 @@ class TaskAdvancePublishTests(unittest.TestCase):
         new_codes = ('HOSTED_PENDING', 'HOSTED_QUEUE_FULL', 'HOSTED_DISPATCH_UNCONFIRMED')
         for code in new_codes:
             with self.subTest(code=code):
-                self.change_file()
+                self.change_file(f'{code}\n')
                 store = self.gated_store()
-                def remote_test(_args, *, _store):
+                def remote_test(args, *, store):
                     print(json.dumps({'result': 'UNAVAILABLE', 'code': code}))
                     return 0
 
                 held = self.advance_gated(store, remote_test, dirty=True)
-                self.assertEqual(held['step'], 'WAITING_REMOTE_TEST')
+                self.assertEqual((held['step'], held['codes'], held['pr']),
+                                 ('WAITING_REMOTE_TEST', ['REMOTE_TEST_UNAVAILABLE', code], None))
                 self.assertEqual(held['next'], 'WAITING_REMOTE_TEST')
-                self.assertEqual(held['codes'], ['REMOTE_TEST_UNAVAILABLE', code])
-                self.assertIsNone(held['pr'])
                 self.assertNotIn('REMOTE_TEST_FAIL', held['codes'])
                 self.assertNotEqual(held['step'], 'RUN_REMOTE_TEST')
                 self.assertNotEqual(held['next'], 'REPAIR_REVIEW')
                 self.assert_no_pr()
 
     def test_pre_pr_remote_gate_hosted_codes_hold_at_waiting_remote_test_and_are_not_fail(self):
-        record = base_record()
-        for code in ('HOSTED_PENDING', 'HOSTED_QUEUE_FULL', 'HOSTED_DISPATCH_UNCONFIRMED'):
+        new_codes = ('HOSTED_PENDING', 'HOSTED_QUEUE_FULL', 'HOSTED_DISPATCH_UNCONFIRMED')
+        for code in new_codes:
             with self.subTest(code=code):
-                store = type('S', (), {'get': lambda self, _id: record})()
-                with patch('llmtool.task_advance._run_remote_test', return_value={'code': code}):
-                    status, hold = task_advance._pre_pr_remote_gate(
-                        record, store, 'executor-1', HEAD, 'feat/task')
-                self.assertIsNone(status)
-                self.assertEqual(hold['step'], 'WAITING_REMOTE_TEST')
-                self.assertEqual(hold['next'], 'WAITING_REMOTE_TEST')
-                self.assertEqual(hold['codes'], ['REMOTE_TEST_UNAVAILABLE', code])
-                self.assertNotIn('REMOTE_TEST_FAIL', hold['codes'])
-                self.assertNotEqual(hold['step'], 'RUN_REMOTE_TEST')
-                self.assertNotEqual(hold['next'], 'REPAIR_REVIEW')
+                self.change_file(f'clean-{code}\n')
+                store = self.gated_store()
+                def remote_test(args, *, store):
+                    print(json.dumps({'result': 'UNAVAILABLE', 'code': code}))
+                    return 0
+
+                held = self.advance_gated(store, remote_test, dirty=False)
+                self.assertEqual((held['step'], held['codes'], held['pr']),
+                                 ('WAITING_REMOTE_TEST', ['REMOTE_TEST_UNAVAILABLE', code], None))
+                self.assertEqual(held['next'], 'WAITING_REMOTE_TEST')
+                self.assertNotIn('REMOTE_TEST_FAIL', held['codes'])
+                self.assertNotEqual(held['step'], 'RUN_REMOTE_TEST')
+                self.assertNotEqual(held['next'], 'REPAIR_REVIEW')
+                self.assert_no_pr()
 
     def test_docs_only_or_no_module_head_opens_pr_then_uses_pr_ref_step(self):
         self.change_file()
