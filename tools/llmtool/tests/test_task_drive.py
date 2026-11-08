@@ -607,6 +607,47 @@ class TaskDriveTests(unittest.TestCase):
         self.assertEqual(len(merge_calls), 2)
         self.assertEqual(pauses, [])
 
+    def test_low_quota_on_ci_workflow_jobs_invalid_stops_without_calling_label(self):
+        waiting_step = {
+            'task_id': 't',
+            'step': 'WAITING_CI',
+            'codes': ['CI_WORKFLOW_JOBS_INVALID'],
+        }
+        advance, calls = self.adapter([waiting_step])
+        label_calls = []
+        pauses = []
+
+        def low_quota():
+            return {
+                'core': {'remaining': 200, 'reset': 1700000100},
+                'graphql': {'remaining': 5000, 'reset': 1700000200},
+            }
+
+        def label_mac_ci(**kwargs):
+            label_calls.append(kwargs)
+            return {'step': 'WAITING_CI', 'codes': []}
+
+        result = task_drive.drive(
+            task_id='t', merge=True, max_steps=5, poll_seconds=5,
+            advance_call=advance, label_mac_ci_call=label_mac_ci,
+            quota_read=low_quota, sleep=pauses.append)
+
+        self.assertEqual(result, {
+            'task_id': 't',
+            'step': 'WAITING_GITHUB_QUOTA',
+            'result': {
+                'resource': 'core',
+                'remaining': 200,
+                'reset': 1700000100,
+                'last_result': waiting_step,
+            },
+            'codes': ['GITHUB_QUOTA_LOW'],
+            'steps': 0,
+        })
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(label_calls, [])
+        self.assertEqual(pauses, [])
+
     def test_unknown_quota_keeps_polling(self):
         pauses = []
         quota_calls = []
