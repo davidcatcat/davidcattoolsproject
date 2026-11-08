@@ -318,6 +318,37 @@ def _valid_pm_session_binding(record, provenance):
             os.path.normpath(cwd) == cwd and
             not any(ord(char) < 0x20 or ord(char) == 0x7f for char in cwd))
 
+
+# An adoption audit entry: the original three fields, or those plus each side's
+# runtime, the new account and the liveness evidence the move relied on (#683).
+_PM_ADOPTION_FIELDS = frozenset(('old_session_key', 'new_session_key', 'at'))
+_PM_ADOPTION_AUDIT_FIELDS = _PM_ADOPTION_FIELDS | frozenset((
+    'old_runtime', 'new_runtime', 'new_account', 'liveness'))
+# The STOPPED evidence pm_session_liveness gives the old session under the
+# adoption lock, by old runtime: (required codes, optional codes).
+_PM_STOPPED_EVIDENCE = {
+    'claude-code': (frozenset(('PROCESS_CLEAN', 'LOCK_FREE', 'REGISTRY_CLEAN')),
+                    frozenset(('TRANSCRIPT_QUIET',))),
+    'codex': (frozenset(('PROCESS_CLEAN', 'LOCK_FREE')), frozenset()),
+}
+
+
+def _valid_pm_adoption_audit(item):
+    """The added fields name real runtimes and the old runtime's STOPPED evidence."""
+    account = item['new_account']
+    liveness = item['liveness']
+    old_runtime = item['old_runtime']
+    if (type(old_runtime) is not str or old_runtime not in _PM_STOPPED_EVIDENCE or
+            type(liveness) is not list or
+            not all(type(code) is str for code in liveness) or
+            len(liveness) != len(set(liveness))):
+        return False
+    required, optional = _PM_STOPPED_EVIDENCE[old_runtime]
+    return (item['new_runtime'] in ('claude-code', 'codex') and
+            (account is None or (type(account) is str and _NAME.fullmatch(account) is not None)) and
+            required <= set(liveness) <= required | optional)
+
+
 # R5 technical observations live inside the existing TaskStore root. They are
 # evidence only: this registry is deliberately separate from worker-dispatch.json
 # and never participates in dispatch authorization.
@@ -760,10 +791,33 @@ def _validate_completion_tombstones(record):
         positions.add(position)
 
 
+def _verified_earlier_pm_sessions(record):
+    """Earlier PM session keys of a verified adoption chain, else an empty set.
+
+    Verified: a non-empty list whose entries each continue from the previous
+    entry's new session, the last ending at the record's current session.
+    """
+    adoptions = record.get('pm_session_adoptions')
+    if (type(adoptions) is not list or not adoptions or
+            any(type(item) is not dict or
+                type(item.get('old_session_key')) is not str or
+                type(item.get('new_session_key')) is not str for item in adoptions)):
+        return frozenset()
+    for previous, item in zip(adoptions, adoptions[1:]):
+        if item['old_session_key'] != previous['new_session_key']:
+            return frozenset()
+    if adoptions[-1]['new_session_key'] != record.get('pm_session_id'):
+        return frozenset()
+    return frozenset(item['old_session_key'] for item in adoptions)
+
+
 def _validate_remote_test_receipts(record):
     receipts = record.get('remote_test_receipts', [])
     if type(receipts) is not list or len(receipts) > 32:
         _fail('REMOTE_TEST_RECEIPT_INVALID')
+    # A receipt stays bound to the PM session that ran the test; after adoption
+    # that session is accepted only through the record's verified chain.
+    earlier_sessions = _verified_earlier_pm_sessions(record)
     for receipt in receipts:
         if (type(receipt) is not dict or set(receipt) not in (
                 _REMOTE_TEST_RECEIPT_FIELDS, _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT) or
@@ -780,7 +834,9 @@ def _validate_remote_test_receipts(record):
                 receipt.get('run_id') != record.get('run_id') or
                 type(receipt.get('executor_task')) is not str or
                 re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', receipt['executor_task']) is None or
-                receipt.get('pm_session') != record.get('pm_session_id') or
+                (receipt.get('pm_session') != record.get('pm_session_id') and
+                 (type(receipt.get('pm_session')) is not str or
+                  receipt['pm_session'] not in earlier_sessions)) or
                 type(receipt.get('modules')) is not list or
                 not 1 <= len(receipt['modules']) <= 32 or
                 any(type(item) is not str or
@@ -984,10 +1040,12 @@ def _validate(record):
         if type(adoptions) is not list or len(adoptions) > 32:
             _fail('PM_SESSION_ADOPTION_INVALID')
         for item in adoptions:
-            if (type(item) is not dict or set(item) !=
-                    frozenset(('old_session_key', 'new_session_key', 'at')) or
+            if (type(item) is not dict or
+                    set(item) not in (_PM_ADOPTION_FIELDS, _PM_ADOPTION_AUDIT_FIELDS) or
                     not _safe_identifier(item.get('old_session_key'), SESSION_ID) or
-                    not _safe_identifier(item.get('new_session_key'), SESSION_ID)):
+                    not _safe_identifier(item.get('new_session_key'), SESSION_ID) or
+                    (set(item) == _PM_ADOPTION_AUDIT_FIELDS and
+                     not _valid_pm_adoption_audit(item))):
                 _fail('PM_SESSION_ADOPTION_INVALID')
             try:
                 stamp = datetime.strptime(item.get('at'), '%Y-%m-%dT%H:%M:%SZ')
@@ -2314,7 +2372,12 @@ class TaskStore:
             _fail()
         return task_id + '.json'
 
-    def _read_at(self, directory, task_id):
+    def _read_at(self, directory, task_id, *, validate=True):
+        """Read one record with every file check and a strict JSON parse.
+
+        validate=False skips only the final _validate; it is for read-only
+        scans whose matches the caller then reads again through get().
+        """
         name = self._name(task_id)
         for _ in range(TASK_READ_ATTEMPTS):
             fd = None
@@ -2363,7 +2426,7 @@ class TaskStore:
                                    parse_constant=lambda _: _fail())
                 if value.get('task_id') != task_id:
                     _fail()
-                return _validate(value)
+                return _validate(value) if validate else value
             except LLMToolError:
                 raise
             except FileNotFoundError:
@@ -2507,6 +2570,32 @@ class TaskStore:
             os.close(directory)
         return sorted(name[:-5] for name in names
                       if name.endswith('.json') and _safe_identifier(name[:-5], TASK_ID))
+
+    def completion_d6_task_ids(self, executor_task_id):
+        """Return sorted IDs of Tasks whose stored completion names this D6.
+
+        Read-only. Each record gets the file checks and strict JSON parse of
+        _read_at but not _validate, so a scan does not grow with full
+        validation of unrelated records. A returned record is not validated:
+        the caller must read it through get() before using it. Nothing is
+        skipped: a record that cannot be opened, read or parsed, or whose
+        task_id does not match its file name, raises. An invalid D6 raises.
+        """
+        if not _safe_identifier(executor_task_id, D6_TASK_ID):
+            _fail()
+        task_ids = self.task_ids()
+        directory = self._dirfd()
+        try:
+            matching = []
+            for task_id in task_ids:
+                record = self._read_at(directory, task_id, validate=False)
+                completion = record.get('completion')
+                if (type(completion) is dict and
+                        completion.get('executor_task_id') == executor_task_id):
+                    matching.append(task_id)
+        finally:
+            os.close(directory)
+        return sorted(matching)
 
     def get(self, task_id):
         directory = self._dirfd()
@@ -2868,7 +2957,8 @@ class TaskStore:
                             changes={'developer': developer}, **{trusted_flag: True})
 
     def adopt_pm_session(self, task_id, *, old_session_key, new_session_key, at,
-                         expected_record_sha256):
+                         expected_record_sha256, old_runtime, new_runtime, new_account,
+                         liveness):
         """Library-internal: atomically move one PM binding, inbox and audit entry."""
         current = self.get(task_id)
         if current.get('pm_session_id') != old_session_key:
@@ -2877,13 +2967,16 @@ class TaskStore:
             _fail('PM_SESSION_ADOPTION_LIMIT')
         audit = list(current.get('pm_session_adoptions', []))
         audit.append({'old_session_key': old_session_key,
-                      'new_session_key': new_session_key, 'at': at})
+                      'new_session_key': new_session_key, 'at': at,
+                      'old_runtime': old_runtime, 'new_runtime': new_runtime,
+                      'new_account': new_account, 'liveness': list(liveness)})
         events = current.get('completion_events')
         changes = {'pm_session_id': new_session_key, 'pm_session_adoptions': audit}
         provenance = current.get('pm_provenance')
         if type(provenance) is dict and 'pm_native_session_id' in provenance:
             changes['pm_provenance'] = dict(
-                provenance, pm_native_session_id=new_session_key[3:])
+                provenance, pm_runtime=new_runtime,
+                pm_native_session_id=new_session_key[3:])
         if events is not None:
             changes['completion_events'] = [
                 dict(event, pm_session_id=new_session_key) for event in events]
@@ -3052,6 +3145,10 @@ class TaskStore:
                 if existing != receipt:
                     _fail('REMOTE_TEST_RECEIPT_CONFLICT')
                 return existing
+            # Only the current PM session records new receipts; earlier
+            # sessions of an adoption chain are accepted on read only.
+            if receipt.get('pm_session') != current.get('pm_session_id'):
+                _fail('REMOTE_TEST_RECEIPT_INVALID')
             if len(receipts) >= 32:
                 _fail('REMOTE_TEST_RECEIPT_LIMIT')
             try:

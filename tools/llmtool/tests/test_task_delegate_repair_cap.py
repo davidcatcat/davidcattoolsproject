@@ -48,8 +48,23 @@ class _Store:
         self.recorded.append((task_id, ref, rounds))
 
 
+# A report with every required section whose Outcome/cost status line says
+# RCA_CONFIRMED, as run_high_debug requires of a confirmed diagnosis.
+_REPORT = '\n'.join((
+    '## Identity and source', 'Synthetic fixture.',
+    '## Symptom and reproduction', 'Synthetic fixture.',
+    '## Root Cause', 'Confirmed root cause.',
+    '## Exactly what to modify', 'Synthetic fixture.',
+    '## Verification', 'Synthetic fixture.',
+    '## Risks and handoff', 'Synthetic fixture.',
+    '## Outcome/cost', 'RCA_CONFIRMED', 'Cost: UNKNOWN',
+)) + '\n'
+_DIAGNOSIS_RUN = 'd' * 32
+
+
 def _entry(*, executor_task=_EXECUTOR_TASK, status='RCA_CONFIRMED',
-           examined_sha=_HEAD, family='pr-938', recorded_at='2026-11-04T00:00:01Z'):
+           examined_sha=_HEAD, family='pr-938', recorded_at='2026-11-04T00:00:01Z',
+           report=_REPORT, report_sha256=None, model_observed='gpt-6.1-sol'):
     from llmtool.high_debug import _d6_name
 
     return {
@@ -60,18 +75,57 @@ def _entry(*, executor_task=_EXECUTOR_TASK, status='RCA_CONFIRMED',
         'd6': _d6_name(executor_task, 1, examined_sha),
         'examined_sha': examined_sha,
         'model_requested': 'gpt-6.1-sol',
-        'model_observed': 'gpt-6.1-sol',
+        'model_observed': model_observed,
         'effort_observed': 'high',
-        'report': 'Confirmed root cause.',
-        'report_sha256': hashlib.sha256(
-            b'Confirmed root cause.').hexdigest(),
+        'report': report,
+        'report_sha256': (hashlib.sha256(report.encode('utf-8')).hexdigest()
+                          if report_sha256 is None else report_sha256),
         'usage': 'UNKNOWN',
         'recorded_at': recorded_at,
     }
 
 
-def _diagnosis(entries):
-    return {'task_id': _HIGH_DEBUG_TASK, 'high_debug': entries}
+def _event(entry, *, sequence=0, **overrides):
+    """The HIGH_DEBUG completion event run_high_debug records for ``entry``."""
+    report_sha256 = entry['report_sha256']
+    event = {
+        'event_id': hashlib.sha256(
+            ('HIGH_DEBUG\0' + _HIGH_DEBUG_TASK + '\0' + entry['examined_sha'] +
+             '\0' + report_sha256).encode()).hexdigest()[:32],
+        'task_id': _HIGH_DEBUG_TASK, 'run_id': _DIAGNOSIS_RUN,
+        'session_id': 'high-debug-' + entry['d6'], 'source': 'HIGH_DEBUG',
+        'source_sha': entry['examined_sha'], 'sequence': sequence,
+        'payload_sha256': hashlib.sha256(report_sha256.encode()).hexdigest(),
+        'state': 'PENDING',
+    }
+    event.update(overrides)
+    return event
+
+
+def _tombstone(entry, **overrides):
+    event = _event(entry)
+    tombstone = {'event_id': event['event_id'], 'source': event['source'],
+                 'session_id': event['session_id'], 'sequence': event['sequence'],
+                 'acked_at': '2026-11-04T00:00:02Z'}
+    tombstone.update(overrides)
+    return tombstone
+
+
+def _diagnosis(entries, *, executor_task=_EXECUTOR_TASK, events=None,
+               tombstones=None):
+    """The original Task holding ``entries`` and, by default, one event each."""
+    record = {
+        'task_id': _HIGH_DEBUG_TASK, 'run_id': _DIAGNOSIS_RUN,
+        'completion': (None if executor_task is None else
+                       {'executor_task_id': executor_task}),
+        'high_debug': entries,
+        'completion_events': (
+            [_event(entry, sequence=index) for index, entry in enumerate(entries)]
+            if events is None else events),
+    }
+    if tombstones is not None:
+        record['completion_event_tombstones'] = tombstones
+    return record
 
 
 def _args(**overrides):
@@ -610,6 +664,355 @@ class LaunchedNoWorkRepairCountTests(unittest.TestCase):
         task_submission_cli._check_delegate_repair_cap(
             _args(high_debug_ref=None, high_debug_task=None), store)
         self.assertEqual(store.recorded, [])
+
+
+class HighDebugRunBindingTests(unittest.TestCase):
+    """#914: past the cap the entry must be bound to its Task, run and report."""
+
+    def setUp(self):
+        for target, kwargs in (
+                ((task_submission_cli.trust, 'load_trust'),
+                 {'return_value': SimpleNamespace(
+                     repository={'slug': 'example/project'})}),
+                ((task_submission_cli, '_delegate_d6_binding'),
+                 {'return_value': (None, SimpleNamespace(head=_HEAD))})):
+            started = patch.object(*target, **kwargs)
+            started.start()
+            self.addCleanup(started.stop)
+
+    def _refuses(self, diagnosis):
+        store = _Store(count=1 + MAX_REPAIR_ATTEMPTS, diagnosis=diagnosis)
+        with self.assertRaisesRegex(
+                LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
+
+    def _passes(self, diagnosis):
+        store = _Store(count=1 + MAX_REPAIR_ATTEMPTS, diagnosis=diagnosis)
+        task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [(
+            _CURRENT_TASK, _HIGH_DEBUG_REF, max(3, (1 + MAX_REPAIR_ATTEMPTS) + 1))])
+
+    def test_no_completion_refuses(self):
+        self._refuses(_diagnosis([_entry()], executor_task=None))
+        diagnosis = _diagnosis([_entry()])
+        del diagnosis['completion']
+        self._refuses(diagnosis)
+
+    def test_completion_naming_another_d6_refuses(self):
+        self._refuses(_diagnosis([_entry()], executor_task='other-d6'))
+
+    def test_missing_report_section_refuses(self):
+        from llmtool.high_debug import REPORT_SECTIONS
+
+        for heading in REPORT_SECTIONS:
+            report = _REPORT.replace('## ' + heading + '\n', '')
+            self.assertNotEqual(report, _REPORT)
+            with self.subTest(heading=heading):
+                self._refuses(_diagnosis([_entry(report=report)]))
+
+    def test_report_status_line_must_say_confirmed(self):
+        # The stored status says RCA_CONFIRMED; the report itself does not.
+        for status_lines in ('RCA_UNCONFIRMED', 'BLOCKED',
+                             'RCA_CONFIRMED\nRCA_CONFIRMED',
+                             'RCA_CONFIRMED - not RCA_UNCONFIRMED', 'Cost only'):
+            report = _REPORT.replace('\nRCA_CONFIRMED\n', '\n' + status_lines + '\n')
+            self.assertNotEqual(report, _REPORT)
+            entry = _entry(report=report)
+            self.assertEqual(entry['status'], 'RCA_CONFIRMED')
+            with self.subTest(status_lines=status_lines):
+                self._refuses(_diagnosis([entry]))
+
+    def test_report_digest_mismatch_refuses(self):
+        self._refuses(_diagnosis([_entry(report_sha256='0' * 64)]))
+        entry = _entry()
+        entry['report'] = _REPORT + 'Edited after the run.\n'
+        self._refuses(_diagnosis([entry]))
+        for report_sha256 in (None, 5, 'A' * 64):
+            entry = _entry()
+            entry['report_sha256'] = report_sha256
+            with self.subTest(report_sha256=report_sha256):
+                self._refuses(_diagnosis([entry], events=[]))
+
+    def test_model_unknown_refuses(self):
+        self._refuses(_diagnosis([_entry(model_observed='UNKNOWN')]))
+        entry = _entry()
+        del entry['model_observed']
+        self._refuses(_diagnosis([entry]))
+        self._refuses(_diagnosis([_entry(model_observed=None)]))
+
+    def test_other_model_refuses(self):
+        for model in ('gpt-6-luna', 'gpt-6.1-sol-mini', 'GPT-6.1-SOL', ' gpt-6.1-sol'):
+            with self.subTest(model=model):
+                self._refuses(_diagnosis([_entry(model_observed=model)]))
+
+    def test_no_event_refuses(self):
+        self._refuses(_diagnosis([_entry()], events=[]))
+        diagnosis = _diagnosis([_entry()])
+        del diagnosis['completion_events']
+        self._refuses(diagnosis)
+        # An event of another entry does not bind this one.
+        other = _entry(report=_REPORT + 'Another run.\n')
+        self._refuses(_diagnosis([_entry()], events=[_event(other)]))
+
+    def test_event_with_wrong_binding_refuses(self):
+        entry = _entry()
+        for overrides in ({'session_id': 'high-debug-other-d6'},
+                          {'source': 'GITHUB'},
+                          {'source_sha': 'b' * 40},
+                          {'payload_sha256': '0' * 64},
+                          {'payload_sha256': hashlib.sha256(_REPORT.encode()).hexdigest()}):
+            with self.subTest(overrides=overrides):
+                self._refuses(_diagnosis(
+                    [entry], events=[_event(entry, **overrides)]))
+
+    def test_tombstone_with_wrong_binding_refuses(self):
+        entry = _entry()
+        for overrides in ({'session_id': 'high-debug-other-d6'},
+                          {'source': 'GITHUB'}):
+            with self.subTest(overrides=overrides):
+                self._refuses(_diagnosis(
+                    [entry], events=[], tombstones=[_tombstone(entry, **overrides)]))
+
+    def test_live_event_passes(self):
+        self._passes(_diagnosis([_entry()]))
+
+    def test_tombstone_passes(self):
+        entry = _entry()
+        self._passes(_diagnosis([entry], events=[], tombstones=[_tombstone(entry)]))
+
+    def test_entry_and_event_from_run_high_debug_pass(self):
+        import io
+        import json
+        import subprocess
+        import tempfile
+        from contextlib import redirect_stdout
+        from pathlib import Path
+
+        from llmtool import high_debug
+        from llmtool.task_store import TaskStore, new_id
+
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve()
+            store_root = base / 'tasks'
+            diagnosis_root = base / 'diagnosis-d6'
+            diagnosis_root.mkdir()
+            sessions = base / 'sessions'
+            sessions.mkdir()
+            thread_id = '0199a000-0000-7000-8000-000000000001'
+            (sessions / f'rollout-2026-11-07T00-00-00-{thread_id}.jsonl').write_text(
+                json.dumps({'type': 'turn_context',
+                            'payload': {'model': 'gpt-6.1-sol', 'effort': 'high'}}) + '\n',
+                encoding='utf-8')
+
+            store = TaskStore(store_root)
+            request = 'Bounded High Debug binding fixture.'
+            record = task_submission_cli._record(
+                _HIGH_DEBUG_TASK, new_id(), 'pm-' + new_id(), 'pm-profile', request,
+                state='PM_RESPONDED', provider_type='openai-compatible',
+                model='pm-model', backend='NO_NATIVE_SESSION_ID_EXPOSED',
+                request_sha=hashlib.sha256(request.encode()).hexdigest())
+            assignment = {'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                          'goal': 'Test the High Debug binding.',
+                          'acceptance': ['dispatch is bounded']}
+            record.update(
+                pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                                  'base_url': None},
+                response=json.dumps({'schema_version': 1, 'summary': 'Fixture response.',
+                                     'developer_assignment': assignment}),
+                pm_assignment=assignment,
+                completion={
+                    'state': 'WAITING_EXECUTOR', 'executor_task_id': _EXECUTOR_TASK,
+                    'reviewer_task_id': None,
+                    'evidence': {'common_dir': str(base / 'repo' / '.git')},
+                    'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
+                    'pm_response': None, 'pm_recommendation': None,
+                    'pm_usage': None, 'pm_error_code': None,
+                })
+            store.create(record)
+
+            def read_registration(executor_task, common_dir, *, allowed_states):
+                self.assertEqual(executor_task, _EXECUTOR_TASK)
+                return SimpleNamespace(result_sha=_HEAD, root=str(base / 'executor-d6'),
+                                       common_dir=common_dir)
+
+            created = []
+
+            def create_d6(*, task_id, base_sha, repo_root, executor_task):
+                created.append((task_id, base_sha, executor_task))
+                return str(diagnosis_root)
+
+            def runner(*, prompt, cwd, output_path):
+                self.assertEqual(cwd, str(diagnosis_root))
+                Path(output_path).write_text(_REPORT, encoding='utf-8')
+                events = json.dumps({'type': 'thread.started', 'thread_id': thread_id})
+                return SimpleNamespace(returncode=0, stdout=(events + '\n').encode(),
+                                       stderr=b'')
+
+            def git_status(argv, **_kwargs):
+                self.assertEqual(argv, ['git', 'status', '--porcelain'])
+                return SimpleNamespace(returncode=0, stdout=b'')
+
+            fake_subprocess = SimpleNamespace(run=git_status, DEVNULL=subprocess.DEVNULL,
+                                              PIPE=subprocess.PIPE)
+            with patch.object(high_debug.task_store, 'default_root',
+                              return_value=store_root), \
+                    patch.object(high_debug.worker_dispatch, 'evaluate',
+                                 return_value=SimpleNamespace(allowed=True)), \
+                    patch.object(high_debug.task_completion, 'collect_git_snapshot',
+                                 return_value=SimpleNamespace(head=_HEAD)), \
+                    patch.object(high_debug, '_d6_taken', return_value=False), \
+                    patch.object(high_debug, '_post_record', return_value=False), \
+                    patch.object(high_debug, 'subprocess', fake_subprocess), \
+                    redirect_stdout(io.StringIO()) as output:
+                high_debug.run_high_debug(
+                    store=store, task_id=_HIGH_DEBUG_TASK, executor_task=_EXECUTOR_TASK,
+                    pr_number=938, family='pr-938',
+                    early_reason='Synthetic early reason.', runner=runner,
+                    create_d6=create_d6, repo_root=str(base / 'repo'),
+                    read_registration=read_registration, sessions_dir=str(sessions))
+            result = json.loads(output.getvalue())
+            diagnosis = store.get(_HIGH_DEBUG_TASK)
+
+        self.assertEqual(result['state'], 'RECORDED')
+        self.assertEqual(result['status'], 'RCA_CONFIRMED')
+        self.assertEqual(len(created), 1)
+        entry = diagnosis['high_debug'][-1]
+        self.assertEqual(entry['model_observed'], 'gpt-6.1-sol')
+        self.assertEqual(entry['d6'], created[0][0])
+        self.assertEqual([event['event_id'] for event in diagnosis['completion_events']],
+                         [result['event_id']])
+        self._passes(diagnosis)
+
+
+# Invented comment URLs of valid shape for the trusted slug; neither names a
+# real comment.
+_COMMENT_REFS = (_HIGH_DEBUG_REF,
+                 'https://github.com/example/project/issues/12#issuecomment-56')
+
+
+class CommentCannotPassRepairCapTests(unittest.TestCase):
+    """#914: at the cap, a comment URL never stands in for a bound High Debug Task."""
+
+    def setUp(self):
+        for target, kwargs in (
+                ((task_submission_cli.trust, 'load_trust'),
+                 {'return_value': SimpleNamespace(
+                     repository={'slug': 'example/project'})}),
+                ((task_submission_cli, '_delegate_d6_binding'),
+                 {'return_value': (None, SimpleNamespace(head=_HEAD))})):
+            started = patch.object(*target, **kwargs)
+            started.start()
+            self.addCleanup(started.stop)
+
+    def _refuses(self, diagnosis, **overrides):
+        store = _Store(count=1 + MAX_REPAIR_ATTEMPTS, diagnosis=diagnosis)
+        with self.assertRaisesRegex(
+                LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$'):
+            task_submission_cli._check_delegate_repair_cap(_args(**overrides), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_comment_url_as_high_debug_task_refuses(self):
+        for ref in _COMMENT_REFS:
+            with self.subTest(ref=ref):
+                self._refuses(_diagnosis([_entry()]), high_debug_task=ref)
+
+    def test_unknown_high_debug_task_refuses(self):
+        self._refuses(_diagnosis([_entry()]), high_debug_task='1' * 32)
+
+    def test_task_without_high_debug_key_refuses(self):
+        diagnosis = _diagnosis([_entry()])
+        del diagnosis['high_debug']
+        self._refuses(diagnosis)
+
+    def test_record_naming_another_task_refuses(self):
+        diagnosis = _diagnosis([_entry()])
+        diagnosis['task_id'] = 'c' * 32
+        self._refuses(diagnosis)
+
+    def test_last_entry_not_a_dict_refuses(self):
+        confirmed = _entry()
+        for last in ('RCA_CONFIRMED', None, ['RCA_CONFIRMED']):
+            with self.subTest(last=last):
+                self._refuses(_diagnosis([confirmed, last],
+                                         events=[_event(confirmed)]))
+
+    def test_missing_high_debug_family_refuses(self):
+        self._refuses(_diagnosis([_entry()]), high_debug_family=None)
+
+    def test_unconfirmed_sole_entry_refuses(self):
+        for status in ('RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID', 'RUN_FAILED'):
+            with self.subTest(status=status):
+                self._refuses(_diagnosis([_entry(status=status)]))
+
+    def test_unconfirmed_entry_after_confirmed_one_refuses(self):
+        for status in ('RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID', 'RUN_FAILED'):
+            with self.subTest(status=status):
+                self._refuses(_diagnosis([
+                    _entry(), _entry(status=status,
+                                     recorded_at='2026-11-04T00:00:02Z')]))
+
+    def test_d6_derived_from_another_head_refuses(self):
+        from llmtool.high_debug import _d6_name
+
+        entry = _entry()
+        entry['d6'] = _d6_name(_EXECUTOR_TASK, 1, 'b' * 40)
+        self.assertNotEqual(entry['d6'], _entry()['d6'])
+        self._refuses(_diagnosis([entry]))
+
+    def test_d6_without_attempt_suffix_refuses(self):
+        for d6 in (_EXECUTOR_TASK, _EXECUTOR_TASK + '-' + _HEAD[:7],
+                   _EXECUTOR_TASK + '-hd-' + _HEAD[:7],
+                   _EXECUTOR_TASK + '-hd0-' + _HEAD[:7]):
+            entry = _entry()
+            entry['d6'] = d6
+            with self.subTest(d6=d6):
+                self._refuses(_diagnosis([entry]))
+
+
+class DelegateRequiresHighDebugTaskTests(unittest.TestCase):
+    """#914: every delegate route refuses a comment URL with no High Debug Task."""
+
+    def setUp(self):
+        for target, kwargs in (
+                ((task_submission_cli.trust, 'load_trust'),
+                 {'return_value': SimpleNamespace(
+                     repository={'slug': 'example/project'})}),
+                ((task_submission_cli, '_delegate_d6_binding'),
+                 {'return_value': (None, SimpleNamespace(head=_HEAD))})):
+            started = patch.object(*target, **kwargs)
+            started.start()
+            self.addCleanup(started.stop)
+
+    def test_each_route_refuses_before_its_runner(self):
+        owner_ref = 'https://github.com/example/project/issues/12#issuecomment-78'
+        routes = (
+            ('run_task_agy_delegate',
+             {'provider': 'agy', 'mode': 'direct', 'owner_ref': owner_ref,
+              'acceptance': ['Synthetic acceptance.']}),
+            ('run_task_claude_delegate',
+             {'provider': 'claude', 'mode': 'direct', 'owner_ref': owner_ref,
+              'acceptance': ['Synthetic acceptance.']}),
+            ('run_task_gw_agent_delegate',
+             {'provider': 'gw-agent', 'mode': 'direct'}),
+            ('run_task_codex_delegate',
+             {'provider': 'codex', 'mode': 'direct',
+              'acceptance': ['Synthetic acceptance.']}),
+            ('run_task_opencode_delegate',
+             {'provider': 'opencode', 'acceptance': ['Synthetic acceptance.']}),
+        )
+        for route, route_args in routes:
+            for ref in _COMMENT_REFS:
+                store = _Store(count=1 + MAX_REPAIR_ATTEMPTS,
+                               diagnosis=_diagnosis([_entry()]))
+                args = _args(high_debug_ref=ref, high_debug_task=None, **route_args)
+                with self.subTest(route=route, ref=ref), \
+                        patch.object(task_submission_cli, route) as runner:
+                    with self.assertRaisesRegex(
+                            LLMToolError, '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$'):
+                        task_submission_cli.run_task_delegate(args, store=store)
+                    runner.assert_not_called()
+                self.assertEqual(store.recorded, [])
 
 
 if __name__ == '__main__':

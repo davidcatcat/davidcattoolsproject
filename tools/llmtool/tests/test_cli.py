@@ -129,7 +129,7 @@ class CLITests(unittest.TestCase):
         task_parser = parser._subparsers._group_actions[0].choices['task']
         parsed_actions = set(task_parser._subparsers._group_actions[0].choices)
         unchanged_actions = {
-            'inspect', 'review', 'review-request', 'review-wait', 'review-bundle',
+            'inspect', 'review', 'review-request', 'review-wait', 'review-bundle', 'train',
         }
         self.assertEqual(parsed_actions - set(TASK_ACTIONS), unchanged_actions)
 
