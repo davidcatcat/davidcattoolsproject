@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import importlib
 import importlib.util
@@ -10,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import stat
 import sys
@@ -41,6 +43,20 @@ _AUDIT_TOOLS = frozenset({'list_dir', 'read_file', 'grep', 'apply_edit', 'finish
 # The Task error code is at most 64 characters and starts with
 # DEVELOPER_GW_AGENT_BLOCKED_, so a longer reason would be cut off.
 _TOOL_FAILURE = re.compile(r'[A-Z0-9_]{1,37}\Z')
+
+# #120 G1a: one gateway session per D6, kept in a private session home
+# outside every worktree and copied into and out of the route tmp.
+SESSION_HOME_DIRNAME = 'gw-agent-sessions'
+# The gateway's own session id format (api_agent_gateway.sessions.valid_id).
+_GATEWAY_SESSION = re.compile(r'[0-9a-f]{32}\Z')
+# The session format TaskStore accepts for a DONE gw-agent run (#1072).
+_BINDING_SESSION = re.compile(r'[0-9a-fA-F-]{16,64}\Z')
+_SESSION_STATE_FILES = ('meta.json', 'history.json')
+_MAX_SESSION_FILE_BYTES = 16 * 1024 * 1024
+_MAX_BINDING_BYTES = 64 * 1024
+_BINDING_FIELDS = frozenset(('schema_version', 'root_task_id', 'executor_task_id',
+                             'session_id', 'data_class', 'scope_digest'))
+_CLOEXEC = getattr(os, 'O_CLOEXEC', 0)
 
 
 def _normalize_gw_agent_usage(value):
@@ -141,6 +157,211 @@ def _scope_digest(task):
         'budgets': dict(sorted(task['budgets'].items())),
     }
     return hashlib.sha256(_canonical(scope)).hexdigest()
+
+
+def _reject_constant(_value):
+    raise ValueError('non-finite JSON number')
+
+
+def _check_private_dir(path):
+    """Refuse a symlink, another owner's directory or any group/world access."""
+    info = os.lstat(path)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or
+            stat.S_IMODE(info.st_mode) & 0o077):
+        raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE')
+
+
+def _inside_git_worktree(path):
+    current = os.path.realpath(path)
+    while True:
+        if os.path.lexists(os.path.join(current, '.git')):
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+
+
+def _read_private(path, limit):
+    """Read one regular 0600-style file owned by this user, never via a symlink."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | _CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077 or
+                info.st_size > limit):
+            raise ValueError('unsafe private file')
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise ValueError('private file too large')
+            chunks.append(chunk)
+        return b''.join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _write_new_private(path, data):
+    """Create one new 0600 file; refuses an existing path or a symlink."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _CLOEXEC,
+                 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_private(directory, name, data, *, replace=True):
+    """Write ``name`` in ``directory`` through an O_EXCL 0600 temp file.
+
+    ``replace`` renames the temp file over the target; otherwise the target is
+    created by a hard link, which never replaces an existing file.
+    """
+    directory = Path(directory)
+    temp = directory / f'.{name}.{secrets.token_hex(8)}.tmp'
+    _write_new_private(temp, data)
+    renamed = False
+    try:
+        if replace:
+            os.rename(temp, directory / name)
+            renamed = True
+        else:
+            os.link(temp, directory / name)
+    finally:
+        if not renamed:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+
+
+def open_session_home(store_root, executor_task_id):
+    """Create or verify ``<store parent>/gw-agent-sessions/<executor task id>``."""
+    if type(executor_task_id) is not str or _TASK_ID.fullmatch(executor_task_id) is None:
+        raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE')
+    try:
+        parent = Path(store_root).absolute().parent / SESSION_HOME_DIRNAME
+        home = parent / executor_task_id
+        for directory in (parent, home):
+            try:
+                os.mkdir(directory, 0o700)
+            except FileExistsError:
+                pass
+            _check_private_dir(directory)
+        if _inside_git_worktree(home):
+            raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE')
+    except RouteError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError):
+        raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE') from None
+    return home
+
+
+class GwAgentSessionLock:
+    """Exclusive non-blocking lock on ``<session home>/lock`` for one delegate call."""
+
+    def __init__(self):
+        self._fd = None
+
+    def acquire(self, home):
+        if self._fd is not None:
+            raise RouteError('GW_AGENT_SESSION_LOCKED')
+        path = Path(home) / 'lock'
+        try:
+            _check_private_dir(home)
+            if not os.path.lexists(path):
+                try:
+                    _write_private(home, 'lock', b'', replace=False)
+                except FileExistsError:
+                    pass
+            fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | _CLOEXEC)
+        except RouteError:
+            raise
+        except OSError:
+            raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE') from None
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                    info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077):
+                raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE')
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RouteError('GW_AGENT_SESSION_LOCKED') from None
+            except OSError:
+                raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE') from None
+        except BaseException:
+            os.close(fd)
+            raise
+        self._fd = fd
+
+    def release(self):
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def session_binding_exists(home):
+    return os.path.lexists(Path(home) / 'binding.json')
+
+
+def read_session_binding(home, *, executor_task_id):
+    """Return the D6's validated binding, or refuse SESSION_UNAVAILABLE."""
+    try:
+        _check_private_dir(home)
+        raw = _read_private(Path(home) / 'binding.json', _MAX_BINDING_BYTES)
+        value = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_pairs,
+                           parse_constant=_reject_constant)
+    except (RouteError, OSError, UnicodeError, ValueError, RecursionError):
+        raise RouteError('GW_AGENT_SESSION_UNAVAILABLE') from None
+    if (type(value) is not dict or set(value) != _BINDING_FIELDS or
+            type(value['schema_version']) is not int or value['schema_version'] != 1 or
+            type(value['root_task_id']) is not str or
+            _TASK_ID.fullmatch(value['root_task_id']) is None or
+            type(value['executor_task_id']) is not str or
+            value['executor_task_id'] != executor_task_id or
+            type(value['session_id']) is not str or
+            _BINDING_SESSION.fullmatch(value['session_id']) is None or
+            _GATEWAY_SESSION.fullmatch(value['session_id']) is None or
+            type(value['data_class']) is not str or not 1 <= len(value['data_class']) <= 64 or
+            type(value['scope_digest']) is not str or
+            re.fullmatch(r'[0-9a-f]{64}', value['scope_digest']) is None):
+        raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+    return dict(value)
+
+
+def write_session_binding(home, *, root_task_id, executor_task_id, session_id,
+                          data_class, scope_digest):
+    """Persist the content-free binding; never prompt, history or findings."""
+    if (type(root_task_id) is not str or _TASK_ID.fullmatch(root_task_id) is None or
+            type(executor_task_id) is not str or
+            _TASK_ID.fullmatch(executor_task_id) is None or
+            type(session_id) is not str or _BINDING_SESSION.fullmatch(session_id) is None or
+            type(data_class) is not str or not 1 <= len(data_class) <= 64 or
+            type(scope_digest) is not str or
+            re.fullmatch(r'[0-9a-f]{64}', scope_digest) is None):
+        raise RouteError('GW_AGENT_SESSION_BINDING_FAILED')
+    binding = {'schema_version': 1, 'root_task_id': root_task_id,
+               'executor_task_id': executor_task_id, 'session_id': session_id,
+               'data_class': data_class, 'scope_digest': scope_digest}
+    try:
+        _check_private_dir(home)
+        _write_private(home, 'binding.json', _canonical(binding) + b'\n')
+    except (RouteError, OSError):
+        raise RouteError('GW_AGENT_SESSION_BINDING_FAILED') from None
+    return binding
 
 
 class GwAgentRoute(DeveloperRoute):
@@ -257,6 +478,15 @@ class GwAgentRoute(DeveloperRoute):
 
     def validate_request(self, request):
         value = super().validate_request(request)
+        session_id = value.get('session_id')
+        session_home = value.get('session_home')
+        # A resume needs the session home it copies the gateway state from.
+        if ((session_id is not None and
+             (type(session_id) is not str or _GATEWAY_SESSION.fullmatch(session_id) is None)) or
+                (session_home is not None and
+                 (type(session_home) is not str or not os.path.isabs(session_home))) or
+                (session_id is not None and session_home is None)):
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
         self._validated_request = value
         task = value.get('task')
         if type(task) is not dict:
@@ -354,7 +584,7 @@ class GwAgentRoute(DeveloperRoute):
             'egress_basis': task['egress_basis'],
             'data_class': gateway_data_class,
             'profile': self.profile_name,
-            'session_id': None,
+            'session_id': request.get('session_id'),
         }
         files = {
             'task.json': serialized_task,
@@ -368,10 +598,74 @@ class GwAgentRoute(DeveloperRoute):
                 stream.write(payload)
                 stream.write(b'\n')
             os.chmod(path, 0o600)
+        if request.get('session_id') is not None:
+            self._copy_state_in(request, root, private_tmp)
+
+    def _session_home(self, request, root):
+        """Return the verified private session home, kept outside the D6."""
+        home = Path(request['session_home'])
+        try:
+            _check_private_dir(home)
+            resolved = home.resolve(strict=True)
+        except (RouteError, OSError, RuntimeError):
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE') from None
+        if resolved == root or root in resolved.parents or resolved in root.parents:
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+        return home
+
+    def _copy_state_in(self, request, root, private_tmp):
+        """Copy the bound session's gateway Store files into <route tmp>/state."""
+        session_id = request['session_id']
+        home = self._session_home(request, root)
+        try:
+            payloads = {name: _read_private(home / name, _MAX_SESSION_FILE_BYTES)
+                        for name in _SESSION_STATE_FILES}
+        except (OSError, ValueError):
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE') from None
+        state = private_tmp / 'state'
+        target = state / 'sessions' / session_id
+        try:
+            for directory in (state, state / 'sessions', target):
+                os.mkdir(directory, 0o700)
+                os.chmod(directory, 0o700)
+            for name, payload in payloads.items():
+                _write_new_private(target / name, payload)
+        except OSError:
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE') from None
+
+    def _copy_state_out(self, tmpdir, request, root):
+        """Copy the run's gateway Store files back to the session home."""
+        if request.get('session_home') is None or type(self._result) is not dict:
+            return
+        session_id = self._result.get('session_id')
+        requested = request.get('session_id')
+        # Never store another session's state over the bound one; the caller
+        # refuses a resumed result that names a different session.
+        if requested is not None and session_id != requested:
+            return
+        if type(session_id) is not str or _GATEWAY_SESSION.fullmatch(session_id) is None:
+            return
+        source = Path(tmpdir) / 'state' / 'sessions' / session_id
+        try:
+            if not all(os.path.lexists(source / name) for name in _SESSION_STATE_FILES):
+                return
+            _check_private_dir(source)
+            payloads = {name: _read_private(source / name, _MAX_SESSION_FILE_BYTES)
+                        for name in _SESSION_STATE_FILES}
+        except (RouteError, OSError, ValueError):
+            raise RouteError('GW_AGENT_SESSION_PERSIST_FAILED') from None
+        home = self._session_home(request, root)
+        try:
+            for name, payload in payloads.items():
+                _write_private(home, name, payload)
+        except OSError:
+            raise RouteError('GW_AGENT_SESSION_PERSIST_FAILED') from None
 
     def build_argv(self, executable, request):
         tmp = request['_route_tmpdir']
-        return [sys.executable, '-B', '-P', '-m', 'api_agent_gateway', 'run',
+        session_id = request.get('session_id')
+        command = ['run'] if session_id is None else ['resume', session_id]
+        return [sys.executable, '-B', '-P', '-m', 'api_agent_gateway', *command,
                 '--authorization-file', str(Path(tmp) / 'authorization.json'),
                 '--workdir', request['root'], '--profile', self.profile_name,
                 '--task-file', str(Path(tmp) / 'task.json'),
@@ -578,6 +872,8 @@ class GwAgentRoute(DeveloperRoute):
             with os.fdopen(fd, 'wb') as stream:
                 stream.write(audit)
             self.audit_copy_path = str(target)
+            # Only after the audit check passed, while the route tmp exists.
+            self._copy_state_out(tmpdir, request, root)
         except RouteError:
             raise
         except (OSError, UnicodeError, ValueError, TypeError, RecursionError):

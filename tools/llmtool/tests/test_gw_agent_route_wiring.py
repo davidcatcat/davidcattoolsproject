@@ -5,6 +5,7 @@ import inspect
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -18,7 +19,9 @@ from unittest.mock import Mock, patch
 
 from llmtool import review_dispatch, task_completion, task_submission_cli, worker_dispatch
 from llmtool.developer_routes import GwAgentRoute, RouteError, load_route_config
-from llmtool.developer_routes.gw_agent import cleanup_audit_copies
+from llmtool.developer_routes.base import RouteResult
+from llmtool.developer_routes.gw_agent import (GwAgentSessionLock, _scope_digest,
+                                               cleanup_audit_copies, open_session_home)
 from llmtool.errors import LLMToolError
 from llmtool.providers.cli_lifecycle import CLIHostTermination, _Cancelled
 from llmtool import task_store
@@ -36,6 +39,12 @@ def tearDownModule():
 
 
 class GwAgentRouteWiringTests(unittest.TestCase):
+    def _store_root(self):
+        # #120 G1a: the D6 session home lives beside the TaskStore root.
+        parent = tempfile.mkdtemp(prefix='gw-agent-store-')
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        return str(Path(parent) / 'tasks')
+
     def test_company_gateway_origin_with_path_is_refused(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
             'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'bounded task',
@@ -48,6 +57,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             def get(self, _task_id):
                 return copy.deepcopy(task)
 
+        store = Store()
+        store.root = self._store_root()
         registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
             common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
             session_ref='session-ref', native_session_id=None)
