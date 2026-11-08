@@ -359,6 +359,26 @@ class GitHubHostedRunnerTests(unittest.TestCase):
                              CODE_PATHS, _hosted_trust())
         self.assertEqual(result['successful_checks'], [])
 
+    def test_each_label_alternative_is_trusted(self):
+        # Nested runner_labels (#1253); frozen like load_trust, as tuples of tuples.
+        config = _hosted_trust(labels=(('macos-15',), ('macos-15-intel',)))
+        for labels in (['macos-15'], ['macos-15-intel']):
+            with self.subTest(labels=labels):
+                result, _ = _collect(_hosted(_job('github_hosted_job', labels=labels)),
+                                     CODE_PATHS, config)
+                self.assertEqual(result['successful_checks'], ['check (hosted)'])
+
+    def test_label_alternatives_match_one_alternative_exactly(self):
+        config = _hosted_trust(labels=(('macos-15',), ('macos-15-intel',)))
+        for labels in (['macos-15', 'macos-15-intel'], ['macos-14'],
+                       ['macos-15', 'self-hosted'], ['macos'], ['macos-15-'], [], None):
+            with self.subTest(labels=labels):
+                self._rejects(_job('github_hosted_job', labels=labels), config)
+        for group in ('Default', 'github actions', None):
+            with self.subTest(group=group):
+                self._rejects(_job('github_hosted_job', labels=['macos-15'],
+                                   runner_group_name=group), config)
+
 
 class TrustedSlugTests(unittest.TestCase):
     def test_github_get_uses_trusted_slug(self):

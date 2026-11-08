@@ -118,6 +118,20 @@ def _readonly(value):
     return value
 
 
+def _hosted_label(item):
+    return type(item) is str and _RUNNER.fullmatch(item) is not None and item != "self-hosted"
+
+
+def _hosted_runner_labels(labels):
+    """github-hosted runner_labels: a flat list of 1-8 labels, or 1-4 alternatives,
+    each a flat list of 1-8 labels (#1253). No deeper nesting, no mixed forms."""
+    if _list(labels, 1, 8, _hosted_label):
+        return True
+    return (type(labels) is list and 1 <= len(labels) <= 4 and
+            all(_list(alternative, 1, 8, _hosted_label) for alternative in labels) and
+            len({frozenset(alternative) for alternative in labels}) == len(labels))
+
+
 def _validate_schema(value):
     _exact(value, {"schema_version", "canonical_root", "workspace_root", "tasks_root",
                    "repository", "ci_trust", "tools"})
@@ -182,9 +196,7 @@ def _validate_schema(value):
         else:
             if workflow["runner_names"] is not None:
                 _fail("TRUST_CI_INVALID")
-            labels = workflow["runner_labels"]
-            if (not _list(labels, 1, 8, lambda item: type(item) is str and
-                          _RUNNER.fullmatch(item) is not None and item != "self-hosted")):
+            if not _hosted_runner_labels(workflow["runner_labels"]):
                 _fail("TRUST_CI_INVALID")
         for field in ("code_check", "docs_check"):
             check = workflow[field]

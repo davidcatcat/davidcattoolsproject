@@ -346,6 +346,58 @@ class TrustTest(unittest.TestCase):
         self._write(value)
         self._error("TRUST_CI_INVALID")
 
+    def _hosted_value(self, labels):
+        value = json.loads(json.dumps(self.data))
+        value["ci_trust"]["mode"] = "github-hosted"
+        for workflow in value["ci_trust"]["workflows"]:
+            workflow["runner_names"] = None
+            workflow["runner_labels"] = ["ubuntu-latest"]
+        value["ci_trust"]["workflows"][0]["runner_labels"] = labels
+        return value
+
+    def test_github_hosted_label_alternatives_load(self):
+        self._write(self._hosted_value([["macos-15"], ["macos-15-intel"]]))
+        loaded = load_trust(home=str(self.home), _allow_root=self.allow_root)
+        self.assertEqual(loaded.ci_trust["workflows"][0]["runner_labels"],
+                         (("macos-15",), ("macos-15-intel",)))
+        self.assertEqual(loaded.ci_trust["workflows"][1]["runner_labels"], ("ubuntu-latest",))
+
+    def test_github_hosted_invalid_runner_labels_are_refused(self):
+        cases = {
+            "null": None,
+            "empty list": [],
+            "empty alternative": [["macos-15"], []],
+            "only empty alternative": [[]],
+            "strings then list": ["macos-15", ["macos-15-intel"]],
+            "list then string": [["macos-15"], "macos-15-intel"],
+            "nested too deep": [[["macos-15"]]],
+            "deeper in second alternative": [["macos-15"], [["macos-15-intel"]]],
+            "five alternatives": [["l1"], ["l2"], ["l3"], ["l4"], ["l5"]],
+            "nine labels in alternative": [["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9"]],
+            "non-string flat label": ["macos-15", 15],
+            "non-string nested label": [["macos-15", 15]],
+            "null nested label": [["macos-15"], [None]],
+            "self-hosted flat": ["macos-15", "self-hosted"],
+            "self-hosted in first alternative": [["self-hosted"], ["macos-15"]],
+            "self-hosted in second alternative": [["macos-15"], ["macos-15-intel", "self-hosted"]],
+            "pattern mismatch in alternative": [["macos-15"], ["macos 15"]],
+            "alternative not a list": [{"label": "macos-15"}],
+        }
+        for name, labels in cases.items():
+            with self.subTest(case=name):
+                self._write(self._hosted_value(labels))
+                self._error("TRUST_CI_INVALID")
+
+    def test_self_hosted_label_alternatives_are_refused(self):
+        value = json.loads(json.dumps(self.data))
+        value["ci_trust"]["workflows"][0]["runner_labels"] = [["macos-15"], ["macos-15-intel"]]
+        self._write(value)
+        self._error("TRUST_CI_INVALID")
+        value["ci_trust"]["workflows"][0]["runner_labels"] = ["self-hosted", "macOS"]
+        self._write(value)
+        self.assertEqual(load_trust(home=str(self.home), _allow_root=self.allow_root)
+                         .ci_trust["workflows"][0]["runner_labels"], ("self-hosted", "macOS"))
+
     def test_path_invalid_and_overlap_have_exact_codes(self):
         value = json.loads(json.dumps(self.data))
         value["canonical_root"] = str(self.canonical / "missing")
