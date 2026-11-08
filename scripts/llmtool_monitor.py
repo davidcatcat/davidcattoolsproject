@@ -1700,6 +1700,8 @@ CI_RUN_READS = 10  # unfinished runs whose job lists are read per refresh (oldes
 GITHUB_LIMIT = 16 << 20   # one page of 100 comments; a larger page fails as a stale status
 GITHUB_PAGE = 100    # comments per request (the API maximum)
 GITHUB_PAGES = 10    # about 600 comments in 12 hours were seen on 2026-11-05
+GITHUB_FULL_READ = 1800.0   # full comment window re-read interval (30 minutes)
+GITHUB_COMMENT_OVERLAP = 120.0   # overlap seconds subtracted from newest updated_at
 
 
 def _github_time(value) -> float:
@@ -2029,6 +2031,9 @@ class GitHubSource:
         self.successful_read = False
         self.read_failed = False
         self.comments_cut = False
+        self._comments: list[dict] = []
+        self._full_read_at: float | None = None
+        self._comment_updated: float | None = None
         self.pending: list[OwnerPending] = []
         self.scope = ""   # what the ★ list could see, said next to it
         self.branch_prs: dict[str, tuple[int, str]] = {}   # head branch -> (PR, MERGED/CLOSED/OPEN)
@@ -2237,28 +2242,76 @@ class GitHubSource:
             return
         self.fetched = time.monotonic()
         failed = True
-        since = self.clock() - self.window
+        now = self.clock()
+        since = now - self.window
         stamp = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        last_full = self._full_read_at
+        full = (
+            last_full is None
+            or self._comment_updated is None
+            or (now - last_full) >= GITHUB_FULL_READ
+            or now < last_full
+        )
+        self._full_read_at = None
         try:
-            comments, more = [], False
+            if full:
+                query = f"since={stamp}&sort=created&direction=desc"
+                more, next_full = False, now
+            else:
+                delta_stamp = datetime.fromtimestamp(
+                    self._comment_updated - GITHUB_COMMENT_OVERLAP, timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                query = f"since={delta_stamp}&sort=updated&direction=asc"
+                more, next_full = self.comments_cut, last_full
+            raw = []
             for page in range(1, GITHUB_PAGES + 1):
-                batch = self._get(f"repos/{self.repo}/issues/comments?since={stamp}"
-                                  f"&sort=created&direction=desc&per_page={GITHUB_PAGE}&page={page}")
+                batch = self._get(f"repos/{self.repo}/issues/comments?{query}"
+                                  f"&per_page={GITHUB_PAGE}&page={page}")
                 if type(batch) is not list:
                     raise ValueError("comments page")
-                comments += batch
+                raw += batch
                 if len(batch) < GITHUB_PAGE:
                     break
             else:
-                # Every page was full: say so unless a probe shows nothing is
-                # left. An unanswered probe keeps the warning and the pages.
-                try:
-                    probe = self._get(f"repos/{self.repo}/issues/comments?since={stamp}"
-                                      f"&sort=created&direction=desc&per_page=1"
-                                      f"&page={GITHUB_PAGE * GITHUB_PAGES + 1}")
-                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
-                    probe = None
-                more = not (type(probe) is list and not probe)
+                if full:
+                    # Every page was full: say so unless a probe shows nothing is
+                    # left. An unanswered probe keeps the warning and the pages.
+                    try:
+                        probe = self._get(f"repos/{self.repo}/issues/comments?since={stamp}"
+                                          f"&sort=created&direction=desc&per_page=1"
+                                          f"&page={GITHUB_PAGE * GITHUB_PAGES + 1}")
+                    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                        probe = None
+                    more = not (type(probe) is list and not probe)
+                else:
+                    next_full = None
+            by_id, unkeyed = {}, []
+            prior = () if full else reversed(self._comments)
+            for item in (*prior, *raw):
+                if type(item) is not dict:
+                    continue
+                key = item.get("id")
+                if type(key) is int:
+                    by_id[key] = item
+                else:
+                    unkeyed.append(item)
+            ordered = (*by_id.values(), *unkeyed) if full else (*reversed(by_id.values()), *unkeyed)
+            comments = sorted(
+                (item for item in ordered
+                 if "created_at" not in item or _github_time(item.get("created_at")) >= since),
+                key=lambda item: _github_time(item.get("created_at")),
+                reverse=True,
+            )
+            newest_updated = max(
+                (_github_time(item.get("updated_at") or item.get("created_at"))
+                 for item in (*raw, *comments) if type(item) is dict),
+                default=0.0,
+            )
+            if not full and self._comment_updated is not None:
+                newest_updated = max(newest_updated, self._comment_updated)
+            self._comments = comments
+            self._comment_updated = newest_updated if newest_updated > 0 else None
+            self._full_read_at = next_full
             pulls = self._get(f"repos/{self.repo}/pulls?state=all&sort=updated"
                               "&direction=desc&per_page=100")
             if type(pulls) is not list:
