@@ -8700,6 +8700,106 @@ class WorkBoardTests(unittest.TestCase):
         self.assertEqual(run("4a")[-1], ("activity", False, True))
         self.assertEqual(run("1a")[-1], ("log", False, False))
 
+    def test_curses_key_filter_clears_screen_and_ignores_unknown_keys(self):
+        import curses
+
+        monitor = mon.Monitor()
+        class Screen:
+            def __init__(self, keys):
+                self.keys = list(keys)
+                self.cleared = []
+            def getmaxyx(self): return (30, 100)
+            def timeout(self, value): pass
+            def keypad(self, value): pass
+            def erase(self): pass
+            def move(self, y, x): pass
+            def refresh(self): pass
+            def addnstr(self, y, x, text, n, attr): pass
+            def getch(self): return self.keys.pop(0)
+            def clearok(self, value): self.cleared.append(value)
+
+        def run(keys):
+            painted = []
+            screen = Screen(keys)
+            original = mon._paint_screen
+            def record(*args, **kwargs):
+                painted.append((args[2], args[3]))
+                return original(*args, **kwargs)
+            with patch.object(mon, "_paint_screen", side_effect=record), \
+                 patch.object(monitor, "poll"), \
+                 patch.object(mon.GitHubSource, "refresh_in_background"), \
+                 patch("curses.curs_set"):
+                mon.run_curses(screen, 60, False, monitor)
+            return screen.cleared, painted
+
+        cleared, painted = run([1000, 200, ord("q")])
+        self.assertEqual(cleared, [True, True])
+        self.assertEqual(len(painted), 3)
+        self.assertTrue(all(view == "office" and offset == 0 for view, offset in painted))
+
+        cleared, painted = run([curses.KEY_DOWN, ord("6"), ord("q")])
+        self.assertEqual(cleared, [])
+        self.assertEqual(painted[-1], ("board", 0))
+
+    def test_paint_screen_parks_cursor_at_origin_before_refresh(self):
+        import curses
+
+        board_monitor = mon.Monitor()
+        pending = [mon.OwnerPending(NOW, "#965", "open", "repair_gate", "repair_gate")]
+        pending.extend(mon.OwnerPending(NOW, f"#{n}", "open", "request", "repair_gate")
+                       for n in range(966, 985))
+        board_monitor.github = self._github([], pending=pending)
+        board_monitor.pm_board = mon.PmBoard("malformed", None, [], [], [])
+
+        tasks_monitor = mon.Monitor()
+        tasks_monitor.opencode_route_failed = True
+
+        office_monitor = mon.Monitor()
+
+        class Screen:
+            def __init__(self, fail_origin=False):
+                self.calls = []
+                self.fail_origin = fail_origin
+            def getmaxyx(self): return (20, 24)
+            def erase(self): pass
+            def move(self, y, x):
+                self.calls.append(("move", (y, x)))
+                if self.fail_origin and (y, x) == (0, 0):
+                    raise curses.error("move failed")
+            def refresh(self):
+                self.calls.append(("refresh", None))
+
+        for view, monitor, colors in (("board", board_monitor, {"!": 8, "section": 4}),
+                                      ("tasks", tasks_monitor, {}),
+                                      ("office", office_monitor, {})):
+            screen = Screen()
+            drawn = {}
+            offset = mon._paint_screen(
+                screen, monitor, view, 0, False, colors,
+                lambda row, text, attr=0: drawn.__setitem__(row, (text, attr)))
+            self.assertEqual(offset, 0)
+            self.assertTrue(drawn)
+            self.assertEqual(screen.calls[-1], ("refresh", None))
+            moves_before_refresh = [pos for kind, pos in screen.calls[:-1] if kind == "move"]
+            self.assertTrue(moves_before_refresh)
+            self.assertEqual(moves_before_refresh[-1], (0, 0))
+            self.assertEqual(screen.calls[-2:], [("move", (0, 0)), ("refresh", None)])
+
+        expected_offset = mon._paint_screen(
+            Screen(), board_monitor, "board", 100, False,
+            {"!": 8, "section": 4}, lambda row, text, attr=0: None)
+        self.assertGreater(expected_offset, 0)
+
+        failing_screen = Screen(fail_origin=True)
+        drawn = {}
+        offset = mon._paint_screen(
+            failing_screen, board_monitor, "board", 100, False,
+            {"!": 8, "section": 4},
+            lambda row, text, attr=0: drawn.__setitem__(row, (text, attr)))
+        self.assertEqual(offset, expected_offset)
+        self.assertTrue(drawn)
+        self.assertEqual(failing_screen.calls, [("move", (0, 0)), ("refresh", None)])
+
     def test_unknown_counts_sections_and_narrow_rows_preserve_refs(self):
         unknown = mon.work_board(self._github(None, successful_read=False),
                                  mon.PmBoard("missing", None, [], [], []), NOW)
