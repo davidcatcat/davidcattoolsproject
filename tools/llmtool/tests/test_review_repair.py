@@ -40,13 +40,20 @@ class TempTaskStore:
     """Small persistent TaskStore fake preserving compare-and-update semantics."""
 
     def __init__(self, root, record):
+        self.root = Path(root).resolve()
+        self.task_id = record.get('task_id')
         self.path = Path(root) / 'task.json'
         self.path.write_text(json.dumps(record))
 
     def get(self, task_id):
+        if task_id != self.task_id:
+            return TaskStore(self.root).get(task_id)
         return json.loads(self.path.read_text())
 
     def compare_and_update(self, task_id, *, expected, **changes):
+        if task_id != self.task_id:
+            return TaskStore(self.root).compare_and_update(
+                task_id, expected=expected, **changes)
         record = self.get(task_id)
         if any(record.get(key) != value for key, value in expected.items()):
             raise RuntimeError('conflict')
@@ -56,6 +63,9 @@ class TempTaskStore:
             sort_keys=True).encode()).hexdigest()
         self.path.write_text(json.dumps(record))
         return record
+
+    def __getattr__(self, name):
+        return getattr(TaskStore(self.root), name)
 
 
 def _record():
@@ -131,6 +141,103 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(captured[0].mode, 'direct')
         self.assertEqual(captured[0].owner_ref, developer['owner_assignment_ref'])
         self.assertEqual(captured[0].cwd, '/registered/d6')
+
+    def test_gw_agent_uses_the_owner_gated_repair_route(self):
+        from test_active_pm_inbox import ActivePMInboxTests
+
+        self.assertEqual(review_repair._worker_key('gw-agent'), 'company-gw-agent')
+        captured = []
+        packet = {
+            'verdict_comment_id': 9, 'task': TASK, 'failed_head': HEAD,
+            'version': 1, 'findings_count': 1,
+            'reviewer_text_excerpt_untrusted_data': 'Fix the reported issue.',
+        }
+        task = {'task_id': TASK, 'pm_assignment': {'acceptance': ['Fix it.']}}
+        developer = {
+            'provider_profile': 'gw-agent', 'owner_assignment_ref': None,
+            'read_paths': ['src'], 'write_paths': ['src/file.py'],
+            'egress_basis': 'Task authorized source files only.',
+        }
+        with patch.object(review_repair, '_registered_d6', return_value=(
+                type('Registration', (), {'root': '/registered/d6'})(), object())):
+            result = review_repair._delegate_repair(
+                task=task, developer=developer, packet=packet,
+                executor_task=EXECUTOR,
+                delegate=lambda args, store: captured.append(args) or 0,
+                store=type('S', (), {'get': lambda _self, _task_id: _record()})())
+        self.assertEqual(result, 0)
+        self.assertEqual(captured[0].provider, 'gw-agent')
+        self.assertEqual(captured[0].mode, 'direct')
+        self.assertIsNone(captured[0].data_class)
+        self.assertIsNone(captured[0].owner_ref)
+        self.assertEqual(captured[0].read_path, ['src'])
+        self.assertEqual(captured[0].write_path, ['src/file.py'])
+        self.assertEqual(captured[0].acceptance, ['Fix it.'])
+        self.assertEqual(captured[0].egress_basis, developer['egress_basis'])
+        self.assertEqual(captured[0].repair_packet, packet)
+        self.assertEqual(captured[0].cwd, '/registered/d6')
+
+        fixture = ActivePMInboxTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        record = _record()
+        record['developer']['provider_profile'] = 'gw-agent'
+        record['developer']['model'] = 'gw'
+        record['pm_assignment']['route'] = 'gw-agent'
+        record['pm_provenance'] = {
+            'pm_native_session_id': fixture.session,
+            'pm_cwd': str(fixture.pm_cwd),
+        }
+        self.store = TempTaskStore(self.temp.name, record)
+
+        paused = type('Decision', (), {'allowed': False, 'reason_code': 'PAUSED'})()
+        with patch.object(review_repair.worker_dispatch, 'evaluate',
+                          return_value=paused) as evaluate:
+            with self.assertRaises(LLMToolError) as caught:
+                review_repair.repair_review(
+                    store=self.store, task_id=TASK, executor_task=EXECUTOR,
+                    pr_number=PR, github_get=lambda _path: [_comment()],
+                    current_head=lambda _task, _executor: HEAD,
+                    dispatch_adapter=lambda **_kwargs: self.fail('must not dispatch'))
+        self.assertEqual(caught.exception.review_repair_code, 'PAUSED')
+        evaluate.assert_called_once_with('company-gw-agent', None, TASK)
+        self.assertNotIn('review_repair_claims', self.store.get(TASK))
+
+        delegated = []
+        allowed = type('Decision', (), {'allowed': True})()
+        with patch.object(review_repair.worker_dispatch, 'evaluate',
+                          return_value=allowed), \
+             patch.object(review_repair, '_registered_d6', return_value=(
+                 type('Registration', (), {'root': '/registered/d6'})(), object())), \
+             redirect_stdout(StringIO()):
+            repair_result = review_repair.repair_review(
+                store=self.store, task_id=TASK, executor_task=EXECUTOR,
+                pr_number=PR, github_get=lambda _path: [_comment()],
+                current_head=lambda _task, _executor: HEAD,
+                delegate_callable=lambda args, store: delegated.append(args) or 0)
+        real_store = TaskStore(Path(self.temp.name).resolve())
+        repair_task = real_store.get(repair_result['repair_task_id'])
+        self.assertEqual(repair_task['pm_assignment']['route'], 'gw-agent')
+        self.assertEqual(repair_task['pm_assignment']['risk'], 'LOW')
+        self.assertEqual(repair_task['pm_assignment']['acceptance'][0],
+                         'Repair the reported issue.')
+        self.assertIn('comment id 9', repair_task['pm_assignment']['acceptance'][1])
+        claims = self.store.get(TASK)['review_repair_claims']
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0]['state'], 'DISPATCHED')
+        self.assertEqual(claims[0]['repair_task_id'], repair_result['repair_task_id'])
+        self.assertEqual(delegated[0].provider, 'gw-agent')
+        self.assertEqual(delegated[0].mode, 'direct')
+        self.assertIsNone(delegated[0].data_class)
+        self.assertIsNone(delegated[0].owner_ref)
+        self.assertEqual(delegated[0].cwd, '/registered/d6')
+
+        version = self._repair_history(MAX)
+        with self.assertRaises(LLMToolError) as limit_caught:
+            self.dispatch(family='network', github_get=lambda _path: [
+                _comment(comment_id=11, version=version)])
+        self.assertEqual(limit_caught.exception.review_repair_code,
+                         'REPAIR_LIMIT_REACHED')
 
     def test_repair_delegate_refuses_unregistered_or_moved_d6_before_provider(self):
         original = _record()

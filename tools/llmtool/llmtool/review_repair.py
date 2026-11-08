@@ -42,9 +42,9 @@ def _update_claim_state(store, task_id, claim, state):
 
 
 def _worker_key(profile):
-    return {'company-gw': 'company-gw', 'codex': 'codex-developer',
-            'opencode': 'opencode-developer', 'claude': 'claude-developer',
-            'agy': 'agy'}.get(profile)
+    return {'company-gw': 'company-gw', 'gw-agent': 'company-gw-agent',
+            'codex': 'codex-developer', 'opencode': 'opencode-developer',
+            'claude': 'claude-developer', 'agy': 'agy'}.get(profile)
 
 
 def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
@@ -69,13 +69,15 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
     registration, _snapshot = _registered_d6(original_task, executor_task)
     args = Namespace(
         task_id=task['task_id'], provider=developer['provider_profile'],
-        mode='direct' if developer['provider_profile'] in ('codex', 'agy', 'claude') else 'proposal',
+        mode='direct' if developer['provider_profile'] in (
+            'codex', 'agy', 'claude', 'gw-agent') else 'proposal',
         owner_ref=developer.get('owner_assignment_ref'),
         selection_source='PM',
         executor_task=executor_task, cwd=registration.root,
         read_path=list(read_paths),
         write_path=list(write_paths), acceptance=list(acceptance),
-        egress_basis=developer.get('egress_basis'), repair_packet=packet,
+        egress_basis=developer.get('egress_basis'), data_class=None,
+        repair_packet=packet,
     )
     return invoke(args, store=store)
 
@@ -91,7 +93,7 @@ def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_
             type(provenance.get('pm_cwd')) is not str):
         _refuse('REPAIR_PM_SESSION_UNAVAILABLE')
     route = developer.get('provider_profile')
-    if route not in ('codex', 'opencode', 'agy', 'claude'):
+    if route not in ('codex', 'opencode', 'agy', 'claude', 'gw-agent'):
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     pm_assignment = task.get('pm_assignment')
     if type(pm_assignment) is not dict or type(pm_assignment.get('goal')) is not str:
