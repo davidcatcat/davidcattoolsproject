@@ -3774,10 +3774,13 @@ class CompletionDocsOnlyAttributedPathsTests(unittest.TestCase):
         del test['docs_only']
         self.assert_refused(self.MERGED, self.DOCS, [test])
 
+    # A present developer_changed_paths must be a non-empty list of unique,
+    # non-empty strings. Membership in changed_paths is not required.
+    MALFORMED_DEVELOPER = ([], None, 'docs/guide.md', ['docs/guide.md', 1],
+                           ['docs/guide.md', ''], ['docs/guide.md', 'docs/guide.md'])
+
     def test_invalid_developer_changed_paths_make_the_record_invalid(self):
-        for developer in ([], None, 'docs/guide.md', ['docs/guide.md', 1],
-                          ['docs/guide.md', 'docs/guide.md'],
-                          ['docs/guide.md', 'docs/other.md']):
+        for developer in self.MALFORMED_DEVELOPER:
             with self.subTest(developer=developer):
                 tests = [self.docs_test(developer if type(developer) is list
                                         else self.DOCS)]
@@ -3806,15 +3809,46 @@ class CompletionDocsOnlyAttributedPathsTests(unittest.TestCase):
         # Codex review v1: a present developer_changed_paths is checked in
         # every completion record, not only when a docs-only test exists.
         executed = {'status': 'PASS', 'source_sha': self.HEAD, 'exit_code': 0}
-        for developer in ([], None, 'docs/guide.md', ['docs/guide.md', 1],
-                          ['docs/guide.md', 'docs/guide.md'],
-                          ['docs/guide.md', 'docs/other.md']):
+        for developer in self.MALFORMED_DEVELOPER:
             with self.subTest(developer=developer):
                 self.assert_refused(self.MERGED, developer, [executed])
         saved = self.save(self.MERGED, _NO_DEVELOPER_PATHS, [executed])
         self.assertEqual(saved['completion']['evidence']['tests'], [executed])
         self.assertNotIn('developer_changed_paths',
                          saved['completion']['evidence']['result'])
+
+    def test_malformed_developer_paths_fail_with_docs_only_test(self):
+        for developer in self.MALFORMED_DEVELOPER:
+            with self.subTest(developer=developer):
+                self.assert_refused(self.MERGED, developer, [self.docs_test(self.DOCS)])
+
+    def test_changed_paths_must_be_a_list_when_developer_paths_present(self):
+        executed = {'status': 'PASS', 'source_sha': self.HEAD, 'exit_code': 0}
+        for changed in (None, 'docs/guide.md', {'docs/guide.md': True}):
+            with self.subTest(changed=changed):
+                task = self._completion_task([], self.DOCS, [executed])
+                task['completion']['evidence']['result']['changed_paths'] = changed
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.create(task)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_STORE_INVALID')
+                self.assertNotIn(task['task_id'], self.store.task_ids())
+
+    def test_attributed_path_outside_changed_paths_is_saved(self):
+        # #1177 attribution can name a path that is not in the net diff, for
+        # example a rename-conflict source or a file added and later deleted.
+        developer = ['docs/guide.md', 'docs/other.md']
+        changed = ['docs/guide.md']
+        executed = {'status': 'PASS', 'source_sha': self.HEAD, 'exit_code': 0}
+        for tests in ([executed], [self.docs_test(developer)]):
+            with self.subTest(status=tests[0]['status']):
+                saved = self.save(changed, developer, tests)
+                result = saved['completion']['evidence']['result']
+                self.assertEqual(result['changed_paths'], changed)
+                self.assertEqual(result['developer_changed_paths'], developer)
+                self.assertEqual(saved['completion']['evidence']['tests'], tests)
+        # The docs-only test still compares with the attributed paths only.
+        self.assert_refused(changed, developer, [self.docs_test(changed)])
 
 
 if __name__ == '__main__':

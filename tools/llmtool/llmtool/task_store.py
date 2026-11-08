@@ -946,18 +946,21 @@ def _completion_docs_paths(result):
     Same rule as _attributed_paths in task_submission_cli.py: the Developer-
     attributed developer_changed_paths when that key is present, else
     changed_paths. Files that only a clean main merge brought in stay in
-    changed_paths and are not Developer changes. A present
-    developer_changed_paths must be a non-empty, duplicate-free list of
-    strings that are all in changed_paths; anything else fails.
+    changed_paths and are not Developer changes. _validate calls this for
+    every completion record it checks. A present developer_changed_paths
+    must be a non-empty list of unique, non-empty strings, and changed_paths
+    must then be a list; anything else fails. Its entries need not appear
+    in changed_paths: Developer attribution (#1177) can name paths outside
+    the net diff, such as a rename-conflict source or a file added and
+    later deleted.
     """
     if 'developer_changed_paths' not in result:
         return result.get('changed_paths', [])
     paths = result['developer_changed_paths']
-    changed = result.get('changed_paths')
     if (type(paths) is not list or not paths or
-            any(type(path) is not str for path in paths) or
-            len(set(paths)) != len(paths) or type(changed) is not list or
-            any(path not in changed for path in paths)):
+            any(type(path) is not str or not path for path in paths) or
+            len(set(paths)) != len(paths) or
+            type(result.get('changed_paths')) is not list):
         _fail()
     return paths
 
