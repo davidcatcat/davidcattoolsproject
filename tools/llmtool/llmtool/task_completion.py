@@ -2138,6 +2138,29 @@ def _review_family_compatible(developer, reviewer_identity):
     return reviewer_family != developer_family
 
 
+def _company_gw_text_proposal_pm_session(task_record, executor_identity):
+    """Return the PM session of a PM-applied company-gw text-proposal Task, else None.
+
+    Only an exact company-gw Developer record qualifies: no exposed native
+    session, a responded unified diff with a sha256, applied in the D6
+    registered to the company-gw trusted agent, and a known PM session.
+    """
+    if type(task_record) is not dict or executor_identity != 'company-gw':
+        return None
+    developer = task_record.get('developer')
+    pm_session = task_record.get('pm_session_id')
+    if (type(developer) is not dict or
+            developer.get('provider_profile') != 'company-gw' or
+            developer.get('backend_session_semantics') != 'NO_NATIVE_SESSION_ID_EXPOSED' or
+            developer.get('state') != 'DEVELOPER_RESPONDED' or
+            developer.get('artifact_format') != 'unified_diff' or
+            type(developer.get('artifact_sha256')) is not str or
+            _HEX64.fullmatch(developer['artifact_sha256']) is None or
+            type(pm_session) is not str or not pm_session or pm_session == 'UNKNOWN'):
+        return None
+    return pm_session
+
+
 def _review_binding_line(task_id, run_id, contract_digest, result_sha):
     return (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
             f'contract={contract_digest} head={result_sha}')
@@ -2667,7 +2690,21 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
     if reviewer.native_session_id in (None, 'UNKNOWN'):
         missing.append('REVIEWER_NATIVE_SESSION_UNVERIFIED')
     elif executor_native_session_id in (None, 'UNKNOWN'):
-        missing.append('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT')
+        # #1241: company-gw only proposes a text diff and exposes no native
+        # session; the PM applies it in the registered company-gw D6. There,
+        # independence rests on the bound cross-family Reviewer on its own D6,
+        # whose native session must differ from the PM session. Every other
+        # route, and any company-gw record that does not match exactly, keeps
+        # the fail-closed rule.
+        pm_session = None
+        if executor_identity == 'company-gw':
+            try:
+                pm_session = _company_gw_text_proposal_pm_session(
+                    load_completion_task_record(), executor_identity)
+            except LLMToolError:
+                pm_session = None
+        if pm_session is None or reviewer.native_session_id == pm_session:
+            missing.append('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT')
     elif reviewer.native_session_id == executor_native_session_id:
         missing.append('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT')
     if reviewer.github_login is None:
