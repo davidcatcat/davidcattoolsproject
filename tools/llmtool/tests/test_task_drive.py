@@ -17,6 +17,12 @@ class TaskDriveTests(unittest.TestCase):
 
         return advance, calls
 
+    def quota_ok(self):
+        return {
+            'core': {'remaining': 5000, 'reset': 1700000100},
+            'graphql': {'remaining': 5000, 'reset': 1700000200},
+        }
+
     def test_drives_each_step_and_merges_only_when_requested(self):
         steps = [
             {'task_id': 't', 'pr': 17, 'head': 'a' * 40, 'codes': []},
