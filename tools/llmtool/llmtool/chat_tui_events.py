@@ -97,15 +97,27 @@ def _other_events(record):
     for item in _items(record.get("remote_test_receipts")):
         failures = item.get("failures")
         failed = str(len(failures)) if type(failures) is list else UNKNOWN
+        actions = item.get("actions")
+        hosted = ""
+        if type(actions) is dict:
+            run_id = actions.get("run_id")
+            if type(run_id) is int and not isinstance(run_id, bool) and 1 <= run_id <= (1 << 53):
+                hosted = ", GitHub-hosted run " + value(actions, "run_id")
         events.append(_event(_time(item, "ended_at") or _time(item, "started_at"), "TEST",
                              "remote test receipt " + value(item, "result") + ", exit "
                              + value(item, "exit_code") + ", ran " + value(item, "ran_total")
                              + ", failed modules " + failed + ", sha "
-                             + value(item, "source_sha")[:12]))
+                             + value(item, "source_sha")[:12] + hosted))
     for item in _items(record.get("remote_test_outcomes")):
         events.append(_event(_time(item, "at"), "TEST",
                              "remote test outcome " + value(item, "result") + " ("
                              + value(item, "code") + "), sha " + value(item, "sha")[:12]))
+    for item in _items(record.get("remote_test_dispatches")):
+        run = value(item, "run_id") if item.get("run_id") is not None else "pending"
+        events.append(_event(_time(item, "dispatched_at"), "TEST",
+                             "hosted remote-test dispatch " + value(item, "state")
+                             + ", run " + run
+                             + ", sha " + value(item, "sha")[:12]))
     for item in _items(record.get("review_dispatch_claim")):
         text = ("review claim PR #" + value(item, "pr") + " v" + value(item, "version") + " "
                 + value(item, "state") + ", reviewer task " + value(item, "reviewer_task"))
