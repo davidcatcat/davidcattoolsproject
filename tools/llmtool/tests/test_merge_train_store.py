@@ -410,6 +410,40 @@ class MergeTrainStoreTest(unittest.TestCase):
             store.task_store.default_root = original
         self.assertTrue(self.path().exists())
 
+    # A docs-only or scripts-only member may carry no EC2 receipt digest.
+
+    def test_null_receipt_digest_round_trips(self):
+        members = [dict(_member(1), remote_test_receipt_digest=None), _member(2)]
+        created = self.create(members=members)
+        self.assertIsNone(created['members'][0]['remote_test_receipt_digest'])
+        self.assertEqual(created['members'][1]['remote_test_receipt_digest'],
+                         format(2, '012x'))
+        body = {key: value for key, value in created.items() if key != 'record_sha256'}
+        self.assertEqual(created['record_sha256'], store.record_digest(body))
+        self.assertEqual(store.get('t-1', root=self.root), created)
+        # The null digest survives every later state move and re-seal.
+        record = self.update(created, state='MERGE_CLAIMED', train_pr=200,
+                             merge_attempt=_attempt('CLAIMED'))
+        self.assertIsNone(store.get('t-1', root=self.root)['members'][0][
+            'remote_test_receipt_digest'])
+        self.assertEqual(store.list_records(self.root), [record])
+
+    def test_non_string_non_null_receipt_digest_refused(self):
+        for digest in (0, 12345678, True, False, ['abcdef12'], {'d': 'abcdef12'}, 1.5,
+                       '', 'ABCDEF12'):
+            with self.subTest(digest=digest):
+                members = [dict(_member(1), remote_test_receipt_digest=digest), _member(2)]
+                self.assertRefused('TRAIN_RECORD_INVALID', self.create, members=members)
+        self.assertFalse(self.path().exists())
+
+    def test_short_hex_receipt_digest_still_seals_as_before(self):
+        created = self.create()
+        expected = hashlib.sha256(json.dumps(_record(), sort_keys=True,
+                                             separators=(',', ':')).encode('utf-8')).hexdigest()
+        self.assertEqual(created['record_sha256'], expected)
+        self.assertEqual(created['members'][0]['remote_test_receipt_digest'],
+                         format(1, '012x'))
+
 
 if __name__ == '__main__':
     unittest.main()

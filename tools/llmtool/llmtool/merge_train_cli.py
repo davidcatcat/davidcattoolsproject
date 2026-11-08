@@ -6,6 +6,8 @@ before the merge-train library step is called, once. ``build`` checks the
 members given on the command line; ``merge`` and ``close`` read the members from
 the validated train record. ``close`` also re-checks a member's owner right
 before each member advance; a refusal there stops the whole close at once.
+``close`` passes its GitHub reader, gh runner and repository root to the close
+step, which closes member PRs that are still open after the train is CLOSED.
 ``build`` hands the members to the build step as ``(task_id, pr)`` pairs in
 command-line order, the shape ``merge_train_build.build_train`` accepts.
 ``status`` reads through ``merge_train_store.list_records`` and changes nothing.
@@ -351,8 +353,10 @@ def run_task_train(args, *, store=None, build_call=None, merge_call=None, close_
                                          github_get=github_get)
     owned = _OwnedAdvance(advance_call, store, caller_key)
     try:
+        # close_train also closes still-open member PRs through these adapters.
         value = _step(train_id, lambda: close_call(
-            train_id, store=store, advance_call=owned, train_root=train_root))
+            train_id, store=store, advance_call=owned, github_get=github_get,
+            gh_runner=gh_runner, root=root, train_root=train_root))
     except _MemberRefused:
         value = None
     if owned.refused is not None:
