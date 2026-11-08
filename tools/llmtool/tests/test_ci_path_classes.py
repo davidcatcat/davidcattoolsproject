@@ -5,6 +5,8 @@ import re
 import sys
 import unittest
 
+import yaml
+
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -194,6 +196,62 @@ class CIPathClassTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertEqual(ci_path_classes.classify_path(path), "runtime")
+
+    def test_workflow_paths_include_markdown_glob_and_reports(self):
+        workflow_path = (Path(__file__).resolve().parents[3] / ".github" / "workflows"
+                         / "llmtool-linux-ci.yml")
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        data = yaml.safe_load(workflow_text)
+        on_section = data.get("on") if "on" in data else data.get(True)
+        self.assertIsNotNone(on_section)
+
+        prior_entries = [
+            "tools/llmtool/**",
+            "!tools/llmtool/*.md",
+            ".github/workflows/llmtool-linux-ci.yml",
+            "tools/ec2-runner/**",
+            "tools/safe-git/**",
+            "tools/api-agent-gateway/**",
+            "tools/ai-loop/**",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "skills/**",
+            "docs/**",
+            "tools/llmtool/*.md",
+            "*.md",
+            "scripts/**",
+            ".github/workflows/**",
+        ]
+
+        for event in ("push", "pull_request"):
+            with self.subTest(event=event):
+                self.assertIn(event, on_section)
+                paths = on_section[event].get("paths", [])
+                self.assertIn("**/*.md", paths)
+                self.assertIn("reports/**", paths)
+                for entry in prior_entries:
+                    self.assertIn(entry, paths)
+                self.assertEqual(paths, prior_entries + ["**/*.md", "reports/**"])
+
+        self.assertIn(
+            "# '*.md' matches only top-level files, so Markdown in reports/ and other folders got no docs check.",
+            workflow_text,
+        )
+
+    def test_reports_only_markdown_change_gives_code_false_and_docs_true(self):
+        self.assertEqual(ci_path_classes.classify_path("reports/x.md"), "docs")
+        self.assertEqual(ci_path_classes.classify_path("reports/x.json"), "other")
+        flags = ci_path_classes.linux_flags(b"reports/x.md\0")
+        self.assertEqual(flags, (False, True, False, False))
+        code, docs, gateway, ai_loop = flags
+        self.assertFalse(code)
+        self.assertTrue(docs)
+        self.assertFalse(gateway)
+        self.assertFalse(ai_loop)
+        flags_multi = ci_path_classes.linux_flags(b"reports/x.md\0reports/sub/report.md\0")
+        self.assertEqual(flags_multi, (False, True, False, False))
+        flags_json = ci_path_classes.linux_flags(b"reports/x.json\0")
+        self.assertEqual(flags_json, (True, False, False, False))
 
 
 if __name__ == "__main__":
