@@ -985,7 +985,17 @@ def run_task_abandon(args, *, store=None, stdout=None):
     saved = store.abandon(args.task_id, pm_session_id=key, reason=args.reason)
     _print({'task_id': saved['task_id'], 'state': 'ABANDONED',
             'abandonment': saved['abandonment']}, stdout=stdout)
+    _sweep_gw_agent_sessions(store)
     return 0
+
+
+def _sweep_gw_agent_sessions(store):
+    """End gw-agent sessions of ended Tasks; never changes the caller's result (#120 G1c)."""
+    try:
+        from . import gw_agent_sessions
+        gw_agent_sessions.sweep(store)
+    except Exception:
+        pass
 
 
 def run_task_remote_test(args, *, store=None, stdout=None):
@@ -4164,6 +4174,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     data_class = getattr(args, 'data_class', None)
     if type(data_class) is not str or not data_class:
         raise LLMToolError('--provider gw-agent requires --data-class')
+    _sweep_gw_agent_sessions(store)
     task = store.get(args.task_id)
     previous = task.get('developer')
     if (type(previous) is dict and previous.get('provider_profile') == 'gw-agent' and

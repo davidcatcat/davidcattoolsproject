@@ -2025,6 +2025,38 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             publish_gh_runner=None, record_result_call=None, merge_gh_runner=None,
             owner_acceptance=None):
     """Perform one selected action and return a bounded JSON-ready summary."""
+    result = _advance_step(
+        task_id=task_id, store=store, pr_number=pr_number, integration_pr=integration_pr,
+        merge=merge, reviewer_session_done=reviewer_session_done,
+        dispatch_review_call=dispatch_review_call,
+        record_review_result_call=record_review_result_call,
+        repair_review_call=repair_review_call, run_task_complete_call=run_task_complete_call,
+        record_github_event_call=record_github_event_call, github_get=github_get, cwd=cwd,
+        publish_git_runner=publish_git_runner, publish_gh_runner=publish_gh_runner,
+        record_result_call=record_result_call, merge_gh_runner=merge_gh_runner,
+        owner_acceptance=owner_acceptance)
+    if type(result) is dict and result.get('step') == 'CLOSED':
+        _sweep_gw_agent_sessions(store)
+    return result
+
+
+def _sweep_gw_agent_sessions(store):
+    """End gw-agent sessions of ended Tasks; never changes the advance result (#120 G1c)."""
+    try:
+        from . import gw_agent_sessions
+        gw_agent_sessions.sweep(TaskStore() if store is None else store)
+    except Exception:
+        pass
+
+
+def _advance_step(*, task_id, store=None, pr_number=None, integration_pr=None, merge=False,
+                  reviewer_session_done=False, dispatch_review_call=None,
+                  record_review_result_call=None, repair_review_call=None,
+                  run_task_complete_call=None, record_github_event_call=None,
+                  github_get=None, cwd=None, publish_git_runner=None,
+                  publish_gh_runner=None, record_result_call=None, merge_gh_runner=None,
+                  owner_acceptance=None):
+    """Perform one selected action and return a bounded JSON-ready summary."""
     if owner_acceptance is not None and not merge:
         # An Owner acceptance is only for a merge; refuse before anything runs.
         return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
