@@ -68,6 +68,16 @@ Before Mode B starts, post a `subpm-lease` claim comment on the WP Issue with `w
 
 Only the main PM merges, adopts Tasks, edits the #763 inventory or asks the Owner. A Mode B hand-back records: WP; Task IDs; D6 and lease-ref; Developer route and start receipt; PR; HEAD SHA; verdict comment URL; CI conclusion; open findings; lease state.
 
+### Large work packages (Owner 2026-11-07)
+
+The PM plans work as packages of 3 to 6 related items with one shared goal, known dependencies and shared acceptance ([Owner instruction, relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6704957386)). A package may hold several bounded PRs. Each PR keeps its own Task scope, acceptance and D6, with one writer per D6 and no conflicting writers.
+
+Packaging changes no gate. The per-D6 cap of three Developer runs (one run plus two repairs), the [High Debug rule](pm-continuation-reference.md#high-debug), safety, authorization, formal review, EC2 and exact-head CI apply to each PR as before. Splitting or merging work to get around them is not allowed.
+
+Independent packages run in parallel through Mode B sub-agent PMs with non-overlapping leases. Request formal review only for a finished PR head. On unfinished work, run only the checks that [Validate a Developer result before review](#validate-a-developer-result-before-review-owner-2026-11-02) allows, never tests inside a D6; final EC2, formal review and exact-head CI still decide.
+
+Owner-reserved decisions, new permissions and security boundaries still stop the dependent work for the Owner.
+
 ## BLOCKED: diagnose, then retry, reassign or isolate
 
 1. **Confirm the cause with evidence:** the exact error code, run/Task ID, observed time and the check that produced it. A stale comment, an assumption or a single indirect signal does not confirm a cause.
@@ -104,6 +114,8 @@ Every Owner decision request must appear in the monitor (Owner 2026-10-28, #515)
 - When the Owner answers in chat, post a new comment that quotes the answer verbatim and says the PM is relaying it. It begins with `<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->`. The Owner never posts on GitHub, so the PM never writes an `actor=Owner` marker; the monitor settles the open row from this `target=Owner status=ANSWERED` marker.
 
 A chat question alone does not count as asking the Owner.
+
+Carried Owner acceptance ([Owner standing rule](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6723320384)): if the relay comment passed to `task advance --merge --owner-acceptance URL` names an older head H0 of the same PR, the merge may go on at the current head H1 only when the PR's own changes since H0 are edits to test files already in the PR that add or delete no file, remove no assertion, skip or test method and add no skip. Carry mode carries only Owner product acceptance. H1 still needs its own bound PASS and exact-head CI. Any `MERGE_ACCEPTANCE_CARRY_*` refusal means the PM asks the Owner again for the current head.
 
 For the required remediation after an AI misses something, see [closing process gaps](pm-continuation-reference.md#closing-process-gaps).
 

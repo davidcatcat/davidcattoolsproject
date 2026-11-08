@@ -1,5 +1,6 @@
 import fcntl
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -50,6 +51,30 @@ def record(request='Implement a small tested feature'):
         'request_sha256': request_sha, 'response': None, 'usage': None,
         'error_code': None, 'record_sha256': None,
     }
+
+
+def remote_test_receipt(task, pm_session=None, **overrides):
+    """One valid PASS remote-test receipt for ``task`` with its receipt_digest.
+
+    ``pm_session`` defaults to the Task's current PM session.
+    """
+    receipt = {
+        'result': 'PASS', 'exit_code': 0, 'source_sha': 'a' * 40,
+        'tree': 'b' * 40, 'fetch_head': 'a' * 40,
+        'modules': ['test_task_store'], 'identity': {'uid': 65534},
+        'started_at': '2026-10-27T00:00:00Z', 'ended_at': '2026-10-27T00:00:01Z',
+        'elapsed_s': 1.0, 'ran_total': 1, 'final': ['OK'], 'failures': [],
+        'log_bytes': 0, 'log_sha256': 'c' * 64, 'remote_log_path': None,
+        'task_id': task['task_id'], 'run_id': task['run_id'],
+        'executor_task': 'd6-task',
+        'pm_session': task['pm_session_id'] if pm_session is None else pm_session,
+        'command_digest': 'd' * 64,
+    }
+    receipt.update(overrides)
+    receipt['receipt_digest'] = hashlib.sha256(json.dumps(
+        receipt, ensure_ascii=False, sort_keys=True, separators=(',', ':'),
+        allow_nan=False).encode() + b'\n').hexdigest()
+    return receipt
 
 
 import review_trust_fixture
@@ -322,6 +347,23 @@ class TaskStoreTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             self.store.append_remote_test_receipt(task['task_id'], invalid)
 
+    def test_remote_test_receipt_of_an_unrelated_pm_session_is_refused(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        before = self.store.get(task['task_id'])
+        unrelated = remote_test_receipt(task, 'pm-' + new_id())
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.append_remote_test_receipt(task['task_id'], unrelated)
+        self.assertEqual(caught.exception.task_store_error_code, 'REMOTE_TEST_RECEIPT_INVALID')
+        self.assertEqual(self.store.get(task['task_id']), before)
+        with self.assertRaises(LLMToolError) as caught:
+            task_store_module._validate_remote_test_receipts(
+                dict(before, remote_test_receipts=[unrelated]))
+        self.assertEqual(caught.exception.task_store_error_code, 'REMOTE_TEST_RECEIPT_INVALID')
+        # With no adoption history only the current session is accepted.
+        task_store_module._validate_remote_test_receipts(
+            dict(before, remote_test_receipts=[remote_test_receipt(task)]))
+
     def test_published_pr_is_idempotent_replaceable_and_validated(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
@@ -379,6 +421,69 @@ class TaskStoreTests(unittest.TestCase):
                 self.store.record_published_pr(task['task_id'], pr, head)
             self.assertEqual(caught.exception.task_store_error_code,
                              'TASK_PUBLISHED_PR_INVALID')
+
+    def test_publish_operations_are_bounded_capped_and_validated(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        older = self.store.get(task['task_id'])
+        self.assertNotIn('publish_operations', older)
+        task_store_module._validate(older)
+
+        def operation(number):
+            return {'task_id': task['task_id'], 'repository': 'owner/repo',
+                    'branch': 'feature/task', 'pr': number,
+                    'creation_url': f'https://github.com/owner/repo/pull/{number}',
+                    'expected_head': 'a' * 40, 'observed_head': None,
+                    'recheck': 'PASS', 'close_attempted': True,
+                    'record_comment': 'POSTED', 'outcome': 'CLOSED',
+                    'next_action': 'publish again'}
+
+        self.assertEqual(task_store_module.MAX_PUBLISH_OPERATIONS, 8)
+        for number in range(1, 11):
+            self.assertEqual(self.store.record_publish_operation(
+                task['task_id'], operation(number)), operation(number))
+        saved = self.store.get(task['task_id'])
+        self.assertEqual([item['pr'] for item in saved['publish_operations']],
+                         list(range(3, 11)))
+        task_store_module._validate(saved)
+
+        long_value = 'x' * (task_store_module._PUBLISH_OPERATION_VALUE_BYTES + 1)
+        missing = operation(1)
+        missing.pop('outcome')
+        invalid_items = (
+            ('not a dict', 'record'),
+            ('missing field', missing),
+            ('extra field', dict(operation(1), stderr='output')),
+            ('long string', dict(operation(1), next_action=long_value)),
+            ('long multibyte string', dict(operation(1), next_action='é' * 257)),
+            ('float value', dict(operation(1), pr=1.5)),
+            ('list value', dict(operation(1), recheck=['FAIL:list'])),
+            ('dict value', dict(operation(1), observed_head={'sha': 'a' * 40})),
+        )
+        for label, item in invalid_items:
+            with self.subTest(label):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.record_publish_operation(task['task_id'], item)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_PUBLISH_OPERATION_INVALID')
+                malformed = dict(saved, publish_operations=[item])
+                malformed['record_sha256'] = task_store_module._digest(malformed)
+                with self.assertRaises(LLMToolError) as caught:
+                    task_store_module._validate(malformed)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_PUBLISH_OPERATION_INVALID')
+        self.assertEqual(self.store.get(task['task_id'])['publish_operations'],
+                         saved['publish_operations'])
+        for label, value in (('too many', [operation(1)] * 9), ('not a list', {})):
+            with self.subTest(label):
+                malformed = dict(saved, publish_operations=value)
+                malformed['record_sha256'] = task_store_module._digest(malformed)
+                with self.assertRaises(LLMToolError) as caught:
+                    task_store_module._validate(malformed)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_PUBLISH_OPERATION_INVALID')
+        exact = dict(operation(1), next_action='y' * task_store_module._PUBLISH_OPERATION_VALUE_BYTES)
+        self.assertEqual(self.store.record_publish_operation(task['task_id'], exact), exact)
 
     def test_remote_test_receipt_accepts_missing_log_and_rejects_other_paths(self):
         task = self._codex_dispatch_task()
@@ -1704,6 +1809,106 @@ class TaskStoreTests(unittest.TestCase):
                     self.assertIsNone(store.get(target['task_id'])['developer'])
         self.assertFalse((root / task_store_module.D6_BINDING_JOURNAL_NAME).exists())
         self.assertEqual(self._d6_live_holders(store, executor_task_id), [])
+
+    @staticmethod
+    def _d6_store_snapshot(store, task_id):
+        journal = store.root / task_store_module.D6_BINDING_JOURNAL_NAME
+        return store.get(task_id), journal.read_bytes() if journal.exists() else None
+
+    def test_d6_forged_claim_is_refused_and_changes_nothing(self):
+        self.assertNotIn('_d6_claims',
+                         inspect.signature(TaskStore.compare_and_update).parameters)
+        executor_task_id = 'executor-forged-claim'
+        forged_claims = frozenset((executor_task_id,))
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            for held in (False, True):
+                for key in ('_d6_claims', 'd6_claims'):
+                    with self.subTest(held=held, key=key):
+                        store = TaskStore(Path(self.temp.name).resolve() /
+                                          f'forged-{key}-{held}')
+                        if held:
+                            self._d6_binder(store, 'fresh', executor_task_id)()
+                        holders = self._d6_live_holders(store, executor_task_id)
+                        task = self._codex_dispatch_task()
+                        store.create(task)
+                        before = self._d6_store_snapshot(store, task['task_id'])
+
+                        def gain(**forged):
+                            return store.compare_and_update(
+                                task['task_id'],
+                                expected={'developer': None, 'completion': None},
+                                developer=self._developer_assignment(
+                                    provider='codex', max_tokens=None),
+                                completion=self._d6_completion(executor_task_id),
+                                **forged)
+
+                        tracker, taken = self._track_binding_locks(store)
+                        with tracker, self.assertRaises(LLMToolError) as caught:
+                            gain(**{key: forged_claims})
+                        self.assertEqual(caught.exception.task_store_error_code,
+                                         'TASK_STORE_INVALID')
+                        self.assertEqual(taken, [])
+                        self.assertEqual(self._d6_store_snapshot(store, task['task_id']),
+                                         before)
+                        self.assertEqual(self._d6_live_holders(store, executor_task_id),
+                                         holders)
+
+                        # The same change with no claim still takes the binding path.
+                        tracker, taken = self._track_binding_locks(store)
+                        if held:
+                            with tracker, self.assertRaises(LLMToolError) as caught:
+                                gain()
+                            self.assertEqual(caught.exception.task_store_error_code,
+                                             'TASK_D6_ALREADY_BOUND')
+                            self.assertEqual(
+                                self._d6_live_holders(store, executor_task_id), holders)
+                        else:
+                            with tracker:
+                                gain()
+                            journal = store.root / task_store_module.D6_BINDING_JOURNAL_NAME
+                            entries = json.loads(journal.read_text(encoding='utf-8'))['entries']
+                            self.assertEqual(entries[-1]['task_id'], task['task_id'])
+                            self.assertEqual(self._d6_live_holders(store, executor_task_id),
+                                             [task['task_id']])
+                        self.assertIn(True, taken)
+
+    def test_d6_forged_claim_leaves_no_dispatch_denial_audit(self):
+        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+        policy['workers']['claude-developer'] = {
+            'dispatch': 'OWNER_ASSIGNMENT_ONLY', 'decided_by': 'Owner',
+            'decided_at': '2026-11-05', 'reason': 'test forged D6 claim',
+            'evidence': 'https://github.com/davidcatcat/davidcattoolsproject/issues/289',
+            'owner_assignments': [],
+        }
+        policy_path = Path(self.temp.name) / 'worker-dispatch-forged-claim.json'
+        policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        executor_task_id = 'executor-forged-denied'
+        developer = self._developer_assignment(provider='claude', max_tokens=None)
+        developer.update(backend_session_semantics='CLI_REPORTED_SESSION_ID',
+                         owner_assignment_ref=(
+                             'https://github.com/davidcatcat/davidcattoolsproject/'
+                             'issues/289#issuecomment-1234567890'),
+                         executor_task_id=executor_task_id)
+        store = TaskStore(Path(self.temp.name).resolve() / 'forged-denied')
+        task = self._codex_dispatch_task()
+        task['pm_assignment'] = dict(task['pm_assignment'], route='claude')
+        store.create(task)
+        before = self._d6_store_snapshot(store, task['task_id'])
+        forged = {'_d6_claims': frozenset((executor_task_id,))}
+        calls = {
+            'compare_and_update': lambda: store.compare_and_update(
+                task['task_id'], expected={'developer': None},
+                developer=developer, **forged),
+            'update': lambda: store.update(task['task_id'], developer=developer, **forged),
+        }
+        with patch.object(worker_dispatch, '_POLICY_PATH', policy_path):
+            for name, call in calls.items():
+                with self.subTest(call=name):
+                    with self.assertRaises(LLMToolError) as caught:
+                        call()
+                    self.assertEqual(caught.exception.task_store_error_code,
+                                     'TASK_STORE_INVALID')
+                    self.assertEqual(self._d6_store_snapshot(store, task['task_id']), before)
 
     def test_developer_reported_claims_are_bounded_and_strict(self):
         task = self._codex_dispatch_task()
@@ -3374,7 +3579,9 @@ class TaskStoreTests(unittest.TestCase):
             self.store.adopt_pm_session(
                 value['task_id'], old_session_key=current['pm_session_id'],
                 new_session_key='pm-' + new_id(), at='2026-10-29T00:00:00Z',
-                expected_record_sha256=current['record_sha256'])
+                expected_record_sha256=current['record_sha256'],
+                old_runtime='claude-code', new_runtime='claude-code', new_account=None,
+                liveness=['PROCESS_CLEAN', 'LOCK_FREE', 'REGISTRY_CLEAN'])
         self.assertEqual(caught.exception.task_store_error_code,
                          'PM_SESSION_ADOPTION_ABANDONED')
         self.assertEqual(self.store.get(value['task_id']), current)
