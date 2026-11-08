@@ -45,11 +45,15 @@ def _unique_json_object(pairs):
     return result
 
 
-def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reason=None):
+def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reason=None,
+            mismatch_keys=None):
     error = LLMToolError(message)
     error.review_dispatch_code = code
     if reason is not None:
         error.review_failure_reason = reason
+    if mismatch_keys is not None:
+        # Fixed JSON key names only; never a returned or expected value.
+        error.review_binding_mismatch_keys = tuple(mismatch_keys)
     raise error from None
 
 
@@ -240,13 +244,18 @@ def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, ve
         verdict = json.loads(final, object_pairs_hook=_unique_json_object)
     except (ValueError, TypeError, RecursionError):
         _refuse('REVIEW_NOT_POSTED', reason='VERDICT_NOT_JSON')
-    expected = {'task_id', 'run_id', 'contract_digest', 'head', 'verdict', 'review'}
-    if type(verdict) is not dict or set(verdict) != expected:
+    # The contract digest is bound only by the exact binding line in the review
+    # text. An older reply may still carry contract_digest; its value is ignored.
+    expected = {'task_id', 'run_id', 'head', 'verdict', 'review'}
+    if type(verdict) is not dict or set(verdict) - {'contract_digest'} != expected:
         _refuse('REVIEW_NOT_POSTED', reason='VERDICT_WRONG_FIELDS')
-    if (verdict.get('task_id') != task_id or verdict.get('run_id') != run_id or
-            verdict.get('contract_digest') != contract_digest or
-            verdict.get('head') != head):
-        _refuse('REVIEW_NOT_POSTED', reason='VERDICT_BINDING_MISMATCH')
+    mismatched = [key for key, value in
+                  (('task_id', task_id), ('run_id', run_id), ('head', head))
+                  if verdict[key] != value]
+    if mismatched:
+        _refuse('REVIEW_NOT_POSTED',
+                'Reviewer dispatch refused: JSON binding keys differ: ' + ', '.join(mismatched),
+                reason='VERDICT_BINDING_MISMATCH', mismatch_keys=mismatched)
     if (type(verdict.get('verdict')) is not str or
             verdict['verdict'] not in ('PASS', 'FIX', 'FAIL', 'BLOCKED')):
         _refuse('REVIEW_NOT_POSTED', reason='VERDICT_STATUS_INVALID')
@@ -313,6 +322,9 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
         if getattr(exc, 'review_dispatch_code', None) != 'REVIEW_NOT_POSTED':
             raise
         reason = getattr(exc, 'review_failure_reason', None)
+        if reason == 'VERDICT_BINDING_MISMATCH':
+            # The reply holds the returned values, so no excerpt is added.
+            raise
         final = _codex_final_message(raw)
         if final is not None and final.strip():
             excerpt = final.encode('utf-8')[:2048].decode('utf-8', 'ignore')
@@ -589,6 +601,12 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         reason = getattr(exc, 'review_failure_reason', None)
         if reason in REVIEW_FAILURE_REASONS:
             unknown['failure_reason'] = reason
+        mismatch = getattr(exc, 'review_binding_mismatch_keys', None)
+        if reason == 'VERDICT_BINDING_MISMATCH' and type(mismatch) is tuple:
+            # Keep only the fixed JSON key names; never a returned or expected value.
+            keys = [key for key in ('task_id', 'run_id', 'head') if key in mismatch]
+            if keys:
+                unknown['binding_mismatch_keys'] = keys
         try:
             claimed = claims + [claim]
             updated_claims = [unknown if item is claim else item for item in claimed]
