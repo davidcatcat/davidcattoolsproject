@@ -102,9 +102,20 @@ class FakeGh:
         self.calls = []
         self.merge_returncode = 0
         self.merge_effect = True
+        # PR numbers whose ``pr close`` exits 1, or raises.
+        self.close_fail = set()
+        self.close_raise = set()
 
     def __call__(self, root, args):
         self.calls.append(list(args))
+        if args[:2] == ['pr', 'close']:
+            number = int(args[2])
+            if number in self.close_raise:
+                raise OSError('gh failed')
+            if number in self.close_fail:
+                return SimpleNamespace(returncode=1, stdout='', stderr='')
+            self.github.pulls[number]['state'] = 'closed'
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
         if args[:2] == ['pr', 'merge']:
             if self.merge_effect:
                 self.github.pulls[int(args[2])].update(
@@ -203,9 +214,12 @@ class MergeTrainOpsTest(unittest.TestCase):
             TRAIN_ID, store=self.store, github_get=self.github, gh_runner=self.gh,
             root=self.root, train_root=self.train_root)
 
-    def _close(self, advance_call):
+    def _close(self, advance_call, gh_runner=None, github_get=None):
         return merge_train_ops.close_train(
-            TRAIN_ID, store=self.store, advance_call=advance_call, train_root=self.train_root)
+            TRAIN_ID, store=self.store, advance_call=advance_call,
+            github_get=self.github if github_get is None else github_get,
+            gh_runner=self.gh if gh_runner is None else gh_runner, root=self.root,
+            train_root=self.train_root)
 
     def _assert_refused(self, result, code, state='BUILT'):
         self.assertEqual(result['step'], 'MERGE_REFUSED', result)
@@ -761,6 +775,195 @@ class MergeTrainOpsTest(unittest.TestCase):
         self.assertEqual(result['codes'], [merge_train_ops.TRAIN_NOT_MERGED])
         self.assertEqual(calls, [])
         self.assertEqual(self._record()['state'], 'BUILT')
+
+    # A member with a null receipt digest (docs-only or scripts-only PR)
+
+    def _create_null_digest(self):
+        record = {
+            'schema_version': 1, 'train_id': TRAIN_ID, 'main_sha': self.main,
+            'members': [dict(_member(TASK_A, PR_A, self.head_a),
+                             remote_test_receipt_digest=None),
+                        _member(TASK_B, PR_B, self.head_b)],
+            'excluded': [], 'train_branch': 'llmtool/train-' + TRAIN_ID,
+            'train_head': self.train_head, 'train_pr': TRAIN_PR, 'state': 'BUILT',
+            'merge_attempt': None, 'merge_sha': None, 'created_at': '2026-11-08T00:00:00Z'}
+        return merge_train_store.create(record, root=self.train_root)
+
+    def test_member_unchanged_treats_null_digest_like_any_member(self):
+        member = _member(TASK_A, PR_A, self.head_a)
+        null_member = dict(member, remote_test_receipt_digest=None)
+        self.assertTrue(merge_train_ops._member_unchanged(member, self.store, self.github))
+        self.assertTrue(merge_train_ops._member_unchanged(null_member, self.store,
+                                                          self.github))
+        self.github.pulls[PR_A]['head']['sha'] = OTHER_SHA
+        self.assertFalse(merge_train_ops._member_unchanged(member, self.store, self.github))
+        self.assertFalse(merge_train_ops._member_unchanged(null_member, self.store,
+                                                           self.github))
+
+    def test_train_with_null_digest_member_merges(self):
+        self._create_null_digest()
+        result = self._merge()
+        self.assertEqual(result['step'], 'MERGED', result)
+        record = self._record()
+        self.assertEqual(record['state'], 'MERGED')
+        self.assertIsNone(record['members'][0]['remote_test_receipt_digest'])
+
+    # close_train closes still-open member PRs after the record is CLOSED
+
+    def _all_closed(self, **kwargs):
+        return {'step': 'CLOSED', 'codes': []}
+
+    def _expected_comment(self):
+        return (f'Closed by llmtool merge train {TRAIN_ID}: this change was merged in '
+                f'train PR #{TRAIN_PR} as squash commit {MERGE_SHA}.')
+
+    def test_close_closes_only_open_member_prs_with_fixed_comment(self):
+        self._merged_train()
+        # PR_B was merged on its own already; it is left alone.
+        self.github.pulls[PR_B].update(state='closed', merged=True)
+        states = []
+
+        def runner(root, args):
+            # The record is already CLOSED when a member PR is closed.
+            states.append(self._record()['state'])
+            return self.gh(root, args)
+
+        result = self._close(self._all_closed, gh_runner=runner)
+        self.assertEqual(result['step'], 'CLOSED', result)
+        self.assertEqual(result['codes'], [])
+        self.assertEqual(result['result'], {
+            'train_id': TRAIN_ID, 'tasks': [TASK_A, TASK_B],
+            'closed_prs': [PR_A], 'failed_prs': []})
+        self.assertEqual(self.gh.named('close'), [
+            ['pr', 'close', str(PR_A), '--comment', self._expected_comment()]])
+        self.assertEqual(states, ['CLOSED'])
+        self.assertEqual(self._record()['state'], 'CLOSED')
+        comment = self.gh.named('close')[0][-1]
+        for text in (TRAIN_ID, '#' + str(TRAIN_PR), MERGE_SHA):
+            self.assertIn(text, comment)
+
+    def test_close_closes_every_open_member_pr_once(self):
+        self._merged_train()
+        result = self._close(self._all_closed)
+        self.assertEqual(result['codes'], [])
+        self.assertEqual(result['result']['closed_prs'], [PR_A, PR_B])
+        self.assertEqual(self.gh.named('close'), [
+            ['pr', 'close', str(PR_A), '--comment', self._expected_comment()],
+            ['pr', 'close', str(PR_B), '--comment', self._expected_comment()]])
+        # The merge and its provenance comment are not repeated.
+        self.assertEqual(len(self.gh.named('merge')), 1)
+        self.assertEqual(len(self.gh.named('comment')), 1)
+
+    def test_close_leaves_closed_or_merged_member_prs_alone(self):
+        self._merged_train()
+        self.github.pulls[PR_A].update(state='closed', merged=False)
+        self.github.pulls[PR_B].update(state='closed', merged=True)
+        result = self._close(self._all_closed)
+        self.assertEqual(result['step'], 'CLOSED', result)
+        self.assertEqual(result['codes'], [])
+        self.assertEqual(result['result']['closed_prs'], [])
+        self.assertEqual(result['result']['failed_prs'], [])
+        self.assertEqual(self.gh.named('close'), [])
+
+    def test_close_failed_pr_close_keeps_closed(self):
+        self._merged_train()
+        self.gh.close_fail.add(PR_A)
+        result = self._close(self._all_closed)
+        self.assertEqual(result['step'], 'CLOSED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_MEMBER_PR_CLOSE_FAILED])
+        self.assertEqual(result['result']['closed_prs'], [PR_B])
+        self.assertEqual(result['result']['failed_prs'], [PR_A])
+        self.assertEqual(self._record()['state'], 'CLOSED')
+        # One close per open PR, never a retry.
+        self.assertEqual([call[2] for call in self.gh.named('close')],
+                         [str(PR_A), str(PR_B)])
+
+    def test_close_raising_runner_is_reported_per_pr(self):
+        self._merged_train()
+        self.gh.close_raise.add(PR_B)
+        result = self._close(self._all_closed)
+        self.assertEqual(result['step'], 'CLOSED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_MEMBER_PR_CLOSE_FAILED])
+        self.assertEqual(result['result']['closed_prs'], [PR_A])
+        self.assertEqual(result['result']['failed_prs'], [PR_B])
+        self.assertEqual(self._record()['state'], 'CLOSED')
+
+    def test_close_failed_pr_read_is_reported_per_pr(self):
+        self._merged_train()
+        del self.github.pulls[PR_A]
+        self.github.pulls[PR_B]['merged'] = 'no'
+        result = self._close(self._all_closed)
+        self.assertEqual(result['step'], 'CLOSED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_MEMBER_PR_CLOSE_FAILED])
+        self.assertEqual(result['result']['closed_prs'], [])
+        self.assertEqual(result['result']['failed_prs'], [PR_A, PR_B])
+        self.assertEqual(self.gh.named('close'), [])
+        self.assertEqual(self._record()['state'], 'CLOSED')
+
+    def test_close_unrecognized_pr_state_is_reported_per_pr(self):
+        self._merged_train()
+        # A state other than open or closed is not proof the PR is done.
+        self.github.pulls[PR_A].update(state='draft', merged=False)
+        result = self._close(self._all_closed)
+        self.assertEqual(result['step'], 'CLOSED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_MEMBER_PR_CLOSE_FAILED])
+        self.assertEqual(result['result']['closed_prs'], [PR_B])
+        self.assertEqual(result['result']['failed_prs'], [PR_A])
+        # Only the open PR gets a close command.
+        self.assertEqual(self.gh.named('close'), [
+            ['pr', 'close', str(PR_B), '--comment', self._expected_comment()]])
+        self.assertEqual(self._record()['state'], 'CLOSED')
+
+    def test_close_empty_pr_state_is_reported_per_pr(self):
+        self._merged_train()
+        self.github.pulls[PR_A].update(state='', merged=False)
+        self.github.pulls[PR_B].update(state='OPEN', merged=False)
+        result = self._close(self._all_closed)
+        self.assertEqual(result['step'], 'CLOSED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_MEMBER_PR_CLOSE_FAILED])
+        self.assertEqual(result['result']['closed_prs'], [])
+        self.assertEqual(result['result']['failed_prs'], [PR_A, PR_B])
+        self.assertEqual(self.gh.named('close'), [])
+        self.assertEqual(self._record()['state'], 'CLOSED')
+
+    def _member_reads(self):
+        return [path for path in self.github.reads if path in (f'pulls/{PR_A}', f'pulls/{PR_B}')]
+
+    def test_close_waiting_members_touches_no_pr(self):
+        self._merged_train()
+        reads = self._member_reads()
+        calls = list(self.gh.calls)
+
+        def advance_call(**kwargs):
+            if kwargs['task_id'] == TASK_B:
+                return {'step': 'READY_FOR_INTEGRATION', 'codes': []}
+            return {'step': 'CLOSED', 'codes': []}
+
+        result = self._close(advance_call)
+        self.assertEqual(result['step'], 'WAITING_MEMBERS', result)
+        self.assertEqual(self.gh.calls, calls)
+        self.assertEqual(self._member_reads(), reads)
+        self.assertEqual(self._record()['state'], 'MERGED')
+
+    def test_close_refused_touches_no_pr(self):
+        self._create()
+        result = self._close(self._all_closed)
+        self.assertEqual(result['step'], 'CLOSE_REFUSED', result)
+        self.assertEqual(self.gh.calls, [])
+        self.assertEqual(self.github.reads, [])
+
+    def test_close_record_write_failure_touches_no_pr(self):
+        self._merged_train()
+        calls = list(self.gh.calls)
+        reads = self._member_reads()
+        patcher, attempts = self._fail_writes('CLOSED', 1)
+        with patcher:
+            result = self._close(self._all_closed)
+        self.assertEqual(result['step'], 'CLOSE_REFUSED', result)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(self.gh.calls, calls)
+        self.assertEqual(self._member_reads(), reads)
+        self.assertEqual(self._record()['state'], 'MERGED')
 
 
 if __name__ == '__main__':
