@@ -68,8 +68,11 @@ class CiTestShardsTests(unittest.TestCase):
         self.assertIn("needs: [changes, shards]", workflow)
         self.assertIn("needs.shards.result", workflow)
         self.assertIn("always()", workflow)
-        self.assertIn("ec2-self-runner-3) account=ghrunner3", workflow)
-        self.assertEqual(workflow.count("ec2-self-runner-4) account=ghrunner4 ;;"), 3)
+        # #1253: GitHub-hosted runners only; the hosted boundary replaces the EC2 one.
+        self.assertNotIn("self-hosted", workflow.split("jobs:", 1)[1])
+        self.assertEqual(workflow.count("runs-on: ubuntu-24.04"), 6)
+        self.assertEqual(workflow.count("- name: Check GitHub-hosted runner boundary"), 3)
+        self.assertEqual(workflow.count('test "$RUNNER_ENVIRONMENT" = github-hosted'), 3)
         self.assertIn("name: check (docs)", workflow)
         self.assertIn("needs: changes", workflow)
         self.assertIn("tools/llmtool/scripts/docs_check.py", workflow)
