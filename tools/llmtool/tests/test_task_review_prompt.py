@@ -1,15 +1,18 @@
 import hashlib
 import io
 import json
+import os
 from argparse import Namespace
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from llmtool.errors import LLMToolError
-from llmtool import cli, task_completion, task_submission_cli
-from llmtool.task_store import _json_bytes
+from llmtool import cli, task_completion, task_store, task_submission_cli
+from llmtool.task_store import TaskStore, _json_bytes
 
 
 TASK_ID = 'a' * 32
@@ -656,6 +659,174 @@ class TaskReviewPromptTests(unittest.TestCase):
         for store in stores:
             with self.subTest(ids_error=store.ids_error, get_error_for=store.get_error_for):
                 self.assertEqual(self.refused(store), 'REVIEW_PROMPT_CONTRACT_MISSING')
+
+
+UNRELATED_COUNT = 60
+
+
+def unrelated_tasks():
+    """Many synthetic Tasks that are not on the reviewed D6."""
+    others = {}
+    for index in range(UNRELATED_COUNT):
+        task_id = f'{0x1000 + index:032x}'
+        record = other_task(task_id, created_at='2026-10-01T10:00:00Z',
+                            executor='other-d6')
+        if index % 2:
+            record['completion'] = None
+        others[task_id] = record
+    return others
+
+
+def same_d6_tasks():
+    """The rule cases on the reviewed D6: tie, later, abandoned and the original."""
+    return {
+        ORIGINAL_ID: other_task(ORIGINAL_ID),
+        # Same created_at as the original: the lower task_id wins the tie.
+        '5' * 32: other_task('5' * 32),
+        # Later than the reviewed Task.
+        '2' * 32: other_task('2' * 32, created_at='2026-11-08T10:00:00Z'),
+        # Earliest of all, but abandoned.
+        '3' * 32: other_task('3' * 32, created_at='2026-11-01T10:00:00Z',
+                             abandoned=True),
+    }
+
+
+@unittest.skipUnless(os.name == 'posix' and hasattr(os, 'O_NOFOLLOW'),
+                     'TaskStore needs POSIX O_NOFOLLOW')
+class RealStoreReviewPromptTests(unittest.TestCase):
+    """One review prompt render against a real TaskStore on a temporary root.
+
+    The synthetic records are not full schema records, so a spy stands in for
+    task_store._validate: it records each Task ID that reaches validation and
+    returns the record, as _validate does on success. Every file check and the
+    strict JSON parse of TaskStore._read_at still run for real.
+    """
+
+    codex_prompt = TaskReviewPromptTests.codex_prompt
+    refused = TaskReviewPromptTests.refused
+    assert_block_after_contract = TaskReviewPromptTests.assert_block_after_contract
+    original_block = TaskReviewPromptTests.original_block
+    REPAIR_RULE = TaskReviewPromptTests.REPAIR_RULE
+
+    def setUp(self):
+        self.fresh_store()
+
+    def fresh_store(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve() / 'tasks'
+        self.store = TaskStore(self.root)
+        self.store._ensure_root()
+        self.validated = []
+
+    def write_raw(self, task_id, raw, *, mode=0o600):
+        fd = os.open(self.root / (task_id + '.json'),
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(raw)
+        os.chmod(self.root / (task_id + '.json'), mode)
+
+    def write_store(self, others):
+        reviewed = FakeStore(provider_profile='claude').task
+        reviewed['created_at'] = REVIEWED_AT
+        self.write_raw(TASK_ID, _json_bytes(reviewed))
+        for task_id, record in others.items():
+            self.write_raw(task_id, _json_bytes(record))
+
+    def spy_validate(self, *, fail_for=None):
+        def spy(record):
+            self.validated.append(record['task_id'])
+            if record['task_id'] == fail_for:
+                raise LLMToolError('synthetic validation failure')
+            return record
+        return patch.object(task_store, '_validate', side_effect=spy)
+
+    def test_render_validates_only_the_reviewed_task_and_tasks_on_its_d6(self):
+        self.write_store({**unrelated_tasks(), **same_d6_tasks()})
+        self.assertEqual(len(self.store.task_ids()), UNRELATED_COUNT + 5)
+        with self.spy_validate() as validate:
+            output = self.codex_prompt(store=self.store)
+        self.assertEqual(validate.call_count, 5)
+        self.assertEqual(sorted(self.validated),
+                         sorted([TASK_ID, *same_d6_tasks()]))
+        self.assertFalse(set(self.validated) & set(unrelated_tasks()))
+        self.assert_block_after_contract(output, self.codex_prompt(), self.original_block('2'))
+
+    def test_render_picks_the_same_original_as_the_full_scan(self):
+        later_only = {'2' * 32: other_task('2' * 32, created_at='2026-11-08T10:00:00Z'),
+                      '3' * 32: other_task('3' * 32, created_at='2026-11-01T10:00:00Z',
+                                           abandoned=True),
+                      '7' * 32: other_task('7' * 32, created_at=REVIEWED_AT)}
+        tie_only = {ORIGINAL_ID: other_task(ORIGINAL_ID), '5' * 32: other_task('5' * 32)}
+        for name, others in (('rule cases', same_d6_tasks()), ('tie', tie_only),
+                             ('no earlier live task', later_only)):
+            with self.subTest(case=name):
+                self.fresh_store()
+                self.write_store({**unrelated_tasks(), **others})
+                with self.spy_validate():
+                    output = self.codex_prompt(store=self.store)
+                # The full scan of a store without the helper is the old rule.
+                old_rule = self.codex_prompt(store=RepairStore(
+                    {**unrelated_tasks(), **others}, provider_profile='claude'))
+                self.assertEqual(output, old_rule)
+                if name == 'no earlier live task':
+                    self.assertNotIn('ORIGINAL TASK CONTRACT', output)
+                else:
+                    self.assertIn('Original Task id: ' + json.dumps(ORIGINAL_ID), output)
+                    self.assertNotIn('5' * 32, output)
+
+    def test_unreadable_or_malformed_record_refuses_the_render(self):
+        bad_id = '9' * 32
+        valid = _json_bytes(other_task(bad_id, executor='other-d6'))
+        cases = (
+            ('truncated JSON', valid[:20], 0o600),
+            ('duplicate key', b'{"task_id":"%s","task_id":"%s"}' % (
+                bad_id.encode(), bad_id.encode()), 0o600),
+            ('NaN constant', b'{"task_id":"%s","x":NaN}' % bad_id.encode(), 0o600),
+            ('not an object', b'[]', 0o600),
+            ('task_id mismatch', _json_bytes(other_task('8' * 32)), 0o600),
+            ('not UTF-8', b'\xff\xfe', 0o600),
+            ('group readable', valid, 0o640),
+            ('unreadable', valid, 0o000),
+        )
+        for name, raw, mode in cases:
+            with self.subTest(case=name):
+                self.fresh_store()
+                self.write_store(same_d6_tasks())
+                self.write_raw(bad_id, raw, mode=mode)
+                with self.spy_validate():
+                    code = self.refused(self.store)
+                self.assertEqual(code, 'REVIEW_PROMPT_CONTRACT_MISSING')
+                self.assertNotIn(bad_id, self.validated)
+        with self.subTest(case='symlink'):
+            self.fresh_store()
+            self.write_store(same_d6_tasks())
+            target =self.root.parent / 'outside.json'
+            target.write_bytes(valid)
+            os.chmod(target, 0o600)
+            os.symlink(target, self.root / (bad_id + '.json'))
+            with self.spy_validate():
+                self.assertEqual(self.refused(self.store), 'REVIEW_PROMPT_CONTRACT_MISSING')
+
+    def test_failing_validation_of_a_task_on_the_d6_still_refuses(self):
+        for fail_for in (ORIGINAL_ID, '3' * 32, '2' * 32):
+            with self.subTest(fail_for=fail_for):
+                self.fresh_store()
+                self.write_store({**unrelated_tasks(), **same_d6_tasks()})
+                with self.spy_validate(fail_for=fail_for):
+                    code = self.refused(self.store)
+                self.assertEqual(code, 'REVIEW_PROMPT_CONTRACT_MISSING')
+
+    def test_helper_lists_only_tasks_whose_completion_names_the_d6(self):
+        self.write_store({**unrelated_tasks(), **same_d6_tasks()})
+        with self.spy_validate():
+            found = self.store.completion_d6_task_ids('executor-d6')
+            self.assertEqual(self.store.completion_d6_task_ids('absent-d6'), [])
+        self.assertEqual(found, sorted([TASK_ID, *same_d6_tasks()]))
+        self.assertEqual(self.validated, [])
+        for invalid in ('', 'Executor', '../d6', '-d6', None, 7):
+            with self.subTest(d6=invalid), self.assertRaises(LLMToolError):
+                self.store.completion_d6_task_ids(invalid)
 
 
 if __name__ == '__main__':
