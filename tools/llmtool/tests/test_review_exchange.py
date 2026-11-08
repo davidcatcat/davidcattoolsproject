@@ -126,6 +126,15 @@ class ExchangeTests(unittest.TestCase):
 
     def test_no_module_import_task_io_or_spawn(self):
         import importlib
+        # A reload makes new objects for every name in the module. Put every
+        # old attribute back after the test, pass or fail, so modules that
+        # imported names before still see the same objects.
+        saved = dict(vars(x))
+        def restore():
+            namespace = vars(x)
+            namespace.clear()
+            namespace.update(saved)
+        self.addCleanup(restore)
         with patch('subprocess.Popen',side_effect=AssertionError('spawn')), \
              patch('socket.create_connection',side_effect=AssertionError('network')):
             importlib.reload(x)

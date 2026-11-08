@@ -539,6 +539,112 @@ class HistoryTests(AdoptionCase):
             self.assert_entry_rejected(task, entry)
 
 
+class RemoteTestReceiptTests(AdoptionCase):
+    """#1204: a receipt stays bound to the PM session that ran the test."""
+
+    def append(self, task, native, executor='d6-task'):
+        receipt = store_fixture.remote_test_receipt(task, 'pm-' + native,
+                                                    executor_task=executor)
+        self.assertEqual(self.store.append_remote_test_receipt(task['task_id'], receipt),
+                         receipt)
+        return receipt
+
+    def assert_append_refused(self, task, receipt):
+        before = self.store.get(task['task_id'])
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.append_remote_test_receipt(task['task_id'], receipt)
+        self.assertEqual(caught.exception.task_store_error_code, 'REMOTE_TEST_RECEIPT_INVALID')
+        self.assertEqual(self.store.get(task['task_id']), before)
+
+    def assert_receipts_invalid(self, record):
+        with self.assertRaises(LLMToolError) as caught:
+            task_store_module._validate_remote_test_receipts(record)
+        self.assertEqual(caught.exception.task_store_error_code, 'REMOTE_TEST_RECEIPT_INVALID')
+
+    def two_adoptions(self):
+        """A Task adopted from A to B, then B to C, with one receipt under each session."""
+        first, _, task = self.stopped_claude()
+        under_first = self.append(task, first, 'd6-first')
+        second = self.new_claude()
+        self.assertEqual(self.adopt(first, second)['moved'], [task['task_id']])
+        under_second = self.append(task, second, 'd6-second')
+        third = self.new_claude()
+        self.assertEqual(self.adopt(second, third)['moved'], [task['task_id']])
+        under_third = self.append(task, third, 'd6-third')
+        return task, (first, second, third), [under_first, under_second, under_third]
+
+    def test_a_stopped_pm_task_with_a_receipt_is_adopted_and_keeps_it(self):
+        old, _, task = self.stopped_claude()
+        receipt = self.append(task, old)
+        stored = self.store.get(task['task_id'])['remote_test_receipts']
+        new = self.new_claude()
+        self.assertEqual(self.adopt(old, new), {'moved': [task['task_id']], 'skipped': []})
+        self.assert_moved(task, old, new)
+        record = self.store.get(task['task_id'])
+        self.assertEqual(record['pm_session_id'], 'pm-' + new)
+        self.assertEqual(record['remote_test_receipts'], stored)
+        self.assertEqual(record['remote_test_receipts'], [receipt])
+        self.assertEqual(json.dumps(record['remote_test_receipts'], sort_keys=True),
+                         json.dumps(stored, sort_keys=True))
+
+        # The identical stored receipt is still returned, unchanged.
+        self.assertEqual(self.store.append_remote_test_receipt(task['task_id'], receipt),
+                         receipt)
+        # A new receipt binds only to the current session.
+        self.assert_append_refused(task, store_fixture.remote_test_receipt(
+            task, 'pm-' + old, executor_task='d6-later'))
+        self.append(task, new, 'd6-later')
+
+    def test_receipts_of_every_earlier_session_in_the_chain_stay_valid(self):
+        task, sessions, receipts = self.two_adoptions()
+        record = self.store.get(task['task_id'])
+        self.assertEqual(record['pm_session_id'], 'pm-' + sessions[2])
+        self.assertEqual(record['remote_test_receipts'], receipts)
+        self.assertEqual([item['pm_session'] for item in record['remote_test_receipts']],
+                         ['pm-' + native for native in sessions])
+        task_store_module._validate_remote_test_receipts(record)
+        task_store_module._validate(record)
+
+    def test_a_receipt_of_an_unrelated_session_is_refused(self):
+        _, _, fresh = self.stopped_claude()
+        self.assert_append_refused(fresh, store_fixture.remote_test_receipt(
+            fresh, 'pm-' + str(uuid.uuid4())))
+
+        task, _, receipts = self.two_adoptions()
+        unrelated = store_fixture.remote_test_receipt(
+            task, 'pm-' + str(uuid.uuid4()), executor_task='d6-other')
+        self.assert_append_refused(task, unrelated)
+        record = self.store.get(task['task_id'])
+        self.assertEqual(record['remote_test_receipts'], receipts)
+        self.assert_receipts_invalid(dict(record, remote_test_receipts=receipts + [unrelated]))
+
+    def test_a_tampered_chain_refuses_earlier_session_receipts(self):
+        task, _, receipts = self.two_adoptions()
+        record = self.store.get(task['task_id'])
+        first, second = record['pm_session_adoptions']
+        stranger = 'pm-' + str(uuid.uuid4())
+        tampered = {
+            'broken link': [first, {**second, 'old_session_key': stranger}],
+            'last entry names another session': [first, {**second, 'new_session_key': stranger}],
+            'empty list': [],
+        }
+        earlier, current = receipts[:2], receipts[2]
+        for label, adoptions in tampered.items():
+            with self.subTest(label):
+                for receipt in earlier:
+                    self.assert_receipts_invalid(dict(
+                        record, pm_session_adoptions=adoptions, remote_test_receipts=[receipt]))
+                # Receipts that all name the current session stay valid, as before.
+                task_store_module._validate_remote_test_receipts(dict(
+                    record, pm_session_adoptions=adoptions, remote_test_receipts=[current]))
+        without = {key: value for key, value in record.items()
+                   if key != 'pm_session_adoptions'}
+        for receipt in earlier:
+            self.assert_receipts_invalid(dict(without, remote_test_receipts=[receipt]))
+        task_store_module._validate_remote_test_receipts(
+            dict(without, remote_test_receipts=[current]))
+
+
 class MidFlightWorkerTests(AdoptionCase):
     def gate_open(self):
         # Dispatch policy is covered elsewhere; these Tasks only need a Developer block.
