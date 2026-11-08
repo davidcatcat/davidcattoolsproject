@@ -894,6 +894,36 @@ class CodexQuotaRecordTests(unittest.TestCase):
         self.assertEqual(self._run(event), self.expected_review)
         self.assertEqual(list(elsewhere.iterdir()), [])
 
+    def test_symlinked_ancestor_folder_stops_the_write(self):
+        # A symlink at ~/.local or ~/.local/state must not be followed either.
+        event = {'type': 'event_msg', 'rate_limits': self._limits(85)}
+        # Each case: the symlinked part, and the folders made inside its target
+        # so the rest of the path would exist if the link were followed.
+        cases = (('.local', ('state', 'llmtool')),
+                 ('.local/state', ('llmtool',)))
+        for linked, inner in cases:
+            with self.subTest(linked=linked):
+                base = Path(tempfile.mkdtemp(dir=self.home))
+                elsewhere = base / 'elsewhere'
+                elsewhere.joinpath(*inner).mkdir(parents=True)
+                link = base / linked
+                link.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(elsewhere, link)
+                before = sorted(str(p) for p in elsewhere.rglob('*'))
+                with patch.dict(os.environ, {'HOME': str(base)}):
+                    self.assertEqual(self._run(event), self.expected_review)
+                self.assertEqual(sorted(str(p) for p in elsewhere.rglob('*')), before)
+
+    def test_symlinked_home_folder_stops_the_write(self):
+        real_home = Path(self.home) / 'real-home'
+        real_home.mkdir()
+        linked_home = Path(self.home) / 'linked-home'
+        os.symlink(real_home, linked_home)
+        event = {'type': 'event_msg', 'rate_limits': self._limits(85)}
+        with patch.dict(os.environ, {'HOME': str(linked_home)}):
+            self.assertEqual(self._run(event), self.expected_review)
+        self.assertEqual(list(real_home.iterdir()), [])
+
     def test_failed_codex_run_keeps_the_same_refusal(self):
         event = {'type': 'event_msg', 'rate_limits': self._limits(100)}
         with self.assertRaises(LLMToolError) as raised:

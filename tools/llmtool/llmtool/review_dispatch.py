@@ -351,10 +351,35 @@ _CODEX_QUOTA_NAME = 'codex-quota.json'
 _CODEX_QUOTA_MAX_BYTES = 4096
 _CODEX_QUOTA_FIELDS = ('used_percent', 'window_minutes', 'resets_at')
 _CODEX_QUOTA_SEARCH_DEPTH = 6
+_CODEX_QUOTA_PARTS = ('.local', 'state', 'llmtool')
 
 
-def _codex_quota_dir():
-    return os.path.join(os.path.expanduser('~'), '.local', 'state', 'llmtool')
+def _open_codex_quota_dir():
+    """Open ~/.local/state/llmtool one part at a time, never via a symlink.
+
+    The home folder is opened with O_NOFOLLOW, so a symlinked home is refused.
+    Each part below it is opened with O_NOFOLLOW from the folder above, and a
+    missing part is made there with mode 0700. A symlink anywhere from the
+    home folder down raises OSError. Returns an open folder fd.
+    """
+    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW
+    dir_fd = os.open(os.path.expanduser('~'), flags)
+    try:
+        for part in _CODEX_QUOTA_PARTS:
+            try:
+                os.mkdir(part, 0o700, dir_fd=dir_fd)
+            except FileExistsError:
+                # Already there; the O_NOFOLLOW open below refuses a symlink.
+                pass
+            next_fd = os.open(part, flags, dir_fd=dir_fd)
+            parent_fd, dir_fd = dir_fd, next_fd
+            os.close(parent_fd)
+            if not stat.S_ISDIR(os.fstat(dir_fd).st_mode):
+                raise OSError('quota path part is not a folder')
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return dir_fd
 
 
 def _epoch_now():
@@ -430,10 +455,7 @@ def _write_codex_quota(record):
     data = json.dumps(record, separators=(',', ':'), allow_nan=False).encode('utf-8')
     if len(data) > _CODEX_QUOTA_MAX_BYTES:
         raise OSError('quota record too large')
-    parent = _codex_quota_dir()
-    os.makedirs(parent, mode=0o700, exist_ok=True)
-    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW
-    dir_fd = os.open(parent, flags)
+    dir_fd = _open_codex_quota_dir()
     try:
         info = os.fstat(dir_fd)
         # The folder must be the user's own and not writable by others.
