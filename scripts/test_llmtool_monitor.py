@@ -2,7 +2,9 @@
 
 Run: python3 -B -m unittest discover -s scripts -p 'test_llmtool_monitor.py'
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sqlite3
@@ -38,7 +40,9 @@ _RULE_ALERT_PATCH = patch.object(
 def setUpModule():
     # Never let a test read the developer's real agent sessions: a live session
     # changing state mid-test would add office events to unrelated assertions.
-    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT"):
+    # The PM board and PM runtime bindings live in the real home too.
+    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT",
+                 "PM_BOARD", "PM_RUNTIME_DIR"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
     _RULE_ALERT_PATCH.start()
 
@@ -47,6 +51,19 @@ def tearDownModule():
     _RULE_ALERT_PATCH.stop()
     _RULE_ALERT_ISOLATED.cleanup()
     _ISOLATED.cleanup()
+
+
+_FOLDER_TICKS = [0]
+
+
+def move_folder_mtime(folder) -> None:
+    """Give a folder an mtime that no earlier listing saw. The monitor lists a
+    folder again only when its mtime changes. Linux file systems keep coarse
+    times, so two quick changes can leave the same mtime; the tests set a new
+    one after each change instead of sleeping and hoping."""
+    _FOLDER_TICKS[0] += 1
+    stamp = 1_000_000_000 + _FOLDER_TICKS[0]   # a fixed past time, never the real one
+    os.utime(folder, (stamp, stamp))
 
 
 # The runner and worker counts every header ends with when no runner runs and
@@ -6014,6 +6031,7 @@ class OfficeViewTests(unittest.TestCase):
             temp = root / "new.tmp"
             temp.write_text(json.dumps(newest), encoding="utf-8")
             os.replace(temp, root / "new.json")
+            move_folder_mtime(root)
             os.utime(root / "new.json", (self.NOW - 1, self.NOW - 1))
             self.assertEqual(mon.remote_test_latest(str(root))[0][1], "task abcdef01 PASS @0123456，跑了 3 個測試")
             self.assertEqual(len(listed), 2)
@@ -6058,8 +6076,9 @@ class OfficeViewTests(unittest.TestCase):
         tasks = self._remote_tasks(("deep", deep, 5), ("ok", {"task_id": self.TASK, "remote_test_receipts": [
             {"result": "FAIL", "source_sha": self.SHA, "ran_total": 2, "ended_at": self._stamp(60)}]}, 60))
         raw = mon._remote_test_open(os.path.join(tasks, "deep.json"), mon.REMOTE_TEST_BUDGET)[1]
-        self.assertIsNone(mon._remote_test_json(raw))
-        row, _ = self._ec2(tasks=tasks)
+        with json_nesting_limit():   # the same limit on every Python version
+            self.assertIsNone(mon._remote_test_json(raw))
+            row, _ = self._ec2(tasks=tasks)
         self.assertEqual((row.state, row.detail),
                          (mon.IDLE, "最近一次：task abcdef01 FAIL @0123456，跑了 2 個測試"))
 
@@ -6098,11 +6117,13 @@ class OfficeViewTests(unittest.TestCase):
             temp = root / "new.tmp"
             temp.write_text(json.dumps({"task_id": self.TASK}), encoding="utf-8")
             os.replace(temp, root / "new.json")
+            move_folder_mtime(root)
             visited.clear()
             self.assertEqual(row().state, mon.UNCHECKED)
             self.assertLessEqual(len(visited), 11)
         # under the cap the newest receipt is the newest again
         os.replace(root / "new.json", root / "new2.json")
+        move_folder_mtime(root)
         self.assertEqual((row().state, row().detail),
                          (mon.IDLE, "最近一次：task abcdef01 PASS @0123456，跑了 3 個測試"))
 
@@ -7329,6 +7350,7 @@ class RefreshCostTests(unittest.TestCase):
         draft.write_text(json.dumps(record), encoding="utf-8")
         os.chmod(draft, 0o600)
         os.replace(draft, path)
+        move_folder_mtime(registry)   # the replace changed the folder
         return path
 
     def test_registry_records_are_parsed_again_only_when_their_file_changed(self):
@@ -7338,7 +7360,6 @@ class RefreshCostTests(unittest.TestCase):
         self.assertEqual(sorted(found), ["wp-a", "wp-b"])
         self.assertEqual(mon.registry_details(str(canonical))["wp-a"][0], "ACTIVE")
         # Another record changes: the folder mtime moves, only that record is opened.
-        time.sleep(0.01)
         self._registry(canonical, "wp-b", state="REVIEW_PENDING")
         counter, opened_a = self._count_opens(str(a))
         with counter:
@@ -7352,6 +7373,7 @@ class RefreshCostTests(unittest.TestCase):
         self._registry(canonical, "wp-a")
         self.assertEqual(sorted(mon.registered_tasks(str(canonical))), ["wp-a", "wp-b"])
         os.remove(b)
+        move_folder_mtime(b.parent)
         self.assertEqual(sorted(mon.registered_tasks(str(canonical))), ["wp-a"])
 
     def test_llmtool_records_are_parsed_once_until_they_change(self):
@@ -7417,8 +7439,8 @@ class RefreshCostTests(unittest.TestCase):
         (folder / "a.jsonl").write_text("{}\n")
         (folder / ".hidden.jsonl").write_text("{}\n")
         self.assertEqual([os.path.basename(p) for p in mon._session_files(str(top))], ["a.jsonl"])
-        time.sleep(0.01)
         (folder / "b.jsonl").write_text("{}\n")
+        move_folder_mtime(folder)
         self.assertEqual(sorted(os.path.basename(p) for p in mon._session_files(str(top))),
                          ["a.jsonl", "b.jsonl"])
         self.assertEqual(mon._session_files(str(self.root / "missing")), [])
@@ -8045,16 +8067,50 @@ class ProcessTableFidelityTests(_TableFixture, unittest.TestCase):
             self.assertTrue(mon.run_ps_users({450}))
 
 
-DEEP_JSON = b"[" * 10_000 + b"]" * 10_000   # json.loads: RecursionError under Python 3.13
+DEEP_JSON = b"[" * 10_000 + b"]" * 10_000
+JSON_NESTING_LIMIT = 1_000
+
+
+@contextlib.contextmanager
+def json_nesting_limit():
+    """json.loads with one fixed nesting limit while the block runs.
+
+    Python's own limit depends on the version and the stack size, so the
+    same deep payload can raise RecursionError on one interpreter and parse
+    on another. Here any input with JSON_NESTING_LIMIT opening brackets in a
+    row raises RecursionError, as the real parser does at its limit. Other
+    input is parsed by the real json.loads. The monitor calls json.loads
+    through the json module, so it sees this limit too."""
+    real_loads = json.loads
+    too_deep = "[" * JSON_NESTING_LIMIT
+
+    def loads(data, *args, **kwargs):
+        text = (bytes(data).decode("utf-8", "replace")
+                if isinstance(data, (bytes, bytearray)) else data)
+        if isinstance(text, str) and too_deep in text:
+            raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+        return real_loads(data, *args, **kwargs)
+
+    with patch.object(json, "loads", loads):
+        yield
 
 
 class DeepJsonTests(unittest.TestCase):
     """Codex review v3 (#637): JSON nested too deeply is a bad answer or a
     bad record like any other, never an exception out of a refresh."""
 
+    def setUp(self):
+        self.enterContext(json_nesting_limit())
+
     def test_the_payload_really_raises_recursion_error(self):
         with self.assertRaises(RecursionError):
             json.loads(DEEP_JSON)
+        with self.assertRaises(RecursionError):
+            json.loads(DEEP_JSON.decode())
+        with self.assertRaises(RecursionError):   # json.load reads through json.loads
+            json.load(io.BytesIO(DEEP_JSON))
+        # Shallow JSON, brackets inside strings included, still parses.
+        self.assertEqual(json.loads(b'[[1], {"a": "[["}]'), [[1], {"a": "[["}])
 
     def test_direct_read_falls_back_to_gh_and_pauses(self):
         tests = DirectGitHubTests()
