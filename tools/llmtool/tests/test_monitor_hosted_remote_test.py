@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -13,6 +14,7 @@ SPEC = importlib.util.spec_from_file_location("llmtool_monitor", MONITOR_PATH)
 if SPEC is None or SPEC.loader is None:
     raise ImportError(f"Cannot load monitor from {MONITOR_PATH}")
 monitor = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = monitor
 SPEC.loader.exec_module(monitor)
 
 
