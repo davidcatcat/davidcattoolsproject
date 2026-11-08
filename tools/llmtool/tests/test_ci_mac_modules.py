@@ -5,11 +5,18 @@ from contextlib import redirect_stdout
 import copy
 import io
 import json
+import os
 from pathlib import Path
+import re
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
+
+import yaml
 
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -668,6 +675,179 @@ class MacTestIdSelectionTests(unittest.TestCase):
         self.assertIn("canonical test ID elapsed seconds:", workflow)
         self.assertIn("canonical unittest test-case count:", workflow)
         self.assertIn("verify=true", workflow)
+
+
+WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml"
+CANONICAL_STEP = "Offline canonical checks"
+MODE_EXPRESSION = "${{ steps.coverage.outputs.mode }}"
+STEP_LIMIT = "${{ steps.coverage.outputs.mode == 'full' && 90 || 45 }}"
+# Synthetic stand-in for a unittest run. FAKE_TESTS picks the behaviour.
+FAKE_TEST_BODY = r"""
+case "$FAKE_TESTS" in
+  pass)
+    printf 'Ran 3 tests in 0.010s\n\nOK\nRan 1 test in 0.001s\n\nOK\n'
+    exit 0 ;;
+  fail)
+    printf 'Ran 2 tests in 0.010s\n\nFAILED (failures=1)\n'
+    exit 7 ;;
+  none)
+    printf 'OK\n'
+    exit 0 ;;
+  slow)
+    : > "$FAKE_STARTED"
+    exec sleep 120 ;;
+esac
+exit 99
+"""
+FAKE_MAKE = '#!/bin/sh\ncase " $* " in *" syntax "*) exit 0 ;; esac\n' + FAKE_TEST_BODY
+FAKE_PYTHON = "#!/bin/sh\n" + FAKE_TEST_BODY
+FAKE_GIT = "#!/bin/sh\nprintf 'fake-head\\n'\n"
+RESULT_LINE = re.compile(r"^canonical result: (\S+)$", re.MULTILINE)
+
+
+def load_workflow():
+    return yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+
+
+def canonical_step():
+    steps = load_workflow()["jobs"]["check"]["steps"]
+    return next(step for step in steps if step.get("name") == CANONICAL_STEP)
+
+
+@unittest.skipUnless(os.name == "posix", "the step runs under bash on POSIX runners")
+class OfflineCanonicalChecksStepTests(unittest.TestCase):
+    """Run the real step script with a fake make, Python and git."""
+
+    def step_script(self, mode):
+        script = canonical_step()["run"]
+        self.assertEqual(script.count(MODE_EXPRESSION), 1)
+        script = script.replace(MODE_EXPRESSION, mode)
+        self.assertNotIn("${{", script)
+        return script
+
+    @staticmethod
+    def kill_group(process):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def start_step(self, mode, behaviour):
+        temporary = tempfile.TemporaryDirectory(prefix="mac-canonical-step-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        bin_dir, runner_temp, work = root / "bin", root / "runner", root / "work"
+        for directory in (bin_dir, runner_temp, work):
+            directory.mkdir()
+        for name, body in (("make", FAKE_MAKE), ("python3", FAKE_PYTHON), ("git", FAKE_GIT)):
+            path = bin_dir / name
+            path.write_text(body, encoding="utf-8")
+            path.chmod(0o700)
+        (runner_temp / "mac-test-ids").write_text("test_alpha\ntest_beta\n", encoding="utf-8")
+        script = root / "step.sh"
+        script.write_text(self.step_script(mode), encoding="utf-8")
+        started = root / "fake-started"
+        log = root / "step.log"
+        # BASH_ENV would run a startup file even with --norc; keep it out.
+        env = {
+            **{key: value for key, value in os.environ.items()
+               if key not in ("BASH_ENV", "ENV")},
+            "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+            "RUNNER_TEMP": str(runner_temp),
+            "JOB_PYTHON": str(bin_dir / "python3"),
+            "FAKE_TESTS": behaviour,
+            "FAKE_STARTED": str(started),
+        }
+        with log.open("wb") as handle:
+            # Same shell flags as GitHub's default bash step shell.
+            process = subprocess.Popen(
+                ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+                cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=handle,
+                stderr=subprocess.STDOUT, start_new_session=True,
+            )
+        # Cleanups run last-in first-out, so the group dies before the files go.
+        self.addCleanup(self.kill_group, process)
+        return process, log, started
+
+    def run_step(self, mode, behaviour):
+        process, log, _ = self.start_step(mode, behaviour)
+        returncode = process.wait(timeout=60)
+        return returncode, log.read_text(encoding="utf-8", errors="replace")
+
+    def assert_one_result(self, output):
+        results = RESULT_LINE.findall(output)
+        self.assertEqual(len(results), 1, output)
+        self.assertIn("canonical exact HEAD: fake-head", output)
+        return results[0]
+
+    def test_script_sets_pass_only_on_its_last_line(self):
+        script = canonical_step()["run"]
+        lines = [line.strip() for line in script.strip().splitlines()]
+        self.assertIn("result=INCOMPLETE", lines)
+        self.assertEqual(script.count("result=PASS"), 1)
+        self.assertEqual(lines[-1], "result=PASS")
+        self.assertEqual([line for line in lines if line.startswith("trap ")],
+                         ["trap report_result EXIT"])
+
+    def test_passing_run_reports_pass_with_summed_count(self):
+        for mode, count in (("full", 4), ("mac-subset", 8)):
+            with self.subTest(mode=mode):
+                returncode, output = self.run_step(mode, "pass")
+                self.assertEqual(returncode, 0, output)
+                self.assertEqual(self.assert_one_result(output), "PASS")
+                self.assertIn(f"canonical unittest test-case count: {count}\n", output)
+                self.assertIn("canonical elapsed seconds: ", output)
+                if mode == "mac-subset":
+                    self.assertIn("canonical test ID: test_alpha\n", output)
+                    self.assertIn("canonical test ID: test_beta\n", output)
+                    self.assertIn("canonical test ID elapsed seconds: ", output)
+
+    def test_failing_command_reports_fail_with_its_exit_status(self):
+        for mode in ("full", "mac-subset"):
+            with self.subTest(mode=mode):
+                returncode, output = self.run_step(mode, "fail")
+                self.assertEqual(returncode, 7, output)
+                self.assertEqual(self.assert_one_result(output), "FAIL")
+
+    def test_zero_test_count_is_not_a_pass(self):
+        for mode in ("full", "mac-subset"):
+            with self.subTest(mode=mode):
+                returncode, output = self.run_step(mode, "none")
+                self.assertNotEqual(returncode, 0, output)
+                self.assertIn(self.assert_one_result(output), ("INCOMPLETE", "FAIL"))
+                self.assertIn("canonical unittest test-case count: 0\n", output)
+                self.assertIn("ran no test cases", output)
+
+    def test_sigterm_during_slow_test_command_is_not_a_pass(self):
+        for mode in ("full", "mac-subset"):
+            with self.subTest(mode=mode):
+                process, log, started = self.start_step(mode, "slow")
+                deadline = time.monotonic() + 30
+                while not started.exists():
+                    self.assertIsNone(process.poll(), log.read_text(errors="replace"))
+                    self.assertLess(time.monotonic(), deadline, "fake test never started")
+                    time.sleep(0.05)
+                os.kill(process.pid, signal.SIGTERM)
+                # The fake command sleeps 120 s, so a quick exit shows bash
+                # did not wait for it before reacting to the signal.
+                returncode = process.wait(timeout=20)
+                output = log.read_text(encoding="utf-8", errors="replace")
+                self.assertNotEqual(returncode, 0, output)
+                self.assertIn(self.assert_one_result(output), ("INCOMPLETE", "FAIL"))
+                self.assertNotIn("canonical result: PASS", output)
+
+
+class MacWorkflowTimeLimitTests(unittest.TestCase):
+    def test_job_and_canonical_step_limits_follow_mode(self):
+        job = load_workflow()["jobs"]["check"]
+        self.assertEqual(job["timeout-minutes"], 100)
+        limited = {step.get("name"): step["timeout-minutes"]
+                   for step in job["steps"] if "timeout-minutes" in step}
+        self.assertEqual(limited, {CANONICAL_STEP: STEP_LIMIT})
 
 
 if __name__ == "__main__":

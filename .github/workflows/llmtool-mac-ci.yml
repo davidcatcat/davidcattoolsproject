@@ -35,7 +35,8 @@ jobs:
       group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
       cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
     runs-on: [self-hosted, macOS, X64, local-mac-ci]
-    timeout-minutes: 45
+    # Outer stop. The Offline canonical checks step has its own limit by mode.
+    timeout-minutes: 100
     steps:
       # Test the PR's own head commit, not GitHub's temporary merge commit
       # (GITHUB_SHA), so a run is exact evidence for the SHA it reports.
@@ -274,13 +275,24 @@ jobs:
                           path.chmod(0o600)
           print('Verifier checks: 12/12 PASS; no skips')
           PY
+      # Full runs get 90 minutes, mac-subset runs 45; the job limit is the outer stop.
       - name: Offline canonical checks
         if: steps.full-due.outputs.run != 'false' && steps.coverage.outputs.mode != 'monitor-only' && steps.coverage.outputs.mode != 'docs-only'
+        timeout-minutes: ${{ steps.coverage.outputs.mode == 'full' && 90 || 45 }}
         run: |
           started=$SECONDS
-          result=PASS
+          # Fail closed: only the last line sets PASS. A cancel, signal, early
+          # exit or zero test count leaves INCOMPLETE or FAIL and exits non-zero.
+          # No INT/TERM trap: bash would then wait for the test command first.
+          result=INCOMPLETE
           test_count=0
-          report_result() { status=$?; if [ "$status" -ne 0 ]; then result=FAIL; fi; printf 'canonical exact HEAD: %s\ncanonical unittest test-case count: %s\ncanonical elapsed seconds: %s\ncanonical result: %s\n' "$(git rev-parse HEAD)" "$test_count" "$((SECONDS - started))" "$result"; return "$status"; }
+          report_result() {
+            status=$?
+            if [ "$status" -ne 0 ]; then result=FAIL; fi
+            printf 'canonical exact HEAD: %s\ncanonical unittest test-case count: %s\ncanonical elapsed seconds: %s\ncanonical result: %s\n' "$(git rev-parse HEAD)" "$test_count" "$((SECONDS - started))" "$result"
+            if [ "$result" != PASS ] && [ "$status" -eq 0 ]; then status=1; fi
+            exit "$status"
+          }
           collect_count() { observed=$(awk '/^Ran [0-9]+ tests?/ { total += $2 } END { print total + 0 }' "$1"); test_count=$((test_count + observed)); }
           trap report_result EXIT
           if [ "${{ steps.coverage.outputs.mode }}" = mac-subset ]; then
@@ -305,6 +317,12 @@ jobs:
             collect_count "$output"
             test "$status" -eq 0 || exit "$status"
           fi
+          # Every command passed. A run with no test cases is not a pass.
+          if [ "$test_count" -le 0 ]; then
+            echo "::error::canonical checks ran no test cases"
+            exit 1
+          fi
+          result=PASS
       - name: Monitor script checks
         if: steps.full-due.outputs.run != 'false'
         run: |
