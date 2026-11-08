@@ -1828,6 +1828,78 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
     return None
 
 
+def _main_compare_status(head, github_get):
+    """Return the GitHub compare status of head against current main, or None."""
+    if type(head) is not str or _HEX40.fullmatch(head) is None:
+        return None
+    try:
+        branch = github_get('branches/main')
+        commit = branch.get('commit') if type(branch) is dict else None
+        main_sha = commit.get('sha') if type(commit) is dict else None
+        if type(main_sha) is not str or _HEX40.fullmatch(main_sha) is None:
+            return None
+        compare = github_get(f'compare/{main_sha}...{head}')
+    except Exception:
+        return None
+    status = compare.get('status') if type(compare) is dict else None
+    return status if status in ('ahead', 'identical', 'behind', 'diverged') else None
+
+
+def _resync_ready_pr(record, store, d6, executor_task, *, cwd=None,
+                     publish_git_runner=None, publish_gh_runner=None,
+                     record_result_call=None):
+    """Resync an open READY PR behind or diverged from main through _publish_task."""
+    root = d6.get('root') if type(d6) is dict else None
+    if type(root) is not str or not root:
+        return 'REFUSED', ['READY_RESYNC_FAILED'], None
+    git_runner = _publish_run_git if publish_git_runner is None else publish_git_runner
+    try:
+        fetched = git_runner(root, ['fetch', 'origin', 'main'])
+    except Exception:
+        return 'REFUSED', ['READY_RESYNC_FAILED'], None
+    fetch_code = getattr(fetched, 'returncode', None)
+    if type(fetch_code) is not int or fetch_code != 0:
+        return 'REFUSED', ['READY_RESYNC_FAILED'], None
+    try:
+        merge_tree = git_runner(
+            root, ['merge-tree', '--write-tree', 'origin/main', 'HEAD'])
+    except Exception:
+        return 'REFUSED', ['READY_RESYNC_FAILED'], None
+    merge_tree_code = getattr(merge_tree, 'returncode', None)
+    if type(merge_tree_code) is int and merge_tree_code == 1:
+        return 'REFUSED', ['READY_RESYNC_CONFLICT'], None
+    if type(merge_tree_code) is not int or merge_tree_code != 0:
+        return 'REFUSED', ['READY_RESYNC_FAILED'], None
+
+    cleared = []
+
+    def pre_pr_gate(head, branch):
+        status, hold = _pre_pr_remote_gate(record, store, executor_task, head, branch)
+        if hold is None and status is not None:
+            cleared.append(head)
+        return hold
+
+    try:
+        published = _publish_task(
+            record, d6, executor_task, pre_pr_gate=pre_pr_gate,
+            git_runner=publish_git_runner, gh_runner=publish_gh_runner,
+            record_result_call=record_result_call)
+    except _PublishRefusal as exc:
+        return 'REFUSED', [exc.code], None
+    except Exception:
+        return 'REFUSED', ['READY_RESYNC_FAILED'], None
+    if type(published) is not dict or type(published.get('head')) is not str:
+        return 'REFUSED', ['READY_RESYNC_FAILED'], None
+    codes = ['READY_RESYNCED']
+    if cleared and published.get('pr') is not None:
+        codes.extend(_record_cleared_pr(
+            store, record.get('task_id'), published['pr'], published['head'], d6,
+            _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
+            root or cwd or os.getcwd()))
+    return 'RESYNCED_WITH_MAIN', codes, {'pr': published.get('pr'),
+                                         'head': published['head']}
+
+
 def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=False,
             reviewer_session_done=False, dispatch_review_call=None,
             record_review_result_call=None, repair_review_call=None,
@@ -2135,6 +2207,20 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                 invoke(store, record, 'github-task-advance', event_id,
                        integration_pr or number, None, 'merge', 'MERGED', merge_sha)
                 step = 'CLOSED'
+            elif (type(pr) is dict and pr.get('state') in (None, 'open') and
+                  pr.get('merged') is not True):
+                main_status = _main_compare_status(d6['result_head'], get)
+                if main_status in ('ahead', 'identical'):
+                    codes.append('WAITING_INTEGRATION')
+                elif main_status is None:
+                    codes.extend(('WAITING_INTEGRATION', 'READY_MAIN_STATUS_UNKNOWN'))
+                else:
+                    step, resync_codes, result = _resync_ready_pr(
+                        record, store, d6, executor_task, cwd=cwd,
+                        publish_git_runner=publish_git_runner,
+                        publish_gh_runner=publish_gh_runner,
+                        record_result_call=record_result_call)
+                    codes.extend(resync_codes)
             else:
                 codes.append('WAITING_INTEGRATION')
         except Exception as exc:
@@ -2216,9 +2302,13 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     elif step in ('WAITING_REPAIR', 'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH',
                   'REVIEW_NO_CODE_FINDING'):
         codes.append(step)
-    next_action =('resume the reviewer to post its verdict' if step == 'REVIEW_NOT_POSTED'
+    next_action = ('resume the reviewer to post its verdict' if step == 'REVIEW_NOT_POSTED'
                    else step)
+    summary = {'task_id': task_id, 'step': step, 'result': result,
+               'next': next_action, 'codes': codes}
+    if step == 'RESYNCED_WITH_MAIN' and type(result) is dict:
+        summary.update(pr=result.get('pr'), head=result.get('head'))
     return _ack_consumed_events(
-        {'task_id': task_id, 'step': step, 'result': result,
-         'next': next_action, 'codes': codes}, record, store,
-        d6.get('result_head') if type(d6) is dict else None)
+        summary, record, store,
+        (result.get('head') if step == 'RESYNCED_WITH_MAIN' and type(result) is dict
+         else d6.get('result_head') if type(d6) is dict else None))
