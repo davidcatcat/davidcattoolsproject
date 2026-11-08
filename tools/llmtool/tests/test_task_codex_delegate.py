@@ -189,6 +189,14 @@ class CodexDelegateTests(unittest.TestCase):
         script.chmod(0o700)
         return script
 
+    def _wait_for_release(self, limit=60.0):
+        deadline = time.monotonic() + limit
+        while not (self.base / 'release-child').exists():
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.01)
+        return None
+
     def _dispatch(self, task, *, ignored=False, bytecode=False, bootstrap_error=None,
                   overwrite_ignored=None, malformed_diff=None, callback_handler=None,
                   registration=None, bound_registration=None, codex_error=None,
@@ -227,7 +235,7 @@ class CodexDelegateTests(unittest.TestCase):
                           kwargs['launch_callback'](os.getpid(),
                               task_submission_cli.codex_direct_developer.process_start_time(
                                   os.getpid()), os.getpgid(os.getpid())),
-                          time.sleep(3.0),
+                          self._wait_for_release(),
                           (self.root / 'src.py').write_text('VALUE = 2\n'),
                           codex_result)[3])
                 if background and codex_result is not None else
@@ -298,12 +306,10 @@ class CodexDelegateTests(unittest.TestCase):
                 'self_review': 'Reviewed.', 'blocked_reason': None},
                 separators=(',', ':')),
             thread_id='12345678-1234-4234-8234-123456789abc')
-        started = time.monotonic()
         code, saved, _callback = self._dispatch(
             task, codex_result=result, background=True)
-        elapsed = time.monotonic() - started
         self.assertEqual(code, 0)
-        self.assertLess(elapsed, 2.0)
+        self.assertEqual((self.root / 'src.py').read_text(), 'VALUE = 1\n')
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_DISPATCHING')
         self.assertEqual(saved['developer']['execution']['status'], 'RUNNING')
         self.assertGreater(saved['developer']['execution']['child_pid'], 0)
@@ -321,7 +327,8 @@ class CodexDelegateTests(unittest.TestCase):
         finally:
             os.chdir(original_cwd)
         self.assertIn('CODEX_CHILD_STILL_RUNNING', str(raised.exception))
-        deadline = time.monotonic() + 5
+        (self.base / 'release-child').write_text('', encoding='utf-8')
+        deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             saved = self.store.get(task['task_id'])
             if saved['developer']['state'] != 'DEVELOPER_DISPATCHING':
