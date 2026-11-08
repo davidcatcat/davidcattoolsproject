@@ -1244,7 +1244,8 @@ def _row_problem(row):
     for field in ('owner_ref', 'after', 'blocker'):
         if row.get(field) is not None and (type(row[field]) is not str or len(row[field]) > 512):
             return f'{field} is not a short string'
-    if row.get('next') is not None:
+    # Only a row without the key skips this check; an explicit null is malformed.
+    if 'next' in row:
         if not _valid_next(row['next']):
             return 'next is not a list of short row ids'
         if row.get('id') is not None and row['id'] in row['next']:
@@ -1256,8 +1257,10 @@ def _classify_ledger(ctx, row, gates, rows_by_id):
     """Apply the row's ledger claims; return (state, evidence), or None for board rules.
 
     Only a live claim counts. A row without task_id follows its live ledger Task;
-    a live reservation without a Task is CLAIMED. When nothing is live, the latest
-    claim of a row without task_id is a stale claim (ANOMALY), unless its Task merged.
+    a live reservation without a Task is CLAIMED. When nothing is live, a row
+    without task_id has only dead claims: it is ANOMALY and the claims stay as
+    history. A dead claim's Task, even a merged one, never classifies the row,
+    so it can never make the row DONE.
     """
     claims = [item for item in ctx.claims() if item['row'] == row['id']]
     if not claims:
@@ -1285,12 +1288,7 @@ def _classify_ledger(ctx, row, gates, rows_by_id):
     if row.get('task_id') is not None:
         # The board names the Task; stale claims on the row are only history.
         return None
-    item, _, reason = statuses[-1]
-    if item['task_id'] is not None:
-        record = ctx.record(item['task_id'])
-        if record is not None and _merged(record):
-            ctx.covered_tasks.add(item['task_id'])
-            return _classify_task(ctx, row, item['task_id'], gates, rows_by_id)
+    _, _, reason = statuses[-1]
     return ANOMALY, [f'stale ledger claim: {reason}; the row can be claimed again']
 
 

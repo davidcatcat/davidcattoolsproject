@@ -1503,11 +1503,11 @@ class ClaimLivenessTests(LedgerCase):
         self.claim('work', HOLDER_B)
 
     def test_dead_or_merged_bound_task_frees_the_row(self):
-        for label, end, state, evidence in (
-                ('abandoned', abandoned, board_check.ANOMALY, 'is ABANDONED'),
-                ('failed', failed, board_check.ANOMALY, 'is FAILED'),
-                ('missing', None, board_check.ANOMALY, 'is not in TaskStore'),
-                ('merged', merged, board_check.DONE, 'merge marker')):
+        for label, end, evidence in (
+                ('abandoned', abandoned, 'is ABANDONED'),
+                ('failed', failed, 'is FAILED'),
+                ('missing', None, 'is not in TaskStore'),
+                ('merged', merged, 'is merged')):
             with self.subTest(end=label):
                 self.remove_ledger()
                 store = FakeStore(pending(TASK_BOUND))
@@ -1517,12 +1517,30 @@ class ClaimLivenessTests(LedgerCase):
 
                 store = FakeStore(end(pending(TASK_BOUND))) if end else FakeStore()
                 result = self.check([{'id': 'work'}], store=store, now=at(12, 1))
-                self.assertRow(result, 'work', state, evidence)
+                # A dead claim is history: the row is ANOMALY, never DONE.
+                self.assertRow(result, 'work', board_check.ANOMALY, evidence)
+                self.assertRow(result, 'work', board_check.ANOMALY, 'can be claimed again')
                 again = self.claim('work', HOLDER_B, store=store, now=at(12, 1))
                 claims = self.claims()
                 self.assertEqual(len(claims), 2)
                 self.assertEqual(claims[0]['task_id'], TASK_BOUND)
                 self.assertEqual(claims[1], again)
+
+    def test_dead_claim_task_never_classifies_the_row(self):
+        # Review finding 2 (PR #1218): the merged Task of a dead claim must not
+        # reach _classify_task, so the row is not DONE and lists no next item.
+        self.write_ledger([ledger_claim('work', task_id=TASK_BOUND)])
+        for end in (merged, abandoned, failed):
+            with self.subTest(end=end.__name__):
+                store = FakeStore(end(pending(TASK_BOUND)))
+                with mock.patch.object(board_check, '_classify_task',
+                                       wraps=board_check._classify_task) as classify:
+                    result = self.check([{'id': 'work', 'next': ['second']}], store=store)
+                classify.assert_not_called()
+                self.assertEqual(states(result), {'work': board_check.ANOMALY}, result)
+                self.assertRow(result, 'work', board_check.ANOMALY, 'stale ledger claim')
+                self.assertEqual(idle_rows(result), set())
+                self.assertEqual(result['exit_code'], 2)
 
     def test_fake_bound_task_in_the_ledger_is_never_live(self):
         self.write_ledger([ledger_claim('work', task_id=TASK_UNKNOWN)])
@@ -1690,13 +1708,19 @@ class NextItemTests(LedgerCase):
         self.assertEqual(states(result), {'first': board_check.WAITING_CI}, result)
 
     def test_malformed_next_is_anomaly(self):
-        for value in ('second', ['second', 3], ['x' * 129], [''], {'second': True},
-                      ['n'] * 33):
+        # Review finding 1 (PR #1218): an explicit null is malformed too; only a
+        # row without the key skips the check.
+        for value in (None, 'second', ['second', 3], ['x' * 129], [''], {'second': True},
+                      ['n'] * 33, [None], False, 0):
             with self.subTest(next=value):
                 result = self.check([{'id': 'first', 'pr': 12, 'next': value}],
                                     github=self.github)
                 self.assertRow(result, 'first', board_check.ANOMALY,
                                'next is not a list of short row ids')
+        for row in ({'id': 'first', 'pr': 12}, {'id': 'first', 'pr': 12, 'next': []}):
+            with self.subTest(row=row):
+                result = self.check([row], github=self.github)
+                self.assertEqual(states(result), {'first': board_check.DONE}, result)
         result = self.check([{'id': 'first', 'pr': 12, 'next': ['first']}],
                             github=self.github)
         self.assertRow(result, 'first', board_check.ANOMALY, 'next names the row itself')
