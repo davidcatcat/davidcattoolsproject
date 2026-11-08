@@ -3646,7 +3646,9 @@ class OfficeViewTests(unittest.TestCase):
 
     def test_company_gw_dispatching_record_shows_a_live_row(self):
         tasks = Path(self.tmp.name) / "tasks"
-        self._gw_task(tasks, "c0" * 16, "company-gw", "DEVELOPER_DISPATCHING", 90)
+        record = self._gw_task(tasks, "c0" * 16, "company-gw", "DEVELOPER_DISPATCHING", 90)
+        # Within the 7-day outcome window too: the run under way is not a failure.
+        os.utime(record, (self.NOW - 90, self.NOW - 90))
         rows = self.rows(llmtool_tasks=str(tasks))
         live = self._gw_named(rows, "company gw developer")
         self.assertEqual(len(live), 1)
@@ -3663,13 +3665,18 @@ class OfficeViewTests(unittest.TestCase):
         at = next(i for i, line in enumerate(lines) if "company gw developer" in line)
         self.assertLess(lines.index(next(l for l in lines if mon.LIVE_SECTION in l)), at)
         self.assertLess(at, lines.index(next(l for l in lines if mon.STATUS_SECTION in l)))
-        # Like 公司 gw agent: an open switch lets the live row say everything; a
-        # paused one keeps the status row, which says a run is under way.
-        self.assertNotIn("公司 gw", self.by_name(rows))
-        self._write_dispatch({"company-gw": {"dispatch": "PAUSED"}})
-        status = self.by_name(self.rows(llmtool_tasks=str(tasks)))["公司 gw"]
-        self.assertEqual(status.state, mon.PAUSED)
+        # Review v2 finding (#1122): like 公司 gw agent, the status row stays
+        # whatever the switch says, and says a run is under way.
+        status = self.by_name(rows)["公司 gw"]
+        self.assertEqual((status.kind, status.state, status.alert), ("worker", mon.IDLE, ""))
         self.assertIn("有 1 個執行中", status.detail)
+        self.assertIn("近 7 天 1 次", status.detail)
+        for switch, state in (("OWNER_ASSIGNMENT_ONLY", mon.IDLE), ("PAUSED", mon.PAUSED)):
+            with self.subTest(switch):
+                self._write_dispatch({"company-gw": {"dispatch": switch}})
+                status = self.by_name(self.rows(llmtool_tasks=str(tasks)))["公司 gw"]
+                self.assertEqual((status.kind, status.state), ("worker", state))
+                self.assertIn("有 1 個執行中", status.detail)
 
     def test_stale_company_gw_dispatching_record_is_not_running(self):
         tasks = Path(self.tmp.name) / "tasks"

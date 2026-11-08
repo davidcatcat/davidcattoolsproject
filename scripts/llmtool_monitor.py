@@ -8052,8 +8052,9 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         switch = switches.get(key)
         trouble = problem
         paused = not trouble and switch[0] == "PAUSED"
-        if live and not trouble and not paused:
+        if live and name not in gw_live and not trouble and not paused:
             continue   # the live CLI rows say everything
+        # A live company gw run keeps its status row, which says how many run.
         notes, state, age, alert = [], None, None, ""
         if name == "opencode developer" and not live:
             outcome = opencode_outcome(now, opencode_db, canonical)
@@ -8068,7 +8069,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
             gw = llmtool_route_outcomes(now, llmtool_tasks).get("company-gw")
             if gw is not None:
                 age = gw[0]
-                if gw[2] == 0:
+                if gw[2] == 0 and not live:   # a run under way has not failed
                     state = ATTENTION   # reachable on paper, but every recent llmtool run failed
                     alert = f"近 7 天 {gw[1]} 次都沒成功，最近一次：{gw[3]}"
                 notes.append(f"本機 llmtool 紀錄（不分 repo）最近一次：{gw[3]}"
