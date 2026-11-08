@@ -2249,6 +2249,7 @@ class GitHubSource:
         full = (
             last_full is None
             or self._comment_updated is None
+            or self.comments_cut
             or (now - last_full) >= GITHUB_FULL_READ
             or now < last_full
         )
@@ -2283,6 +2284,8 @@ class GitHubSource:
                     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
                         probe = None
                     more = not (type(probe) is list and not probe)
+                    if more:
+                        next_full = None
                 else:
                     next_full = None
             by_id, unkeyed = {}, []
