@@ -6330,7 +6330,9 @@ def _llmtool_record(path: str, st):
 
 def _llmtool_paths(root: str) -> list[str]:
     """The record files, with records that disappeared forgotten."""
-    paths = glob.glob(os.path.join(root, "*.json"))
+    # Sorted, so records with equal mtimes (common on Linux, whose file times
+    # are coarse) are taken in the same order on every platform.
+    paths = sorted(glob.glob(os.path.join(root, "*.json")))
     if len(_llmtool_records) > len(paths) + 64:
         for stale in set(_llmtool_records) - set(paths):
             _llmtool_records.pop(stale, None)

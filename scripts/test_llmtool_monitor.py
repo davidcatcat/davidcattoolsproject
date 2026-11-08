@@ -35,19 +35,25 @@ _RULE_ALERT_ISOLATED = tempfile.TemporaryDirectory()
 _RULE_ALERT_PATCH = patch.object(
     mon, "RULE_ALERT_FILE",
     os.path.join(_RULE_ALERT_ISOLATED.name, "rule-file-alerts.json"))
+# Monitor.poll looks for runners under /Users/ghrunner* and the home folder.
+# Tests use only the isolated RUNNER_ROOT, so a real runner on this machine
+# (the Mac CI runners, or the EC2 job's own account) never adds rows.
+_RUNNER_ROOTS_PATCH = patch.object(mon, "runner_roots", lambda: [mon.RUNNER_ROOT])
 
 
 def setUpModule():
     # Never let a test read the developer's real agent sessions: a live session
     # changing state mid-test would add office events to unrelated assertions.
-    # The PM board and PM runtime bindings live in the real home too.
+    # The PM board, PM runtime bindings and runner folder live in the real home too.
     for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT",
-                 "PM_BOARD", "PM_RUNTIME_DIR"):
+                 "PM_BOARD", "PM_RUNTIME_DIR", "RUNNER_ROOT"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
     _RULE_ALERT_PATCH.start()
+    _RUNNER_ROOTS_PATCH.start()
 
 
 def tearDownModule():
+    _RUNNER_ROOTS_PATCH.stop()
     _RULE_ALERT_PATCH.stop()
     _RULE_ALERT_ISOLATED.cleanup()
     _ISOLATED.cleanup()
@@ -355,6 +361,7 @@ class QuotaWarningTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
         os.utime(path, (modified or self.NOW, modified or self.NOW))
+        move_folder_mtime(path.parent)   # a new session file: the folder is listed again
         mon._tail_cache.pop(str(path), None)
         return path
 
@@ -929,6 +936,7 @@ class ActivityViewTests(unittest.TestCase):
                   "request": request}
         path.write_text(json.dumps(record), encoding="utf-8")
         os.chmod(path, 0o600)
+        move_folder_mtime(path.parent)   # a new Task file: the folder is listed again
         return path
 
     @staticmethod
@@ -937,6 +945,7 @@ class ActivityViewTests(unittest.TestCase):
         path.write_text('{"name":"plain"}', encoding="utf-8")
         os.chmod(path, 0o600)
         os.utime(path, (mtime, mtime))
+        move_folder_mtime(path.parent)
         return path
 
     def test_pm_last_dispatch_header_recent_stale_absent_and_wrapped(self):
@@ -1693,6 +1702,8 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertIn("Reviewer → PM：審查通過（#8・自述）", line)   # trusted login, regardless of association
 
     def test_secret_like_text_is_hidden_in_headlines(self):
+        # Sensitive-detector test (#763/#981 exception): every value below is
+        # synthetic, made up for this test, and never a real credential.
         cases = ("token=abc123xyz789 leaked", "Authorization: Bearer abc.def.ghi",
                  "use ghp_ABCDEFGHijklmnop1234 now", "key sk-proj-ABCDEFGH12345678",
                  "AKIAABCDEFGHIJKLMNOP aws", "password: hunter2!",
@@ -2842,6 +2853,7 @@ class OfficeViewTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("".join(json.dumps(item) + "\n" for item in items), encoding="utf-8")
         os.utime(path, (self.NOW - age, self.NOW - age))
+        move_folder_mtime(path.parent)   # a new session file: the folder is listed again
         return path
 
     def _codex(self, name, meta, events, age):
@@ -2868,6 +2880,7 @@ class OfficeViewTests(unittest.TestCase):
             "goal": "GOAL-SECRET", "reported": "REPORTED-SECRET"}
         path.write_text(json.dumps(record), encoding="utf-8")
         os.chmod(path, 0o600)
+        move_folder_mtime(path.parent)   # a new Task file: the folder is listed again
         return path
 
     def _codex_for_task(self, name, task_root, session, originator="codex-tui", age=20):
@@ -3037,6 +3050,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(problem, "")
         linked = tasks / f"{'c' * 32}.json"
         os.link(original, linked)
+        move_folder_mtime(tasks)   # the new link is listed too
         entries, problem = mon.codex_work_records(str(tasks))
         self.assertEqual(entries, [])
         self.assertEqual(problem, "")
@@ -3424,6 +3438,7 @@ class OfficeViewTests(unittest.TestCase):
             "developer": {"provider_type": provider, "state": state,
                           "executor_task_id": "wp-1", "created_at": stamp}}), encoding="utf-8")
         os.chmod(path, 0o600)
+        move_folder_mtime(path.parent)   # a new Task file: the folder is listed again
         return path
 
     def _gw_route(self, task):
@@ -6150,6 +6165,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn(b"example-host", mon._remote_test_open(str(config), mon.REMOTE_TEST_BUDGET)[1])
         # a hard link to the config is refused as well
         os.link(config, tasks / "y.json")
+        move_folder_mtime(tasks)   # so y.json is listed and really refused, not missed
         row, text = self._ec2(tasks=str(tasks))
         self.assertEqual(row.detail, "尚無遠端測試紀錄")
         self.assertNotIn("example-host", text)
