@@ -6,6 +6,8 @@ before the merge-train library step is called, once. ``build`` checks the
 members given on the command line; ``merge`` and ``close`` read the members from
 the validated train record. ``close`` also re-checks a member's owner right
 before each member advance; a refusal there stops the whole close at once.
+``build`` hands the members to the build step as ``(task_id, pr)`` pairs in
+command-line order, the shape ``merge_train_build.build_train`` accepts.
 ``status`` reads through ``merge_train_store.list_records`` and changes nothing.
 A stale-source stop before build, merge or close prints the same one refusal.
 
@@ -331,8 +333,10 @@ def run_task_train(args, *, store=None, build_call=None, merge_call=None, close_
                 from .merge_train_build import build_train as build_call
             except ImportError:
                 return _finish(_refused(TRAIN_BUILD_UNAVAILABLE))
+        # build_train takes (task_id, pr) pairs in train order (#1182 D1).
+        pairs = [(member['task_id'], member['pr']) for member in members]
         return _finish(_step(None, lambda: build_call(
-            members, store=store, caller_key=caller_key, github_get=github_get,
+            pairs, store=store, caller_key=caller_key, github_get=github_get,
             git_runner=git_runner, gh_runner=gh_runner, root=root, train_root=train_root)))
     if action == 'merge':
         if merge_call is None:
