@@ -1,9 +1,13 @@
-"""#1182 T4b1: task advance --integration-pr closes a member of a merged merge train.
+"""#1182: a member of a merged merge train reports CLOSED.
 
-Real Git repository and real merge-train records in temporary directories; only
-the GitHub PR snapshots are fakes.
+T4b1 covers task advance --integration-pr. The later section covers task
+advance and task drive without it, for a Task the train already closed.
+
+Real Git repository, real TaskStore and real merge-train records in temporary
+directories; only the GitHub PR snapshots and the write adapters are fakes.
 """
 
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -11,10 +15,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from llmtool import github_events
 from llmtool import merge_train
 from llmtool import merge_train_store
 from llmtool import task_advance
+from llmtool import task_drive
+from llmtool import task_store
+from llmtool import task_submission_cli
 from llmtool.errors import LLMToolError
+from llmtool.task_store import TaskStore, new_id
 
 
 TASK_A = 'a1' * 16
@@ -44,13 +53,14 @@ class TrainMemberClosureTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         base = Path(os.path.realpath(temporary.name))
-        self.trains = base / 'store' / 'merge-trains'
-        (base / 'store').mkdir()
-        # Patch the record root lookup so no real TaskStore root is touched.
-        patcher = patch.object(merge_train_store, '_directory_path',
-                               lambda _root: self.trains)
+        self.tasks_root = base / 'tasks'
+        # As in production, train records live beside the TaskStore root.
+        self.trains = base / 'merge-trains'
+        # Point the default root at the temp store so no real root is touched.
+        patcher = patch.object(task_store, 'default_root', lambda: self.tasks_root)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.store = TaskStore(self.tasks_root)
         self.repo = str(base / 'repo')
         os.mkdir(self.repo)
         self.git('init', '-q')
@@ -305,131 +315,210 @@ class TrainMemberClosureTests(unittest.TestCase):
             self.assertEqual(self.target(self.task(), integration, integration_pr=27),
                              (27, 'd' * 40))
 
-    # Advance without --integration-pr: a train already closed the Task ------
+    # Advance and drive without --integration-pr: a train already closed the Task
 
-    def merge_event(self, *, issue_number=TRAIN_PR, merge_sha=None, status='MERGED'):
-        """The GitHub merge event an earlier train closure recorded on the Task."""
+    def stored_task(self, head):
+        """Create a Task in the real TaskStore whose result head is ``head``."""
+        task_id, run_id = new_id(), new_id()
+        request = 'Bounded non-sensitive merge train member task.'
+        task = task_submission_cli._record(
+            task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED',
+            request_sha=hashlib.sha256(request.encode()).hexdigest())
+        task.update(
+            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                              'base_url': None},
+            response='PM returned a bounded task.', error_code=None,
+            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                           'goal': 'Land one change through a merge train.',
+                           'acceptance': ['the merge train merges the change']},
+            # The closure check reads only the result head from the evidence.
+            completion={'state': 'WAITING_REVIEW', 'executor_task_id': None,
+                        'reviewer_task_id': None, 'missing_gates': [],
+                        'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+                        'pm_recommendation': None, 'pm_usage': None,
+                        'pm_error_code': None,
+                        'evidence': {'task_id': task_id, 'run_id': run_id, 'result': {
+                            'task_id': task_id, 'run_id': run_id, 'result_head': head}}})
+        self.store.create(task)
+        return task_id
+
+    def record_merge(self, task_id, *, issue_number=TRAIN_PR, merge_sha=None,
+                     status='MERGED'):
+        """Store the merge event an earlier train closure wrote, by the same call."""
         merge_sha = self.squash if merge_sha is None else merge_sha
-        return {'source': 'GITHUB', 'source_sha': merge_sha, 'state': 'ACKED',
-                'issue_number': issue_number, 'comment_id': None,
-                'marker_type': 'merge', 'marker_status': status, 'merge_sha': merge_sha}
+        event_id = hashlib.sha256(
+            f'GITHUB\0merge\0{issue_number}\0{merge_sha}'.encode()).hexdigest()[:32]
+        github_events._record(self.store, {'task_id': task_id}, 'github-task-advance',
+                              event_id, issue_number, None, 'merge', status, merge_sha)
 
-    def closed_task(self, task_id=TASK_A, head=None, pr=17, **event):
-        task = self.task(task_id, head, pr)
-        task['completion_events'].append(self.merge_event(**event))
-        return task
+    def merge_events(self, task_id):
+        return [event for event in self.store.get(task_id).get('completion_events', [])
+                if event.get('source') == 'GITHUB' and event.get('marker_type') == 'merge']
 
-    def run_advance(self, task, *, integration_pr=None, integration=None):
-        head = task['review_dispatch_claim'][0]['head_sha']
-        prs = {17: {'number': 17, 'merged': False, 'state': 'closed',
-                    'head': {'sha': head}},
-               TRAIN_PR: self.integration() if integration is None else integration}
-        saved = []
+    def member_train(self, train_id='t1', *, state='MERGED'):
+        """Two stored Tasks at the train heads and a train record listing both."""
+        a, b = self.stored_task(self.head_a), self.stored_task(self.head_b)
+        record = self.make_train(train_id, state=state, members=[
+            self.member(a, 17, self.head_a), self.member(b, 18, self.head_b)])
+        return a, b, record
+
+    def github_get(self, integration=None):
+        prs = {TRAIN_PR: self.integration() if integration is None else integration}
 
         def get(path):
             if path.startswith('pulls/') and path[len('pulls/'):].isdigit():
                 return prs.get(int(path[len('pulls/'):]))
             return []
+        return get
 
-        store = type('S', (), {'get': lambda _self, _id: task})()
-        with patch.object(task_advance, '_review_outcomes', return_value=[]):
+    @staticmethod
+    def write_adapters():
+        """Fake every review, repair, publish, merge and event write; record any call."""
+        calls = []
+
+        def recorder(name):
+            return lambda *_args, **_kwargs: calls.append(name)
+        names = ('dispatch_review_call', 'record_review_result_call', 'repair_review_call',
+                 'run_task_complete_call', 'record_github_event_call', 'publish_gh_runner',
+                 'record_result_call', 'merge_gh_runner')
+        return calls, {name: recorder(name) for name in names}
+
+    def run_advance(self, task_id, *, integration_pr=None, integration=None):
+        calls, adapters = self.write_adapters()
+        with patch.object(task_advance, '_run_remote_test',
+                          side_effect=lambda *_a, **_k: calls.append('ec2_remote_test')):
             result = task_advance.advance(
-                task_id=task['task_id'], store=store, integration_pr=integration_pr,
-                github_get=get, cwd=self.repo,
-                record_github_event_call=lambda *args: saved.append(args))
-        return result, saved
+                task_id=task_id, store=self.store, integration_pr=integration_pr,
+                github_get=self.github_get(integration), cwd=self.repo, **adapters)
+        return result, calls
 
-    def assert_today(self, task, **kwargs):
-        """The closed-member check falls through: same step as a Task with no event."""
-        plain = self.task(task['task_id'], task['review_dispatch_claim'][0]['head_sha'],
-                          task['review_dispatch_claim'][0]['pr'])
-        expected, _ = self.run_advance(plain, **kwargs)
+    def run_drive(self, task_id, *, merge=False, integration=None):
+        calls, adapters = self.write_adapters()
+        with patch.object(task_advance, '_run_remote_test',
+                          side_effect=lambda *_a, **_k: calls.append('ec2_remote_test')), \
+                patch.object(task_advance, 'advance',
+                             wraps=task_advance.advance) as advance:
+            result = task_drive.drive(
+                task_id=task_id, store=self.store, merge=merge, max_steps=5,
+                sleep=lambda _seconds: calls.append('sleep'),
+                label_mac_ci_call=lambda **_kwargs: calls.append('label_mac_ci'),
+                github_get=self.github_get(integration), cwd=self.repo, **adapters)
+        return result, calls, advance
+
+    def assert_today(self, task_id, head, **kwargs):
+        """The closure check falls through: same step as a Task with no merge event."""
+        expected, _ = self.run_advance(self.stored_task(head), **kwargs)
         self.assertNotEqual(expected['step'], 'CLOSED')
-        result, saved = self.run_advance(task, **kwargs)
+        before = self.merge_events(task_id)
+        result, calls = self.run_advance(task_id, **kwargs)
         self.assertEqual((result['step'], result['next']), (expected['step'], expected['next']))
-        self.assertEqual(saved, [])
+        self.assertEqual(calls, [])
+        self.assertEqual(self.merge_events(task_id), before)
 
     def test_advance_reports_closed_for_a_train_closed_task(self):
         for state in ('MERGED', 'CLOSED'):
             with self.subTest(state=state):
-                record = self.make_train('t-' + state.lower(), state=state)
-                for task in (self.closed_task(), self.closed_task(TASK_B, self.head_b, 18)):
-                    result, saved = self.run_advance(task)
+                a, b, record = self.member_train('t-' + state.lower(), state=state)
+                for task_id in (a, b):
+                    # Without its merge event the same stored Task does not close.
+                    before, _ = self.run_advance(task_id)
+                    self.assertNotEqual(before['step'], 'CLOSED')
+                    self.record_merge(task_id)
+                    result, calls = self.run_advance(task_id)
                     self.assertEqual((result['step'], result['next']), ('CLOSED', 'CLOSED'))
-                    # No second MERGED event is recorded.
-                    self.assertEqual(saved, [])
+                    # Nothing is written to GitHub; no second MERGED event is stored.
+                    self.assertEqual(calls, [])
+                    self.assertEqual(len(self.merge_events(task_id)), 1)
                 os.unlink(self.trains / (record['train_id'] + '.json'))
 
-    def test_closed_member_check_writes_nothing_to_github(self):
-        self.make_train()
-        runner_calls = []
-        task = self.closed_task()
-        prs = {17: {'number': 17, 'merged': False, 'head': {'sha': self.head_a}},
-               TRAIN_PR: self.integration()}
-
-        def get(path):
-            if path.startswith('pulls/') and path[len('pulls/'):].isdigit():
-                return prs.get(int(path[len('pulls/'):]))
-            return []
-
-        store = type('S', (), {'get': lambda _self, _id: task})()
-        result = task_advance.advance(
-            task_id=TASK_A, store=store, github_get=get, cwd=self.repo,
-            publish_gh_runner=lambda *args: runner_calls.append(args),
-            merge_gh_runner=lambda *args: runner_calls.append(args),
-            record_github_event_call=lambda *args: runner_calls.append(args))
-        self.assertEqual(result['step'], 'CLOSED')
-        self.assertEqual(runner_calls, [])
+    def test_drive_stops_at_closed_for_a_train_closed_task(self):
+        a, _b, _record = self.member_train()
+        before, _calls, _advance = self.run_drive(a)
+        self.assertNotEqual(before['step'], 'CLOSED')
+        self.record_merge(a)
+        for merge in (False, True):
+            with self.subTest(merge=merge):
+                result, calls, advance = self.run_drive(a, merge=merge)
+                self.assertEqual((result['step'], result['next'], result['steps']),
+                                 ('CLOSED', 'CLOSED', 1))
+                # One advance call without --integration-pr; no review, repair,
+                # EC2, publish, merge, label or poll follows it.
+                advance.assert_called_once()
+                self.assertIs(advance.call_args.kwargs['merge'], False)
+                self.assertNotIn('integration_pr', advance.call_args.kwargs)
+                self.assertEqual(calls, [])
+                self.assertEqual(len(self.merge_events(a)), 1)
 
     def test_advance_with_integration_pr_keeps_its_path(self):
-        self.make_train()
+        a, _b, _record = self.member_train()
+        self.record_merge(a)
+        expected, _ = self.run_advance(self.stored_task(self.head_a), integration_pr=TRAIN_PR)
         with patch.object(task_advance, '_train_closed_member') as closed_member:
-            result, saved = self.run_advance(self.closed_task(), integration_pr=TRAIN_PR)
+            result, _calls = self.run_advance(a, integration_pr=TRAIN_PR)
         closed_member.assert_not_called()
-        self.assertEqual(result['step'], 'CLOSED')
-        self.assertEqual(len(saved), 1)
-        self.assertEqual(saved[0][-3:], ('merge', 'MERGED', self.squash))
+        self.assertEqual((result['step'], result['next']), (expected['step'], expected['next']))
 
     def test_no_merge_event_keeps_todays_step(self):
-        self.make_train()
-        self.assert_today(self.task())
-        self.assert_today(self.closed_task(status='OPEN'))
+        a, b, _record = self.member_train()
+        self.assert_today(a, self.head_a)
+        self.record_merge(b, status='OPEN')
+        self.assert_today(b, self.head_b)
 
     def test_no_train_record_keeps_todays_step(self):
-        self.make_train()
-        self.assert_today(self.closed_task(issue_number=27))
+        a, _b, _record = self.member_train()
+        self.record_merge(a, issue_number=27)
+        self.assert_today(a, self.head_a)
 
     def test_train_in_another_state_keeps_todays_step(self):
         for state in ('BUILT', 'MERGE_CLAIMED'):
             with self.subTest(state=state):
-                record = self.make_train('t-' + state.lower().replace('_', '-'), state=state)
-                self.assert_today(self.closed_task())
+                a, _b, record = self.member_train(
+                    't-' + state.lower().replace('_', '-'), state=state)
+                self.record_merge(a)
+                self.assert_today(a, self.head_a)
                 os.unlink(self.trains / (record['train_id'] + '.json'))
 
-    def test_task_or_head_not_listed_keeps_todays_step(self):
-        self.make_train()
-        self.assert_today(self.closed_task(TASK_C, self.head_a))
-        self.assert_today(self.closed_task(head=self.head_other))
+    def test_task_not_listed_keeps_todays_step(self):
+        self.member_train()
+        unlisted = self.stored_task(self.head_a)
+        self.record_merge(unlisted)
+        self.assert_today(unlisted, self.head_a)
+
+    def test_head_not_listed_keeps_todays_step(self):
+        # The train lists this Task, but at another head than its result head.
+        moved, b = self.stored_task(self.head_other), self.stored_task(self.head_b)
+        self.make_train(members=[self.member(moved, 17, self.head_a),
+                                 self.member(b, 18, self.head_b)])
+        self.record_merge(moved)
+        self.assert_today(moved, self.head_other)
 
     def test_other_merge_sha_keeps_todays_step(self):
-        self.make_train()
-        self.assert_today(self.closed_task(merge_sha=self.main))
+        a, _b, _record = self.member_train()
+        self.record_merge(a, merge_sha=self.main)
+        self.assert_today(a, self.head_a)
 
     def test_train_proof_failure_keeps_todays_step(self):
-        self.make_train()
-        self.assert_today(self.closed_task(),
-                          integration=self.integration(merged=False))
+        a, _b, _record = self.member_train()
+        self.record_merge(a)
+        self.assert_today(a, self.head_a, integration=self.integration(merged=False))
 
     def test_store_read_error_does_not_close(self):
-        self.make_train()
+        a, _b, _record = self.member_train()
+        self.record_merge(a)
         (self.trains / 'not a record').write_text('x', encoding='utf-8')
-        self.assert_today(self.closed_task())
+        self.assert_today(a, self.head_a)
+        result, calls, _advance = self.run_drive(a)
+        self.assertNotEqual(result['step'], 'CLOSED')
+        self.assertEqual(calls, [])
 
     def test_store_refusal_does_not_close(self):
-        self.make_train()
+        a, _b, _record = self.member_train()
+        self.record_merge(a)
         refusal = LLMToolError('TRAIN_RECORD_UNAVAILABLE')
         with patch.object(merge_train_store, 'find_by_pr', side_effect=refusal):
-            self.assert_today(self.closed_task())
+            self.assert_today(a, self.head_a)
 
 
 if __name__ == '__main__':
