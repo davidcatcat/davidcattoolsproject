@@ -221,16 +221,27 @@ class EligibleMemberTests(_Base):
                             FILES: [{'filename': 'docs/guide.md'}]})
         self.assertRefused(self.check(routes=routes), 'MERGE_REQUIRED_CHECK_MISSING')
 
-    def test_scripts_only_member_needs_macos_not_linux(self):
-        routes = _routes(**{CHECKS: _checks(_run(77, MACOS)),
+    def test_scripts_only_member_needs_linux_and_macos(self):
+        # #1208: a scripts/-only PR follows the code rule.
+        routes = _routes(**{CHECKS: _checks(_run(76, LINUX), _run(77, MACOS)),
                             FILES: [{'filename': 'scripts/tool.sh'}]})
         result = self.check(routes=routes)
         self.assertTrue(result['eligible'], result)
-        self.assertIsNone(result['member']['linux_check_run_id'])
+        self.assertEqual(result['member']['linux_check_run_id'], 76)
         self.assertEqual(result['member']['macos_check_run_id'], 77)
 
+    def test_scripts_only_member_without_linux_refuses(self):
+        routes = _routes(**{CHECKS: _checks(_run(77, MACOS)),
+                            FILES: [{'filename': 'scripts/tool.sh'}]})
+        self.assertRefused(self.check(routes=routes), 'MERGE_REQUIRED_CHECK_MISSING')
+
+    def test_scripts_only_member_with_skipped_linux_refuses(self):
+        routes = _routes(**{CHECKS: _checks(_run(76, LINUX, 'skipped'), _run(77, MACOS)),
+                            FILES: [{'filename': 'scripts/tool.sh'}]})
+        self.assertRefused(self.check(routes=routes), 'MERGE_REQUIRED_CHECK_SKIPPED')
+
     def test_scripts_only_member_without_macos_refuses(self):
-        routes = _routes(**{CHECKS: _checks(_run(78, DOCS)),
+        routes = _routes(**{CHECKS: _checks(_run(76, LINUX), _run(78, DOCS)),
                             FILES: [{'filename': 'scripts/tool.sh'}]})
         self.assertRefused(self.check(routes=routes), 'MERGE_REQUIRED_CHECK_MISSING')
 

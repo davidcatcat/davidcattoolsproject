@@ -4097,14 +4097,18 @@ class MergeNewerClaimVetoTests(unittest.TestCase):
 
 
 class ScriptsOnlyCiTests(unittest.TestCase):
-    """#1139: a scripts/-only PR needs no Linux job; macOS stays required."""
+    """#1208: a scripts/-only PR needs exact-head Linux CI like any code PR."""
 
     PR = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'mergeable': True}
+    LINUX = 'check (Linux 3.14)'
+    MAC = 'check (macOS 3.13)'
 
     @staticmethod
-    def reader(paths, names, conclusion='success'):
+    def reader(paths, outcomes):
+        """outcomes maps a check name to its conclusion."""
         runs = [{'id': index + 1, 'head_sha': HEAD, 'name': name, 'status': 'completed',
-                 'conclusion': conclusion} for index, name in enumerate(names)]
+                 'conclusion': conclusion}
+                for index, (name, conclusion) in enumerate(outcomes.items())]
         def get(path):
             if path.startswith('commits/'):
                 return {'total_count': len(runs), 'check_runs': runs}
@@ -4113,31 +4117,58 @@ class ScriptsOnlyCiTests(unittest.TestCase):
             raise AssertionError(path)
         return get
 
+    def test_scripts_only_helper_is_removed(self):
+        self.assertFalse(hasattr(task_advance, '_scripts_only_ci'))
+
     def test_merge_and_review_ci_rules_by_changed_paths(self):
         scripts = ['scripts/llmtool_monitor.py', 'scripts/tool.sh']
-        mac = ['check (macOS 3.13)']
+        linux, mac = self.LINUX, self.MAC
         cases = (
-            ('scripts only with macOS', scripts, mac, 'success', None, (None, None)),
-            ('scripts only without checks', scripts, [], 'success',
-             'MERGE_CHECKS_MISSING', (None, None)),
-            ('scripts only with Linux only', scripts, ['check (Linux 3.14)'], 'success',
+            ('scripts only with Linux and macOS', scripts,
+             {linux: 'success', mac: 'success'}, None, (None, None)),
+            ('scripts only with macOS only', scripts, {mac: 'success'},
+             'MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
+            ('scripts only with skipped Linux', scripts,
+             {linux: 'skipped', mac: 'success'},
+             'MERGE_REQUIRED_CHECK_SKIPPED', ('CI_FAILED', 'LINUX_CI_FAILED')),
+            ('scripts only without checks', scripts, {},
+             'MERGE_CHECKS_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
+            ('scripts only with Linux only', scripts, {linux: 'success'},
              'MERGE_REQUIRED_CHECK_MISSING', (None, None)),
-            ('scripts only with skipped macOS', scripts, mac, 'skipped',
+            ('scripts only with skipped macOS', scripts,
+             {linux: 'success', mac: 'skipped'},
              'MERGE_MACOS_CHECK_REQUIRED', (None, None)),
-            ('one other path', scripts + ['src/module.py'], mac, 'success',
+            ('one other path', scripts + ['src/module.py'], {mac: 'success'},
              'MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
-            ('docs only', ['docs/guide.md'], mac, 'success',
+            ('docs only', ['docs/guide.md'], {mac: 'success'},
              'MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
+            ('docs only with docs check', ['docs/guide.md'], {'check (docs)': 'success'},
+             None, (None, None)),
+            ('skills Python file with docs check only', ['skills/x/tool.py'],
+             {'check (docs)': 'success'},
+             'MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
+            ('skills Python file with Linux and macOS', ['skills/x/tool.py'],
+             {linux: 'success', mac: 'success'}, None, (None, None)),
+            ('skills Markdown with docs check', ['skills/x/SKILL.md'],
+             {'check (docs)': 'success'}, None, (None, None)),
         )
-        for label, paths, names, conclusion, merge_code, review in cases:
+        for label, paths, outcomes, merge_code, review in cases:
             with self.subTest(label):
-                get = self.reader(paths, names, conclusion)
+                get = self.reader(paths, outcomes)
                 self.assertEqual(task_advance._merge_checks({}, 17, HEAD, self.PR, get),
                                  merge_code)
                 self.assertEqual(task_advance._review_ci_gate(17, HEAD, get), review)
-        self.assertTrue(task_advance._scripts_only_ci(scripts))
-        for paths in ([], ['scripts'], ['tools/scripts/a.py'], [None]):
-            self.assertFalse(task_advance._scripts_only_ci(paths))
+
+    def test_review_of_scripts_only_pr_waits_for_linux_ci(self):
+        scripts = ['scripts/llmtool_monitor.py']
+        get = self.reader(scripts, {self.MAC: 'success'})
+        self.assertEqual(task_advance._review_ci_gate(17, HEAD, get),
+                         ('WAITING_CI', 'LINUX_CI_PENDING'))
+        get = self.reader(scripts, {self.LINUX: 'failure', self.MAC: 'success'})
+        self.assertEqual(task_advance._review_ci_gate(17, HEAD, get),
+                         ('CI_FAILED', 'LINUX_CI_FAILED'))
+        get = self.reader(scripts, {self.LINUX: 'success'})
+        self.assertEqual(task_advance._review_ci_gate(17, HEAD, get), (None, None))
 
 
 class IntegrationDeltaRealGitTests(unittest.TestCase):

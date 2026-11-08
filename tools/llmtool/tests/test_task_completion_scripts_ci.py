@@ -1,8 +1,9 @@
-"""task complete CI evidence for a scripts/-only Task (#1132 item 4 follow-up).
+"""task complete CI evidence for a scripts/-only Task (#1208).
 
-A scripts/-only change runs no Linux job (the same rule task advance applies),
-so task complete requires only the exact-head macOS check for it. Every other
-path set keeps today's Mac + Linux code gate or the docs gate.
+The 11-07 relaxation that let a scripts/-only change skip the Linux job is
+withdrawn. A scripts/-only change is code: task complete needs the exact-head
+Linux and macOS code checks, like any other code change. The docs gate stays.
+A Python file under skills/ is code, not documentation.
 """
 import sys
 import unittest
@@ -40,7 +41,10 @@ class ScriptsOnlyCiTests(unittest.TestCase):
 
     def _workflow(self, responses, check_runs, *, path, name, workflow_id, run_id,
                   check_name, check_id, runner, outcome):
-        """Add one workflow's responses; outcome is success/failure/pending or None (no run)."""
+        """Add one workflow's responses.
+
+        outcome is success, failure, skipped, pending, or None (no run).
+        """
         responses['actions/workflows/' + path.rsplit('/', 1)[-1]] = {
             'id': workflow_id, 'path': path, 'name': name, 'state': 'active'}
         runs_key = (f'actions/workflows/{workflow_id}/runs?head_sha={RESULT_SHA}'
@@ -144,42 +148,44 @@ class ScriptsOnlyCiTests(unittest.TestCase):
 
     # Cases ---------------------------------------------------------------
 
-    def test_scripts_only_mac_success_without_linux_run_closes_ci_gate(self):
-        # Reproduction: before the fix task complete still required Linux here.
-        responses = {**self._review_responses(), **self._ci_responses(mac='success')}
-        result, calls = self._collect_github(responses, SCRIPTS_PATHS)
-        self.assertNotIn('REQUIRED_CI_MISSING', result['missing_gates'])
+    def test_scripts_only_helper_is_removed(self):
+        self.assertFalse(hasattr(task_completion, '_scripts_only_ci'))
+        self.assertFalse(hasattr(task_completion, '_SCRIPTS_ONLY_SKIPPED_CODE_CHECK'))
+
+    def test_scripts_only_mac_success_without_linux_run_does_not_close_ci_gate(self):
+        # The withdrawn rule closed the gate here; Linux is required again.
+        for linux in (None, 'skipped'):
+            with self.subTest(linux=linux):
+                responses = {**self._review_responses(),
+                             **self._ci_responses(mac='success', linux=linux)}
+                result, calls = self._collect_github(responses, SCRIPTS_PATHS)
+                self.assertIn('REQUIRED_CI_MISSING', result['missing_gates'])
+                evidence = result['evidence']
+                self.assertEqual(evidence['required_checks'], [LINUX_CHECK, MAC_CHECK])
+                self.assertEqual(evidence['successful_checks'], [MAC_CHECK])
+                self.assertIn('actions/workflows/llmtool-linux-ci.yml', calls)
+
+    def test_scripts_only_with_linux_and_mac_success_closes_ci_gate(self):
+        responses = {**self._review_responses(),
+                     **self._ci_responses(mac='success', linux='success')}
+        result, _ = self._collect_github(responses, SCRIPTS_PATHS)
         self.assertEqual(result['missing_gates'], [])
         evidence = result['evidence']
-        self.assertEqual(evidence['required_checks'], [MAC_CHECK])
-        self.assertEqual(evidence['successful_checks'], [MAC_CHECK])
-        self.assertEqual(evidence['ci_check_ids'], {MAC_CHECK: 21})
-        self.assertEqual(evidence['ci_workflow_path'], MAC_PATH)
-        self.assertNotIn('actions/workflows/llmtool-linux-ci.yml', calls)
+        self.assertEqual(evidence['required_checks'], [LINUX_CHECK, MAC_CHECK])
+        self.assertEqual(evidence['successful_checks'], [LINUX_CHECK, MAC_CHECK])
+        self.assertEqual(evidence['ci_check_ids'], {MAC_CHECK: 21, LINUX_CHECK: 61})
 
-    def test_scripts_only_helper_matches_task_advance_rule(self):
-        self.assertTrue(task_completion._scripts_only_ci(['scripts/a.py']))
-        self.assertTrue(task_completion._scripts_only_ci(SCRIPTS_PATHS))
-        self.assertTrue(task_completion._scripts_only_ci(['scripts/a.py', 'scripts/b.md']))
-        for paths in ([], None, ('scripts/a.py',), ['scripts/README.md'],
-                      ['scripts/a.py', 'tools/llmtool/llmtool/x.py'],
-                      ['scripts/a.py', 'docs/guide.md'], ['scripts/a.py', 7],
-                      ['tools/llmtool/scripts/a.py'], ['scriptsx/a.py']):
-            with self.subTest(paths=paths):
-                self.assertFalse(task_completion._scripts_only_ci(paths))
-
-    def test_scripts_only_collect_reads_mac_workflow_only(self):
-        evidence, calls = self._collect(self._ci_responses(mac='success'), SCRIPTS_PATHS)
-        self.assertEqual(evidence['required_checks'], [MAC_CHECK])
-        self.assertEqual(evidence['successful_checks'], [MAC_CHECK])
-        self.assertFalse(evidence['linux_required'])
+    def test_scripts_only_collect_reads_mac_and_linux_workflows(self):
+        evidence, calls = self._collect(
+            self._ci_responses(mac='success', linux='success'), SCRIPTS_PATHS)
+        self.assertEqual(evidence['required_checks'], [LINUX_CHECK, MAC_CHECK])
+        self.assertEqual(evidence['successful_checks'], [LINUX_CHECK, MAC_CHECK])
+        self.assertTrue(evidence['linux_required'])
         self.assertFalse(evidence['docs_only'])
-        # The result keeps today's key set (OwnerValuesGoldenTests); no new key.
         self.assertNotIn('scripts_only', evidence)
-        self.assertEqual(self._workflow_reads(calls),
-                         ['actions/workflows/llmtool-mac-ci.yml'])
-        self.assertFalse(any('workflows/43/' in path or 'runs/200/' in path
-                             for path in calls))
+        self.assertEqual(self._workflow_reads(calls), [
+            'actions/workflows/llmtool-mac-ci.yml',
+            'actions/workflows/llmtool-linux-ci.yml'])
 
     def test_mixed_empty_and_none_paths_keep_mac_and_linux_gate(self):
         for changed_paths in (['scripts/a.py', 'tools/llmtool/llmtool/task_completion.py'],
@@ -222,54 +228,51 @@ class ScriptsOnlyCiTests(unittest.TestCase):
             with self.subTest(mac=mac):
                 responses = {**self._review_responses(),
                              **self._ci_responses(mac=mac, linux='success')}
-                result, calls = self._collect_github(responses, SCRIPTS_PATHS)
+                result, _ = self._collect_github(responses, SCRIPTS_PATHS)
                 self.assertIn('REQUIRED_CI_MISSING', result['missing_gates'])
                 if extra is not None:
                     self.assertIn(extra, result['missing_gates'])
-                self.assertEqual(result['evidence']['required_checks'], [MAC_CHECK])
-                self.assertNotIn(LINUX_CHECK, result['evidence']['successful_checks'])
-                self.assertNotIn('actions/workflows/llmtool-linux-ci.yml', calls)
+                self.assertEqual(result['evidence']['required_checks'],
+                                 [LINUX_CHECK, MAC_CHECK])
+                self.assertNotIn(MAC_CHECK, result['evidence']['successful_checks'])
+
+    def test_not_run_checks_do_not_list_linux_for_scripts_only(self):
+        base = list(task_completion._ci_trust()['not_run_checks'])
+        self.assertEqual(list(task_completion._not_run_checks(False)), base)
+        with self.assertRaises(TypeError):
+            task_completion._not_run_checks(False, scripts_only=True)
+
+        responses = {**self._review_responses(),
+                     **self._ci_responses(mac='success', linux='success')}
+        for changed_paths in (SCRIPTS_PATHS, ['tools/llmtool/llmtool/x.py']):
+            with self.subTest(changed_paths=changed_paths):
+                result, _ = self._collect_github(responses, changed_paths)
+                self.assertEqual(result['evidence']['not_run_checks'],
+                                 [{'name': name, 'status': 'NOT_RUN'} for name in base])
+
+    def test_skills_python_file_is_not_docs_only(self):
+        self.assertFalse(task_completion._docs_only_ci(['skills/x/tool.py']))
+        self.assertFalse(task_completion._docs_only_ci(
+            ['skills/x/SKILL.md', 'skills/x/tool.py']))
+        for paths in (['skills/x/SKILL.md'], ['skills/x/reference.md'],
+                      ['docs/guide.md'], ['AGENTS.md'], ['CLAUDE.md'], ['README.md'],
+                      ['tools/llmtool/ROADMAP.md']):
+            with self.subTest(paths=paths):
+                self.assertTrue(task_completion._docs_only_ci(paths))
+
+    def test_skills_python_file_needs_linux_and_mac_code_checks(self):
+        evidence, _ = self._collect(
+            self._ci_responses(mac='success', linux='success'), ['skills/x/tool.py'])
+        self.assertEqual(evidence['required_checks'], [LINUX_CHECK, MAC_CHECK])
+        self.assertFalse(evidence['docs_only'])
 
     def test_scripts_only_malformed_mac_job_fails_closed(self):
-        responses = self._ci_responses(mac='success', linux='failure')
+        responses = self._ci_responses(mac='success', linux='success')
         responses['actions/runs/100/attempts/1/jobs?per_page=100']['jobs'][0][
             'runner_name'] = 'unregistered-runner'
         with self.assertRaises(LLMToolError) as rejected:
             self._collect(responses, SCRIPTS_PATHS)
         self.assertEqual(rejected.exception.completion_code, 'CI_WORKFLOW_JOBS_INVALID')
-
-    def test_not_run_checks_list_linux_for_scripts_only(self):
-        base = list(task_completion._ci_trust()['not_run_checks'])
-        scripts_expected = base + ([] if LINUX_CHECK in base else [LINUX_CHECK])
-        self.assertEqual(list(task_completion._not_run_checks(False, scripts_only=True)),
-                         scripts_expected)
-        self.assertEqual(list(task_completion._not_run_checks(False)), base)
-
-        responses = {**self._review_responses(), **self._ci_responses(mac='success')}
-        result, _ = self._collect_github(responses, SCRIPTS_PATHS)
-        self.assertEqual(result['evidence']['not_run_checks'],
-                         [{'name': name, 'status': 'NOT_RUN'} for name in scripts_expected])
-
-        responses = {**self._review_responses(),
-                     **self._ci_responses(mac='success', linux='success')}
-        result, _ = self._collect_github(responses, ['tools/llmtool/llmtool/x.py'])
-        self.assertEqual(result['evidence']['not_run_checks'],
-                         [{'name': name, 'status': 'NOT_RUN'} for name in base])
-
-    def test_scripts_only_with_no_mac_workflow_is_trust_ci_invalid(self):
-        ci_trust = task_completion._ci_trust()
-        linux_only = dict(ci_trust)
-        linux_only['workflows'] = [workflow for workflow in ci_trust['workflows']
-                                   if workflow['code_check'] == LINUX_CHECK]
-        self.assertEqual(len(linux_only['workflows']), 1)
-        with patch.object(task_completion, '_ci_trust', return_value=linux_only), \
-                patch.object(task_completion, '_github_get',
-                             side_effect=AssertionError('no GitHub read expected')):
-            with self.assertRaises(LLMToolError) as rejected:
-                task_completion._collect_ci_evidence(
-                    pr_number=PR_NUMBER, result_sha=RESULT_SHA,
-                    changed_paths=SCRIPTS_PATHS)
-        self.assertEqual(rejected.exception.completion_code, 'TRUST_CI_INVALID')
 
 
 if __name__ == '__main__':
