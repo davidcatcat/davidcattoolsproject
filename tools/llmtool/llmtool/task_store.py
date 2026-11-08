@@ -2347,7 +2347,12 @@ class TaskStore:
             _fail()
         return task_id + '.json'
 
-    def _read_at(self, directory, task_id):
+    def _read_at(self, directory, task_id, *, validate=True):
+        """Read one record with every file check and a strict JSON parse.
+
+        validate=False skips only the final _validate; it is for read-only
+        scans whose matches the caller then reads again through get().
+        """
         name = self._name(task_id)
         for _ in range(TASK_READ_ATTEMPTS):
             fd = None
@@ -2396,7 +2401,7 @@ class TaskStore:
                                    parse_constant=lambda _: _fail())
                 if value.get('task_id') != task_id:
                     _fail()
-                return _validate(value)
+                return _validate(value) if validate else value
             except LLMToolError:
                 raise
             except FileNotFoundError:
@@ -2540,6 +2545,32 @@ class TaskStore:
             os.close(directory)
         return sorted(name[:-5] for name in names
                       if name.endswith('.json') and _safe_identifier(name[:-5], TASK_ID))
+
+    def completion_d6_task_ids(self, executor_task_id):
+        """Return sorted IDs of Tasks whose stored completion names this D6.
+
+        Read-only. Each record gets the file checks and strict JSON parse of
+        _read_at but not _validate, so a scan does not grow with full
+        validation of unrelated records. A returned record is not validated:
+        the caller must read it through get() before using it. Nothing is
+        skipped: a record that cannot be opened, read or parsed, or whose
+        task_id does not match its file name, raises. An invalid D6 raises.
+        """
+        if not _safe_identifier(executor_task_id, D6_TASK_ID):
+            _fail()
+        task_ids = self.task_ids()
+        directory = self._dirfd()
+        try:
+            matching = []
+            for task_id in task_ids:
+                record = self._read_at(directory, task_id, validate=False)
+                completion = record.get('completion')
+                if (type(completion) is dict and
+                        completion.get('executor_task_id') == executor_task_id):
+                    matching.append(task_id)
+        finally:
+            os.close(directory)
+        return sorted(matching)
 
     def get(self, task_id):
         directory = self._dirfd()
