@@ -424,9 +424,10 @@ def _member_pr_comment(record):
 def _close_member_prs(record, github_get, gh_runner, root):
     """Close each member PR that is still open and not merged; return (closed, failed).
 
-    One fresh read per PR. A PR already closed or merged is left alone. A
-    failed or malformed read, or a failed close, is listed in ``failed``.
-    Each open PR gets one close command, never a retry.
+    One fresh read per PR. A PR that is merged, or whose state is closed, is
+    left alone. A PR whose state is open and not merged gets one close
+    command, never a retry. A failed or malformed read, any other state, or a
+    failed close is listed in ``failed``; no PR is silently skipped.
     """
     closed, failed = [], []
     comment = _member_pr_comment(record)
@@ -437,7 +438,11 @@ def _close_member_prs(record, github_get, gh_runner, root):
                 type(pr.get('merged')) is not bool):
             failed.append(number)
             continue
-        if pr['state'] != 'open' or pr['merged']:
+        if pr['merged'] or pr['state'] == 'closed':
+            continue
+        if pr['state'] != 'open':
+            # An unknown state is not proof the PR is done; report it.
+            failed.append(number)
             continue
         try:
             outcome = gh_runner(root, ['pr', 'close', str(number), '--comment', comment])
@@ -461,7 +466,8 @@ def close_train(train_id, *, store, advance_call, github_get, gh_runner, root,
     member PR is read once through ``github_get``. A PR still open and not
     merged is closed once through ``gh_runner`` (``gh pr close N --comment``)
     with one fixed comment naming the train id, the train PR and the squash
-    SHA. A PR already closed or merged is left alone. A failed read or close
+    SHA. A PR that is merged or in state closed is left alone. A failed or
+    malformed read, any state other than open or closed, or a failed close
     keeps step CLOSED (the record stays CLOSED) and adds
     TRAIN_MEMBER_PR_CLOSE_FAILED. The result lists ``closed_prs`` and
     ``failed_prs``. A refused or WAITING_MEMBERS close never touches a PR.

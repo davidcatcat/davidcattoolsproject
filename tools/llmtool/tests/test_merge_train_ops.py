@@ -900,6 +900,32 @@ class MergeTrainOpsTest(unittest.TestCase):
         self.assertEqual(self.gh.named('close'), [])
         self.assertEqual(self._record()['state'], 'CLOSED')
 
+    def test_close_unrecognized_pr_state_is_reported_per_pr(self):
+        self._merged_train()
+        # A state other than open or closed is not proof the PR is done.
+        self.github.pulls[PR_A].update(state='draft', merged=False)
+        result = self._close(self._all_closed)
+        self.assertEqual(result['step'], 'CLOSED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_MEMBER_PR_CLOSE_FAILED])
+        self.assertEqual(result['result']['closed_prs'], [PR_B])
+        self.assertEqual(result['result']['failed_prs'], [PR_A])
+        # Only the open PR gets a close command.
+        self.assertEqual(self.gh.named('close'), [
+            ['pr', 'close', str(PR_B), '--comment', self._expected_comment()]])
+        self.assertEqual(self._record()['state'], 'CLOSED')
+
+    def test_close_empty_pr_state_is_reported_per_pr(self):
+        self._merged_train()
+        self.github.pulls[PR_A].update(state='', merged=False)
+        self.github.pulls[PR_B].update(state='OPEN', merged=False)
+        result = self._close(self._all_closed)
+        self.assertEqual(result['step'], 'CLOSED', result)
+        self.assertEqual(result['codes'], [merge_train_ops.TRAIN_MEMBER_PR_CLOSE_FAILED])
+        self.assertEqual(result['result']['closed_prs'], [])
+        self.assertEqual(result['result']['failed_prs'], [PR_A, PR_B])
+        self.assertEqual(self.gh.named('close'), [])
+        self.assertEqual(self._record()['state'], 'CLOSED')
+
     def _member_reads(self):
         return [path for path in self.github.reads if path in (f'pulls/{PR_A}', f'pulls/{PR_B}')]
 
