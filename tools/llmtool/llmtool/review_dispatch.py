@@ -601,6 +601,12 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         reason = getattr(exc, 'review_failure_reason', None)
         if reason in REVIEW_FAILURE_REASONS:
             unknown['failure_reason'] = reason
+        mismatch = getattr(exc, 'review_binding_mismatch_keys', None)
+        if reason == 'VERDICT_BINDING_MISMATCH' and type(mismatch) is tuple:
+            # Keep only the fixed JSON key names; never a returned or expected value.
+            keys = [key for key in ('task_id', 'run_id', 'head') if key in mismatch]
+            if keys:
+                unknown['binding_mismatch_keys'] = keys
         try:
             claimed = claims + [claim]
             updated_claims = [unknown if item is claim else item for item in claimed]

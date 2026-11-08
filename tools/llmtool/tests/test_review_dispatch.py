@@ -686,8 +686,33 @@ class ReviewDispatchTests(unittest.TestCase):
         claim = self.store.get(TASK)['review_dispatch_claim'][0]
         self.assertEqual(claim['state'], 'UNKNOWN')
         self.assertEqual(claim['failure_reason'], 'VERDICT_BINDING_MISMATCH')
+        # The claim names only the differing key, never its value.
+        self.assertEqual(claim['binding_mismatch_keys'], ['head'])
         self.assertNotIn(wrong_head, json.dumps(claim))
         self.assertNotIn('review_result', claim)
+
+    def test_other_codex_refusals_store_no_binding_mismatch_keys(self):
+        self.store.data.update({
+            'developer': {'provider_profile': 'claude'},
+            'run_id': 'c' * 32,
+            'task_binding': {'contract_digest': 'd' * 64},
+        })
+        text = _codex_review_text()
+        raw = _codex_event_stream(text.replace('contract=' + 'd' * 64,
+                                               'contract=' + 'e' * 64))
+        with patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                          return_value=SimpleNamespace(root='/repo/reviewer-d6')), \
+                self.assertRaises(LLMToolError) as raised:
+            self.invoke(
+                preflight=[(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer'),
+                           (TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')],
+                codex_runner=lambda **_kw: self._parse(raw))
+        self.assertEqual(raised.exception.review_failure_reason,
+                         'REVIEW_BINDING_LINE_MISSING')
+        claim = self.store.get(TASK)['review_dispatch_claim'][0]
+        self.assertEqual(claim['state'], 'UNKNOWN')
+        self.assertEqual(claim['failure_reason'], 'REVIEW_BINDING_LINE_MISSING')
+        self.assertNotIn('binding_mismatch_keys', claim)
 
     def test_reviewer_selection_is_cross_family_and_unknown_is_refused(self):
         executor = SimpleNamespace(
