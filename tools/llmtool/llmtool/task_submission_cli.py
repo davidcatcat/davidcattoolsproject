@@ -805,7 +805,8 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--acceptance', action='append', required=True, help='bounded acceptance condition; repeat as needed')
     delegate.add_argument('--egress-basis', required=True, help='task-specific non-sensitive data authorization basis')
     delegate.add_argument('--data-class', help='required data classification for gw-agent direct Tasks')
-    delegate.add_argument('--owner-ref', help='required Owner assignment comment URL for AGY or Claude direct Tasks')
+    delegate.add_argument('--owner-ref', help=('Owner assignment comment URL: required for Claude direct Tasks; '
+                                'optional for AGY, validated when given'))
     delegate.add_argument('--high-debug-ref',
                           help='trusted GitHub comment URL authorizing a repair-cap override')
     delegate.add_argument('--high-debug-task',
@@ -3645,12 +3646,24 @@ def _codex_developer_profile():
     return provider, effort
 
 
-def run_task_agy_delegate(args, *, store, route_runner=None):
-    """Run the provider-neutral AGY adapter against its registered D6 task."""
+def _optional_agy_owner_ref(args):
+    """Return the AGY --owner-ref, which may be None (#785 M18).
+
+    The live dispatch gate decides: PAUSED or OWNER_ASSIGNMENT_ONLY still
+    refuse without a matching ref. A supplied ref must still be a valid Owner
+    comment URL, checked before any store read or Task mutation.
+    """
     owner_ref = getattr(args, 'owner_ref', None)
-    if (type(owner_ref) is not str or
+    if owner_ref is not None and (
+            type(owner_ref) is not str or
             worker_dispatch.owner_comment_ref().fullmatch(owner_ref) is None):
         raise LLMToolError('--provider agy requires a valid --owner-ref before Task mutation')
+    return owner_ref
+
+
+def run_task_agy_delegate(args, *, store, route_runner=None):
+    """Run the provider-neutral AGY adapter against its registered D6 task."""
+    owner_ref = _optional_agy_owner_ref(args)
     if getattr(args, 'mode', None) != 'direct':
         raise LLMToolError('--provider agy requires --mode direct')
     if getattr(args, 'context_stdin', False):
@@ -5503,8 +5516,7 @@ def run_task_delegate(args, *, store=None):
     if args.provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider agy requires --mode direct')
-        if getattr(args, 'owner_ref', None) is None:
-            raise LLMToolError('--provider agy requires --owner-ref')
+        _optional_agy_owner_ref(args)
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         _check_delegate_repair_cap(args, store)
         return run_task_agy_delegate(args, store=store)

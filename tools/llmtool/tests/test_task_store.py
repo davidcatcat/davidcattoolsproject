@@ -896,6 +896,71 @@ class TaskStoreTests(unittest.TestCase):
                 self.assertEqual(saved['developer'].get('execution'),
                                  developer.get('execution'))
 
+    def _allow_agy_by_fixture_policy(self):
+        """Self-contained v1 policy fixture with AGY ALLOWED; never the live file."""
+        evidence = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+        workers = {
+            key: {'dispatch': 'PAUSED', 'decided_by': 'Owner', 'decided_at': '2026-11-08',
+                  'reason': 'test fixture', 'evidence': evidence}
+            for key in worker_dispatch.WORKERS
+        }
+        workers['company-gw-agent'] = {
+            'dispatch': 'PAUSED', 'decided_by': 'PM', 'decided_at': '2026-11-08',
+            'reason': 'test fixture', 'evidence': worker_dispatch._GW_AGENT_PAUSED_REF}
+        workers['agy']['dispatch'] = 'ALLOWED'
+        temporary_policy = Path(self.temp.name) / 'worker-dispatch-agy-allowed.json'
+        temporary_policy.write_text(
+            json.dumps({'schema_version': 1, 'workers': workers}), encoding='utf-8')
+        patcher = patch.object(worker_dispatch, '_POLICY_PATH', temporary_policy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_agy_owner_assignment_ref_may_be_none_but_claude_still_needs_a_valid_ref(self):
+        # #785 M18: AGY dispatch is decided by the live gate, so the store
+        # accepts an AGY record whose ref is None. A supplied ref must still
+        # be valid, the key stays required for AGY, and Claude keeps its rule.
+        self._allow_agy_by_fixture_policy()
+        artifact = ('diff --git a/src.py b/src.py\n'
+                    '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        developer = self._developer_assignment(provider='agy', max_tokens=None)
+        developer.update(
+            state='DEVELOPER_RESPONDED', provider_type='agy-cli', model='gemini-test',
+            backend_session_semantics='CLI_REPORTED_SESSION_ID', owner_assignment_ref=None,
+            execution={
+                'status': 'DONE', 'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
+                'cleanup_status': 'CONFIRMED', 'usage_source': 'UNKNOWN',
+                'source_bytes': None, 'source_file_count': None,
+                'source_manifest_sha256': None,
+            },
+            artifact=artifact, artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=developer)
+        self.assertIn('owner_assignment_ref', saved['developer'])
+        self.assertIsNone(saved['developer']['owner_assignment_ref'])
+        task_store_module._validate(saved)
+
+        missing_key = dict(saved['developer'])
+        del missing_key['owner_assignment_ref']
+        refused = (
+            ('agy malformed ref', dict(saved['developer'],
+                                       owner_assignment_ref='https://example.invalid/x')),
+            ('agy non-string ref', dict(saved['developer'], owner_assignment_ref=7)),
+            ('agy missing key', missing_key),
+            ('claude None ref', dict(saved['developer'], provider_profile='claude',
+                                     provider_type='claude-cli')),
+            ('codex None ref', dict(saved['developer'], provider_profile='codex',
+                                    provider_type='codex-cli')),
+        )
+        for label, candidate in refused:
+            with self.subTest(label):
+                malformed = dict(saved, developer=candidate)
+                malformed['record_sha256'] = task_store_module._digest(malformed)
+                with self.assertRaises(LLMToolError):
+                    task_store_module._validate(malformed)
+
     def test_non_claude_d6_binding_refuses_second_live_task_for_each_route(self):
         store = TaskStore(Path(self.temp.name).resolve())
         routes = ('codex', 'company-gw', 'opencode', 'agy', 'gw-agent')
