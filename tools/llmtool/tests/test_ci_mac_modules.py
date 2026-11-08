@@ -5,9 +5,14 @@ from contextlib import redirect_stdout
 import copy
 import io
 import json
+import os
 from pathlib import Path
+import shutil
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -668,6 +673,149 @@ class MacTestIdSelectionTests(unittest.TestCase):
         self.assertIn("canonical test ID elapsed seconds:", workflow)
         self.assertIn("canonical unittest test-case count:", workflow)
         self.assertIn("verify=true", workflow)
+
+
+WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml"
+MODE_PLACEHOLDER = "${{ steps.coverage.outputs.mode }}"
+NON_PASS_RESULT = r"canonical result: (INCOMPLETE|FAIL)\n"
+
+# One fake test command for both modes. FAKE_TEST_MODE picks what it does.
+FAKE_TEST = """#!/bin/sh
+case "$FAKE_TEST_MODE" in
+  pass) echo 'Ran 3 tests in 0.010s'; echo; echo OK; exit 0 ;;
+  fail) echo 'Ran 2 tests in 0.010s'; echo; echo 'FAILED (failures=1)'; exit 3 ;;
+  zero) echo OK; exit 0 ;;
+  slow) : > "$FAKE_TEST_STARTED"; exec sleep 30 ;;
+esac
+echo "unknown fake test mode" >&2
+exit 97
+"""
+FAKE_MAKE = """#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = syntax ]; then exit 0; fi
+done
+exec fake-test
+"""
+FAKE_PYTHON = "#!/bin/sh\nexec fake-test\n"
+FAKE_GIT = "#!/bin/sh\necho fake-head\n"
+
+
+def _kill_process_group(process):
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    if process.poll() is None:
+        process.wait(timeout=10)
+
+
+class OfflineCanonicalStepTests(unittest.TestCase):
+    """Run the real step script under bash with fake make, Python and git."""
+
+    def workflow(self):
+        import yaml
+
+        return yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+
+    def step_script(self, mode):
+        steps = self.workflow()["jobs"]["check"]["steps"]
+        script = next(s for s in steps if s.get("name") == "Offline canonical checks")["run"]
+        self.assertIn(MODE_PLACEHOLDER, script)
+        return script.replace(MODE_PLACEHOLDER, mode)
+
+    def run_step(self, mode, fake_mode, send_signal=None):
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash is not installed")
+        temporary = tempfile.TemporaryDirectory(prefix="mac-canonical-step-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        for name, text in (("fake-test", FAKE_TEST), ("make", FAKE_MAKE),
+                           ("python3", FAKE_PYTHON), ("git", FAKE_GIT)):
+            path = bin_dir / name
+            path.write_text(text, encoding="utf-8")
+            path.chmod(0o755)
+        (root / "mac-test-ids").write_text("test_alpha\ntest_beta\n", encoding="utf-8")
+        script = root / "step.sh"
+        script.write_text(self.step_script(mode), encoding="utf-8")
+        started_marker = root / "test-started"
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("BASH_ENV", "ENV")}
+        env.update({
+            "PATH": str(bin_dir) + os.pathsep + env.get("PATH", os.defpath),
+            "JOB_PYTHON": str(bin_dir / "python3"),
+            "RUNNER_TEMP": str(root),
+            "FAKE_TEST_MODE": fake_mode,
+            "FAKE_TEST_STARTED": str(started_marker),
+        })
+        output_path = root / "step-output"
+        # Same shell flags as GitHub's default bash step shell.
+        with output_path.open("wb") as output:
+            process = subprocess.Popen(
+                [bash, "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+                cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=output,
+                stderr=subprocess.STDOUT, start_new_session=True,
+            )
+        self.addCleanup(_kill_process_group, process)
+        if send_signal is not None:
+            deadline = time.monotonic() + 15
+            while not started_marker.exists():
+                self.assertIsNone(process.poll(), "step ended before the test command ran")
+                self.assertLess(time.monotonic(), deadline, "fake test command never started")
+                time.sleep(0.05)
+            process.send_signal(send_signal)
+        # A slow fake test sleeps 30 s, so this also proves bash did not wait for it.
+        returncode = process.wait(timeout=15)
+        return returncode, output_path.read_text(encoding="utf-8")
+
+    def test_passing_run_with_count_prints_pass_and_exits_zero(self):
+        for mode, count in (("mac-subset", 6), ("full", 3)):
+            with self.subTest(mode=mode):
+                returncode, output = self.run_step(mode, "pass")
+                self.assertEqual(returncode, 0, output)
+                self.assertIn("canonical exact HEAD: fake-head\n", output)
+                self.assertIn(f"canonical unittest test-case count: {count}\n", output)
+                self.assertIn("canonical elapsed seconds: ", output)
+                self.assertIn("canonical result: PASS\n", output)
+                if mode == "mac-subset":
+                    self.assertIn("canonical test ID: test_alpha\n", output)
+                    self.assertIn("canonical test ID: test_beta\n", output)
+                    self.assertIn("canonical test ID elapsed seconds: ", output)
+
+    def test_failing_command_prints_fail_with_its_exit_status(self):
+        for mode in ("mac-subset", "full"):
+            with self.subTest(mode=mode):
+                returncode, output = self.run_step(mode, "fail")
+                self.assertEqual(returncode, 3, output)
+                self.assertIn("canonical result: FAIL\n", output)
+                self.assertNotIn("canonical result: PASS", output)
+
+    def test_zero_test_count_is_not_pass(self):
+        for mode in ("mac-subset", "full"):
+            with self.subTest(mode=mode):
+                returncode, output = self.run_step(mode, "zero")
+                self.assertNotEqual(returncode, 0, output)
+                self.assertIn("canonical unittest test-case count: 0\n", output)
+                self.assertRegex(output, NON_PASS_RESULT)
+                self.assertNotIn("canonical result: PASS", output)
+
+    def test_sigterm_during_test_command_is_not_pass(self):
+        for mode in ("mac-subset", "full"):
+            with self.subTest(mode=mode):
+                returncode, output = self.run_step(mode, "slow", signal.SIGTERM)
+                self.assertNotEqual(returncode, 0, output)
+                self.assertIn("canonical exact HEAD: fake-head\n", output)
+                self.assertRegex(output, NON_PASS_RESULT)
+                self.assertNotIn("canonical result: PASS", output)
+
+    def test_job_timeout_is_90_for_dispatch_and_45_otherwise(self):
+        check = self.workflow()["jobs"]["check"]
+        self.assertEqual(
+            check["timeout-minutes"],
+            "${{ github.event_name == 'workflow_dispatch' && 90 || 45 }}",
+        )
 
 
 if __name__ == "__main__":
