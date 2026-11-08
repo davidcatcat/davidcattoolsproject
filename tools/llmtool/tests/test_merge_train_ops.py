@@ -14,7 +14,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from llmtool import merge_train, merge_train_ops, merge_train_store, task_completion  # noqa: E402
+from llmtool import mac_full_suite, merge_train, merge_train_ops, merge_train_store  # noqa: E402
+from llmtool import task_completion  # noqa: E402
 from llmtool.errors import LLMToolError  # noqa: E402
 
 TRAIN_ID = 'train-1182'
@@ -180,6 +181,12 @@ class MergeTrainOpsTest(unittest.TestCase):
                                     return_value=self.main)
         self.read_main = patcher.start()
         self.addCleanup(patcher.stop)
+        # These tests fix the exact gh calls and codes of a merge. The full
+        # Mac CI request is stubbed here and tested in test_mac_full_suite.
+        suite = mock.patch.object(mac_full_suite, 'request_full_suite',
+                                  return_value=mac_full_suite.MAC_FULL_SUITE_DISPATCHED)
+        self.request_full_suite = suite.start()
+        self.addCleanup(suite.stop)
 
     def _set_train_head(self, head):
         self.github.pulls[TRAIN_PR] = _pull(TRAIN_PR, head)

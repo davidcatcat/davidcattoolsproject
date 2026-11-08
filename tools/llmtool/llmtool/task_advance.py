@@ -15,7 +15,8 @@ import time
 from pathlib import Path
 from argparse import Namespace
 
-from . import active_pm_inbox, github_events, remote_test, review_dispatch, review_repair
+from . import active_pm_inbox, github_events, mac_full_suite, remote_test, review_dispatch
+from . import review_repair
 from . import review_result, task_completion, task_submission_cli
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes
@@ -762,7 +763,7 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
                 except Exception:
                     warning_codes.append('MERGE_RESULT_RECORD_FAILED')
             return _merge_success(record, number, head, review_version, gh_runner, root,
-                                  warning_codes)
+                                  warning_codes, github_get)
         claim['state'] = 'UNKNOWN'
         try:
             store.compare_and_update(record['task_id'], expected={'merge_attempt':
@@ -785,10 +786,11 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
             pass
         warning_codes.append('MERGE_RESULT_RECORD_FAILED')
     return _merge_success(record, number, head, review_version, gh_runner, root,
-                          warning_codes)
+                          warning_codes, github_get)
 
 
-def _merge_success(record, number, head, review_version, gh_runner, root, warning_codes):
+def _merge_success(record, number, head, review_version, gh_runner, root, warning_codes,
+                   github_get=None):
     body = (f'llmtool task advance merge provenance: task={record["task_id"]} '
             f'head={head} review_version={review_version} checks=exact-head-success-or-skipped')
     try:
@@ -797,6 +799,12 @@ def _merge_success(record, number, head, review_version, gh_runner, root, warnin
             warning_codes.append('MERGE_PROVENANCE_COMMENT_FAILED')
     except Exception:
         warning_codes.append('MERGE_PROVENANCE_COMMENT_FAILED')
+    # Ask for one full Mac CI run on the new main. Its outcome never changes
+    # the merge; only a failed or skipped request is reported.
+    suite = mac_full_suite.request_full_suite(gh_runner=gh_runner, root=root,
+                                              github_get=github_get)
+    if suite not in mac_full_suite.OK_CODES:
+        warning_codes.append(suite)
     return {'step': 'MERGED', 'codes': warning_codes, 'result': {'pr': number, 'head': head}}
 
 

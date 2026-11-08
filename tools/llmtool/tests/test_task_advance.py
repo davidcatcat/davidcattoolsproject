@@ -10,6 +10,7 @@ from contextlib import redirect_stdout
 from unittest.mock import call, patch
 from pathlib import Path
 
+from llmtool import mac_full_suite
 from llmtool import review_dispatch
 from llmtool import review_result
 from llmtool import task_advance
@@ -18,6 +19,21 @@ from llmtool import task_submission_cli
 from llmtool.errors import LLMToolError
 from llmtool.task_store import _json_bytes
 from llmtool.cli import main, parser_for_cli
+
+
+# Merge tests here fix the exact GitHub reads, gh calls and codes of a merge.
+# The full Mac CI request after a merge is stubbed for this module and is
+# tested in test_mac_full_suite.
+_FULL_SUITE_PATCH = patch.object(mac_full_suite, 'request_full_suite',
+                                 return_value=mac_full_suite.MAC_FULL_SUITE_DISPATCHED)
+
+
+def setUpModule():
+    _FULL_SUITE_PATCH.start()
+
+
+def tearDownModule():
+    _FULL_SUITE_PATCH.stop()
 
 
 HEAD = 'a' * 40

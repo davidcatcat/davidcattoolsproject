@@ -7,8 +7,8 @@ the train delta, every member's bound PASS and the train-head CI, then reads
 authenticated main once more right before the claim. A record left in
 MERGE_CLAIMED (its UNKNOWN or MERGED write failed) is settled from one fresh PR
 read without a new merge: MERGED when the train merged at its head, else UNKNOWN.
-The provenance comment is posted only after MERGED is durably recorded.
-close_train then closes the member Tasks in record order through ``task advance``.
+The provenance comment is posted only after MERGED is durably recorded, and
+one full Mac CI run on main is then requested (mac_full_suite). close_train then closes the member Tasks in record order through ``task advance``.
 
 merge_train holds an exclusive non-blocking per-train operation lock (a
 dot-file beside the record) for the whole call; a held lock refuses
@@ -28,7 +28,7 @@ import re
 import stat
 
 from . import merge_train as _train_build
-from . import merge_train_store, task_advance, task_completion
+from . import mac_full_suite, merge_train_store, task_advance, task_completion
 
 _HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 _CODE = re.compile(r'[A-Z][A-Z0-9_]{0,63}\Z')
@@ -199,12 +199,14 @@ def _provenance(record, merge_sha):
     return '\n'.join(lines)
 
 
-def _finish_merged(record, expected_sha256, attempt, merge_sha, gh_runner, root, train_root):
+def _finish_merged(record, expected_sha256, attempt, merge_sha, gh_runner, root, train_root,
+                   github_get=None):
     """Record a merge seen at the exact train head, then post one provenance comment.
 
     The comment follows only a durable MERGED write. When both writes fail the
     record stays MERGE_CLAIMED or UNKNOWN and the next call settles it from a
-    fresh PR read without a new merge, posting the comment then.
+    fresh PR read without a new merge, posting the comment then. The full Mac
+    CI request follows the comment in the same way.
     """
     outcome = {'train_id': record['train_id'], 'pr': record['train_pr'],
                'head': record['train_head'], 'merge_sha': merge_sha}
@@ -228,6 +230,12 @@ def _finish_merged(record, expected_sha256, attempt, merge_sha, gh_runner, root,
             codes.append(TRAIN_PROVENANCE_COMMENT_FAILED)
     except Exception:
         codes.append(TRAIN_PROVENANCE_COMMENT_FAILED)
+    # Ask for one full Mac CI run on the new main. It never changes the train
+    # state or record; only a failed or skipped request is reported.
+    suite = mac_full_suite.request_full_suite(gh_runner=gh_runner, root=root,
+                                              github_get=github_get)
+    if suite not in mac_full_suite.OK_CODES:
+        codes.append(suite)
     return _result('MERGED', codes, outcome)
 
 
@@ -248,7 +256,7 @@ def _resolve_unknown(record, github_get, gh_runner, root, train_root):
             attempt.get('head_sha') != record['train_head']):
         return _refused(TRAIN_NOT_MERGEABLE)
     return _finish_merged(record, record['record_sha256'], attempt, merge_sha,
-                          gh_runner, root, train_root)
+                          gh_runner, root, train_root, github_get)
 
 
 def _record_unknown(train_id, expected_sha256, attempt, train_root):
@@ -279,7 +287,7 @@ def _recover_claimed(record, github_get, gh_runner, root, train_root):
     merge_sha = _merged_at(_read_pr(github_get, train_pr), train_head)
     if merge_sha is not None:
         return _finish_merged(record, record['record_sha256'], attempt, merge_sha,
-                              gh_runner, root, train_root)
+                              gh_runner, root, train_root, github_get)
     _record_unknown(record['train_id'], record['record_sha256'], attempt, train_root)
     return _refused(TRAIN_MERGE_OUTCOME_UNKNOWN,
                     {'train_id': record['train_id'], 'pr': train_pr, 'head': train_head})
@@ -411,7 +419,7 @@ def _merge_locked(train_id, store, github_get, gh_runner, root, train_root):
         return _refused(TRAIN_MERGE_OUTCOME_UNKNOWN,
                         {'train_id': train_id, 'pr': train_pr, 'head': train_head})
     return _finish_merged(claimed, claimed['record_sha256'], attempt, merge_sha,
-                          gh_runner, root, train_root)
+                          gh_runner, root, train_root, github_get)
 
 
 def close_train(train_id, *, store, advance_call, train_root=None):
