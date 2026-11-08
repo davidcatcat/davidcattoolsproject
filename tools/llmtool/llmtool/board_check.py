@@ -1257,8 +1257,10 @@ def _row_problem(row):
 def _classify_ledger(ctx, row, gates, rows_by_id):
     """Apply the row's ledger claims; return (state, evidence), or None for board rules.
 
-    Only a live claim counts. A row without task_id follows its live ledger Task;
-    a live reservation without a Task is CLAIMED. When the row has claims and
+    Only a live claim counts. A live reservation without a Task is CLAIMED,
+    whether or not the board row has a task_id; it never falls through to the
+    Task rules. A row without task_id follows its live ledger Task, and a board
+    task_id that differs from it is ANOMALY. When the row has claims and
     none is live, it is ANOMALY before any Task is read, whatever the board
     task_id says; the claims stay as history. So no Task, not even a merged
     one, can make such a row DONE or hide the stale claim.
@@ -1273,10 +1275,10 @@ def _classify_ledger(ctx, row, gates, rows_by_id):
     if live:
         ctx.live_rows.add(row['id'])
         item, reason = live[0]
+        # A reservation holds the row until a Task is bound to it, even when
+        # the board already names a Task.
         if item['task_id'] is None:
-            if row.get('task_id') is None:
-                return CLAIMED, [f'ledger {reason}; no Task bound yet']
-            return None
+            return CLAIMED, [f'ledger {reason}; no Task bound yet']
         ctx.covered_tasks.add(item['task_id'])
         if row.get('task_id') is None:
             state, evidence = _classify_task(ctx, row, item['task_id'], gates, rows_by_id)

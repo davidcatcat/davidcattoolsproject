@@ -1585,6 +1585,33 @@ class LedgerBoardStateTests(LedgerCase):
         self.assertEqual((result['result'], result['exit_code'], result['anomalies']),
                          ('CLEAN', 0, []))
 
+    def test_live_reservation_on_a_row_with_task_id_is_claimed(self):
+        # Review finding (PR #1218) and High Debug RCA: a live reservation with
+        # no bound Task holds the row whatever the board task_id says. The
+        # board Task is never read, so a pending one is not idle work and a
+        # merged one does not make the row DONE.
+        self.write_ledger([ledger_claim('work')])
+        cases = (('pending', TASK_BOUND, FakeStore(pending(TASK_BOUND))),
+                 ('merged', TASK_BOUND, FakeStore(merged(pending(TASK_BOUND)))),
+                 ('different', TASK_OTHER,
+                  FakeStore(pending(TASK_BOUND), pending(TASK_OTHER))),
+                 ('absent', None, FakeStore(pending(TASK_BOUND))))
+        for label, board_task, store in cases:
+            with self.subTest(board_task_id=label):
+                row = {'id': 'work', 'next': ['second']}
+                if board_task is not None:
+                    row['task_id'] = board_task
+                with mock.patch.object(board_check, '_classify_task',
+                                       wraps=board_check._classify_task) as classify:
+                    result = self.check([row], store=store)
+                classify.assert_not_called()
+                self.assertEqual(states(result), {'work': board_check.CLAIMED}, result)
+                self.assertRow(result, 'work', board_check.CLAIMED, 'no Task bound yet')
+                self.assertRow(result, 'work', board_check.CLAIMED, 'reservation by pm-a')
+                self.assertEqual(idle_rows(result), set())
+                self.assertEqual((result['result'], result['exit_code'], result['anomalies']),
+                                 ('CLEAN', 0, []))
+
     def test_row_without_task_id_follows_its_live_ledger_task(self):
         self.write_ledger([ledger_claim('work', task_id=TASK_BOUND)])
         result = self.check([{'id': 'work'}], store=FakeStore(pending(TASK_BOUND)))
