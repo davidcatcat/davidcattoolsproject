@@ -211,8 +211,6 @@ class HostedReceiptTests(unittest.TestCase):
         missing = actions_block()
         missing.pop('nonce')
         cases = [
-            ('actions not a dict', None),
-            ('actions a list', []),
             ('missing field', missing),
             ('extra field', actions_block(extra='value')),
             ('wrong workflow path',
@@ -244,6 +242,21 @@ class HostedReceiptTests(unittest.TestCase):
         for label, block in cases:
             with self.subTest(label):
                 self._assert_refused(receipt(self.task, actions=block), marker='zzmarker')
+
+    def test_non_dict_actions_are_refused(self):
+        # Set the key directly: the receipt() helper treats actions=None as absent.
+        for label, value in (
+                ('actions null', None),
+                ('actions a string', 'zzmarker-actions'),
+                ('actions an empty list', []),
+                ('actions a list of the block', [actions_block()]),
+                ('actions an int', 1001)):
+            with self.subTest(label):
+                bad = receipt(self.task)
+                bad['actions'] = value
+                bad['receipt_digest'] = receipt_digest(bad)
+                self.assertIn('actions', bad)
+                self._assert_refused(bad, marker='zzmarker')
 
     def test_actions_require_null_remote_log_path(self):
         self._assert_refused(receipt(self.task, actions=actions_block(),
