@@ -2310,5 +2310,4 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         summary.update(pr=result.get('pr'), head=result.get('head'))
     return _ack_consumed_events(
         summary, record, store,
-        (result.get('head') if step == 'RESYNCED_WITH_MAIN' and type(result) is dict
-         else d6.get('result_head') if type(d6) is dict else None))
+        d6.get('result_head') if type(d6) is dict else None)
