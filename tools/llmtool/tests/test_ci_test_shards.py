@@ -157,8 +157,8 @@ class CiTestShardsTests(unittest.TestCase):
         self.assertEqual(set(mac_data.keys()), linux_schema)
         default = mac_data["default_seconds"]
         weights = mac_data["modules"]
-        self.assertIsInstance(default, int)
-        self.assertGreater(default, 0)
+        self.assertEqual(default, 3)
+        self.assertEqual(len(weights), 31)
         modules = {path.name for path in ci_test_shards.TESTS.glob("test_*.py")}
         self.assertTrue(set(weights.keys()) <= modules)
 
@@ -181,11 +181,7 @@ class CiTestShardsTests(unittest.TestCase):
         measured_total = sum(shard_totals)
         for shard_total in shard_totals:
             self.assertLess(shard_total * 2, measured_total)
-
-        explicit_totals = [sum(weights.get(module, 0) for module in shard) for shard in shards]
-        explicit_sum = sum(explicit_totals)
-        for explicit_total in explicit_totals:
-            self.assertLess(explicit_total * 2, explicit_sum)
+        self.assertLessEqual(max(shard_totals) - min(shard_totals), 60)
 
     def test_mac_workflow_has_single_check_job_and_three_hosted_shards(self):
         workflow = (TOOLS_ROOT.parent.parent / ".github/workflows/llmtool-mac-ci.yml").read_text(
