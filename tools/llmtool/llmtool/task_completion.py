@@ -1931,14 +1931,28 @@ def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
     return evidence
 
 
-def run_bounded_tests(*, root, source_sha, result_sha, read_paths, write_paths):
-    """Run fixed registered tests or record an actual Git-derived docs-only result."""
+def run_bounded_tests(*, root, source_sha, result_sha, read_paths, write_paths,
+                      trusted_base_sha=None):
+    """Run fixed registered tests or record an actual Git-derived docs-only result.
+
+    With trusted_base_sha the docs-only decision uses only Developer-attributed
+    paths: files that a clean merge of trusted main brought in are not Task
+    changes. A merge whose second parent is not in trusted main, or that has a
+    conflict or hand resolution, still counts its paths. Without it the plain
+    source_sha..result_sha diff decides, as before.
+    """
     eligible = sorted({(p, _registered_test(p)) for p in (*read_paths, *write_paths)
                        if _registered_test(p) is not None})
     before = collect_git_snapshot(root)
     if before.head != result_sha or not before.clean:
         _stop('TEST_SOURCE_MISMATCH')
-    changed_paths = _committed_changed_paths(root, source_sha, result_sha)
+    if trusted_base_sha is None:
+        changed_paths = _committed_changed_paths(root, source_sha, result_sha)
+    else:
+        changed_paths = list(_developer_changed_paths(
+            root, source_sha, result_sha, trusted_base_sha))
+        if not changed_paths or len(changed_paths) > _PROPOSAL_FILE_LIMIT:
+            _stop('TEST_PATH_INVALID')
     if _docs_only(changed_paths):
         return [{'status': 'NOT_APPLICABLE_DOCS_ONLY', 'changed_paths': changed_paths,
                  'source_sha': result_sha, 'docs_only': True}]
