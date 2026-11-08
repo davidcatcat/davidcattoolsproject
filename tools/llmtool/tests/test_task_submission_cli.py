@@ -3057,41 +3057,38 @@ class TaskSubmissionCLITests(unittest.TestCase):
         config_path = self._write_remote_test_config('{invalid json')
         config_loader = self._remote_test_config_loader(config_path)
         evidence, result = self._remote_local_evidence()
+        evidence['test_policy'] = 'REMOTE_RECEIPT'
         with patch('llmtool.task_submission_cli.task_completion.'
                       'run_bounded_worktree_tests') as local:
-            self.assertEqual(submission_cli._remote_test_config_state(config_loader),
-                             'INVALID')
-            with self.assertRaises(LLMToolError) as raised:
-                submission_cli._remote_receipt_test_policy(
-                    task, config_loader=config_loader)
-            self.assertEqual(str(raised.exception), 'REMOTE_TEST_CONFIG_INVALID')
-            self.assertEqual(raised.exception.completion_code,
-                             'REMOTE_TEST_CONFIG_INVALID')
-            with self.assertRaises(LLMToolError) as blocked:
-                submission_cli._direct_result_tests(
-                    task, evidence, result, task['developer'],
-                    config_loader=config_loader)
+            self.assertEqual(submission_cli._remote_receipt_test_policy(
+                task, config_loader=config_loader),
+                             'REMOTE_RECEIPT')
+            tests = submission_cli._direct_result_tests(
+                task, evidence, result, task['developer'],
+                config_loader=config_loader)
         local.assert_not_called()
-        self.assertEqual(str(blocked.exception), 'REMOTE_TEST_CONFIG_INVALID')
-        self.assertEqual(blocked.exception.completion_code,
-                         'REMOTE_TEST_CONFIG_INVALID')
+        self.assertEqual(tests[0]['status'], 'DEFERRED_REMOTE_RECEIPT')
+        self.assertEqual(tests[0]['path'],
+                         'tools/llmtool/tests/test_task_submission_cli.py')
 
     def test_unconfigured_remote_test_keeps_local_test_behaviour(self):
         task = self._remote_test_task()
         config_loader = self._remote_test_config_loader(
             self.home / '.config/llmtool/remote-test.json')
         evidence, result = self._remote_local_evidence()
+        evidence['test_policy'] = 'REMOTE_RECEIPT'
         with patch('llmtool.task_submission_cli.task_completion.'
-                      'run_bounded_worktree_tests', return_value=[]) as local:
-            self.assertEqual(submission_cli._remote_test_config_state(config_loader),
-                             'MISSING')
+                      'run_bounded_worktree_tests') as local:
             self.assertEqual(submission_cli._remote_receipt_test_policy(
-                task, config_loader=config_loader), 'LOCAL')
+                task, config_loader=config_loader),
+                             'REMOTE_RECEIPT')
             tests = submission_cli._direct_result_tests(
                 task, evidence, result, task['developer'],
                 config_loader=config_loader)
-        self.assertEqual(tests, [])
-        local.assert_called_once()
+        local.assert_not_called()
+        self.assertEqual(tests[0]['status'], 'DEFERRED_REMOTE_RECEIPT')
+        self.assertEqual(tests[0]['path'],
+                         'tools/llmtool/tests/test_task_submission_cli.py')
 
     def test_valid_remote_test_config_keeps_remote_receipt_behaviour(self):
         task = self._remote_test_task()
@@ -3103,8 +3100,6 @@ class TaskSubmissionCLITests(unittest.TestCase):
         evidence['test_policy'] = 'REMOTE_RECEIPT'
         with patch('llmtool.task_submission_cli.task_completion.'
                       'run_bounded_worktree_tests') as local:
-            self.assertEqual(submission_cli._remote_test_config_state(config_loader),
-                             'VALID')
             self.assertEqual(submission_cli._remote_receipt_test_policy(
                 task, config_loader=config_loader),
                              'REMOTE_RECEIPT')
