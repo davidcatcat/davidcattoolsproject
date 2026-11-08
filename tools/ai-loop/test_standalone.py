@@ -131,7 +131,8 @@ class StandaloneSafetyTests(unittest.TestCase):
         )
         self.assertIn("ai_loop: ${{ steps.classify.outputs.ai_loop }}", workflow)
         self.assertIn("needs.changes.outputs.ai_loop == 'true'", workflow)
-        self.assertIn("python3.14 -B -m unittest discover -s tools/ai-loop", workflow)
+        self.assertIn('"$SETUP_PYTHON" -B -m unittest discover -s tools/ai-loop', workflow)
+        self.assertIn("python-version: '3.14'", workflow)
 
 
 if __name__ == "__main__":

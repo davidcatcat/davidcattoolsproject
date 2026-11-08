@@ -6397,7 +6397,7 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             tests = task_completion.run_bounded_tests(root=git_evidence['root'],
                 source_sha=developer['source_sha'],
                 result_sha=git_evidence['result_head'], read_paths=developer['read_paths'],
-                write_paths=developer['write_paths'])
+                write_paths=developer['write_paths'], trusted_base_sha=main_pin['sha'])
         evidence['result'] = git_evidence
         evidence['tests'] = tests
         if any(item.get('status') not in
