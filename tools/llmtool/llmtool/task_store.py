@@ -157,7 +157,8 @@ _COMPLETION_INTENT_FIELDS = frozenset((
     'receipt_sha256', 'confirmed_at',
 ))
 _COMPLETION_SOURCES = frozenset(('DIRECT_D6_DEVELOPER', 'HOST_WORKER', 'REVIEWER',
-                                 'EC2_REMOTE_TEST', 'GITHUB', 'HIGH_DEBUG'))
+                                 'EC2_REMOTE_TEST', 'GITHUB', 'HIGH_DEBUG',
+                                 'GITHUB_REMOTE_TEST'))
 _REMOTE_TEST_RECEIPT_FIELDS = frozenset((
     'result', 'exit_code', 'source_sha', 'tree', 'fetch_head', 'modules',
     'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
@@ -165,8 +166,25 @@ _REMOTE_TEST_RECEIPT_FIELDS = frozenset((
     'run_id', 'executor_task', 'pm_session', 'command_digest', 'receipt_digest'))
 _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT = (
     _REMOTE_TEST_RECEIPT_FIELDS | frozenset(('failure_excerpt',)))
+_REMOTE_TEST_RECEIPT_FIELDS_WITH_ACTIONS = (
+    _REMOTE_TEST_RECEIPT_FIELDS | frozenset(('actions',)))
+_REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT_AND_ACTIONS = (
+    _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT | frozenset(('actions',)))
+_REMOTE_TEST_RECEIPT_SHAPES = (
+    _REMOTE_TEST_RECEIPT_FIELDS, _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT,
+    _REMOTE_TEST_RECEIPT_FIELDS_WITH_ACTIONS,
+    _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT_AND_ACTIONS)
 _REMOTE_TEST_FAILURE_EXCERPT_LIMIT = 4096
 _REMOTE_TEST_FAILURE_EXCERPT_LINES = 40
+# GitHub Actions provenance of a hosted remote test run (#1257).
+_REMOTE_TEST_ACTIONS_FIELDS = frozenset((
+    'run_id', 'run_attempt', 'job_id', 'check_run_id', 'workflow_path',
+    'workflow_sha', 'labels', 'runner_group', 'nonce'))
+_REMOTE_TEST_ACTIONS_WORKFLOW_PATH = '.github/workflows/llmtool-remote-test.yml'
+_REMOTE_TEST_ACTIONS_LABELS = ('ubuntu-24.04',)
+_REMOTE_TEST_ACTIONS_RUNNER_GROUP = 'GitHub Actions'
+_REMOTE_TEST_ACTIONS_ID_MAX = 2 ** 53
+_REMOTE_TEST_ACTIONS_ATTEMPT_MAX = 100
 
 
 def _valid_remote_test_failure_excerpt(value):
@@ -176,6 +194,30 @@ def _valid_remote_test_failure_excerpt(value):
         return len(value.encode('utf-8')) <= _REMOTE_TEST_FAILURE_EXCERPT_LIMIT
     except UnicodeError:
         return False
+
+
+def _valid_remote_test_actions(value):
+    """Return whether ``value`` is one exact GitHub Actions provenance block."""
+    if type(value) is not dict or set(value) != _REMOTE_TEST_ACTIONS_FIELDS:
+        return False
+    for field in ('run_id', 'job_id', 'check_run_id'):
+        if (type(value[field]) is not int or
+                not 1 <= value[field] <= _REMOTE_TEST_ACTIONS_ID_MAX):
+            return False
+    labels = value['labels']
+    return (type(value['run_attempt']) is int and
+            1 <= value['run_attempt'] <= _REMOTE_TEST_ACTIONS_ATTEMPT_MAX and
+            type(value['workflow_path']) is str and
+            value['workflow_path'] == _REMOTE_TEST_ACTIONS_WORKFLOW_PATH and
+            type(value['workflow_sha']) is str and
+            re.fullmatch(r'[0-9a-f]{40}', value['workflow_sha']) is not None and
+            type(labels) is list and
+            all(type(item) is str for item in labels) and
+            tuple(labels) == _REMOTE_TEST_ACTIONS_LABELS and
+            type(value['runner_group']) is str and
+            value['runner_group'] == _REMOTE_TEST_ACTIONS_RUNNER_GROUP and
+            type(value['nonce']) is str and
+            re.fullmatch(r'[0-9a-f]{32}', value['nonce']) is not None)
 MAX_REMOTE_TEST_OUTCOMES = 32
 _REMOTE_TEST_OUTCOME_FIELDS = frozenset((
     'result', 'code', 'executor_task', 'sha', 'modules', 'at'))
@@ -819,8 +861,10 @@ def _validate_remote_test_receipts(record):
     # that session is accepted only through the record's verified chain.
     earlier_sessions = _verified_earlier_pm_sessions(record)
     for receipt in receipts:
-        if (type(receipt) is not dict or set(receipt) not in (
-                _REMOTE_TEST_RECEIPT_FIELDS, _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT) or
+        if (type(receipt) is not dict or set(receipt) not in _REMOTE_TEST_RECEIPT_SHAPES or
+                ('actions' in receipt and
+                 (not _valid_remote_test_actions(receipt['actions']) or
+                  receipt.get('remote_log_path') is not None)) or
                 ('failure_excerpt' in receipt and
                  (receipt.get('result') == 'PASS' or
                   not _valid_remote_test_failure_excerpt(
@@ -3130,8 +3174,7 @@ class TaskStore:
 
     def append_remote_test_receipt(self, task_id, receipt):
         """Append one validated remote test receipt idempotently to its Task."""
-        if type(receipt) is not dict or set(receipt) not in (
-                _REMOTE_TEST_RECEIPT_FIELDS, _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT):
+        if type(receipt) is not dict or set(receipt) not in _REMOTE_TEST_RECEIPT_SHAPES:
             _fail('REMOTE_TEST_RECEIPT_INVALID')
         for _ in range(5):
             current = self.get(task_id)
