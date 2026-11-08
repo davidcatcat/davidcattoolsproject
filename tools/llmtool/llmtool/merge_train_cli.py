@@ -9,6 +9,11 @@ before each member advance; a refusal there stops the whole close at once.
 ``status`` reads through ``merge_train_store.list_records`` and changes nothing.
 A stale-source stop before build, merge or close prints the same one refusal.
 
+Malformed input refuses TRAIN_INPUT_INVALID while the command line is parsed,
+before the fresh-source check or any call: unknown options at the train or
+sub-command level, help flags (the train parsers have no help option), missing
+values, and malformed members or train_id.
+
 Every command prints exactly one JSON object with ``train_id`` when known,
 ``step``, ``codes`` and ``result``. A refusal is ``pm_caller.refusal``-shaped
 and carries one code; nothing is called after it. Output that a step prints
@@ -88,22 +93,57 @@ class _TrainParser(argparse.ArgumentParser):
         return namespace, extras
 
 
+def _valid_action(namespace):
+    """True when the parsed train action carries well-formed members or train_id."""
+    action = getattr(namespace, 'train_action', None)
+    if action == 'build':
+        return _members(getattr(namespace, 'member', None)) is not None
+    if action in ('status', 'merge', 'close'):
+        return _train_id(getattr(namespace, 'train_id', None)) is not None
+    return False
+
+
+def _strict_train_parse(parse_known_args):
+    """Wrap the train parser's own ``parse_known_args``.
+
+    Any unrecognized token at the train or sub-command level, or a parsed action
+    with malformed members or train_id, refuses TRAIN_INPUT_INVALID here, while
+    the command line is parsed: before the root parser's generic error, the
+    fresh-source check, the store or any step.
+    """
+    @functools.wraps(parse_known_args)
+    def parse(args=None, namespace=None):
+        namespace, extras = parse_known_args(args, namespace)
+        if extras or not _valid_action(namespace):
+            _input_error()
+        return namespace, extras
+    return parse
+
+
 def add_train_parser(task_actions):
-    """Register ``task train build|status|merge|close`` under ``task_actions``."""
+    """Register ``task train build|status|merge|close`` under ``task_actions``.
+
+    The train parser and its sub-command parsers have no help option, so a help
+    flag is malformed input like any other unknown option.
+    """
     train = task_actions.add_parser(
-        'train', help='Build, inspect, merge or close one merge train (one step per call)')
+        'train', add_help=False,
+        help='Build, inspect, merge or close one merge train (one step per call)')
     train.error = _input_error
+    train.parse_known_args = _strict_train_parse(train.parse_known_args)
     actions = train.add_subparsers(dest='train_action', required=True,
                                    parser_class=_TrainParser)
-    build = actions.add_parser('build', help='Build one train from 2 to 6 member Tasks')
+    build = actions.add_parser('build', add_help=False,
+                               help='Build one train from 2 to 6 member Tasks')
     build.add_argument('--member', action='append', metavar='TASK_ID:PR',
                        help='member Task and its PR, in train order (repeat 2 to 6 times)')
     build.add_argument('--pm-session', help='caller PM session (default: runtime session)')
-    status = actions.add_parser('status', help='Print one train record; changes nothing')
+    status = actions.add_parser('status', add_help=False,
+                                help='Print one train record; changes nothing')
     status.add_argument('train_id')
     for name, text in (('merge', 'Merge one recorded train once at its exact head'),
                        ('close', 'Close the member Tasks of one merged train')):
-        child = actions.add_parser(name, help=text)
+        child = actions.add_parser(name, add_help=False, help=text)
         child.add_argument('train_id')
         child.add_argument('--pm-session', help='caller PM session (default: runtime session)')
     return train

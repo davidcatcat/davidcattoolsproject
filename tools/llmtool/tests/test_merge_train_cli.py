@@ -183,9 +183,54 @@ class MergeTrainCliTest(unittest.TestCase):
                                       '--pm-session', SESSION])
             self.assertEqual(args.pm_session, SESSION)
 
+    def _stale(self):
+        def stale():
+            error = LLMToolError('LLMTOOL_SOURCE_STALE')
+            error.completion_code = 'LLMTOOL_SOURCE_STALE'
+            raise error
+        self.freshness.side_effect = stale
+
+    def assertInputRefused(self, argv):
+        """``task train *argv`` prints one TRAIN_INPUT_INVALID JSON object, exits 1,
+        writes nothing to stderr and calls no freshness check, store or step."""
+        steps = {name: Recorder({'step': 'BUILT', 'codes': [], 'result': None})
+                 for name in ('build_call', 'merge_call', 'close_call', 'advance_call')}
+        adapters = self._adapters(**steps)
+        original = merge_train_cli.run_task_train
+        runs = []
+
+        def wrapped(args):
+            runs.append(args)
+            return original(args, **adapters)
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(merge_train_cli, 'run_task_train', wrapped), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = cli.main(['task', 'train', *argv])
+            except SystemExit as exc:
+                code = exc.code
+        self.assertEqual(code, 1)
+        self.assertEqual(err.getvalue(), '')
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, out.getvalue())
+        self.assertRefused(json.loads(lines[0]), merge_train_cli.TRAIN_INPUT_INVALID)
+        self.assertEqual(runs, [])
+        self.assertEqual(self.freshness.calls, [])
+        self.assertEqual(self.store.calls, [])
+        for name, step in steps.items():
+            self.assertEqual(step.calls, [], name)
+
+    def _valid_argv(self):
+        return {
+            'build': ['build', '--member', TASK_A + ':101', '--member', TASK_B + ':102',
+                      '--pm-session', SESSION],
+            'status': ['status', TRAIN_ID],
+            'merge': ['merge', TRAIN_ID, '--pm-session', SESSION],
+            'close': ['close', TRAIN_ID, '--pm-session', SESSION],
+        }
+
     def test_malformed_input_refuses_once_without_any_call(self):
-        build = Recorder({'step': 'BUILT', 'codes': [], 'result': {'train_id': TRAIN_ID}})
-        merge = Recorder({'step': 'MERGED', 'codes': [], 'result': None})
         member_a, member_b = TASK_A + ':101', TASK_B + ':102'
         cases = [
             [],
@@ -210,14 +255,97 @@ class MergeTrainCliTest(unittest.TestCase):
         ]
         for argv in cases:
             with self.subTest(argv=argv):
-                code, value, _ = self._main(argv + ['--pm-session', SESSION]
-                                            if argv[:1] == ['build'] else argv,
-                                            build_call=build, merge_call=merge)
-                self.assertEqual(code, 1)
-                self.assertRefused(value, merge_train_cli.TRAIN_INPUT_INVALID)
-        self.assertEqual(build.calls, [])
-        self.assertEqual(merge.calls, [])
-        self.assertEqual(self.store.calls, [])
+                self.assertInputRefused(argv + ['--pm-session', SESSION]
+                                        if argv[:1] == ['build'] else argv)
+
+    def test_unknown_train_level_option_refuses_before_every_subcommand(self):
+        for name, argv in self._valid_argv().items():
+            for option in (['--bogus'], ['-x'], ['--bogus=1'], ['--member', TASK_A + ':101'],
+                           ['--pm-session', SESSION], ['--train-id', TRAIN_ID]):
+                with self.subTest(command=name, option=option):
+                    self.assertInputRefused(option + argv)
+
+    def test_unknown_subcommand_option_refuses(self):
+        for name, argv in self._valid_argv().items():
+            for option in (['--bogus'], ['-x'], ['--bogus=1'], ['--json']):
+                with self.subTest(command=name, option=option, where='end'):
+                    self.assertInputRefused(argv + option)
+                with self.subTest(command=name, option=option, where='after-name'):
+                    self.assertInputRefused(argv[:1] + option + argv[1:])
+        # status takes no caller session.
+        self.assertInputRefused(['status', TRAIN_ID, '--pm-session', SESSION])
+
+    def test_help_flags_refuse_at_every_train_level(self):
+        member_a, member_b = TASK_A + ':101', TASK_B + ':102'
+        cases = [
+            ['-h'], ['--help'], ['-h', 'build'], ['--help', 'status', TRAIN_ID],
+            ['-h', 'merge', TRAIN_ID, '--pm-session', SESSION], ['-h', 'bogus'],
+            ['bogus', '-h'], ['--help', '--bogus'],
+            ['build', '-h'], ['build', '--help'],
+            ['build', '--member', member_a, '--member', member_b, '--help'],
+            ['build', '-h', '--member', 'not-a-member'],
+            ['build', '--member', member_a, '-h', '--pm-session', SESSION],
+            ['status', '-h'], ['status', TRAIN_ID, '--help'], ['status', '--help', 'Bad_ID'],
+            ['merge', '--help'], ['merge', TRAIN_ID, '-h', '--pm-session', SESSION],
+            ['merge', '../escape', '-h'],
+            ['close', '-h', TRAIN_ID], ['close', TRAIN_ID, '--pm-session', SESSION, '--help'],
+            ['close', '--help', '--bogus'],
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                self.assertInputRefused(argv)
+
+    def test_missing_option_values_refuse(self):
+        member_a = TASK_A + ':101'
+        cases = [
+            ['build', '--member'],
+            ['build', '--member', member_a, '--member'],
+            ['build', '--member', '--pm-session', SESSION],
+            ['build', '--member', member_a, '--member', TASK_B + ':102', '--pm-session'],
+            ['merge', TRAIN_ID, '--pm-session'],
+            ['merge', '--pm-session', SESSION],
+            ['close', TRAIN_ID, '--pm-session'],
+            ['close', '--pm-session', SESSION],
+            ['status'],
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                self.assertInputRefused(argv)
+
+    def test_malformed_semantic_input_refuses_before_a_stale_source_check(self):
+        self._stale()
+        member_a = TASK_A + ':101'
+        cases = [
+            ['build', '--member', member_a, '--pm-session', SESSION],
+            ['build', '--member', member_a, '--member', 'not-a-member', '--pm-session', SESSION],
+            ['build', '--member', member_a, '--member', member_a, '--pm-session', SESSION],
+            ['build', '--pm-session', SESSION] + [
+                item for index in range(7) for item in
+                ('--member', format(index + 1, '032x') + ':' + str(index + 1))],
+            ['merge', 'Bad_ID', '--pm-session', SESSION],
+            ['merge', '../escape', '--pm-session', SESSION],
+            ['close', 'Bad_ID', '--pm-session', SESSION],
+            ['close', '', '--pm-session', SESSION],
+            ['status', 'Bad_ID'],
+            ['--bogus', 'merge', TRAIN_ID, '--pm-session', SESSION],
+            ['close', TRAIN_ID, '--pm-session', SESSION, '-h'],
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                self.assertInputRefused(argv)
+
+    def test_other_task_commands_keep_the_generic_parser_error(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = cli.main(['task', 'inspect', '--bogus'])
+            except SystemExit as exc:
+                code = exc.code
+        self.assertEqual(code, 2)
+        self.assertEqual(out.getvalue(), '')
+        self.assertIn('invalid command or options', err.getvalue())
+        self.assertNotIn(merge_train_cli.TRAIN_INPUT_INVALID, err.getvalue())
+        self.assertEqual(self.freshness.calls, [])
 
     def test_six_members_are_accepted(self):
         records = {}
