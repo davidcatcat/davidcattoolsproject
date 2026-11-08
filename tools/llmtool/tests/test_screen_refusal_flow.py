@@ -22,6 +22,19 @@ from llmtool import task_submission_cli as submission_cli
 from llmtool.errors import LLMToolError
 from llmtool.task_store import new_id
 
+import review_trust_fixture
+
+
+def setUpModule():
+    # Fixture trust, so no route entry stops with TRUST_MISSING before its own
+    # duplicate check on a host without local trust state.
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
 _EXECUTOR = 'executor-d6-1'
 _ADDED = 'colour = lantern'
 _DIFF = (
