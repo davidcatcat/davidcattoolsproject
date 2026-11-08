@@ -115,6 +115,8 @@ Every Owner decision request must appear in the monitor (Owner 2026-10-28, #515)
 
 A chat question alone does not count as asking the Owner.
 
+Carried Owner acceptance ([Owner standing rule](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6723320384)): if the relay comment passed to `task advance --merge --owner-acceptance URL` names an older head H0 of the same PR, the merge may go on at the current head H1 only when the PR's own changes since H0 are edits to test files already in the PR that add or delete no file, remove no assertion, skip or test method and add no skip. Carry mode carries only Owner product acceptance. H1 still needs its own bound PASS and exact-head CI. Any `MERGE_ACCEPTANCE_CARRY_*` refusal means the PM asks the Owner again for the current head.
+
 For the required remediation after an AI misses something, see [closing process gaps](pm-continuation-reference.md#closing-process-gaps).
 
 ### Reviewer and Developer quota continuation (Owner 2026-10-27)

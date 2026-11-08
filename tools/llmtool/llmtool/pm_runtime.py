@@ -3,6 +3,7 @@
 import fcntl
 import atexit
 import collections
+import contextlib
 import json
 import os
 import re
@@ -594,6 +595,79 @@ def _session_live_elsewhere(native_id, transcript, now, created_at=None,
         return False
 
 
+def _session_state_root(state_root):
+    return _ensure_state_dir(
+        Path(state_root or Path.home() / '.local/state/llmtool/pm-runtime'))
+
+
+def _fence_path(root, key):
+    return root / (key + '.fence.json')
+
+
+@contextlib.contextmanager
+def transfer_lock(native_id, state_root=None):
+    """Hold the session's driver lock for the whole block, or raise PM_SESSION_BUSY."""
+    key = active_pm_inbox.pm_session_key(native_id)
+    root = _session_state_root(state_root)
+    lock_fd = _check_state_file(root / (key + '.lock'), create=True)
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise _error('PM_SESSION_BUSY', 'PM session already has an active driver') from None
+        except OSError:
+            raise _error('PM_STATE_INVALID', 'PM session lock could not be acquired') from None
+        yield
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+
+def write_session_fence(native_id, new_session_key, at, state_root=None):
+    """Durably record that this session was transferred, so it can never reconnect."""
+    key = active_pm_inbox.pm_session_key(native_id)
+    if (type(new_session_key) is not str or new_session_key == key or
+            active_pm_inbox.SESSION_ID.fullmatch(new_session_key) is None or
+            type(at) is not str or not at):
+        raise _error('PM_SESSION_INVALID', 'PM session fence is invalid')
+    root = _session_state_root(state_root)
+    _write_json_atomic(root, _fence_path(root, key),
+                       {'native_session_id': native_id, 'new_session_key': new_session_key,
+                        'at': at})
+
+
+def read_session_fence(native_id, state_root=None):
+    """The session's fence; None only when no fence file exists.
+
+    Any other non-None value means fenced: a fence that is malformed, unsafe or
+    unreadable returns a marker instead of the recorded fields.
+    """
+    unreadable = {'fence_state': 'UNREADABLE'}
+    try:
+        root = _session_state_root(state_root)
+        path = _fence_path(root, active_pm_inbox.pm_session_key(native_id))
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return None
+        value = _read_state_json(root, path)
+    except (LLMToolError, OSError, ValueError):
+        return unreadable
+    if (type(value) is not dict or
+            set(value) != {'native_session_id', 'new_session_key', 'at'} or
+            value['native_session_id'] != native_id or
+            type(value['new_session_key']) is not str or type(value['at']) is not str):
+        return unreadable
+    return value
+
+
+def refuse_fenced_session(native_id, root):
+    if read_session_fence(native_id, root) is not None:
+        raise _error('PM_SESSION_TRANSFERRED', 'PM session was transferred and cannot reconnect')
+
+
 def _terminate_all(signum=None, frame=None):
     previous = _previous_signal_handlers.get(signum, signal.SIG_DFL)
     if previous is None:
@@ -1091,6 +1165,7 @@ class PMRuntime:
             raise _error('PM_SESSION_BUSY', 'PM session lock could not be acquired') from None
         self._key, self._root, self._lock_fd = key, root, lock_fd
         try:
+            refuse_fenced_session(self.pm_session_id, root)
             turns = self._history_read()
             recovered = False
             recovery_time = _timestamp(self.clock)

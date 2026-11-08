@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import resource
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,11 @@ from llmtool.test_output_excerpts import (
     MAX_EXCERPT_BYTES, MAX_EXCERPTS, MAX_FAILURE_IDS, MAX_FILE_BYTES,
     MAX_SOURCE_LINES, MAX_TOTAL_EXCERPT_BYTES, select_test_excerpts,
 )
+
+# The parser child must stay within this CPU time (user plus system).
+CHILD_CPU_BUDGET_SECONDS = 5.0
+# Wall-clock limit for the parser child. It only stops a hang.
+CHILD_HANG_TIMEOUT_SECONDS = 60
 
 
 def unittest_capture(records, *, run_count=None, summary=None):
@@ -118,8 +124,11 @@ class TestOutputExcerptsTests(unittest.TestCase):
         self.path.write_bytes(raw)
         environment = os.environ.copy()
         environment['PYTHONPATH'] = str(Path(__file__).resolve().parents[1])
-        # A child process lets the regression fail promptly even if a regex
-        # holds the GIL. Exercise the public parser, including physical reads.
+        # A child process lets the regression fail even if a regex holds the
+        # GIL. Exercise the public parser, including physical reads.
+        # The budget is the child's CPU time, so a busy host does not cause a
+        # failure. The long wall-clock timeout only stops a hang.
+        before = resource.getrusage(resource.RUSAGE_CHILDREN)
         completed = subprocess.run(
             [sys.executable, '-c',
              'import json, sys\n'
@@ -130,7 +139,15 @@ class TestOutputExcerptsTests(unittest.TestCase):
              'except LLMToolError as error:\n'
              '    result = {"error": str(error)}\n'
              'print(json.dumps(result))\n', str(self.path)],
-            env=environment, capture_output=True, text=True, check=True, timeout=5)
+            env=environment, capture_output=True, text=True, check=True,
+            timeout=CHILD_HANG_TIMEOUT_SECONDS)
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        child_cpu = ((after.ru_utime - before.ru_utime)
+                     + (after.ru_stime - before.ru_stime))
+        self.assertLessEqual(
+            child_cpu, CHILD_CPU_BUDGET_SECONDS,
+            f'parser child used {child_cpu:.2f}s CPU, budget is '
+            f'{CHILD_CPU_BUDGET_SECONDS}s')
         self.assertEqual(completed.stderr, '')
         self.assertEqual(self.path.read_bytes(), raw)
         return json.loads(completed.stdout)

@@ -83,6 +83,7 @@ class CodexRuntime:
         owner._closed = False
         self._closed = False
         try:
+            pm_runtime.refuse_fenced_session(native_id, root)
             self._read_state()
             owner._history_read()
             if binding.get('session_started') or self._thread_id is not None:

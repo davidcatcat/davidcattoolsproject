@@ -50,6 +50,10 @@ def owner_only(worker_key, owner_assignment_ref=None, task_id=None):
 
 import review_trust_fixture
 
+# Reuse the completion and PM inbox fixtures without re-collecting their tests.
+import test_active_pm_inbox as pm_fixture
+import test_task_completion as completion_fixture
+
 
 def setUpModule():
     review_trust_fixture.start_module()
@@ -566,6 +570,151 @@ class DeveloperAssignmentInboxTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(out.getvalue()), {'code': 'ROLE_ACCOUNT_DIR_INVALID'})
         self.assertEqual(self.stored(assigned['assignment_id'])['state'], 'ASSIGNED')
+
+
+class AssignmentChainAcrossAccountsTests(unittest.TestCase):
+    """One Task through assign, claim, complete and PM inbox on two Claude accounts.
+
+    The PM runs on account A and the Developer on account B; each account is
+    only a temporary CLAUDE_CONFIG_DIR. Fixtures are borrowed, never inherited,
+    so no existing test is collected twice.
+    """
+
+    setUp_fixture = completion_fixture.TaskCompletionTests.setUp
+    _git = completion_fixture.TaskCompletionTests._git
+    _trusted_main_ref = completion_fixture.TaskCompletionTests._trusted_main_ref
+    _write_registration = completion_fixture.TaskCompletionTests._write_registration
+    _write_env2_marker = completion_fixture.TaskCompletionTests._write_env2_marker
+    _task = completion_fixture.TaskCompletionTests._task
+    _mock_complete_evidence = completion_fixture.TaskCompletionTests._mock_complete_evidence
+    _claude_session = pm_fixture.ActivePMInboxTests._claude_session
+    _record_pm = pm_fixture.ActivePMInboxTests._record_pm
+    _ready_task = pm_fixture.ActivePMInboxTests._ready_task
+    _complete = pm_fixture.ActivePMInboxTests._complete
+    assert_refused = DeveloperAssignmentInboxTests.assert_refused
+
+    def setUp(self):
+        self.setUp_fixture()
+        self.account_a = str(self.base / 'claude-account-a')
+        self.account_b = str(self.base / 'claude-account-b')
+        self.pm_cwd = self.base / 'pm-root'
+        self.pm_cwd.mkdir()
+        env = patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': self.account_a,
+                                      'HOME': str(self.base / 'home')})
+        env.start()
+        self.addCleanup(env.stop)
+        gate = patch('llmtool.worker_dispatch.evaluate', side_effect=allow)
+        gate.start()
+        self.addCleanup(gate.stop)
+        self.session = self._claude_session()
+        self.key = 'pm-' + self.session
+        self.store = TaskStore(self.base / 'tasks')
+
+    def fresh_store(self):
+        return TaskStore(self.base / 'tasks')
+
+    def assign(self, task, **kwargs):
+        return inbox.assign(self.store, worker=WORKER, d6_task_id=self.task_id,
+                            common_dir=self.common, pm_session_key=self.key,
+                            task_id=task['task_id'], **kwargs)
+
+    def d6_transcript(self, session, account):
+        path = active_pm_inbox.claude_session_file(session, str(self.root),
+                                                   {'CLAUDE_CONFIG_DIR': account})
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}\n')
+
+    def claim_as_b(self, assignment_id, session):
+        return inbox.claim(self.fresh_store(), assignment_id, worker=WORKER,
+                           d6_task_id=self.task_id, session_id=session,
+                           environ={'CLAUDE_CONFIG_DIR': self.account_b})
+
+    def test_one_task_crosses_both_accounts_from_assign_to_pm_ack(self):
+        task = self._ready_task()
+        assigned = self.assign(task)
+        assignment_id = assigned['assignment_id']
+        self.assertEqual((assigned['state'], assigned['task_id'], assigned['source_sha']),
+                         ('ASSIGNED', task['task_id'], self.source_sha))
+
+        # A session known only to the PM's account cannot claim as account B.
+        pm_only = str(uuid.uuid4())
+        self.d6_transcript(pm_only, self.account_a)
+        self.assert_refused('ASSIGNMENT_SESSION_NOT_FOUND', self.claim_as_b,
+                            assignment_id, pm_only)
+
+        session = str(uuid.uuid4())
+        self.d6_transcript(session, self.account_b)
+        claimed = self.claim_as_b(assignment_id, session)
+        receipt = claimed['claim']
+        self.assertEqual((claimed['state'], receipt['session_id']), ('CLAIMED', session))
+        self.assertEqual(receipt['account_dir_label'],
+                         inbox.account_dir_label({'CLAUDE_CONFIG_DIR': self.account_b}))
+        self.assertNotEqual(receipt['account_dir_label'],
+                            inbox.account_dir_label({'CLAUDE_CONFIG_DIR': self.account_a}))
+
+        # The Developer completes on account B, where the PM has no transcript.
+        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': self.account_b}):
+            code, completed = self._complete(task)
+        self.assertEqual((code, completed['completion']['state']), (0, 'PM_EVIDENCE_READY'))
+        self.assertFalse(active_pm_inbox.claude_session_file(
+            self.session, str(self.pm_cwd), {'CLAUDE_CONFIG_DIR': self.account_b}).exists())
+
+        other = str(uuid.uuid4())
+        self.d6_transcript(other, self.account_b)
+        self.assert_refused('ASSIGNMENT_ALREADY_CLAIMED', self.claim_as_b,
+                            assignment_id, other)
+        self.assertEqual(self.claim_as_b(assignment_id, session)['claim'], receipt)
+
+        # The PM reads on account A through its own store view.
+        view = active_pm_inbox.read_inbox(self.fresh_store(), self.key)
+        (event,) = view['events']
+        self.assertEqual(event['task_id'], task['task_id'])
+        self.assertIs(event['current'], True)
+        self.assertEqual(event['source'], 'DIRECT_D6_DEVELOPER')
+        self.assertEqual(event['active_pm_handoff']['state'], 'PM_EVIDENCE_READY')
+        self.assertEqual(event['pm_recovery']['resume_argv'],
+                         ['claude', '--resume', self.session])
+        self.assertEqual(view['status'], 'OK')
+        self.assertEqual(view['unclaimed_assignments'], [])
+        (seen,) = view['claimed_assignments']
+        self.assertEqual((seen['assignment_id'], seen['task_id'], seen['claim']),
+                         (assignment_id, task['task_id'], receipt))
+
+        store = self.fresh_store()
+        active_pm_inbox.ack(store, event['event_id'], self.key)
+        after = active_pm_inbox.read_inbox(store, self.key)
+        self.assertEqual(after['events'], [])
+        self.assertEqual([item['claim'] for item in after['claimed_assignments']], [receipt])
+
+        # A claimed assignment never turns UNCLAIMED once its expiry time passes.
+        later = (datetime.strptime(assigned['expires_at'], '%Y-%m-%dT%H:%M:%SZ')
+                 .replace(tzinfo=timezone.utc) + timedelta(hours=1))
+        unclaimed, still_claimed = inbox.pm_assignments(self.fresh_store(), self.key, now=later)
+        self.assertEqual(unclaimed, [])
+        self.assertEqual([(item['assignment_id'], item['state'], item['claim'])
+                          for item in still_claimed],
+                         [(assignment_id, 'CLAIMED', receipt)])
+
+    def test_task_bound_assignment_past_expiry_is_unclaimed_and_late_claim_refused(self):
+        task = self._ready_task()
+        past = datetime.now(timezone.utc) - timedelta(seconds=700)
+        assigned = self.assign(task, now=past)
+        expected = [(assigned['assignment_id'], task['task_id'], 'UNCLAIMED')]
+
+        def pm_unclaimed():
+            view = active_pm_inbox.peek_inbox(self.fresh_store(), self.key)
+            self.assertEqual(view['status'], 'ATTENTION')
+            return [(item['assignment_id'], item['task_id'], item['state'])
+                    for item in view['unclaimed_assignments']]
+
+        self.assertEqual(pm_unclaimed(), expected)
+        session = str(uuid.uuid4())
+        self.d6_transcript(session, self.account_b)
+        self.assert_refused('ASSIGNMENT_EXPIRED', self.claim_as_b,
+                            assigned['assignment_id'], session)
+        (stored,) = self.fresh_store().get_developer_assignments()
+        self.assertEqual(stored['state'], 'EXPIRED')
+        self.assertEqual(pm_unclaimed(), expected)
 
 
 if __name__ == '__main__':

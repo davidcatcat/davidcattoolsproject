@@ -10,8 +10,9 @@ import threading
 import unittest
 import uuid
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool.cli import main, parser_for_cli
@@ -34,6 +35,9 @@ from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT, _record,
                                          run_task_record_pm, run_task_show,
                                          run_task_submit)
 from llmtool.opencode_direct_developer import DirectOpenCodeError, DirectResult
+
+# Captured before any fixture patches it (#1072).
+_REAL_DIRECT_BIND = submission_cli._bind_direct_native_session
 
 FIXTURE_ORIGINS = ('git@github.com:davidcatcat/davidcattoolsproject.git',
                    'https://github.com/davidcatcat/davidcattoolsproject.git')
@@ -189,6 +193,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
             'llmtool.task_submission_cli._bootstrap_registered_d6')
         self.bootstrap_patch.start()
         self.addCleanup(self.bootstrap_patch.stop)
+        # #1072: OpenCode cases that reach the D6 session bind keep their
+        # unbound result; the bind cases below use the real step.
+        self.native_bind_patch = patch.object(
+            submission_cli, '_bind_direct_native_session', return_value=False)
+        self.native_bind_patch.start()
+        self.addCleanup(self.native_bind_patch.stop)
 
     def invoke(self, *, resolver=None, client=None, key=None):
         out = io.StringIO()
@@ -713,6 +723,15 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(main(['task', 'show', saved['task_id']]), 0)
         self.assertEqual(json.loads(output.getvalue())['pm_provenance'], saved['pm_provenance'])
 
+    def _adopt_liveness_evidence_ready(self, claude_home):
+        """Give the liveness check the account config and registry it reads."""
+        config = self.home / '.config' / 'llmtool' / 'config.yaml'
+        config.parent.mkdir(parents=True, exist_ok=True)
+        claude_home.chmod(0o700)
+        config.write_text('accounts:\n  claude-one:\n    kind: claude\n    config_dir: ' +
+                          str(claude_home) + '\n', encoding='utf-8')
+        (claude_home / 'sessions').mkdir(mode=0o700, exist_ok=True)
+
     def test_task_adopt_moves_open_tasks_and_second_run_is_noop(self):
         pm_cwd = Path(self.temp.name).resolve() / 'pm-cwd'
         pm_cwd.mkdir()
@@ -736,13 +755,17 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 store=store, input_stream=io.StringIO(json.dumps({
                     'request': 'Add a focused test.', 'response': response})),
                 return_record=True)
-        old_file.unlink()
+        # The old PM has stopped: its transcript stays and has gone quiet.
+        self._adopt_liveness_evidence_ready(claude_home)
+        os.utime(old_file, (1, 1))
         self.assertEqual(parser_for_cli().parse_args([
             'task', 'adopt', '--from-pm-session', old_native,
             '--to-pm-session', 'pm-' + new_native]).action, 'adopt')
         with patch.dict(os.environ, env), \
                 patch('llmtool.task_submission_cli.os.getcwd', return_value=str(pm_cwd)), \
-                patch('llmtool.task_submission_cli.TaskStore', return_value=store):
+                patch('llmtool.task_submission_cli.TaskStore', return_value=store), \
+                patch('llmtool.pm_session_liveness._list_processes',
+                      return_value='1 /sbin/launchd\n'):
             first_out = io.StringIO()
             with redirect_stdout(first_out):
                 self.assertEqual(main(['task', 'adopt', '--from-pm-session', old_native,
@@ -760,6 +783,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(json.loads(second_out.getvalue()),
                              {'moved': [], 'skipped': []})
             self.assertEqual(store.get(task['task_id']), snapshot)
+        self.assertEqual(old_file.read_text(encoding='utf-8'), '{}\n')
 
     def test_task_adopt_refusals_are_sanitized_and_do_not_change_records(self):
         pm_cwd = Path(self.temp.name).resolve() / 'pm-refusal-cwd'
@@ -785,14 +809,17 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     'request': 'Add a focused test.', 'response': response})),
                 return_record=True)
         before = store.get(task['task_id'])
+        self._adopt_liveness_evidence_ready(claude_home)
         attempts = (
-            (old_native, new_native, 'PM_SESSION_ADOPTION_OLD_SESSION_PRESENT'),
+            (old_native, new_native, 'PM_SESSION_ADOPTION_OLD_PM_ACTIVE'),
             (old_native, old_native, 'PM_SESSION_ADOPTION_KEYS_EQUAL'),
             ('malformed-key', new_native, 'PM_SESSION_ADOPTION_KEY_INVALID'),
         )
         with patch.dict(os.environ, env), \
                 patch('llmtool.task_submission_cli.os.getcwd', return_value=str(pm_cwd)), \
-                patch('llmtool.task_submission_cli.TaskStore', return_value=store):
+                patch('llmtool.task_submission_cli.TaskStore', return_value=store), \
+                patch('llmtool.pm_session_liveness._list_processes',
+                      return_value='77 claude --resume ' + old_native + '\n'):
             for old_key, new_key, code in attempts:
                 out = io.StringIO()
                 with self.subTest(code=code):
@@ -804,6 +831,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     self.assertNotIn(str(pm_cwd), out.getvalue())
                     self.assertNotIn(old_file.name, out.getvalue())
                     self.assertEqual(store.get(task['task_id']), before)
+                    self.assertEqual(old_file.read_text(encoding='utf-8'), '{}\n')
 
     def test_task_adopt_appears_in_help_and_other_task_parser_remains(self):
         parser = parser_for_cli()
@@ -1517,6 +1545,358 @@ class TaskSubmissionCLITests(unittest.TestCase):
             code = run_task_delegate(args)
         self.assertEqual(code, 1, output.getvalue())
         self.assertEqual(invoke.call_args.kwargs['root'], str(self.executor_root))
+
+    # #1072: an accepted OpenCode run binds its session to the D6 before the
+    # result is saved. The D6 lifecycle helper is faked; no OpenCode call.
+
+    def _executor_record_path(self):
+        return Path(self.executor_common_dir) / 'llmtool-worktrees' / 'executor-task-1.json'
+
+    def _set_executor_native_session(self, value):
+        path = self._executor_record_path()
+        record = json.loads(path.read_text(encoding='utf-8'))
+        record.pop('native_session_id', None)
+        if value is not None:
+            record['native_session_id'] = value
+        path.write_text(json.dumps(record), encoding='utf-8')
+        path.chmod(0o600)
+
+    def _executor_native_session(self):
+        return json.loads(self._executor_record_path().read_text(
+            encoding='utf-8')).get('native_session_id')
+
+    @staticmethod
+    def _opencode_result(session='ses_Abc123', *, exit_code=0, digest='a' * 64,
+                         cleanup='CONFIRMED'):
+        return DirectResult(exit_code, session, 'Updated fixture.', None, 'UNKNOWN',
+                            digest, 32, cleanup, 'opencode v2.0.32', 10, 1, 'b' * 64)
+
+    def _opencode_bind_run(self, result=None, *, real_bind=True, answer='BOUND',
+                           stored=None, held=None, repair=False, rejected=False,
+                           run_error=None, mutate=None):
+        """Run OpenCode once on its own store with a fake D6 lifecycle helper.
+
+        ``mutate`` edits the run's execution evidence just before the bind
+        step, to model evidence the store refuses.
+        """
+        self._bind_serial = getattr(self, '_bind_serial', 0) + 1
+        store = TaskStore(Path(self.temp.name).resolve() / f'bind-store-{self._bind_serial}')
+        self._set_executor_native_session(held)
+        subprocess.run(['/usr/bin/git', 'checkout', '--', 'sample.py'],
+                       cwd=self.executor_root, check=True, capture_output=True)
+        with patch.object(submission_cli, 'TaskStore', return_value=store):
+            task = self._pm_task_with_opencode_assignment()
+        calls = []
+
+        def lifecycle(_registration, session):
+            calls.append(session)
+            if answer == 'BOUND':
+                self._set_executor_native_session(session if stored is None else stored)
+            return answer
+
+        def execute(**_kwargs):
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            if run_error is not None:
+                raise run_error
+            return result
+
+        args = self._opencode_delegate_args(task)
+        if repair:
+            args.repair_packet = {
+                'task': 'e' * 32, 'pr': 7, 'executor_task': 'executor-task-1',
+                'failed_head': 'f' * 40, 'version': 1, 'verdict_comment_id': 11,
+                'findings_count': 1,
+                'reviewer_text_excerpt_untrusted_data': 'Set VALUE to 2.'}
+        run = {'calls': calls, 'store': store, 'task_id': task['task_id'],
+               'code': None, 'error': None}
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {'HOME': str(self.home)}))
+            if real_bind:
+                def mutating_bind(registration, developer, completion, session_format,
+                                  **kwargs):
+                    mutate(developer['execution'])
+                    return _REAL_DIRECT_BIND(registration, developer, completion,
+                                             session_format, **kwargs)
+                bind = _REAL_DIRECT_BIND if mutate is None else mutating_bind
+                stack.enter_context(patch.object(
+                    submission_cli, '_bind_direct_native_session', bind))
+            stack.enter_context(patch.object(
+                submission_cli, '_bind_codex_native_session', side_effect=lifecycle))
+            stack.enter_context(patch(
+                'llmtool.task_submission_cli.opencode_direct_developer.run',
+                side_effect=execute))
+            if rejected:
+                stack.enter_context(patch(
+                    'llmtool.task_submission_cli._developer_output_rejection',
+                    return_value='DEVELOPER_OUTPUT_INVALID_DIFF'))
+            writes = stack.enter_context(patch.object(
+                store, 'compare_and_update', wraps=store.compare_and_update))
+            collect = stack.enter_context(patch.object(
+                submission_cli.task_completion, 'collect_executor_worktree_result',
+                wraps=submission_cli.task_completion.collect_executor_worktree_result))
+            event = stack.enter_context(patch.object(
+                submission_cli, 'run_task_direct_result_event',
+                wraps=submission_cli.run_task_direct_result_event))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            try:
+                run['code'] = run_task_opencode_delegate(args, store=store)
+            except (LLMToolError, KeyboardInterrupt) as exc:
+                run['error'] = type(exc).__name__
+        run.update(
+            saved=store.get(task['task_id']), d6=self._executor_native_session(),
+            event_calls=event.call_count,
+            collect_calls=[call.kwargs for call in collect.call_args_list],
+            responded_writes=[call.kwargs for call in writes.call_args_list
+                              if (call.kwargs.get('developer') or {}).get('state') ==
+                              'DEVELOPER_RESPONDED'])
+        return run
+
+    def _assert_evidence_names(self, saved, session):
+        for evidence in (saved['completion']['evidence'],
+                         saved['developer']['direct_result_callback']['evidence']):
+            self.assertEqual(evidence['executor_native_session_id'], session)
+            self.assertEqual(evidence['executor_native_session'],
+                             'VERIFIED' if session is not None else 'UNKNOWN')
+
+    def test_opencode_accepted_run_binds_its_session_in_the_result_write(self):
+        run = self._opencode_bind_run(self._opencode_result())
+        saved = run['saved']
+        self.assertEqual(run['calls'], ['ses_Abc123'])
+        self.assertEqual(run['d6'], 'ses_Abc123')
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertNotIn('native_session_binding', saved['developer']['execution'])
+        self._assert_evidence_names(saved, 'ses_Abc123')
+        # One write saves the developer result and the completion evidence.
+        result_write = run['responded_writes'][0]
+        self.assertEqual(result_write['completion']['evidence']['executor_native_session_id'],
+                         'ses_Abc123')
+        self.assertEqual(result_write['developer']['direct_result_callback']['evidence']
+                         ['executor_native_session'], 'VERIFIED')
+        # The first evidence collection expects the session the D6 now holds.
+        self.assertEqual(run['event_calls'], 1)
+        self.assertEqual(run['collect_calls'][0]['expected_native_session_id'], 'ses_Abc123')
+        callback = saved['developer']['direct_result_callback']
+        self.assertNotIn('D6_TASK_BINDING_MISMATCH', callback['missing_gates'])
+        self.assertIn('TEST_SCOPE_MISSING', callback['missing_gates'])
+
+    def test_opencode_run_without_usable_session_binds_nothing(self):
+        def outcome(run):
+            developer = run['saved']['developer']
+            completion = run['saved']['completion']
+            callback = developer['direct_result_callback']
+            return (run['code'], run['error'], run['event_calls'], developer['state'],
+                    developer['error_code'], developer['execution'],
+                    developer['artifact'] is None,
+                    completion['evidence']['executor_native_session_id'],
+                    completion['evidence']['executor_native_session'],
+                    callback['evidence']['executor_native_session_id'],
+                    callback.get('state'), callback.get('missing_gates'))
+
+        for session in (None, '', 'UNKNOWN', 'not a session'):
+            with self.subTest(session=session):
+                today = self._opencode_bind_run(self._opencode_result(session),
+                                                real_bind=False)
+                run = self._opencode_bind_run(self._opencode_result(session))
+                self.assertEqual(run['calls'], [])
+                self.assertIsNone(run['d6'])
+                self.assertEqual(outcome(run), outcome(today))
+
+    def test_opencode_bind_waits_for_every_store_execution_check(self):
+        for name, options, unaccepted in (
+                ('exit-code', {'result': self._opencode_result(exit_code=1)}, False),
+                ('cleanup', {'result': self._opencode_result(cleanup='UNKNOWN')}, False),
+                ('stdout-digest', {'result': self._opencode_result(digest='not-a-digest')},
+                 False),
+                ('rejected', {'result': self._opencode_result(), 'rejected': True}, True),
+                ('failed', {'run_error': DirectOpenCodeError('OPENCODE_TIMEOUT')}, True),
+                ('interrupted', {'run_error': KeyboardInterrupt()}, True)):
+            with self.subTest(run=name):
+                run = self._opencode_bind_run(**options)
+                self.assertEqual(run['calls'], [])
+                self.assertIsNone(run['d6'])
+                self._assert_evidence_names(run['saved'], None)
+                if unaccepted:
+                    self.assertNotEqual(run['saved']['developer']['state'],
+                                        'DEVELOPER_RESPONDED')
+                    self.assertEqual(run['event_calls'], 0)
+
+    @staticmethod
+    def _set_execution(**fields):
+        def mutate(execution):
+            execution.update(fields)
+        return mutate
+
+    def test_opencode_bind_refuses_execution_evidence_the_store_rejects(self):
+        # A valid session with execution evidence TaskStore refuses: nothing
+        # is bound, and the store still refuses the result write.
+        def drop(field):
+            return lambda execution: execution.pop(field)
+
+        set_ = self._set_execution
+        for name, mutate in (
+                ('extra-binding-field', set_(native_session_binding='BOUND')),
+                ('extra-launch-field', set_(child_pid=321)),
+                ('missing-field', drop('elapsed_ms')),
+                ('status-done', set_(status='DONE')),
+                ('status-unknown', set_(status='UNKNOWN')),
+                ('elapsed-negative', set_(elapsed_ms=-1)),
+                ('elapsed-too-large', set_(elapsed_ms=86_400_001)),
+                ('elapsed-bool', set_(elapsed_ms=True)),
+                ('elapsed-str', set_(elapsed_ms='32')),
+                ('elapsed-float', set_(elapsed_ms=32.0)),
+                ('source-bytes-negative', set_(source_bytes=-1)),
+                ('source-bytes-too-large', set_(source_bytes=2 * 1024 * 1024 + 1)),
+                ('source-bytes-bool', set_(source_bytes=True)),
+                ('source-files-zero', set_(source_file_count=0)),
+                ('source-files-too-many', set_(source_file_count=33)),
+                ('source-files-bool', set_(source_file_count=True)),
+                ('manifest-uppercase', set_(source_manifest_sha256='B' * 64)),
+                ('manifest-short', set_(source_manifest_sha256='b' * 63)),
+                ('manifest-not-str', set_(source_manifest_sha256=1)),
+                ('usage-source', set_(usage_source='ESTIMATED')),
+                # The fake run reports no usage, so CLI-reported usage is refused.
+                ('usage-source-without-usage', set_(usage_source='CLI_REPORTED')),
+                ('source-partial', set_(source_bytes=None)),
+                ('source-all-null', set_(source_bytes=None, source_file_count=None,
+                                         source_manifest_sha256=None))):
+            with self.subTest(field=name):
+                run = self._opencode_bind_run(self._opencode_result(), mutate=mutate)
+                self.assertEqual(run['calls'], [])
+                self.assertIsNone(run['d6'])
+                self._assert_evidence_names(run['saved'], None)
+                self.assertNotEqual(run['saved']['developer']['state'],
+                                    'DEVELOPER_RESPONDED')
+                self.assertEqual(run['event_calls'], 0)
+
+    def test_opencode_bind_accepts_execution_at_the_store_bounds(self):
+        set_ = self._set_execution
+        for name, mutate in (
+                ('elapsed-zero', set_(elapsed_ms=0)),
+                ('elapsed-max', set_(elapsed_ms=86_400_000)),
+                ('elapsed-none', set_(elapsed_ms=None)),
+                ('source-bytes-zero', set_(source_bytes=0)),
+                ('source-bytes-max', set_(source_bytes=2 * 1024 * 1024)),
+                ('source-files-max', set_(source_file_count=32))):
+            with self.subTest(field=name):
+                run = self._opencode_bind_run(self._opencode_result(), mutate=mutate)
+                self.assertEqual(run['calls'], ['ses_Abc123'])
+                self.assertEqual(run['d6'], 'ses_Abc123')
+                self.assertEqual(run['saved']['developer']['state'], 'DEVELOPER_RESPONDED')
+                self._assert_evidence_names(run['saved'], 'ses_Abc123')
+
+    def test_opencode_d6_already_holding_the_run_session_needs_no_helper(self):
+        run = self._opencode_bind_run(self._opencode_result(), held='ses_Abc123')
+        self.assertEqual(run['calls'], [])
+        self.assertEqual(run['d6'], 'ses_Abc123')
+        self.assertEqual(run['saved']['developer']['state'], 'DEVELOPER_RESPONDED')
+        self._assert_evidence_names(run['saved'], 'ses_Abc123')
+        self.assertEqual(run['event_calls'], 1)
+        self.assertEqual(run['collect_calls'][0]['expected_native_session_id'], 'ses_Abc123')
+
+    def test_opencode_session_the_d6_does_not_take_is_refused(self):
+        for name, options, calls, d6 in (
+                ('d6-holds-another', {'held': 'ses_Earlier1'}, [], 'ses_Earlier1'),
+                ('helper-refused', {'answer': 'D6_BIND_NATIVE_SESSION_REFUSED'},
+                 ['ses_Abc123'], None),
+                ('helper-unavailable', {'answer': 'D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE'},
+                 ['ses_Abc123'], None),
+                ('read-back-differs', {'stored': 'ses_Other999'},
+                 ['ses_Abc123'], 'ses_Other999')):
+            with self.subTest(case=name):
+                run = self._opencode_bind_run(self._opencode_result(), **options)
+                developer = run['saved']['developer']
+                self.assertEqual(run['calls'], calls)
+                self.assertEqual(run['d6'], d6)
+                self.assertEqual(run['code'], 1)
+                self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                self.assertEqual(developer['error_code'], 'OPENCODE_D6_SESSION_REFUSED')
+                self.assertIsNone(developer['artifact'])
+                self.assertEqual(run['event_calls'], 0)
+                self._assert_evidence_names(
+                    run['saved'], 'ses_Earlier1' if name == 'd6-holds-another' else None)
+
+    def test_opencode_repair_run_keeps_the_earlier_d6_session(self):
+        run = self._opencode_bind_run(self._opencode_result(), held='ses_Earlier1',
+                                      repair=True)
+        self.assertEqual(run['calls'], [])
+        self.assertEqual(run['d6'], 'ses_Earlier1')
+        self.assertEqual(run['saved']['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(run['saved']['developer']['execution']['native_session_id'],
+                         'ses_Abc123')
+        self._assert_evidence_names(run['saved'], 'ses_Earlier1')
+        self.assertEqual(run['event_calls'], 1)
+        self.assertEqual(run['collect_calls'][0]['expected_native_session_id'],
+                         'ses_Earlier1')
+        self.assertNotIn('D6_TASK_BINDING_MISMATCH',
+                         run['saved']['developer']['direct_result_callback']['missing_gates'])
+
+    def _complete_with_reviewer_session(self, run, reviewer_native):
+        result_sha = '4' * 40
+        git_evidence = {
+            'root': str(self.executor_root), 'common_dir': self.executor_common_dir,
+            'branch': 'feat/test-executor', 'source_sha': self.executor_head,
+            'result_head': result_sha, 'changed_paths': ['sample.py'],
+            'diff_sha256': '5' * 64, 'executor_identity': 'executor-agent-1',
+        }
+
+        def github(**_kwargs):
+            return {'evidence': {'pr_number': 10, 'head_sha': result_sha,
+                                 'formal_review_state': 'UNVERIFIED',
+                                 'required_checks': [], 'successful_checks': [],
+                                 'ci_head_sha': result_sha},
+                    'missing_gates': ['CI_REQUIRED_CHECKS_MISSING']}
+
+        real_read = submission_cli.task_completion.read_d6_registration
+
+        def read_registration(task_id, *args, **kwargs):
+            if task_id == 'reviewer-task-1':
+                return SimpleNamespace(task_id=task_id, native_session_id=reviewer_native)
+            return real_read(task_id, *args, **kwargs)
+
+        args = Namespace(task_id=run['task_id'], executor_task='executor-task-1',
+                         reviewer_task='reviewer-task-1', pr=10)
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.task_completion.collect_executor_result',
+                      return_value=git_evidence) as collect, \
+                patch('llmtool.task_submission_cli.task_completion._github_get',
+                      return_value={'ref': 'refs/heads/main', 'object': {
+                          'type': 'commit', 'sha': '9' * 40}}), \
+                patch('llmtool.task_submission_cli.task_completion._trusted_slug',
+                      return_value='davidcatcat/davidcattoolsproject'), \
+                patch('llmtool.task_submission_cli.task_completion.run_bounded_tests',
+                      return_value=[{'path': 'sample.py', 'source_sha': result_sha,
+                                     'exit_code': 0, 'output_sha256': '6' * 64}]), \
+                patch('llmtool.task_submission_cli.task_completion.collect_github_evidence',
+                      side_effect=github), \
+                patch.object(submission_cli.task_completion, 'read_d6_registration',
+                             side_effect=read_registration), \
+                redirect_stdout(io.StringIO()):
+            run_task_complete(args, store=run['store'])
+        return collect.call_args.kwargs, run['store'].get(run['task_id'])['completion']
+
+    def test_opencode_reviewer_session_gate_uses_bound_and_repair_sessions(self):
+        for name, options, reviewer, expected_d6, blocked in (
+                ('bound-other-reviewer', {}, 'ses_Reviewer1', 'ses_Abc123', False),
+                ('bound-same-reviewer', {}, 'ses_Abc123', 'ses_Abc123', True),
+                ('repair-run-session', {'held': 'ses_Earlier1', 'repair': True},
+                 'ses_Abc123', 'ses_Earlier1', True),
+                ('repair-other-reviewer', {'held': 'ses_Earlier1', 'repair': True},
+                 'ses_Reviewer1', 'ses_Earlier1', False)):
+            with self.subTest(case=name):
+                run = self._opencode_bind_run(self._opencode_result(), **options)
+                self.assertEqual(run['saved']['developer']['state'], 'DEVELOPER_RESPONDED')
+                collected, completion = self._complete_with_reviewer_session(run, reviewer)
+                self.assertEqual(collected['expected_native_session_id'], expected_d6)
+                self.assertNotIn('D6_TASK_BINDING_MISMATCH', completion['missing_gates'])
+                if blocked:
+                    self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                                  completion['missing_gates'])
+                    self.assertEqual(
+                        completion['evidence']['review_pr_ci']['formal_review_state'],
+                        'UNVERIFIED')
+                else:
+                    self.assertNotIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                                     completion['missing_gates'])
 
     def test_opencode_direct_callback_accepts_docs_only_and_blocks_mixed_unregistered(self):
         for mixed in (False, True):
@@ -4611,20 +4991,33 @@ class DelegateRepairCapTests(unittest.TestCase):
         self._prior_assignments()
         task = self._task()
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123'
-        diagnosis = self._task()
-        from llmtool.high_debug import _d6_name
-        report = 'Confirmed root cause.'
+        # The High Debug Task is the original Task of the D6 being repaired.
+        diagnosis = self._task(executor='executor-task-1', developer=True)
+        from llmtool.high_debug import REPORT_SECTIONS, _d6_name
+        report = ''.join('## ' + section + '\nSynthetic fixture.\n'
+                         for section in REPORT_SECTIONS[:-1])
+        report += '## ' + REPORT_SECTIONS[-1] + '\nRCA_CONFIRMED\nCost: UNKNOWN\n'
+        report_sha256 = hashlib.sha256(report.encode()).hexdigest()
         entry = {
             'family': 'pr-938', 'failed_corrections': 2, 'early_reason': None,
             'examined_sha': 'a' * 40,
             'd6': _d6_name('executor-task-1', 1, 'a' * 40),
             'model_requested': 'gpt-6.1-sol', 'model_observed': 'gpt-6.1-sol',
             'effort_observed': 'high', 'status': 'RCA_CONFIRMED',
-            'report_sha256': hashlib.sha256(report.encode()).hexdigest(),
+            'report_sha256': report_sha256,
             'report': report, 'usage': 'UNKNOWN',
             'recorded_at': '2026-11-04T00:00:01Z',
         }
         self.store.append_high_debug(diagnosis['task_id'], entry)
+        # The HIGH_DEBUG completion event run_high_debug records for the entry.
+        self.store.record_completion_event(
+            diagnosis['task_id'],
+            event_id=hashlib.sha256(
+                ('HIGH_DEBUG\0' + diagnosis['task_id'] + '\0' + 'a' * 40 + '\0' +
+                 report_sha256).encode()).hexdigest()[:32],
+            run_id=diagnosis['run_id'], session_id='high-debug-' + entry['d6'],
+            source='HIGH_DEBUG', source_sha='a' * 40, sequence=0,
+            payload_sha256=hashlib.sha256(report_sha256.encode()).hexdigest())
         args = self._args(task, 'opencode', high_debug_ref=ref,
                           high_debug_task=diagnosis['task_id'],
                           high_debug_family='pr-938')

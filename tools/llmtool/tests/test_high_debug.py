@@ -1594,6 +1594,86 @@ class HighDebugTests(unittest.TestCase):
                              ('UNKNOWN', 'UNKNOWN'))
 
 
+class HighDebugWrongTaskOrFamilyTests(unittest.TestCase):
+    """#914: run_high_debug refuses a wrong Task, executor D6 or family before any run."""
+
+    def setUp(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        store_root_patch = patch.object(high_debug.task_store, 'default_root',
+                                        return_value=Path(root.name) / 'tasks')
+        store_root_patch.start()
+        self.addCleanup(store_root_patch.stop)
+        poster_patch = patch.object(high_debug, '_post_github_record',
+                                    return_value=True)
+        self.poster = poster_patch.start()
+        self.addCleanup(poster_patch.stop)
+
+    _REMOVED = object()
+
+    def _refusal(self, store, *, executor_task='executor', family='family',
+                 read_registration=None):
+        create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+        reader = read_registration or unittest.mock.Mock()
+        with patch.object(high_debug.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=True)):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(store=store, task_id='a' * 32,
+                    executor_task=executor_task, pr_number=17, family=family,
+                    failed_corrections=2, runner=runner, create_d6=create,
+                    read_registration=reader)
+        if read_registration is None:
+            # The refusal came before the D6 registration was read.
+            reader.assert_not_called()
+        create.assert_not_called()
+        runner.assert_not_called()
+        self.poster.assert_not_called()
+        self.assertEqual(store.entries, [])
+        self.assertEqual(store.events, [])
+        return caught.exception.high_debug_code
+
+    @classmethod
+    def _store(cls, **changes):
+        """The module ``_Store`` whose record has ``changes``; _REMOVED drops a key."""
+        store = _Store()
+        get = store.get
+
+        def changed(task_id):
+            record = get(task_id)
+            for key, value in changes.items():
+                if value is cls._REMOVED:
+                    record.pop(key, None)
+                else:
+                    record[key] = value
+            return record
+        store.get = changed
+        return store
+
+    def test_record_naming_another_task_is_task_invalid(self):
+        self.assertEqual(self._refusal(self._store(task_id='b' * 32)),
+                         'HIGH_DEBUG_TASK_INVALID')
+
+    def test_executor_task_other_than_completion_is_d6_unavailable(self):
+        self.assertEqual(self._refusal(_Store(), executor_task='other-executor'),
+                         'HIGH_DEBUG_D6_UNAVAILABLE')
+
+    def test_missing_completion_is_d6_unavailable(self):
+        for completion in (self._REMOVED, None):
+            with self.subTest(completion=completion):
+                self.assertEqual(self._refusal(self._store(completion=completion)),
+                                 'HIGH_DEBUG_D6_UNAVAILABLE')
+
+    def test_registration_reader_error_is_d6_unavailable(self):
+        reader = unittest.mock.Mock(side_effect=OSError('registry unavailable'))
+        self.assertEqual(self._refusal(_Store(), read_registration=reader),
+                         'HIGH_DEBUG_D6_UNAVAILABLE')
+        reader.assert_called_once()
+
+    def test_failed_corrections_for_family_without_claims_is_argument_invalid(self):
+        self.assertEqual(self._refusal(_Store(), family='other-family'),
+                         'HIGH_DEBUG_ARGUMENT_INVALID')
+
+
 class _Store:
     def __init__(self):
         self.entries = []

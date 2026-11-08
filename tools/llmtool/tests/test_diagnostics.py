@@ -646,11 +646,26 @@ class EventTests(unittest.TestCase):
                 obj.to_json()
 
 
+def restore_module_after_reload(test, module):
+    # A reload makes new objects for every name in the module. Other modules
+    # that imported a name before keep the old object. Put every old attribute
+    # back after the test, pass or fail, so those identities still hold.
+    saved = dict(vars(module))
+
+    def restore():
+        namespace = vars(module)
+        namespace.clear()
+        namespace.update(saved)
+
+    test.addCleanup(restore)
+
+
 class SideEffectTests(unittest.TestCase):
     def test_import_and_model_use_perform_no_io_or_provider_calls(self):
         # Import machinery may read source; block data I/O, writes, network and
         # provider/executor seams while reloading and exercising the core itself.
         from llmtool import providers
+        restore_module_after_reload(self, d)
         out, err = io.StringIO(), io.StringIO()
         with ExitStack() as stack:
             for target in ('builtins.open', 'os.open', 'os.mkdir', 'os.makedirs',
@@ -667,6 +682,19 @@ class SideEffectTests(unittest.TestCase):
             create.assert_not_called()
         self.assertEqual(out.getvalue(), '')
         self.assertEqual(err.getvalue(), '')
+
+    def test_reload_test_keeps_imported_screen_identity(self):
+        # Run the reload test in this process, then check that a module which
+        # imported a diagnostics name still sees the same object.
+        from llmtool import diagnostics, telegram_channel
+        original = diagnostics.safe_diagnostic_text
+        self.assertIs(telegram_channel.safe_diagnostic_text, original)
+        result = unittest.TestResult()
+        SideEffectTests('test_import_and_model_use_perform_no_io_or_provider_calls').run(result)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        self.assertIs(diagnostics.safe_diagnostic_text, original)
+        self.assertIs(telegram_channel.safe_diagnostic_text,
+                      diagnostics.safe_diagnostic_text)
 
     def test_core_ast_has_no_execution_or_persistence_imports_calls(self):
         source = Path(d.__file__).read_text()
