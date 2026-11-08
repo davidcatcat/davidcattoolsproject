@@ -25,6 +25,7 @@ MODULE_LIST = LLMTOOL_ROOT / "ci" / "mac-modules.txt"
 MONITOR_PATHS = {
     "scripts/llmtool_monitor.py",
     "scripts/test_llmtool_monitor.py",
+    "scripts/test_llmtool_monitor_github_reads.py",
 }
 TEST_ROOT = "tools/llmtool/tests/"
 

@@ -21,6 +21,7 @@ on:
       - '!tools/llmtool/*.md'
       - 'scripts/llmtool_monitor.py'
       - 'scripts/test_llmtool_monitor.py'
+      - 'scripts/test_llmtool_monitor_github_reads.py'
       - '.github/workflows/llmtool-mac-ci.yml'
       - 'tools/mac-runner/**'
       - 'tools/safe-git/**'
@@ -107,7 +108,7 @@ jobs:
                   .github/workflows/*|tools/llmtool/scripts/ci_*.py) verify=true ;;
                 esac
                 case "$path" in
-                  scripts/llmtool_monitor.py|scripts/test_llmtool_monitor.py) ;;
+                  scripts/llmtool_monitor.py|scripts/test_llmtool_monitor.py|scripts/test_llmtool_monitor_github_reads.py) ;;
                   *) mode=mac-subset ;;
                 esac
               done < "$paths"
