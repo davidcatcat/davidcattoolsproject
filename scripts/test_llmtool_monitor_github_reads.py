@@ -139,10 +139,11 @@ class GitHubSourceIncrementalReadsTest(unittest.TestCase):
         def fake_get(path: str):
             if path.startswith(f"repos/{self.repo}/issues/comments?"):
                 comment_Urls.append(path)
+                page = path.rsplit("&page=", 1)[-1]
                 if mode == "initial":
                     return [c1]
                 if mode == "fail_page2":
-                    if "page=1" in path:
+                    if page == "1":
                         return [uncommitted] * monitor.GITHUB_PAGE
                     raise RuntimeError("simulated comment read failure")
                 if mode == "fail_non_list":
@@ -161,7 +162,8 @@ class GitHubSourceIncrementalReadsTest(unittest.TestCase):
             comment_Urls.clear()
             source.refresh(force=True)
             self.assertTrue(source.read_failed)
-            self.assertTrue(any("sort=updated" in u for u in comment_Urls))
+            self.assertEqual([u.rsplit("&page=", 1)[-1] for u in comment_Urls], ["1", "2"])
+            self.assertTrue(all("sort=updated" in u for u in comment_Urls))
             self.assertEqual([c["id"] for c in source._comments], [1])
             self.assertEqual([e.summary for e in source.events], ["kept comment"])
 
@@ -186,6 +188,54 @@ class GitHubSourceIncrementalReadsTest(unittest.TestCase):
             self.assertIn("sort=created&direction=desc", comment_Urls[0])
             self.assertEqual([c["id"] for c in source._comments], [3, 1])
 
+    def test_non_list_on_page_2_of_incremental_read(self) -> None:
+        source = self._make_source()
+        t0 = self.now
+        c1 = _comment(1, t0 - 400, updated_at=t0 - 400, body="kept comment")
+        uncommitted = _comment(2, t0 + 10, updated_at=t0 + 10, body="from failed read")
+        c3 = _comment(3, t0 + 50, updated_at=t0 + 50, body="from recovery full read")
+
+        mode = "initial"
+        comment_urls: list[str] = []
+
+        def fake_get(path: str):
+            if path.startswith(f"repos/{self.repo}/issues/comments?"):
+                comment_urls.append(path)
+                page = path.rsplit("&page=", 1)[-1]
+                if mode == "initial":
+                    return [c1]
+                if mode == "fail_non_list_page2":
+                    if page == "1":
+                        return [uncommitted] * monitor.GITHUB_PAGE
+                    return {"message": "not a list"}
+                return [c3, c1]
+            return []
+
+        with mock.patch.object(source, "_get", side_effect=fake_get):
+            source.refresh(force=True)
+            self.assertFalse(source.read_failed)
+            self.assertEqual([c["id"] for c in source._comments], [1])
+            self.assertEqual([e.summary for e in source.events], ["kept comment"])
+
+            mode = "fail_non_list_page2"
+            self.now = t0 + 30.0
+            comment_urls.clear()
+            source.refresh(force=True)
+            self.assertTrue(source.read_failed)
+            self.assertEqual([u.rsplit("&page=", 1)[-1] for u in comment_urls], ["1", "2"])
+            self.assertTrue(all("sort=updated" in u for u in comment_urls))
+            self.assertEqual([c["id"] for c in source._comments], [1])
+            self.assertEqual([e.summary for e in source.events], ["kept comment"])
+
+            mode = "recover"
+            self.now = t0 + 60.0
+            comment_urls.clear()
+            source.refresh(force=True)
+            self.assertFalse(source.read_failed)
+            self.assertEqual(len(comment_urls), 1)
+            self.assertIn("sort=created&direction=desc", comment_urls[0])
+            self.assertEqual([c["id"] for c in source._comments], [3, 1])
+
     def test_thirty_minute_full_reread_and_page_limit_forces_full_read(self) -> None:
         source = self._make_source()
         t0 = self.now
@@ -197,7 +247,7 @@ class GitHubSourceIncrementalReadsTest(unittest.TestCase):
             if path.startswith(f"repos/{self.repo}/issues/comments?"):
                 comment_queries.append(path)
                 if hit_page_limit and "sort=updated" in path:
-                    page_num = int(path.rsplit("page=", 1)[1])
+                    page_num = int(path.rsplit("&page=", 1)[-1])
                     base = (page_num - 1) * monitor.GITHUB_PAGE
                     return [
                         _comment(100 + base + i, t0 - 50 + i, updated_at=t0 + i)
