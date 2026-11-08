@@ -948,6 +948,28 @@ def _known_review_failure_reason(value):
     return type(value) is str and value in REVIEW_FAILURE_REASONS
 
 
+def _completion_docs_paths(result):
+    """Return the paths a completion docs-only test is checked against (#1169).
+
+    Same rule as _attributed_paths in task_submission_cli.py: the Developer-
+    attributed developer_changed_paths when that key is present, else
+    changed_paths. Files that only a clean main merge brought in stay in
+    changed_paths and are not Developer changes. A present
+    developer_changed_paths must be a non-empty, duplicate-free list of
+    strings that are all in changed_paths; anything else fails.
+    """
+    if 'developer_changed_paths' not in result:
+        return result.get('changed_paths', [])
+    paths = result['developer_changed_paths']
+    changed = result.get('changed_paths')
+    if (type(paths) is not list or not paths or
+            any(type(path) is not str for path in paths) or
+            len(set(paths)) != len(paths) or type(changed) is not list or
+            any(path not in changed for path in paths)):
+        _fail()
+    return paths
+
+
 def _validate(record):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
@@ -2207,6 +2229,12 @@ def _validate(record):
                     _fail()
                 result_head = evidence['result'].get('result_head')
                 review_ci = evidence['review_pr_ci']
+                # A docs-only test is checked against Developer-attributed
+                # paths, so files from a clean main merge do not fail it.
+                docs_paths = (_completion_docs_paths(evidence['result'])
+                              if any(type(test) is dict and
+                                     test.get('status') == 'NOT_APPLICABLE_DOCS_ONLY'
+                                     for test in evidence['tests']) else None)
                 if (type(result_head) is not str or
                         re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
                         evidence['result'].get('task_id') != record['task_id'] or
@@ -2215,9 +2243,8 @@ def _validate(record):
                             (test.get('status') == 'NOT_APPLICABLE_DOCS_ONLY' and
                              (test.get('docs_only') is not True or
                               test.get('source_sha') != result_head or
-                              test.get('changed_paths') != evidence['result'].get('changed_paths') or
-                              not all(path.endswith('.md') for path in
-                                      evidence['result'].get('changed_paths', [])))) or
+                              test.get('changed_paths') != docs_paths or
+                              not all(path.endswith('.md') for path in docs_paths))) or
                             (test.get('status') != 'NOT_APPLICABLE_DOCS_ONLY' and
                             (test.get('source_sha') != result_head or
                             type(test.get('exit_code')) is not int or test.get('exit_code') != 0
