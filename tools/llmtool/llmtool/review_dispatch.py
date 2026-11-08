@@ -4,10 +4,12 @@ from contextlib import redirect_stdout
 from datetime import datetime, timezone
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -345,6 +347,140 @@ def _review_return(claim, result):
     return output
 
 
+_CODEX_QUOTA_NAME = 'codex-quota.json'
+_CODEX_QUOTA_MAX_BYTES = 4096
+_CODEX_QUOTA_FIELDS = ('used_percent', 'window_minutes', 'resets_at')
+_CODEX_QUOTA_SEARCH_DEPTH = 6
+
+
+def _codex_quota_dir():
+    return os.path.join(os.path.expanduser('~'), '.local', 'state', 'llmtool')
+
+
+def _epoch_now():
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+def _quota_number(value):
+    # A plain finite int or float; bool, text and NaN do not count.
+    return (type(value) in (int, float) and math.isfinite(value))
+
+
+def _find_rate_limits(value, depth=0):
+    """Return the last rate_limits dict in one event, skipping item content."""
+    found = None
+    if depth > _CODEX_QUOTA_SEARCH_DEPTH:
+        return None
+    if type(value) is dict:
+        for key, child in value.items():
+            if key == 'item':
+                # Model and tool content lives under item; never read it.
+                continue
+            if key == 'rate_limits' and type(child) is dict:
+                found = child
+                continue
+            inner = _find_rate_limits(child, depth + 1)
+            if inner is not None:
+                found = inner
+    elif type(value) is list:
+        for child in value:
+            inner = _find_rate_limits(child, depth + 1)
+            if inner is not None:
+                found = inner
+    return found
+
+
+def _codex_quota_figures(raw):
+    """Keep only the three numbers per window from the newest rate_limits."""
+    if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_MAX_OUTPUT:
+        return None
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeError:
+        return None
+    newest = None
+    for line in text.splitlines():
+        if 'rate_limits' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        limits = _find_rate_limits(event)
+        if limits is not None:
+            newest = limits
+    if newest is None:
+        return None
+    figures = {}
+    for name in ('primary', 'secondary'):
+        window = newest.get(name)
+        if type(window) is not dict:
+            continue
+        kept = {field: window.get(field) for field in _CODEX_QUOTA_FIELDS}
+        if not all(_quota_number(value) for value in kept.values()):
+            continue
+        if kept['window_minutes'] <= 0:
+            continue
+        figures[name] = kept
+    return figures or None
+
+
+def _write_codex_quota(record):
+    """Atomically replace the private quota file; raise OSError on any doubt."""
+    data = json.dumps(record, separators=(',', ':'), allow_nan=False).encode('utf-8')
+    if len(data) > _CODEX_QUOTA_MAX_BYTES:
+        raise OSError('quota record too large')
+    parent = _codex_quota_dir()
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW
+    dir_fd = os.open(parent, flags)
+    try:
+        info = os.fstat(dir_fd)
+        # The folder must be the user's own and not writable by others.
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or
+                info.st_mode & 0o022):
+            raise OSError('quota folder not private')
+        temporary = '.%s.%d.%s.tmp' % (_CODEX_QUOTA_NAME, os.getpid(), os.urandom(4).hex())
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=dir_fd)
+        try:
+            try:
+                os.fchmod(fd, 0o600)
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(temporary, _CODEX_QUOTA_NAME, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            temporary = None
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary, dir_fd=dir_fd)
+                except OSError:
+                    pass
+    finally:
+        os.close(dir_fd)
+
+
+def _record_codex_quota(raw):
+    """Best effort: store the newest Codex rate-limit figures, never raise.
+
+    Only used percent, window size, reset time and the read time are kept.
+    """
+    try:
+        figures = _codex_quota_figures(raw)
+        if figures is None:
+            return
+        record = {'schema_version': 1, 'read_at': _epoch_now()}
+        record.update(figures)
+        _write_codex_quota(record)
+    except Exception:
+        # The quota file is a side note; it never changes the review result.
+        return
+
+
 def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
                     model=_CODEX_REVIEW_MODEL, effort=_CODEX_REVIEW_EFFORT,
                     config_dir=None):
@@ -366,6 +502,7 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
         _refuse('REVIEWER_TIMEOUT')
     except OSError:
         _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
+    _record_codex_quota(getattr(result, 'stdout', None))
     if result.returncode:
         raw_stderr = result.stderr[:65536] if type(result.stderr) is bytes else b''
         excerpt = raw_stderr.decode('utf-8', 'replace')

@@ -38,7 +38,7 @@ _RULE_ALERT_PATCH = patch.object(
 def setUpModule():
     # Never let a test read the developer's real agent sessions: a live session
     # changing state mid-test would add office events to unrelated assertions.
-    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT"):
+    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT", "CODEX_QUOTA_FILE"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
     _RULE_ALERT_PATCH.start()
 
@@ -387,6 +387,96 @@ class QuotaWarningTests(unittest.TestCase):
                 "secondary": {"resets_at": self.NOW}}}}
             self._write(path, [rate])
             self.assertEqual(mon.quota_warnings(self.NOW, temp, []), [])
+
+    def _quota_file(self, folder, record, mode=0o600):
+        path = Path(folder) / "codex-quota.json"
+        text = record if type(record) is str else json.dumps(record)
+        path.write_text(text, encoding="utf-8")
+        os.chmod(path, mode)
+        return str(path)
+
+    def _quota_record(self, percent=85, read_at=None, window=300):
+        return {"schema_version": 1, "read_at": self.NOW - 60 if read_at is None else read_at,
+                "primary": {"used_percent": percent, "window_minutes": window,
+                            "resets_at": self.NOW + 3600}}
+
+    def test_read_codex_quota_fresh_returns_only_the_figures(self):
+        with tempfile.TemporaryDirectory() as temp:
+            record = self._quota_record()
+            record["secondary"] = {"used_percent": 10.5, "window_minutes": 10080,
+                                   "resets_at": self.NOW + 86400}
+            path = self._quota_file(temp, record)
+            self.assertEqual(mon.read_codex_quota(self.NOW, path), {
+                "state": "FRESH", "read_at": self.NOW - 60,
+                "primary": record["primary"], "secondary": record["secondary"]})
+
+    def test_read_codex_quota_unknown_for_missing_malformed_mode_and_stale(self):
+        with tempfile.TemporaryDirectory() as temp:
+            missing = os.path.join(temp, "none.json")
+            self.assertEqual(mon.read_codex_quota(self.NOW, missing),
+                             {"state": "UNKNOWN", "reason": "missing"})
+            for bad in ("not json", json.dumps([1]),
+                        json.dumps(dict(self._quota_record(), schema_version=2)),
+                        json.dumps({"schema_version": 1, "read_at": self.NOW}),
+                        json.dumps(dict(self._quota_record(), primary={
+                            "used_percent": "85", "window_minutes": 300,
+                            "resets_at": self.NOW + 3600})),
+                        json.dumps(dict(self._quota_record(), extra=1))):
+                with self.subTest(bad=bad):
+                    path = self._quota_file(temp, bad)
+                    self.assertEqual(mon.read_codex_quota(self.NOW, path),
+                                     {"state": "UNKNOWN", "reason": "malformed"})
+            path = self._quota_file(temp, self._quota_record(), mode=0o644)
+            self.assertEqual(mon.read_codex_quota(self.NOW, path),
+                             {"state": "UNKNOWN", "reason": "mode"})
+            # One 300-minute window: a read 301 minutes old is stale.
+            path = self._quota_file(temp, self._quota_record(read_at=self.NOW - 301 * 60))
+            self.assertEqual(mon.read_codex_quota(self.NOW, path),
+                             {"state": "UNKNOWN", "reason": "stale"})
+            link = os.path.join(temp, "link.json")
+            os.symlink(self._quota_file(temp, self._quota_record()), link)
+            self.assertEqual(mon.read_codex_quota(self.NOW, link)["state"], "UNKNOWN")
+
+    def test_codex_quota_option_prints_one_json_line(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as temp:
+            path = self._quota_file(temp, self._quota_record())
+            for target, state in ((path, "FRESH"), (os.path.join(temp, "none"), "UNKNOWN")):
+                output = io.StringIO()
+                with patch.object(mon, "CODEX_QUOTA_FILE", target), \
+                        patch.object(mon.time, "time", return_value=self.NOW), \
+                        contextlib.redirect_stdout(output):
+                    code = mon.main(["--codex-quota"])
+                self.assertEqual(code, 0)
+                lines = output.getvalue().splitlines()
+                self.assertEqual(len(lines), 1)
+                self.assertEqual(json.loads(lines[0]), mon.read_codex_quota(self.NOW, target))
+                self.assertEqual(json.loads(lines[0])["state"], state)
+
+    def test_quota_warnings_reads_a_fresh_file_once_and_ignores_unknown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            missing = temp + "/missing"
+            path = self._quota_file(temp, self._quota_record())
+            reset = time.strftime("%H:%M", time.localtime(self.NOW + 3600))
+            expected = f"Codex 5 小時額度已用 85%，{reset} 重置（紀錄 1 分鐘前）"
+            self.assertEqual(mon.quota_warnings(self.NOW, missing, [], quota_path=path),
+                             [expected])
+            low = self._quota_file(temp, self._quota_record(percent=79))
+            self.assertEqual(mon.quota_warnings(self.NOW, missing, [], quota_path=low), [])
+            stale = self._quota_file(temp, self._quota_record(read_at=self.NOW - 400 * 60))
+            self.assertEqual(mon.quota_warnings(self.NOW, missing, [], quota_path=stale), [])
+            self.assertEqual(mon.quota_warnings(self.NOW, missing, [],
+                                                quota_path=os.path.join(temp, "none")), [])
+            # A session tail line for the same window wins; the file adds no second line.
+            path = self._quota_file(temp, self._quota_record(percent=90))
+            folder = Path(temp) / time.strftime("%Y/%m/%d", time.localtime(self.NOW))
+            self._write(folder / "rollout-a.jsonl", [{"type": "event_msg", "payload": {
+                "rate_limits": {"primary": {"used_percent": 85, "window_minutes": 300,
+                                            "resets_at": self.NOW + 3600}}}}])
+            lines = mon.quota_warnings(self.NOW, temp, [], quota_path=path)
+            self.assertEqual(len(lines), 1)
+            self.assertIn("已用 85%", lines[0])
 
     def test_claude_quota_hit_cleared_expired_and_reset_text_only(self):
         with tempfile.TemporaryDirectory() as temp:

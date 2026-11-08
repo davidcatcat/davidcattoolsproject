@@ -2,7 +2,9 @@ import hashlib
 import json
 import io
 from contextlib import redirect_stderr
+import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -791,6 +793,116 @@ def _codex_event_stream(review_text):
             'type': 'agent_message', 'text': json.dumps(verdict)}},
     ]
     return '\n'.join(json.dumps(event) for event in events).encode('utf-8')
+
+
+class CodexQuotaRecordTests(unittest.TestCase):
+    """The bound Codex review path keeps only quota figures, best effort."""
+    NOW = 1_800_000_000
+    TASK_RECORD = {'task_id': TASK, 'run_id': 'c' * 32,
+                   'task_binding': {'contract_digest': 'd' * 64}}
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = self.temp.name
+        home_patch = patch.dict(os.environ, {'HOME': self.home})
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
+        clock = patch.object(review_dispatch, '_epoch_now', return_value=self.NOW)
+        clock.start()
+        self.addCleanup(clock.stop)
+        self.quota_path = Path(self.home) / '.local' / 'state' / 'llmtool' / 'codex-quota.json'
+        self.expected_review = {'thread_id': '0123456789abcdef',
+                                'review_text': _codex_review_text(), 'verdict': 'PASS'}
+
+    @staticmethod
+    def _limits(percent, **extra):
+        primary = {'used_percent': percent, 'window_minutes': 300,
+                   'resets_at': 1_800_003_600, **extra}
+        return {'primary': primary,
+                'secondary': {'used_percent': 12.5, 'window_minutes': 10080,
+                              'resets_at': 1_800_400_000}}
+
+    def _run(self, *events, returncode=0):
+        stream = _codex_event_stream(_codex_review_text())
+        extra = '\n'.join(json.dumps(event) for event in events).encode('utf-8')
+        stdout = stream + (b'\n' + extra if events else b'')
+        result = SimpleNamespace(returncode=returncode, stdout=stdout,
+                                 stderr=b'codex reviewer failed safely')
+        with patch.object(review_dispatch.shutil, 'which', return_value='/bin/codex'), \
+                patch.object(review_dispatch.subprocess, 'run', return_value=result):
+            return review_dispatch._dispatch_codex(
+                reviewer_root='/repo/reviewer-d6', prompt='review prompt',
+                task=dict(self.TASK_RECORD), head=HEAD)
+
+    def test_newest_rate_limits_are_recorded_with_only_the_figures(self):
+        older = {'type': 'event_msg', 'payload': {'type': 'token_count',
+                                                   'rate_limits': self._limits(40)}}
+        newer_limits = self._limits(85, note='dropped extra field')
+        newer_limits['plan_type'] = 'dropped plan text'
+        newer_limits['rate_limit_reached_type'] = None
+        newer = {'type': 'turn.completed', 'rate_limits': newer_limits}
+        # Rate limits inside item content are model or tool text and never read.
+        in_item = {'type': 'item.completed', 'item': {
+            'type': 'command_execution', 'rate_limits': self._limits(1)}}
+        self.assertEqual(self._run(older, newer, in_item), self.expected_review)
+        record = json.loads(self.quota_path.read_text(encoding='utf-8'))
+        self.assertEqual(record, {
+            'schema_version': 1, 'read_at': self.NOW,
+            'primary': {'used_percent': 85, 'window_minutes': 300,
+                        'resets_at': 1_800_003_600},
+            'secondary': {'used_percent': 12.5, 'window_minutes': 10080,
+                          'resets_at': 1_800_400_000}})
+        self.assertEqual(stat.S_IMODE(self.quota_path.stat().st_mode), 0o600)
+        parent = self.quota_path.parent.stat()
+        self.assertEqual(parent.st_uid, os.getuid())
+        self.assertEqual(stat.S_IMODE(parent.st_mode) & 0o022, 0)
+        text = self.quota_path.read_text(encoding='utf-8')
+        for leaked in ('review prompt', 'dropped', 'plan_type', 'FORMAL', TASK):
+            self.assertNotIn(leaked, text)
+        self.assertEqual(sorted(path.name for path in self.quota_path.parent.iterdir()),
+                         ['codex-quota.json'])
+
+    def test_no_rate_limits_event_means_no_write(self):
+        self.assertEqual(self._run(), self.expected_review)
+        self.assertFalse(self.quota_path.exists())
+        self.assertFalse(self.quota_path.parent.exists())
+
+    def test_malformed_figures_mean_no_write_and_same_result(self):
+        bad = self._limits('85')
+        bad['secondary'] = {'used_percent': True, 'window_minutes': 10080,
+                            'resets_at': 1_800_400_000}
+        events = ({'type': 'event_msg', 'rate_limits': bad},
+                  {'type': 'event_msg', 'rate_limits': 'not an object'})
+        self.assertEqual(self._run(*events), self.expected_review)
+        self.assertFalse(self.quota_path.exists())
+
+    def test_write_failure_leaves_the_review_result_unchanged(self):
+        event = {'type': 'event_msg', 'rate_limits': self._limits(85)}
+        with patch.object(review_dispatch, '_write_codex_quota',
+                          side_effect=OSError('disk full')) as write:
+            self.assertEqual(self._run(event), self.expected_review)
+        write.assert_called_once()
+        self.assertFalse(self.quota_path.exists())
+
+    def test_symlinked_state_folder_is_not_followed(self):
+        elsewhere = Path(self.home) / 'elsewhere'
+        elsewhere.mkdir()
+        self.quota_path.parent.parent.mkdir(parents=True)
+        os.symlink(elsewhere, self.quota_path.parent)
+        event = {'type': 'event_msg', 'rate_limits': self._limits(85)}
+        self.assertEqual(self._run(event), self.expected_review)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_failed_codex_run_keeps_the_same_refusal(self):
+        event = {'type': 'event_msg', 'rate_limits': self._limits(100)}
+        with self.assertRaises(LLMToolError) as raised:
+            self._run(event, returncode=2)
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertIn('codex reviewer failed safely', str(raised.exception))
+        # A run that hit its limit still leaves the figures for the PM to read.
+        record = json.loads(self.quota_path.read_text(encoding='utf-8'))
+        self.assertEqual(record['primary']['used_percent'], 100)
 
 
 def _claim(*, head=HEAD, version=1, reviewer='reviewer-a'):
