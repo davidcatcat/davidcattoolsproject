@@ -1,10 +1,10 @@
 #!/bin/sh
-# Company LLM benchmark for the internal Switchyard/Qwen gateway.
+# Home LLM benchmark for the Qwen gateway.
 # POSIX-sh compatible on macOS: run with ./scripts/llm-benchmark.sh or sh scripts/llm-benchmark.sh
 
 set -eu
 
-BASE_URL=${BASE_URL:-http://10.29.7.58:4000}
+BASE_URL=${BASE_URL:?set BASE_URL to the home LLM gateway URL, for example http://home-llm.example:8000}
 MODEL=${MODEL:-gw}
 CONTEXT_SIZES=${CONTEXT_SIZES:-"8000 16000 32000 64000"}
 
@@ -162,7 +162,7 @@ PY
 }
 
 cat > "$REPORT" <<EOF
-# Company LLM Benchmark
+# Home LLM Benchmark
 
 - Date: $(date)
 - Host: $(hostname)

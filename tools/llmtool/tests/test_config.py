@@ -335,7 +335,7 @@ active_provider: openai-main
         init_config(self.user)
         self.assertEqual(self.resolve(), DEFAULTS)
         self.assertEqual(yaml.safe_load(self.user.read_text()), DEFAULTS)
-        self.assertNotIn("10.29.7.58", self.user.read_text())
+        self.assertNotIn("10.0.0.10", self.user.read_text())
         self.assertNotIn("gw", self.user.read_text())
         self.assertEqual(self.user.stat().st_mode & 0o777, 0o600)
         self.user.write_text("generation: {max_tokens: 42}")

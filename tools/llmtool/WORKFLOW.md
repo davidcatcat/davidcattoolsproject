@@ -290,7 +290,7 @@ Cloud is a separate computer; it does not inherit the Mac's sessions or network.
 |---|---|---|
 | Source/docs changes, review, unit tests, fake-runtime/mock integration, lint/build | Configured Cloud checkout; local Mac also supported | Exact SHA, commands, exits, results |
 | GitHub branch, push, PR, CI | Cloud when access is available | Remote branch SHA, PR URL, CI run SHA/status |
-| Company LLM `10.29.7.58:4000`, model `gw`, VPN coexistence | Actual Mac with company VPN | Route/reachability, auth if applicable, exact live marker |
+| Home LLM gateway (for example `home-llm.example:8000`), model `gw`, VPN coexistence | Actual Mac with the home LLM VPN | Route/reachability, auth if applicable, exact live marker |
 | Existing Claude CLI / Codex CLI authentication, Keychain-dependent setup | Actual Mac | Executable/version, direct marker and llmtool E2E result separately |
 | Mac localhost, Docker/VM/database, running processes, unpushed files, macOS isolation | Actual Mac | Actual dependency and revision tested |
 | Public provider live tests | Explicitly configured and authorized environment | Real inference evidence; Cloud availability alone proves nothing |

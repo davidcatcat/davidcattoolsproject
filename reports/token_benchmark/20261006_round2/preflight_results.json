@@ -24,7 +24,7 @@
     "ignore_user_config": true,
     "ignore_rules": true
   },
-  "company_config_yaml": "active_provider: company-preflight\nproviders:\n  company-preflight:\n    type: openai-compatible\n    base_url: http://10.29.7.58:4000\n    model: gw\n    timeout_seconds: 120\n    api_key: null\n    api_key_env: null\n    provider_options:\n      enable_thinking: false\ngeneration:\n  temperature: 0\n  max_tokens: 4096\n",
+  "company_config_yaml": "active_provider: company-preflight\nproviders:\n  company-preflight:\n    type: openai-compatible\n    base_url: http://home-llm.example:8000\n    model: gw\n    timeout_seconds: 120\n    api_key: null\n    api_key_env: null\n    provider_options:\n      enable_thinking: false\ngeneration:\n  temperature: 0\n  max_tokens: 4096\n",
   "temporary_config_sha256": "82a5bd737ffe5af2bf7bc280bb4f8dc12db8f281282fa17b36ee7751e83995e4",
   "company_observer_sha256": "2e4611f44314085e42ac8e1837d68504d7bef7bb8d19fac632541dcbb3adf144",
   "filler_algorithm": "Repeated 117-byte line: alphabet doubled, 8-byte slices starting at offsets 0,2,...,24, joined by spaces and newline; repeat and truncate to exact requested bytes. No semantic records or future benchmark identifiers.",

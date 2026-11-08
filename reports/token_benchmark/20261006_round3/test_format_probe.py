@@ -54,7 +54,7 @@ def load_metadata():
 
 class FakeRequest:
     def __init__(self):
-        self.full_url = 'http://10.29.7.58:4000/v1/chat/completions'
+        self.full_url = 'http://home-llm.example:8000/v1/chat/completions'
         self.method = 'POST'
         self.headers = [('Content-Type', 'application/json')]
         self.data = json.dumps({'model': 'gw', 'temperature': 0, 'max_tokens': 4096,

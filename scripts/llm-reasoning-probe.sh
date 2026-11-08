@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-BASE_URL=${BASE_URL:-http://10.29.7.58:4000}
+BASE_URL=${BASE_URL:?set BASE_URL to the home LLM gateway URL, for example http://home-llm.example:8000}
 MODEL=${MODEL:-gw}
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
@@ -42,7 +42,7 @@ Log:
 EOF
 
 cat > "$REPORT" <<EOF
-# Company LLM Reasoning-Control Probe
+# Home LLM Reasoning-Control Probe
 
 - Date: $(date)
 - Host: $(hostname)

@@ -196,17 +196,18 @@ spend Codex tokens on a paired benchmark until that exact route/pipeline passes 
 pre-registered Company-only gate. P1 now preserves validated usage metadata on parseable
 provider failures, but it does not turn failed model output into a successful result.
 
-## Company LLM benchmark
+## Home LLM benchmark
 
-Run the internal LLM benchmark from the repository root:
+Run the home LLM benchmark from the repository root. `BASE_URL` is required; the
+scripts have no built-in gateway address:
 
 ```bash
-sh scripts/llm-benchmark.sh
+BASE_URL=http://home-llm.example:8000 sh scripts/llm-benchmark.sh
 ```
 
 Defaults:
 
-- Gateway: `http://10.29.7.58:4000`
+- Gateway: set by `BASE_URL` (required), for example `http://home-llm.example:8000`
 - Route: `gw`
 - Long-context probes: approximately 8k, 16k, 32k, and 64k tokens
 - Output: a Markdown report plus raw JSON responses under `reports/`
@@ -214,7 +215,7 @@ Defaults:
 Override settings when needed:
 
 ```bash
-BASE_URL=http://10.29.7.58:4000 MODEL=gw CONTEXT_SIZES="8000 16000 32000 64000" sh scripts/llm-benchmark.sh
+BASE_URL=http://home-llm.example:8000 MODEL=gw CONTEXT_SIZES="8000 16000 32000 64000" sh scripts/llm-benchmark.sh
 ```
 
 The benchmark covers long-context retention, evidence-disciplined Kubernetes log diagnosis, Git diff review, cross-file root-cause analysis, and context compression/evidence preservation.

@@ -25,7 +25,7 @@ CONFIG = '''active_provider: company-round2
 providers:
   company-round2:
     type: openai-compatible
-    base_url: http://10.29.7.58:4000
+    base_url: http://home-llm.example:8000
     model: gw
     timeout_seconds: 120
     api_key: null
@@ -46,7 +46,7 @@ expected = Path(os.environ['STAGE_A_INPUT']).read_text()
 audit = Path(os.environ['STAGE_A_AUDIT'])
 def observed_init(self, provider, generation, key=None):
     assert provider['type'] == 'openai-compatible'
-    assert provider['base_url'] == 'http://10.29.7.58:4000' and provider['model'] == 'gw'
+    assert provider['base_url'] == 'http://home-llm.example:8000' and provider['model'] == 'gw'
     assert provider['timeout_seconds'] == 120
     assert provider['api_key'] is None and provider['api_key_env'] is None and key is None
     assert provider['provider_options'] == {'enable_thinking': False}
@@ -55,7 +55,7 @@ def observed_init(self, provider, generation, key=None):
     original_open = self.opener.open
     def observed_open(req, *args, **kwargs):
         body = json.loads(req.data)
-        assert req.full_url == 'http://10.29.7.58:4000/v1/chat/completions'
+        assert req.full_url == 'http://home-llm.example:8000/v1/chat/completions'
         assert req.get_method() == 'POST' and not req.has_header('Authorization')
         assert body['model'] == 'gw' and body['temperature'] == 0 and body['max_tokens'] == 4096
         assert body['chat_template_kwargs'] == {'enable_thinking': False}
