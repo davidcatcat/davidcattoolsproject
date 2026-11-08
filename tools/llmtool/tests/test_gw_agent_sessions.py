@@ -7,6 +7,7 @@ import json
 import os
 from argparse import Namespace
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -320,13 +321,72 @@ class SweepTests(unittest.TestCase):
         home = self.make_home('executor-closed', 'root-closed', history=False)
         (home / 'sessions' / SESSION / 'history.json').symlink_to(outside_file)
         (home / 'sessions' / ('f' * 32)).symlink_to(outside_dir, target_is_directory=True)
-        results, _ = self.sweep(FakeRunner(1))
+        # The runner would succeed, but a home holding links never reaches it.
+        results, runner = self.sweep()
         self.assertEqual(results, [{'executor_task_id': 'executor-closed',
                                     'outcome': gw_agent_sessions.REMOVED_AFTER_END_FAILURE}])
+        self.assertEqual(runner.calls, [])
         self.assertFalse(os.path.lexists(home))
         self.assertEqual(outside_file.read_text(encoding='utf-8'), HISTORY_TEXT)
         self.assertEqual((outside_dir / 'history.json').read_text(encoding='utf-8'),
                          HISTORY_TEXT)
+
+    def test_unsafe_state_entry_never_reaches_the_gateway(self):
+        outside_dir = self.tmp / 'outside-state'
+        outside_dir.mkdir(mode=0o700)
+        self.write(outside_dir / 'history.json', HISTORY_TEXT)
+        self.write(outside_dir / 'meta.json', json.dumps({'session_id': SESSION}))
+        outside_file = self.tmp / 'outside-file.json'
+        self.write(outside_file, HISTORY_TEXT)
+
+        def session_dir_link(home):
+            shutil.rmtree(home / 'sessions' / SESSION)
+            (home / 'sessions' / SESSION).symlink_to(outside_dir, target_is_directory=True)
+
+        def sessions_root_link(home):
+            shutil.rmtree(home / 'sessions')
+            (home / 'sessions').symlink_to(outside_dir, target_is_directory=True)
+
+        def other_session_link(home):
+            (home / 'sessions' / ('f' * 32)).symlink_to(outside_dir,
+                                                        target_is_directory=True)
+
+        def tombstones_link(home):
+            (home / 'tombstones').symlink_to(outside_dir, target_is_directory=True)
+
+        def meta_link(home):
+            (home / 'sessions' / SESSION / 'meta.json').unlink()
+            (home / 'sessions' / SESSION / 'meta.json').symlink_to(outside_file)
+
+        def history_link(home):
+            (home / 'sessions' / SESSION / 'history.json').unlink()
+            (home / 'sessions' / SESSION / 'history.json').symlink_to(outside_file)
+
+        def history_hard_link(home):
+            (home / 'sessions' / SESSION / 'history.json').unlink()
+            os.link(outside_file, home / 'sessions' / SESSION / 'history.json')
+
+        def meta_fifo(home):
+            (home / 'sessions' / SESSION / 'meta.json').unlink()
+            os.mkfifo(home / 'sessions' / SESSION / 'meta.json', 0o600)
+
+        cases = (session_dir_link, sessions_root_link, other_session_link,
+                 tombstones_link, meta_link, history_link, history_hard_link, meta_fifo)
+        for index, make_unsafe in enumerate(cases):
+            with self.subTest(case=make_unsafe.__name__):
+                executor = f'executor-unsafe-{index}'
+                home = self.make_home(executor, 'root-closed')
+                make_unsafe(home)
+                results, runner = self.sweep()
+                self.assertEqual(results, [{
+                    'executor_task_id': executor,
+                    'outcome': gw_agent_sessions.REMOVED_AFTER_END_FAILURE}])
+                self.assertEqual(runner.calls, [])
+                self.assertFalse(os.path.lexists(home))
+                self.assertEqual((outside_dir / 'history.json').read_text(encoding='utf-8'),
+                                 HISTORY_TEXT)
+                self.assertTrue((outside_dir / 'meta.json').is_file())
+                self.assertEqual(outside_file.read_text(encoding='utf-8'), HISTORY_TEXT)
 
     def test_symlinked_binding_makes_an_orphan_and_target_survives(self):
         outside = self.tmp / 'outside-binding.json'

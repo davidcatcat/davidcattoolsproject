@@ -11,6 +11,11 @@ state, including UNKNOWN or an unreadable record, is open and the home is never
 touched. Every filesystem step works through directory descriptors opened with
 ``O_NOFOLLOW``: a symlink is unlinked as a link and never resolved, and nothing
 outside the ``gw-agent-sessions`` directory is touched.
+
+The gateway works by path names, so it is run only on a plain home: every entry
+under it is a real directory or a single-link regular file owned by this user.
+A home holding a symlink, hard link, FIFO, socket or device anywhere is never
+handed to the gateway; it is cleaned here, by descriptor, as an end failure.
 """
 
 from __future__ import annotations
@@ -145,9 +150,13 @@ def _sweep_home(store, base, base_fd, name, now, task_ids, runner, package_path,
             session_id = binding['session_id'] if binding is not None else None
             ended = True
             if state == 'ENDED' and session_id is not None:
-                if package is _UNRESOLVED:
-                    package = _gateway_package(package_path)
-                ended = _end_session(base / name, session_id, package, runner)
+                # The gateway follows path names: hand it only a plain home that is
+                # still the entry checked above. Anything else is an end failure.
+                ended = False
+                if _state_is_plain(home_fd) and _still_entry(base_fd, name, info):
+                    if package is _UNRESOLVED:
+                        package = _gateway_package(package_path)
+                    ended = _end_session(base / name, session_id, package, runner)
             if session_id is not None:
                 _unlink_session_files(home_fd, session_id)
             if not _remove_entry(base_fd, name, 0):
@@ -297,6 +306,58 @@ def _newest_mtime(parent_fd, name, info, depth, count):
     finally:
         os.close(fd)
     return newest
+
+
+def _state_is_plain(home_fd):
+    """True only when the gateway cannot follow or block on anything in the home.
+
+    Every entry, at any depth, must be a real directory or a regular file with a
+    single link, owned by this user. A symlink, hard link, FIFO, socket or device,
+    an unreadable entry, or a tree too deep or too large makes the home unsafe.
+    """
+    try:
+        return _plain_tree(home_fd, 0, [0])
+    except (OSError, _Kept):
+        return False
+
+
+def _plain_tree(dir_fd, depth, count):
+    if depth >= _MAX_DEPTH:
+        raise _Kept()
+    uid = os.getuid()
+    for child in os.listdir(dir_fd):
+        count[0] += 1
+        if count[0] > _MAX_ENTRIES:
+            raise _Kept()
+        info = os.lstat(child, dir_fd=dir_fd)
+        if info.st_uid != uid:
+            return False
+        if stat.S_ISREG(info.st_mode):
+            if info.st_nlink != 1:
+                return False
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            return False
+        fd = os.open(child, _DIR_FLAGS, dir_fd=dir_fd)
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                return False
+            if not _plain_tree(fd, depth + 1, count):
+                return False
+        finally:
+            os.close(fd)
+    return True
+
+
+def _still_entry(base_fd, name, info):
+    """True when ``name`` in the sessions dir is still the real directory checked."""
+    try:
+        current = os.lstat(name, dir_fd=base_fd)
+    except OSError:
+        return False
+    return (stat.S_ISDIR(current.st_mode) and
+            (current.st_dev, current.st_ino) == (info.st_dev, info.st_ino))
 
 
 def _try_lock(home_fd):
