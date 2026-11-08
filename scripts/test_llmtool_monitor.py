@@ -3746,6 +3746,28 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("DEVELOPER_OUTPUT_INVALID_DIFF", failed)
         self.assertIn("輸入 不明 / 輸出 不明 / 合計 7 tokens", failed)
 
+    def test_gw_task_that_never_dispatched_shows_no_finished_row(self):
+        """Review v1 finding (#1122): only an admitted dispatch that ended is
+        finished. A pending, blocked or refused Task never ran: it makes no
+        row and does not hide a gw-agent run's audit copy."""
+        tasks = Path(self.tmp.name) / "tasks"
+        root = Path(self.tmp.name) / "audits"
+        states = ("DEVELOPER_PENDING", "BLOCKED", "DEVELOPER_UNAVAILABLE")
+        for at, state in enumerate(states):
+            self._gw_task(tasks, f"9{at}" * 16, "company-gw", state, 60 + at)
+            self._gw_task(tasks, f"8{at}" * 16, "company-gw-agent", state, 120 + at)
+        self._gw_audit_copy(root, "run00000", 121)   # a real gw-agent run ended then
+        self.assertEqual(mon.GW_FINISHED, {"DEVELOPER_RESPONDED", "DEVELOPER_OUTCOME_UNKNOWN",
+                                           "DEVELOPER_OUTPUT_REJECTED"})
+        with patch.object(mon, "GW_AUDIT_ROOT", str(root)):
+            rows = self.rows(llmtool_tasks=str(tasks))
+        gw = [row for row in rows if row.name in mon.GW_ROSTER]
+        self.assertEqual([(row.name, row.state, row.evidence, row.sid) for row in gw],
+                         [("gw-agent developer", mon.DONE, "llmtool 稽核檔", "run00000")])
+        self.assertNotIn("已結束 · DEVELOPER_PENDING", "\n".join(self._gw_view(rows)))
+        self.assertNotIn("wp-1", mon._d6_running_tasks(rows))
+        self.assertIn("公司 gw", self.by_name(rows))   # nothing ran: the status row stays
+
     def test_gw_task_record_text_never_reaches_a_row(self):
         tasks = Path(self.tmp.name) / "tasks"
         self._gw_task(tasks, "b1" * 16, "company-gw", "DEVELOPER_DISPATCHING", 30,

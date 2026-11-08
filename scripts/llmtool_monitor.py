@@ -7034,13 +7034,16 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
 # read with the bounded loader (_bounded_task_entries), and only GwRecord's
 # developer fields are kept: never the request, response, artifact, summary,
 # acceptance or audit text. A finished run of either route comes from its Task
-# record (model and token counts); a gw-agent run whose record was not read
-# still shows from the time of the audit copy llmtool keeps
-# (developer_routes/gw_agent.py, collect), never twice.
+# record (model and token counts), only when its state shows an admitted
+# dispatch that ended (GW_FINISHED, the end states of DISPATCH_ACCEPTED); a
+# pending, blocked or refused Task never ran and makes no row. A gw-agent run
+# whose record was not read still shows from the time of the audit copy llmtool
+# keeps (developer_routes/gw_agent.py, collect), never twice.
 GW_ROSTER = {"gw-agent developer": "公司 gw agent", "company gw developer": "公司 gw"}
 GW_PROFILES = {"company-gw": "company gw developer",   # llmtool provider_profile -> row
                "company-gw-agent": "gw-agent developer", "gw-agent": "gw-agent developer"}
 GW_DISPATCHING = "DEVELOPER_DISPATCHING"
+GW_FINISHED = DISPATCH_ACCEPTED - {GW_DISPATCHING}   # completed or failed dispatches
 GW_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}")   # a plain model name
 GW_USAGE = (("input_tokens", "prompt_tokens"), ("output_tokens", "completion_tokens"),
             ("total_tokens",))
@@ -7199,10 +7202,12 @@ def _gw_record_rows(now: float, root: str, registered: dict) -> tuple[list, list
             if entry.name != "company gw developer":
                 continue
             state = WORKING
-        else:
+        elif entry.state in GW_FINISHED:
             state = DONE
             if entry.name == "gw-agent developer":
                 agent_done.append(age)
+        else:   # pending, blocked or refused: no dispatch ran, so no row
+            continue
         rows.append(_gw_row(state, _gw_words(entry), age, entry.d6, registered, entry.task,
                             "", "llmtool 紀錄", entry.name))
     return rows, agent_done
