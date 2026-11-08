@@ -2,6 +2,7 @@
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import os
@@ -10,11 +11,14 @@ import sys
 import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from llmtool import cli, merge_train_cli, merge_train_store, pm_caller
-from llmtool import source_freshness, task_advance, task_completion
+from llmtool import cli, merge_train, merge_train_cli, merge_train_eligibility
+from llmtool import merge_train_ops, merge_train_store, pm_caller
+from llmtool import source_freshness, task_advance, task_completion, task_submission_cli
 from llmtool.errors import LLMToolError
+from llmtool.task_store import TaskStore
 
 SESSION = '3f2b8c1e-6a4d-4e2b-9c1a-7d5e8f9a0b1c'
 OTHER_SESSION = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d'
@@ -358,7 +362,8 @@ class MergeTrainCliTest(unittest.TestCase):
         build = Recorder({'step': 'BUILT', 'codes': [], 'result': {'train_id': TRAIN_ID}})
         code, value, _ = self._main(argv + ['--pm-session', SESSION], build_call=build)
         self.assertEqual(code, 0)
-        self.assertEqual(len(build.calls[0][0][0]), 6)
+        self.assertEqual(build.calls[0][0][0],
+                         [(format(index + 1, '032x'), index + 1) for index in range(6)])
 
     # cli.py dispatch
 
@@ -449,8 +454,8 @@ class MergeTrainCliTest(unittest.TestCase):
                                  'result': {'train_id': TRAIN_ID}})
         self.assertEqual(len(build.calls), 1)
         args, kwargs = build.calls[0]
-        self.assertEqual(args, ([{'task_id': TASK_B, 'pr': 102},
-                                 {'task_id': TASK_A, 'pr': 101}],))
+        # The (task_id, pr) pair shape merge_train_build.build_train accepts.
+        self.assertEqual(args, ([(TASK_B, 102), (TASK_A, 101)],))
         self.assertIs(kwargs['store'], self.store)
         self.assertEqual(kwargs['caller_key'], self.caller)
         self.assertIs(kwargs['github_get'], self.github_get)
@@ -751,6 +756,154 @@ class MergeTrainCliTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(self.train_dir))
         os.chmod(self.train_dir, 0o700)
         self.assertEqual(merge_train_store.get(TRAIN_ID, root=self.train_root), before)
+
+    # Wiring: the real library steps, with only readers and runners faked
+
+    @staticmethod
+    def _commands(runner):
+        """The argument lists a fake git or gh runner was called with."""
+        return [args[1] for args, _ in runner.calls]
+
+    def _task_store(self, task_ids):
+        """A real TaskStore under the temporary root, built as test_pm_caller.py
+        setUp does, holding one caller-owned Task record per id."""
+        home = Path(self.base).resolve()
+        os.environ['HOME'] = str(home)
+        store = TaskStore(home / 'tasks')
+        request = 'Bounded non-sensitive merge train build task.'
+        for index, task_id in enumerate(task_ids):
+            task = task_submission_cli._record(
+                task_id, format(index + 1, 'x') * 32, self.caller, 'pm-profile', request,
+                state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+                backend='NO_NATIVE_SESSION_ID_EXPOSED',
+                request_sha=hashlib.sha256(request.encode()).hexdigest())
+            task.update(pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                                          'base_url': None},
+                        response='PM returned a bounded task.', error_code=None,
+                        pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                                       'goal': 'Build one merge train.',
+                                       'acceptance': ['the caller owns the Task']})
+            store.create(task)
+            self.assertEqual(store.get(task_id)['pm_session_id'], self.caller)
+        return store
+
+    def test_build_wiring_runs_the_real_build_train(self):
+        # build_call is not injected: the real merge_train_build.build_train runs
+        # against a real TaskStore. The Task records have no PM_EVIDENCE_READY
+        # completion, so the real eligibility gate excludes each member; the
+        # repository root does not exist, so the candidate build reads no Git
+        # object and nothing is built.
+        self.assertFalse(os.path.lexists(self.root))
+        store = self._task_store((TASK_A, TASK_B))
+        # Log every read, then go through the real TaskStore read path.
+        reads, real_get = [], store.get
+
+        def logged_get(task_id):
+            reads.append(task_id)
+            return real_get(task_id)
+
+        store.get = logged_get
+        train_root = str(store.root)
+        # The train records live beside the TaskStore root: the same self.train_dir.
+        self.assertEqual(os.path.realpath(train_root), os.path.realpath(self.train_root))
+        main_read = Recorder('c' * 40)
+        github_get, git_runner, gh_runner = Recorder(), Recorder(), Recorder()
+        with mock.patch.object(task_completion, 'read_authenticated_main_sha', main_read):
+            code, value, _ = self._main(['build', '--member', TASK_B + ':102',
+                                         '--member', TASK_A + ':101', '--pm-session', SESSION],
+                                        store=store, train_root=train_root,
+                                        github_get=github_get, git_runner=git_runner,
+                                        gh_runner=gh_runner)
+        self.assertEqual(code, 1)
+        self.assertEqual(value['step'], 'REFUSED')
+        self.assertEqual(len(value['codes']), 1)
+        self.assertNotEqual(value['codes'], [merge_train.TRAIN_MEMBERS_INVALID])
+        self.assertNotIn('train_id', value)
+        not_ready = merge_train_eligibility.TRAIN_MEMBER_NOT_READY
+        # The eligibility gate saw both members, in the given order.
+        self.assertEqual(value['result']['excluded'], [
+            {'task_id': TASK_B, 'pr': 102, 'code': not_ready},
+            {'task_id': TASK_A, 'pr': 101, 'code': not_ready}])
+        self.assertEqual(len(main_read.calls), 1)
+        # CLI owner check, build_train owner check, then eligibility: each in order,
+        # each a read of the real stored record.
+        self.assertEqual(reads, [TASK_B, TASK_A] * 3)
+        self.assertEqual(self.store.calls, [])
+        # Nothing pushed, no PR created, no train recorded.
+        self.assertFalse(any(args[:1] == ['push'] for args in self._commands(git_runner)))
+        self.assertFalse(any(args[:2] == ['pr', 'create']
+                             for args in self._commands(gh_runner)))
+        self.assertEqual((git_runner.calls, gh_runner.calls, github_get.calls), ([], [], []))
+        self.assertFalse(os.path.lexists(self.train_dir))
+
+    def test_merge_wiring_runs_the_real_merge_train(self):
+        # merge_call is not injected: the real merge_train_ops.merge_train runs.
+        before = self._create()
+        current_main = 'e' * 40
+        self.assertNotEqual(current_main, before['main_sha'])
+        main_read = Recorder(current_main)
+        github_get, gh_runner = Recorder(), Recorder()
+        with mock.patch.object(task_completion, 'read_authenticated_main_sha', main_read):
+            code, value, _ = self._main(['merge', TRAIN_ID, '--pm-session', SESSION],
+                                        github_get=github_get, gh_runner=gh_runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(value, {
+            'train_id': TRAIN_ID, 'step': 'SUPERSEDED',
+            'codes': [merge_train_ops.TRAIN_MAIN_MOVED],
+            'result': {'train_id': TRAIN_ID, 'main_sha': before['main_sha'],
+                       'current_main': current_main}})
+        self.assertEqual(len(main_read.calls), 1)
+        self.assertEqual(merge_train_store.get(TRAIN_ID, root=self.train_root)['state'],
+                         'SUPERSEDED')
+        self.assertFalse(any(args[:2] == ['pr', 'merge'] for args in self._commands(gh_runner)))
+        self.assertEqual(gh_runner.calls, [])
+        self.assertEqual(self.store.calls, [TASK_A, TASK_B])
+
+    def test_close_wiring_runs_the_real_close_train(self):
+        # close_call is not injected: the real merge_train_ops.close_train runs.
+        # Record order differs from task-id order.
+        self._merged((TASK_B, TASK_A))
+
+        def advance_step(**kwargs):
+            # Log into the store's read log, so the owner re-check order shows.
+            self.store.calls.append(('advance', kwargs['task_id']))
+            return {'step': 'CLOSED', 'codes': []}
+
+        advance = Recorder(side_effect=advance_step)
+        code, value, _ = self._main(['close', TRAIN_ID, '--pm-session', SESSION],
+                                    advance_call=advance)
+        self.assertEqual(code, 0)
+        self.assertEqual(value, {'train_id': TRAIN_ID, 'step': 'CLOSED', 'codes': [],
+                                 'result': {'train_id': TRAIN_ID, 'tasks': [TASK_B, TASK_A]}})
+        self.assertEqual(merge_train_store.get(TRAIN_ID, root=self.train_root)['state'],
+                         'CLOSED')
+        self.assertEqual(advance.calls, [
+            ((), {'task_id': TASK_B, 'pr_number': 101, 'integration_pr': TRAIN_PR}),
+            ((), {'task_id': TASK_A, 'pr_number': 102, 'integration_pr': TRAIN_PR})])
+        # CLI owner checks first, then a re-check right before each member advance.
+        self.assertEqual(self.store.calls, [TASK_B, TASK_A,
+                                            TASK_B, ('advance', TASK_B),
+                                            TASK_A, ('advance', TASK_A)])
+
+    def test_close_wiring_keeps_the_train_merged_while_a_member_is_open(self):
+        before = self._merged((TASK_A, TASK_B))
+
+        def advance_step(**kwargs):
+            if kwargs['task_id'] == TASK_A:
+                return {'step': 'WAITING_CI', 'codes': []}
+            return {'step': 'CLOSED', 'codes': []}
+
+        advance = Recorder(side_effect=advance_step)
+        code, value, _ = self._main(['close', TRAIN_ID, '--pm-session', SESSION],
+                                    advance_call=advance)
+        self.assertEqual(code, 1)
+        self.assertEqual(value, {'train_id': TRAIN_ID, 'step': 'WAITING_MEMBERS',
+                                 'codes': [merge_train_ops.TRAIN_MEMBERS_OPEN],
+                                 'result': {'train_id': TRAIN_ID, 'open': [TASK_A]}})
+        self.assertEqual([call[1]['task_id'] for call in advance.calls], [TASK_A, TASK_B])
+        stored = merge_train_store.get(TRAIN_ID, root=self.train_root)
+        self.assertEqual(stored['state'], 'MERGED')
+        self.assertEqual(stored, before)
 
     # Output and exit codes
 
