@@ -21,6 +21,7 @@ OTHER_SESSION = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d'
 TASK_A = 'a' * 32
 TASK_B = 'b' * 32
 TASK_C = 'c' * 32
+TASK_D = 'd' * 32
 EXECUTOR = 'e' * 32
 TRAIN_ID = 'train-0001'
 TRAIN_PR = 500
@@ -60,9 +61,9 @@ class Forbidden:
         raise AssertionError('adapter must not be called by the CLI')
 
 
-def _record(train_id=TRAIN_ID, state='BUILT'):
+def _record(train_id=TRAIN_ID, state='BUILT', task_ids=(TASK_A, TASK_B)):
     members = []
-    for index, task_id in enumerate((TASK_A, TASK_B)):
+    for index, task_id in enumerate(task_ids):
         members.append({
             'task_id': task_id, 'pr': 101 + index, 'head': str(index + 1) * 40,
             'executor_task': EXECUTOR, 'review_version': 1,
@@ -106,6 +107,7 @@ class MergeTrainCliTest(unittest.TestCase):
             TASK_A: {'task_id': TASK_A, 'pm_session_id': self.caller},
             TASK_B: {'task_id': TASK_B, 'pm_session_id': self.caller},
             TASK_C: {'task_id': TASK_C, 'pm_session_id': self.other},
+            TASK_D: {'task_id': TASK_D, 'pm_session_id': self.caller},
         })
         self.root = os.path.join(self.base, 'repo')
         self.github_get = Forbidden()
@@ -292,8 +294,11 @@ class MergeTrainCliTest(unittest.TestCase):
                     code = cli.main(['task', 'train', *argv])
                 self.assertEqual(code, 1)
                 self.assertEqual(runs, [])
-                self.assertEqual(out.getvalue(), '')
-                self.assertIn('LLMTOOL_SOURCE_STALE', err.getvalue())
+                lines = out.getvalue().splitlines()
+                self.assertEqual(len(lines), 1, out.getvalue())
+                self.assertRefused(json.loads(lines[0]), 'LLMTOOL_SOURCE_STALE',
+                                   None if argv[0] == 'build' else TRAIN_ID)
+                self.assertEqual(err.getvalue(), '')
         self.assertEqual((build.calls, merge.calls, close.calls, advance.calls),
                          ([], [], [], []))
         self.assertEqual(self.store.calls, [])
@@ -456,31 +461,79 @@ class MergeTrainCliTest(unittest.TestCase):
 
     # close
 
+    def _merged(self, task_ids):
+        """Create a record for ``task_ids`` and move it BUILT -> MERGED."""
+        built = self._create(task_ids=task_ids)
+        attempt = {'pr': TRAIN_PR, 'head_sha': built['train_head'], 'state': 'CLAIMED',
+                   'claimed_at': '2026-11-08T00:00:00Z'}
+        claimed = merge_train_store.compare_and_update(
+            TRAIN_ID, built['record_sha256'], root=self.train_root, state='MERGE_CLAIMED',
+            merge_attempt=attempt)
+        return merge_train_store.compare_and_update(
+            TRAIN_ID, claimed['record_sha256'], root=self.train_root, state='MERGED',
+            merge_sha='f' * 40, merge_attempt=dict(attempt, state='MERGED'))
+
     def test_close_passes_train_id_and_owner_checked_advance(self):
         self._create(state='BUILT')
         advance = Recorder({'step': 'CLOSED', 'codes': []})
 
         def close_step(train_id, *, store, advance_call, train_root):
             first = advance_call(task_id=TASK_A, pr_number=101, integration_pr=TRAIN_PR)
-            # A member adopted away between the CLI check and its advance is refused.
-            self.store.records[TASK_B]['pm_session_id'] = self.other
             second = advance_call(task_id=TASK_B, pr_number=102, integration_pr=TRAIN_PR)
-            return {'step': 'WAITING_MEMBERS', 'codes': ['TRAIN_MEMBERS_OPEN'],
+            return {'step': 'CLOSED', 'codes': [],
                     'result': {'first': first['step'], 'second': second['step']}}
 
         close = Recorder(side_effect=close_step)
         code, value, _ = self._main(['close', TRAIN_ID, '--pm-session', SESSION],
                                     close_call=close, advance_call=advance)
-        self.assertEqual(code, 1)
-        self.assertEqual(value, {'train_id': TRAIN_ID, 'step': 'WAITING_MEMBERS',
-                                 'codes': ['TRAIN_MEMBERS_OPEN'],
-                                 'result': {'first': 'CLOSED', 'second': 'REFUSED'}})
+        self.assertEqual(code, 0)
+        self.assertEqual(value, {'train_id': TRAIN_ID, 'step': 'CLOSED', 'codes': [],
+                                 'result': {'first': 'CLOSED', 'second': 'CLOSED'}})
         args, kwargs = close.calls[0]
         self.assertEqual(args, (TRAIN_ID,))
         self.assertIs(kwargs['store'], self.store)
         self.assertEqual(kwargs['train_root'], self.train_root)
-        self.assertEqual(advance.calls, [((), {'task_id': TASK_A, 'pr_number': 101,
-                                              'integration_pr': TRAIN_PR})])
+        self.assertEqual(advance.calls, [
+            ((), {'task_id': TASK_A, 'pr_number': 101, 'integration_pr': TRAIN_PR}),
+            ((), {'task_id': TASK_B, 'pr_number': 102, 'integration_pr': TRAIN_PR})])
+
+    def test_close_stops_at_once_when_a_member_owner_changes_between_steps(self):
+        before = self._merged((TASK_A, TASK_B, TASK_D))
+
+        def advance_step(**kwargs):
+            # The second member is adopted away after the first member closes.
+            self.store.records[TASK_B]['pm_session_id'] = self.other
+            return {'step': 'CLOSED', 'codes': []}
+
+        advance = Recorder(side_effect=advance_step)
+        # The real close_train treats an Exception from one member advance as an
+        # open member and goes on; the refusal must still stop the whole close.
+        code, value, _ = self._main(['close', TRAIN_ID, '--pm-session', SESSION],
+                                    advance_call=advance)
+        self.assertEqual(code, 1)
+        self.assertRefused(value, pm_caller.NOT_TASK_OWNER, TRAIN_ID, TASK_B)
+        self.assertEqual([call[1]['task_id'] for call in advance.calls], [TASK_A])
+        self.assertEqual(merge_train_store.get(TRAIN_ID, root=self.train_root), before)
+
+    def test_close_refusal_holds_when_the_step_swallows_it(self):
+        self._create()
+
+        def swallowing(train_id, *, store, advance_call, train_root):
+            self.store.records[TASK_A]['pm_session_id'] = self.other
+            for task_id in (TASK_A, TASK_B):
+                try:
+                    advance_call(task_id=task_id, pr_number=101, integration_pr=TRAIN_PR)
+                except BaseException:
+                    pass
+            return {'step': 'CLOSED', 'codes': [], 'result': None}
+
+        advance = Recorder({'step': 'CLOSED', 'codes': []})
+        code, value, _ = self._main(['close', TRAIN_ID, '--pm-session', SESSION],
+                                    close_call=Recorder(side_effect=swallowing),
+                                    advance_call=advance)
+        self.assertEqual(code, 1)
+        self.assertRefused(value, pm_caller.NOT_TASK_OWNER, TRAIN_ID, TASK_A)
+        self.assertEqual(advance.calls, [])
 
     def test_close_refuses_non_owner_before_any_call(self):
         self._create()
@@ -538,6 +591,38 @@ class MergeTrainCliTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertRefused(value, merge_train_store.TRAIN_RECORD_UNAVAILABLE, TRAIN_ID)
         self.assertFalse(os.path.lexists(self.train_dir))
+        # A missing parent of the record directory is not created either.
+        nested = os.path.join(self.base, 'absent', 'tasks')
+        code, value, _ = self._main(['status', TRAIN_ID], train_root=nested)
+        self.assertEqual(code, 1)
+        self.assertRefused(value, merge_train_store.TRAIN_RECORD_UNAVAILABLE, TRAIN_ID)
+        self.assertFalse(os.path.lexists(os.path.join(self.base, 'absent')))
+
+    def test_status_of_unknown_train_id_refuses_unavailable(self):
+        self._create()
+        code, value, _ = self._main(['status', 'train-0002'])
+        self.assertEqual(code, 1)
+        self.assertRefused(value, merge_train_store.TRAIN_RECORD_UNAVAILABLE, 'train-0002')
+
+    def test_status_leaves_directory_mode_and_existence_unchanged(self):
+        before = self._create()
+        mode = os.stat(self.train_dir).st_mode
+        # status never goes through the create-or-repair directory open.
+        with mock.patch.object(merge_train_store, '_open_directory', Forbidden()):
+            code, value, _ = self._main(['status', TRAIN_ID])
+        self.assertEqual((code, value['step']), (0, 'STATUS'))
+        self.assertEqual(os.stat(self.train_dir).st_mode, mode)
+        # A directory with another mode is refused, not repaired: a get() would
+        # chmod it back to 0o700.
+        os.chmod(self.train_dir, 0o750)
+        self.addCleanup(os.chmod, self.train_dir, 0o700)
+        code, value, _ = self._main(['status', TRAIN_ID])
+        self.assertEqual(code, 1)
+        self.assertRefused(value, merge_train_store.TRAIN_RECORD_INVALID, TRAIN_ID)
+        self.assertEqual(os.stat(self.train_dir).st_mode & 0o7777, 0o750)
+        self.assertTrue(os.path.isdir(self.train_dir))
+        os.chmod(self.train_dir, 0o700)
+        self.assertEqual(merge_train_store.get(TRAIN_ID, root=self.train_root), before)
 
     # Output and exit codes
 

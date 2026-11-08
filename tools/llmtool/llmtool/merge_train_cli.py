@@ -5,7 +5,9 @@
 before the merge-train library step is called, once. ``build`` checks the
 members given on the command line; ``merge`` and ``close`` read the members from
 the validated train record. ``close`` also re-checks a member's owner right
-before each member advance. ``status`` reads the record and changes nothing.
+before each member advance; a refusal there stops the whole close at once.
+``status`` reads through ``merge_train_store.list_records`` and changes nothing.
+A stale-source stop before build, merge or close prints the same one refusal.
 
 Every command prints exactly one JSON object with ``train_id`` when known,
 ``step``, ``codes`` and ``result``. A refusal is ``pm_caller.refusal``-shaped
@@ -29,6 +31,7 @@ import sys
 TRAIN_INPUT_INVALID = 'TRAIN_INPUT_INVALID'
 TRAIN_BUILD_UNAVAILABLE = 'TRAIN_BUILD_UNAVAILABLE'
 TRAIN_STEP_FAILED = 'TRAIN_STEP_FAILED'
+SOURCE_UNKNOWN = 'LLMTOOL_SOURCE_UNKNOWN'
 
 MIN_MEMBERS = 2
 MAX_MEMBERS = 6
@@ -146,15 +149,18 @@ def _read_record(train_id, train_root):
 
 
 def _status(train_id, train_root):
+    """Read through ``list_records`` only: ``get`` may create the record
+    directory or change its mode, and status must change nothing."""
     from . import merge_train_store
-    # get() creates a missing record directory; status must change nothing.
     try:
-        os.lstat(merge_train_store._directory_path(train_root))
-    except OSError:
+        records = merge_train_store.list_records(train_root)
+    except Exception as exc:
+        return _refused(_exception_code(exc, merge_train_store.TRAIN_RECORD_UNAVAILABLE),
+                        train_id)
+    found = [record for record in records if record.get('train_id') == train_id]
+    if len(found) != 1:
         return _refused(merge_train_store.TRAIN_RECORD_UNAVAILABLE, train_id)
-    record, code = _read_record(train_id, train_root)
-    if record is None:
-        return _refused(code, train_id)
+    record = found[0]
     return {'train_id': train_id, 'step': STATUS_STEP, 'codes': [],
             'result': {field: record[field] for field in STATUS_FIELDS}}
 
@@ -185,17 +191,51 @@ def _step(train_id, call):
     return value
 
 
-def _owned_advance(call, store, caller_key):
-    """Re-check a member's owner right before its advance; refuse without calling."""
-    from . import pm_caller
+class _MemberRefused(BaseException):
+    """A member's owner re-check refused inside ``close``; stops the whole close.
 
-    def invoke(**kwargs):
-        task_id = kwargs.get('task_id')
-        code = pm_caller.owner_refusal_code(store, task_id, caller_key)
-        if code is not None:
-            return pm_caller.refusal(task_id, code)
-        return call(**kwargs)
-    return invoke
+    ``merge_train_ops.close_train`` treats an ``Exception`` from one member
+    advance as an open member and goes on to the next member, so a
+    ``pm_caller.PMCallerRefused`` would not stop it. This BaseException passes
+    that handler, and ``run_task_train`` turns it into the pm_caller refusal.
+    """
+
+    def __init__(self, task_id, code):
+        super().__init__(code)
+        self.task_id = task_id
+        self.code = code
+
+
+class _OwnedAdvance:
+    """Re-check a member's owner right before its advance; refuse without calling.
+
+    The first refusal is latched: every later call raises it again without
+    calling the advance, even when a step swallows the first raise.
+    """
+
+    def __init__(self, call, store, caller_key):
+        self.call = call
+        self.store = store
+        self.caller_key = caller_key
+        self.refused = None
+
+    def __call__(self, **kwargs):
+        if self.refused is None:
+            from . import pm_caller
+            task_id = kwargs.get('task_id')
+            code = pm_caller.owner_refusal_code(self.store, task_id, self.caller_key)
+            if code is None:
+                return self.call(**kwargs)
+            self.refused = (task_id, code)
+        raise _MemberRefused(*self.refused)
+
+
+def source_refusal(args, exc):
+    """Print the one refusal for a stale-source stop before a train step; exit 1."""
+    code = getattr(exc, 'completion_code', None)
+    if type(code) is not str or not _CODE.fullmatch(code):
+        code = SOURCE_UNKNOWN
+    return _finish(_refused(code, _train_id(getattr(args, 'train_id', None))))
 
 
 def run_task_train(args, *, store=None, build_call=None, merge_call=None, close_call=None,
@@ -265,6 +305,14 @@ def run_task_train(args, *, store=None, build_call=None, merge_call=None, close_
     if advance_call is None:
         advance_call = functools.partial(task_advance.advance, store=store,
                                          github_get=github_get)
-    owned = _owned_advance(advance_call, store, caller_key)
-    return _finish(_step(train_id, lambda: close_call(
-        train_id, store=store, advance_call=owned, train_root=train_root)))
+    owned = _OwnedAdvance(advance_call, store, caller_key)
+    try:
+        value = _step(train_id, lambda: close_call(
+            train_id, store=store, advance_call=owned, train_root=train_root))
+    except _MemberRefused:
+        value = None
+    if owned.refused is not None:
+        # Also when the step swallowed the raise and returned a result.
+        task_id, code = owned.refused
+        value = _refused(code, train_id, task_id)
+    return _finish(value)

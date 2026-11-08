@@ -558,10 +558,13 @@ def main(argv=None):
                 from .review_bundle import run_review_bundle
                 return run_review_bundle(args)
             if args.action == 'train':
+                from . import merge_train_cli
                 if args.train_action in ('build', 'merge', 'close'):
                     from .source_freshness import require_fresh_source
-                    require_fresh_source()
-                from . import merge_train_cli
+                    try:
+                        require_fresh_source()
+                    except LLMToolError as exc:
+                        return merge_train_cli.source_refusal(args, exc)
                 return merge_train_cli.run_task_train(args)
             return run_task_review(args) if args.action == 'review' else run_task_inspect(args)
         if args.command == 'test-excerpts':
