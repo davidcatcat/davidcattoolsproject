@@ -292,13 +292,26 @@ jobs:
                           path.chmod(0o600)
           print('Verifier checks: 12/12 PASS; no skips')
           PY
+      # Full runs get 110 minutes and other modes 45. The 120-minute job
+      # limit stays the outer stop.
       - name: Offline canonical checks
         if: steps.full-due.outputs.run != 'false' && steps.coverage.outputs.mode != 'monitor-only' && steps.coverage.outputs.mode != 'docs-only'
+        timeout-minutes: ${{ steps.coverage.outputs.mode == 'full' && 110 || 45 }}
         run: |
+          # Fail closed: the result stays INCOMPLETE until the last line.
+          # An early exit, signal or timeout reports INCOMPLETE or FAIL.
           started=$SECONDS
-          result=PASS
+          result=INCOMPLETE
           test_count=0
-          report_result() { status=$?; if [ "$status" -ne 0 ]; then result=FAIL; fi; printf 'canonical exact HEAD: %s\ncanonical unittest test-case count: %s\ncanonical elapsed seconds: %s\ncanonical result: %s\n' "$(git rev-parse HEAD)" "$test_count" "$((SECONDS - started))" "$result"; return "$status"; }
+          report_result() {
+            status=$?
+            if [ "$status" -ne 0 ]; then result=FAIL; fi
+            printf 'canonical exact HEAD: %s\ncanonical unittest test-case count: %s\ncanonical elapsed seconds: %s\ncanonical result: %s\n' "$(git rev-parse HEAD)" "$test_count" "$((SECONDS - started))" "$result"
+            if [ "$result" != PASS ]; then
+              if [ "$status" -eq 0 ]; then status=1; fi
+              exit "$status"
+            fi
+          }
           collect_count() { observed=$(awk '/^Ran [0-9]+ tests?/ { total += $2 } END { print total + 0 }' "$1"); test_count=$((test_count + observed)); }
           trap report_result EXIT
           if [ "${{ steps.coverage.outputs.mode }}" = mac-subset ]; then
@@ -323,6 +336,11 @@ jobs:
             collect_count "$output"
             test "$status" -eq 0 || exit "$status"
           fi
+          if [ "$test_count" -eq 0 ]; then
+            echo "::error::canonical checks ran no test cases"
+            exit 1
+          fi
+          result=PASS
       - name: Monitor script checks
         if: steps.full-due.outputs.run != 'false'
         run: |
