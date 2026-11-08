@@ -1,0 +1,25 @@
+{
+  "default_seconds": 12,
+  "modules": {
+    "test_worktree_env.py": 420,
+    "test_action_contract_cli.py": 210,
+    "test_task_submission_cli.py": 195,
+    "test_cli.py": 180,
+    "test_d6_worktree_env.py": 175,
+    "test_task_advance.py": 160,
+    "test_task_completion.py": 150,
+    "test_task_drive.py": 140,
+    "test_chat_tui_scenarios.py": 130,
+    "test_chat_tui_pty.py": 125,
+    "test_cli_lifecycle_state.py": 115,
+    "test_cli_provider_lifecycle.py": 105,
+    "test_codex_cli_provider.py": 95,
+    "test_opencode_direct_developer.py": 90,
+    "test_codex_direct_developer.py": 85,
+    "test_review_authority_native.py": 80,
+    "test_review_repair.py": 75,
+    "test_chat_tui_theme_pty.py": 70,
+    "test_task_store.py": 65,
+    "test_ci_mac_modules.py": 65
+  }
+}

@@ -9,8 +9,8 @@ name: llmtool Mac CI
 # job-owned venv that the verified-Python step checks byte for byte. The
 # company LLM, its VPN and any company configuration are never used here; all
 # tests are offline. HOSTED_CI_ENABLED is the kill switch: anything but 'true'
-# skips the job (MAC_CI_ENABLED, the old self-hosted switch, stays 'false' so
-# older self-hosted copies of this file on other branches never run), and a skipped job is NOT_RUN, not PASS.
+# skips the job (MAC_CI_ENABLED, the old local-runner switch, stays 'false' so
+# older copies of this file on other branches never run), and a skipped job is NOT_RUN, not PASS.
 # Use workflow_dispatch after each merge train so the full suite runs.
 on:
   pull_request:
@@ -30,16 +30,25 @@ permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
 jobs:
-  check:
-    name: check (macOS 3.13)
-    if: vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci')
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
-      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  selection:
+    name: select Mac CI coverage
+    if: >-
+      vars.HOSTED_CI_ENABLED == 'true'
+      && github.repository == 'davidcatcat/davidcattoolsproject'
+      && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci'))
+      && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci')
     runs-on: macos-15-intel
-    # Owner #1253: up to 120 minutes while the hosted full suite is measured (#1220).
     timeout-minutes: 120
+    outputs:
+      mode: ${{ steps.coverage.outputs.mode }}
+      verify: ${{ steps.coverage.outputs.verify }}
+      run: ${{ steps.full-due.outputs.run || 'true' }}
+      test_ids: ${{ steps.coverage.outputs.test_ids }}
     steps:
       # Test the PR's own head commit, not GitHub's temporary merge commit
       # (GITHUB_SHA), so a run is exact evidence for the SHA it reports.
@@ -76,6 +85,15 @@ jobs:
               fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
             fi
           fi
+      - name: Check GitHub-hosted runner boundary
+        run: |
+          fail() { echo "::error::hosted runner boundary failed: $1"; exit 1; }
+          test "$RUNNER_ENVIRONMENT" = github-hosted || fail "not a GitHub-hosted runner"
+          test "$(id -u)" -ne 0 || fail "job runs as root"
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GW_AGENT_API_KEY; do
+            test -z "${!name+x}" || fail "credential environment $name present"
+          done
+          echo "Runner: $RUNNER_NAME ($RUNNER_ENVIRONMENT, $RUNNER_OS $RUNNER_ARCH); user: $(id -un)"
       # PRs use the validated Mac-required IDs plus changed/mapped test IDs.
       # Monitor-only and documentation-only changes skip canonical Mac tests;
       # unknown, failed, and non-PR comparisons use full checks.
@@ -87,6 +105,7 @@ jobs:
         run: |
           mode=full
           verify=true
+          test_ids=''
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             selection_started=$SECONDS
             paths="$RUNNER_TEMP/changed-paths"
@@ -134,13 +153,16 @@ jobs:
                     count=$(printf '%s' "$selection" | python3 -I -B -c 'import json,sys; print(json.load(sys.stdin)["test_id_count"])')
                     reason=$(printf '%s' "$selection" | python3 -I -B -c 'import json,sys; print(json.load(sys.stdin)["selection_reason"])')
                     fallback=$(printf '%s' "$selection" | python3 -I -B -c 'import json,sys; print(",".join(json.load(sys.stdin)["fallback_reasons"]) or "none")')
+                    test_ids=$(tr '\n' ' ' < "$RUNNER_TEMP/mac-test-ids")
                     printf 'selection exact HEAD: %s\nselection changed paths:\n' "$EXPECTED_SHA"
                     git diff --no-ext-diff --no-renames --name-only "$BASE_SHA" "$EXPECTED_SHA" --
-                    printf 'selection level: %s\nselection test IDs: %s\nselection test ID count: %s\nselection reason: %s\nselection fallback reasons: %s\nselection elapsed seconds: %s\n' "$level" "$(tr '\n' ' ' < "$RUNNER_TEMP/mac-test-ids")" "$count" "$reason" "$fallback" "$((SECONDS - selection_started))"
+                    printf 'selection level: %s\nselection test IDs: %s\nselection test ID count: %s\nselection reason: %s\nselection fallback reasons: %s\nselection elapsed seconds: %s\n' "$level" "$test_ids" "$count" "$reason" "$fallback" "$((SECONDS - selection_started))"
                     if [ "$level" = L3 ]; then
                       mode=full
+                      test_ids=''
                     elif [ "$count" -eq 0 ]; then
                       mode=docs-only
+                      test_ids=''
                     fi
                   fi
                 fi
@@ -149,6 +171,7 @@ jobs:
           fi
           printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
           printf 'verify=%s\n' "$verify" >> "$GITHUB_OUTPUT"
+          printf 'test_ids=%s\n' "$test_ids" >> "$GITHUB_OUTPUT"
           echo "coverage mode: $mode"
       - name: Full main suite due gate
         id: full-due
@@ -169,8 +192,63 @@ jobs:
             echo "::error::unexpected full-suite gate result"
             exit 1
           fi
+      - name: Working tree is clean
+        run: |
+          status=$(git status --porcelain)
+          if [ -n "$status" ]; then
+            echo "::error::the CI run changed tracked files or left untracked files:"
+            printf '%s\n' "$status"
+            exit 1
+          fi
+          echo "working tree clean"
+
+  shards:
+    name: mac shard ${{ matrix.shard }}/3 (macOS 3.13)
+    needs: selection
+    if: >-
+      vars.HOSTED_CI_ENABLED == 'true'
+      && github.repository == 'davidcatcat/davidcattoolsproject'
+      && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci'))
+      && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci')
+      && needs.selection.outputs.run != 'false'
+      && needs.selection.outputs.mode == 'full'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || 'main' }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Source revision
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          fail() { echo "::error::source revision check failed: $1"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            EXPECTED_SHA=$(git rev-parse HEAD) || fail "cannot read checked-out main SHA"
+          fi
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected SHA is not a full commit id"
+          head=$(git rev-parse HEAD) || fail "cannot read HEAD"
+          test "$head" = "$EXPECTED_SHA" || fail "checked out $head, expected $EXPECTED_SHA"
+          echo "tested source HEAD: $head ($GITHUB_EVENT_NAME)"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            test "$head" != "$GITHUB_SHA" || fail "checked out the merge ref instead of the PR head"
+            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "missing PR base SHA"
+            if git merge-base --is-ancestor "$BASE_SHA" "$head"; then
+              echo "merge coverage: head contains base $BASE_SHA"
+            else
+              status=$?
+              test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
+              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+            fi
+          fi
       - name: Set up Python 3.13
-        if: steps.full-due.outputs.run != 'false'
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: '3.13'
@@ -183,11 +261,7 @@ jobs:
             test -z "${!name+x}" || fail "credential environment $name present"
           done
           echo "Runner: $RUNNER_NAME ($RUNNER_ENVIRONMENT, $RUNNER_OS $RUNNER_ARCH); user: $(id -un)"
-      # Use setup-python's 3.13 in a job-owned venv with a copied executable.
-      # The trusted-runtime check refuses a group/other-writable interpreter;
-      # the copy is checked byte-for-byte without changing the shared Python.
       - name: Job-owned verified Python
-        if: steps.full-due.outputs.run != 'false'
         run: |
           python3 -c 'import sys; assert sys.version_info[:2] == (3, 13), sys.version'
           src_exe="$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')"
@@ -214,12 +288,263 @@ jobs:
             || fail "copy does not run from RUNNER_TEMP"
           echo "JOB_PYTHON=$exe" >> "$GITHUB_ENV"
       - name: Install llmtool
-        if: steps.full-due.outputs.run != 'false'
         run: |
           "$JOB_PYTHON" -m pip install --requirement tools/llmtool/requirements-ci.txt
           "$JOB_PYTHON" -m pip install --no-deps -e tools/llmtool
       - name: Verifier failure-path checks
-        if: steps.full-due.outputs.run != 'false' && steps.coverage.outputs.verify == 'true'
+        if: matrix.shard == 1 && needs.selection.outputs.verify == 'true'
+        run: |
+          "$JOB_PYTHON" -B - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          import yaml
+
+          workflow = yaml.safe_load(Path('.github/workflows/llmtool-mac-ci.yml').read_text())
+          step = next(s for s in workflow['jobs']['shards']['steps']
+                      if s.get('name') == 'Job-owned verified Python')['run']
+          guard = step.split('# BEGIN status-checked verification\n', 1)[1].split(
+              '# END status-checked verification', 1)[0]
+          fail = next(line for line in step.splitlines() if line.startswith('fail()'))
+          # Run the actual guard, not a second implementation of its checks.
+          second_hash_error = ('shasum() { if test -e "$dst/hash-called"; then return 2; '
+                               'fi; : > "$dst/hash-called"; command shasum "$@"; }')
+          second_hash_empty = ('shasum() { if test -e "$dst/hash-called"; then return 0; '
+                               'fi; : > "$dst/hash-called"; command shasum "$@"; }')
+          cases = [
+              ('regular flow', '', None, None),
+              ('find error with empty stdout', 'find() { return 2; }', None, 'cannot scan copy'),
+              ('writable entry', '', 'writable', 'writable file left in copy'),
+              ('both hash tools fail', 'shasum() { return 2; }', None, 'cannot hash copy'),
+              ('source hash tool fails', second_hash_error, None, 'cannot hash source'),
+              ('copy hash empty success', 'shasum() { return 0; }', None, 'invalid copy hash'),
+              ('source hash empty success', second_hash_empty, None, 'invalid source hash'),
+              ('malformed hash', "shasum() { printf 'invalid\\n'; }", None, 'invalid copy hash'),
+              ('different bytes', '', 'different', 'interpreter bytes differ'),
+              ('copy unreadable', '', 'copy unreadable', 'cannot hash copy'),
+              ('source unreadable', '', 'source unreadable', 'cannot hash source'),
+              ('both unreadable', '', 'both unreadable', 'cannot hash copy'),
+          ]
+          if os.geteuid() == 0:
+              raise RuntimeError('read-failure probes require an unprivileged job')
+          for label, override, mutation, expected in cases:
+              with tempfile.TemporaryDirectory(prefix='wf87-verifier-') as temporary:
+                  root = Path(temporary)
+                  dst = root / 'copy'
+                  dst.mkdir()
+                  exe, source = dst / 'python', root / 'source-python'
+                  for path in (exe, source):
+                      path.write_bytes(b'identical synthetic interpreter bytes\n')
+                      path.chmod(0o600)
+                  if mutation == 'writable':
+                      (dst / 'writable').write_bytes(b'fixture')
+                      (dst / 'writable').chmod(0o666)
+                  if mutation == 'different':
+                      source.write_bytes(b'different synthetic interpreter bytes\n')
+                  unreadable = {'copy unreadable': (exe,), 'source unreadable': (source,),
+                                'both unreadable': (exe, source)}.get(mutation, ())
+                  for path in unreadable:
+                      path.chmod(0o111)
+                  try:
+                      result = subprocess.run(
+                          ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
+                           fail + '\n' + override + '\n' + guard],
+                          env={**os.environ, 'dst': str(dst), 'exe': str(exe),
+                               'src_exe': str(source)}, capture_output=True, text=True, timeout=10)
+                      if expected is None:
+                          assert result.returncode == 0, label
+                      else:
+                          assert result.returncode == 1, label
+                          assert 'job-owned Python check failed: ' + expected in result.stdout, label
+                          if unreadable:
+                              assert 'Permission denied' in result.stderr, label
+                      print(label + ': PASS')
+                  finally:
+                      for path in unreadable:
+                          path.chmod(0o600)
+          print('Verifier checks: 12/12 PASS; no skips')
+          PY
+      - name: Offline canonical shard checks
+        timeout-minutes: 45
+        run: |
+          # Fail closed: the result stays INCOMPLETE until the last line.
+          # An early exit, signal or timeout reports INCOMPLETE or FAIL.
+          started=$SECONDS
+          result=INCOMPLETE
+          test_count=0
+          module_count=0
+          shard="shard ${{ matrix.shard }}/3"
+          report_result() {
+            status=$?
+            if [ "$status" -ne 0 ]; then result=FAIL; fi
+            printf 'canonical exact HEAD: %s\ncanonical shard: %s\ncanonical shard module count: %s\ncanonical unittest test-case count: %s\ncanonical elapsed seconds: %s\ncanonical result: %s\n' "$(git rev-parse HEAD)" "$shard" "$module_count" "$test_count" "$((SECONDS - started))" "$result"
+            if [ "$result" != PASS ]; then
+              if [ "$status" -eq 0 ]; then status=1; fi
+              exit "$status"
+            fi
+          }
+          collect_count() { observed=$(awk '/^Ran [0-9]+ tests?/ { total += $2 } END { print total + 0 }' "$1"); test_count=$((test_count + observed)); }
+          trap report_result EXIT
+          make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
+          modules=$("$JOB_PYTHON" tools/llmtool/scripts/ci_test_shards.py --timings tools/llmtool/ci/mac-test-module-seconds.json 3 "${{ matrix.shard }}")
+          while IFS= read -r module <&3; do
+            [ -n "$module" ] || continue
+            module_count=$((module_count + 1))
+            output="$RUNNER_TEMP/mac-test-output"
+            set +e
+            "$JOB_PYTHON" -m unittest discover -s tools/llmtool/tests -p "$module" -v < /dev/null 2>&1 | tee "$output"
+            status=${PIPESTATUS[0]}
+            set -e
+            collect_count "$output"
+            test "$status" -eq 0 || exit "$status"
+          done 3<<< "$modules" < /dev/null
+          if [ "$test_count" -eq 0 ]; then
+            echo "::error::canonical checks ran no test cases"
+            exit 1
+          fi
+          result=PASS
+      - name: Monitor script checks
+        if: matrix.shard == 1
+        run: |
+          "$JOB_PYTHON" -B -m unittest discover -s scripts
+      - name: Working tree is clean
+        run: |
+          status=$(git status --porcelain)
+          if [ -n "$status" ]; then
+            echo "::error::the CI run changed tracked files or left untracked files:"
+            printf '%s\n' "$status"
+            exit 1
+          fi
+          echo "working tree clean"
+
+  check:
+    name: check (macOS 3.13)
+    needs: [selection, shards]
+    if: >-
+      always()
+      && vars.HOSTED_CI_ENABLED == 'true'
+      && github.repository == 'davidcatcat/davidcattoolsproject'
+      && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci'))
+      && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci')
+    runs-on: macos-15-intel
+    # Owner #1253: up to 120 minutes for macOS jobs (#1220).
+    timeout-minutes: 120
+    steps:
+      - name: Check GitHub-hosted runner boundary
+        run: |
+          fail() { echo "::error::hosted runner boundary failed: $1"; exit 1; }
+          test "$RUNNER_ENVIRONMENT" = github-hosted || fail "not a GitHub-hosted runner"
+          test "$(id -u)" -ne 0 || fail "job runs as root"
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GW_AGENT_API_KEY; do
+            test -z "${!name+x}" || fail "credential environment $name present"
+          done
+          echo "Runner: $RUNNER_NAME ($RUNNER_ENVIRONMENT, $RUNNER_OS $RUNNER_ARCH); user: $(id -un)"
+      - name: Require selection and full-mode shards to pass
+        env:
+          SELECTION_RESULT: ${{ needs.selection.result }}
+          COVERAGE_MODE: ${{ needs.selection.outputs.mode }}
+          FULL_DUE_RUN: ${{ needs.selection.outputs.run }}
+          SHARDS_RESULT: ${{ needs.shards.result }}
+        run: |
+          printf 'selection result: %s\ncoverage mode: %s\nfull-due run: %s\nshards result: %s\n' \
+            "$SELECTION_RESULT" "$COVERAGE_MODE" "$FULL_DUE_RUN" "$SHARDS_RESULT"
+          if [ "$SELECTION_RESULT" != success ]; then
+            echo "::error::Mac CI selection job result: $SELECTION_RESULT"
+            exit 1
+          fi
+          if [ "$FULL_DUE_RUN" = false ]; then
+            echo "full main suite not due; skipping shard and subset execution"
+            exit 0
+          fi
+          case "$COVERAGE_MODE" in
+            full)
+              if [ "$SHARDS_RESULT" != success ]; then
+                echo "::error::Mac shard matrix result: $SHARDS_RESULT"
+                exit 1
+              fi
+              echo "all Mac shards passed"
+              ;;
+            mac-subset|monitor-only|docs-only)
+              ;;
+            *)
+              echo "::error::unexpected coverage mode: $COVERAGE_MODE"
+              exit 1
+              ;;
+          esac
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        if: needs.selection.outputs.run != 'false' && needs.selection.outputs.mode != 'full'
+        with:
+          ref: ${{ github.event.pull_request.head.sha || 'main' }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Source revision
+        if: needs.selection.outputs.run != 'false' && needs.selection.outputs.mode != 'full'
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          fail() { echo "::error::source revision check failed: $1"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            EXPECTED_SHA=$(git rev-parse HEAD) || fail "cannot read checked-out main SHA"
+          fi
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected SHA is not a full commit id"
+          head=$(git rev-parse HEAD) || fail "cannot read HEAD"
+          test "$head" = "$EXPECTED_SHA" || fail "checked out $head, expected $EXPECTED_SHA"
+          echo "tested source HEAD: $head ($GITHUB_EVENT_NAME)"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            test "$head" != "$GITHUB_SHA" || fail "checked out the merge ref instead of the PR head"
+            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "missing PR base SHA"
+            if git merge-base --is-ancestor "$BASE_SHA" "$head"; then
+              echo "merge coverage: head contains base $BASE_SHA"
+            else
+              status=$?
+              test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
+              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+            fi
+          fi
+      - name: Set up Python 3.13
+        if: needs.selection.outputs.run != 'false' && needs.selection.outputs.mode != 'full'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+      # Use setup-python's 3.13 in a job-owned venv with a copied executable.
+      # The trusted-runtime check refuses a group/other-writable interpreter;
+      # the copy is checked byte-for-byte without changing the shared Python.
+      - name: Job-owned verified Python
+        if: needs.selection.outputs.run != 'false' && needs.selection.outputs.mode != 'full'
+        run: |
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 13), sys.version'
+          src_exe="$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')"
+          dst="$RUNNER_TEMP/job-python"
+          python3 -m venv --copies "$dst"
+          chmod -R go-w "$dst"
+          exe="$dst/bin/python3"
+          fail() { echo "::error::job-owned Python check failed: $1"; exit 1; }
+          { test -f "$exe" && test ! -L "$exe"; } || fail "interpreter is not a regular file"
+          test "$(stat -f %u "$exe")" = "$(id -u)" || fail "interpreter not owned by job user"
+          test $(( 0$(stat -f %Lp "$exe") & 022 )) -eq 0 || fail "interpreter group/other writable"
+          # Scan physical entries only; the shared base runtime and libraries
+          # remain part of the audited Mac runner trust boundary.
+          # BEGIN status-checked verification
+          inventory=$(find "$dst" ! -type l \( -perm -020 -o -perm -002 \) -print -quit) || fail "cannot scan copy"
+          test -z "$inventory" || fail "writable file left in copy"
+          copy_hash=$(shasum -a 256 < "$exe") || fail "cannot hash copy"
+          source_hash=$(shasum -a 256 < "$src_exe") || fail "cannot hash source"
+          [[ "$copy_hash" =~ ^[0-9a-f]{64}[[:space:]][[:space:]]-$ ]] || fail "invalid copy hash"
+          [[ "$source_hash" =~ ^[0-9a-f]{64}[[:space:]][[:space:]]-$ ]] || fail "invalid source hash"
+          test "$copy_hash" = "$source_hash" || fail "interpreter bytes differ"
+          # END status-checked verification
+          "$exe" -c 'import os,sys; root=os.path.realpath(os.environ["RUNNER_TEMP"]); assert os.path.commonpath((root,os.path.realpath(sys.executable)))==root' \
+            || fail "copy does not run from RUNNER_TEMP"
+          echo "JOB_PYTHON=$exe" >> "$GITHUB_ENV"
+      - name: Install llmtool
+        if: needs.selection.outputs.run != 'false' && needs.selection.outputs.mode != 'full'
+        run: |
+          "$JOB_PYTHON" -m pip install --requirement tools/llmtool/requirements-ci.txt
+          "$JOB_PYTHON" -m pip install --no-deps -e tools/llmtool
+      - name: Verifier failure-path checks
+        if: needs.selection.outputs.run != 'false' && needs.selection.outputs.mode != 'full' && needs.selection.outputs.verify == 'true'
         run: |
           "$JOB_PYTHON" -B - <<'PY'
           import os
@@ -292,11 +617,16 @@ jobs:
                           path.chmod(0o600)
           print('Verifier checks: 12/12 PASS; no skips')
           PY
-      # Full runs get 110 minutes and other modes 45. The 120-minute job
-      # limit stays the outer stop.
+      - name: Prepare selected test IDs
+        if: needs.selection.outputs.run != 'false' && needs.selection.outputs.mode == 'mac-subset'
+        env:
+          SELECTED_TEST_IDS: ${{ needs.selection.outputs.test_ids }}
+        run: |
+          printf '%s\n' $SELECTED_TEST_IDS | awk 'NF' > "$RUNNER_TEMP/mac-test-ids"
+          test -s "$RUNNER_TEMP/mac-test-ids" || { echo "::error::no selected Mac test IDs"; exit 1; }
       - name: Offline canonical checks
-        if: steps.full-due.outputs.run != 'false' && steps.coverage.outputs.mode != 'monitor-only' && steps.coverage.outputs.mode != 'docs-only'
-        timeout-minutes: ${{ steps.coverage.outputs.mode == 'full' && 110 || 45 }}
+        if: needs.selection.outputs.run != 'false' && needs.selection.outputs.mode == 'mac-subset'
+        timeout-minutes: 45
         run: |
           # Fail closed: the result stays INCOMPLETE until the last line.
           # An early exit, signal or timeout reports INCOMPLETE or FAIL.
@@ -314,38 +644,29 @@ jobs:
           }
           collect_count() { observed=$(awk '/^Ran [0-9]+ tests?/ { total += $2 } END { print total + 0 }' "$1"); test_count=$((test_count + observed)); }
           trap report_result EXIT
-          if [ "${{ steps.coverage.outputs.mode }}" = mac-subset ]; then
-            make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
-            while IFS= read -r test_id <&3; do
-              output="$RUNNER_TEMP/mac-test-output"
-              test_started=$SECONDS
-              set +e
-              "$JOB_PYTHON" -I -B -c 'import sys,unittest; sys.path[:0]=["tools/llmtool/tests","tools/llmtool"]; suite=unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(not result.wasSuccessful())' "$test_id" 2>&1 | tee "$output"
-              status=${PIPESTATUS[0]}
-              set -e
-              collect_count "$output"
-              printf 'canonical test ID: %s\ncanonical test ID elapsed seconds: %s\n' "$test_id" "$((SECONDS - test_started))"
-              test "$status" -eq 0 || exit "$status"
-            done 3< "$RUNNER_TEMP/mac-test-ids" < /dev/null
-          else
+          make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
+          while IFS= read -r test_id <&3; do
             output="$RUNNER_TEMP/mac-test-output"
+            test_started=$SECONDS
             set +e
-            make -C tools/llmtool check PYTHON="$JOB_PYTHON" 2>&1 | tee "$output"
+            "$JOB_PYTHON" -I -B -c 'import sys,unittest; sys.path[:0]=["tools/llmtool/tests","tools/llmtool"]; suite=unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(not result.wasSuccessful())' "$test_id" 2>&1 | tee "$output"
             status=${PIPESTATUS[0]}
             set -e
             collect_count "$output"
+            printf 'canonical test ID: %s\ncanonical test ID elapsed seconds: %s\n' "$test_id" "$((SECONDS - test_started))"
             test "$status" -eq 0 || exit "$status"
-          fi
+          done 3< "$RUNNER_TEMP/mac-test-ids" < /dev/null
           if [ "$test_count" -eq 0 ]; then
             echo "::error::canonical checks ran no test cases"
             exit 1
           fi
           result=PASS
       - name: Monitor script checks
-        if: steps.full-due.outputs.run != 'false'
+        if: needs.selection.outputs.run != 'false' && needs.selection.outputs.mode != 'full'
         run: |
           "$JOB_PYTHON" -B -m unittest discover -s scripts
       - name: Working tree is clean
+        if: needs.selection.outputs.run != 'false' && needs.selection.outputs.mode != 'full'
         run: |
           status=$(git status --porcelain)
           if [ -n "$status" ]; then

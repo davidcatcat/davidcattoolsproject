@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+import io
 import json
 import os
 import re
@@ -11,6 +13,7 @@ from unittest.mock import patch
 
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
+MAC_TIMINGS = TOOLS_ROOT / "ci" / "mac-test-module-seconds.json"
 sys.path.insert(0, str(TOOLS_ROOT))
 from scripts import ci_test_shards
 
@@ -137,6 +140,70 @@ class CiTestShardsTests(unittest.TestCase):
                     self.assertEqual((result["code"] == "true", result["docs"] == "true"), expected)
         self.assertIn(
             'unittest discover -s tools/llmtool/tests -p "$module" < /dev/null',
+            workflow,
+        )
+
+    def test_default_output_is_unchanged_without_timings_flag(self):
+        expected_shards = ci_test_shards.partition(3)
+        for index, expected in enumerate(expected_shards, start=1):
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                ci_test_shards.main(["3", str(index)])
+            self.assertEqual(buffer.getvalue(), "".join(f"{name}\n" for name in expected))
+
+    def test_mac_timings_partition_is_disjoint_complete_and_each_shard_under_half_total(self):
+        linux_schema = set(json.loads(ci_test_shards.TIMINGS.read_text(encoding="utf-8")).keys())
+        mac_data = json.loads(MAC_TIMINGS.read_text(encoding="utf-8"))
+        self.assertEqual(set(mac_data.keys()), linux_schema)
+        default = mac_data["default_seconds"]
+        weights = mac_data["modules"]
+        self.assertIsInstance(default, int)
+        self.assertGreater(default, 0)
+        modules = {path.name for path in ci_test_shards.TESTS.glob("test_*.py")}
+        self.assertTrue(set(weights.keys()) <= modules)
+
+        shards = ci_test_shards.partition(3, timings=MAC_TIMINGS)
+        self.assertEqual(len(shards), 3)
+        self.assertEqual(set(shards[0]) & set(shards[1]), set())
+        self.assertEqual(set(shards[0]) & set(shards[2]), set())
+        self.assertEqual(set(shards[1]) & set(shards[2]), set())
+        self.assertEqual(set(shards[0]) | set(shards[1]) | set(shards[2]), modules)
+
+        for index, expected in enumerate(shards, start=1):
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                ci_test_shards.main(["--timings", str(MAC_TIMINGS), "3", str(index)])
+            self.assertEqual(buffer.getvalue().splitlines(), expected)
+
+        shard_totals = [
+            sum(weights.get(module, default) for module in shard) for shard in shards
+        ]
+        measured_total = sum(shard_totals)
+        for shard_total in shard_totals:
+            self.assertLess(shard_total * 2, measured_total)
+
+        explicit_totals = [sum(weights.get(module, 0) for module in shard) for shard in shards]
+        explicit_sum = sum(explicit_totals)
+        for explicit_total in explicit_totals:
+            self.assertLess(explicit_total * 2, explicit_sum)
+
+    def test_mac_workflow_has_single_check_job_and_three_hosted_shards(self):
+        workflow = (TOOLS_ROOT.parent.parent / ".github/workflows/llmtool-mac-ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(workflow.count("name: check (macOS 3.13)"), 1)
+        self.assertNotIn("self-hosted", workflow)
+        self.assertEqual(workflow.count("runs-on: macos-15-intel"), 3)
+        self.assertIn("needs: [selection, shards]", workflow)
+        self.assertIn("needs.selection.result", workflow)
+        self.assertIn("needs.shards.result", workflow)
+        self.assertIn('if [ "$SHARDS_RESULT" != success ]; then', workflow)
+        self.assertIn("always()", workflow)
+        self.assertIn("fail-fast: false", workflow)
+        self.assertIn("shard: [1, 2, 3]", workflow)
+        self.assertIn(
+            'tools/llmtool/scripts/ci_test_shards.py --timings '
+            'tools/llmtool/ci/mac-test-module-seconds.json 3 "${{ matrix.shard }}"',
             workflow,
         )
 
