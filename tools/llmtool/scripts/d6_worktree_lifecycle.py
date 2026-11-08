@@ -1391,6 +1391,22 @@ def _publication(root, branch, head, squash, train_squash=None):
         return None
     if is_ancestor(head, origin_main):
         return "origin_main"
+    return _merge_proof(root, head, squash, train_squash)
+
+
+def _merge_proof(root, head, squash, train_squash=None):
+    """Name the squash or train proof that HEAD was merged into origin/main, or None.
+
+    The same check serves the normal retire path and a superseded reviewer head.
+    """
+    def is_ancestor(commit, ref):
+        return _task_git(root, "merge-base", "--is-ancestor", commit, ref,
+                         check=False).returncode == 0
+
+    origin_main = "refs/remotes/origin/main"
+    if _task_git(root, "rev-parse", "--verify", "--quiet", origin_main + "^{commit}",
+                 check=False).returncode != 0:
+        return None
     if squash is not None:
         pr_head, squash_sha = squash
         parents = _task_git(root, "rev-list", "--parents", "-n", "1", squash_sha,
@@ -1530,8 +1546,20 @@ def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root,
             plan["reasons"].append("D6_RETIRE_REVIEW_EVIDENCE_REQUIRED")
         else:
             pr_number, pr_head = reviewed_pr_evidence
-            if (pr_head != head or record.get("head_sha") != head):
+            if record.get("head_sha") != head:
                 plan["reasons"].append("D6_RETIRE_REVIEW_HEAD_MISMATCH")
+            elif pr_head != head:
+                # Superseded review: the PR moved on after this review. Accept
+                # only if the reviewed head is in the PR's final head and that
+                # final head is proven merged by squash or train evidence.
+                if _task_git(root, "merge-base", "--is-ancestor", head, pr_head,
+                             check=False).returncode != 0:
+                    plan["reasons"].append("D6_RETIRE_REVIEW_HEAD_MISMATCH")
+                elif _merge_proof(root, pr_head, squash, train_squash) is None:
+                    plan["reasons"].append("D6_RETIRE_REVIEW_MERGE_UNPROVEN")
+                else:
+                    plan["publication"] = "reviewed_pr_merged_descendant"
+                    plan["reviewed_pr_number"] = pr_number
             else:
                 publication = _publication(root, branch, head, None, None)
                 if publication not in ("origin_branch", "origin_pr_head"):
@@ -2012,6 +2040,9 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                 result["publication_note"] = "pushed to origin/<branch>; merge not proven"
             elif plan.get("publication") == "origin_pr_head":
                 result["publication_note"] = "HEAD is reachable from a published origin PR head ref"
+            elif plan.get("publication") == "reviewed_pr_merged_descendant":
+                result["publication_note"] = ("reviewed HEAD is an ancestor of the PR's final "
+                                              "head, proven merged by squash or train evidence")
             if plan.get("accepted_unknown"):
                 result["unknown_accepted"] = True
             if plan.get("legacy_unstamped"):
@@ -2523,7 +2554,9 @@ def _main(argv=None):
                         help="merged squash train: PR head, train head and squash commit")
     parser.add_argument("--reviewed-pr-evidence", action="append",
                         metavar="TASK_ID=PR_NUMBER:HEAD_SHA",
-                        help="closed or unmerged reviewer PR and its published head")
+                        help="reviewer PR and its head: the published reviewed head, or "
+                             "the PR's final merged head when the review was superseded "
+                             "(then also give --squash-evidence or --train-evidence)")
     parser.add_argument("--reconcile-registry", action="store_true",
                         help="list registry records whose worktree is absent; dry run by default")
     parser.add_argument("--execute-approved-reconcile", action="store_true",
