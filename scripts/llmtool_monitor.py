@@ -8846,7 +8846,8 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
 # screen functions the office and board views call; it starts no GitHub,
 # provider or process call. Every exported string is text those views show,
 # passed through SECRETISH once more. The server binds 127.0.0.1 only, serves
-# GET/HEAD under a per-start random path token, checks Host, and answers each
+# GET/HEAD under a per-start random path token, checks Host right after the
+# request parses (before any method dispatch), and answers each
 # request from the bytes the poll loop last stored.
 import hmac
 import http.server
@@ -9041,6 +9042,23 @@ class _StateHandler(http.server.BaseHTTPRequestHandler):
         return (len(hosts) == 1
                 and hosts[0].strip().lower() in (f"127.0.0.1:{port}", f"localhost:{port}"))
 
+    def handle_expect_100(self) -> bool:
+        """No interim 100 Continue: it would go out before the Host check, and
+        no request body is ever read. The final answer comes straight away."""
+        return True
+
+    def parse_request(self) -> bool:
+        """The Host check, right after the request line and headers parse and
+        before any method dispatch: a wrong Host gets 403 for every method,
+        known or not. A malformed request keeps the parser's fixed rejection."""
+        if not super().parse_request():
+            return False
+        if self._host_ok():
+            return True
+        self.close_connection = True
+        self._reply(403, SERVE_BODIES[403])
+        return False
+
     def _target(self) -> str | None:
         """The page or the state for a path under the right token, else None.
         The path is the request line's own target: http.server rewrites a
@@ -9056,7 +9074,8 @@ class _StateHandler(http.server.BaseHTTPRequestHandler):
         return "page" if parts[2] == "" else "state"
 
     def _serve(self) -> None:
-        if not self._host_ok():
+        if not self._host_ok():   # parse_request already refused it; kept as a second guard
+            self.close_connection = True
             self._reply(403, SERVE_BODIES[403])
             return
         target = self._target()
@@ -9068,7 +9087,8 @@ class _StateHandler(http.server.BaseHTTPRequestHandler):
             self._reply(200, self.server.state_store.get(), "application/json; charset=utf-8")
 
     def _refuse(self) -> None:
-        self._reply(405, SERVE_BODIES[405], extra=(("Allow", SERVE_METHODS),))
+        self.close_connection = True   # any request body stays unread
+        self._reply(405,SERVE_BODIES[405], extra=(("Allow", SERVE_METHODS),))
 
     do_GET = do_HEAD = _serve
     do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = do_TRACE = do_CONNECT = _refuse

@@ -10704,3 +10704,110 @@ class ServeMainTests(unittest.TestCase):
             self.assertEqual(mon.main(["--serve", "--no-github", "--port", "8765", "--interval", "2"]), 0)
         self.assertEqual([(interval, port) for interval, _monitor, port in calls], [(1.0, 0), (2.0, 8765)])
         self.assertIsInstance(calls[0][1], _StateMonitor)
+
+
+class ServeHostFirstTests(unittest.TestCase):
+    """#1164 High Debug RCA: Host is checked right after the request parses,
+    before any method dispatch, so a wrong Host is 403 for every method."""
+
+    KNOWN = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT")
+    REFUSED = ("POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT")
+    UNKNOWN = ("PROPFIND", "BREW")
+
+    def setUp(self):
+        self.store = mon.StateStore(b'{"schema_version":1}')
+        self.server, self.token = mon.serve_state(self.store)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever,
+                                       kwargs={"poll_interval": 0.05}, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(5)
+
+    def raw(self, data: bytes) -> bytes:
+        """Send bytes as they are and read until the server closes."""
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as conn:
+            conn.sendall(data)
+            chunks = []
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        return b"".join(chunks)
+
+    def send(self, method, hosts, extra=()):
+        lines = [f"{method} /{self.token}/state.json HTTP/1.1"]
+        lines += [f"Host: {host}" for host in hosts]
+        lines += list(extra) + ["Connection: close", "", ""]
+        head, _, body = self.raw("\r\n".join(lines).encode("latin-1")).partition(b"\r\n\r\n")
+        status_line, *header_lines = head.decode("latin-1").split("\r\n")
+        headers = {}
+        for line in header_lines:
+            name, _, value = line.partition(":")
+            headers[name.strip().lower()] = value.strip()
+        return int(status_line.split()[1]), headers, body
+
+    def assert_headers(self, headers):
+        StateServeTests.assert_headers(self, headers)
+
+    def test_wrong_host_is_403_for_every_method_before_dispatch(self):
+        good = f"127.0.0.1:{self.port}"
+        dispatched = []
+
+        def record(handler):
+            dispatched.append(handler.command)
+
+        bad_hosts = ([], ["evil.example"], [f"evil.example:{self.port}"],
+                     [f"192.168.1.20:{self.port}"], [f"127.0.0.1:{self.port + 1}"], ["localhost"],
+                     [good, good], [good, "evil.example"])
+        with contextlib.ExitStack() as stack:
+            for method in self.KNOWN:
+                stack.enter_context(patch.object(mon._StateHandler, f"do_{method}", record))
+            for method in self.KNOWN + self.UNKNOWN:
+                for hosts in bad_hosts:
+                    with self.subTest(method=method, hosts=hosts):
+                        status, headers, body = self.send(method, hosts)
+                        self.assertEqual(status, 403)
+                        self.assertEqual(body, b"" if method == "HEAD" else b"forbidden\n")
+                        self.assertNotIn("allow", headers)
+                        self.assert_headers(headers)
+        self.assertEqual(dispatched, [])
+
+    def test_good_host_keeps_405_and_501(self):
+        for host in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
+            for method in self.REFUSED:
+                with self.subTest(host=host, method=method):
+                    status, headers, body = self.send(method, [host])
+                    self.assertEqual((status, body), (405, b"method not allowed\n"))
+                    self.assertEqual(headers["allow"], "GET, HEAD")
+                    self.assert_headers(headers)
+            for method in self.UNKNOWN:
+                with self.subTest(host=host, method=method):
+                    status, headers, body = self.send(method, [host])
+                    self.assertEqual((status, body), (501, b"bad request\n"))
+                    self.assertNotIn("allow", headers)
+                    self.assert_headers(headers)
+            status, _headers, body = self.send("GET", [host])
+            self.assertEqual((status, body), (200, b'{"schema_version":1}'))
+
+    def test_malformed_request_line_is_rejected_without_a_host_check(self):
+        for line in (f"BROKEN /{self.token}/ X", f"GET /{self.token}/ HTTP/1.1 extra",
+                     f"GET /{self.token}/ HTTP/2.0"):
+            with self.subTest(line=line):
+                answer = self.raw(f"{line}\r\n\r\n".encode("latin-1"))
+                self.assertTrue(answer.endswith(b"bad request\n"))
+                self.assertNotIn(b"forbidden", answer)
+                self.assertNotIn(self.token.encode(), answer)
+
+    def test_expect_100_gets_no_interim_answer_before_the_host_check(self):
+        expect = ("Expect: 100-continue", "Content-Length: 4")
+        status, headers, body = self.send("POST", ["evil.example"], expect)
+        self.assertEqual((status, body), (403, b"forbidden\n"))
+        self.assertNotIn("allow", headers)
+        status, headers, body = self.send("POST", [f"127.0.0.1:{self.port}"], expect)
+        self.assertEqual((status, body), (405, b"method not allowed\n"))
+        self.assertEqual(headers["allow"], "GET, HEAD")
