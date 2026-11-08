@@ -3,8 +3,11 @@ import ctypes
 import errno as _errno
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import selectors
+import signal
 import subprocess
 import sys
 import tempfile
@@ -12,11 +15,13 @@ import threading
 import time
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool import opencode_worker as w
 from llmtool.action_contract import TaskBinding
-from llmtool.run_budget import RunBudget, UsageLedger, CallUsage, CallPhase
+from llmtool.run_budget import (RunBudget, UsageLedger, CallUsage, CallPhase,
+                                MAX_WALL_CLOCK_MS)
 from llmtool.task_lifecycle import AgentBinding, Role
 
 
@@ -24,6 +29,7 @@ _LIBC_WAITID = None
 _WEXITED = getattr(os, 'WEXITED', 4)
 _WNOHANG = getattr(os, 'WNOHANG', 1)
 _WNOWAIT = getattr(os, 'WNOWAIT', 32)
+# Unscaled; every real run passes it through scaled_budget().
 LOAD_TOLERANT_BUDGET = RunBudget(1, 8, 0, 15000, 100, 100)
 
 
@@ -85,11 +91,11 @@ def _waitid_nowait(pid):
 
 
 FAKE = '''#!PYTHON -IB
-import json,signal,sys,time,os,threading
+import json,signal,socketserver,sys,time,os,threading
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from urllib.request import Request,urlopen
 from pathlib import Path
-signal.alarm(8)
+signal.alarm(ALARM_SECONDS)
 if sys.argv[1]=='serve':
  class Handler(BaseHTTPRequestHandler):
   protocol_version='HTTP/1.1'
@@ -112,7 +118,11 @@ if sys.argv[1]=='serve':
    if self.path=='/api/session/ses_syntheticWorker':
     self._send(type(self).payload['info']);return
    self.send_error(404)
- server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+ class Server(ThreadingHTTPServer):
+  def server_bind(self):
+   socketserver.TCPServer.server_bind(self)
+   self.server_name='127.0.0.1';self.server_port=self.server_address[1]
+ server=Server(('127.0.0.1',0),Handler)
  server.daemon_threads=True
  threading.Thread(target=lambda:server.serve_forever(poll_interval=.005),daemon=True).start()
  print(json.dumps({'url':'http://127.0.0.1:%d'%server.server_port}),flush=True)
@@ -166,8 +176,8 @@ else:
 
 
 NATIVE_FAKE = FAKE.replace(
-""" server=ThreadingHTTPServer(('127.0.0.1',0),Handler)""",
-""" server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+""" server=Server(('127.0.0.1',0),Handler)""",
+""" server=Server(('127.0.0.1',0),Handler)
  import subprocess
  child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(20)'])
  Path('SERVER_DESCENDANT.json').write_text(json.dumps({'pid':child.pid,'pgid':os.getpgid(child.pid)}))
@@ -177,6 +187,127 @@ NATIVE_FAKE = FAKE.replace(
 SERVER_NONZERO = FAKE.replace(
 """sys.stdin.buffer.read();server.shutdown();server.server_close()""",
 """sys.stdin.buffer.read();server.shutdown();server.server_close();sys.exit(3)""")
+
+
+# Readiness baseline: how long this machine takes to start the synthetic server.
+# Production timeouts are not changed; only the budgets the tests pass grow.
+_READINESS_PROBE_CAP_S = 60.0       # hard cap of the probe itself
+_READINESS_MARGIN_FACTOR = 4        # margin = 4 x baseline (server + client starts)
+_READINESS_FAST_START_S = 0.25      # at or below this, budgets stay as written
+_FAKE_MIN_ALARM_S = 8               # the FAKE safety alarm is never shorter
+_READINESS = None                   # (seconds or None, failure message or None)
+_REAL_POPEN = subprocess.Popen      # the probe is immune to a test's Popen patch
+
+
+def _fake_text(script, wall_clock_ms):
+    """The synthetic CLI text; its own alarm always outlasts the given budget."""
+    alarm = max(_FAKE_MIN_ALARM_S, math.ceil(wall_clock_ms / 1000) + 2)
+    return script.replace('PYTHON', sys.executable).replace('ALARM_SECONDS', str(alarm))
+
+
+def _end_probe(process):
+    """End and reap the probe server and its whole owned group."""
+    try:
+        process.stdin.close()  # Lease release, as production does.
+    except OSError:
+        pass
+    try:
+        # The leader is not reaped yet, so this group id is still ours.
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    process.wait(timeout=30)
+    for stream in (process.stdout, process.stderr):
+        stream.close()
+
+
+def _probe_readiness():
+    """Start the FAKE server once like production and time its url line."""
+    temp = tempfile.TemporaryDirectory(prefix='opencode-readiness-',
+                                       dir=str(Path(tempfile.gettempdir()).resolve()))
+    out, err = bytearray(), bytearray()
+    seconds = None
+    try:
+        root = Path(temp.name)
+        project = root/'project'; project.mkdir(mode=0o700)
+        state = root/'runtime'; state.mkdir(mode=0o700)
+        for name in ('home','config','cache','data','state','tmp'):
+            (state/name).mkdir(mode=0o700)
+        executable = root/'synthetic-cli'
+        executable.write_text(_fake_text(FAKE, _READINESS_PROBE_CAP_S * 1000))
+        executable.chmod(0o700)
+        env = w._environment(SimpleNamespace(runtime=SimpleNamespace(state_root=str(state))),
+                             b'{}', 'SYNTHETIC')
+        started = time.monotonic()
+        process = _REAL_POPEN([str(executable),'serve','--stdio','--port','0'],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,bufsize=0,
+            cwd=str(project),env=env,shell=False,close_fds=True,start_new_session=True,
+            umask=0o077)
+        try:
+            end = started + _READINESS_PROBE_CAP_S
+            with selectors.DefaultSelector() as selector:
+                for stream in (process.stdout, process.stderr):
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, selectors.EVENT_READ)
+                while selector.get_map() and b'\n' not in out:
+                    remaining = end - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    for key, _ in selector.select(remaining):
+                        try:
+                            chunk = os.read(key.fileobj.fileno(), 65536)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                        elif key.fileobj is process.stdout:
+                            out.extend(chunk)
+                        else:
+                            err.extend(chunk); del err[:-2000]
+                    if b'\n' in out:
+                        seconds = time.monotonic() - started
+        finally:
+            _end_probe(process)
+    except Exception as error:  # Reported as the probe failure, never as a skip.
+        err.extend(('\nprobe error: %s' % type(error).__name__).encode())
+        seconds = None
+    finally:
+        temp.cleanup()
+    if seconds is not None:
+        try:
+            url = json.loads(bytes(out).split(b'\n', 1)[0].decode())['url']
+        except (ValueError, KeyError, TypeError):
+            url = None
+        if not (isinstance(url, str) and url.startswith('http://127.0.0.1:')):
+            seconds = None
+    if seconds is not None:
+        return seconds, None
+    tail = bytes(err[-2000:]).decode('utf-8', 'replace').strip() or '<empty>'
+    return None, ('synthetic server readiness probe got no url line within %d s; '
+                  'probe stderr tail:\n%s' % (_READINESS_PROBE_CAP_S, tail))
+
+
+def _readiness_seconds():
+    """The once-per-process baseline; a failed probe fails the calling test."""
+    global _READINESS
+    if _READINESS is None:
+        _READINESS = _probe_readiness()
+    seconds, failure = _READINESS
+    if failure is not None:
+        raise AssertionError(failure)
+    return seconds
+
+
+def scaled_budget(budget):
+    """The one helper for every wall-clock budget a test passes to run_worker.
+
+    Adds 4 x the readiness baseline to the written milliseconds, capped at the
+    RunBudget maximum; a fast-starting machine keeps the written value.
+    """
+    seconds = _readiness_seconds()
+    margin = (0 if seconds <= _READINESS_FAST_START_S
+              else math.ceil(seconds * _READINESS_MARGIN_FACTOR * 1000))
+    return replace(budget, wall_clock_ms=min(MAX_WALL_CLOCK_MS, budget.wall_clock_ms + margin))
 
 
 def _still_waitable(process):
@@ -225,7 +356,7 @@ class Host:
 class OpenCodeWorkerTests(unittest.TestCase):
     def tight_budget(self):
         """Leave synthetic process startup ample time before timeout cases."""
-        return w.RunBudget(1, 8, 0, 15000, 100, 100)
+        return scaled_budget(w.RunBudget(1, 8, 0, 15000, 100, 100))
 
     def run_client_timeout(self, job, host):
         """Deliver a timeout at the client pump without waiting on wall time."""
@@ -241,6 +372,8 @@ class OpenCodeWorkerTests(unittest.TestCase):
             return w.run_worker(job, host)
 
     def job(self, prompt='success', script=FAKE, **changes):
+        if 'budget' not in changes:
+            changes['budget'] = scaled_budget(RunBudget(1,8,0,3000,100,100))
         temp = tempfile.TemporaryDirectory(prefix='opencode-worker-', dir=str(Path(tempfile.gettempdir()).resolve()))
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
@@ -250,7 +383,8 @@ class OpenCodeWorkerTests(unittest.TestCase):
         for name in ('home','config','cache','data','state','tmp'):
             (state/name).mkdir(mode=0o700)
         executable = root/'synthetic-cli'
-        executable.write_text(script.replace('PYTHON', sys.executable)); executable.chmod(0o700)
+        executable.write_text(_fake_text(script, changes['budget'].wall_clock_ms))
+        executable.chmod(0o700)
         values = dict(
             task=TaskBinding('worker-task','a'*32,1,'b'*64),
             agent=AgentBinding('developer','developer-session',Role.DEVELOPER,
@@ -260,7 +394,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
             read_paths=('PUBLIC.txt',), write_paths=('PUBLIC.txt',),
             runtime=w.RuntimePin(str(executable),hashlib.sha256(executable.read_bytes()).hexdigest(),
                                  '2.0.32',str(state)),
-            budget=RunBudget(1,8,0,3000,100,100), usage=UsageLedger((),0,0),
+            usage=UsageLedger((),0,0),
             max_steps=2)
         values.update(changes)
         return w.WorkerJob(**values)
@@ -657,7 +791,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
         self.assertFalse(job._attempted)
 
     def test_hard_linked_pinned_runtime_is_admitted_and_runs(self):
-        job=self.job(budget=LOAD_TOLERANT_BUDGET);executable=Path(job.runtime.executable);alias=executable.parent/'synthetic-cli-alias'
+        job=self.job(budget=scaled_budget(LOAD_TOLERANT_BUDGET));executable=Path(job.runtime.executable);alias=executable.parent/'synthetic-cli-alias'
         os.link(executable,alias)
         self.assertEqual(os.lstat(executable).st_nlink,2)
         self.assertEqual(os.lstat(alias).st_ino,os.lstat(executable).st_ino)
@@ -680,14 +814,14 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 spawn.assert_not_called()
 
     def test_native_config_caps_every_request_at_the_output_budget(self):
-        job=self.job(budget=RunBudget(1,8,0,15000,200,128))
+        job=self.job(budget=scaled_budget(RunBudget(1,8,0,15000,200,128)))
         cfg=w.configuration(job)
         self.assertEqual(cfg['providers'],{'opencode':{'models':{'deepseek-v4.1-flash-free':{
             'limit':{'context':200,'output':128}}}}})
         self.assertEqual(w.run_worker(job,Host()).code,'OPENCODE_OUTPUT_RETURNED')
 
     def test_native_retry_is_stopped_at_the_first_extra_request(self):
-        job=self.job('retry',max_steps=1,budget=RunBudget(1,8,0,6000,100,100))
+        job=self.job('retry',max_steps=1,budget=scaled_budget(RunBudget(1,8,0,6000,100,100)))
         started=time.monotonic()
         result=w.run_worker(job,Host())
         self.assertEqual(result.code,'OPENCODE_PROVIDER_RETRY_BLOCKED',result)
@@ -716,7 +850,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
                           ('missing-cache','OPENCODE_USAGE_UNKNOWN'),
                           ('nonzero-cost','OPENCODE_COST_UNKNOWN')):
             with self.subTest(mode=mode):
-                result=w.run_worker(self.job(mode,budget=LOAD_TOLERANT_BUDGET),Host())
+                result=w.run_worker(self.job(mode,budget=scaled_budget(LOAD_TOLERANT_BUDGET)),Host())
                 self.assertEqual(result.code,code,result)
                 self.assertIsNone(result.content)
                 self.assertTrue(result.cleanup_confirmed)
@@ -843,7 +977,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
                      patch.object(w,'_WAITID_FALLBACK',None,create=True), \
                      patch.object(w.CLIProcessLifecycle,'__exit__',record_exit), \
                      patch.object(w,'reject',record_reject):
-                    result=w.run_worker(self.job(budget=LOAD_TOLERANT_BUDGET),Host())
+                    result=w.run_worker(self.job(budget=scaled_budget(LOAD_TOLERANT_BUDGET)),Host())
                 self.assertEqual(result.code,'OPENCODE_CLEANUP_UNKNOWN',result)
                 self.assertEqual(result.status,'BLOCKED')
                 self.assertIsNone(result.content)
@@ -1034,7 +1168,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 self.assertEqual(caught.exception.worker_code,'OPENCODE_CLEANUP_UNKNOWN')
 
     def test_native_owned_group_descendant_cleanup_is_bounded_and_trusted(self):
-        job=self.job(script=NATIVE_FAKE,budget=RunBudget(1,8,0,8000,100,100))
+        job=self.job(script=NATIVE_FAKE,budget=scaled_budget(RunBudget(1,8,0,8000,100,100)))
         start=time.monotonic()
         result=w.run_worker(job,Host())
         elapsed=time.monotonic()-start

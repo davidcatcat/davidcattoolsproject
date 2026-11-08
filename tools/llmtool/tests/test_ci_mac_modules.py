@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 from contextlib import redirect_stdout
+import copy
 import io
 import json
 from pathlib import Path
@@ -35,9 +37,82 @@ KNOWN_DARWIN_REGRESSION_CLASSES = {
     "test_chat_tui_theme_pty.ThemePTYTests",
     "test_review_authority_native.NativeProviderTests",
 }
+PR_781_PATHS = (
+    "tools/llmtool/llmtool/review_repair.py",
+    "tools/llmtool/llmtool/task_advance.py",
+    "tools/llmtool/tests/test_review_repair.py",
+    "tools/llmtool/tests/test_task_advance.py",
+)
 
 
 class MacTestIdSelectionTests(unittest.TestCase):
+    def assert_pr_781_selection(self, report):
+        """Check the #781 report against its core set and import-derived extras.
+
+        The extras are derived from the test tree with ``ast`` here, so a new
+        test module importing task_advance or review_repair needs no edit.
+        """
+        targets = {"llmtool.review_repair", "llmtool.task_advance"}
+        test_dir = REPO_ROOT / "tools" / "llmtool" / "tests"
+
+        def imports_target(test_path):
+            tree = ast.parse(test_path.read_text(encoding="utf-8"), filename=str(test_path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = {alias.name for alias in node.names}
+                elif (isinstance(node, ast.ImportFrom) and node.level == 0
+                      and node.module):
+                    names = {node.module} | {
+                        f"{node.module}.{alias.name}" for alias in node.names
+                    }
+                else:
+                    continue
+                if names & targets:
+                    return True
+            return False
+
+        self.assertEqual(report["level"], "L1")
+        self.assertEqual(report["fallback_reasons"], [])
+        self.assertEqual(report["fallback_paths"], [])
+        self.assertEqual(report["fallback_details"], [])
+        selected = set(report["test_ids"])
+        core = MAC_REQUIRED | {
+            "test_review_repair", "test_task_advance", "test_task_drive",
+            "test_claude_route_wiring",
+        }
+        self.assertEqual(core - selected, set(), "#781 core test IDs are missing")
+        for test_id in sorted(selected - core):
+            test_path = test_dir / f"{test_id}.py"
+            self.assertTrue(
+                test_id.startswith("test_") and test_id.isidentifier()
+                and test_path.is_file() and imports_target(test_path),
+                f"#781 selected an unrelated test ID: {test_id}",
+            )
+        for test_path in sorted(test_dir.glob("test_*.py")):
+            if imports_target(test_path):
+                self.assertIn(test_path.stem, selected,
+                              f"#781 missed an importing test module: {test_path.stem}")
+
+    def test_pr_781_fixture_check_rejects_lost_unrelated_and_fallback_edits(self):
+        report = ci_mac_modules.selection_report(list(PR_781_PATHS), REPO_ROOT)
+        self.assert_pr_781_selection(copy.deepcopy(report))
+        self.assertIn("test_task_advance", report["test_ids"])
+        self.assertNotIn("test_worker_dispatch", report["test_ids"])
+        self.assertTrue((REPO_ROOT / "tools/llmtool/tests/test_worker_dispatch.py").is_file())
+
+        lost = copy.deepcopy(report)
+        lost["test_ids"] = [test_id for test_id in lost["test_ids"]
+                            if test_id != "test_task_advance"]
+        unrelated = copy.deepcopy(report)
+        unrelated["test_ids"] = sorted(set(unrelated["test_ids"]) | {"test_worker_dispatch"})
+        fallback = copy.deepcopy(report)
+        fallback["fallback_reasons"] = ["missing_file"]
+        for label, edited in (("lost", lost), ("unrelated", unrelated),
+                              ("fallback", fallback)):
+            with self.subTest(edit=label):
+                with self.assertRaises(AssertionError):
+                    self.assert_pr_781_selection(edited)
+
     def test_explicit_manifest_selects_known_darwin_regression_classes(self):
         selected = ci_mac_modules.required_test_ids(REPO_ROOT)
         self.assertEqual(selected, MAC_REQUIRED)
@@ -335,21 +410,8 @@ class MacTestIdSelectionTests(unittest.TestCase):
 
     def test_historical_pr_path_fixtures_preserve_selection_and_rejection_reasons(self):
         fixtures = (
-            (
-                "#781",
-                [
-                    "tools/llmtool/llmtool/review_repair.py",
-                    "tools/llmtool/llmtool/task_advance.py",
-                    "tools/llmtool/tests/test_review_repair.py",
-                    "tools/llmtool/tests/test_task_advance.py",
-                ],
-                "L1",
-                MAC_REQUIRED | {
-                    "test_review_repair", "test_task_advance", "test_task_drive",
-                    "test_claude_route_wiring",
-                },
-                None,
-            ),
+            # #781 ids are checked by assert_pr_781_selection, not a frozen list.
+            ("#781", list(PR_781_PATHS), "L1", None, None),
             (
                 "#782",
                 [
@@ -433,6 +495,8 @@ class MacTestIdSelectionTests(unittest.TestCase):
                     self.assertTrue(all(":" not in reason
                                         for reason in report["fallback_reasons"]))
                     self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
+                elif label == "#781":
+                    self.assert_pr_781_selection(report)
                 elif label == "#791":
                     self.assertEqual(report["fallback_reasons"], [])
                     self.assertEqual(report["fallback_paths"], [])

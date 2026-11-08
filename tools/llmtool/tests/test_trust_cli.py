@@ -1,8 +1,11 @@
 """CLI tests for owner trust configuration commands."""
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -34,6 +37,149 @@ class TrustCliTest(unittest.TestCase):
         self.home = Path(tempfile.mkdtemp()).resolve()
         self.home.chmod(0o700)
         self.addCleanup(shutil.rmtree, self.home)
+
+    def _real_checkout(self, name, origin="https://github.com/example/project.git"):
+        root = self.home / name
+        root.mkdir(mode=0o700)
+        trust_cli._git("init", "-q", cwd=root)
+        trust_cli._git("remote", "add", "origin", origin, cwd=root)
+        return root
+
+    def _write_real_trust(self, root):
+        """Write a trust.json that the real loader accepts; return its digest."""
+        workspace = self.home / ".local" / "share" / "llmtool-dev-workspaces" / "project"
+        workspace.mkdir(mode=0o700, parents=True)
+        (workspace / "tasks").mkdir(mode=0o700)
+        document = {
+            "schema_version": 1,
+            "canonical_root": str(root),
+            "workspace_root": str(workspace),
+            "tasks_root": str(workspace / "tasks"),
+            "repository": {"slug": "example/project",
+                           "allowed_origins": ["git@github.com:example/project.git",
+                                               "https://github.com/example/project.git"],
+                           "approval_refs": {"reviewer_host_policy_issue": 120,
+                                             "worker_dispatch_issue": 410,
+                                             "worker_dispatch_evidence_pr": 411,
+                                             "retain_release_issues": [289, 352]}},
+            "ci_trust": _ci_draft(),
+            "tools": {"git": None, "gh_path": None, "lsof": None},
+        }
+        (self.home / ".config").mkdir(mode=0o700)
+        (self.home / ".config" / "llmtool").mkdir(mode=0o700)
+        target = self.home / ".config" / "llmtool" / "trust.json"
+        raw = (json.dumps(document, sort_keys=True, indent=2) + "\n").encode("utf-8")
+        target.write_bytes(raw)
+        target.chmod(0o600)
+        return hashlib.sha256(raw).hexdigest()
+
+    def _write_active_record(self, root):
+        registry_dir = root / ".git" / "llmtool-worktrees"
+        registry_dir.mkdir(mode=0o700)
+        registry = registry_dir / "task.json"
+        registry.write_text(json.dumps({"state": "ACTIVE", "trust_sha256": "old",
+                                        "trust_binding_sha256": "old"}), encoding="utf-8")
+        registry.chmod(0o600)
+        return registry
+
+    def _write_draft(self):
+        draft = self.home / "draft.json"
+        draft.write_text(json.dumps({"ci_trust": _ci_draft()}), encoding="utf-8")
+        return draft
+
+    def _replace(self, draft, digest):
+        args = argparse.Namespace(input=str(draft), import_config=False,
+                                  replace=True, confirm_rotation=digest)
+        with mock.patch.object(trust_cli, "_owner_home", return_value=self.home):
+            return trust_cli._init(args)
+
+    def _replace_error(self, draft, digest):
+        with self.assertRaises(trust_cli.TrustError) as caught:
+            self._replace(draft, digest)
+        return caught.exception.code
+
+    def test_replace_reads_registry_of_trusted_non_owner_root(self):
+        root = self._real_checkout("checkout")
+        digest = self._write_real_trust(root)
+        self._write_active_record(root)
+        draft = self._write_draft()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(root)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(self._replace(draft, digest), 0)
+        target = self.home / ".config" / "llmtool" / "trust.json"
+        replaced = hashlib.sha256(target.read_bytes()).hexdigest()
+        self.assertEqual(output.getvalue(),
+                         f"trust_sha256: {replaced}\naffected_active_records: 1\n")
+
+    def test_replace_from_untrusted_checkout_stops_before_any_write(self):
+        trusted = self._real_checkout("trusted")
+        digest = self._write_real_trust(trusted)
+        target = self.home / ".config" / "llmtool" / "trust.json"
+        raw = target.read_bytes()
+        self.addCleanup(os.chdir, os.getcwd())
+        for name, origin in (("other", "https://github.com/example/other.git"),
+                             ("not-github", "https://example.com/example/other.git")):
+            with self.subTest(origin=origin):
+                os.chdir(self._real_checkout(name, origin))
+                before = sorted(self.home.rglob("*"))
+                # A missing draft shows the refusal comes before the draft is read.
+                code = self._replace_error(self.home / "missing-draft.json", digest)
+                self.assertEqual(code, "TRUST_ROTATION_ROOT_UNTRUSTED")
+                self.assertEqual(target.read_bytes(), raw)
+                self.assertEqual(sorted(self.home.rglob("*")), before)
+
+    def test_replace_from_second_checkout_ignores_git_overrides_to_trusted_root(self):
+        trusted = self._real_checkout("trusted")
+        digest = self._write_real_trust(trusted)
+        target = self.home / ".config" / "llmtool" / "trust.json"
+        raw = target.read_bytes()
+        other = self._real_checkout("other")
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(other)
+        before = sorted(self.home.rglob("*"))
+        overrides = {"GIT_DIR": str(trusted / ".git"), "GIT_WORK_TREE": str(trusted)}
+        with mock.patch.dict(os.environ, overrides):
+            code = self._replace_error(self.home / "missing-draft.json", digest)
+        self.assertEqual(code, "TRUST_ROTATION_ROOT_UNTRUSTED")
+        self.assertEqual(target.read_bytes(), raw)
+        self.assertEqual(sorted(self.home.rglob("*")), before)
+
+    def test_replace_from_trusted_root_ignores_git_overrides_to_second_checkout(self):
+        trusted = self._real_checkout("trusted")
+        digest = self._write_real_trust(trusted)
+        self._write_active_record(trusted)
+        draft = self._write_draft()
+        other = self._real_checkout("other", "https://github.com/example/other.git")
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(trusted)
+        overrides = {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)}
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, overrides), contextlib.redirect_stdout(output):
+            self.assertEqual(self._replace(draft, digest), 0)
+        self.assertIn("affected_active_records: 1\n", output.getvalue())
+        target = self.home / ".config" / "llmtool" / "trust.json"
+        document = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(document["canonical_root"], str(trusted))
+        self.assertEqual(document["repository"]["slug"], "example/project")
+
+    def test_replace_failures_keep_their_codes_from_trusted_root(self):
+        root = self._real_checkout("checkout")
+        digest = self._write_real_trust(root)
+        registry = self._write_active_record(root)
+        draft = self._write_draft()
+        target = self.home / ".config" / "llmtool" / "trust.json"
+        raw = target.read_bytes()
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(root)
+
+        self.assertEqual(self._replace_error(draft, "0" * 64), "TRUST_ROTATION_UNCONFIRMED")
+        registry.chmod(0o644)
+        self.assertEqual(self._replace_error(draft, digest), "TRUST_REGISTRY_INVALID")
+        self.assertEqual(target.read_bytes(), raw)
+        target.chmod(0o000)
+        self.assertEqual(self._replace_error(draft, digest), "TRUST_ROTATION_UNCONFIRMED")
 
     def test_init_writes_private_file_atomically_and_refuses_overwrite(self):
         checkout = self.home / "checkout"
@@ -123,7 +269,7 @@ class TrustCliTest(unittest.TestCase):
         }
         draft = self.home / "draft.json"
         draft.write_text(json.dumps({"ci_trust": _ci_draft()}), encoding="utf-8")
-        old = mock.Mock(sha256=old_sha256)
+        old = mock.Mock(sha256=old_sha256, canonical_root=str(checkout))
         args = argparse.Namespace(input=str(draft), import_config=False,
                                   replace=True, confirm_rotation="b" * 64)
         with mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
@@ -137,6 +283,7 @@ class TrustCliTest(unittest.TestCase):
         with mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
              mock.patch.object(trust_cli, "load_trust", side_effect=[
                  old, trust_cli.TrustError("TRUST_PATH_INVALID")]), \
+             mock.patch.object(trust_cli, "_checkout_top", return_value=checkout), \
              mock.patch.object(trust_cli, "_checkout_values", return_value=values), \
              mock.patch.object(trust_cli, "_affected_active_records", return_value=3):
             with self.assertRaises(trust_cli.TrustError):
@@ -145,6 +292,7 @@ class TrustCliTest(unittest.TestCase):
 
         with mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
              mock.patch.object(trust_cli, "load_trust", side_effect=[old, mock.Mock()]), \
+             mock.patch.object(trust_cli, "_checkout_top", return_value=checkout), \
              mock.patch.object(trust_cli, "_checkout_values", return_value=values), \
              mock.patch.object(trust_cli, "_affected_active_records", return_value=3), \
              mock.patch.object(trust_cli, "verify_repository",
@@ -156,6 +304,7 @@ class TrustCliTest(unittest.TestCase):
         output = __import__("io").StringIO()
         with mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
              mock.patch.object(trust_cli, "load_trust", return_value=old), \
+             mock.patch.object(trust_cli, "_checkout_top", return_value=checkout), \
              mock.patch.object(trust_cli, "_checkout_values", return_value=values), \
              mock.patch.object(trust_cli, "_affected_active_records", return_value=3), \
              mock.patch.object(trust_cli, "verify_repository", return_value=True), \
@@ -180,11 +329,13 @@ class TrustCliTest(unittest.TestCase):
             registry = registry_dir / (task_id + ".json")
             registry.write_text(json.dumps(record), encoding="utf-8")
             registry.chmod(0o600)
-        with mock.patch.object(trust_cli, "_git", return_value=str(common)):
-            self.assertEqual(trust_cli._affected_active_records(self.home, "new"), 2)
+        root = str(self.home / "checkout")
+        with mock.patch.object(trust_cli, "_git", return_value=str(common)) as git:
+            self.assertEqual(trust_cli._affected_active_records(root, "new"), 2)
+            self.assertEqual(git.call_args.kwargs["cwd"], root)
             (registry_dir / "active-old.json").chmod(0o644)
             with self.assertRaises(trust_cli.TrustError) as caught:
-                trust_cli._affected_active_records(self.home, "new")
+                trust_cli._affected_active_records(root, "new")
         self.assertEqual(caught.exception.code, "TRUST_REGISTRY_INVALID")
 
     def test_show_masks_all_paths_and_reports_sanitized_failure(self):
