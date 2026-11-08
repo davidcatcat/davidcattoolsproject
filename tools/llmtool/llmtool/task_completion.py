@@ -2170,9 +2170,27 @@ def _company_gw_text_proposal_pm_session(task_record, executor_identity):
             developer.get('artifact_format') != 'unified_diff' or
             type(developer.get('artifact_sha256')) is not str or
             _HEX64.fullmatch(developer['artifact_sha256']) is None or
-            type(pm_session) is not str or not pm_session or pm_session == 'UNKNOWN'):
+            _native_session_identity(pm_session) is None):
         return None
     return pm_session
+
+
+def _native_session_identity(value):
+    """Return a comparable native session identity, else None.
+
+    A Task stores a UUID-backed PM session as ``pm-<native UUID>`` while D6
+    records hold the raw native UUID, so one ``pm-`` prefix is removed and the
+    rest is case-folded. Empty or UNKNOWN identities give None.
+    """
+    if type(value) is not str:
+        return None
+    identity = value.strip()
+    if identity[:3].casefold() == 'pm-':
+        identity = identity[3:].strip()
+    identity = identity.casefold()
+    if not identity or identity == 'unknown':
+        return None
+    return identity
 
 
 def _review_binding_line(task_id, run_id, contract_digest, result_sha):
@@ -2707,9 +2725,10 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         # #1241: company-gw only proposes a text diff and exposes no native
         # session; the PM applies it in the registered company-gw D6. There,
         # independence rests on the bound cross-family Reviewer on its own D6,
-        # whose native session must differ from the PM session. Every other
-        # route, and any company-gw record that does not match exactly, keeps
-        # the fail-closed rule.
+        # whose native session must differ from the PM session. Both sides are
+        # compared as normalized identities (the Task stores `pm-<native>`).
+        # Every other route, and any company-gw record that does not match
+        # exactly, keeps the fail-closed rule.
         pm_session = None
         if executor_identity == 'company-gw':
             try:
@@ -2717,7 +2736,10 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                     load_completion_task_record(), executor_identity)
             except LLMToolError:
                 pm_session = None
-        if pm_session is None or reviewer.native_session_id == pm_session:
+        pm_identity = _native_session_identity(pm_session)
+        reviewer_identity = _native_session_identity(reviewer.native_session_id)
+        if (pm_identity is None or reviewer_identity is None or
+                reviewer_identity == pm_identity):
             missing.append('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT')
     elif reviewer.native_session_id == executor_native_session_id:
         missing.append('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT')

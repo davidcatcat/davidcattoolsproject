@@ -2961,6 +2961,32 @@ class TaskCompletionTests(unittest.TestCase):
                       d6_not_independent['missing_gates'])
         self.assertEqual(d6_not_independent['evidence']['formal_review_state'], 'UNVERIFIED')
 
+    def test_company_gw_pm_session_gate_compares_normalized_native_identity(self):
+        # A UUID-backed PM session is stored as `pm-<native>` on the Task while
+        # the Reviewer D6 holds the raw native id; the gate must still match.
+        _, collect = self._company_gw_review_fixture()
+        for pm_session in ('pm-native-reviewer', 'PM-NATIVE-REVIEWER',
+                           'pm-Native-Reviewer', ' pm-native-reviewer ',
+                           'NATIVE-REVIEWER'):
+            with self.subTest(pm_session=pm_session):
+                evidence = collect(self._company_gw_task_record(pm_session_id=pm_session))
+                self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                              evidence['missing_gates'])
+                self.assertEqual(evidence['evidence']['formal_review_state'], 'UNVERIFIED')
+        for pm_session in ('pm-', 'pm-UNKNOWN', 'unknown', ''):
+            with self.subTest(pm_session=pm_session):
+                evidence = collect(self._company_gw_task_record(pm_session_id=pm_session))
+                self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                              evidence['missing_gates'])
+                self.assertEqual(evidence['evidence']['formal_review_state'], 'UNVERIFIED')
+        with self.subTest(pm_session='pm-native-pm-synthetic'):
+            evidence = collect(self._company_gw_task_record(
+                pm_session_id='pm-native-pm-synthetic'))
+            self.assertNotIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                             evidence['missing_gates'])
+            self.assertEqual(evidence['evidence']['formal_review_state'], 'ACCEPTED')
+            self.assertEqual(evidence['missing_gates'], [])
+
     def test_missing_executor_native_session_stays_not_independent_off_company_gw(self):
         _, collect = self._company_gw_review_fixture()
         cases = {
