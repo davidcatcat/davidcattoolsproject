@@ -84,12 +84,21 @@ _V2_REMOTE_OUTCOME_SHAPES = tuple(shape | frozenset(('remote_test_outcomes',))
                                   for shape in _V2_SHAPES)
 _V2_REMOTE_RECEIPT_OUTCOME_SHAPES = tuple(shape | frozenset((
     'remote_test_receipts', 'remote_test_outcomes')) for shape in _V2_SHAPES)
+_V2_REMOTE_DISPATCH_SHAPES = tuple(shape | frozenset(('remote_test_dispatches',))
+                                   for shape in _V2_SHAPES)
+_V2_REMOTE_TEST_DISPATCH_SHAPES = tuple(shape | frozenset((
+    'remote_test_receipts', 'remote_test_dispatches')) for shape in _V2_SHAPES)
+_V2_REMOTE_OUTCOME_DISPATCH_SHAPES = tuple(shape | frozenset((
+    'remote_test_outcomes', 'remote_test_dispatches')) for shape in _V2_SHAPES)
+_V2_REMOTE_RECEIPT_OUTCOME_DISPATCH_SHAPES = tuple(shape | frozenset((
+    'remote_test_receipts', 'remote_test_outcomes', 'remote_test_dispatches'))
+    for shape in _V2_SHAPES)
 FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'dispatch_audit', 'completion_events', 'completion_event_tombstones',
-    'remote_test_receipts', 'remote_test_outcomes', 'review_dispatch_claim',
-    'review_repair_claims', 'high_debug', 'abandonment', 'pm_session_adoptions',
-    'pm_provenance', 'merge_attempt', 'published_pr', 'repair_cap_override',
-    'publish_operations'))
+    'remote_test_receipts', 'remote_test_outcomes', 'remote_test_dispatches',
+    'review_dispatch_claim', 'review_repair_claims', 'high_debug',
+    'abandonment', 'pm_session_adoptions', 'pm_provenance', 'merge_attempt',
+    'published_pr', 'repair_cap_override', 'publish_operations'))
 # One bounded record per publish refusal after this publish's own gh pr create
 # (#1139). Values are only int, bool, null or short strings; no command output.
 MAX_PUBLISH_OPERATIONS = 8
@@ -112,7 +121,11 @@ _REVIEW_REPAIR_OPTIONAL_FIELDS = frozenset(('repair_task_id', 'family',
                                              'high_debug_report_sha256'))
 _V2_REPAIR_BASES = (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
                     *_V2_REMOTE_OUTCOME_SHAPES,
-                    *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)
+                    *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES,
+                    *_V2_REMOTE_DISPATCH_SHAPES,
+                    *_V2_REMOTE_TEST_DISPATCH_SHAPES,
+                    *_V2_REMOTE_OUTCOME_DISPATCH_SHAPES,
+                    *_V2_REMOTE_RECEIPT_OUTCOME_DISPATCH_SHAPES)
 _V2_REPAIR_OPTIONAL_BASES = (
     *_V2_REPAIR_BASES,
     *(shape | frozenset(('completion_events',)) for shape in _V2_REPAIR_BASES),
@@ -221,6 +234,12 @@ def _valid_remote_test_actions(value):
 MAX_REMOTE_TEST_OUTCOMES = 32
 _REMOTE_TEST_OUTCOME_FIELDS = frozenset((
     'result', 'code', 'executor_task', 'sha', 'modules', 'at'))
+MAX_REMOTE_TEST_DISPATCHES = 32
+_REMOTE_TEST_DISPATCH_FIELDS = frozenset((
+    'nonce', 'sha', 'executor_task', 'modules', 'dispatched_at', 'run_id', 'state'))
+_REMOTE_TEST_DISPATCH_STATES = frozenset((
+    'DISPATCHED', 'RUN_FOUND', 'RECORDED', 'ABANDONED'))
+_REMOTE_TEST_DISPATCH_RUN_ID_MAX = 2 ** 53
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
 _OPTIONAL_USAGE_FIELDS = frozenset((
     'cached_prompt_tokens', 'reasoning_tokens', 'tool_calls', 'served_model'))
@@ -963,6 +982,51 @@ def _validate_remote_test_outcomes(record):
             _fail('REMOTE_TEST_OUTCOME_INVALID')
 
 
+def _valid_remote_test_dispatch_entry(entry):
+    if type(entry) is not dict or set(entry) != _REMOTE_TEST_DISPATCH_FIELDS:
+        return False
+    nonce = entry.get('nonce')
+    if type(nonce) is not str or re.fullmatch(r'[0-9a-f]{32}', nonce) is None:
+        return False
+    sha = entry.get('sha')
+    if type(sha) is not str or re.fullmatch(r'[0-9a-f]{40}', sha) is None:
+        return False
+    executor_task = entry.get('executor_task')
+    if type(executor_task) is not str or D6_TASK_ID.fullmatch(executor_task) is None:
+        return False
+    modules = entry.get('modules')
+    if (type(modules) is not list or not 1 <= len(modules) <= 8 or
+            any(type(m) is not str or re.fullmatch(r'test_[a-z0-9_]{1,80}', m) is None for m in modules) or
+            modules != sorted(set(modules))):
+        return False
+    dispatched_at = entry.get('dispatched_at')
+    if (type(dispatched_at) is not str or
+            re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{6})?Z', dispatched_at) is None):
+        return False
+    state = entry.get('state')
+    if state not in _REMOTE_TEST_DISPATCH_STATES:
+        return False
+    run_id = entry.get('run_id')
+    if run_id is not None:
+        if (type(run_id) is not int or isinstance(run_id, bool) or
+                not 1 <= run_id <= _REMOTE_TEST_DISPATCH_RUN_ID_MAX):
+            return False
+    elif state in ('RUN_FOUND', 'RECORDED'):
+        return False
+    return True
+
+
+def _validate_remote_test_dispatches(record):
+    dispatches = record.get('remote_test_dispatches', [])
+    if type(dispatches) is not list or len(dispatches) > MAX_REMOTE_TEST_DISPATCHES:
+        _fail('REMOTE_TEST_DISPATCH_INVALID')
+    seen_nonces = set()
+    for item in dispatches:
+        if not _valid_remote_test_dispatch_entry(item) or item['nonce'] in seen_nonces:
+            _fail('REMOTE_TEST_DISPATCH_INVALID')
+        seen_nonces.add(item['nonce'])
+
+
 def _valid_publish_operation(item):
     """Return whether item is one publish operation record of the fixed fields."""
     if type(item) is not dict or set(item) != _PUBLISH_OPERATION_FIELDS:
@@ -1022,30 +1086,7 @@ def _validate(record):
     if (type(record) is not dict or
             (record.get('schema_version') == 1 and keys != _FIELDS_V1) or
             (record.get('schema_version') == 2 and keys not in
-             (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
-              *_V2_REMOTE_OUTCOME_SHAPES, *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES,
-              *(shape | frozenset(('completion_events',))
-                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
-                              *_V2_REMOTE_OUTCOME_SHAPES,
-                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *(shape | frozenset(('completion_events', 'completion_event_tombstones'))
-                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
-                              *_V2_REMOTE_OUTCOME_SHAPES,
-                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *(shape | frozenset(('review_dispatch_claim',))
-                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
-                              *_V2_REMOTE_OUTCOME_SHAPES,
-                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *(shape | frozenset(('completion_events', 'review_dispatch_claim'))
-                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
-                              *_V2_REMOTE_OUTCOME_SHAPES,
-                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *(shape | frozenset(('completion_events', 'completion_event_tombstones',
-                                  'review_dispatch_claim'))
-                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
-                              *_V2_REMOTE_OUTCOME_SHAPES,
-                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *_V2_REPAIR_SHAPES, *_HIGH_DEBUG_VALID_SHAPES,
+             (*_V2_REPAIR_OPTIONAL_BASES, *_V2_REPAIR_SHAPES, *_HIGH_DEBUG_VALID_SHAPES,
              *_REPAIR_CAP_OVERRIDE_VALID_SHAPES)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
@@ -1287,6 +1328,8 @@ def _validate(record):
         _validate_remote_test_receipts(record)
     if 'remote_test_outcomes' in record:
         _validate_remote_test_outcomes(record)
+    if 'remote_test_dispatches' in record:
+        _validate_remote_test_dispatches(record)
     for key in ('created_at', 'updated_at'):
         try:
             stamp = datetime.strptime(record[key], '%Y-%m-%dT%H:%M:%SZ')
