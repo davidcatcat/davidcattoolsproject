@@ -992,6 +992,24 @@ def _known_review_failure_reason(value):
     return type(value) is str and value in REVIEW_FAILURE_REASONS
 
 
+_BINDING_MISMATCH_KEY_NAMES = frozenset(('task_id', 'run_id', 'head'))
+
+
+def _valid_binding_mismatch_keys(item):
+    """Return whether a review claim's binding_mismatch_keys field is allowed.
+
+    Only an UNKNOWN claim refused with VERDICT_BINDING_MISMATCH may carry it,
+    as a non-empty list of distinct JSON key names. It never holds a value.
+    """
+    keys = item.get('binding_mismatch_keys')
+    return (item.get('state') == 'UNKNOWN' and
+            item.get('failure_reason') == 'VERDICT_BINDING_MISMATCH' and
+            type(keys) is list and bool(keys) and
+            all(type(key) is str and key in _BINDING_MISMATCH_KEY_NAMES
+                for key in keys) and
+            len(set(keys)) == len(keys))
+
+
 def _validate(record):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
@@ -1141,7 +1159,7 @@ def _validate(record):
         identities = set()
         for item in claims:
             if (type(item) is not dict or
-                    set(item) - frozenset(('failure_reason',)) not in (
+                    set(item) - frozenset(('failure_reason', 'binding_mismatch_keys')) not in (
                         _REVIEW_DISPATCH_CLAIM_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
@@ -1149,6 +1167,8 @@ def _validate(record):
                         frozenset(('review_result',))) or
                     ('failure_reason' in item and
                      not _known_review_failure_reason(item['failure_reason'])) or
+                    ('binding_mismatch_keys' in item and
+                     not _valid_binding_mismatch_keys(item)) or
                     ('account' in item and
                      (type(item['account']) is not str or
                       _NAME.fullmatch(item['account']) is None)) or
