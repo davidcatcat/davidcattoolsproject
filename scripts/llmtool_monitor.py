@@ -6654,7 +6654,7 @@ def _remote_test_json(raw: bytes):
 def _remote_test_time(value) -> float:
     if type(value) is not str:
         return 0.0
-    return _github_time(re.sub(r"\.\d+Z$", "Z", value))
+    return _github_time(re.sub(r"\.\d{6}Z$", "Z", value))
 
 
 DISPATCH_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z$")

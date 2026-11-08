@@ -158,6 +158,78 @@ class TestMonitorHostedRemoteTest(unittest.TestCase):
         entries = monitor._remote_test_entries(record)
         self.assertEqual(entries, ())
 
+    def test_receipt_and_outcome_with_rejected_fractional_timestamps_give_no_entry(self):
+        rejected_times = [
+            "2026-11-09T01:00:00.1Z",
+            "2026-11-09T01:00:00.1234567Z",
+        ]
+        for timestamp in rejected_times:
+            with self.subTest(timestamp=timestamp, kind="receipt"):
+                record = {
+                    "task_id": "0123456789abcdef0123456789abcdef",
+                    "remote_test_receipts": [
+                        {
+                            "result": "PASS",
+                            "source_sha": "a" * 40,
+                            "ran_total": 5,
+                            "ended_at": timestamp,
+                        }
+                    ],
+                }
+                entries = monitor._remote_test_entries(record)
+                self.assertEqual(entries, ())
+
+            with self.subTest(timestamp=timestamp, kind="outcome"):
+                record = {
+                    "task_id": "0123456789abcdef0123456789abcdef",
+                    "remote_test_outcomes": [
+                        {
+                            "result": "TIMEOUT",
+                            "sha": "a" * 40,
+                            "code": "EXECUTION_TIMEOUT",
+                            "at": timestamp,
+                        }
+                    ],
+                }
+                entries = monitor._remote_test_entries(record)
+                self.assertEqual(entries, ())
+
+    def test_receipt_and_outcome_with_valid_timestamps_give_entry(self):
+        valid_times = [
+            "2026-11-09T01:00:00Z",
+            "2026-11-09T01:00:00.123456Z",
+        ]
+        for timestamp in valid_times:
+            with self.subTest(timestamp=timestamp, kind="receipt"):
+                record = {
+                    "task_id": "0123456789abcdef0123456789abcdef",
+                    "remote_test_receipts": [
+                        {
+                            "result": "PASS",
+                            "source_sha": "a" * 40,
+                            "ran_total": 5,
+                            "ended_at": timestamp,
+                        }
+                    ],
+                }
+                entries = monitor._remote_test_entries(record)
+                self.assertEqual(len(entries), 1)
+
+            with self.subTest(timestamp=timestamp, kind="outcome"):
+                record = {
+                    "task_id": "0123456789abcdef0123456789abcdef",
+                    "remote_test_outcomes": [
+                        {
+                            "result": "TIMEOUT",
+                            "sha": "a" * 40,
+                            "code": "EXECUTION_TIMEOUT",
+                            "at": timestamp,
+                        }
+                    ],
+                }
+                entries = monitor._remote_test_entries(record)
+                self.assertEqual(len(entries), 1)
+
     def test_remote_test_row_pending_hosted_dispatch(self):
         now = 1794200000.0
         words = "task 01234567 hosted DISPATCHED run 待定 @aaaaaaa"
