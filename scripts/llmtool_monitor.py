@@ -7023,20 +7023,101 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
                      80, kind="worker", evidence="llmtool 紀錄")
 
 
-# Company LLM runs (#763 Owner): while a gw-agent Developer run is under way it
-# gets a live row like the Claude and Codex rows, then a 完成 row for
-# OFFICE_DONE_WINDOW; otherwise only its status row stays. No Task file is
-# opened for these rows: it holds the prompt and model output. A run is live
-# only on its gateway process. Its Task id comes from the authorization.json
-# beside its audit file (ids, scope digest, egress basis; no prompt, no
-# credential), and a finished run from the time of the audit copy llmtool keeps
-# (developer_routes/gw_agent.py, collect). A company gw run is an API call
-# inside llmtool and leaves neither, so it has no row here.
-GW_ROSTER = {"gw-agent developer": "公司 gw agent"}
+# Company LLM runs (#763 Owner, #1122): while a company gw or gw-agent Developer
+# run is under way it gets a live row like the Claude and Codex rows, then a 完成
+# row for OFFICE_DONE_WINDOW; otherwise only its status row stays. A gw-agent
+# run is live only on its gateway process; its Task id comes from the
+# authorization.json beside its audit file (ids, scope digest, egress basis; no
+# prompt, no credential). A company gw run is an API call inside llmtool with
+# no process of its own, so it is live while its llmtool Task record says
+# DEVELOPER_DISPATCHING and changed within OFFICE_DONE_WINDOW. Task records are
+# read with the bounded loader (_bounded_task_entries), and only GwRecord's
+# developer fields are kept: never the request, response, artifact, summary,
+# acceptance or audit text. A finished run of either route comes from its Task
+# record (model and token counts); a gw-agent run whose record was not read
+# still shows from the time of the audit copy llmtool keeps
+# (developer_routes/gw_agent.py, collect), never twice.
+GW_ROSTER = {"gw-agent developer": "公司 gw agent", "company gw developer": "公司 gw"}
+GW_PROFILES = {"company-gw": "company gw developer",   # llmtool provider_profile -> row
+               "company-gw-agent": "gw-agent developer", "gw-agent": "gw-agent developer"}
+GW_DISPATCHING = "DEVELOPER_DISPATCHING"
+GW_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}")   # a plain model name
+GW_USAGE = (("input_tokens", "prompt_tokens"), ("output_tokens", "completion_tokens"),
+            ("total_tokens",))
+GW_TASK_BUDGET = 4 << 20
+_gw_parsed: dict = {}   # root -> {path: ((st_ino, st_mtime_ns, st_size), entries)}
 GW_AUDIT_ROOT = None   # None: the temp directory, resolved in _gw_finished (it may not exist)
 GW_AUDIT_PREFIX = "llmtool-gw-agent-audit-"
 GW_AUDIT_ID = re.compile(r"[A-Za-z0-9_]{1,16}")   # the random end of a mkdtemp name
 GW_AUTH_MAX = 64 << 10
+
+
+@dataclass(frozen=True)
+class GwRecord:
+    task: str
+    name: str             # row name from GW_PROFILES
+    state: str
+    code: str
+    model: str            # "" = not a plain model name
+    usage: tuple | None   # (input, output, total), each a count or None; None = not recorded
+    d6: str
+    updated: float
+
+
+def _gw_time(value) -> float:
+    """Epoch seconds of an llmtool UTC time stamp, else 0."""
+    when = _remote_test_time(value)
+    if when or type(value) is not str:
+        return when
+    try:
+        parsed = datetime.fromisoformat(value)
+        return parsed.timestamp() if parsed.tzinfo is not None else 0.0
+    except (ValueError, OverflowError, OSError):
+        return 0.0
+
+
+def _gw_count(value):
+    return value if type(value) is int and value >= 0 else None
+
+
+def _gw_entry(record) -> GwRecord | None:
+    """Only the developer fields a gw row shows; the rest of the record is dropped."""
+    if type(record) is not dict:
+        return None
+    task, developer = record.get("task_id"), record.get("developer")
+    if (type(task) is not str or not DISPATCH_TASK_ID.fullmatch(task)
+            or type(developer) is not dict):
+        return None
+    profile, state = developer.get("provider_profile"), developer.get("state")
+    if (type(profile) is not str or profile not in GW_PROFILES
+            or type(state) is not str or not CODE_TEXT.fullmatch(state)):
+        return None
+    code, model = developer.get("error_code"), developer.get("model")
+    code = code if type(code) is str and CODE_TEXT.fullmatch(code) else ""
+    model = model if type(model) is str and GW_MODEL.fullmatch(model) else ""
+    found, usage = developer.get("usage"), None
+    if type(found) is dict and any(name in found for names in GW_USAGE for name in names):
+        usage = tuple(_gw_count(next((found[name] for name in names if name in found), None))
+                      for names in GW_USAGE)
+    d6 = developer.get("executor_task_id")
+    d6 = d6 if type(d6) is str and AGENT_PATH.fullmatch(d6) else ""
+    return GwRecord(task, GW_PROFILES[profile], state, code, model, usage, d6,
+                    _gw_time(record.get("updated_at")))
+
+
+def _gw_words(entry: GwRecord) -> str:
+    model = f"模型 {entry.model}" if entry.model else "模型不明"
+    if entry.state == GW_DISPATCHING:
+        return f"執行中 · {model}"
+    result = DEVELOPER_RESULTS.get(entry.state, entry.state)
+    if entry.code:
+        result += f"（{entry.code}）"
+    if entry.usage is None:
+        use = "用量未記錄"
+    else:
+        counts = ["不明" if count is None else str(count) for count in entry.usage]
+        use = f"輸入 {counts[0]} / 輸出 {counts[1]} / 合計 {counts[2]} tokens"
+    return f"已結束 · {result} · {model} · {use}"
 
 
 def _gw_auth_task(audit: str) -> str:
@@ -7093,19 +7174,44 @@ def _gw_activity(audit: str, now: float, elapsed: float | None) -> float:
 
 
 def _gw_row(state: str, words: str, age: float, d6: str, registered: dict, task: str,
-            sid: str, evidence: str) -> OfficeRow:
+            sid: str, evidence: str, name: str = "gw-agent developer") -> OfficeRow:
     """A registered D6 is named by the PR binding (_bind_d6_pr_rows) like other
     D6 rows; any other place is named here."""
     parts = [f"task {task[:8]}"] if task else ["未綁定 Task"]
     if d6 not in registered:
         parts.append(f"D6 {d6}（未登記）" if d6 else "未綁定 D6")
-    return OfficeRow("gw-agent developer", state, " · ".join(parts + [words]), age, 10,
+    return OfficeRow(name, state, " · ".join(parts + [words]), age, 10,
                      role="developer", task=f"task {d6}" if d6 in registered else "",
                      evidence=evidence, sid=sid)
 
 
-def gw_rows(processes: list[Process], now: float, canonical: str) -> list[OfficeRow]:
-    """Live and recently finished gw-agent Developer runs."""
+def _gw_record_rows(now: float, root: str, registered: dict) -> tuple[list, list]:
+    """(rows, ages of finished gw-agent runs) from llmtool Task records changed
+    within OFFICE_DONE_WINDOW. A gw-agent record never makes a live row."""
+    entries, _ = _bounded_task_entries(root, _gw_parsed, GW_TASK_BUDGET, _gw_entry)
+    rows, agent_done = [], []
+    for entry in sorted(entries, key=lambda item: (-item.updated, item.task)):
+        age = now - entry.updated
+        if entry.updated <= 0 or not -REMOTE_TEST_SKEW <= age <= OFFICE_DONE_WINDOW:
+            continue
+        age = max(0.0, age)
+        if entry.state == GW_DISPATCHING:
+            if entry.name != "company gw developer":
+                continue
+            state = WORKING
+        else:
+            state = DONE
+            if entry.name == "gw-agent developer":
+                agent_done.append(age)
+        rows.append(_gw_row(state, _gw_words(entry), age, entry.d6, registered, entry.task,
+                            "", "llmtool 紀錄", entry.name))
+    return rows, agent_done
+
+
+def gw_rows(processes: list[Process], now: float, canonical: str,
+            root: str | None = None) -> list[OfficeRow]:
+    """Live and recently finished company gw and gw-agent Developer runs."""
+    root = LLMTOOL_TASKS if root is None else root
     registered = registered_tasks(canonical)
     rows = []
     for proc in sorted(processes, key=lambda p: p.pid):
@@ -7118,7 +7224,13 @@ def gw_rows(processes: list[Process], now: float, canonical: str) -> list[Office
         age = _gw_activity(proc.gw[2], now, _elapsed_seconds(proc.elapsed))
         rows.append(_gw_row(WORKING, "執行中", age, d6, registered, _gw_auth_task(proc.gw[2]),
                             f"pid {proc.pid}", "程序"))
-    for age, run in _gw_finished(now):
+    recorded, agent_done = _gw_record_rows(now, root, registered)
+    rows += recorded
+    copies = _gw_finished(now)
+    for done in agent_done:   # the audit copy of a run its Task record already shows
+        if copies:
+            copies.remove(min(copies, key=lambda copy: abs(copy[0] - done)))
+    for age, run in copies:
         rows.append(_gw_row(DONE, "已結束", age, "", registered, "", run, "llmtool 稽核檔"))
     return rows
 
@@ -7921,7 +8033,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         mac.append(ci_queue_row(mac_waiting, runner_count))
     rows += agy + mac + github_runner_rows(ci_view, now, local_names, ci)
     rows.append(remote_test_row(processes, now, llmtool_tasks))
-    gw_runs = gw_rows(processes, now, canonical)
+    gw_runs = gw_rows(processes, now, canonical, llmtool_tasks)
     rows += gw_runs
     gw_live: dict = {}
     for row in gw_runs:

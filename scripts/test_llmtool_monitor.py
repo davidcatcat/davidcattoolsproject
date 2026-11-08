@@ -3583,7 +3583,9 @@ class OfficeViewTests(unittest.TestCase):
                 self.assertNotIn("wp-1", mon._d6_running_tasks(rows))
                 self.assertIn("公司 gw", self.by_name(rows))
 
-    def test_gw_rows_open_no_task_file_and_no_audit_content(self):
+    def test_gw_rows_open_no_audit_content(self):
+        """#1122 replaces the #1115 rule: Task records are read (bounded loader),
+        the gateway's audit, task and result files still never are."""
         tasks = Path(self.tmp.name) / "tasks"
         task = "8b" * 16
         record = self._gw_record(tasks, task, "gw-agent-cli", "DEVELOPER_DISPATCHING",
@@ -3609,10 +3611,158 @@ class OfficeViewTests(unittest.TestCase):
             runs = mon.gw_rows(processes, self.NOW, self.canonical)
         self.assertEqual([row.state for row in runs], [mon.WORKING, mon.DONE])
         self.assertIn(str(audit.with_name("authorization.json")), opened)
-        for path in (record, audit, copy, audit.with_name("task.json"),
+        self.assertIn(str(record), opened)
+        for path in (audit, copy, audit.with_name("task.json"),
                      audit.with_name("result.json")):
             self.assertNotIn(str(path), opened)
-        self.assertFalse(any(path.startswith(str(tasks)) for path in opened))
+
+    # Company LLM runs from llmtool Task records (#1122).
+    GW_MARKERS = ("REQUEST-TEXT-MARKER", "RESPONSE-TEXT-MARKER", "ARTIFACT-TEXT-MARKER",
+                  "SUMMARY-TEXT-MARKER", "ACCEPTANCE-TEXT-MARKER", "AUDIT-TEXT-MARKER")
+
+    def _gw_task(self, tasks, task, profile, state, age, *, model="gw-model-1",
+                 usage=None, code=None, d6="wp-1"):
+        """An llmtool Task record of a company LLM run. Its request, response,
+        artifact, summary, acceptance and audit text must never reach a row."""
+        path = Path(tasks) / f"{task}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        developer = {"provider_profile": profile, "state": state, "executor_task_id": d6,
+                     "model": model, "artifact": "ARTIFACT-TEXT-MARKER",
+                     "summary": "SUMMARY-TEXT-MARKER", "response": "RESPONSE-TEXT-MARKER"}
+        if usage is not None:
+            developer["usage"] = usage
+        if code is not None:
+            developer["error_code"] = code
+        path.write_text(json.dumps({
+            "task_id": task, "updated_at": iso(self.NOW - age),
+            "request": "REQUEST-TEXT-MARKER", "response": "RESPONSE-TEXT-MARKER",
+            "acceptance": ["ACCEPTANCE-TEXT-MARKER"], "audit": [{"note": "AUDIT-TEXT-MARKER"}],
+            "developer": developer}), encoding="utf-8")
+        os.chmod(path, 0o600)
+        return path
+
+    def _gw_named(self, rows, name):
+        return sorted((row for row in rows if row.name == name), key=lambda row: row.age)
+
+    def test_company_gw_dispatching_record_shows_a_live_row(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        self._gw_task(tasks, "c0" * 16, "company-gw", "DEVELOPER_DISPATCHING", 90)
+        rows = self.rows(llmtool_tasks=str(tasks))
+        live = self._gw_named(rows, "company gw developer")
+        self.assertEqual(len(live), 1)
+        row = live[0]
+        self.assertEqual((row.state, row.task, row.evidence, row.kind, row.role),
+                         (mon.WORKING, "task wp-1", "llmtool 紀錄", "agent", "developer"))
+        self.assertAlmostEqual(row.age, 90, delta=1)
+        detail = mon._row_detail(row)
+        for words in ("task c0c0c0c0", "D6 wp-1", "執行中", "模型 gw-model-1"):
+            self.assertIn(words, detail)
+        self.assertIn("wp-1", mon._d6_running_tasks(rows))
+        self.assertEqual(mon._row_person(row), "CompanyGW")
+        lines = self._gw_view(rows)
+        at = next(i for i, line in enumerate(lines) if "company gw developer" in line)
+        self.assertLess(lines.index(next(l for l in lines if mon.LIVE_SECTION in l)), at)
+        self.assertLess(at, lines.index(next(l for l in lines if mon.STATUS_SECTION in l)))
+        # Like 公司 gw agent: an open switch lets the live row say everything; a
+        # paused one keeps the status row, which says a run is under way.
+        self.assertNotIn("公司 gw", self.by_name(rows))
+        self._write_dispatch({"company-gw": {"dispatch": "PAUSED"}})
+        status = self.by_name(self.rows(llmtool_tasks=str(tasks)))["公司 gw"]
+        self.assertEqual(status.state, mon.PAUSED)
+        self.assertIn("有 1 個執行中", status.detail)
+
+    def test_stale_company_gw_dispatching_record_is_not_running(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        self._gw_task(tasks, "d1" * 16, "company-gw", "DEVELOPER_DISPATCHING",
+                      mon.OFFICE_DONE_WINDOW + 60)
+        rows = self.rows(llmtool_tasks=str(tasks))
+        self.assertFalse(any(row.name in mon.GW_ROSTER for row in rows))
+        self.assertNotIn("wp-1", mon._d6_running_tasks(rows))
+        status = self.by_name(rows)["公司 gw"]
+        self.assertEqual((status.kind, status.state), ("worker", mon.IDLE))
+        self.assertNotIn("執行中", status.detail)
+
+    def test_finished_company_gw_run_shows_model_and_token_counts(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        self._gw_task(tasks, "e2" * 16, "company-gw", "DEVELOPER_RESPONDED", 120,
+                      usage={"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500})
+        self._gw_task(tasks, "e3" * 16, "company-gw", "DEVELOPER_RESPONDED", 300,
+                      usage={"prompt_tokens": 40, "completion_tokens": 2, "total_tokens": 42})
+        self._gw_task(tasks, "e4" * 16, "company-gw", "DEVELOPER_RESPONDED", 600,
+                      model="gw model\nnext line",
+                      usage={"input_tokens": -1, "output_tokens": "300", "total_tokens": True})
+        self._gw_task(tasks, "e5" * 16, "company-gw", "DEVELOPER_RESPONDED",
+                      mon.OFFICE_DONE_WINDOW + 60, usage={"total_tokens": 9})
+        rows = self.rows(llmtool_tasks=str(tasks))
+        done = self._gw_named(rows, "company gw developer")
+        self.assertEqual([(row.state, row.evidence) for row in done],
+                         [(mon.DONE, "llmtool 紀錄")] * 3)
+        self.assertAlmostEqual(done[0].age, 120, delta=1)
+        first, second, odd = (mon._row_detail(row) for row in done)
+        for words in ("task e2e2e2e2", "已結束", "成功回應", "模型 gw-model-1",
+                      "輸入 1200 / 輸出 300 / 合計 1500 tokens"):
+            self.assertIn(words, first)
+        self.assertIn("輸入 40 / 輸出 2 / 合計 42 tokens", second)
+        self.assertIn("模型不明", odd)
+        self.assertIn("輸入 不明 / 輸出 不明 / 合計 不明 tokens", odd)
+        self.assertNotIn("next line", odd)
+        self.assertNotIn("wp-1", mon._d6_running_tasks(rows))
+        self.assertIn("公司 gw", self.by_name(rows))   # nothing live: the status row stays
+        self._gw_view(rows)
+
+    def test_finished_gw_agent_run_shows_one_row_from_its_task_record(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        root = Path(self.tmp.name) / "audits"
+        self._gw_task(tasks, "f6" * 16, "company-gw-agent", "DEVELOPER_RESPONDED", 120,
+                      usage={"input_tokens": 800, "output_tokens": 90, "total_tokens": 890})
+        self._gw_audit_copy(root, "same0000", 118)    # the same run's audit copy
+        self._gw_audit_copy(root, "other000", 900)    # a run whose record was not read
+        # A gw-agent record still dispatching makes no live row: only its gateway does.
+        self._gw_task(tasks, "f7" * 16, "company-gw-agent", "DEVELOPER_DISPATCHING", 30)
+        with patch.object(mon, "GW_AUDIT_ROOT", str(root)):
+            rows = self.rows(llmtool_tasks=str(tasks))
+        agent = self._gw_named(rows, "gw-agent developer")
+        self.assertEqual([(row.state, row.evidence, row.sid) for row in agent],
+                         [(mon.DONE, "llmtool 紀錄", ""), (mon.DONE, "llmtool 稽核檔", "other000")])
+        detail = mon._row_detail(agent[0])
+        for words in ("task f6f6f6f6", "模型 gw-model-1", "輸入 800 / 輸出 90 / 合計 890 tokens"):
+            self.assertIn(words, detail)
+        self.assertFalse(any(row.state == mon.WORKING for row in rows if row.name in mon.GW_ROSTER))
+        self.assertNotIn("f7f7f7f7", "\n".join(self._gw_view(rows)))
+
+    def test_finished_gw_run_without_usage_or_with_a_failure(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        self._gw_task(tasks, "a1" * 16, "company-gw", "DEVELOPER_RESPONDED", 60)
+        self._gw_task(tasks, "a2" * 16, "company-gw-agent", "DEVELOPER_RESPONDED", 120, usage={})
+        self._gw_task(tasks, "a3" * 16, "company-gw", "DEVELOPER_OUTPUT_REJECTED", 180,
+                      code="DEVELOPER_OUTPUT_INVALID_DIFF", usage={"total_tokens": 7})
+        rows = self.rows(llmtool_tasks=str(tasks))
+        details = {row.detail.split(" · ")[0]: row.detail for row in rows
+                   if row.name in mon.GW_ROSTER}
+        self.assertEqual(sorted(details), ["task a1a1a1a1", "task a2a2a2a2", "task a3a3a3a3"])
+        self.assertIn("用量未記錄", details["task a1a1a1a1"])
+        self.assertIn("用量未記錄", details["task a2a2a2a2"])
+        failed = details["task a3a3a3a3"]
+        self.assertIn("DEVELOPER_OUTPUT_INVALID_DIFF", failed)
+        self.assertIn("輸入 不明 / 輸出 不明 / 合計 7 tokens", failed)
+
+    def test_gw_task_record_text_never_reaches_a_row(self):
+        tasks = Path(self.tmp.name) / "tasks"
+        self._gw_task(tasks, "b1" * 16, "company-gw", "DEVELOPER_DISPATCHING", 30,
+                      usage={"total_tokens": 1})
+        self._gw_task(tasks, "b2" * 16, "company-gw", "DEVELOPER_OUTPUT_REJECTED", 60,
+                      code="DEVELOPER_OUTPUT_INVALID_ENVELOPE")
+        self._gw_task(tasks, "b3" * 16, "company-gw-agent", "DEVELOPER_RESPONDED", 90,
+                      usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3})
+        self._gw_task(tasks, "b4" * 16, "company-gw", "DEVELOPER_RESPONDED", 120,
+                      model="REQUEST-TEXT-MARKER plus words", d6="RESPONSE TEXT MARKER")
+        rows = self.rows(llmtool_tasks=str(tasks))
+        self.assertEqual(sum(row.name in mon.GW_ROSTER for row in rows), 4)
+        text = "\n".join([repr(row) for row in rows] + mon.office_lines(rows, expand=True)
+                         + [repr(mon._gw_parsed.get(str(tasks)))])
+        for marker in self.GW_MARKERS:
+            self.assertNotIn(marker, text)
+        self.assertNotIn("RESPONSE TEXT MARKER", text)
 
     def test_idle_claude_session_row_covers_its_d6_process(self):
         self._write(self.claude / "proj" / "idle.jsonl", [
