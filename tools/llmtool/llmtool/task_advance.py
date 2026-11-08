@@ -1723,6 +1723,56 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
     return None
 
 
+def _train_closed_member(record, github_get, *, root=None, git_runner=None):
+    """Return whether a merge train already closed this Task (#1182).
+
+    The proof starts from the Task's own recorded GitHub merge event: its PR
+    must be a MERGED or CLOSED train record that lists this Task at its result
+    head, with the event's merge SHA as the record's merge_sha. The #1187
+    train proof must then pass. Any doubt, including a store error, is False.
+    """
+    try:
+        task_id = record.get('task_id') if type(record) is dict else None
+        completion = record.get('completion') if type(record) is dict else None
+        evidence = completion.get('evidence') if type(completion) is dict else None
+        result = evidence.get('result') if type(evidence) is dict else None
+        head = result.get('result_head') if type(result) is dict else None
+        events = record.get('completion_events') if type(record) is dict else None
+        if (type(task_id) is not str or type(head) is not str or
+                _HEX40.fullmatch(head) is None or type(events) is not list):
+            return False
+        from . import merge_train_store
+        for event in reversed(events):
+            if (type(event) is not dict or event.get('source') != 'GITHUB' or
+                    event.get('marker_type') != 'merge' or
+                    event.get('marker_status') != 'MERGED'):
+                continue
+            train_pr = event.get('issue_number')
+            merge_sha = event.get('merge_sha')
+            if (type(train_pr) is not int or not 1 <= train_pr <= 9999999 or
+                    type(merge_sha) is not str or _HEX40.fullmatch(merge_sha) is None or
+                    event.get('source_sha') != merge_sha):
+                continue
+            # A store error raises here and closes nothing.
+            train = merge_train_store.find_by_pr(train_pr)
+            if (type(train) is not dict or train.get('state') not in ('MERGED', 'CLOSED') or
+                    train.get('merge_sha') != merge_sha):
+                continue
+            members = train.get('members')
+            member = next((item for item in members if type(item) is dict and
+                           item.get('task_id') == task_id and item.get('head') == head),
+                          None) if type(members) is list else None
+            if member is None:
+                continue
+            integration = _pr_snapshot(train_pr, github_get)
+            if _train_member_merged(train, task_id, member.get('pr'), head, integration,
+                                    train_pr, root, git_runner):
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=False,
             reviewer_session_done=False, dispatch_review_call=None,
             record_review_result_call=None, repair_review_call=None,
@@ -1740,6 +1790,14 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     number = _pr_number(record, pr_number)
     get = task_completion._github_get if github_get is None else github_get
     d6 = _d6_snapshot(record, executor_task) if type(executor_task) is str else None
+    if integration_pr is None and _train_closed_member(
+            record, get, git_runner=publish_git_runner,
+            root=(d6.get('root') if type(d6) is dict else None) or cwd or os.getcwd()):
+        # A merge train already closed this Task; its MERGED event is recorded.
+        return _ack_consumed_events(
+            {'task_id': task_id, 'step': 'CLOSED', 'result': None,
+             'next': 'CLOSED', 'codes': []}, record, store,
+            d6.get('result_head') if type(d6) is dict else None)
     if (number is None and type(d6) is dict and d6.get('dirty') is False and
             type(d6.get('root')) is str and d6.get('root') and
             type(d6.get('branch')) is str and d6.get('branch') and

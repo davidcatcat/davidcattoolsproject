@@ -14,6 +14,7 @@ from unittest.mock import patch
 from llmtool import merge_train
 from llmtool import merge_train_store
 from llmtool import task_advance
+from llmtool.errors import LLMToolError
 
 
 TASK_A = 'a1' * 16
@@ -303,6 +304,132 @@ class TrainMemberClosureTests(unittest.TestCase):
         with patch.object(task_advance, '_integration_delta_verified', return_value=True):
             self.assertEqual(self.target(self.task(), integration, integration_pr=27),
                              (27, 'd' * 40))
+
+    # Advance without --integration-pr: a train already closed the Task ------
+
+    def merge_event(self, *, issue_number=TRAIN_PR, merge_sha=None, status='MERGED'):
+        """The GitHub merge event an earlier train closure recorded on the Task."""
+        merge_sha = self.squash if merge_sha is None else merge_sha
+        return {'source': 'GITHUB', 'source_sha': merge_sha, 'state': 'ACKED',
+                'issue_number': issue_number, 'comment_id': None,
+                'marker_type': 'merge', 'marker_status': status, 'merge_sha': merge_sha}
+
+    def closed_task(self, task_id=TASK_A, head=None, pr=17, **event):
+        task = self.task(task_id, head, pr)
+        task['completion_events'].append(self.merge_event(**event))
+        return task
+
+    def run_advance(self, task, *, integration_pr=None, integration=None):
+        head = task['review_dispatch_claim'][0]['head_sha']
+        prs = {17: {'number': 17, 'merged': False, 'state': 'closed',
+                    'head': {'sha': head}},
+               TRAIN_PR: self.integration() if integration is None else integration}
+        saved = []
+
+        def get(path):
+            if path.startswith('pulls/') and path[len('pulls/'):].isdigit():
+                return prs.get(int(path[len('pulls/'):]))
+            return []
+
+        store = type('S', (), {'get': lambda _self, _id: task})()
+        with patch.object(task_advance, '_review_outcomes', return_value=[]):
+            result = task_advance.advance(
+                task_id=task['task_id'], store=store, integration_pr=integration_pr,
+                github_get=get, cwd=self.repo,
+                record_github_event_call=lambda *args: saved.append(args))
+        return result, saved
+
+    def assert_today(self, task, **kwargs):
+        """The closed-member check falls through: same step as a Task with no event."""
+        plain = self.task(task['task_id'], task['review_dispatch_claim'][0]['head_sha'],
+                          task['review_dispatch_claim'][0]['pr'])
+        expected, _ = self.run_advance(plain, **kwargs)
+        self.assertNotEqual(expected['step'], 'CLOSED')
+        result, saved = self.run_advance(task, **kwargs)
+        self.assertEqual((result['step'], result['next']), (expected['step'], expected['next']))
+        self.assertEqual(saved, [])
+
+    def test_advance_reports_closed_for_a_train_closed_task(self):
+        for state in ('MERGED', 'CLOSED'):
+            with self.subTest(state=state):
+                record = self.make_train('t-' + state.lower(), state=state)
+                for task in (self.closed_task(), self.closed_task(TASK_B, self.head_b, 18)):
+                    result, saved = self.run_advance(task)
+                    self.assertEqual((result['step'], result['next']), ('CLOSED', 'CLOSED'))
+                    # No second MERGED event is recorded.
+                    self.assertEqual(saved, [])
+                os.unlink(self.trains / (record['train_id'] + '.json'))
+
+    def test_closed_member_check_writes_nothing_to_github(self):
+        self.make_train()
+        runner_calls = []
+        task = self.closed_task()
+        prs = {17: {'number': 17, 'merged': False, 'head': {'sha': self.head_a}},
+               TRAIN_PR: self.integration()}
+
+        def get(path):
+            if path.startswith('pulls/') and path[len('pulls/'):].isdigit():
+                return prs.get(int(path[len('pulls/'):]))
+            return []
+
+        store = type('S', (), {'get': lambda _self, _id: task})()
+        result = task_advance.advance(
+            task_id=TASK_A, store=store, github_get=get, cwd=self.repo,
+            publish_gh_runner=lambda *args: runner_calls.append(args),
+            merge_gh_runner=lambda *args: runner_calls.append(args),
+            record_github_event_call=lambda *args: runner_calls.append(args))
+        self.assertEqual(result['step'], 'CLOSED')
+        self.assertEqual(runner_calls, [])
+
+    def test_advance_with_integration_pr_keeps_its_path(self):
+        self.make_train()
+        with patch.object(task_advance, '_train_closed_member') as closed_member:
+            result, saved = self.run_advance(self.closed_task(), integration_pr=TRAIN_PR)
+        closed_member.assert_not_called()
+        self.assertEqual(result['step'], 'CLOSED')
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0][-3:], ('merge', 'MERGED', self.squash))
+
+    def test_no_merge_event_keeps_todays_step(self):
+        self.make_train()
+        self.assert_today(self.task())
+        self.assert_today(self.closed_task(status='OPEN'))
+
+    def test_no_train_record_keeps_todays_step(self):
+        self.make_train()
+        self.assert_today(self.closed_task(issue_number=27))
+
+    def test_train_in_another_state_keeps_todays_step(self):
+        for state in ('BUILT', 'MERGE_CLAIMED'):
+            with self.subTest(state=state):
+                record = self.make_train('t-' + state.lower().replace('_', '-'), state=state)
+                self.assert_today(self.closed_task())
+                os.unlink(self.trains / (record['train_id'] + '.json'))
+
+    def test_task_or_head_not_listed_keeps_todays_step(self):
+        self.make_train()
+        self.assert_today(self.closed_task(TASK_C, self.head_a))
+        self.assert_today(self.closed_task(head=self.head_other))
+
+    def test_other_merge_sha_keeps_todays_step(self):
+        self.make_train()
+        self.assert_today(self.closed_task(merge_sha=self.main))
+
+    def test_train_proof_failure_keeps_todays_step(self):
+        self.make_train()
+        self.assert_today(self.closed_task(),
+                          integration=self.integration(merged=False))
+
+    def test_store_read_error_does_not_close(self):
+        self.make_train()
+        (self.trains / 'not a record').write_text('x', encoding='utf-8')
+        self.assert_today(self.closed_task())
+
+    def test_store_refusal_does_not_close(self):
+        self.make_train()
+        refusal = LLMToolError('TRAIN_RECORD_UNAVAILABLE')
+        with patch.object(merge_train_store, 'find_by_pr', side_effect=refusal):
+            self.assert_today(self.closed_task())
 
 
 if __name__ == '__main__':
