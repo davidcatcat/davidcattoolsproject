@@ -17,7 +17,7 @@ from argparse import Namespace
 
 from . import active_pm_inbox, github_events, remote_test, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
-from . import task_submission_cli
+from . import mac_full_suite, task_submission_cli
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes
 
@@ -1050,7 +1050,8 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
                     warning_codes.append('MERGE_RESULT_RECORD_FAILED')
             outcome = _merge_success(record, number, head, review_version, gh_runner, root,
                                      warning_codes, owner_acceptance=owner_acceptance,
-                                     acceptance_carry=acceptance_carry)
+                                     acceptance_carry=acceptance_carry,
+                                     github_get=github_get)
             outcome['result']['main_behind_by'] = behind_by
             return outcome
         claim['state'] = 'UNKNOWN'
@@ -1076,13 +1077,14 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         warning_codes.append('MERGE_RESULT_RECORD_FAILED')
     outcome = _merge_success(record, number, head, review_version, gh_runner, root,
                              warning_codes, owner_acceptance=owner_acceptance,
-                             acceptance_carry=acceptance_carry)
+                             acceptance_carry=acceptance_carry,
+                             github_get=github_get)
     outcome['result']['main_behind_by'] = behind_by
     return outcome
 
 
 def _merge_success(record, number, head, review_version, gh_runner, root, warning_codes,
-                   *, owner_acceptance=None, acceptance_carry=None):
+                   *, owner_acceptance=None, acceptance_carry=None, github_get=None):
     body = (f'llmtool task advance merge provenance: task={record["task_id"]} '
             f'head={head} review_version={review_version} checks=exact-head-success-or-skipped')
     if owner_acceptance is not None:
@@ -1103,6 +1105,12 @@ def _merge_success(record, number, head, review_version, gh_runner, root, warnin
             warning_codes.append('MERGE_PROVENANCE_COMMENT_FAILED')
     except Exception:
         warning_codes.append('MERGE_PROVENANCE_COMMENT_FAILED')
+    suite_code = mac_full_suite.request_full_suite(gh_runner, root, github_get)
+    if suite_code not in (
+        mac_full_suite.MAC_FULL_SUITE_DISPATCHED,
+        mac_full_suite.MAC_FULL_SUITE_ALREADY_QUEUED,
+    ):
+        warning_codes.append(suite_code)
     result = {'pr': number, 'head': head}
     if owner_acceptance is not None:
         result['owner_acceptance'] = owner_acceptance

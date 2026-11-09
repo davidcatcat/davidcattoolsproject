@@ -155,7 +155,9 @@ class AcceptTests(OwnerAcceptanceTestCase):
         self.assertIn(COMMIT_PATH, reads)
 
     def test_valid_acceptance_merges_with_the_url_in_provenance(self):
-        result, calls, _reads = self.merge_once(URL)
+        with patch('llmtool.mac_full_suite.request_full_suite',
+                   return_value='MAC_FULL_SUITE_DISPATCHED'):
+            result, calls, _reads = self.merge_once(URL)
         self.assertEqual(result['step'], 'MERGED')
         self.assertEqual(result['codes'], [])
         self.assertEqual(result['result'],
@@ -198,7 +200,9 @@ class UnchangedWithoutOptionTests(OwnerAcceptanceTestCase):
         self.assertEqual(calls, [])
 
     def test_merge_without_option_keeps_provenance_and_result(self):
-        result, calls, reads = self.merge_once(files=CODE_FILES)
+        with patch('llmtool.mac_full_suite.request_full_suite',
+                   return_value='MAC_FULL_SUITE_DISPATCHED'):
+            result, calls, reads = self.merge_once(files=CODE_FILES)
         self.assertEqual(result, {'step': 'MERGED', 'codes': [],
                                   'result': {'pr': 17, 'head': HEAD, 'main_behind_by': 0}})
         provenance = [call for call in calls if call[:2] == ['pr', 'comment']]
