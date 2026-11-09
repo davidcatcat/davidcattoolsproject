@@ -935,7 +935,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
     def _delegate(self, target, *, usage=(1026, 49), served_model='qwen3.8-27b',
                   provider_model='gw', reject_responded=False, route_runner=None,
                   wrap_store=None, gate=None, authorize=None, route_factory=None,
-                  content='hello synthetic\n', bind=None):
+                  content='hello synthetic\n', bind=None, repair_packet=None):
         # #1072: without ``bind`` the D6 session step keeps today's unbound
         # result; with it the real step runs against that fake lifecycle helper.
         task_id = self.task_id = self._active_pm_task(target)
@@ -958,6 +958,8 @@ class GwAgentRealStoreTests(unittest.TestCase):
             acceptance=[f'Only {target} is created.'], selection_source='PM',
             executor_task='executor-d6', read_path=[target], write_path=[target],
             cwd=str(self.root))
+        if repair_packet is not None:
+            args.repair_packet = repair_packet
         real_config = load_route_config()
         real_config['routes']['gw-agent']['package_path'] = str(
             Path(__file__).resolve().parents[2] / 'api-agent-gateway')
@@ -1041,6 +1043,32 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertIn('+hello synthetic\n', developer['artifact'])
         self.assertEqual((self.root / target).read_text(), 'hello synthetic\n')
         self.assertEqual(self._git('status', '--porcelain'), f'?? {target}')
+
+    def test_repair_run_resumes_bound_gateway_session(self):
+        self._delegate("gw-agent-first.md")
+        first_task = self.task_id
+        home = Path(self.store_root).parent / 'gw-agent-sessions' / 'executor-d6'
+        from llmtool.developer_routes import gw_agent
+        binding = gw_agent.read_session_binding(home, executor_task_id='executor-d6')
+        self.assertEqual(binding['root_task_id'], first_task)
+        self._release_d6()
+        seen = {}
+
+        def runner(route, request, **kwargs):
+            seen.update(request)
+            raise RouteError(
+                'GW_AGENT_MODEL_ERROR_HTTP_429',
+                facts={'gateway_code': 'HTTP_429'})
+
+        with patch.object(task_submission_cli, '_validate_repair_packet',
+                          side_effect=lambda value: value):
+            self._delegate('gw-agent-repair.md', route_runner=runner,
+                           repair_packet={'reviewer_text_excerpt_untrusted_data':
+                                          'synthetic finding'})
+        self.assertEqual(seen['session_id'], binding['session_id'])
+        self.assertEqual(seen['task']['task_id'], first_task)
+        self.assertEqual(seen['task']['findings'], ['synthetic finding'])
+        self._release_d6()
 
     def test_docs_success_persists_and_reaches_the_active_pm(self):
         target = 'gw-agent-synthetic.md'
