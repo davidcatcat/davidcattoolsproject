@@ -120,15 +120,16 @@ class D6RetireTests(unittest.TestCase):
     def _record(self, task_id):
         return json.loads((self.registry / (task_id + ".json")).read_text())
 
-    def _retire(self, task_ids, *, execute=False, squash=None, discard=(), evidence=None,
-                reviewed_pr=None, workspace_root=None):
+    def _retire(self, task_ids, *, execute=False, squash=None, train=None, discard=(),
+                evidence=None, reviewed_pr=None, workspace_root=None):
         output = io.StringIO()
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
                 patch.object(lifecycle, "_process_cwds", side_effect=self._cwds), \
                 contextlib.redirect_stdout(output):
             ok = lifecycle.retire_worktrees(
                 canonical_root=self.source, task_ids=task_ids, execute=execute,
-                squash_evidence=squash, discard_uncommitted=discard,
+                squash_evidence=squash, train_evidence=train,
+                discard_uncommitted=discard,
                 unknown_evidence=evidence,
                 reviewed_pr_evidence=reviewed_pr,
                 workspace_root=workspace_root or self.tasks)
@@ -365,6 +366,118 @@ class D6RetireTests(unittest.TestCase):
             ["review-mismatch"], reviewed_pr={"review-mismatch": ("532", "0" * 40)})
         self.assertFalse(ok)
         self.assertIn("D6_RETIRE_REVIEW_HEAD_MISMATCH", line["reasons"])
+        self.assertTrue(root.is_dir())
+
+    def test_superseded_reviewer_head_with_squash_proof_accepted(self):
+        root, head = self._task("review-superseded-squash", publish=False, reviewer=True)
+        pr_head = _git(self.source, "commit-tree", "-p", head, "-m", "author update",
+                       _git(self.source, "rev-parse", head + "^{tree}"))
+        squash = _git(self.source, "commit-tree", "-p", self.base, "-m", "squash PR (#601)",
+                      _git(self.source, "rev-parse", pr_head + "^{tree}"))
+        _git(self.source, "update-ref", "refs/remotes/origin/main", squash)
+        ok, (line,) = self._retire(
+            ["review-superseded-squash"], execute=True,
+            reviewed_pr={"review-superseded-squash": ("601", pr_head)},
+            squash={"review-superseded-squash": (pr_head, squash)})
+        self.assertTrue(ok, line)
+        self.assertEqual(line["result"], "REMOVED")
+        self.assertEqual(line["publication"], "reviewed_pr_merged_descendant")
+        self.assertEqual(line["reviewed_pr_number"], "601")
+        self.assertFalse(os.path.lexists(root))
+        record = self._record("review-superseded-squash")
+        self.assertEqual(record["state"], "REMOVED")
+        self.assertIn("publication=reviewed_pr_merged_descendant", record["evidence_refs"][-1])
+
+    def test_superseded_reviewer_head_with_train_proof_accepted(self):
+        root, head = self._task("review-superseded-train", publish=False, reviewer=True)
+        pr_head = _git(self.source, "commit-tree", "-p", head, "-m", "author update",
+                       _git(self.source, "rev-parse", head + "^{tree}"))
+        train_head = _git(self.source, "commit-tree", "-p", pr_head, "-m", "train head",
+                          _git(self.source, "rev-parse", pr_head + "^{tree}"))
+        squash = _git(self.source, "commit-tree", "-p", self.base, "-m", "train squash (#602)",
+                      _git(self.source, "rev-parse", train_head + "^{tree}"))
+        _git(self.source, "update-ref", "refs/remotes/origin/main", squash)
+        ok, (line,) = self._retire(
+            ["review-superseded-train"], execute=True,
+            reviewed_pr={"review-superseded-train": ("602", pr_head)},
+            train={"review-superseded-train": (pr_head, train_head, squash)})
+        self.assertTrue(ok, line)
+        self.assertEqual(line["result"], "REMOVED")
+        self.assertEqual(line["publication"], "reviewed_pr_merged_descendant")
+        self.assertEqual(line["reviewed_pr_number"], "602")
+        self.assertFalse(os.path.lexists(root))
+
+    def test_superseded_reviewer_non_ancestor_head_refused(self):
+        root, _head = self._task("review-non-ancestor", publish=False, reviewer=True)
+        divergent_head = _git(self.source, "commit-tree", "-p", self.base, "-m", "divergent PR",
+                              _git(self.source, "rev-parse", self.base + "^{tree}"))
+        squash = _git(self.source, "commit-tree", "-p", self.base, "-m", "squash (#603)",
+                      _git(self.source, "rev-parse", divergent_head + "^{tree}"))
+        _git(self.source, "update-ref", "refs/remotes/origin/main", squash)
+        ok, (line,) = self._retire(
+            ["review-non-ancestor"],
+            reviewed_pr={"review-non-ancestor": ("603", divergent_head)},
+            squash={"review-non-ancestor": (divergent_head, squash)})
+        self.assertFalse(ok)
+        self.assertEqual(line["result"], "BLOCKED")
+        self.assertIn("D6_RETIRE_REVIEW_HEAD_MISMATCH", line["reasons"])
+        self.assertTrue(root.is_dir())
+
+    def test_superseded_reviewer_without_merge_proof_refused(self):
+        root, head = self._task("review-no-proof", publish=False, reviewer=True)
+        pr_head = _git(self.source, "commit-tree", "-p", head, "-m", "author update",
+                       _git(self.source, "rev-parse", head + "^{tree}"))
+        ok, (line,) = self._retire(
+            ["review-no-proof"],
+            reviewed_pr={"review-no-proof": ("604", pr_head)})
+        self.assertFalse(ok)
+        self.assertEqual(line["result"], "BLOCKED")
+        self.assertIn("D6_RETIRE_REVIEW_MERGE_UNPROVEN", line["reasons"])
+        self.assertTrue(root.is_dir())
+
+    def test_superseded_reviewer_with_wrong_squash_sha_refused(self):
+        root, head = self._task("review-wrong-squash", publish=False, reviewer=True)
+        pr_head = _git(self.source, "commit-tree", "-p", head, "-m", "author update",
+                       _git(self.source, "rev-parse", head + "^{tree}"))
+        wrong_squash = _git(self.source, "commit-tree", "-p", self.base, "-m", "unmerged squash",
+                            _git(self.source, "rev-parse", pr_head + "^{tree}"))
+        ok, (line,) = self._retire(
+            ["review-wrong-squash"],
+            reviewed_pr={"review-wrong-squash": ("605", pr_head)},
+            squash={"review-wrong-squash": (pr_head, wrong_squash)})
+        self.assertFalse(ok)
+        self.assertEqual(line["result"], "BLOCKED")
+        self.assertIn("D6_RETIRE_REVIEW_MERGE_UNPROVEN", line["reasons"])
+        self.assertTrue(root.is_dir())
+
+    def test_superseded_reviewer_record_head_mismatch_refused(self):
+        root, head = self._task("review-rec-mismatch", publish=False, reviewer=True)
+        pr_head = _git(self.source, "commit-tree", "-p", head, "-m", "author update",
+                       _git(self.source, "rev-parse", head + "^{tree}"))
+        squash = _git(self.source, "commit-tree", "-p", self.base, "-m", "squash (#606)",
+                      _git(self.source, "rev-parse", pr_head + "^{tree}"))
+        _git(self.source, "update-ref", "refs/remotes/origin/main", squash)
+        record = self._record("review-rec-mismatch")
+        record["head_sha"] = self.base
+        lifecycle._replace_record(self.registry / "review-rec-mismatch.json", record)
+        ok, (line,) = self._retire(
+            ["review-rec-mismatch"],
+            reviewed_pr={"review-rec-mismatch": ("606", pr_head)},
+            squash={"review-rec-mismatch": (pr_head, squash)})
+        self.assertFalse(ok)
+        self.assertIn("D6_RETIRE_REVIEW_HEAD_MISMATCH", line["reasons"])
+        self.assertTrue(root.is_dir())
+
+    def test_reviewer_squash_evidence_without_reviewed_pr_evidence_refused(self):
+        root, head = self._task("review-squash-no-pr", publish=False, reviewer=True)
+        squash = _git(self.source, "commit-tree", "-p", self.base, "-m", "squash (#607)",
+                      _git(self.source, "rev-parse", head + "^{tree}"))
+        _git(self.source, "update-ref", "refs/remotes/origin/main", squash)
+        ok, (line,) = self._retire(
+            ["review-squash-no-pr"],
+            squash={"review-squash-no-pr": (head, squash)})
+        self.assertFalse(ok)
+        self.assertIn("D6_RETIRE_REVIEW_EVIDENCE_REQUIRED", line["reasons"])
         self.assertTrue(root.is_dir())
 
     def test_dry_run_removes_nothing(self):
