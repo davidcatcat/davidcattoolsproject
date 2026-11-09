@@ -1278,7 +1278,7 @@ def _hosted_finish(store, task_id, task, run, nonce, *, executor_task, sha, ref,
         return saved
 
     if outcome[0] == 'OUTCOME':
-        _, result, code = outcome
+        _, result, code, *rest = outcome
         out = _record_outcome(store, task_id, task, result=result, code=code,
                               executor_task=executor_task, sha=sha, modules=modules_list)
         if code != 'HOSTED_PENDING':
@@ -1306,7 +1306,7 @@ def _run_hosted(store, task_id, task, *, executor_task, sha, ref, modules,
         get=get, post=post, now=now,
     )
     if start_res[0] == 'OUTCOME':
-        _, result, code, _ = start_res
+        _, result, code, *rest = start_res
         return _record_outcome(store, task_id, task, result=result, code=code,
                                executor_task=executor_task, sha=sha, modules=modules)
     if start_res[0] == 'RUN':

@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from llmtool import remote_test
@@ -480,3 +481,8 @@ class RemoteTestHostedFinishTests(unittest.TestCase):
         self.assertEqual(len(stored_task['remote_test_outcomes']), 1)
         self.assertEqual(stored_task['remote_test_outcomes'][0]['code'], 'HOSTED_DISPATCH_UNCONFIRMED')
         self.assertEqual(stored_task['remote_test_dispatches'][0]['state'], 'DISPATCHED')
+
+
+if __name__ == '__main__':
+    unittest.main()
+
