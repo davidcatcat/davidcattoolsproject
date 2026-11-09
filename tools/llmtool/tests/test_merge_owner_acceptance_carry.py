@@ -201,7 +201,9 @@ class CarryAllowedTests(CarryTestCase):
         })
 
     def test_carry_merges_with_its_provenance_line(self):
-        result, calls, _reads = self.merge_once()
+        with patch('llmtool.mac_full_suite.request_full_suite',
+                   return_value='MAC_FULL_SUITE_DISPATCHED'):
+            result, calls, _reads = self.merge_once()
         self.assertEqual(result['step'], 'MERGED')
         self.assertEqual(result['codes'], [])
         self.assertEqual(result['result']['owner_acceptance'], URL)
