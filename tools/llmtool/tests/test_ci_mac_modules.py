@@ -17,6 +17,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+import yaml
+
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -758,8 +760,8 @@ class MacTestIdSelectionTests(unittest.TestCase):
 
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml"
 CANONICAL_STEP = "Offline canonical checks"
-MODE_EXPRESSION = "${{ steps.coverage.outputs.mode }}"
-STEP_LIMIT = "${{ steps.coverage.outputs.mode == 'full' && 110 || 45 }}"
+MODE_EXPRESSION = "${{ needs.select.outputs.mode }}"
+STEP_LIMIT = "${{ needs.select.outputs.mode == 'full' && 110 || 45 }}"
 # Synthetic commit id for the fake git; not a real revision.
 SYNTHETIC_HEAD = "f" * 40
 # Shared body of the fake test commands. FAKE_STARTED makes the command
@@ -837,12 +839,59 @@ class CanonicalStepStructureTests(unittest.TestCase):
         limits = [line for line in lines if line.strip().startswith("timeout-minutes:")]
         self.assertEqual(limits, [
             "    timeout-minutes: 120",
+            "    timeout-minutes: 120",
             f"        timeout-minutes: {STEP_LIMIT}",
         ])
-        job = lines.index("  check:")
-        steps = lines.index("    steps:")
-        self.assertTrue(job < lines.index(limits[0]) < steps)
-        self.assertIn(limits[1], workflow_step(CANONICAL_STEP))
+        select_job = lines.index("  select:")
+        select_steps = lines.index("    steps:", select_job)
+        self.assertTrue(select_job < lines.index(limits[0], select_job) < select_steps)
+        check_job = lines.index("  check:")
+        check_steps = lines.index("    steps:", check_job)
+        self.assertTrue(check_job < lines.index(limits[1], check_job) < check_steps)
+        self.assertIn(limits[2], workflow_step(CANONICAL_STEP))
+
+    def test_selection_job_exists_and_check_job_needs_it(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        jobs = workflow.get("jobs", {})
+        self.assertIn("select", jobs)
+        select_job = jobs.get("select", {})
+        check_job = jobs.get("check", {})
+        self.assertIn("if", select_job)
+        self.assertEqual(select_job.get("if"), check_job.get("if"))
+        needs = check_job.get("needs")
+        if isinstance(needs, list):
+            self.assertIn("select", needs)
+        else:
+            self.assertEqual(needs, "select")
+        check_names = [
+            j.get("name")
+            for j in jobs.values()
+            if isinstance(j, dict) and j.get("name") == "check (macOS 3.13)"
+        ]
+        self.assertEqual(len(check_names), 1)
+        workflow_text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("  select:", workflow_text)
+        self.assertIn("  check:", workflow_text)
+        self.assertIn("needs: select", workflow_text)
+        self.assertEqual(workflow_text.count("name: check (macOS 3.13)"), 1)
+
+    def test_concurrency_block_placement_on_select_job_only(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        self.assertNotIn("concurrency", workflow)
+        jobs = workflow.get("jobs", {})
+        select_job = jobs.get("select", {})
+        self.assertIn("concurrency", select_job)
+        select_concurrency = select_job.get("concurrency", {})
+        expected_group = (
+            "${{ github.workflow }}-${{ "
+            "github.event_name == 'workflow_dispatch' && 'full-main' "
+            "|| format('{0}-{1}', github.event_name, github.ref) }}"
+        )
+        expected_cancel = "${{ github.event_name != 'workflow_dispatch' }}"
+        self.assertEqual(select_concurrency.get("group"), expected_group)
+        self.assertEqual(select_concurrency.get("cancel-in-progress"), expected_cancel)
+        check_job = jobs.get("check", {})
+        self.assertNotIn("concurrency", check_job)
 
 
 @unittest.skipUnless(os.name == "posix", "the step script runs under POSIX bash")
