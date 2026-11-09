@@ -5373,9 +5373,8 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     if not valid:
         if ref is not None:
             raise LLMToolError(
-                'DELEGATE_HIGH_DEBUG_REF_INVALID: accepted forms are an Issue comment link '
-                'https://github.com/OWNER/REPO/issues/N#issuecomment-M or '
-                'https://github.com/OWNER/REPO/issues/N/comments/M for this repository')
+                'DELEGATE_HIGH_DEBUG_REF_INVALID: an Issue comment link on this repository '
+                'whose path ends in /issues/N#issuecomment-M or /issues/N/comments/M')
         raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
     if high_debug_task is None:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_REQUIRED')

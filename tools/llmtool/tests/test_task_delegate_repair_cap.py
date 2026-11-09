@@ -308,10 +308,10 @@ class DelegateRepairCapTests(unittest.TestCase):
                 _args(high_debug_ref=bad_ref), store)
         message = str(caught.exception)
         self.assertTrue(message.startswith('DELEGATE_HIGH_DEBUG_REF_INVALID'))
-        self.assertIn('https://github.com/OWNER/REPO/issues/N#issuecomment-M', message)
-        self.assertIn('https://github.com/OWNER/REPO/issues/N/comments/M', message)
-        self.assertIn('for this repository', message)
+        self.assertIn('/issues/N#issuecomment-M', message)
+        self.assertIn('/issues/N/comments/M', message)
         self.assertNotIn(bad_ref, message)
+        self.assertNotIn('github.com', message)
         self.assertEqual(store.recorded, [])
 
     def test_pull_request_comment_link_is_refused(self):
