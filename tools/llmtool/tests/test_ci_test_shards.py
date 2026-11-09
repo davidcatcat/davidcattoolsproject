@@ -163,22 +163,37 @@ class CiTestShardsTests(unittest.TestCase):
             ".github/workflows/**",
         ]
         header = workflow.split("jobs:", 1)[0]
-        push_match = re.search(r"push:\n\s+branches:.*?\n\s+paths:\n((?:\s+-\s+.*?\n)+)", header)
-        self.assertIsNotNone(push_match)
+        # Under push there are a branches list and a comment line before paths:,
+        # and under pull_request a comment line comes before paths:.
+        # Parse the lines between each paths: key and the next key without assuming
+        # the trigger and paths: are adjacent.
+        paths_matches = list(
+            re.finditer(
+                r"(?ms)^\s+paths:\n(?P<entries>.*?)(?=^\s+[a-zA-Z0-9_-]+:|\Z)",
+                header,
+            )
+        )
+        self.assertEqual(len(paths_matches), 2)
+        self.assertIn("push:", header[: paths_matches[0].start()])
+        self.assertIn(
+            "pull_request:",
+            header[paths_matches[0].end() : paths_matches[1].start()],
+        )
+
         push_paths = [
             line.strip().lstrip("- ").strip("'\"")
-            for line in push_match.group(1).strip().splitlines()
+            for line in paths_matches[0].group("entries").splitlines()
+            if line.strip().startswith("-")
         ]
         self.assertEqual(push_paths, expected_paths)
         self.assertEqual(push_paths[-2:], ["scripts/**", ".github/workflows/**"])
         idx_llmtool = push_paths.index("tools/llmtool/**")
         self.assertEqual(push_paths[idx_llmtool + 1], "!tools/llmtool/*.md")
 
-        pr_match = re.search(r"pull_request:\n\s+paths:\n((?:\s+-\s+.*?\n)+)", header)
-        self.assertIsNotNone(pr_match)
         pr_paths = [
             line.strip().lstrip("- ").strip("'\"")
-            for line in pr_match.group(1).strip().splitlines()
+            for line in paths_matches[1].group("entries").splitlines()
+            if line.strip().startswith("-")
         ]
         self.assertEqual(pr_paths, expected_paths)
         self.assertEqual(pr_paths[-2:], ["scripts/**", ".github/workflows/**"])
