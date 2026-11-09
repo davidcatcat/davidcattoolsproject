@@ -90,6 +90,47 @@ class GwAgentRouteTests(unittest.TestCase):
         with credential_loader, value_loader:
             return run_route(*args, **kwargs)
 
+    def test_launcher_below_3_11_drops_the_working_directory_from_sys_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            request = {'_route_tmpdir': tmpdir, 'root': str(Path(tmpdir) / 'root')}
+            with mock.patch.object(gw_agent, '_HAS_SAFE_PATH_FLAG', False):
+                argv = self.route.build_argv(sys.executable, request)
+            self.assertEqual(
+                argv,
+                [sys.executable, '-B', '-c', gw_agent._SAFE_PATH_LAUNCHER, 'run',
+                 '--authorization-file', str(Path(tmpdir) / 'authorization.json'),
+                 '--workdir', request['root'], '--profile', self.route.profile_name,
+                 '--task-file', str(Path(tmpdir) / 'task.json'),
+                 '--result-file', str(Path(tmpdir) / 'result.json'),
+                 '--audit-file', str(Path(tmpdir) / 'audit.jsonl'),
+                 '--profiles-file', str(Path(tmpdir) / 'profiles.json'),
+                 '--state-dir', str(Path(tmpdir) / 'state')])
+            with mock.patch.object(gw_agent, '_HAS_SAFE_PATH_FLAG', True):
+                argv = self.route.build_argv(sys.executable, request)
+            self.assertEqual(
+                argv,
+                [sys.executable, '-B', '-P', '-m', 'api_agent_gateway', 'run',
+                 '--authorization-file', str(Path(tmpdir) / 'authorization.json'),
+                 '--workdir', request['root'], '--profile', self.route.profile_name,
+                 '--task-file', str(Path(tmpdir) / 'task.json'),
+                 '--result-file', str(Path(tmpdir) / 'result.json'),
+                 '--audit-file', str(Path(tmpdir) / 'audit.jsonl'),
+                 '--profiles-file', str(Path(tmpdir) / 'profiles.json'),
+                 '--state-dir', str(Path(tmpdir) / 'state')])
+        launcher = gw_agent._SAFE_PATH_LAUNCHER.replace(
+            "runpy.run_module('api_agent_gateway', run_name='__main__', alter_sys=True)",
+            'import json; print(json.__file__)')
+        with tempfile.TemporaryDirectory() as shadow_dir:
+            (Path(shadow_dir) / 'json.py').write_text('')
+            completed = subprocess.run(
+                [sys.executable, '-B', '-c', launcher],
+                cwd=shadow_dir,
+                capture_output=True,
+                text=True,
+                check=True)
+            printed = completed.stdout.strip()
+            self.assertNotIn(shadow_dir, printed)
+
     def test_missing_optional_key_writes_unauthenticated_profile_and_environment(self):
         with tempfile.TemporaryDirectory() as tmpdir, \
                 mock.patch.object(gw_agent.llm_config, 'resolve_profile_config',
@@ -334,8 +375,13 @@ class GwAgentRouteTests(unittest.TestCase):
             self.assertEqual(env['GW_AGENT_API_KEY'], self.credential)
             self.assertEqual(env['PYTHONPATH'], self.route.package_path)
             self.assertIn('-B', argv)
-            self.assertIn('-P', argv)
-            self.assertIn('api_agent_gateway', argv)
+            if sys.version_info >= (3, 11):
+                self.assertIn('-P', argv)
+                self.assertIn('api_agent_gateway', argv)
+            else:
+                self.assertIn('-c', argv)
+                self.assertEqual(argv[argv.index('-c') + 1], gw_agent._SAFE_PATH_LAUNCHER)
+                self.assertNotIn('-P', argv)
             self.assertNotIn(self.credential, ' '.join(argv))
             task_file = Path(argv[argv.index('--task-file') + 1])
             auth_file = Path(argv[argv.index('--authorization-file') + 1])
