@@ -346,6 +346,67 @@ class TrustTest(unittest.TestCase):
         self._write(value)
         self._error("TRUST_CI_INVALID")
 
+    def test_github_hosted_runner_label_alternatives_load_and_freeze(self):
+        value = json.loads(json.dumps(self.data))
+        value["ci_trust"]["mode"] = "github-hosted"
+        for workflow in value["ci_trust"]["workflows"]:
+            workflow["runner_names"] = None
+            workflow["runner_labels"] = [["macos-15"], ["macos-15-intel"]]
+        self._write(value)
+        trusted = load_trust(home=str(self.home), _allow_root=self.allow_root)
+        self.assertEqual(
+            trusted.ci_trust["workflows"][0]["runner_labels"],
+            (("macos-15",), ("macos-15-intel",)),
+        )
+
+    def test_github_hosted_repeated_runner_label_alternatives_load(self):
+        value = json.loads(json.dumps(self.data))
+        value["ci_trust"]["mode"] = "github-hosted"
+        for workflow in value["ci_trust"]["workflows"]:
+            workflow["runner_names"] = None
+            workflow["runner_labels"] = [["macos-15"], ["macos-15"]]
+        self._write(value)
+        trusted = load_trust(home=str(self.home), _allow_root=self.allow_root)
+        self.assertEqual(
+            trusted.ci_trust["workflows"][0]["runner_labels"],
+            (("macos-15",), ("macos-15",)),
+        )
+
+    def test_github_hosted_invalid_runner_label_forms_refused(self):
+        invalid_labels = [
+            None,
+            [],
+            [[]],
+            [["macos-15"], []],
+            ["macos-15", ["macos-15-intel"]],
+            [["macos-15"], "macos-15-intel"],
+            [[["macos-15"]]],
+            [["macos-15"], [["macos-15-intel"]]],
+            [["macos-15"], ["macos-14"], ["macos-13"], ["macos-12"], ["macos-11"]],
+            [["macos-15", "macos-14", "macos-13", "macos-12", "macos-11", "macos-10", "macos-9", "macos-8", "macos-7"]],
+            [["macos-15", 123]],
+            [123],
+            [["self-hosted"]],
+            [["macos-15"], ["self-hosted"]],
+            [["macos-15", "macos-15"]],
+        ]
+        for labels in invalid_labels:
+            with self.subTest(labels=labels):
+                value = json.loads(json.dumps(self.data))
+                value["ci_trust"]["mode"] = "github-hosted"
+                for workflow in value["ci_trust"]["workflows"]:
+                    workflow["runner_names"] = None
+                    workflow["runner_labels"] = [["macos-15"]]
+                value["ci_trust"]["workflows"][0]["runner_labels"] = labels
+                self._write(value)
+                self._error("TRUST_CI_INVALID")
+
+    def test_self_hosted_nested_runner_labels_refused(self):
+        value = json.loads(json.dumps(self.data))
+        value["ci_trust"]["workflows"][0]["runner_labels"] = [["macos-15"]]
+        self._write(value)
+        self._error("TRUST_CI_INVALID")
+
     def test_path_invalid_and_overlap_have_exact_codes(self):
         value = json.loads(json.dumps(self.data))
         value["canonical_root"] = str(self.canonical / "missing")
