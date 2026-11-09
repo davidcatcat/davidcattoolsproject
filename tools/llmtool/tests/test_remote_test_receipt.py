@@ -760,8 +760,10 @@ class RemoteTestReceiptTests(unittest.TestCase):
 
     def test_run_tree_unresolvable_writes_null_tree(self):
         out_dir = self.root / "out-tree-null"
+        runner_calls = []
 
         def success_runner(python, src, module, timeout):
+            runner_calls.append(module)
             return SimpleNamespace(
                 returncode=0,
                 stdout=b"Ran 1 test\nOK\n",
@@ -794,12 +796,14 @@ class RemoteTestReceiptTests(unittest.TestCase):
             git=custom_git,
         )
 
-        self.assertEqual(code, 0)
+        self.assertNotEqual(code, 0)
         raw = (out_dir / "receipt.json").read_bytes()
         validated = remote_test._validate_remote_receipt(raw, sha=SHA, modules=("test_alpha",))
         self.assertIsNotNone(validated)
-        self.assertEqual(validated["result"], "PASS")
+        self.assertEqual(validated["result"], "FAIL")
+        self.assertNotEqual(validated["exit_code"], 0)
         self.assertIsNone(validated["tree"])
+        self.assertEqual(runner_calls, [])
 
     def test_run_module_oserror_on_non_executable_python(self):
         res = remote_test_receipt.run_module(str(self.venv_py), str(self.src), "test_alpha", 120)

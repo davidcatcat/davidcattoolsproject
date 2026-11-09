@@ -263,6 +263,8 @@ def _verify_checkout(src, sha, git_runner):
             return False, None
 
         tree = _resolve_tree(src, sha, git_runner)
+        if tree is None:
+            return False, None
         return True, tree
     except (OSError, subprocess.SubprocessError):
         return False, None
