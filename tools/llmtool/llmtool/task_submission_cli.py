@@ -4398,10 +4398,16 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             return decision
         owner_gate_denied = True
         return False
+    repair_packet = getattr(args, 'repair_packet', None)
+    if repair_packet is not None:
+        repair_packet = _validate_repair_packet(repair_packet)
     site = None
     try:
         execute = run_route if route_runner is None else route_runner
-        site = gw_agent_callsite.SessionCallSite(store.root, executor_task_id=registration.task_id, task_id=task['task_id'], repair_excerpt=None, data_class=data_class).__enter__()
+        site = gw_agent_callsite.SessionCallSite(store.root, executor_task_id=registration.task_id, task_id=task['task_id'], repair_excerpt=(None if repair_packet is None else repair_packet['reviewer_text_excerpt_untrusted_data']), data_class=data_class).__enter__()
+        if site.is_repair:
+            task_input = dict(task_input, task_id=site.gateway_task_id, findings=site.findings)
+            site.check_scope(task_input)
         try:
             result = execute(route, {'root': registration.root, 'model': model, 'effort': effort,
                 'expected_branch': registration.branch, 'expected_head': snapshot.head,
