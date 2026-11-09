@@ -29,55 +29,32 @@ on:
       - 'tools/safe-git/**'
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
 permissions:
   contents: read
   actions: read
 
 jobs:
-  check:
-    name: check (macOS 3.13)
+  select:
+    name: select
     if: vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci' || github.event.label.name == 'mac-ci-intel')
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
-      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
     runs-on: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'mac-ci-intel') && 'macos-15' || 'macos-15-intel' }}
-    # Owner #1253: up to 120 minutes while the hosted full suite is measured (#1220).
     timeout-minutes: 120
+    outputs:
+      mode: ${{ steps.coverage.outputs.mode }}
+      verify: ${{ steps.coverage.outputs.verify }}
+      test_ids: ${{ steps.coverage.outputs.test_ids }}
+      due: ${{ steps.full-due.outputs.run }}
+      run: ${{ steps.full-due.outputs.run }}
     steps:
-      # Test the PR's own head commit, not GitHub's temporary merge commit
-      # (GITHUB_SHA), so a run is exact evidence for the SHA it reports.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ github.event.pull_request.head.sha || 'main' }}
           fetch-depth: 0
           persist-credentials: false
-      # Without the merge ref, a head behind the base is reported as a notice
-      # under the loose merge rule (#1317) and the merge still binds this
-      # exact head and rechecks live main and mergeability.
-      - name: Source revision
-        env:
-          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || '' }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          fail() { echo "::error::source revision check failed: $1"; exit 1; }
-          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
-            EXPECTED_SHA=$(git rev-parse HEAD) || fail "cannot read checked-out main SHA"
-          fi
-          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected SHA is not a full commit id"
-          head=$(git rev-parse HEAD) || fail "cannot read HEAD"
-          test "$head" = "$EXPECTED_SHA" || fail "checked out $head, expected $EXPECTED_SHA"
-          echo "tested source HEAD: $head ($GITHUB_EVENT_NAME)"
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            test "$head" != "$GITHUB_SHA" || fail "checked out the merge ref instead of the PR head"
-            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "missing PR base SHA"
-            if git merge-base --is-ancestor "$BASE_SHA" "$head"; then
-              echo "merge coverage: head contains base $BASE_SHA"
-            else
-              status=$?
-              test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
-              echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head (loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"
-            fi
-          fi
       # PRs use the validated Mac-required IDs plus changed/mapped test IDs.
       # Monitor-only and documentation-only changes skip canonical Mac tests;
       # unknown, failed, and non-PR comparisons use full checks.
@@ -151,6 +128,9 @@ jobs:
           fi
           printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
           printf 'verify=%s\n' "$verify" >> "$GITHUB_OUTPUT"
+          if [ -f "$RUNNER_TEMP/mac-test-ids" ]; then
+            printf 'test_ids=%s\n' "$(tr '\n' ' ' < "$RUNNER_TEMP/mac-test-ids")" >> "$GITHUB_OUTPUT"
+          fi
           echo "coverage mode: $mode"
       - name: Full main suite due gate
         id: full-due
@@ -171,8 +151,59 @@ jobs:
             echo "::error::unexpected full-suite gate result"
             exit 1
           fi
+
+  check:
+    name: check (macOS 3.13)
+    needs: select
+    if: vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci' || github.event.label.name == 'mac-ci-intel')
+    runs-on: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'mac-ci-intel') && 'macos-15' || 'macos-15-intel' }}
+    # Owner #1253: up to 120 minutes while the hosted full suite is measured (#1220).
+    timeout-minutes: 120
+    steps:
+      # Test the PR's own head commit, not GitHub's temporary merge commit
+      # (GITHUB_SHA), so a run is exact evidence for the SHA it reports.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || 'main' }}
+          fetch-depth: 0
+          persist-credentials: false
+      # Without the merge ref, a head behind the base is reported as a notice
+      # under the loose merge rule (#1317) and the merge still binds this
+      # exact head and rechecks live main and mergeability.
+      - name: Source revision
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          fail() { echo "::error::source revision check failed: $1"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            EXPECTED_SHA=$(git rev-parse HEAD) || fail "cannot read checked-out main SHA"
+          fi
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected SHA is not a full commit id"
+          head=$(git rev-parse HEAD) || fail "cannot read HEAD"
+          test "$head" = "$EXPECTED_SHA" || fail "checked out $head, expected $EXPECTED_SHA"
+          echo "tested source HEAD: $head ($GITHUB_EVENT_NAME)"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            test "$head" != "$GITHUB_SHA" || fail "checked out the merge ref instead of the PR head"
+            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "missing PR base SHA"
+            if git merge-base --is-ancestor "$BASE_SHA" "$head"; then
+              echo "merge coverage: head contains base $BASE_SHA"
+            else
+              status=$?
+              test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
+              echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head (loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"
+            fi
+          fi
+      - name: Populate test IDs
+        if: needs.select.outputs.run != 'false' && needs.select.outputs.mode == 'mac-subset'
+        env:
+          TEST_IDS: ${{ needs.select.outputs.test_ids }}
+        run: |
+          for id in $TEST_IDS; do
+            echo "$id"
+          done > "$RUNNER_TEMP/mac-test-ids"
       - name: Set up Python 3.13
-        if: steps.full-due.outputs.run != 'false'
+        if: needs.select.outputs.run != 'false'
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: '3.13'
@@ -189,7 +220,7 @@ jobs:
       # The trusted-runtime check refuses a group/other-writable interpreter;
       # the copy is checked byte-for-byte without changing the shared Python.
       - name: Job-owned verified Python
-        if: steps.full-due.outputs.run != 'false'
+        if: needs.select.outputs.run != 'false'
         run: |
           python3 -c 'import sys; assert sys.version_info[:2] == (3, 13), sys.version'
           src_exe="$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')"
@@ -216,12 +247,12 @@ jobs:
             || fail "copy does not run from RUNNER_TEMP"
           echo "JOB_PYTHON=$exe" >> "$GITHUB_ENV"
       - name: Install llmtool
-        if: steps.full-due.outputs.run != 'false'
+        if: needs.select.outputs.run != 'false'
         run: |
           "$JOB_PYTHON" -m pip install --requirement tools/llmtool/requirements-ci.txt
           "$JOB_PYTHON" -m pip install --no-deps -e tools/llmtool
       - name: Verifier failure-path checks
-        if: steps.full-due.outputs.run != 'false' && steps.coverage.outputs.verify == 'true'
+        if: needs.select.outputs.run != 'false' && needs.select.outputs.verify == 'true'
         run: |
           "$JOB_PYTHON" -B - <<'PY'
           import os
@@ -297,8 +328,8 @@ jobs:
       # Full runs get 110 minutes and other modes 45. The 120-minute job
       # limit stays the outer stop.
       - name: Offline canonical checks
-        if: steps.full-due.outputs.run != 'false' && steps.coverage.outputs.mode != 'monitor-only' && steps.coverage.outputs.mode != 'docs-only'
-        timeout-minutes: ${{ steps.coverage.outputs.mode == 'full' && 110 || 45 }}
+        if: needs.select.outputs.run != 'false' && needs.select.outputs.mode != 'monitor-only' && needs.select.outputs.mode != 'docs-only'
+        timeout-minutes: ${{ needs.select.outputs.mode == 'full' && 110 || 45 }}
         run: |
           # Fail closed: the result stays INCOMPLETE until the last line.
           # An early exit, signal or timeout reports INCOMPLETE or FAIL.
@@ -316,7 +347,7 @@ jobs:
           }
           collect_count() { observed=$(awk '/^Ran [0-9]+ tests?/ { total += $2 } END { print total + 0 }' "$1"); test_count=$((test_count + observed)); }
           trap report_result EXIT
-          if [ "${{ steps.coverage.outputs.mode }}" = mac-subset ]; then
+          if [ "${{ needs.select.outputs.mode }}" = mac-subset ]; then
             make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
             while IFS= read -r test_id <&3; do
               output="$RUNNER_TEMP/mac-test-output"
@@ -350,7 +381,7 @@ jobs:
           fi
           result=PASS
       - name: Monitor script checks
-        if: steps.full-due.outputs.run != 'false'
+        if: needs.select.outputs.run != 'false'
         run: |
           "$JOB_PYTHON" -B -m unittest discover -s scripts
       - name: Working tree is clean

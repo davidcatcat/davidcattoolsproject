@@ -715,8 +715,8 @@ class MacTestIdSelectionTests(unittest.TestCase):
 
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml"
 CANONICAL_STEP = "Offline canonical checks"
-MODE_EXPRESSION = "${{ steps.coverage.outputs.mode }}"
-STEP_LIMIT = "${{ steps.coverage.outputs.mode == 'full' && 110 || 45 }}"
+MODE_EXPRESSION = "${{ needs.select.outputs.mode }}"
+STEP_LIMIT = "${{ needs.select.outputs.mode == 'full' && 110 || 45 }}"
 # Synthetic commit id for the fake git; not a real revision.
 SYNTHETIC_HEAD = "f" * 40
 # Shared body of the fake test commands. FAKE_STARTED makes the command
@@ -794,12 +794,38 @@ class CanonicalStepStructureTests(unittest.TestCase):
         limits = [line for line in lines if line.strip().startswith("timeout-minutes:")]
         self.assertEqual(limits, [
             "    timeout-minutes: 120",
+            "    timeout-minutes: 120",
             f"        timeout-minutes: {STEP_LIMIT}",
         ])
-        job = lines.index("  check:")
-        steps = lines.index("    steps:")
-        self.assertTrue(job < lines.index(limits[0]) < steps)
-        self.assertIn(limits[1], workflow_step(CANONICAL_STEP))
+        select_job = lines.index("  select:")
+        select_steps = lines.index("    steps:", select_job)
+        self.assertTrue(select_job < lines.index(limits[0], select_job) < select_steps)
+        check_job = lines.index("  check:")
+        check_steps = lines.index("    steps:", check_job)
+        self.assertTrue(check_job < lines.index(limits[1], check_job) < check_steps)
+        self.assertIn(limits[2], workflow_step(CANONICAL_STEP))
+
+    def test_selection_job_exists_and_check_job_needs_it(self):
+        try:
+            import yaml
+            workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+            jobs = workflow.get("jobs", {})
+            self.assertIn("select", jobs)
+            check_job = jobs.get("check", {})
+            needs = check_job.get("needs")
+            if isinstance(needs, list):
+                self.assertIn("select", needs)
+            else:
+                self.assertEqual(needs, "select")
+            check_names = [j.get("name") for j in jobs.values() if isinstance(j, dict) and j.get("name") == "check (macOS 3.13)"]
+            self.assertEqual(len(check_names), 1)
+        except ImportError:
+            pass
+        workflow_text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("  select:", workflow_text)
+        self.assertIn("  check:", workflow_text)
+        self.assertIn("needs: select", workflow_text)
+        self.assertEqual(workflow_text.count("name: check (macOS 3.13)"), 1)
 
 
 @unittest.skipUnless(os.name == "posix", "the step script runs under POSIX bash")
