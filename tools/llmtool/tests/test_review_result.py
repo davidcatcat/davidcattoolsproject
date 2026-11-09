@@ -252,3 +252,30 @@ class ReviewResultTests(unittest.TestCase):
                                        '--reviewer', 'codex-reviewer']), 17)
         self.assertEqual(handler.call_args.args[0].reviewer, 'codex-reviewer')
 
+
+class PriorityFindingTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = _store(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _findings(self, extra):
+        verdict = review_result._comment_verdict(
+            _comment('FAIL', extra=extra), head=HEAD, version=1,
+            task=self.store.get(TASK))
+        return verdict[3]
+
+    def test_plain_and_bold_priority_lines_count(self):
+        self.assertEqual(self._findings('[P0] issue\n**[P1] issue\n'), 2)
+
+    def test_priority_line_with_existing_prefix_counts_once(self):
+        self.assertEqual(self._findings('- [P0] issue\n'), 1)
+        self.assertEqual(self._findings('Finding: [P1] issue\n'), 1)
+
+    def test_mid_line_and_invalid_priority_tags_count_zero(self):
+        self.assertEqual(self._findings('issue [P0]\n[P4] issue\n[Px] issue\n'), 0)
+
+    def test_no_finding_line_counts_zero(self):
+        self.assertEqual(self._findings('no findings\n'), 0)
