@@ -714,3 +714,73 @@ def _hosted_find_run(nonce, *, get=None):
         return None
     return 'AMBIGUOUS'
 
+
+def _hosted_check_run(job, head_sha, get):
+    """Return the job's check run, or a failure code when it cannot be read."""
+    url = job.get('check_run_url')
+    match = (re.fullmatch(
+        r'https://api\.github\.com/repos/[^/\s]+/[^/\s]+/check-runs/([1-9][0-9]{0,18})',
+        url) if type(url) is str else None)
+    if match is None:
+        return 'HOSTED_RUNNER_UNTRUSTED'
+    check_id = int(match.group(1))
+    try:
+        listing = get(f'commits/{head_sha}/check-runs?per_page=100')
+    except Exception:
+        listing = None
+    checks = listing.get('check_runs') if isinstance(listing, dict) else None
+    if isinstance(checks, list):
+        matching = [item for item in checks
+                    if isinstance(item, dict) and item.get('id') == check_id]
+        if len(matching) != 1:
+            return 'HOSTED_RUNNER_UNTRUSTED'
+        return matching[0]
+    # Fall back to the job's direct check-run URL when the listing cannot
+    # supply the check run this job points at.
+    try:
+        check = get(f'check-runs/{check_id}')
+    except Exception:
+        return 'UNREADABLE'
+    if not isinstance(check, dict) or 'app' not in check or 'head_sha' not in check:
+        return 'HOSTED_RUNNER_UNTRUSTED'
+    return check
+
+
+def _hosted_job(run, *, get=None):
+    """Return one remote-test job, or a failure code for an unmatched run."""
+    if get is None:
+        get = _github_get
+    if (type(run) is not dict or type(run.get('id')) is not int or
+            run['id'] <= 0 or type(run.get('head_sha')) is not str or
+            not _SHA.fullmatch(run['head_sha'])):
+        return 'UNREADABLE'
+    try:
+        data = get(f'actions/runs/{run["id"]}/jobs?per_page=100')
+    except Exception:
+        return 'UNREADABLE'
+    if not isinstance(data, dict):
+        return 'UNREADABLE'
+    jobs = data.get('jobs')
+    if not isinstance(jobs, list) or any(not isinstance(job, dict) for job in jobs):
+        return 'UNREADABLE'
+    matching = [job for job in jobs if job.get('name') == _HOSTED_JOB_NAME]
+    if len(matching) != 1:
+        return 'HOSTED_JOB_MISSING'
+    job = matching[0]
+    status = job.get('status')
+    if status != 'completed':
+        if status in ('queued', 'in_progress'):
+            return job
+        return 'HOSTED_RUNNER_UNTRUSTED'
+    if (job.get('labels') != list(_HOSTED_LABELS) or
+            job.get('runner_group_name') != _HOSTED_RUNNER_GROUP):
+        return 'HOSTED_RUNNER_UNTRUSTED'
+    check = _hosted_check_run(job, run['head_sha'], get)
+    if not isinstance(check, dict):
+        return check
+    app = check.get('app')
+    if (check.get('head_sha') != run['head_sha'] or
+            not isinstance(app, dict) or app.get('id') != _HOSTED_APP_ID):
+        return 'HOSTED_RUNNER_UNTRUSTED'
+    return job
+
