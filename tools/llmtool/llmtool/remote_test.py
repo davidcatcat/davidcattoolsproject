@@ -420,7 +420,8 @@ def _fresh_pr_head(pr):
 
 
 def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
-                    store=None, config_path=None, transport=None):
+                    store=None, config_path=None, transport=None,
+                    hosted=False, get=None, post=None, get_bytes=None, now=None):
     """Run one SSH session after local Task, D6, module and config admission."""
     store = TaskStore() if store is None else store
     try:
@@ -499,6 +500,10 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     if (not selected or len(selected) > _MAX_REMOTE_MODULES or
             any(type(x) is not str or not _MODULE.fullmatch(x) or x not in admitted for x in selected)):
         return denied('MODULE_NOT_ADMITTED')
+    if hosted:
+        return _run_hosted(store, task_id, task, executor_task=executor_task,
+                           sha=sha, ref=ref, modules=selected,
+                           get=get, post=post, get_bytes=get_bytes, now=now)
     try:
         config = _config(config_path)
     except LLMToolError:

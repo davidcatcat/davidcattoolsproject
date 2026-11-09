@@ -916,7 +916,7 @@ def add_task_submission_parsers(actions):
     repair.add_argument('--auto-review', action='store_true',
                         help='dispatch the next formal review after a successful repair')
     remote_test = actions.add_parser(
-        'remote-test', help='Run admitted Task tests once on the configured EC2 host')
+        'remote-test', help='Run admitted Task tests once on EC2 unless --hosted is given')
     remote_test.add_argument('task_id', help='existing durable Task ID')
     remote_test.add_argument('--executor-task', required=True, help='registered D6 Executor task')
     remote_test.add_argument('--sha', required=True, help='40-character registered D6 result SHA')
@@ -924,6 +924,8 @@ def add_task_submission_parsers(actions):
     remote_test.add_argument('--module', action='append', default=[],
                              help='admitted test module; repeat to select more than one')
     remote_test.add_argument('--pr', type=int, help='PR whose recorded head is the expected SHA')
+    remote_test.add_argument('--hosted', action='store_true',
+                             help='run on the GitHub-hosted workflow instead of EC2')
 
 
 def run_task_status(args, *, store=None, stdout=None):
@@ -996,7 +998,7 @@ def run_task_remote_test(args, *, store=None, stdout=None):
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,
                              sha=args.sha, ref=args.ref, modules=args.module,
-                             pr=args.pr, store=store)
+                             pr=args.pr, store=store, hosted=args.hosted)
     return _print(result, stdout)
 
 
