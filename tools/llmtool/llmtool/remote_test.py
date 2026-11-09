@@ -1123,3 +1123,97 @@ def _hosted_outcome(run, job, raw, *, sha, modules):
         return ('OUTCOME', 'UNKNOWN', 'RECEIPT_CONFLICT')
 
     return ('OUTCOME', 'UNKNOWN', 'HOSTED_RUN_UNKNOWN')
+
+
+def _as_utc_datetime(val):
+    if callable(val):
+        val = val()
+    if val is None:
+        return datetime.now(timezone.utc)
+    if isinstance(val, datetime):
+        if val.tzinfo is None:
+            return val.replace(tzinfo=timezone.utc)
+        return val.astimezone(timezone.utc)
+    if isinstance(val, (int, float)):
+        return datetime.fromtimestamp(val, tz=timezone.utc)
+    if isinstance(val, str):
+        iso = val.replace('Z', '+00:00')
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    raise TypeError(f'Unsupported now parameter: {val!r}')
+
+
+def _parse_dispatched_at(val):
+    iso = val.replace('Z', '+00:00')
+    dt = datetime.fromisoformat(iso)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _hosted_start(store, task_id, task, *, executor_task, sha, ref, modules,
+                  get=None, post=None, now=None):
+    """Start or advance one admitted hosted remote test dispatch step."""
+    now_dt = _as_utc_datetime(now)
+    modules_list = list(modules)
+
+    entry = None
+    dispatches = task.get('remote_test_dispatches')
+    if isinstance(dispatches, list):
+        for item in dispatches:
+            if (isinstance(item, dict) and
+                    item.get('executor_task') == executor_task and
+                    item.get('sha') == sha and
+                    item.get('modules') == modules_list and
+                    item.get('state') in ('DISPATCHED', 'RUN_FOUND')):
+                entry = item
+                break
+
+    if entry is not None:
+        nonce = entry['nonce']
+    else:
+        nonce = _new_nonce()
+        dispatched_at = now_dt.replace(microsecond=0).strftime('%Y-%m-%dT%H:%M:%SZ')
+        candidate = {
+            'nonce': nonce,
+            'sha': sha,
+            'executor_task': executor_task,
+            'modules': modules_list,
+            'dispatched_at': dispatched_at,
+            'run_id': None,
+            'state': 'DISPATCHED',
+        }
+        entry = store.append_remote_test_dispatch(task_id, candidate)
+        if 'remote_test_dispatches' in task:
+            task['remote_test_dispatches'].append(entry)
+        else:
+            task['remote_test_dispatches'] = [entry]
+
+        dispatch_status = _hosted_dispatch(sha, ref, modules_list, nonce, post=post)
+        if dispatch_status == 'UNCONFIRMED':
+            return ('OUTCOME', 'UNAVAILABLE', 'HOSTED_DISPATCH_UNCONFIRMED', nonce)
+
+    run = _hosted_find_run(nonce, get=get)
+    if run == 'AMBIGUOUS':
+        return ('OUTCOME', 'UNKNOWN', 'HOSTED_RUN_AMBIGUOUS', nonce)
+    if run == 'UNREADABLE':
+        return ('OUTCOME', 'UNAVAILABLE', 'HOSTED_PENDING', nonce)
+    if run is None:
+        dispatched_dt = _parse_dispatched_at(entry['dispatched_at'])
+        if (now_dt - dispatched_dt).total_seconds() < 1800:
+            return ('OUTCOME', 'UNAVAILABLE', 'HOSTED_PENDING', nonce)
+        store.update_remote_test_dispatch(task_id, nonce, state='ABANDONED')
+        entry['state'] = 'ABANDONED'
+        return ('OUTCOME', 'UNAVAILABLE', 'HOSTED_DISPATCH_UNCONFIRMED', nonce)
+    if isinstance(run, dict):
+        if entry.get('state') == 'DISPATCHED':
+            run_id = int(run['id'])
+            store.update_remote_test_dispatch(task_id, nonce, state='RUN_FOUND', run_id=run_id)
+            entry['state'] = 'RUN_FOUND'
+            entry['run_id'] = run_id
+        return ('RUN', run, nonce)
+
+    return ('OUTCOME', 'UNAVAILABLE', 'HOSTED_PENDING', nonce)
+
