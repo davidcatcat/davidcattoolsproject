@@ -626,6 +626,82 @@ class TaskStoreTests(unittest.TestCase):
                         expected={'record_sha256': initial['record_sha256']},
                         review_dispatch_claim=[claim])
 
+    def _claimed_review_task(self):
+        """Create a task holding one CLAIMED review claim; return task and claim."""
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        claimed = {
+            'executor_task': 'executor-d6', 'pr': 42,
+            'head_sha': 'a' * 40, 'version': 1, 'state': 'CLAIMED',
+            'reviewer_task': 'reviewer-d6', 'native_session_id': None,
+            'account_mode': 'CODEX_CLI',
+            'claimed_at': '2026-10-27T00:00:00Z',
+            'updated_at': '2026-10-27T00:00:00Z',
+        }
+        initial = self.store.get(task['task_id'])
+        self.store.compare_and_update(
+            task['task_id'], expected={'record_sha256': initial['record_sha256']},
+            review_dispatch_claim=[claimed])
+        return task, claimed
+
+    def test_binding_mismatch_keys_are_stored_on_an_unknown_mismatch_claim(self):
+        for keys in (['head'], ['task_id'], ['run_id'], ['task_id', 'run_id', 'head'],
+                     ['head', 'task_id']):
+            with self.subTest(keys=keys):
+                task, claimed = self._claimed_review_task()
+                current = self.store.get(task['task_id'])
+                unknown = dict(claimed, state='UNKNOWN',
+                               updated_at='2026-10-27T00:01:00Z',
+                               failure_reason='VERDICT_BINDING_MISMATCH',
+                               binding_mismatch_keys=keys)
+                self.store.compare_and_update(
+                    task['task_id'], expected={'record_sha256': current['record_sha256']},
+                    review_dispatch_claim=[unknown])
+                self.assertEqual(
+                    self.store.get(task['task_id'])['review_dispatch_claim'], [unknown])
+
+    def test_binding_mismatch_keys_are_refused_outside_their_one_allowed_shape(self):
+        mismatch = {'failure_reason': 'VERDICT_BINDING_MISMATCH'}
+        cases = {
+            'empty list': dict(mismatch, binding_mismatch_keys=[]),
+            'repeated key': dict(mismatch, binding_mismatch_keys=['head', 'head']),
+            'unknown key': dict(mismatch, binding_mismatch_keys=['contract_digest']),
+            'value not name': dict(mismatch, binding_mismatch_keys=['e' * 40]),
+            'tuple': dict(mismatch, binding_mismatch_keys=('head',)),
+            'string': dict(mismatch, binding_mismatch_keys='head'),
+            'non-string item': dict(mismatch, binding_mismatch_keys=[1]),
+            'other reason': {'failure_reason': 'REVIEW_BINDING_LINE_MISSING',
+                             'binding_mismatch_keys': ['head']},
+            'no reason': {'binding_mismatch_keys': ['head']},
+        }
+        for name, extra in cases.items():
+            with self.subTest(case=name):
+                task, claimed = self._claimed_review_task()
+                current = self.store.get(task['task_id'])
+                unknown = dict(claimed, state='UNKNOWN',
+                               updated_at='2026-10-27T00:01:00Z', **extra)
+                with self.assertRaises(LLMToolError) as raised:
+                    self.store.compare_and_update(
+                        task['task_id'],
+                        expected={'record_sha256': current['record_sha256']},
+                        review_dispatch_claim=[unknown])
+                self.assertEqual(getattr(raised.exception, 'task_store_error_code', None),
+                                 'REVIEW_DISPATCH_CLAIM_INVALID')
+                self.assertEqual(
+                    self.store.get(task['task_id'])['review_dispatch_claim'], [claimed])
+        # Only an UNKNOWN claim may carry the field, even with the mismatch reason.
+        task, claimed = self._claimed_review_task()
+        current = self.store.get(task['task_id'])
+        dispatched = dict(claimed, state='DISPATCHED', native_session_id='native-1',
+                          failure_reason='VERDICT_BINDING_MISMATCH',
+                          binding_mismatch_keys=['head'])
+        with self.assertRaises(LLMToolError) as raised:
+            self.store.compare_and_update(
+                task['task_id'], expected={'record_sha256': current['record_sha256']},
+                review_dispatch_claim=[dispatched])
+        self.assertEqual(getattr(raised.exception, 'task_store_error_code', None),
+                         'REVIEW_DISPATCH_CLAIM_INVALID')
+
     def _claude_result_task(self, pm_session_id=None):
         task = self._codex_dispatch_task()
         if pm_session_id is not None:
