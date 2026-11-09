@@ -1292,6 +1292,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                 parsed = claude_route.parse_output(result.stdout, result.stderr, '')
             except Exception:
                 parsed = None
+            if type(parsed) is dict and type(parsed.get('raw')) is dict:
+                usage = _claude_usage(parsed['raw'].get('usage'))
             if claude_route.quota_exhausted(parsed or {}, result.stderr):
                 raise _AttemptFailed('HIGH_DEBUG_QUOTA_EXHAUSTED')
             if result.returncode != 0 or parsed is None or parsed.get('status') != 'DONE':

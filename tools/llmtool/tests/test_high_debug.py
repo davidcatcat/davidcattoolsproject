@@ -1616,12 +1616,12 @@ class HighDebugTests(unittest.TestCase):
     def _run_claude_case(self, report, *, runner=None,
                          account='reviewer-account', config_dir='/safe/claude',
                          source='roles', evaluate_allowed=True,
-                         created_agent_id=None):
+                         created_agent_id=None, store=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         subprocess.run(['git', 'init', '-q', str(root)], check=True)
-        store = _Store()
+        store = store if store is not None else _Store()
         registration = SimpleNamespace(result_sha='a' * 40, root=str(root),
                                        common_dir=str(root / '.git'))
         def default_runner(*, prompt, cwd, output_path):
@@ -1683,11 +1683,12 @@ class HighDebugTests(unittest.TestCase):
         report += 'RCA_CONFIRMED'
         runner = lambda *, prompt, cwd, output_path: self._claude_completed(
             report, model='claude-sonnet-4-4')
+        store = _Store()
         with self.assertRaises(LLMToolError) as caught:
-            self._run_claude_case(report, runner=runner)
+            self._run_claude_case(report, runner=runner, store=store)
         self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_MODEL_UNVERIFIED')
         self._poster.assert_called_once()
-        entry = self._poster.call_args.args[0]
+        entry = store.entries[0]
         self.assertEqual(entry['status'], 'RUN_FAILED')
         self.assertEqual(entry['report'], 'HIGH_DEBUG_MODEL_UNVERIFIED')
         self.assertEqual(entry['model_observed'], 'claude-sonnet-4-4')
@@ -1700,11 +1701,12 @@ class HighDebugTests(unittest.TestCase):
         runner = lambda *, prompt, cwd, output_path: self._claude_completed(
             '', is_error=True, subtype='error', returncode=1,
             api_error_status=429, stderr=b'usage limit exceeded\n')
+        store = _Store()
         with self.assertRaises(LLMToolError) as caught:
-            self._run_claude_case('', runner=runner)
+            self._run_claude_case('', runner=runner, store=store)
         self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_QUOTA_EXHAUSTED')
         self._poster.assert_called_once()
-        entry = self._poster.call_args.args[0]
+        entry = store.entries[0]
         self.assertEqual(entry['status'], 'RUN_FAILED')
         self.assertEqual(entry['report'], 'HIGH_DEBUG_QUOTA_EXHAUSTED')
         self.assertEqual(entry['model_requested'], 'claude-opus-5-5')
