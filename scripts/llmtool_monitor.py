@@ -1096,6 +1096,7 @@ class Monitor:
         self.one_shot, finished, ended = track_one_shot(self.one_shot, result.processes, time.time())
         if self.github is not None:
             self.github.want_ci = any(p.role == "Actions runner" for p in result.processes)
+            self.github.want_hosted_ci = True
         new += [(stamp, "i", text) for text in ended]
         if time.monotonic() >= self.office_due:
             # Session scans, tails, sqlite and AGY lookups are the costly part of a
@@ -2008,7 +2009,7 @@ class GitHubSource:
     """Rate-limited, read-only GitHub activity. Failures become a status line."""
 
     def __init__(self, repo: str, window_hours: float = 12.0, runner=None, clock=time.time,
-                 direct: bool = False) -> None:
+                 direct: bool = False, want_hosted_ci: bool = False) -> None:
         if not GITHUB_REPO.fullmatch(repo or ""):
             raise ValueError("--github expects OWNER/REPO")
         self.repo, self.window = repo, window_hours * 3600
@@ -2051,6 +2052,7 @@ class GitHubSource:
         # on the next one.
         self.pr_checks: dict | None = None
         self.want_ci = False   # set while a self-hosted runner is on this Mac
+        self.want_hosted_ci = want_hosted_ci
         self.want_main = False
         self.main_health: MainHealth | None = None
         self.main_error = ""
@@ -2510,7 +2512,7 @@ class GitHubSource:
         else:
             view = replace(view, runners=runners, seen_at=self.clock(), error="")
         self.ci_view = view   # the runners show now; their jobs follow below
-        if self.want_ci or view.runners:
+        if self.want_hosted_ci or self.want_ci or view.runners:
             stamps: dict = {}   # run id -> updated_at from the runs list
             read: dict = {}     # run id -> job list read during this refresh
 
@@ -2529,6 +2531,8 @@ class GitHubSource:
                 return found
             try:
                 payload = self._get(f"repos/{self.repo}/actions/runs?per_page=30")
+                if type(payload) is not dict:
+                    raise ValueError("actions runs")
                 self.ci_heads = ci_head_runs(payload)
                 stamps = {run.get("id"): str(run.get("updated_at") or "")
                           for run in (payload.get("workflow_runs") if type(payload) is dict else None) or []
@@ -2551,6 +2555,9 @@ class GitHubSource:
                     if end and end > last.get(runner, ("", "", 0.0))[2]:
                         last[runner] = (text, result, end)
             view = replace(view, finished=last, queued=tuple(queued))
+        else:
+            self.ci_runs = None
+            self.ci_heads = None
         self.ci_view = view
 
 
@@ -8677,6 +8684,7 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     mon = Monitor()
     mon.agents = ClaudeAgents(background=False)   # a single poll: ask before it, not after
     if github is not None:
+        github.want_hosted_ci = True
         github.refresh()   # before the poll, so the D6 list can see PR states
         mon.github = github
     mon.poll()
@@ -8995,6 +9003,7 @@ def main(argv: list[str] | None = None) -> int:
                                                        direct=not (args.once or args.gh_cli))
     if github is not None:
         github.want_main = True
+        github.want_hosted_ci = True
     if args.once:
         return run_once(github)
     mon = Monitor(min_age=max(0.0, args.min_age), show_all=args.all)

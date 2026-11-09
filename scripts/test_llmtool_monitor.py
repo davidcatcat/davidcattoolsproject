@@ -2110,9 +2110,13 @@ class GitHubActivityTests(unittest.TestCase):
              patch.object(mon.time, "time", return_value=NOW), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
             self.assertEqual(mon.main(["--once", "--github"]), 0)
-        self.assertEqual(len(run.calls), 4)
+        self.assertEqual(len(run.calls), 5)
         self.assertTrue(all(argv[1:4] == ["api", "-X", "GET"] for argv, _ in run.calls))
         self.assertTrue(all(mon.DEFAULT_GITHUB_REPO in argv[4] for argv, _ in run.calls))
+        runs_calls = [argv for argv, _ in run.calls
+                      if f"repos/{mon.DEFAULT_GITHUB_REPO}/actions/runs" in argv[4]]
+        self.assertEqual(len(runs_calls), 1)
+        self.assertEqual(runs_calls[0][1:4], ["api", "-X", "GET"])
         self.assertIn("GitHub #4：新留言 — hello", out.getvalue())
 
     def test_developer_status_markers_are_finite_and_self_reported(self):
