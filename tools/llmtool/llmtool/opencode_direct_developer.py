@@ -74,6 +74,7 @@ class DirectOpenCodeError(LLMToolError):
         self.started_at = started_at
         self.ended_at = ended_at
         self.native_session_id = native_session_id
+        self.event_summary = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,7 @@ class DirectResult:
     run_id: str | None = None
     started_at: str | None = None
     ended_at: str | None = None
+    event_summary: dict | None = None
 
 
 def _reject(code):
@@ -594,6 +596,65 @@ def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
     return sid, output_text or None, usage
 
 
+def summarize_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
+    """Return a bounded integer summary of the valid JSON event prefix."""
+    try:
+        step_limit_value = _validate_steps(step_limit)
+    except Exception:
+        step_limit_value = DEFAULT_AGENT_STEPS
+    if type(raw) is not bytes:
+        events = []
+    else:
+        try:
+            events, _ = _json_event_prefix(raw)
+        except Exception:
+            events = []
+    event_counts = {}
+    step_finishes = 0
+    text_chars = 0
+    tool_use_count = 0
+    edit_tool_uses = 0
+    edited_files = set()
+    for event in events:
+        event_type = event.get('type') if type(event) is dict else None
+        if event_type == 'step_start':
+            event_counts['step_start'] = event_counts.get('step_start', 0) + 1
+        elif event_type == 'step_finish':
+            event_counts['step_finish'] = event_counts.get('step_finish', 0) + 1
+            step_finishes += 1
+        elif event_type == 'text':
+            event_counts['text'] = event_counts.get('text', 0) + 1
+            part = event.get('part')
+            value = part.get('text') if type(part) is dict else event.get('text')
+            if type(value) is str:
+                text_chars += len(value)
+        elif event_type == 'tool_use':
+            event_counts['tool_use'] = event_counts.get('tool_use', 0) + 1
+            tool_use_count += 1
+            part = event.get('part')
+            tool = part.get('tool') if type(part) is dict else None
+            if tool in ('edit', 'write', 'patch'):
+                edit_tool_uses += 1
+                state = part.get('state') if type(part) is dict else None
+                input_state = state.get('input') if type(state) is dict else None
+                file_path = input_state.get('filePath') if type(input_state) is dict else None
+                if type(file_path) is str:
+                    edited_files.add(file_path)
+        elif event_type == 'error':
+            event_counts['error'] = event_counts.get('error', 0) + 1
+        else:
+            event_counts['other'] = event_counts.get('other', 0) + 1
+    return {
+        'event_counts': {key: count for key, count in event_counts.items() if count},
+        'step_finishes': step_finishes,
+        'step_limit': step_limit_value,
+        'text_chars': text_chars,
+        'tool_use_count': tool_use_count,
+        'edit_tool_uses': edit_tool_uses,
+        'edited_file_count': len(edited_files),
+    }
+
+
 def _version(executable):
     started = time.monotonic()
     deadline = started + VERSION_TIMEOUT_SECONDS
@@ -883,6 +944,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         exc.cleanup_status = cleanup
         exc.process_exit_code = process.returncode
         exc.stdout_sha256 = hashlib.sha256(raw).hexdigest()
+        exc.event_summary = summarize_events(raw, step_limit=steps)
         exc.elapsed_ms = elapsed
         exc.source_bytes = source_bytes
         exc.source_file_count = source_file_count
@@ -897,4 +959,5 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                         'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                         hashlib.sha256(raw).hexdigest(), elapsed, cleanup, version,
                         source_bytes, source_file_count, source_manifest_sha256,
-                        dispatch_task_id, run_id, started_at, ended_at)
+                        dispatch_task_id, run_id, started_at, ended_at,
+                        event_summary=summarize_events(raw, step_limit=steps))
