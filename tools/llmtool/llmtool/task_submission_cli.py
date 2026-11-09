@@ -4121,6 +4121,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
 
 def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     """Run the company Gw Agent Gateway route against its registered D6 task."""
+    from . import gw_agent_sessions
+    gw_agent_sessions.sweep_quietly(store)
     if getattr(args, 'mode', None) != 'direct':
         raise LLMToolError('--provider gw-agent requires --mode direct')
     if getattr(args, 'context_stdin', False):
