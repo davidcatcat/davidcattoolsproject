@@ -6490,8 +6490,6 @@ class CompletionAttributedPathsStoreTests(unittest.TestCase):
                           wraps=real_collector) as collect, \
              patch.object(task_completion, 'run_bounded_tests',
                           wraps=real_tests) as tests, \
-             patch('llmtool.task_submission_cli._remote_test_config_state',
-                   return_value='MISSING'), \
              patch('llmtool.task_submission_cli.resolve_profile_config',
                    side_effect=AssertionError('unexpected provider')) as resolve, \
              patch.object(task_completion, 'collect_github_evidence',
