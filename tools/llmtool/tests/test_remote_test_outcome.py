@@ -332,6 +332,14 @@ class HostedOutcomeMappingTests(unittest.TestCase):
                     remote_test._hosted_outcome(run, job, self.pass_raw, sha=_SHA, modules=_MODULES),
                     ('OUTCOME', 'UNKNOWN', expected_code),
                 )
+            with self.subTest(job_conclusion=c):
+                run = {'status': 'completed', 'conclusion': 'failure'}
+                job = {'status': 'completed', 'conclusion': c, 'labels': list(remote_test._HOSTED_LABELS), 'runner_group_name': remote_test._HOSTED_RUNNER_GROUP}
+                expected_code = f'HOSTED_RUN_{c.upper()}'
+                self.assertEqual(
+                    remote_test._hosted_outcome(run, job, self.pass_raw, sha=_SHA, modules=_MODULES),
+                    ('OUTCOME', 'UNKNOWN', expected_code),
+                )
 
     def test_missing_or_invalid_artifact_yields_receipt_invalid(self):
         valid_job = {'status': 'completed', 'conclusion': 'success', 'labels': list(remote_test._HOSTED_LABELS), 'runner_group_name': remote_test._HOSTED_RUNNER_GROUP}
