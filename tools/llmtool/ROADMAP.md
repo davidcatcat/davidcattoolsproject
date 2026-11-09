@@ -12,7 +12,7 @@ Current collaboration and execution authority is in [AGENTS.md](../../AGENTS.md)
 | P1 — Failure Usage Preservation | DONE and merged. | [PR #39](https://github.com/davidcatcat/davidcattoolsproject/pull/39) |
 | A11b — Execution, Approval & Recovery | IN PROGRESS; F2 general user-repository mutation is NOT AUTHORIZED, except `task advance` in this repository under Owner S4 (#1019). | [PR #32](https://github.com/davidcatcat/davidcattoolsproject/pull/32), [PR #43](https://github.com/davidcatcat/davidcattoolsproject/pull/43), [PR #49](https://github.com/davidcatcat/davidcattoolsproject/pull/49), [PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84), [issue #97](https://github.com/davidcatcat/davidcattoolsproject/issues/97) |
 | A11c — Integration & Real-world Acceptance | IN PROGRESS; M1b real-task adoption and full M2 are NOT_VERIFIED; T1 is HOLD_REPRIORITIZE. | [PR #128](https://github.com/davidcatcat/davidcattoolsproject/pull/128), [PR #129](https://github.com/davidcatcat/davidcattoolsproject/pull/129), [PR #131](https://github.com/davidcatcat/davidcattoolsproject/pull/131), [PR #133](https://github.com/davidcatcat/davidcattoolsproject/pull/133), [issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120) |
-| A12 — Remote Frontends / Telegram Agent | FUTURE OPTIONAL. v1 design (read-only status, notifications, approve/reject only via the A11b.3 `REMOTE_OWNER` issuer; remote-approvable classes empty by default) posted on [#120](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6552977888). | [issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120) |
+| A12 — Remote Frontends / Telegram Agent | FUTURE OPTIONAL. v1 design (read-only status, notifications, approve/reject only via the A11b.3 `REMOTE_OWNER` issuer; remote-approvable classes empty by default) posted on [#120](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6552977888). WP5 Phase B work-package authorization and #1234 account isolation are IN PROGRESS offline; the formal Owner authorization channel stays OFF, see [WP5 Phase B](#a12-wp5-phase-b-and-1234-account-isolation). | [issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120) |
 | A13 — Distribution, Installation & Updates | **OWNER-DIRECTED DESIGN (2026-11-01); implementation by PM dispatch.** Private wheel-only distribution to other users first (D1, D9); open source later via a clean-history repo (D5). Each installation's user is its own Owner (D3). POSIX only (D4). Design specs posted; no implementation started. See [A13 — Private distribution](#a13--private-distribution-owner-decisions-2026-11-01-396-d1d14). | [issue #396](https://github.com/davidcatcat/davidcattoolsproject/issues/396) (decisions D1–D14), trust root [#369](https://github.com/davidcatcat/davidcattoolsproject/issues/369) |
 
 ## Next steps
@@ -77,6 +77,27 @@ Owner order puts A12.1 Telegram after the Mac CLI and before the A12.2 local Web
 The cursor follows the same private state-file rules as the WP5 GitHubSync poll ledger (#1144); a shared helper can follow once both merge.
 
 Gap analysis and open Owner questions: [#1160 comment](https://github.com/davidcatcat/davidcattoolsproject/issues/1160#issuecomment-6705724171).
+
+## A12 WP5 Phase B and #1234 account isolation
+
+Owner decisions on #1144, relayed verbatim in [c6744205705](https://github.com/davidcatcat/davidcattoolsproject/issues/1144#issuecomment-6744205705); design [#1350](../../docs/design/a12-wp5-phase-b-workpackage-authorization-1144.md); Task plan [c6744333732](https://github.com/davidcatcat/davidcattoolsproject/issues/1144#issuecomment-6744333732).
+
+- GitHub Environment Approval is the main approval source; until #1234 isolation acceptance it is test and accident protection only.
+- The Owner approves a work package once; Tasks, repairs, redo PRs, tests and merges inside its scope need no new approval.
+- Defaults: run_cap 5 Developer runs and repairs, expiry 7 days, cost cap equal to the existing budget; the PM never raises them.
+- No valid authorization means WAITING_OWNER.
+- No second PM, scheduler, TaskStore or authorization system.
+- A11c and other authorized work do not wait for Phase B.
+
+| Step | Part | Status |
+| --- | --- | --- |
+| 1 | #1234 account and credential isolation: boundary audit design, minimal Owner steps, isolation acceptance | In progress |
+| 2 | B0 GitHub Environment Approval PoC: design, then a test-only workflow after the Owner creates the protected environment and AI posts as ddavidccatssun | Planned |
+| 3 | B1 work-package authorization record, validator and approval checker (offline) | Planned |
+| 4 | B2 store, inheritance (#1329), revocation and run_cap counting (offline) | Planned |
+| 5 | B3 live ChatGPT to GitHub to llmtool Core to PM to Developer to Reviewer to CI acceptance | After step 1 acceptance |
+
+The formal Owner authorization channel stays OFF until #1234 isolation acceptance passes.
 
 ## Future backlog — TUI attachments (DEFERRED, Owner 2026-11-03)
 

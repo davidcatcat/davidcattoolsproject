@@ -15,6 +15,7 @@ _VERDICT_VERSION_HEAD = re.compile(
 _CODEX_BINDING = re.compile(
     r'LLMTOOL-REVIEW-BINDING v1 task=([0-9a-f]{32}) run=([0-9a-f]{32}) '
     r'contract=([0-9a-f]{64}) head=([0-9a-f]{40})\Z')
+_PRIORITY_FINDING = re.compile(r'^(?:\*\*)?\[P[0-3]\]')
 
 
 def _refuse(code):
@@ -105,7 +106,8 @@ def _comment_verdict(comment, *, head, version, task):
         outcome = 'REVIEW_FAIL'
     findings = sum(1 for line in lines[2:]
                    if line.lstrip().startswith(('-', '*')) or
-                   re.match(r'(?i)^finding\b', line.strip()))
+                   re.match(r'(?i)^finding\b', line.strip()) or
+                   _PRIORITY_FINDING.match(line.strip()))
     return (updated_at, comment_id, outcome, findings)
 
 

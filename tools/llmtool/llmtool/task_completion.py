@@ -44,7 +44,7 @@ _GIT_LIMIT = 2 * 1024 * 1024
 _PROPOSAL_FILE_LIMIT = 128
 _PROPOSAL_TREE_LIMIT = 8 * 1024 * 1024
 _TIMEOUT = 10
-_TEST_TIMEOUT = 180
+_TEST_TIMEOUT = 300  # seconds; the gw-agent wiring module needs about 220-240 s on the Mac
 _TEST_OUTPUT_LIMIT = 256 * 1024
 # Legacy CI values, kept only for ``llmtool trust verify-legacy`` until #369
 # PR-10. The completion gate reads ``ci_trust`` from trust.json at use time
@@ -86,6 +86,8 @@ _FORMAL_ACCEPT = 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT'
 _REVIEW_VERDICT_ACTIVITY_LINE = '<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->'
 _GITHUB_API_PATH = re.compile(
     r'(?!/)(?!.*(?:^|/)\.\.(?:/|$))(?:compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}|'
+    r'issues/[0-9]{1,7}/comments\?per_page=[0-9]{1,3}&page=[0-9]{1,3}'
+    r'&since=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z|'
     r'(?!compare/)[A-Za-z0-9_./?=&-]{1,256})\Z')
 
 
@@ -1817,20 +1819,6 @@ def _docs_only_ci(paths):
     return True
 
 
-# The trusted workflow whose code check a scripts/-only change does not run.
-_SCRIPTS_ONLY_SKIPPED_CODE_CHECK = 'check (Linux 3.14)'
-
-
-def _scripts_only_ci(paths):
-    """Return whether every changed path is under scripts/ (not docs-only).
-
-    Same rule as task_advance._scripts_only_ci: such a change runs no Linux job.
-    """
-    return (type(paths) is list and bool(paths) and
-            all(type(path) is str and path.startswith('scripts/') for path in paths) and
-            not _docs_only_ci(paths))
-
-
 def _committed_changed_paths(root, source_sha, result_sha):
     """Read all paths changed between the task source and exact result."""
     raw = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv',
@@ -2384,19 +2372,14 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
     Code path: every ci_trust workflow with a ``code_check`` must succeed and
     the first such workflow is primary; the docs-only path does the same with
     ``docs_check``. With the Owner's values this is the Mac + Linux code gate
-    and the Linux ``check (docs)`` docs gate. A scripts/-only change runs no
-    Linux job (as in task advance), so its code path leaves out the workflow
-    whose code check is ``check (Linux 3.14)`` and requires the Mac check only.
+    and the Linux ``check (docs)`` docs gate.
     """
     ci_trust = _ci_trust()
     docs_only = _docs_only_ci(changed_paths)
-    scripts_only = _scripts_only_ci(changed_paths)
-    linux_required = not scripts_only
+    linux_required = True
     field = 'docs_check' if docs_only else 'code_check'
     selected = [workflow for workflow in ci_trust['workflows']
-                if workflow[field] is not None and
-                not (scripts_only and field == 'code_check' and
-                     workflow['code_check'] == _SCRIPTS_ONLY_SKIPPED_CODE_CHECK)]
+                if workflow[field] is not None]
     if not selected:
         _stop('TRUST_CI_INVALID')
     results = []
@@ -2475,16 +2458,12 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
             'workflow_name': primary_workflow['name']}
 
 
-def _not_run_checks(docs_only, scripts_only=False):
+def _not_run_checks(docs_only):
     """Display-only NOT_RUN names: ci_trust not_run_checks, plus skipped code checks."""
     ci_trust = _ci_trust()
     base = tuple(ci_trust['not_run_checks'])
     skipped = tuple(workflow['code_check'] for workflow in ci_trust['workflows']
                     if docs_only and workflow['code_check'] is not None)
-    if scripts_only and not docs_only:
-        skipped = tuple(workflow['code_check'] for workflow in ci_trust['workflows']
-                        if workflow['code_check'] == _SCRIPTS_ONLY_SKIPPED_CODE_CHECK and
-                        workflow['code_check'] not in base)
     return base + skipped
 
 
@@ -2813,8 +2792,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             'required_checks': sorted(required_checks),
             'successful_checks': sorted(successful), 'ci_head_sha': result_sha,
             'not_run_checks': [{'name': name, 'status': 'NOT_RUN'}
-                               for name in _not_run_checks(
-                                   ci['docs_only'], _scripts_only_ci(changed_paths))],
+                               for name in _not_run_checks(ci['docs_only'])],
             'ci_workflow_path': ci['workflow_path'],
             'ci_workflow_name': ci['workflow_name'],
             'ci_workflow_id': ci['workflow_id'], 'ci_run_id': ci['run_id'],

@@ -236,16 +236,26 @@ class EligibleMemberTests(_Base):
                             FILES: [{'filename': 'docs/guide.md'}]})
         self.assertRefused(self.check(routes=routes), 'MERGE_REQUIRED_CHECK_MISSING')
 
-    def test_scripts_only_member_needs_macos_not_linux(self):
-        routes = _routes(**{CHECKS: _checks(_run(77, MACOS)),
+    def test_scripts_only_member_needs_linux_and_macos(self):
+        routes = _routes(**{CHECKS: _checks(_run(101, LINUX), _run(77, MACOS)),
                             FILES: [{'filename': 'scripts/tool.sh'}]})
         result = self.check(routes=routes)
         self.assertTrue(result['eligible'], result)
-        self.assertIsNone(result['member']['linux_check_run_id'])
+        self.assertEqual(result['member']['linux_check_run_id'], 101)
         self.assertEqual(result['member']['macos_check_run_id'], 77)
 
+    def test_scripts_only_member_without_linux_refuses(self):
+        routes = _routes(**{CHECKS: _checks(_run(77, MACOS)),
+                            FILES: [{'filename': 'scripts/tool.sh'}]})
+        self.assertRefused(self.check(routes=routes), 'MERGE_REQUIRED_CHECK_MISSING')
+
+    def test_scripts_only_member_with_skipped_linux_refuses(self):
+        routes = _routes(**{CHECKS: _checks(_run(101, LINUX, 'skipped'), _run(77, MACOS)),
+                            FILES: [{'filename': 'scripts/tool.sh'}]})
+        self.assertRefused(self.check(routes=routes), 'MERGE_REQUIRED_CHECK_SKIPPED')
+
     def test_scripts_only_member_without_macos_refuses(self):
-        routes = _routes(**{CHECKS: _checks(_run(78, DOCS)),
+        routes = _routes(**{CHECKS: _checks(_run(101, LINUX)),
                             FILES: [{'filename': 'scripts/tool.sh'}]})
         self.assertRefused(self.check(routes=routes), 'MERGE_REQUIRED_CHECK_MISSING')
 
@@ -622,7 +632,7 @@ class RouteRemoteTestTests(_Base):
     """The member EC2 rule follows the PR route (docs-only, scripts-only, code)."""
 
     DOCS_ROUTES = {CHECKS: _checks(_run(55, DOCS)), FILES: [{'filename': 'docs/guide.md'}]}
-    SCRIPTS_ROUTES = {CHECKS: _checks(_run(77, MACOS)),
+    SCRIPTS_ROUTES = {CHECKS: _checks(_run(101, LINUX), _run(77, MACOS)),
                       FILES: [{'filename': 'scripts/tool.sh'}]}
 
     def assertNullDigestMember(self, result):
@@ -647,6 +657,7 @@ class RouteRemoteTestTests(_Base):
         result = self.check(record=_record(remote_test_receipts=[]),
                             routes=_routes(**self.SCRIPTS_ROUTES))
         self.assertNullDigestMember(result)
+        self.assertEqual(result['member']['linux_check_run_id'], 101)
         self.assertEqual(result['member']['macos_check_run_id'], 77)
 
     def test_scripts_only_member_with_other_head_receipt_only_is_eligible(self):

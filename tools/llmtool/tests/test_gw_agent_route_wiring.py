@@ -36,6 +36,14 @@ def tearDownModule():
 
 
 class GwAgentRouteWiringTests(unittest.TestCase):
+    def test_delegate_sweeps_gw_agent_sessions_before_checks(self):
+        args = Namespace(mode='proposal')
+        store = object()
+        with patch('llmtool.gw_agent_sessions.sweep_quietly') as sweep:
+            with self.assertRaises(LLMToolError):
+                task_submission_cli.run_task_gw_agent_delegate(args, store=store)
+            sweep.assert_called_once_with(store)
+
     def test_company_gateway_origin_with_path_is_refused(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
             'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'bounded task',
@@ -439,6 +447,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
 
         class Store:
             def __init__(self):
+                self._temp = tempfile.TemporaryDirectory(prefix='gw-agent-store-')
+                self.root = Path(self._temp.name) / 'tasks'
                 self.value = dict(task)
 
             def get(self, _task_id):
@@ -623,6 +633,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
 
         class Store:
             def __init__(self):
+                self._temp = tempfile.TemporaryDirectory(prefix='gw-agent-store-')
+                self.root = Path(self._temp.name) / 'tasks'
                 self.value = copy.deepcopy(task)
 
             def get(self, _task_id):
@@ -993,7 +1005,9 @@ class GwAgentRealStoreTests(unittest.TestCase):
         # An unconfirmed Task holds its D6; each subtest that leaves one behind
         # gets its own store so it cannot block the next subtest.
         self._store_serial += 1
-        self.store_root = self.base / f'tasks-{self._store_serial}'
+        parent = self.base / f'store-{self._store_serial}'
+        parent.mkdir(mode=0o700)
+        self.store_root = parent / 'tasks'
         self.store = task_store.TaskStore(self.store_root)
 
     def _reloaded(self):

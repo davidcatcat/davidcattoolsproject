@@ -291,11 +291,12 @@ def record_remote_test_event(store, task_id, receipt):
     existing = next((event for event in known if event['event_id'] == event_id), None)
     if existing is not None:
         return existing
+    source = 'GITHUB_REMOTE_TEST' if isinstance(receipt.get('actions'), dict) else 'EC2_REMOTE_TEST'
     stream = [event['sequence'] for event in known
-              if (event['source'], event['session_id']) == ('EC2_REMOTE_TEST', session_id)]
+              if (event['source'], event['session_id']) == (source, session_id)]
     return store.record_completion_event(
         task_id, event_id=event_id, run_id=record['run_id'], session_id=session_id,
-        source='EC2_REMOTE_TEST', source_sha=source_sha,
+        source=source, source_sha=source_sha,
         sequence=max(stream) + 1 if stream else 0,
         payload_sha256=payload_sha256)['event']
 
