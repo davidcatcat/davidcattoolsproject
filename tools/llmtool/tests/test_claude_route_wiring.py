@@ -558,6 +558,9 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                     def __init__(self):
                         self.value = dict(task)
 
+                    def task_ids(self):
+                        return [self.value['task_id']]
+
                     def get(self, _task_id):
                         return dict(self.value)
 

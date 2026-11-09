@@ -40,11 +40,58 @@ class TempTaskStore:
     """Small persistent TaskStore fake preserving compare-and-update semantics."""
 
     def __init__(self, root, record):
-        self.path = Path(root) / 'task.json'
-        self.path.write_text(json.dumps(record))
+        self.root = Path(root)
+        self.path = self.root / 'task.json'
+        records = record if isinstance(record, (list, tuple)) else [record]
+        for index, item in enumerate(records):
+            self._write_record(item, is_primary=(index == 0))
+
+    def _write_record(self, item, is_primary=False):
+        if is_primary:
+            (self.root / 'task.json').write_text(
+                item if isinstance(item, str) else json.dumps(item))
+        elif isinstance(item, dict) and 'task_id' in item:
+            (self.root / f"{item['task_id']}.json").write_text(json.dumps(item))
+        elif isinstance(item, tuple) and len(item) == 2:
+            task_id, content = item
+            text = content if isinstance(content, str) else json.dumps(content)
+            (self.root / f"{task_id}.json").write_text(text)
+        elif isinstance(item, dict):
+            (self.root / 'task.json').write_text(json.dumps(item))
+
+    def put(self, item):
+        self._write_record(item, is_primary=(isinstance(item, dict) and item.get('task_id') == TASK))
+        return item
+
+    def task_ids(self):
+        ids = []
+        if (self.root / 'task.json').exists():
+            try:
+                data = json.loads((self.root / 'task.json').read_text())
+                if isinstance(data, dict) and 'task_id' in data:
+                    ids.append(data['task_id'])
+                else:
+                    ids.append('task')
+            except Exception:
+                ids.append('task')
+        for p in sorted(self.root.glob('*.json')):
+            if p.stem != 'task' and p.stem not in ids:
+                ids.append(p.stem)
+        return ids
 
     def get(self, task_id):
-        return json.loads(self.path.read_text())
+        path = self.root / f'{task_id}.json'
+        if path.exists():
+            return json.loads(path.read_text())
+        fallback = self.root / 'task.json'
+        if fallback.exists():
+            data = json.loads(fallback.read_text())
+            if isinstance(data, dict):
+                if data.get('task_id') == task_id or task_id == 'task':
+                    return data
+            elif task_id == 'task':
+                return data
+        raise KeyError(task_id)
 
     def compare_and_update(self, task_id, *, expected, **changes):
         record = self.get(task_id)
@@ -54,7 +101,10 @@ class TempTaskStore:
         record['record_sha256'] = hashlib.sha256(json.dumps(
             {key: value for key, value in record.items() if key != 'record_sha256'},
             sort_keys=True).encode()).hexdigest()
-        self.path.write_text(json.dumps(record))
+        path = self.root / f'{task_id}.json'
+        if not path.exists() and (self.root / 'task.json').exists():
+            path = self.root / 'task.json'
+        path.write_text(json.dumps(record))
         return record
 
 
@@ -878,6 +928,148 @@ class ReviewRepairTests(unittest.TestCase):
                 self.assertEqual(cli.main(['task', 'repair', TASK, '--executor-task', EXECUTOR,
                                            '--pr', str(PR)]), 17)
         handler.assert_called_once()
+
+    def test_child_task_named_by_root_claim_refuses_without_writes_or_calls(self):
+        child_id = '2' * 32
+        child_executor = 'executor-child'
+        root_record = _record()
+        root_record['review_repair_claims'] = [{
+            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 1,
+            'attempt': 1, 'family': f'pr-{PR}', 'state': 'DISPATCHED',
+            'repair_task_id': child_id, 'comment_id': 9, 'packet_sha256': 'f' * 64,
+            'claimed_at': '2026-10-27T01:00:00Z',
+        }]
+        child_record = _record()
+        child_record['task_id'] = child_id
+        child_record['run_id'] = '3' * 32
+        child_record['completion']['executor_task_id'] = child_executor
+        child_record['review_dispatch_claim'] = [{
+            'executor_task': child_executor, 'pr': PR, 'head_sha': HEAD, 'version': 1,
+            'state': 'DISPATCHED', 'reviewer_task': 'reviewer-d6',
+            'native_session_id': 'review-session', 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
+            'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:00Z',
+        }]
+        child_record['completion_events'] = [{
+            'event_id': '4' * 32, 'source': 'REVIEWER', 'state': 'PENDING',
+            'source_sha': HEAD, 'session_id': 'review-' + '4' * 32,
+            'received_at': '2026-10-27T01:01:00Z',
+        }]
+        child_record['review_repair_claims'] = []
+
+        # 1. Review packet flow
+        self.store = TempTaskStore(self.temp.name, [root_record, child_record])
+        recorded = []
+        adapter_calls = []
+        with self.assertRaises(LLMToolError) as caught:
+            review_repair.repair_review(
+                store=self.store, task_id=child_id, executor_task=child_executor,
+                pr_number=PR, github_get=lambda _path: [_comment()],
+                current_head=lambda _task, _executor: HEAD,
+                dispatch_adapter=lambda **kwargs: adapter_calls.append(kwargs),
+                repair_task_recorder=lambda **kwargs: recorded.append(kwargs))
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_ROOT_TASK_REQUIRED')
+        self.assertEqual(self.store.get(child_id).get('review_repair_claims'), [])
+        self.assertEqual(recorded, [])
+        self.assertEqual(adapter_calls, [])
+
+        # 2. EC2 receipt flow
+        child_receipt = {
+            'task_id': child_id, 'run_id': child_record['run_id'],
+            'executor_task': child_executor, 'source_sha': HEAD,
+            'result': 'FAIL', 'modules': ['test_remote'],
+            'failure_excerpt': 'FAIL: test_remote\nAssertionError',
+        }
+        child_receipt['receipt_digest'] = hashlib.sha256(
+            task_store._json_bytes(child_receipt)).hexdigest()
+        self.store = TempTaskStore(self.temp.name, [root_record, child_record])
+        recorded = []
+        adapter_calls = []
+        with self.assertRaises(LLMToolError) as caught:
+            review_repair.repair_review(
+                store=self.store, task_id=child_id, executor_task=child_executor,
+                pr_number=PR, remote_test_receipt=child_receipt,
+                current_head=lambda _task, _executor: HEAD,
+                dispatch_adapter=lambda **kwargs: adapter_calls.append(kwargs),
+                repair_task_recorder=lambda **kwargs: recorded.append(kwargs))
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_ROOT_TASK_REQUIRED')
+        self.assertEqual(self.store.get(child_id).get('review_repair_claims'), [])
+        self.assertEqual(recorded, [])
+        self.assertEqual(adapter_calls, [])
+
+    def test_root_task_replays_or_refuses_at_cap_as_before(self):
+        child_id = '2' * 32
+        root_record = _record()
+        root_claim = {
+            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 1,
+            'attempt': 1, 'family': f'pr-{PR}', 'state': 'DISPATCHED',
+            'repair_task_id': child_id, 'comment_id': 9,
+            'packet_sha256': hashlib.sha256(json.dumps(
+                {'executor_task': EXECUTOR, 'failed_head': HEAD, 'findings_count': 1,
+                 'pr': PR, 'reviewer_text_excerpt_untrusted_data': _comment()['body'][:2000],
+                 'task': TASK, 'verdict_comment_id': 9, 'version': 1},
+                sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+            'claimed_at': '2026-10-27T01:00:00Z',
+        }
+        root_record['review_repair_claims'] = [root_claim]
+        child_record = _record()
+        child_record['task_id'] = child_id
+        child_record['review_repair_claims'] = []
+
+        # Root replays with child record present
+        self.store = TempTaskStore(self.temp.name, [root_record, child_record])
+        result = self.dispatch()
+        self.assertTrue(result['replayed'])
+        self.assertEqual(result['repair_task_id'], child_id)
+        self.assertEqual(len(self.calls), 0)
+
+        # Root refuses at cap with child record present
+        capped_record = _record()
+        capped_record['review_repair_claims'] = [
+            self._stored_claim(attempt=n, repair_id=f'{n:032x}')
+            for n in range(1, MAX + 1)
+        ]
+        self.store = TempTaskStore(self.temp.name, [capped_record, child_record])
+        self._assert_refused('REPAIR_LIMIT_REACHED')
+
+    def test_scan_task_ids_failure_gives_repair_count_unavailable_with_no_write(self):
+        before = self.store.get(TASK).get('review_repair_claims')
+        with patch.object(self.store, 'task_ids', side_effect=RuntimeError('disk error')):
+            with self.assertRaises(LLMToolError) as caught:
+                self.dispatch()
+            self.assertEqual(caught.exception.review_repair_code, 'REPAIR_COUNT_UNAVAILABLE')
+        self.assertEqual(self.store.get(TASK).get('review_repair_claims'), before)
+        self.assertEqual(self.calls, [])
+
+    def test_scan_unreadable_record_gives_repair_count_unavailable_with_no_write(self):
+        before = self.store.get(TASK).get('review_repair_claims')
+        # Record cannot be read (corrupt JSON decode failure)
+        (self.store.root / 'other.json').write_text('{bad-json')
+        with self.assertRaises(LLMToolError) as caught:
+            self.dispatch()
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_COUNT_UNAVAILABLE')
+        self.assertEqual(self.store.get(TASK).get('review_repair_claims'), before)
+        self.assertEqual(self.calls, [])
+
+        # Record is not a dict
+        (self.store.root / 'other.json').write_text(json.dumps('not-a-dict'))
+        with self.assertRaises(LLMToolError) as caught:
+            self.dispatch()
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_COUNT_UNAVAILABLE')
+        self.assertEqual(self.store.get(TASK).get('review_repair_claims'), before)
+        self.assertEqual(self.calls, [])
+
+    def test_malformed_claims_list_does_not_match(self):
+        for bad_claims in ('not a list', 42, [None], ['string-item'],
+                           [{'repair_task_id': TASK}, 'not-a-dict']):
+            with self.subTest(bad_claims=bad_claims):
+                other_record = _record()
+                other_record['task_id'] = '9' * 32
+                other_record['review_repair_claims'] = bad_claims
+                self.store = TempTaskStore(self.temp.name, [_record(), other_record])
+                calls_before = len(self.calls)
+                result = self.dispatch()
+                self.assertEqual(result['claim']['attempt'], 1)
+                self.assertEqual(len(self.calls), calls_before + 1)
 
 
 if __name__ == '__main__':
