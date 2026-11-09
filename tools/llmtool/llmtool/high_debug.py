@@ -11,9 +11,10 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
+import functools
 
 from .errors import LLMToolError
-from . import task_completion, task_store, worker_dispatch
+from . import role_config, task_completion, task_store, worker_dispatch
 from .test_output_excerpts import (
     _CLOUD_KEY, _SENSITIVE, _emitted_sensitive, _sensitive_jwt, _sensitive_url,
 )
@@ -26,6 +27,8 @@ _SESSION_READ_LIMIT = 2 * 1024 * 1024
 _REPORT_LIMIT = 16384
 _EVIDENCE_LIMIT = 8192
 _RECORD_TOKEN = re.compile(r'[A-Za-z0-9._-]{1,64}\Z')
+_CLAUDE_MODEL = 'claude-opus-5-5'
+_CLAUDE_EFFORT = 'medium'
 _REFUSAL_CODES = frozenset((
     'HIGH_DEBUG_RUN_FAILED', 'HIGH_DEBUG_WROTE_FILES',
     'HIGH_DEBUG_REPORT_INVALID', 'HIGH_DEBUG_QUOTA_EXHAUSTED',
@@ -88,7 +91,7 @@ def _record_body(entry, task_id, refusal_code=None, account=None):
                               for key in ('input', 'cached', 'output', 'reasoning'))
     else:
         usage_text = 'UNKNOWN'
-    is_claude = entry.get('model_requested') == 'claude-opus-5-5' or account is not None
+    is_claude = entry.get('model_requested') == _CLAUDE_MODEL or account is not None
     actor = 'Claude' if is_claude else 'Codex'
     lines = [
         f'<!-- activity: type=developer_progress actor={actor} target=PM status={marker_status} -->',
@@ -947,8 +950,8 @@ def _run_claude(*, prompt, cwd, output_path, config_dir):
     from .developer_routes.claude import ClaudeRoute
     route = ClaudeRoute({'executable': 'claude', 'config_dir': config_dir})
     argv = [
-        'claude', '-p', '--output-format', 'json', '--model', 'claude-opus-5-5',
-        '--effort', 'high', '--no-session-persistence', '--restricted',
+        'claude', '-p', '--output-format', 'json', '--model', _CLAUDE_MODEL,
+        '--effort', _CLAUDE_EFFORT, '--no-session-persistence', '--restricted',
         '--tools', 'Read,Glob,Grep', '--permission-mode', 'default',
         '--permission-prompts', 'none', '--strict-mcp-config', '--', prompt,
     ]
@@ -1120,11 +1123,13 @@ def _require_screen_cleared(task_id, family):
 def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                    failed_corrections=None, early_reason=None, evidence=None,
                    runner=None, create_d6=None, repo_root=None,
-                   read_registration=None, sessions_dir=None):
+                   read_registration=None, sessions_dir=None,
+                   route='codex'):
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
         _refuse('HIGH_DEBUG_TASK_INVALID')
-    if (type(task_id) is not str or _SCREEN_TASK_ID.fullmatch(task_id) is None or
+    if (route not in ('codex', 'claude') or
+            type(task_id) is not str or _SCREEN_TASK_ID.fullmatch(task_id) is None or
             type(executor_task) is not str or
             re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', executor_task) is None or
             type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
@@ -1174,9 +1179,20 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         except LLMToolError: raise
         except Exception: _refuse('HIGH_DEBUG_EVIDENCE_INVALID')
     else: evidence_text = ''
-    policy = worker_dispatch.evaluate('codex-developer', None, task_id)
+    worker_key = 'claude-reviewer' if route == 'claude' else 'codex-developer'
+    policy = worker_dispatch.evaluate(worker_key, None, task_id)
     if not policy.allowed:
         _refuse('HIGH_DEBUG_DISPATCH_REFUSED')
+    account = None
+    config_dir = None
+    if route == 'claude':
+        role_settings = role_config.resolve_role('reviewer')
+        if (role_settings.get('source') == 'builtin' or
+                role_settings.get('config_dir') is None or
+                role_settings.get('account') is None):
+            _refuse('HIGH_DEBUG_ACCOUNT_UNCONFIGURED')
+        account = role_settings['account']
+        config_dir = role_settings['config_dir']
     completion = task.get('completion')
     ev = completion.get('evidence') if type(completion) is dict else None
     if type(ev) is not dict or completion.get('executor_task_id') != executor_task or type(ev.get('common_dir')) is not str:
@@ -1204,9 +1220,11 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     else:
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
+    model_requested = _CLAUDE_MODEL if route == 'claude' else 'gpt-6.1-sol'
+
     def failed(code, observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN', report=None,
                detail=None, screen_hits=None):
-        # A Codex attempt that started but did not finish is recorded: it
+        # A diagnosis attempt that started but did not finish is recorded: it
         # counts toward the entry limit and keeps its D6 traceable. Recording
         # is best effort: the original refusal code is what the caller sees.
         try:
@@ -1217,12 +1235,12 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                 family=family, failed_corrections=failed_corrections,
                 early_reason=early_reason, head=head, d6=d6, code=code, report=report,
                 observed=observed, effort=effort, usage=usage,
-                recorded_at=recorded_at)
+                recorded_at=recorded_at, model_requested=model_requested)
         try:
             store.append_high_debug(task_id, entry)
         except Exception:
             pass
-        posted = _post_record(entry, pr_number, repo_root, task_id, code)
+        posted = _post_record(entry, pr_number, repo_root, task_id, code, account=account)
         if not posted:
             detail = (detail + ' ' if detail else '') + 'github_record=UNPOSTED'
         if screen_hits is not None:
@@ -1232,7 +1250,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         _refuse(code, detail)
 
     create = create_d6 or _create_d6
-    try: diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root, executor_task=executor_task)
+    agent_id = 'claude-high-debug-claude-opus-5-5' if route == 'claude' else 'codex-high-debug-gpt-6.1-sol'
+    try: diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root, executor_task=executor_task, agent_id=agent_id)
     except Exception: _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
     reason = f'failed corrections: {failed_corrections}' if failed_corrections is not None else f'early reason: {early_reason}'
     prompt = (f'Task: {task_id}\nPR: {pr_number}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'
@@ -1247,16 +1266,53 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     try:
         with tempfile.NamedTemporaryFile(prefix='llmtool-high-debug-', delete=False) as stream:
             output_path = stream.name
-        result = (runner or _run_codex)(prompt=prompt, cwd=diagnosis_root or d6, output_path=output_path)
-        if result.returncode != 0: raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
-        events_raw = result.stdout
-        if len(events_raw) > 1024 * 1024 or len(result.stderr) > 65536:
-            raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
-        raw = Path(output_path).read_bytes()
-        thread_id = _thread_id_from_events(events_raw)
-        observed, effort = _session_observed(thread_id, sessions_dir)
-        usage = _usage_from_events(events_raw)
-        report = raw.decode('utf-8')
+        if runner is not None:
+            actual_runner = runner
+        elif route == 'claude':
+            actual_runner = functools.partial(_run_claude, config_dir=config_dir)
+        else:
+            actual_runner = _run_codex
+        result = actual_runner(prompt=prompt, cwd=diagnosis_root or d6, output_path=output_path)
+        if route == 'codex':
+            if result.returncode != 0: raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
+            events_raw = result.stdout
+            if len(events_raw) > 1024 * 1024 or len(result.stderr) > 65536:
+                raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
+            raw = Path(output_path).read_bytes()
+            thread_id = _thread_id_from_events(events_raw)
+            observed, effort = _session_observed(thread_id, sessions_dir)
+            usage = _usage_from_events(events_raw)
+            report = raw.decode('utf-8')
+        else:
+            if len(result.stdout) > 1024 * 1024 or len(result.stderr) > 65536:
+                raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
+            from .developer_routes.claude import ClaudeRoute
+            claude_route = ClaudeRoute({'executable': 'claude', 'config_dir': config_dir})
+            try:
+                parsed = claude_route.parse_output(result.stdout, result.stderr, '')
+            except Exception:
+                parsed = None
+            if claude_route.quota_exhausted(parsed or {}, result.stderr):
+                raise _AttemptFailed('HIGH_DEBUG_QUOTA_EXHAUSTED')
+            if result.returncode != 0 or parsed is None or parsed.get('status') != 'DONE':
+                raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
+            raw_obj = parsed.get('raw')
+            if type(raw_obj) is not dict:
+                raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
+            raw_result = raw_obj.get('result')
+            if type(raw_result) is not str:
+                raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
+            observed_raw = claude_route.verified_model('', _CLAUDE_MODEL)
+            if observed_raw != _CLAUDE_MODEL:
+                observed = observed_raw if type(observed_raw) is str and _RECORD_TOKEN.fullmatch(observed_raw) else 'UNKNOWN'
+                effort = 'UNKNOWN'
+                usage = _claude_usage(raw_obj.get('usage'))
+                raise _AttemptFailed('HIGH_DEBUG_MODEL_UNVERIFIED')
+            observed = _CLAUDE_MODEL
+            effort = 'UNKNOWN'
+            usage = _claude_usage(raw_obj.get('usage'))
+            report = raw_result
+
         status_result = subprocess.run(['git', 'status', '--porcelain'], cwd=diagnosis_root or d6,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             check=False, timeout=60)
@@ -1290,11 +1346,11 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     status=_outcome_status(report)
     if any(not _has_report_section(report, h) for h in REPORT_SECTIONS): status='REPORT_INVALID'
     entry={'family':family, 'failed_corrections':failed_corrections, 'early_reason':early_reason,
-       'examined_sha':head,'d6':d6,'model_requested':'gpt-6.1-sol','model_observed':observed,
+       'examined_sha':head,'d6':d6,'model_requested':model_requested,'model_observed':observed,
        'effort_observed':effort,'status':status,'report_sha256':hashlib.sha256(report.encode()).hexdigest(),
        'report':report,'usage':usage,'recorded_at':store._completion_now()}
     store.append_high_debug(task_id, entry)
-    posted = _post_record(entry, pr_number, repo_root, task_id)
+    posted = _post_record(entry, pr_number, repo_root, task_id, account=account)
     payload=entry['report_sha256'].encode()
     event_id=hashlib.sha256(('HIGH_DEBUG\0'+task_id+'\0'+head+'\0'+entry['report_sha256']).encode()).hexdigest()[:32]
     result=store.record_completion_event(task_id,event_id=event_id,run_id=task['run_id'],

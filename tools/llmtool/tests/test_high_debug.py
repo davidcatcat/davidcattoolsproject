@@ -1593,6 +1593,199 @@ class HighDebugTests(unittest.TestCase):
             self.assertEqual(high_debug._session_observed('thread-1234567890', root),
                              ('UNKNOWN', 'UNKNOWN'))
 
+    @staticmethod
+    def _claude_completed(report, *, model='claude-opus-5-5', is_error=False,
+                          subtype='success', returncode=0, stderr=b'',
+                          api_error_status=None, usage=None):
+        payload = {
+            'type': 'result',
+            'subtype': subtype,
+            'is_error': is_error,
+            'session_id': '12345678-1234-5678-1234-567812345678',
+            'result': report,
+            'usage': usage or {'input_tokens': 100, 'output_tokens': 50,
+                               'cache_read_input_tokens': 20},
+            'modelUsage': {model: {'outputTokens': 50}},
+        }
+        if api_error_status is not None:
+            payload['api_error_status'] = api_error_status
+        return subprocess.CompletedProcess([], returncode,
+                                          stdout=json.dumps(payload).encode('utf-8'),
+                                          stderr=stderr)
+
+    def _run_claude_case(self, report, *, runner=None,
+                         account='reviewer-account', config_dir='/safe/claude',
+                         source='roles', evaluate_allowed=True,
+                         created_agent_id=None):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        subprocess.run(['git', 'init', '-q', str(root)], check=True)
+        store = _Store()
+        registration = SimpleNamespace(result_sha='a' * 40, root=str(root),
+                                       common_dir=str(root / '.git'))
+        def default_runner(*, prompt, cwd, output_path):
+            return self._claude_completed(report)
+        actual_runner = runner or default_runner
+        def create(**kwargs):
+            if created_agent_id is not None:
+                created_agent_id.append(kwargs.get('agent_id'))
+            return str(root)
+        role_settings = {
+            'role': 'reviewer',
+            'source': source,
+            'account': account,
+            'config_dir': config_dir,
+            'provider': 'claude',
+        }
+        with patch.object(high_debug.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=evaluate_allowed)) as mock_eval, \
+             patch.object(high_debug.role_config, 'resolve_role',
+                          return_value=role_settings) as mock_resolve, \
+             patch.object(high_debug.task_completion, 'collect_git_snapshot',
+                          return_value=SimpleNamespace(head='a' * 40)), \
+             patch.object(high_debug.task_completion, 'read_d6_registration',
+                          return_value=registration):
+            result = high_debug.run_high_debug(
+                store=store, task_id='a' * 32, executor_task='executor',
+                pr_number=17, family='family', failed_corrections=2,
+                runner=actual_runner, create_d6=create,
+                read_registration=lambda *_args, **_kwargs: registration,
+                route='claude')
+            return result, store, mock_eval, mock_resolve
+
+    def test_claude_happy_path_records_report_and_usage(self):
+        report = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS)
+        report += 'RCA_CONFIRMED'
+        created_agents = []
+        _result, store, mock_eval, mock_resolve = self._run_claude_case(
+            report, created_agent_id=created_agents)
+        mock_eval.assert_called_with('claude-reviewer', None, 'a' * 32)
+        mock_resolve.assert_called_with('reviewer')
+        self.assertEqual(created_agents, ['claude-high-debug-claude-opus-5-5'])
+        self.assertEqual(len(store.entries), 1)
+        entry = store.entries[0]
+        self.assertEqual(entry['status'], 'RCA_CONFIRMED')
+        self.assertEqual(entry['model_requested'], 'claude-opus-5-5')
+        self.assertEqual(entry['model_observed'], 'claude-opus-5-5')
+        self.assertEqual(entry['effort_observed'], 'UNKNOWN')
+        self.assertEqual(entry['usage'], {'input': 100, 'cached': 20, 'output': 50, 'reasoning': 0})
+        self.assertEqual(len(store.events), 1)
+        self.assertEqual(store.events[0]['session_id'], 'high-debug-' + entry['d6'])
+        self.assertIn('executor-hd1-aaaaaaa', entry['d6'])
+        self._poster.assert_called_once()
+        body = self._poster.call_args.args[1]
+        self.assertIn('actor=Claude', body.splitlines()[0])
+        self.assertIn('Account: reviewer-account', body)
+
+    def test_claude_another_observed_model_fails_model_unverified(self):
+        report = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS)
+        report += 'RCA_CONFIRMED'
+        runner = lambda *, prompt, cwd, output_path: self._claude_completed(
+            report, model='claude-sonnet-4-4')
+        with self.assertRaises(LLMToolError) as caught:
+            self._run_claude_case(report, runner=runner)
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_MODEL_UNVERIFIED')
+        self._poster.assert_called_once()
+        entry = self._poster.call_args.args[0]
+        self.assertEqual(entry['status'], 'RUN_FAILED')
+        self.assertEqual(entry['report'], 'HIGH_DEBUG_MODEL_UNVERIFIED')
+        self.assertEqual(entry['model_observed'], 'claude-sonnet-4-4')
+        self.assertEqual(entry['model_requested'], 'claude-opus-5-5')
+        self.assertEqual(entry['usage'], {'input': 100, 'cached': 20, 'output': 50, 'reasoning': 0})
+        body = self._poster.call_args.args[1]
+        self.assertIn('Refusal code: HIGH_DEBUG_MODEL_UNVERIFIED', body)
+
+    def test_claude_quota_result_fails_quota_exhausted(self):
+        runner = lambda *, prompt, cwd, output_path: self._claude_completed(
+            '', is_error=True, subtype='error', returncode=1,
+            api_error_status=429, stderr=b'usage limit exceeded\n')
+        with self.assertRaises(LLMToolError) as caught:
+            self._run_claude_case('', runner=runner)
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_QUOTA_EXHAUSTED')
+        self._poster.assert_called_once()
+        entry = self._poster.call_args.args[0]
+        self.assertEqual(entry['status'], 'RUN_FAILED')
+        self.assertEqual(entry['report'], 'HIGH_DEBUG_QUOTA_EXHAUSTED')
+        self.assertEqual(entry['model_requested'], 'claude-opus-5-5')
+        body = self._poster.call_args.args[1]
+        self.assertIn('Refusal code: HIGH_DEBUG_QUOTA_EXHAUSTED', body)
+
+    def test_claude_unconfigured_account_refuses_before_create_d6(self):
+        cases = (
+            {'source': 'builtin', 'account': None, 'config_dir': None},
+            {'source': 'roles', 'account': None, 'config_dir': '/safe/claude'},
+            {'source': 'roles', 'account': 'my-account', 'config_dir': None},
+        )
+        for role_settings in cases:
+            with self.subTest(role_settings=role_settings):
+                create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+                store = _Store()
+                with patch.object(high_debug.worker_dispatch, 'evaluate',
+                                  return_value=SimpleNamespace(allowed=True)), \
+                     patch.object(high_debug.role_config, 'resolve_role',
+                                  return_value=role_settings):
+                    with self.assertRaises(LLMToolError) as caught:
+                        high_debug.run_high_debug(
+                            store=store, task_id='a' * 32, executor_task='executor',
+                            pr_number=17, family='family', failed_corrections=2,
+                            runner=runner, create_d6=create, route='claude')
+                self.assertEqual(caught.exception.high_debug_code,
+                                 'HIGH_DEBUG_ACCOUNT_UNCONFIGURED')
+                create.assert_not_called()
+                runner.assert_not_called()
+
+    def test_unknown_route_refuses_before_create_d6(self):
+        create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.run_high_debug(
+                store=_Store(), task_id='a' * 32, executor_task='executor',
+                pr_number=17, family='family', failed_corrections=2,
+                runner=runner, create_d6=create, route='unknown-route')
+        self.assertEqual(caught.exception.high_debug_code,
+                         'HIGH_DEBUG_ARGUMENT_INVALID')
+        create.assert_not_called()
+        runner.assert_not_called()
+
+    def test_run_claude_argv_and_environment_isolation(self):
+        unrelated = 'LLMTOOL_TEST_UNRELATED_VAR_NAME'
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = str(Path(directory) / 'report.md')
+            with patch.dict(high_debug.os.environ, {unrelated: 'should-not-pass'}), \
+                 patch.object(high_debug.subprocess, 'run') as mock_run:
+                high_debug._run_claude(prompt='diagnose issue', cwd=directory,
+                                      output_path=output_path,
+                                      config_dir=directory)
+        argv = mock_run.call_args.args[0]
+        kwargs = mock_run.call_args.kwargs
+        env = kwargs['env']
+        self.assertEqual(argv[0], 'claude')
+        self.assertIn('--effort', argv)
+        self.assertEqual(argv[argv.index('--effort') + 1], 'medium')
+        self.assertIn('--tools', argv)
+        self.assertEqual(argv[argv.index('--tools') + 1], 'Read,Glob,Grep')
+        self.assertIn('--model', argv)
+        self.assertEqual(argv[argv.index('--model') + 1], 'claude-opus-5-5')
+        self.assertIn('--strict-mcp-config', argv)
+        self.assertEqual(kwargs['timeout'], 1800)
+        self.assertFalse(kwargs['check'])
+        self.assertEqual(kwargs['stdin'], subprocess.DEVNULL)
+        self.assertEqual(env['CLAUDE_CONFIG_DIR'], directory)
+        self.assertNotIn(unrelated, env)
+
+    def test_claude_comment_has_actor_claude_and_account_line(self):
+        entry = {'d6': 'run-1', 'family': 'family', 'examined_sha': 'a' * 40,
+                 'model_requested': 'claude-opus-5-5', 'model_observed': 'claude-opus-5-5',
+                 'effort_observed': 'UNKNOWN', 'status': 'RCA_CONFIRMED',
+                 'report_sha256': 'b' * 64, 'usage': {'input': 1, 'cached': 0,
+                 'output': 2, 'reasoning': 0}}
+        body = high_debug._record_body(entry, 'a' * 32, account='valid-account')
+        self.assertIn('actor=Claude', body.splitlines()[0])
+        self.assertIn('Account: valid-account', body)
+
+        body_unsafe = high_debug._record_body(entry, 'a' * 32, account='unsafe account!')
+        self.assertIn('Account: UNKNOWN', body_unsafe)
+
 
 class HighDebugWrongTaskOrFamilyTests(unittest.TestCase):
     """#914: run_high_debug refuses a wrong Task, executor D6 or family before any run."""
