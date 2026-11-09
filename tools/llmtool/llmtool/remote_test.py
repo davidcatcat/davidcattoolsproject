@@ -1,6 +1,7 @@
 """One-shot, bounded EC2 test execution for an admitted D6 Task result."""
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import time
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +40,9 @@ _HOSTED_ZIP_MEMBER_LIMIT = 32768
 _ZIP_LIMIT = 65536
 _ZIP_MEMBER_LIMIT = 32768
 _MEMBER_LIMIT = 32768
+_HOSTED_PAGE_LIMIT = 10
+_HOSTED_ARTIFACT_PAGE_LIMIT = 10
+_ARTIFACT_ZIP_PATH = re.compile(r'actions/artifacts/[0-9]+/zip\Z')
 _HOSTED_DISPATCH_PATH = 'actions/workflows/llmtool-remote-test.yml/dispatches'
 _GH_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
 _REMOTE_LIMIT = 32768
@@ -780,4 +785,187 @@ def _hosted_job(run, *, get=None):
         return 'HOSTED_RUNNER_UNTRUSTED'
     return job
 
+
+def _hosted_get_bytes(path, *, limit=_HOSTED_ZIP_LIMIT + 1):
+    """Make one GET to download an artifact zip using gh CLI."""
+    if type(path) is not str or not _ARTIFACT_ZIP_PATH.fullmatch(path):
+        raise ValueError(f'Unsupported artifact path: {path}')
+    gh = shutil.which('gh', path=_GH_PATH)
+    if gh is None:
+        raise LLMToolError('gh executable not found')
+    slug = _trusted_slug()
+    env = {
+        'PATH': _GH_PATH,
+        'HOME': os.path.expanduser('~'),
+        'LC_ALL': 'C',
+        'GH_PROMPT_DISABLED': '1',
+        'GH_NO_UPDATE_NOTIFIER': '1',
+        'NO_COLOR': '1',
+    }
+    if os.environ.get('GH_CONFIG_DIR'):
+        env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
+    argv = [
+        gh, 'api', '--method', 'GET',
+        '-H', 'Accept: application/vnd.github+json',
+        '-H', 'X-GitHub-Api-Version: 2022-11-28',
+        'repos/' + slug + '/' + path,
+    ]
+    try:
+        process = subprocess.Popen(
+            argv, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            shell=False, close_fds=True, start_new_session=True,
+        )
+    except OSError as exc:
+        raise LLMToolError(f'Failed to execute gh: {exc}') from exc
+
+    deadline = time.monotonic() + 10
+    raw_out = bytearray()
+    raw_err = bytearray()
+    selector = selectors.DefaultSelector()
+    stopped_early = False
+    try:
+        for stream, kind in ((process.stdout, 'out'), (process.stderr, 'err')):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, kind)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, 10)
+            for key, _ in selector.select(min(remaining, 0.1)):
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                elif key.data == 'out':
+                    needed = limit - len(raw_out)
+                    if needed > 0:
+                        raw_out.extend(chunk[:needed])
+                    if len(raw_out) >= limit:
+                        stopped_early = True
+                        selector.unregister(key.fileobj)
+                        break
+                else:
+                    if len(raw_err) + len(chunk) > 65536:
+                        raise LLMToolError('GET stderr exceeded limit')
+                    raw_err.extend(chunk)
+        code = process.wait(timeout=max(0, deadline - time.monotonic()))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LLMToolError(f'gh command failure: {exc}') from exc
+    finally:
+        selector.close()
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, 9)
+            except OSError:
+                process.kill()
+            process.wait()
+        if process.stdout:
+            process.stdout.close()
+        if process.stderr:
+            process.stderr.close()
+    if not stopped_early and code != 0:
+        raise LLMToolError(f'gh GET failed with code {code}')
+    return bytes(raw_out)
+
+
+def _hosted_artifact(run_id, nonce, *, get=None, get_bytes=None):
+    """Return receipt.json bytes from the run's single receipt artifact, else None."""
+    if isinstance(run_id, int) and run_id > 0:
+        run_id_str = str(run_id)
+    elif isinstance(run_id, str) and run_id.isdigit() and int(run_id) > 0:
+        run_id_str = run_id
+    else:
+        return None
+    if type(nonce) is not str or not _NONCE.fullmatch(nonce):
+        return None
+    if get is None:
+        get = _github_get
+    if get_bytes is None:
+        get_bytes = _hosted_get_bytes
+
+    expected_name = _HOSTED_ARTIFACT_PREFIX + nonce
+    all_artifacts = []
+    total_count = None
+
+    for page in range(1, _HOSTED_ARTIFACT_PAGE_LIMIT + 1):
+        path = f'actions/runs/{run_id_str}/artifacts?per_page=100&page={page}'
+        try:
+            data = get(path)
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        page_total = data.get('total_count')
+        if type(page_total) is not int or page_total < 0:
+            return None
+        if total_count is None:
+            total_count = page_total
+        elif total_count != page_total:
+            return None
+        artifacts = data.get('artifacts')
+        if not isinstance(artifacts, list):
+            return None
+        all_artifacts.extend(artifacts)
+        if not artifacts or len(all_artifacts) >= total_count:
+            break
+    else:
+        return None
+
+    if total_count is None or total_count != len(all_artifacts):
+        return None
+
+    matching = []
+    for artifact in all_artifacts:
+        if not isinstance(artifact, dict):
+            return None
+        if artifact.get('name') == expected_name:
+            matching.append(artifact)
+
+    if len(matching) != 1:
+        return None
+
+    candidate = matching[0]
+    if candidate.get('expired') is not False:
+        return None
+
+    size = candidate.get('size_in_bytes')
+    if type(size) is not int or size < 0 or size > _HOSTED_ZIP_LIMIT:
+        return None
+
+    artifact_id = candidate.get('id')
+    if type(artifact_id) is not int or artifact_id <= 0:
+        return None
+
+    download_path = f'actions/artifacts/{artifact_id}/zip'
+    try:
+        raw_zip = get_bytes(download_path)
+    except Exception:
+        return None
+
+    if not isinstance(raw_zip, (bytes, bytearray)):
+        return None
+    if len(raw_zip) > _HOSTED_ZIP_LIMIT:
+        return None
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw_zip)) as zf:
+            infolist = zf.infolist()
+            if len(infolist) != 1:
+                return None
+            info = infolist[0]
+            if info.filename != 'receipt.json':
+                return None
+            if info.is_dir():
+                return None
+            mode = info.external_attr >> 16
+            if (mode & 0o170000) != 0 and not stat.S_ISREG(mode):
+                return None
+            if info.file_size < 0 or info.file_size > _HOSTED_MEMBER_LIMIT:
+                return None
+            member_bytes = zf.read(info)
+            if len(member_bytes) > _HOSTED_MEMBER_LIMIT:
+                return None
+            return member_bytes
+    except Exception:
+        return None
 
