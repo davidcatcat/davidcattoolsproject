@@ -36,6 +36,7 @@ _STATUS_EXIT = {'DONE': 0, 'BLOCKED': 3, 'MODEL_ERROR': 4,
                 'POLICY_REFUSED': 5, 'BUDGET_EXCEEDED': 6}
 _AUDIT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 _MAX_USAGE_TOKENS = 50_000_000
+_SESSION_FILE_MAX_BYTES = 16 * 1024 * 1024
 # Names the company gateway routes on. They are not model identities: the
 # provider answers with the model it really served, which is what gets recorded.
 _ROUTING_ALIASES = frozenset({'gw'})
@@ -261,6 +262,20 @@ class GwAgentRoute(DeveloperRoute):
 
     def validate_request(self, request):
         value = super().validate_request(request)
+        session_id = request.get('session_id')
+        session_home = request.get('session_home')
+        if session_id is not None:
+            if type(session_id) is not str or _BINDING_SESSION_ID_READ.fullmatch(session_id) is None:
+                raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+            if session_home is None:
+                raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+        if session_home is not None:
+            if type(session_home) is not str or not os.path.isabs(session_home):
+                raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+        if session_id is not None:
+            value['session_id'] = session_id
+        if session_home is not None:
+            value['session_home'] = session_home
         self._validated_request = value
         task = value.get('task')
         if type(task) is not dict:
@@ -332,6 +347,43 @@ class GwAgentRoute(DeveloperRoute):
         if (package_path == root or root in package_path.parents or package_path in root.parents or
                 private_tmp == root or root in private_tmp.parents):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
+        session_id = request.get('session_id')
+        if session_id is not None:
+            session_home = request.get('session_home')
+            if not session_home:
+                raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+            try:
+                home_path = Path(session_home)
+                if not _is_private_dir(home_path):
+                    raise ValueError('session home not private')
+                home_resolved = home_path.resolve()
+                if (home_resolved == root or
+                        home_resolved in root.parents or
+                        root in home_resolved.parents):
+                    raise ValueError('session home inside or containing root')
+                meta_bytes = private_read(home_path / 'meta.json', max_bytes=_SESSION_FILE_MAX_BYTES)
+                history_bytes = private_read(home_path / 'history.json', max_bytes=_SESSION_FILE_MAX_BYTES)
+
+                state_dir = Path(tmpdir) / 'state'
+                sessions_dir = state_dir / 'sessions'
+                dest_session_dir = sessions_dir / session_id
+                for directory in (state_dir, sessions_dir, dest_session_dir):
+                    try:
+                        directory.mkdir(mode=0o700)
+                    except FileExistsError:
+                        pass
+                    os.chmod(directory, 0o700)
+
+                for filename, payload in (('meta.json', meta_bytes), ('history.json', history_bytes)):
+                    target = dest_session_dir / filename
+                    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(fd, 'wb') as stream:
+                        stream.write(payload)
+                    os.chmod(target, 0o600)
+            except RouteError:
+                raise
+            except Exception:
+                raise RouteError('GW_AGENT_SESSION_UNAVAILABLE') from None
         task = dict(request['task'])
         gateway_data_class = self.data_class_map.get(
             task.get('data_class'), task.get('data_class'))
@@ -358,7 +410,7 @@ class GwAgentRoute(DeveloperRoute):
             'egress_basis': task['egress_basis'],
             'data_class': gateway_data_class,
             'profile': self.profile_name,
-            'session_id': None,
+            'session_id': request.get('session_id'),
         }
         files = {
             'task.json': serialized_task,
@@ -375,23 +427,20 @@ class GwAgentRoute(DeveloperRoute):
 
     def build_argv(self, executable, request):
         tmp = request['_route_tmpdir']
+        session_id = request.get('session_id')
+        cmd = ['resume', session_id] if session_id is not None else ['run']
+        common_args = [
+            '--authorization-file', str(Path(tmp) / 'authorization.json'),
+            '--workdir', request['root'], '--profile', self.profile_name,
+            '--task-file', str(Path(tmp) / 'task.json'),
+            '--result-file', str(Path(tmp) / 'result.json'),
+            '--audit-file', str(Path(tmp) / 'audit.jsonl'),
+            '--profiles-file', str(Path(tmp) / 'profiles.json'),
+            '--state-dir', str(Path(tmp) / 'state'),
+        ]
         if _HAS_SAFE_PATH_FLAG:
-            return [sys.executable, '-B', '-P', '-m', 'api_agent_gateway', 'run',
-                    '--authorization-file', str(Path(tmp) / 'authorization.json'),
-                    '--workdir', request['root'], '--profile', self.profile_name,
-                    '--task-file', str(Path(tmp) / 'task.json'),
-                    '--result-file', str(Path(tmp) / 'result.json'),
-                    '--audit-file', str(Path(tmp) / 'audit.jsonl'),
-                    '--profiles-file', str(Path(tmp) / 'profiles.json'),
-                    '--state-dir', str(Path(tmp) / 'state')]
-        return [sys.executable, '-B', '-c', _SAFE_PATH_LAUNCHER, 'run',
-                '--authorization-file', str(Path(tmp) / 'authorization.json'),
-                '--workdir', request['root'], '--profile', self.profile_name,
-                '--task-file', str(Path(tmp) / 'task.json'),
-                '--result-file', str(Path(tmp) / 'result.json'),
-                '--audit-file', str(Path(tmp) / 'audit.jsonl'),
-                '--profiles-file', str(Path(tmp) / 'profiles.json'),
-                '--state-dir', str(Path(tmp) / 'state')]
+            return [sys.executable, '-B', '-P', '-m', 'api_agent_gateway'] + cmd + common_args
+        return [sys.executable, '-B', '-c', _SAFE_PATH_LAUNCHER] + cmd + common_args
 
     def _load_credential(self):
         if self._credential_resolved:
@@ -591,6 +640,35 @@ class GwAgentRoute(DeveloperRoute):
             with os.fdopen(fd, 'wb') as stream:
                 stream.write(audit)
             self.audit_copy_path = str(target)
+            session_home = request.get('session_home')
+            if session_home is not None:
+                result_session_id = (self._result.get('session_id')
+                                     if isinstance(self._result, dict) else None)
+                requested_session_id = request.get('session_id')
+                if (isinstance(result_session_id, str) and
+                        _BINDING_SESSION_ID_READ.fullmatch(result_session_id) is not None and
+                        (requested_session_id is None or result_session_id == requested_session_id)):
+                    source_session_dir = Path(tmpdir) / 'state' / 'sessions' / result_session_id
+                    meta_src = source_session_dir / 'meta.json'
+                    history_src = source_session_dir / 'history.json'
+                    if os.path.lexists(meta_src) and os.path.lexists(history_src):
+                        try:
+                            home_path = Path(session_home)
+                            if not _is_private_dir(home_path):
+                                raise ValueError('session home not private dir')
+                            home_resolved = home_path.resolve()
+                            if (home_resolved == root or
+                                    home_resolved in root.parents or
+                                    root in home_resolved.parents):
+                                raise ValueError('session home inside or containing root')
+                            meta_bytes = private_read(meta_src, max_bytes=_SESSION_FILE_MAX_BYTES)
+                            history_bytes = private_read(history_src, max_bytes=_SESSION_FILE_MAX_BYTES)
+                            private_write(home_path / 'meta.json', meta_bytes)
+                            private_write(home_path / 'history.json', history_bytes)
+                        except RouteError:
+                            raise
+                        except Exception:
+                            raise RouteError('GW_AGENT_SESSION_PERSIST_FAILED') from None
         except RouteError:
             raise
         except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
