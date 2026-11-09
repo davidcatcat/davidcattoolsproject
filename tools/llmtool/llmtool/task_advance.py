@@ -2081,23 +2081,14 @@ def _closed_train_member_head(record, task_id, store):
     for event in reversed(events):
         if type(event) is not dict:
             continue
-        outcome = event.get('outcome') or event.get('state')
-        if outcome != 'MERGED':
+        if event.get('source') != 'GITHUB' or event.get('session_id') != 'github-task-advance':
             continue
-        event_type = event.get('event_type') or event.get('type')
-        if event_type is not None and event_type != 'merge':
+        if event.get('marker_type') != 'merge' or event.get('marker_status') != 'MERGED':
             continue
-        source = event.get('source')
-        is_github = source in ('GITHUB', 'github-task-advance') or (
-            type(source) is str and 'github' in source.lower())
-        if not is_github:
-            continue
-        pr = event.get('pr')
-        if type(pr) is not int or not 1 <= pr <= 9999999:
-            pr = event.get('pr_number')
+        pr = event.get('issue_number')
         if type(pr) is not int or not 1 <= pr <= 9999999:
             continue
-        merge_sha = event.get('source_sha') or event.get('merge_sha') or event.get('sha')
+        merge_sha = event.get('merge_sha') or event.get('source_sha')
         if type(merge_sha) is not str or not _HEX40.fullmatch(merge_sha):
             continue
         try:
