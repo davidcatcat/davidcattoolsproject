@@ -21,6 +21,8 @@
 6. 不用文件宣告取代 Security／Functional／Mac 實機驗收；CI 事件濾除不等於測試通過，也不可用「最近一次綠燈」遮蔽相同 SHA 的紅燈。
 7. 本目錄是經驗庫，不是另外一份 llmtool Roadmap 或可執行 ai-loop 控制器；技術規範以 [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md)、[safe-git](../../skills/safe-git/SKILL.md) 與當前 Workflow 為準。
 
+自 2026-11-09 起，llmtool Linux 與 Mac CI 改跑 GitHub-hosted runner（Owner [#1253](https://github.com/davidcatcat/davidcattoolsproject/issues/1253)、[#1256](https://github.com/davidcatcat/davidcattoolsproject/issues/1256)）；詳見 [GitHub-hosted CI 2026-11-09](github-actions-guide.md#github-hosted-ci-2026-11-09)。下方 #99 案例保留為歷史。
+
 ## 第一個已驗證案例
 
 2026-10-25 的 Issue #99 Mac Self-hosted Runner 遷移候選與目前 **NOT_RUN** 的平台覆蓋，見 [GitHub Actions Guide](github-actions-guide.md#issue-99-mac-遷移候選2026-10-25尚未驗收)；該候選尚未構成正式 Mac CI 或安全驗收。

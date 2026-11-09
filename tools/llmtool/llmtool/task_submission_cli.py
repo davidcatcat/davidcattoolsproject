@@ -5267,7 +5267,7 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     executor_task = getattr(args, 'executor_task', None)
     current_task_id = getattr(args, 'task_id', None)
     try:
-        task_ids = store.task_ids()
+        task_ids = store.completion_d6_task_ids(executor_task)
     except Exception:
         raise LLMToolError(
             f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
@@ -5371,9 +5371,11 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
                  r'/issues/[1-9][0-9]*(?:/comments/[1-9][0-9]*|#issuecomment-[1-9][0-9]*)',
                  ref) is not None)
     if not valid:
-        code = ('DELEGATE_HIGH_DEBUG_REF_INVALID' if ref is not None else
-                'DELEGATE_REPAIR_LIMIT_REACHED')
-        raise LLMToolError(code)
+        if ref is not None:
+            raise LLMToolError(
+                'DELEGATE_HIGH_DEBUG_REF_INVALID: an Issue comment link on this repository '
+                'whose path ends in /issues/N#issuecomment-M or /issues/N/comments/M')
+        raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
     if high_debug_task is None:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_REQUIRED')
     if (type(high_debug_task) is not str or
@@ -5430,8 +5432,13 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
         except Exception:
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
     _registration, snapshot = d6_binding
-    if examined_sha != getattr(snapshot, 'head', None):
-        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID')
+    current_head = getattr(snapshot, 'head', None)
+    if examined_sha != current_head:
+        head_prefix = current_head[:12] if type(current_head) is str else ''
+        examined_prefix = examined_sha[:12] if type(examined_sha) is str else ''
+        raise LLMToolError(
+            f'DELEGATE_HIGH_DEBUG_HEAD_MOVED: a new High Debug must be taken on '
+            f'the current D6 head {head_prefix}; examined SHA {examined_prefix}')
     try:
         store.record_repair_cap_override(
             current_task_id, ref=ref, rounds=max(3, count + 1))

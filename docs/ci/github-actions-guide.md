@@ -1,6 +1,18 @@
 # GitHub Actions Guide — 本 Repo 的 CI 行為契約
 
+## GitHub-hosted CI 2026-11-09
+
+自 2026-11-09 起，repository 已改為 public，llmtool Linux 與 Mac CI 回到 GitHub-hosted runner（Owner [#1253](https://github.com/davidcatcat/davidcattoolsproject/issues/1253)、[#1256](https://github.com/davidcatcat/davidcattoolsproject/issues/1256)）。`llmtool Linux CI` 的每個 job 都跑在 GitHub-hosted `ubuntu-24.04`：例行使用 Python 3.14；Python 3.9 只在 main 上以手動 `workflow_dispatch` 加 `python39` 啟動。`llmtool Mac CI` 的 `check (macOS 3.13)` 跑在 `macos-15-intel`，job 上限 120 分鐘。
+
+以下維持不變：check 名稱、exact-HEAD 與 base-ancestor 檢查、`mac-ci` label gate、依影響範圍篩選 PR 模組，以及每次 merge train 後以 `workflow_dispatch` 跑完整 Mac suite。
+
+`HOSTED_CI_ENABLED` 是 kill switch：值不是 `true` 時跳過 job，記為 **NOT_RUN**。`LINUX_CI_ENABLED` 與 `MAC_CI_ENABLED` 是舊開關，保留為 `false`。skipped、cancelled、timeout 與 pending 一律不算 PASS。self-hosted CI 已退役，重新啟用需要新的 Owner grant。
+
+llmtool `task complete` 只有在 Owner-only trust config 把 CI trust 切到 GitHub-hosted 模式後，才接受 hosted job（Owner 在 [#1256](https://github.com/davidcatcat/davidcattoolsproject/issues/1256) 的答案 A）。
+
 ## Issue #99 Mac 遷移候選（2026-10-25，尚未驗收）
+
+此節是 2026-10-25 的 self-hosted 歷史，已由上方 [GitHub-hosted CI 2026-11-09](#github-hosted-ci-2026-11-09) 取代。
 
 Owner 決定保持 Private repository、不再使用付費 GitHub-hosted Runner。正式舊 workflow `llmtool CI`、`nlf CI`、控制分支 `ai-loop helper CI` 已在 GitHub 設為 `disabled_manually`；[最後一筆 llmtool Ubuntu run 40113971497](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/40113971497) 已取消。這是止費狀態，並非新 CI PASS。Mac smoke [40113489740](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/40113489740) 只證明 Runner 連線與 Python 3.13.3 可啟動，未證明安全隔離。
 
@@ -23,7 +35,8 @@ Owner 決定保持 Private repository、不再使用付費 GitHub-hosted Runner�
 
 | Workflow | 使用情境 | 不能隨意更動的證據 |
 | --- | --- | --- |
-| [`llmtool-mac-ci.yml`](../../.github/workflows/llmtool-mac-ci.yml) | 遷移候選：llmtool feature PR 與 main Push；手動 `workflow_dispatch` 作補救 | Mac Python 3.13、來源 HEAD／Base 檢查；正式 CI 尚 NOT_RUN |
+| [`llmtool-linux-ci.yml`](../../.github/workflows/llmtool-linux-ci.yml) | GitHub-hosted：llmtool PR 與 main Push；手動 `workflow_dispatch` 加 `python39` 跑 Python 3.9 | 每個 job 跑在 `ubuntu-24.04`；例行 Python 3.14；來源 HEAD／Base 檢查不變 |
+| [`llmtool-mac-ci.yml`](../../.github/workflows/llmtool-mac-ci.yml) | GitHub-hosted：llmtool feature PR 與 main Push；手動 `workflow_dispatch` 跑完整 Mac suite | `check (macOS 3.13)` 跑在 `macos-15-intel`（120 分鐘上限）；來源 HEAD／Base 檢查不變 |
 | [`nlf-ci.yml`](../../.github/workflows/nlf-ci.yml) | 歷史 nlf Go 測試與平台驗證；目前 disabled | Linux／macOS／Windows／race／fuzz 均 NOT_RUN |
 | ai-loop helper CI（在 `automation/ai-loop` 控制分支） | 歷史控制器 PR／Push CI；目前 disabled | WP3 的既有驗收不得沿用舊綠燈，須另行處理 |
 

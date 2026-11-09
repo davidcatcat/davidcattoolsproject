@@ -720,6 +720,7 @@ def _hosted_find_run(nonce, *, get=None):
     return 'AMBIGUOUS'
 
 
+<<<<<<< HEAD
 def _hosted_check_run(job, head_sha, get):
     """Return the job's check run, or a failure code when it cannot be read."""
     url = job.get('check_run_url')
@@ -761,18 +762,54 @@ def _hosted_job(run, *, get=None):
         return 'UNREADABLE'
     try:
         data = get(f'actions/runs/{run["id"]}/jobs?per_page=100')
+=======
+def _extract_check_run_id(job):
+    """Extract check-run ID string from a job dict, or return None."""
+    if not isinstance(job, dict):
+        return None
+    check_url = job.get('check_run_url')
+    if isinstance(check_url, str):
+        match = re.search(r'check-runs/([1-9][0-9]{0,18})\b', check_url)
+        if match:
+            return match.group(1)
+    check_id = job.get('check_run_id')
+    if isinstance(check_id, int) and check_id > 0:
+        return str(check_id)
+    return None
+
+
+def _hosted_job(run, *, get=None):
+    """Read a hosted run's jobs, require exactly one remote-test job, and verify completed runner trust."""
+    if not isinstance(run, dict) or not isinstance(run.get('id'), int) or run['id'] <= 0:
+        return 'UNREADABLE'
+    if get is None:
+        get = _github_get
+    run_id = run['id']
+    path = f'actions/runs/{run_id}/jobs'
+    try:
+        data = get(path)
+>>>>>>> origin/main
     except Exception:
         return 'UNREADABLE'
     if not isinstance(data, dict):
         return 'UNREADABLE'
     jobs = data.get('jobs')
+<<<<<<< HEAD
     if not isinstance(jobs, list) or any(not isinstance(job, dict) for job in jobs):
         return 'UNREADABLE'
+=======
+    if not isinstance(jobs, list):
+        return 'UNREADABLE'
+    for job in jobs:
+        if not isinstance(job, dict):
+            return 'UNREADABLE'
+>>>>>>> origin/main
     matching = [job for job in jobs if job.get('name') == _HOSTED_JOB_NAME]
     if len(matching) != 1:
         return 'HOSTED_JOB_MISSING'
     job = matching[0]
     status = job.get('status')
+<<<<<<< HEAD
     if status != 'completed':
         if status in ('queued', 'in_progress'):
             return job
@@ -786,6 +823,30 @@ def _hosted_job(run, *, get=None):
     app = check.get('app')
     if (check.get('head_sha') != run['head_sha'] or
             not isinstance(app, dict) or app.get('id') != _HOSTED_APP_ID):
+=======
+    if status in ('queued', 'in_progress'):
+        return job
+    if status != 'completed':
+        return 'HOSTED_RUNNER_UNTRUSTED'
+    if job.get('labels') != list(_HOSTED_LABELS):
+        return 'HOSTED_RUNNER_UNTRUSTED'
+    if job.get('runner_group_name') != _HOSTED_RUNNER_GROUP:
+        return 'HOSTED_RUNNER_UNTRUSTED'
+    check_run_id = _extract_check_run_id(job)
+    if check_run_id is None:
+        return 'HOSTED_RUNNER_UNTRUSTED'
+    try:
+        check_run = get(f'check-runs/{check_run_id}')
+    except Exception:
+        return 'UNREADABLE'
+    if not isinstance(check_run, dict):
+        return 'UNREADABLE'
+    app = check_run.get('app')
+    if not isinstance(app, dict) or app.get('id') != _HOSTED_APP_ID:
+        return 'HOSTED_RUNNER_UNTRUSTED'
+    run_head = run.get('head_sha')
+    if not isinstance(run_head, str) or check_run.get('head_sha') != run_head:
+>>>>>>> origin/main
         return 'HOSTED_RUNNER_UNTRUSTED'
     return job
 
@@ -973,6 +1034,7 @@ def _hosted_artifact(run_id, nonce, *, get=None, get_bytes=None):
     except Exception:
         return None
 
+<<<<<<< HEAD
 
 _PENDING_STATUSES = frozenset({'queued', 'in_progress', 'waiting', 'requested', 'pending'})
 _UNKNOWN_CONCLUSIONS = frozenset({
@@ -1123,3 +1185,5 @@ def _hosted_outcome(run, job, raw, *, sha, modules):
     return ('OUTCOME', 'UNKNOWN', 'HOSTED_RUN_UNKNOWN')
 
 
+=======
+>>>>>>> origin/main

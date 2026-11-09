@@ -359,6 +359,32 @@ class GitHubHostedRunnerTests(unittest.TestCase):
                              CODE_PATHS, _hosted_trust())
         self.assertEqual(result['successful_checks'], [])
 
+    def test_label_alternatives_trusted(self):
+        # Each alternative matches when the job has exact labels.
+        config = _hosted_trust(labels=(('macos-15',), ('macos-15-intel',)))
+        for label in ('macos-15', 'macos-15-intel'):
+            with self.subTest(label=label):
+                result, _ = _collect(_hosted(_job('github_hosted_job', labels=[label])),
+                                     CODE_PATHS, config)
+                self.assertEqual(result['successful_checks'], ['check (hosted)'])
+
+    def test_label_alternatives_untrusted_labels_refused(self):
+        # Subset, superset, self-hosted, wrong or missing labels are refused.
+        config = _hosted_trust(labels=(('macos-15',), ('macos-15-intel',)))
+        for labels in (['macos-15', 'macos-15-intel'], ['macos-14'],
+                       ['macos-15', 'self-hosted'], ['macos'], [], None):
+            with self.subTest(labels=labels):
+                self._rejects(_job('github_hosted_job', labels=labels), config)
+
+    def test_label_alternatives_untrusted_runner_groups_refused(self):
+        # An alternative match in the wrong runner group is refused.
+        config = _hosted_trust(labels=(('macos-15',), ('macos-15-intel',)))
+        for group in ('Default', 'github actions', None):
+            with self.subTest(group=group):
+                self._rejects(
+                    _job('github_hosted_job', labels=['macos-15'], runner_group_name=group),
+                    config)
+
 
 class TrustedSlugTests(unittest.TestCase):
     def test_github_get_uses_trusted_slug(self):
