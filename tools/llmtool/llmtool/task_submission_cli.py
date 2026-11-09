@@ -983,6 +983,8 @@ def run_task_abandon(args, *, store=None, stdout=None):
     store = TaskStore() if store is None else store
     key = active_pm_inbox.pm_session_key(args.pm_session)
     saved = store.abandon(args.task_id, pm_session_id=key, reason=args.reason)
+    from . import gw_agent_sessions
+    gw_agent_sessions.sweep_quietly(store)
     _print({'task_id': saved['task_id'], 'state': 'ABANDONED',
             'abandonment': saved['abandonment']}, stdout=stdout)
     return 0
