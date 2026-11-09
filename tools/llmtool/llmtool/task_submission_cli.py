@@ -894,7 +894,7 @@ def add_task_submission_parsers(actions):
                                help='review verdict version (1-9999; default 1)')
     review_result.add_argument('--reviewer-session-done', action='store_true',
                                help='record REVIEW_BLOCKED when no verdict exists')
-    high_debug = actions.add_parser('high-debug', help='Run one read-only Codex diagnosis of an Executor D6')
+    high_debug = actions.add_parser('high-debug', help='Run one read-only Codex or Claude diagnosis of an Executor D6')
     high_debug.add_argument('task_id')
     high_debug.add_argument('--executor-task', required=True)
     high_debug.add_argument('--pr', required=True, type=int)
@@ -903,6 +903,7 @@ def add_task_submission_parsers(actions):
     choice.add_argument('--failed-corrections', type=int)
     choice.add_argument('--early')
     high_debug.add_argument('--evidence-file')
+    high_debug.add_argument('--route', choices=('codex', 'claude'), default='codex')
     repair = actions.add_parser(
         'repair', help='Dispatch one bounded repair for the newest failed formal review')
     repair.add_argument('task_id', help='existing durable Task ID')
@@ -1347,6 +1348,9 @@ def run_task_advance(args, *, store=None, **adapters):
             integration_pr=getattr(args, 'integration_pr', None),
             merge=getattr(args, 'merge', False),
             reviewer_session_done=getattr(args, 'reviewer_session_done', False), **adapters)
+    if result.get('step') == 'CLOSED':
+        from . import gw_agent_sessions
+        gw_agent_sessions.sweep_quietly(TaskStore() if store is None else store)
     _print(result)
     return 1 if result.get('codes') else 0
 
@@ -1390,6 +1394,9 @@ def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapter
         # whatever step budget remains, and report only the refusal.
         _print(pm_caller.refusal(args.task_id, exc.code))
         return 1
+    if result.get('step') == 'CLOSED':
+        from . import gw_agent_sessions
+        gw_agent_sessions.sweep_quietly(store)
     _print(result)
     return 1 if result.get('codes') else 0
 
@@ -1536,7 +1543,7 @@ def run_task_high_debug(args, *, store=None, runner=None, create_d6=None):
         task_id=args.task_id, executor_task=args.executor_task, pr_number=args.pr,
         family=args.family, failed_corrections=getattr(args, 'failed_corrections', None),
         early_reason=getattr(args, 'early', None), evidence=getattr(args, 'evidence_file', None),
-        runner=runner, create_d6=create_d6)
+        runner=runner, create_d6=create_d6, route=getattr(args, 'route', 'codex'))
 
 
 _DIFF_HEADER = re.compile(r'^diff --git a/([^\r\n]+) b/([^\r\n]+)$')
@@ -5164,7 +5171,7 @@ def _collect_ec2_repair_task_ids(record, new_ids, legacy_ids):
         (new_ids if kind == 'NEW' else legacy_ids).add(repair_task_id)
 
 
-_HIGH_DEBUG_MODEL = 'gpt-6.1-sol'
+_HIGH_DEBUG_MODELS = frozenset(('gpt-6.1-sol', 'claude-opus-5-5'))
 
 
 def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
@@ -5183,7 +5190,10 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     if (type(completion) is not dict or type(executor_task) is not str or
             completion.get('executor_task_id') != executor_task):
         raise ValueError
-    if entry.get('model_observed') != _HIGH_DEBUG_MODEL:
+    model_observed = entry.get('model_observed')
+    if (type(model_observed) is not str or
+            model_observed not in _HIGH_DEBUG_MODELS or
+            model_observed != entry.get('model_requested')):
         raise ValueError
     report = entry.get('report')
     report_sha256 = entry.get('report_sha256')
