@@ -199,6 +199,8 @@ Confirm the receipt within 2 minutes of dispatch. Until then record only `DISPAT
 
 Formal verdicts are posted with `gh pr comment`, never `gh pr review`, because Task advance scans issue comments. Merge only when every exact-head check is `SUCCESS` or `SKIPPED`, with macOS `SUCCESS` where required; `CANCELLED` or pending checks block the merge.
 
+**Code PRs merge only through llmtool (#1208).** A PR that changes any path not classified as documentation merges only through `llmtool task advance --merge` or a merge train (`llmtool task train`). Both refuse a missing, skipped or red required check. The PM never runs `gh pr merge` on such a PR, including Owner-direct and monitor PRs. Reason: audit #1174 found 60 hand-merged PRs with a required check missing ([#1208](https://github.com/davidcatcat/davidcattoolsproject/issues/1208)). This is a rule, not a technical block: a same-user AI can still run `gh pr merge` (S2), so never claim it prevents that. A documentation-only PR keeps its current gates: formal review and exact-head `check (docs)`. If the llmtool merge path is broken, the PM records the defect and waits for the fix or an Owner decision; it does not fall back to `gh pr merge`.
+
 ## What the skills own and what the runtime owns
 
 **Skills** (this contract and the files it links) own:

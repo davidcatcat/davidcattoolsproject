@@ -50,6 +50,8 @@ Submit one consolidated exact-SHA candidate to a qualified, authorized formal Re
 
 After review and exact-head CI pass, reconcile the tested SHA against the current target, assess integration changes, and merge only when every task-required gate passes under [safe-git](../safe-git/SKILL.md). A relevant source change invalidates affected checks and review.
 
+**Owner acceptance is a separate gate (#1208).** Owner product acceptance and formal cross-family review are two independent gates. When a Task needs Owner acceptance, its PR needs both, plus exact-head CI. A relayed Owner acceptance never replaces formal review or CI, and a formal PASS never replaces Owner acceptance. #888 is the case that must not repeat.
+
 **Company LLM Developer route:** Follow the authority, eligible task scope, privacy, execution and acceptance requirements in [AGENTS.md](../../AGENTS.md). A `gw` assignment is not evidence of live dispatch, patch application, full formal review or Task closure. Do not claim quality or net savings from one trial.
 
 <a id="p0--sole-owner-escalation-rule-owner-decision-2026-10-10"></a>
