@@ -3290,14 +3290,66 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         def gh_runner(_root, args):
             gh_calls.append(args)
             return type('R', (), {'returncode': 0 if args[1] == 'merge' else 1})()
-        result = task_advance._merge_once(store=store, record=record, number=17,
-            head=HEAD, pr=pr, events=[event], github_get=github_get,
-            gh_runner=gh_runner, root='/repo')
-        self.assertEqual(result['step'], 'MERGED')
-        self.assertEqual(result['codes'], [
-            'MERGE_RESULT_RECORD_FAILED', 'MERGE_PROVENANCE_COMMENT_FAILED'])
-        self.assertEqual(store.attempt['state'], 'MERGED')
-        self.assertEqual(sum(call[1] == 'merge' for call in gh_calls), 1)
+        with patch('llmtool.mac_full_suite.request_full_suite',
+                   return_value='MAC_FULL_SUITE_DISPATCHED'):
+            result = task_advance._merge_once(store=store, record=record, number=17,
+                head=HEAD, pr=pr, events=[event], github_get=github_get,
+                gh_runner=gh_runner, root='/repo')
+            self.assertEqual(result['step'], 'MERGED')
+            self.assertEqual(result['codes'], [
+                'MERGE_RESULT_RECORD_FAILED', 'MERGE_PROVENANCE_COMMENT_FAILED'])
+            self.assertEqual(store.attempt['state'], 'MERGED')
+            self.assertEqual(sum(call[1] == 'merge' for call in gh_calls), 1)
+
+    def test_successful_merge_records_warning_when_mac_full_suite_dispatch_fails(self):
+        review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                  'review_result': {'verdict': 'PASS'}}
+        event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}
+        record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                  'review_dispatch_claim': [review]}
+
+        class Store:
+            def __init__(self):
+                self.attempt = None
+                self.fail_record_once = True
+            def compare_and_update(self, _task_id, *, expected, merge_attempt):
+                if 'record_sha256' in expected:
+                    self.attempt = dict(merge_attempt)
+                    return
+                if self.attempt != expected.get('merge_attempt'):
+                    raise RuntimeError('claim changed')
+                if merge_attempt['state'] == 'MERGED' and self.fail_record_once:
+                    self.fail_record_once = False
+                    raise RuntimeError('temporary record error')
+                self.attempt = dict(merge_attempt)
+
+        store, gh_calls = Store(), []
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
+              'labels': [{'name': 'mac-ci'}]}
+        checks = {'total_count': 2, 'check_runs': [
+            {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+             'conclusion': 'success'},
+            {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
+             'conclusion': 'success'}]}
+        @with_current_main
+        def github_get(path):
+            if path.startswith('commits/'):
+                return checks
+            if path.endswith('/files?per_page=100'):
+                return [{'filename': 'src/module.py'}]
+            return pr
+        def gh_runner(_root, args):
+            gh_calls.append(args)
+            return type('R', (), {'returncode': 0 if args[1] == 'merge' else 1})()
+        with patch('llmtool.mac_full_suite.request_full_suite',
+                   return_value='MAC_FULL_SUITE_DISPATCH_FAILED') as mock_suite:
+            result = task_advance._merge_once(store=store, record=record, number=17,
+                head=HEAD, pr=pr, events=[event], github_get=github_get,
+                gh_runner=gh_runner, root='/repo')
+            self.assertEqual(result['step'], 'MERGED')
+            self.assertEqual(mock_suite.call_count, 1)
+            self.assertEqual(result['codes'][-1], 'MAC_FULL_SUITE_DISPATCH_FAILED')
 
 
 class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
@@ -3397,18 +3449,20 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
                     self.assertEqual(result['result']['main_behind_by'], 2)
 
     def test_head_with_current_main_merges(self):
-        for status in ('ahead', 'identical'):
-            with self.subTest(status=status):
-                result, reads, calls, claims = self.merge(compare_reply={'status': status})
-                self.assertEqual(result['step'], 'MERGED')
-                self.assertEqual(calls[0], ['pr', 'merge', '17', '--squash',
-                                            '--match-head-commit', HEAD])
-                self.assertEqual(sum(call[1] == 'merge' for call in calls), 1)
-                self.assertEqual([claim['state'] for claim in claims],
-                                 ['CLAIMED', 'MERGED'])
-                self.assertEqual(result['result']['main_behind_by'], 0)
-                self.assertEqual(reads[-3:], ['pulls/17', 'branches/main',
-                                              self.COMPARE_PATH])
+        with patch('llmtool.mac_full_suite.request_full_suite',
+                   return_value='MAC_FULL_SUITE_DISPATCHED'):
+            for status in ('ahead', 'identical'):
+                with self.subTest(status=status):
+                    result, reads, calls, claims = self.merge(compare_reply={'status': status})
+                    self.assertEqual(result['step'], 'MERGED')
+                    self.assertEqual(calls[0], ['pr', 'merge', '17', '--squash',
+                                                '--match-head-commit', HEAD])
+                    self.assertEqual(sum(call[1] == 'merge' for call in calls), 1)
+                    self.assertEqual([claim['state'] for claim in claims],
+                                     ['CLAIMED', 'MERGED'])
+                    self.assertEqual(result['result']['main_behind_by'], 0)
+                    self.assertEqual(reads[-3:], ['pulls/17', 'branches/main',
+                                                  self.COMPARE_PATH])
 
     def test_behind_head_refusals(self):
         cases = (
