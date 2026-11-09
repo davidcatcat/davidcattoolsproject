@@ -3,8 +3,10 @@ name: llmtool Mac CI
 # Feature branches are tested through their pull request, not again on push:
 # a branch push plus its PR used to run the same commit twice (Issue #99).
 # The PM triggers workflow_dispatch after each merge train for main's full
-# suite. Jobs run on GitHub-hosted macos-15-intel (#1253, Owner 2026-11-09:
-# the repository is public; the Owner's Mac no longer takes CI jobs). Python
+# suite. pull_request jobs run on macos-15 unless the PR has the mac-ci-intel
+# label, and workflow_dispatch (main full suite) runs on macos-15-intel (#1253,
+# Owner 2026-11-09: the repository is public; the Owner's Mac no longer takes
+# CI jobs). Python
 # 3.13 comes from actions/setup-python (pinned by SHA) and is copied into a
 # job-owned venv that the verified-Python step checks byte for byte. The
 # company LLM, its VPN and any company configuration are never used here; all
@@ -33,11 +35,11 @@ permissions:
 jobs:
   check:
     name: check (macOS 3.13)
-    if: vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci')
+    if: vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci' || github.event.label.name == 'mac-ci-intel')
     concurrency:
       group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
       cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
-    runs-on: macos-15-intel
+    runs-on: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'mac-ci-intel') && 'macos-15' || 'macos-15-intel' }}
     # Owner #1253: up to 120 minutes while the hosted full suite is measured (#1220).
     timeout-minutes: 120
     steps:
