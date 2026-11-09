@@ -161,6 +161,8 @@ class CiTestShardsTests(unittest.TestCase):
             "*.md",
             "scripts/**",
             ".github/workflows/**",
+            "**/*.md",
+            "reports/**",
         ]
         header = workflow.split("jobs:", 1)[0]
         # Under push there are a branches list and a comment line before paths:,
