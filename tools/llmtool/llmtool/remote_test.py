@@ -4,6 +4,9 @@ import hashlib
 import json
 import os
 import re
+import secrets
+import selectors
+import shutil
 import stat
 import subprocess
 import time
@@ -12,13 +15,31 @@ from pathlib import Path
 
 from .active_pm_inbox import record_remote_test_event, record_remote_test_outcome_event
 from .errors import LLMToolError
-from .task_completion import _github_get, read_d6_registration
+from . import github_identity
+from .task_completion import _github_get, _trusted_slug, read_d6_registration
 from .task_store import TaskStore, _emitted_sensitive, _json_bytes
 
 _SHA = re.compile(r'[0-9a-f]{40}\Z')
 _REF = re.compile(r'(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z')
 _MODULE = re.compile(r'test_[a-z0-9_]{1,80}\Z')
 _TASK = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
+_NONCE = re.compile(r'[0-9a-f]{32}\Z')
+_HOSTED_WORKFLOW_PATH = '.github/workflows/llmtool-remote-test.yml'
+_HOSTED_JOB_NAME = 'remote-test'
+_HOSTED_LABELS = ('ubuntu-24.04',)
+_HOSTED_RUNNER_GROUP = 'GitHub Actions'
+_HOSTED_APP_ID = 15368
+_HOSTED_ACTORS = (github_identity.owner_login(), github_identity.ai_login())
+_HOSTED_TITLE_PREFIX = 'llmtool remote-test '
+_HOSTED_ARTIFACT_PREFIX = 'remote-test-receipt-'
+_HOSTED_ZIP_LIMIT = 65536
+_HOSTED_MEMBER_LIMIT = 32768
+_HOSTED_ZIP_MEMBER_LIMIT = 32768
+_ZIP_LIMIT = 65536
+_ZIP_MEMBER_LIMIT = 32768
+_MEMBER_LIMIT = 32768
+_HOSTED_DISPATCH_PATH = 'actions/workflows/llmtool-remote-test.yml/dispatches'
+_GH_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
 _REMOTE_LIMIT = 32768
 _FAILURE_EXCERPT_LIMIT = 4096
 _FAILURE_EXCERPT_LINES = 40
@@ -523,3 +544,173 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     saved = store.append_remote_test_receipt(task_id, receipt)
     record_remote_test_event(store, task_id, saved)
     return saved
+
+
+def _new_nonce():
+    """Return 32 lowercase hex characters from the secrets module."""
+    return secrets.token_hex(16)
+
+
+def _hosted_post(path, body):
+    """Make one POST to the single accepted hosted dispatch path using gh CLI."""
+    if path != _HOSTED_DISPATCH_PATH:
+        raise ValueError(f'Unsupported dispatch path: {path}')
+    gh = shutil.which('gh', path=_GH_PATH)
+    if gh is None:
+        raise LLMToolError('gh executable not found')
+    slug = _trusted_slug()
+    env = {
+        'PATH': _GH_PATH,
+        'HOME': os.path.expanduser('~'),
+        'LC_ALL': 'C',
+        'GH_PROMPT_DISABLED': '1',
+        'GH_NO_UPDATE_NOTIFIER': '1',
+        'NO_COLOR': '1',
+    }
+    if os.environ.get('GH_CONFIG_DIR'):
+        env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
+    argv = [
+        gh, 'api', '--method', 'POST',
+        '-H', 'Accept: application/vnd.github+json',
+        '-H', 'X-GitHub-Api-Version: 2022-11-28',
+        '--input', '-',
+        'repos/' + slug + '/' + path,
+    ]
+    if isinstance(body, bytes):
+        payload = body
+    else:
+        payload = json.dumps(body, separators=(',', ':')).encode('utf-8')
+    try:
+        process = subprocess.Popen(
+            argv, env=env, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            shell=False, close_fds=True, start_new_session=True,
+        )
+    except OSError as exc:
+        raise LLMToolError(f'Failed to execute gh: {exc}') from exc
+
+    deadline = time.monotonic() + 10
+    raw_out = bytearray()
+    raw_err = bytearray()
+    selector = selectors.DefaultSelector()
+    try:
+        if process.stdin:
+            process.stdin.write(payload)
+            process.stdin.close()
+        for stream, kind in ((process.stdout, 'out'), (process.stderr, 'err')):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, kind)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, 10)
+            for key, _ in selector.select(min(remaining, 0.1)):
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                elif key.data == 'out':
+                    if len(raw_out) + len(chunk) > 65536:
+                        raise LLMToolError('POST output exceeded limit')
+                    raw_out.extend(chunk)
+                else:
+                    if len(raw_err) + len(chunk) > 65536:
+                        raise LLMToolError('POST stderr exceeded limit')
+                    raw_err.extend(chunk)
+        code = process.wait(timeout=max(0, deadline - time.monotonic()))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LLMToolError(f'gh command failure: {exc}') from exc
+    finally:
+        selector.close()
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, 9)
+            except OSError:
+                process.kill()
+            process.wait()
+        if process.stdout:
+            process.stdout.close()
+        if process.stderr:
+            process.stderr.close()
+    if code != 0:
+        raise LLMToolError(f'gh POST failed with code {code}')
+    return True
+
+
+def _hosted_dispatch(sha, ref, modules, nonce, *, post=None):
+    """Validate parameters and dispatch the GitHub-hosted remote-test workflow."""
+    if type(sha) is not str or not _SHA.fullmatch(sha):
+        raise ValueError('Invalid sha')
+    if type(ref) is not str or not _REF.fullmatch(ref):
+        raise ValueError('Invalid ref')
+    if type(nonce) is not str or not _NONCE.fullmatch(nonce):
+        raise ValueError('Invalid nonce')
+    if not isinstance(modules, (list, tuple)):
+        raise ValueError('modules must be a sequence')
+    if not (1 <= len(modules) <= 8):
+        raise ValueError('modules must contain 1 to 8 items')
+    if any(type(m) is not str or not _MODULE.fullmatch(m) for m in modules):
+        raise ValueError('Each module must match _MODULE')
+    if list(modules) != sorted(set(modules)):
+        raise ValueError('modules must be 1 to 8 sorted distinct items')
+
+    body = {
+        'ref': 'main',
+        'inputs': {
+            'sha': sha,
+            'ref': ref,
+            'modules': ' '.join(modules),
+            'nonce': nonce,
+        },
+    }
+    if post is None:
+        post = _hosted_post
+    try:
+        res = post(_HOSTED_DISPATCH_PATH, body)
+        if res is False or res == 'UNCONFIRMED':
+            return 'UNCONFIRMED'
+        return 'DISPATCHED'
+    except Exception:
+        return 'UNCONFIRMED'
+
+
+def _hosted_find_run(nonce, *, get=None):
+    """Find the single matching workflow run for the given nonce."""
+    if type(nonce) is not str or not _NONCE.fullmatch(nonce):
+        raise ValueError('Invalid nonce')
+    if get is None:
+        get = _github_get
+    workflow_file = _HOSTED_WORKFLOW_PATH.rsplit('/', 1)[-1]
+    path = f'actions/workflows/{workflow_file}/runs?event=workflow_dispatch&branch=main'
+    try:
+        data = get(path)
+    except Exception:
+        return 'UNREADABLE'
+    if not isinstance(data, dict):
+        return 'UNREADABLE'
+    runs = data.get('workflow_runs')
+    if not isinstance(runs, list):
+        return 'UNREADABLE'
+    expected_title = _HOSTED_TITLE_PREFIX + nonce
+    kept = []
+    for run in runs:
+        if not isinstance(run, dict):
+            return 'UNREADABLE'
+        if run.get('display_title') != expected_title:
+            continue
+        if run.get('head_branch') != 'main':
+            continue
+        if run.get('path') != _HOSTED_WORKFLOW_PATH:
+            continue
+        actor = run.get('actor')
+        if not isinstance(actor, dict) or actor.get('login') not in _HOSTED_ACTORS:
+            continue
+        triggering = run.get('triggering_actor')
+        if not isinstance(triggering, dict) or triggering.get('login') not in _HOSTED_ACTORS:
+            continue
+        kept.append(run)
+    if len(kept) == 1:
+        return kept[0]
+    if len(kept) == 0:
+        return None
+    return 'AMBIGUOUS'
+
