@@ -566,6 +566,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
     def test_monitor_and_documentation_changes_select_no_subset(self):
         for path in (
             "scripts/llmtool_monitor.py",
+            "scripts/test_llmtool_monitor_github_reads.py",
             "tools/llmtool/docs/guide.md",
             "AGENTS.md",
             "CLAUDE.md",
@@ -675,6 +676,41 @@ class MacTestIdSelectionTests(unittest.TestCase):
         self.assertIn("canonical test ID elapsed seconds:", workflow)
         self.assertIn("canonical unittest test-case count:", workflow)
         self.assertIn("verify=true", workflow)
+
+    def test_monitor_github_reads_selection_matches_monitor_test(self):
+        # Changes holding only the new monitor test are selected like scripts/test_llmtool_monitor.py.
+        baseline = ci_mac_modules.selection_report(
+            ["scripts/test_llmtool_monitor.py"], REPO_ROOT
+        )
+        report = ci_mac_modules.selection_report(
+            ["scripts/test_llmtool_monitor_github_reads.py"], REPO_ROOT
+        )
+        self.assertEqual(report["level"], "L0")
+        self.assertEqual(report["test_ids"], [])
+        self.assertEqual(report["level"], baseline["level"])
+        self.assertEqual(report["test_ids"], baseline["test_ids"])
+        self.assertEqual(report["selection_reason"], baseline["selection_reason"])
+        self.assertEqual(report["fallback_reasons"], baseline["fallback_reasons"])
+        self.assertEqual(report["fallback_paths"], baseline["fallback_paths"])
+        self.assertEqual(report["fallback_details"], baseline["fallback_details"])
+        self.assertEqual(
+            ci_mac_modules.select_test_ids(
+                ["scripts/test_llmtool_monitor_github_reads.py"], REPO_ROOT
+            ),
+            ci_mac_modules.select_test_ids(
+                ["scripts/test_llmtool_monitor.py"], REPO_ROOT
+            ),
+        )
+
+    def test_workflow_names_monitor_github_reads_paths_and_pattern(self):
+        # Workflow paths list and monitor-only case pattern both name the new file.
+        workflow = (REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml").read_text()
+        self.assertIn("- 'scripts/test_llmtool_monitor_github_reads.py'", workflow)
+        case_pattern = (
+            "scripts/llmtool_monitor.py|scripts/test_llmtool_monitor.py|"
+            "scripts/test_llmtool_monitor_github_reads.py)"
+        )
+        self.assertIn(case_pattern, workflow)
 
 
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml"

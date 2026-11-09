@@ -1,5 +1,6 @@
 import hashlib
 import json
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -54,14 +55,11 @@ class RemoteTestGateTests(unittest.TestCase):
             raise FileNotFoundError
 
         self.assertEqual(task_submission_cli._remote_receipt_test_policy(
-            task, read_paths=[PATH], config_loader=unconfigured), 'LOCAL')
-        with self.assertRaises(LLMToolError) as invalid:
-            task_submission_cli._remote_receipt_test_policy(
-                task, read_paths=[PATH],
-                config_loader=lambda: (_ for _ in ()).throw(
-                    LLMToolError('REMOTE_TEST_CONFIG_INVALID')))
-        self.assertEqual(invalid.exception.completion_code,
-                         'REMOTE_TEST_CONFIG_INVALID')
+            task, read_paths=[PATH], config_loader=unconfigured), 'REMOTE_RECEIPT')
+        self.assertEqual(task_submission_cli._remote_receipt_test_policy(
+            task, read_paths=[PATH],
+            config_loader=lambda: (_ for _ in ()).throw(
+                LLMToolError('REMOTE_TEST_CONFIG_INVALID'))), 'REMOTE_RECEIPT')
         outside = task_with_tests()
         outside['task_contract']['test_commands'][0]['argv'][-1] = 'test_other.py'
         self.assertEqual(task_submission_cli._remote_receipt_test_policy(
@@ -95,10 +93,8 @@ class RemoteTestGateTests(unittest.TestCase):
         self.assertNotIn('Run only listed test_commands', remote)
         self.assertNotIn('Run only listed test_commands;', remote)
 
-        def unconfigured():
-            raise FileNotFoundError
-
-        with patch.object(remote_test, '_config', side_effect=unconfigured):
+        with patch('llmtool.task_submission_cli._remote_receipt_test_policy',
+                   return_value='LOCAL'):
             local = task_submission_cli._codex_direct_prompt(task, **common)
         self.assertIn('Run only listed test_commands;', local)
         self.assertIn('"test_policy":"LOCAL"', local)
@@ -122,6 +118,39 @@ class RemoteTestGateTests(unittest.TestCase):
             self.assertEqual(task_submission_cli._direct_result_tests(
                 task, evidence, result, developer), [{'status': 'PASSED'}])
         local_tests.assert_called_once()
+
+    def test_remote_testable_task_with_missing_config_defers_remote_tests_and_skips_local(self):
+        task = task_with_tests()
+        task['developer'] = {'read_paths': [PATH], 'write_paths': [PATH]}
+
+        def unconfigured():
+            raise FileNotFoundError
+
+        with patch.object(remote_test, '_config', side_effect=unconfigured):
+            policy = task_submission_cli._remote_receipt_test_policy(
+                task, read_paths=[PATH])
+            self.assertEqual(policy, 'REMOTE_RECEIPT')
+
+            registration = SimpleNamespace(
+                task_id='d6-task', trusted_agent_id='agent-1',
+                session_ref='session-1', native_session_id='native-1',
+                root='/repo', common_dir='/repo/.git', branch='feat/task')
+            callback = task_submission_cli._direct_result_callback(
+                task, registration, SHA)
+            self.assertEqual(callback['evidence']['test_policy'], 'REMOTE_RECEIPT')
+
+            result = {'diff_sha256': '4' * 64, 'changed_paths': [PATH]}
+            with patch.object(task_submission_cli.task_completion,
+                              'run_bounded_worktree_tests') as worktree_tests, \
+                 patch.object(task_submission_cli.task_completion,
+                              'run_bounded_tests') as bounded_tests:
+                tests = task_submission_cli._direct_result_tests(
+                    task, callback['evidence'], result, task['developer'])
+                worktree_tests.assert_not_called()
+                bounded_tests.assert_not_called()
+            self.assertEqual(len(tests), 1)
+            self.assertEqual(tests[0]['status'], 'DEFERRED_REMOTE_RECEIPT')
+            self.assertEqual(tests[0]['path'], PATH)
 
     def test_gate_accepts_only_exact_bound_verified_pass_receipt(self):
         task = task_with_tests()

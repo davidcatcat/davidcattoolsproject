@@ -526,8 +526,8 @@ class TaskCompletionTests(unittest.TestCase):
                           return_value=[{
                               'path': self.source_path, 'source_sha': tested_head,
                               'exit_code': 0, 'output_sha256': '6' * 64}]) as tests, \
-             patch('llmtool.task_submission_cli._remote_test_config_state',
-                   return_value='MISSING'), \
+             patch('llmtool.task_submission_cli._remote_receipt_test_policy',
+                   return_value='LOCAL'), \
              patch('llmtool.task_submission_cli.resolve_profile_config',
                    side_effect=AssertionError('unexpected provider')) as resolve, \
              patch.object(task_completion, 'collect_github_evidence',
@@ -1198,8 +1198,8 @@ class TaskCompletionTests(unittest.TestCase):
                                       'path': self.source_path,
                                       'source_sha': result_sha, 'exit_code': 0,
                                       'output_sha256': '6' * 64}]) as tests, \
-                     patch('llmtool.task_submission_cli._remote_test_config_state',
-                           return_value='MISSING'), \
+                     patch('llmtool.task_submission_cli._remote_receipt_test_policy',
+                           return_value='LOCAL'), \
                      patch('llmtool.task_submission_cli.resolve_profile_config',
                            side_effect=AssertionError('unexpected provider')) as resolve, \
                      patch.object(task_completion, 'collect_github_evidence',
