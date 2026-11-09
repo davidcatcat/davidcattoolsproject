@@ -1051,6 +1051,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
         from llmtool.developer_routes import gw_agent
         binding = gw_agent.read_session_binding(home, executor_task_id='executor-d6')
         self.assertEqual(binding['root_task_id'], first_task)
+        (self.root / 'gw-agent-first.md').unlink()
         self._release_d6()
         seen = {}
 
