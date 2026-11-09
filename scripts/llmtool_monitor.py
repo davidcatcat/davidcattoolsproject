@@ -4290,6 +4290,20 @@ def ci_finished_runs(payload) -> list:
             if type(run) is dict and run.get("status") == "completed" and type(run.get("id")) is int]
 
 
+def _clean_runner_name(name) -> str | None:
+    if name is None:
+        return None
+    name_str = str(name)
+    if not name_str:
+        return None
+    cleaned = "".join(c for c in name_str if not unicodedata.category(c).startswith("C"))
+    cleaned = cleaned[:64]
+    return cleaned if cleaned else None
+
+
+clean_runner_name = _clean_runner_name
+
+
 def ci_runner_names(runs: list, jobs_of, queued: list | None = None) -> list:
     """Fill in which runner runs each unfinished workflow: one entry per
     in-progress job, so a run with jobs on two runners shows on both. Job
@@ -4307,16 +4321,17 @@ def ci_runner_names(runs: list, jobs_of, queued: list | None = None) -> list:
             except (OSError, ValueError, RuntimeError, AttributeError, subprocess.SubprocessError):
                 found = None
             if found is not None:
-                jobs = [job for job in found if job.get("status") == "in_progress" and job.get("runner_name")]
+                jobs = [job for job in found if job.get("status") == "in_progress"]
                 waiting = any(job.get("status") in CI_ACTIVE and job.get("status") != "in_progress"
                               for job in found) or (waiting and not found)
                 if queued is not None:
                     queued += ci_queued_jobs(payload, text)
         for job in jobs:
             job_name = str(job.get("name") or "")[:40]
+            runner_name = _clean_runner_name(job.get("runner_name"))
             named.append(("in_progress", text + (f"：{job_name}" if job_name else ""),
                           _github_time(job.get("started_at")) or started,
-                          str(job["runner_name"]), run_id))
+                          runner_name, run_id))
         if not jobs:   # nothing runs yet, whatever the run says
             named.append(("queued" if waiting else status, text, started, runner, run_id))
         elif waiting:
@@ -4377,12 +4392,13 @@ def ci_finished_jobs(payload, text: str) -> list:
     """Finished jobs of one workflow run as (runner, job text, result, end time)."""
     found = []
     for job in (payload.get("jobs") if type(payload) is dict else None) or []:
-        if (type(job) is dict and job.get("status") == "completed"
-                and RUNNER_NAME.fullmatch(str(job.get("runner_name") or ""))):
-            name = str(job.get("name") or "")[:40]
-            found.append((job["runner_name"], text + (f"：{name}" if name else ""),
-                          CI_CONCLUSIONS.get(job.get("conclusion"), "結果不明"),
-                          _github_time(job.get("completed_at"))))
+        if type(job) is dict and job.get("status") == "completed":
+            runner = _clean_runner_name(job.get("runner_name"))
+            if runner:
+                name = str(job.get("name") or "")[:40]
+                found.append((runner, text + (f"：{name}" if name else ""),
+                              CI_CONCLUSIONS.get(job.get("conclusion"), "結果不明"),
+                              _github_time(job.get("completed_at"))))
     return found
 
 
