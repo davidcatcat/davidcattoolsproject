@@ -470,7 +470,7 @@ def _source_revision(source_file=None):
 
     try:
         git_dir = None
-        for candidate in (source_dir, *source_dir.parents[:8]):
+        for candidate in (source_dir, *list(source_dir.parents)[:8]):
             marker = candidate / ".git"
             try:
                 marker_info = marker.lstat()

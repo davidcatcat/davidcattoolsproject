@@ -183,8 +183,12 @@ def _validate_schema(value):
             if workflow["runner_names"] is not None:
                 _fail("TRUST_CI_INVALID")
             labels = workflow["runner_labels"]
-            if (not _list(labels, 1, 8, lambda item: type(item) is str and
-                          _RUNNER.fullmatch(item) is not None and item != "self-hosted")):
+            # Accept either a flat list of 1-8 labels or 1-4 alternatives of 1-8 labels.
+            label_ok = lambda item: type(item) is str and _RUNNER.fullmatch(item) is not None and item != "self-hosted"
+            valid_flat = _list(labels, 1, 8, label_ok)
+            valid_alts = (type(labels) is list and 1 <= len(labels) <= 4 and
+                          all(_list(alt, 1, 8, label_ok) for alt in labels))
+            if not (valid_flat or valid_alts):
                 _fail("TRUST_CI_INVALID")
         for field in ("code_check", "docs_check"):
             check = workflow[field]

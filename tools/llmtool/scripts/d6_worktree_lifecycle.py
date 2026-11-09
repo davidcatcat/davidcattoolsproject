@@ -1362,6 +1362,43 @@ def _identity_reasons(root, record, canonical_root, common_dir, workspace_root):
     return []
 
 
+def _check_merge_evidence(root, head, squash, train_squash=None):
+    """Return the merge proof rule name if head is proven merged, else None."""
+    def is_ancestor(commit, ref):
+        return _task_git(root, "merge-base", "--is-ancestor", commit, ref,
+                         check=False).returncode == 0
+
+    def has_ref(ref):
+        return _task_git(root, "rev-parse", "--verify", "--quiet",
+                         ref + "^{commit}", check=False).returncode == 0
+
+    origin_main = "refs/remotes/origin/main"
+    if not has_ref(origin_main):
+        return None
+    if squash is not None:
+        pr_head, squash_sha = squash
+        parents = _task_git(root, "rev-list", "--parents", "-n", "1", squash_sha,
+                            check=False)
+        if (pr_head == head and parents.returncode == 0 and
+                len(parents.stdout.split()) == 2 and is_ancestor(squash_sha, origin_main)):
+            return "squash_evidence"
+    if train_squash is not None:
+        pr_head, train_head, squash_sha = train_squash
+        parents = _task_git(root, "rev-list", "--parents", "-n", "1", squash_sha,
+                            check=False)
+        squash_tree = _task_git(root, "rev-parse", "--verify", "--quiet",
+                                squash_sha + "^{tree}", check=False)
+        train_tree = _task_git(root, "rev-parse", "--verify", "--quiet",
+                               train_head + "^{tree}", check=False)
+        if (pr_head == head and is_ancestor(pr_head, train_head) and
+                parents.returncode == 0 and len(parents.stdout.split()) == 2 and
+                is_ancestor(squash_sha, origin_main) and
+                squash_tree.returncode == 0 and train_tree.returncode == 0 and
+                squash_tree.stdout == train_tree.stdout):
+            return "train_squash_evidence"
+    return None
+
+
 def _publication(root, branch, head, squash, train_squash=None):
     """Name the rule proving HEAD's commits are published, or None.
 
@@ -1391,28 +1428,7 @@ def _publication(root, branch, head, squash, train_squash=None):
         return None
     if is_ancestor(head, origin_main):
         return "origin_main"
-    if squash is not None:
-        pr_head, squash_sha = squash
-        parents = _task_git(root, "rev-list", "--parents", "-n", "1", squash_sha,
-                            check=False)
-        if (pr_head == head and parents.returncode == 0 and
-                len(parents.stdout.split()) == 2 and is_ancestor(squash_sha, origin_main)):
-            return "squash_evidence"
-    if train_squash is not None:
-        pr_head, train_head, squash_sha = train_squash
-        parents = _task_git(root, "rev-list", "--parents", "-n", "1", squash_sha,
-                            check=False)
-        squash_tree = _task_git(root, "rev-parse", "--verify", "--quiet",
-                                squash_sha + "^{tree}", check=False)
-        train_tree = _task_git(root, "rev-parse", "--verify", "--quiet",
-                               train_head + "^{tree}", check=False)
-        if (pr_head == head and is_ancestor(pr_head, train_head) and
-                parents.returncode == 0 and len(parents.stdout.split()) == 2 and
-                is_ancestor(squash_sha, origin_main) and
-                squash_tree.returncode == 0 and train_tree.returncode == 0 and
-                squash_tree.stdout == train_tree.stdout):
-            return "train_squash_evidence"
-    return None
+    return _check_merge_evidence(root, head, squash, train_squash)
 
 
 def _covered(path, entries):
@@ -1530,15 +1546,28 @@ def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root,
             plan["reasons"].append("D6_RETIRE_REVIEW_EVIDENCE_REQUIRED")
         else:
             pr_number, pr_head = reviewed_pr_evidence
-            if (pr_head != head or record.get("head_sha") != head):
-                plan["reasons"].append("D6_RETIRE_REVIEW_HEAD_MISMATCH")
-            else:
-                publication = _publication(root, branch, head, None, None)
-                if publication not in ("origin_branch", "origin_pr_head"):
-                    plan["reasons"].append("D6_RETIRE_UNPUBLISHED")
+            if pr_head == head:
+                if record.get("head_sha") != head:
+                    plan["reasons"].append("D6_RETIRE_REVIEW_HEAD_MISMATCH")
                 else:
-                    plan["publication"] = "reviewed_pr_head"
-                    plan["reviewed_pr_number"] = pr_number
+                    publication = _publication(root, branch, head, None, None)
+                    if publication not in ("origin_branch", "origin_pr_head"):
+                        plan["reasons"].append("D6_RETIRE_UNPUBLISHED")
+                    else:
+                        plan["publication"] = "reviewed_pr_head"
+                        plan["reviewed_pr_number"] = pr_number
+            else:
+                is_ancestor = (_task_git(root, "merge-base", "--is-ancestor", head, pr_head,
+                                         check=False).returncode == 0)
+                if record.get("head_sha") != head or not is_ancestor:
+                    plan["reasons"].append("D6_RETIRE_REVIEW_HEAD_MISMATCH")
+                else:
+                    merge_proof = _check_merge_evidence(root, pr_head, squash, train_squash)
+                    if merge_proof is None:
+                        plan["reasons"].append("D6_RETIRE_REVIEW_MERGE_UNPROVEN")
+                    else:
+                        plan["publication"] = "reviewed_pr_merged_descendant"
+                        plan["reviewed_pr_number"] = pr_number
     else:
         plan["publication"] = _publication(root, branch, head, squash, train_squash)
         if plan["publication"] is None:

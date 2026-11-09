@@ -334,6 +334,29 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
               else base_family + EC2_FAMILY_SUFFIX)
     if len(family) > 64:
         _refuse('REPAIR_FAMILY_INVALID')
+    # The count lives on the root Task, which task advance drives.
+    try:
+        candidate_ids = list(store.task_ids())
+    except Exception:
+        _refuse('REPAIR_COUNT_UNAVAILABLE')
+    for other_id in candidate_ids:
+        if other_id == task_id:
+            continue
+        try:
+            other_record = store.get(other_id)
+        except Exception:
+            _refuse('REPAIR_COUNT_UNAVAILABLE')
+        if type(other_record) is not dict:
+            _refuse('REPAIR_COUNT_UNAVAILABLE')
+        if other_record.get('task_id') == task_id:
+            continue
+        other_claims = other_record.get('review_repair_claims')
+        if type(other_claims) is not list:
+            continue
+        if any(type(item) is not dict for item in other_claims):
+            continue
+        if any(item.get('repair_task_id') == task_id for item in other_claims):
+            _refuse('REPAIR_ROOT_TASK_REQUIRED')
     claims = task.get('review_repair_claims', [])
     if type(claims) is not list:
         _refuse('REPAIR_CLAIM_UNAVAILABLE')

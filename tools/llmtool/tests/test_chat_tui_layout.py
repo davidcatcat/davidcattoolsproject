@@ -239,7 +239,7 @@ class TurnTextTests(unittest.TestCase):
 
     def test_history_usage_line_is_short(self):
         turns, total = chat_tui_pm.history_turns({"turns": [{
-            "started_at": "2026-10-30T01:00:00+00:00", "ended_at": "2026-10-30T01:00:04.5+00:00",
+            "started_at": "2026-10-30T01:00:00+00:00", "ended_at": "2026-10-30T01:00:04.500000+00:00",
             "owner_text": "hi", "status": "INTERRUPTED", "result_text": "ok",
             "usage": {"input_tokens": 1500, "output_tokens": 700, "cache_read_input_tokens": 9}}]})
         self.assertEqual(total, 1)

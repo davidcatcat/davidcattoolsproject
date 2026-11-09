@@ -1700,6 +1700,8 @@ CI_RUN_READS = 10  # unfinished runs whose job lists are read per refresh (oldes
 GITHUB_LIMIT = 16 << 20   # one page of 100 comments; a larger page fails as a stale status
 GITHUB_PAGE = 100    # comments per request (the API maximum)
 GITHUB_PAGES = 10    # about 600 comments in 12 hours were seen on 2026-11-05
+GITHUB_FULL_READ = 1800.0   # full comment window re-read interval (30 minutes)
+GITHUB_COMMENT_OVERLAP = 120.0   # overlap seconds subtracted from newest updated_at
 
 
 def _github_time(value) -> float:
@@ -2029,6 +2031,9 @@ class GitHubSource:
         self.successful_read = False
         self.read_failed = False
         self.comments_cut = False
+        self._comments: list[dict] = []
+        self._full_read_at: float | None = None
+        self._comment_updated: float | None = None
         self.pending: list[OwnerPending] = []
         self.scope = ""   # what the ★ list could see, said next to it
         self.branch_prs: dict[str, tuple[int, str]] = {}   # head branch -> (PR, MERGED/CLOSED/OPEN)
@@ -2237,28 +2242,79 @@ class GitHubSource:
             return
         self.fetched = time.monotonic()
         failed = True
-        since = self.clock() - self.window
+        now = self.clock()
+        since = now - self.window
         stamp = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        last_full = self._full_read_at
+        full = (
+            last_full is None
+            or self._comment_updated is None
+            or self.comments_cut
+            or (now - last_full) >= GITHUB_FULL_READ
+            or now < last_full
+        )
+        self._full_read_at = None
         try:
-            comments, more = [], False
+            if full:
+                query = f"since={stamp}&sort=created&direction=desc"
+                more, next_full = False, now
+            else:
+                delta_stamp = datetime.fromtimestamp(
+                    self._comment_updated - GITHUB_COMMENT_OVERLAP, timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                query = f"since={delta_stamp}&sort=updated&direction=asc"
+                more, next_full = self.comments_cut, last_full
+            raw = []
             for page in range(1, GITHUB_PAGES + 1):
-                batch = self._get(f"repos/{self.repo}/issues/comments?since={stamp}"
-                                  f"&sort=created&direction=desc&per_page={GITHUB_PAGE}&page={page}")
+                batch = self._get(f"repos/{self.repo}/issues/comments?{query}"
+                                  f"&per_page={GITHUB_PAGE}&page={page}")
                 if type(batch) is not list:
                     raise ValueError("comments page")
-                comments += batch
+                raw += batch
                 if len(batch) < GITHUB_PAGE:
                     break
             else:
-                # Every page was full: say so unless a probe shows nothing is
-                # left. An unanswered probe keeps the warning and the pages.
-                try:
-                    probe = self._get(f"repos/{self.repo}/issues/comments?since={stamp}"
-                                      f"&sort=created&direction=desc&per_page=1"
-                                      f"&page={GITHUB_PAGE * GITHUB_PAGES + 1}")
-                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
-                    probe = None
-                more = not (type(probe) is list and not probe)
+                if full:
+                    # Every page was full: say so unless a probe shows nothing is
+                    # left. An unanswered probe keeps the warning and the pages.
+                    try:
+                        probe = self._get(f"repos/{self.repo}/issues/comments?since={stamp}"
+                                          f"&sort=created&direction=desc&per_page=1"
+                                          f"&page={GITHUB_PAGE * GITHUB_PAGES + 1}")
+                    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                        probe = None
+                    more = not (type(probe) is list and not probe)
+                    if more:
+                        next_full = None
+                else:
+                    next_full = None
+            by_id, unkeyed = {}, []
+            prior = () if full else reversed(self._comments)
+            for item in (*prior, *raw):
+                if type(item) is not dict:
+                    continue
+                key = item.get("id")
+                if type(key) is int:
+                    by_id[key] = item
+                else:
+                    unkeyed.append(item)
+            ordered = (*by_id.values(), *unkeyed) if full else (*reversed(by_id.values()), *unkeyed)
+            comments = sorted(
+                (item for item in ordered
+                 if "created_at" not in item or _github_time(item.get("created_at")) >= since),
+                key=lambda item: _github_time(item.get("created_at")),
+                reverse=True,
+            )
+            newest_updated = max(
+                (_github_time(item.get("updated_at") or item.get("created_at"))
+                 for item in (*raw, *comments) if type(item) is dict),
+                default=0.0,
+            )
+            if not full and self._comment_updated is not None:
+                newest_updated = max(newest_updated, self._comment_updated)
+            self._comments = comments
+            self._comment_updated = newest_updated if newest_updated > 0 else None
+            self._full_read_at = next_full
             pulls = self._get(f"repos/{self.repo}/pulls?state=all&sort=updated"
                               "&direction=desc&per_page=100")
             if type(pulls) is not list:
@@ -6657,6 +6713,19 @@ def _remote_test_time(value) -> float:
     return _github_time(re.sub(r"\.\d{6}Z$", "Z", value))
 
 
+DISPATCH_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z$")
+
+
+def _dispatch_time(value) -> float:
+    if type(value) is not str or not DISPATCH_TIMESTAMP.fullmatch(value):
+        return 0.0
+    try:
+        fmt = "%Y-%m-%dT%H:%M:%S.%fZ" if "." in value else "%Y-%m-%dT%H:%M:%SZ"
+        return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return 0.0
+
+
 CODEX_WORK_BUDGET = 4 << 20
 DISPATCH_BUDGET = 4 << 20
 CODEX_WORK_BEFORE = 5.0
@@ -6917,6 +6986,11 @@ def _remote_test_entries(record) -> tuple:
             continue
         sha, ran = item.get("source_sha"), item.get("ran_total")
         words = f"task {task} {result}"
+        actions = item.get("actions")
+        if type(actions) is dict:
+            run_id = actions.get("run_id")
+            if type(run_id) is int and not isinstance(run_id, bool) and 1 <= run_id <= (1 << 53):
+                words += f" GitHub-hosted run {run_id}"
         words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
         words += f"，跑了 {ran} 個測試" if type(ran) is int and ran >= 0 else ""
         found.append((_remote_test_time(item.get("ended_at")), words))
@@ -6929,6 +7003,29 @@ def _remote_test_entries(record) -> tuple:
         words += f"（{code}）" if type(code) is str and CODE_TEXT.fullmatch(code) else ""
         words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
         found.append((_remote_test_time(item.get("at")), words))
+    dispatches = record.get("remote_test_dispatches")
+    for item in dispatches if type(dispatches) is list else []:
+        if type(item) is not dict:
+            continue
+        state = item.get("state")
+        if state not in ("DISPATCHED", "RUN_FOUND"):
+            continue
+        sha = item.get("sha")
+        if type(sha) is not str or not HEX_SHA.fullmatch(sha):
+            continue
+        dispatched_at = item.get("dispatched_at")
+        when = _dispatch_time(dispatched_at)
+        if when <= 0:
+            continue
+        run_id = item.get("run_id")
+        if run_id is None:
+            run_word = "待定"
+        elif type(run_id) is int and not isinstance(run_id, bool) and 1 <= run_id <= (1 << 53):
+            run_word = str(run_id)
+        else:
+            continue
+        words = f"task {task} hosted {state} run {run_word} @{sha[:7]}"
+        found.append((when, words))
     return tuple(entry for entry in found if entry[0])
 
 
@@ -7019,6 +7116,9 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
     if latest is None:
         return OfficeRow("EC2 遠端測試", IDLE, "尚無遠端測試紀錄", None, 80, kind="worker",
                          evidence="llmtool 紀錄")
+    if re.search(r"\bhosted (?:DISPATCHED|RUN_FOUND)\b", latest[1]):
+        return OfficeRow("EC2 遠端測試", WORKING, f"GitHub-hosted 執行中：{latest[1]}",
+                         max(0.0, now - latest[0]), 80, kind="worker", evidence="llmtool 紀錄")
     return OfficeRow("EC2 遠端測試", IDLE, f"最近一次：{latest[1]}", max(0.0, now - latest[0]),
                      80, kind="worker", evidence="llmtool 紀錄")
 

@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -139,6 +140,404 @@ class CiTestShardsTests(unittest.TestCase):
             'unittest discover -s tools/llmtool/tests -p "$module" < /dev/null',
             workflow,
         )
+
+    def test_workflow_paths_include_scripts_and_workflows_preserving_order(self):
+        workflow = (TOOLS_ROOT.parent.parent / ".github/workflows/llmtool-linux-ci.yml").read_text(
+            encoding="utf-8"
+        )
+        expected_paths = [
+            "tools/llmtool/**",
+            "!tools/llmtool/*.md",
+            ".github/workflows/llmtool-linux-ci.yml",
+            "tools/ec2-runner/**",
+            "tools/safe-git/**",
+            "tools/api-agent-gateway/**",
+            "tools/ai-loop/**",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "skills/**",
+            "docs/**",
+            "tools/llmtool/*.md",
+            "*.md",
+            "scripts/**",
+            ".github/workflows/**",
+        ]
+        header = workflow.split("jobs:", 1)[0]
+        # Under push there are a branches list and a comment line before paths:,
+        # and under pull_request a comment line comes before paths:.
+        # Parse the lines between each paths: key and the next key without assuming
+        # the trigger and paths: are adjacent.
+        paths_matches = list(
+            re.finditer(
+                r"(?ms)^\s+paths:\n(?P<entries>.*?)(?=^\s+[a-zA-Z0-9_-]+:|\Z)",
+                header,
+            )
+        )
+        self.assertEqual(len(paths_matches), 2)
+        self.assertIn("push:", header[: paths_matches[0].start()])
+        self.assertIn(
+            "pull_request:",
+            header[paths_matches[0].end() : paths_matches[1].start()],
+        )
+
+        push_paths = [
+            line.strip().lstrip("- ").strip("'\"")
+            for line in paths_matches[0].group("entries").splitlines()
+            if line.strip().startswith("-")
+        ]
+        self.assertEqual(push_paths, expected_paths)
+        self.assertEqual(push_paths[-2:], ["scripts/**", ".github/workflows/**"])
+        idx_llmtool = push_paths.index("tools/llmtool/**")
+        self.assertEqual(push_paths[idx_llmtool + 1], "!tools/llmtool/*.md")
+
+        pr_paths = [
+            line.strip().lstrip("- ").strip("'\"")
+            for line in paths_matches[1].group("entries").splitlines()
+            if line.strip().startswith("-")
+        ]
+        self.assertEqual(pr_paths, expected_paths)
+        self.assertEqual(pr_paths[-2:], ["scripts/**", ".github/workflows/**"])
+        idx_llmtool_pr = pr_paths.index("tools/llmtool/**")
+        self.assertEqual(pr_paths[idx_llmtool_pr + 1], "!tools/llmtool/*.md")
+
+    def test_repository_script_tests_step_contract(self):
+        workflow = (TOOLS_ROOT.parent.parent / ".github/workflows/llmtool-linux-ci.yml").read_text(
+            encoding="utf-8"
+        )
+        shards_section = workflow.split("shards:", 1)[1].split("check:", 1)[0]
+        self.assertIn("name: Repository script tests", shards_section)
+        step_pos = shards_section.index("name: Repository script tests")
+        clean_pos = shards_section.index("name: Working tree is clean")
+        self.assertLess(step_pos, clean_pos)
+        if "name: Safe-git preflight tests" in shards_section:
+            safe_git_pos = shards_section.index("name: Safe-git preflight tests")
+            self.assertLess(safe_git_pos, step_pos)
+
+        step_match = re.search(
+            r"(?ms)(?P<comment>(?:^[ ]*#[^\n]*\n)+)?[ ]*- name: Repository script tests\n(?P<body>.*?)(?=^[ ]*- name:|\Z)",
+            shards_section,
+        )
+        self.assertIsNotNone(step_match)
+        comment = step_match.group("comment") or ""
+        body = step_match.group("body")
+
+        self.assertIn("#1174", comment)
+        self.assertIn("3.9", comment)
+        self.assertIn("matrix.shard == 1 && matrix.python == '3.14'", body)
+        self.assertIn("shell: bash", body)
+        self.assertIn("PYTHONDONTWRITEBYTECODE: '1'", body)
+        self.assertIn(
+            '"$JOB_PYTHON" -B -m unittest discover -s scripts -p \'test_*.py\' < /dev/null',
+            body,
+        )
+
+    def test_repository_script_tests_run_script_execution(self):
+        if shutil.which("bash") is None:
+            self.skipTest("bash is missing")
+
+        workflow = (TOOLS_ROOT.parent.parent / ".github/workflows/llmtool-linux-ci.yml").read_text(
+            encoding="utf-8"
+        )
+        step_match = re.search(
+            r"(?ms)^      - name: Repository script tests\n.*?^        run: \|\n"
+            r"(?P<script>(?:^          [^\n]*\n|^          \n)*)",
+            workflow,
+        )
+        self.assertIsNotNone(step_match)
+        step_script = textwrap.dedent(step_match.group("script"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            (temp / "scripts").mkdir()
+            skills_dir = temp / "skills"
+            skills_dir.mkdir()
+
+            fake_python = temp / "fake_python"
+            fake_python.write_text(
+                "#!/bin/sh\n"
+                "if [ -n \"$FAKE_PYTHON_LOG\" ]; then\n"
+                "  echo \"$@\" >> \"$FAKE_PYTHON_LOG\"\n"
+                "fi\n"
+                "if [ \"$FAKE_PYTHON_FAIL\" = \"scripts\" ]; then\n"
+                "  for arg in \"$@\"; do\n"
+                "    if [ \"$arg\" = \"scripts\" ]; then\n"
+                "      exit 1\n"
+                "    fi\n"
+                "  done\n"
+                "fi\n"
+                "if [ \"$FAKE_PYTHON_FAIL\" = \"skills\" ]; then\n"
+                "  for arg in \"$@\"; do\n"
+                "    case \"$arg\" in\n"
+                "      skills*) exit 1 ;;\n"
+                "    esac\n"
+                "  done\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+
+            # Case 1: no skills tests gives exit 0 and 'nothing to run'
+            log1 = temp / "log1.txt"
+            env1 = os.environ.copy()
+            env1["JOB_PYTHON"] = str(fake_python)
+            env1["FAKE_PYTHON_LOG"] = str(log1)
+            proc1 = subprocess.run(
+                ["bash", "-e", "-c", step_script],
+                cwd=temp,
+                env=env1,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc1.returncode, 0)
+            self.assertIn("nothing to run", proc1.stdout)
+            lines1 = log1.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines1), 1)
+            self.assertIn("discover -s scripts", lines1[0])
+
+            # Case 2: a failing scripts run gives nonzero
+            log2 = temp / "log2.txt"
+            env2 = os.environ.copy()
+            env2["JOB_PYTHON"] = str(fake_python)
+            env2["FAKE_PYTHON_LOG"] = str(log2)
+            env2["FAKE_PYTHON_FAIL"] = "scripts"
+            proc2 = subprocess.run(
+                ["bash", "-e", "-c", step_script],
+                cwd=temp,
+                env=env2,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(proc2.returncode, 0)
+
+            # Case 3: a skills folder with a test_*.py file is discovered
+            skill_folder = skills_dir / "my_skill"
+            skill_folder.mkdir(parents=True)
+            (skill_folder / "test_sample.py").touch()
+
+            log3 = temp / "log3.txt"
+            env3 = os.environ.copy()
+            env3["JOB_PYTHON"] = str(fake_python)
+            env3["FAKE_PYTHON_LOG"] = str(log3)
+            proc3 = subprocess.run(
+                ["bash", "-e", "-c", step_script],
+                cwd=temp,
+                env=env3,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc3.returncode, 0)
+            self.assertNotIn("nothing to run", proc3.stdout)
+            lines3 = log3.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines3), 2)
+            self.assertIn("discover -s scripts", lines3[0])
+            self.assertIn("discover -s skills/my_skill", lines3[1])
+
+            # Case 4: a failing skills run gives nonzero
+            log4 = temp / "log4.txt"
+            env4 = os.environ.copy()
+            env4["JOB_PYTHON"] = str(fake_python)
+            env4["FAKE_PYTHON_LOG"] = str(log4)
+            env4["FAKE_PYTHON_FAIL"] = "skills"
+            proc4 = subprocess.run(
+                ["bash", "-e", "-c", step_script],
+                cwd=temp,
+                env=env4,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(proc4.returncode, 0)
+            lines4 = log4.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines4), 2)
+            self.assertIn("discover -s scripts", lines4[0])
+            self.assertIn("discover -s skills/my_skill", lines4[1])
+
+
+import shutil
+
+
+class SourceRevisionLooseMergeTests(unittest.TestCase):
+    """Verifies loose merge and exact-head assertions in CI Source revision steps."""
+
+    @classmethod
+    def setUpClass(cls):
+        mac_workflow = (
+            TOOLS_ROOT.parent.parent / ".github/workflows/llmtool-mac-ci.yml"
+        ).read_text(encoding="utf-8")
+        linux_workflow = (
+            TOOLS_ROOT.parent.parent / ".github/workflows/llmtool-linux-ci.yml"
+        ).read_text(encoding="utf-8")
+        cls.mac_scripts = cls._extract_scripts(mac_workflow)
+        cls.linux_scripts = cls._extract_scripts(linux_workflow)
+        cls.all_scripts = cls.mac_scripts + cls.linux_scripts
+
+    @staticmethod
+    def _extract_scripts(workflow: str) -> list[str]:
+        # Extract each '- name: Source revision' step's run script after 'run: |'
+        pattern = re.compile(
+            r"(?ms)^ +- name: Source revision\b.*?^ +run: \|\n"
+            r"(?P<script>(?:^ {10}[^\n]*\n)+)"
+        )
+        return [textwrap.dedent(m.group("script")) for m in pattern.finditer(workflow)]
+
+    def test_extracted_script_counts(self):
+        # One Source revision step in Mac workflow, three in Linux workflow.
+        self.assertEqual(len(self.mac_scripts), 1)
+        self.assertEqual(len(self.linux_scripts), 3)
+
+    def test_text_requirements_in_extracted_scripts(self):
+        notice_line = (
+            'echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head '
+            '(loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"'
+        )
+        for i, script in enumerate(self.all_scripts):
+            with self.subTest(script_index=i):
+                self.assertIn("::notice::", script)
+                self.assertIn("does not contain base", script)
+                self.assertIn(notice_line, script)
+                self.assertIn('test "$head" = "$EXPECTED_SHA"', script)
+                self.assertIn('test "$head" != "$GITHUB_SHA"', script)
+                self.assertIn('git merge-base --is-ancestor "$BASE_SHA" "$head"', script)
+                self.assertIn("cannot compare head with base", script)
+                self.assertNotIn("update the branch", script)
+                self.assertNotIn('fail "head does not contain base', script)
+
+    def test_bash_loose_merge_and_head_refusals(self):
+        # Skip only if bash or git is missing.
+        if shutil.which("bash") is None or shutil.which("git") is None:
+            self.skipTest("bash or git is missing")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repo = temp_path / "repo"
+            repo.mkdir()
+
+            git_env = {
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": str(temp_path),
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
+
+            def run_git(*args):
+                subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    env=git_env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+            # Local identity and gpgsign disabled without reading global git config
+            run_git("init")
+            run_git("config", "user.name", "Test User")
+            run_git("config", "user.email", "test@example.com")
+            run_git("config", "commit.gpgsign", "false")
+
+            # Commit A parent
+            (repo / "file.txt").write_text("initial content\n", encoding="utf-8")
+            run_git("add", "file.txt")
+            run_git("commit", "-m", "initial commit")
+            parent_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                env=git_env,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            # Commit A
+            (repo / "file.txt").write_text("commit A content\n", encoding="utf-8")
+            run_git("commit", "-am", "commit A")
+            sha_a = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                env=git_env,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            # Commit B from A's parent on another branch so B does not contain A
+            run_git("checkout", "-b", "branch-b", parent_sha)
+            (repo / "file_b.txt").write_text("commit B content\n", encoding="utf-8")
+            run_git("add", "file_b.txt")
+            run_git("commit", "-m", "commit B")
+            sha_b = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                env=git_env,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            dummy_github_sha = "f" * 40
+
+            for i, script in enumerate(self.all_scripts):
+                with self.subTest(script_index=i):
+                    # B does not contain A: exit 0 and stdout contains ::notice::
+                    env_loose = {
+                        "PATH": os.environ.get("PATH", ""),
+                        "HOME": str(temp_path),
+                        "GITHUB_EVENT_NAME": "pull_request",
+                        "EXPECTED_SHA": sha_b,
+                        "BASE_SHA": sha_a,
+                        "GITHUB_SHA": dummy_github_sha,
+                    }
+                    proc = subprocess.run(
+                        ["bash", "-c", script],
+                        cwd=repo,
+                        env=env_loose,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(
+                        proc.returncode,
+                        0,
+                        msg=f"script {i} failed: stdout={proc.stdout}, stderr={proc.stderr}",
+                    )
+                    self.assertIn("::notice::", proc.stdout)
+
+                    # Contained base (parent of B): exit 0 and stdout contains 'merge coverage'
+                    env_contained = dict(env_loose, BASE_SHA=parent_sha)
+                    proc = subprocess.run(
+                        ["bash", "-c", script],
+                        cwd=repo,
+                        env=env_contained,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(
+                        proc.returncode,
+                        0,
+                        msg=f"script {i} failed: stdout={proc.stdout}, stderr={proc.stderr}",
+                    )
+                    self.assertIn("merge coverage", proc.stdout)
+
+                    # EXPECTED_SHA does not match checked-out HEAD: nonzero exit
+                    env_wrong_expected = dict(env_loose, EXPECTED_SHA=sha_a)
+                    proc = subprocess.run(
+                        ["bash", "-c", script],
+                        cwd=repo,
+                        env=env_wrong_expected,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(proc.returncode, 0)
+
+                    # GITHUB_SHA matches HEAD (merge-ref check): nonzero exit
+                    env_merge_ref = dict(env_loose, GITHUB_SHA=sha_b)
+                    proc = subprocess.run(
+                        ["bash", "-c", script],
+                        cwd=repo,
+                        env=env_merge_ref,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(proc.returncode, 0)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -89,6 +90,47 @@ class GwAgentRouteTests(unittest.TestCase):
             gw_agent.llm_config, 'api_' + 'key', return_value=self.credential)
         with credential_loader, value_loader:
             return run_route(*args, **kwargs)
+
+    def test_launcher_below_3_11_drops_the_working_directory_from_sys_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            request = {'_route_tmpdir': tmpdir, 'root': str(Path(tmpdir) / 'root')}
+            with mock.patch.object(gw_agent, '_HAS_SAFE_PATH_FLAG', False):
+                argv = self.route.build_argv(sys.executable, request)
+            self.assertEqual(
+                argv,
+                [sys.executable, '-B', '-c', gw_agent._SAFE_PATH_LAUNCHER, 'run',
+                 '--authorization-file', str(Path(tmpdir) / 'authorization.json'),
+                 '--workdir', request['root'], '--profile', self.route.profile_name,
+                 '--task-file', str(Path(tmpdir) / 'task.json'),
+                 '--result-file', str(Path(tmpdir) / 'result.json'),
+                 '--audit-file', str(Path(tmpdir) / 'audit.jsonl'),
+                 '--profiles-file', str(Path(tmpdir) / 'profiles.json'),
+                 '--state-dir', str(Path(tmpdir) / 'state')])
+            with mock.patch.object(gw_agent, '_HAS_SAFE_PATH_FLAG', True):
+                argv = self.route.build_argv(sys.executable, request)
+            self.assertEqual(
+                argv,
+                [sys.executable, '-B', '-P', '-m', 'api_agent_gateway', 'run',
+                 '--authorization-file', str(Path(tmpdir) / 'authorization.json'),
+                 '--workdir', request['root'], '--profile', self.route.profile_name,
+                 '--task-file', str(Path(tmpdir) / 'task.json'),
+                 '--result-file', str(Path(tmpdir) / 'result.json'),
+                 '--audit-file', str(Path(tmpdir) / 'audit.jsonl'),
+                 '--profiles-file', str(Path(tmpdir) / 'profiles.json'),
+                 '--state-dir', str(Path(tmpdir) / 'state')])
+        launcher = gw_agent._SAFE_PATH_LAUNCHER.replace(
+            "runpy.run_module('api_agent_gateway', run_name='__main__', alter_sys=True)",
+            'import json; print(json.__file__)')
+        with tempfile.TemporaryDirectory() as shadow_dir:
+            (Path(shadow_dir) / 'json.py').write_text('')
+            completed = subprocess.run(
+                [sys.executable, '-B', '-c', launcher],
+                cwd=shadow_dir,
+                capture_output=True,
+                text=True,
+                check=True)
+            printed = completed.stdout.strip()
+            self.assertNotIn(shadow_dir, printed)
 
     def test_missing_optional_key_writes_unauthenticated_profile_and_environment(self):
         with tempfile.TemporaryDirectory() as tmpdir, \
@@ -334,8 +376,13 @@ class GwAgentRouteTests(unittest.TestCase):
             self.assertEqual(env['GW_AGENT_API_KEY'], self.credential)
             self.assertEqual(env['PYTHONPATH'], self.route.package_path)
             self.assertIn('-B', argv)
-            self.assertIn('-P', argv)
-            self.assertIn('api_agent_gateway', argv)
+            if sys.version_info >= (3, 11):
+                self.assertIn('-P', argv)
+                self.assertIn('api_agent_gateway', argv)
+            else:
+                self.assertIn('-c', argv)
+                self.assertEqual(argv[argv.index('-c') + 1], gw_agent._SAFE_PATH_LAUNCHER)
+                self.assertNotIn('-P', argv)
             self.assertNotIn(self.credential, ' '.join(argv))
             task_file = Path(argv[argv.index('--task-file') + 1])
             auth_file = Path(argv[argv.index('--authorization-file') + 1])
@@ -810,6 +857,403 @@ class GwAgentRouteTests(unittest.TestCase):
         status = subprocess.check_output(
             ['/usr/bin/git', '-C', str(self.root), 'status', '--porcelain'], text=True)
         self.assertEqual(status, f'?? {target}\n')
+
+    def test_validate_request_session_parameters(self):
+        valid_sess = '0123456789abcdef0123456789abcdef'
+        valid_home = str(Path(self.temp.name) / 'valid-home')
+
+        # Session home and session id both valid.
+        req = self.request()
+        req['session_id'] = valid_sess
+        req['session_home'] = valid_home
+        val = self.route.validate_request(req)
+        self.assertEqual(val.get('session_id'), valid_sess)
+        self.assertEqual(val.get('session_home'), valid_home)
+
+        # Session home without session id is valid.
+        req2 = self.request()
+        req2['session_home'] = valid_home
+        val2 = self.route.validate_request(req2)
+        self.assertNotIn('session_id', val2)
+        self.assertEqual(val2.get('session_home'), valid_home)
+
+        # Session id without session home raises GW_AGENT_SESSION_UNAVAILABLE.
+        req3 = self.request()
+        req3['session_id'] = valid_sess
+        with self.assertRaises(RouteError) as cm:
+            self.route.validate_request(req3)
+        self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_UNAVAILABLE')
+
+        # Bad session id values raise GW_AGENT_SESSION_UNAVAILABLE.
+        for bad_id in ('short', 'not-hex-characters-32-chars-long!', 'A' * 32, 'a' * 31, 'a' * 33, 12345):
+            bad_req = self.request()
+            bad_req['session_id'] = bad_id
+            bad_req['session_home'] = valid_home
+            with self.subTest(bad_id=bad_id), self.assertRaises(RouteError) as cm:
+                self.route.validate_request(bad_req)
+            self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_UNAVAILABLE')
+
+        # Bad session home values raise GW_AGENT_SESSION_UNAVAILABLE.
+        for bad_home in ('relative/path', '', 12345, None):
+            bad_req = self.request()
+            bad_req['session_id'] = valid_sess
+            bad_req['session_home'] = bad_home
+            with self.subTest(bad_home=bad_home), self.assertRaises(RouteError) as cm:
+                self.route.validate_request(bad_req)
+            self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_UNAVAILABLE')
+
+    def test_build_argv_run_versus_resume(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Run without session_id
+            req_run = {'_route_tmpdir': tmpdir, 'root': str(Path(tmpdir) / 'root')}
+            argv_run = self.route.build_argv(sys.executable, req_run)
+            self.assertIn('run', argv_run)
+            self.assertNotIn('resume', argv_run)
+
+            # Resume with session_id
+            sess_id = '0123456789abcdef0123456789abcdef'
+            req_resume = {'_route_tmpdir': tmpdir, 'root': str(Path(tmpdir) / 'root'),
+                          'session_id': sess_id}
+            argv_resume = self.route.build_argv(sys.executable, req_resume)
+            self.assertNotIn('run', argv_resume)
+            self.assertIn('resume', argv_resume)
+            self.assertEqual(argv_resume[argv_resume.index('resume') + 1], sess_id)
+
+            common_tail = [
+                '--authorization-file', str(Path(tmpdir) / 'authorization.json'),
+                '--workdir', req_run['root'], '--profile', self.route.profile_name,
+                '--task-file', str(Path(tmpdir) / 'task.json'),
+                '--result-file', str(Path(tmpdir) / 'result.json'),
+                '--audit-file', str(Path(tmpdir) / 'audit.jsonl'),
+                '--profiles-file', str(Path(tmpdir) / 'profiles.json'),
+                '--state-dir', str(Path(tmpdir) / 'state'),
+            ]
+            self.assertEqual(argv_run[argv_run.index('run') + 1:], common_tail)
+            self.assertEqual(argv_resume[argv_resume.index(sess_id) + 1:], common_tail)
+
+            # Check legacy Python 3.9 launcher branch
+            with mock.patch.object(gw_agent, '_HAS_SAFE_PATH_FLAG', False):
+                legacy_run = self.route.build_argv(sys.executable, req_run)
+                legacy_resume = self.route.build_argv(sys.executable, req_resume)
+                self.assertIn('run', legacy_run)
+                self.assertIn('resume', legacy_resume)
+                self.assertEqual(legacy_resume[legacy_resume.index('resume') + 1], sess_id)
+                self.assertEqual(legacy_run[legacy_run.index('run') + 1:], common_tail)
+                self.assertEqual(legacy_resume[legacy_resume.index(sess_id) + 1:], common_tail)
+
+    def test_authorization_json_session_id_null_and_set(self):
+        # Null session_id when omitted
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch.object(gw_agent.llm_config, 'resolve_profile_config', return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
+            self.route.prepare_files(tmpdir, self.request())
+            auth = json.loads((Path(tmpdir) / 'authorization.json').read_text())
+            self.assertIsNone(auth['session_id'])
+
+        # Set session_id carried into authorization.json
+        sess_id = '0123456789abcdef0123456789abcdef'
+        home = Path(self.temp.name) / 'auth-home'
+        home.mkdir(mode=0o700)
+        os.chmod(home, 0o700)
+        for name in ('meta.json', 'history.json'):
+            p = home / name
+            p.write_bytes(b'{"synthetic": true}\n')
+            os.chmod(p, 0o600)
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch.object(gw_agent.llm_config, 'resolve_profile_config', return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
+            req = self.request()
+            req['session_id'] = sess_id
+            req['session_home'] = str(home)
+            self.route.prepare_files(tmpdir, req)
+            auth = json.loads((Path(tmpdir) / 'authorization.json').read_text())
+            self.assertEqual(auth['session_id'], sess_id)
+
+    def test_copy_in_keeps_0700_folders_and_0600_files(self):
+        sess_id = '0123456789abcdef0123456789abcdef'
+        home = Path(self.temp.name) / 'copy-in-home'
+        home.mkdir(mode=0o700)
+        os.chmod(home, 0o700)
+        meta_data = b'{"synthetic": "meta-data"}\n'
+        hist_data = b'{"synthetic": "hist-data"}\n'
+        for name, data in (('meta.json', meta_data), ('history.json', hist_data)):
+            p = home / name
+            p.write_bytes(data)
+            os.chmod(p, 0o600)
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch.object(gw_agent.llm_config, 'resolve_profile_config', return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
+            req = self.request()
+            req['session_id'] = sess_id
+            req['session_home'] = str(home)
+            self.route.prepare_files(tmpdir, req)
+
+            state_dir = Path(tmpdir) / 'state'
+            sessions_dir = state_dir / 'sessions'
+            dest_dir = sessions_dir / sess_id
+            for directory in (state_dir, sessions_dir, dest_dir):
+                self.assertTrue(directory.is_dir())
+                self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+
+            dest_meta = dest_dir / 'meta.json'
+            dest_hist = dest_dir / 'history.json'
+            self.assertTrue(dest_meta.is_file())
+            self.assertTrue(dest_hist.is_file())
+            self.assertEqual(stat.S_IMODE(dest_meta.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(dest_hist.stat().st_mode), 0o600)
+            self.assertEqual(dest_meta.read_bytes(), meta_data)
+            self.assertEqual(dest_hist.read_bytes(), hist_data)
+
+    def test_copy_in_refuses_unsafe_source_and_home_inside_d6_root(self):
+        sess_id = '0123456789abcdef0123456789abcdef'
+
+        def make_valid_home(name):
+            d = Path(self.temp.name) / name
+            d.mkdir(mode=0o700)
+            os.chmod(d, 0o700)
+            for fname in ('meta.json', 'history.json'):
+                f = d / fname
+                f.write_bytes(b'{"synthetic": true}\n')
+                os.chmod(f, 0o600)
+            return d
+
+        # Symlinked meta.json
+        home_sym_file = make_valid_home('sym-file')
+        (home_sym_file / 'meta.json').unlink()
+        target = Path(self.temp.name) / 'target-meta.json'
+        target.write_bytes(b'{"synthetic": true}\n')
+        os.chmod(target, 0o600)
+        os.symlink(target, home_sym_file / 'meta.json')
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch.object(gw_agent.llm_config, 'resolve_profile_config', return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
+            req = self.request()
+            req['session_id'] = sess_id
+            req['session_home'] = str(home_sym_file)
+            with self.assertRaises(RouteError) as cm:
+                self.route.prepare_files(tmpdir, req)
+            self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_UNAVAILABLE')
+
+        # Symlinked session home directory
+        real_home = make_valid_home('real-home')
+        sym_home = Path(self.temp.name) / 'sym-dir'
+        os.symlink(real_home, sym_home)
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch.object(gw_agent.llm_config, 'resolve_profile_config', return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
+            req = self.request()
+            req['session_id'] = sess_id
+            req['session_home'] = str(sym_home)
+            with self.assertRaises(RouteError) as cm:
+                self.route.prepare_files(tmpdir, req)
+            self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_UNAVAILABLE')
+
+        # Group-readable source file
+        home_grp_file = make_valid_home('grp-file')
+        os.chmod(home_grp_file / 'meta.json', 0o640)
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch.object(gw_agent.llm_config, 'resolve_profile_config', return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
+            req = self.request()
+            req['session_id'] = sess_id
+            req['session_home'] = str(home_grp_file)
+            with self.assertRaises(RouteError) as cm:
+                self.route.prepare_files(tmpdir, req)
+            self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_UNAVAILABLE')
+
+        # Group-readable session home directory
+        home_grp_dir = make_valid_home('grp-dir')
+        os.chmod(home_grp_dir, 0o750)
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch.object(gw_agent.llm_config, 'resolve_profile_config', return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
+            req = self.request()
+            req['session_id'] = sess_id
+            req['session_home'] = str(home_grp_dir)
+            with self.assertRaises(RouteError) as cm:
+                self.route.prepare_files(tmpdir, req)
+            self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_UNAVAILABLE')
+
+        # Foreign-owned (patched uid) source
+        home_foreign = make_valid_home('foreign')
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch.object(gw_agent.os, 'getuid', return_value=os.getuid() + 1), \
+                mock.patch.object(gw_agent.llm_config, 'resolve_profile_config', return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
+            req = self.request()
+            req['session_id'] = sess_id
+            req['session_home'] = str(home_foreign)
+            with self.assertRaises(RouteError) as cm:
+                self.route.prepare_files(tmpdir, req)
+            self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_UNAVAILABLE')
+
+        # Home inside D6 root
+        home_inside_d6 = self.root / 'sessions'
+        home_inside_d6.mkdir(mode=0o700)
+        os.chmod(home_inside_d6, 0o700)
+        for fname in ('meta.json', 'history.json'):
+            f = home_inside_d6 / fname
+            f.write_bytes(b'{"synthetic": true}\n')
+            os.chmod(f, 0o600)
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch.object(gw_agent.llm_config, 'resolve_profile_config', return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
+            req = self.request()
+            req['session_id'] = sess_id
+            req['session_home'] = str(home_inside_d6)
+            with self.assertRaises(RouteError) as cm:
+                self.route.prepare_files(tmpdir, req)
+            self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_UNAVAILABLE')
+
+    def test_copy_out_writes_0600_files_and_preserves_on_audit_or_session_mismatch(self):
+        sess_id = '0123456789abcdef0123456789abcdef'
+        home = Path(self.temp.name) / 'copy-out-home'
+        home.mkdir(mode=0o700)
+        os.chmod(home, 0o700)
+        meta_data = b'{"type": "meta", "synthetic": 1}\n'
+        hist_data = b'{"type": "history", "synthetic": 2}\n'
+
+        # Successful copy-out writes 0600 files
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest_dir = Path(tmpdir) / 'state' / 'sessions' / sess_id
+            dest_dir.mkdir(parents=True, mode=0o700)
+            os.chmod(dest_dir, 0o700)
+            for name, data in (('meta.json', meta_data), ('history.json', hist_data)):
+                p = dest_dir / name
+                p.write_bytes(data)
+                os.chmod(p, 0o600)
+
+            audit_path = Path(tmpdir) / 'audit.jsonl'
+            digest = self._write_valid_audit(audit_path)
+
+            result = {
+                'schema_version': 1, 'status': 'DONE', 'code': None,
+                'run_id': 'a' * 24, 'session_id': sess_id,
+                'task_id': 'task-001', 'changed_paths': [],
+                'summary': 'done', 'served_model': 'fake-model',
+                'usage': {'status': 'REPORTED', 'calls': 1}, 'turns': 1,
+                'budget_used': {}, 'audit_sha256': digest,
+            }
+            res_path = Path(tmpdir) / 'result.json'
+            self._write_json(res_path, result)
+            res_path.chmod(0o600)
+
+            req = self.request()
+            req['session_id'] = sess_id
+            req['session_home'] = str(home)
+            self.route.collect(tmpdir, req)
+
+            out_meta = home / 'meta.json'
+            out_hist = home / 'history.json'
+            self.assertTrue(out_meta.is_file())
+            self.assertTrue(out_hist.is_file())
+            self.assertEqual(stat.S_IMODE(out_meta.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(out_hist.stat().st_mode), 0o600)
+            self.assertEqual(out_meta.read_bytes(), meta_data)
+            self.assertEqual(out_hist.read_bytes(), hist_data)
+
+            out_meta.unlink()
+            out_hist.unlink()
+
+        # Audit check fails -> nothing copied
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest_dir = Path(tmpdir) / 'state' / 'sessions' / sess_id
+            dest_dir.mkdir(parents=True, mode=0o700)
+            for name, data in (('meta.json', meta_data), ('history.json', hist_data)):
+                p = dest_dir / name
+                p.write_bytes(data)
+                os.chmod(p, 0o600)
+
+            audit_path = Path(tmpdir) / 'audit.jsonl'
+            self._write_valid_audit(audit_path)
+
+            result = {
+                'schema_version': 1, 'status': 'DONE', 'code': None,
+                'run_id': 'a' * 24, 'session_id': sess_id,
+                'task_id': 'task-001', 'changed_paths': [],
+                'summary': 'done', 'served_model': 'fake-model',
+                'usage': {}, 'turns': 1,
+                'budget_used': {}, 'audit_sha256': '0' * 64,
+            }
+            res_path = Path(tmpdir) / 'result.json'
+            self._write_json(res_path, result)
+            res_path.chmod(0o600)
+
+            req = self.request()
+            req['session_id'] = sess_id
+            req['session_home'] = str(home)
+            with self.assertRaises(RouteError) as cm:
+                self.route.collect(tmpdir, req)
+            self.assertEqual(cm.exception.code, 'GW_AGENT_AUDIT_INVALID')
+            self.assertFalse((home / 'meta.json').exists())
+            self.assertFalse((home / 'history.json').exists())
+
+        # Result names another session -> copies nothing
+        with tempfile.TemporaryDirectory() as tmpdir:
+            other_sess = 'fedcba9876543210fedcba9876543210'
+            dest_dir = Path(tmpdir) / 'state' / 'sessions' / other_sess
+            dest_dir.mkdir(parents=True, mode=0o700)
+            for name, data in (('meta.json', meta_data), ('history.json', hist_data)):
+                p = dest_dir / name
+                p.write_bytes(data)
+                os.chmod(p, 0o600)
+
+            audit_path = Path(tmpdir) / 'audit.jsonl'
+            digest = self._write_valid_audit(audit_path)
+
+            result = {
+                'schema_version': 1, 'status': 'DONE', 'code': None,
+                'run_id': 'a' * 24, 'session_id': other_sess,
+                'task_id': 'task-001', 'changed_paths': [],
+                'summary': 'done', 'served_model': 'fake-model',
+                'usage': {'status': 'REPORTED', 'calls': 1}, 'turns': 1,
+                'budget_used': {}, 'audit_sha256': digest,
+            }
+            res_path = Path(tmpdir) / 'result.json'
+            self._write_json(res_path, result)
+            res_path.chmod(0o600)
+
+            req = self.request()
+            req['session_id'] = sess_id
+            req['session_home'] = str(home)
+            self.route.collect(tmpdir, req)
+            self.assertFalse((home / 'meta.json').exists())
+            self.assertFalse((home / 'history.json').exists())
+
+        # Unsafe source file raises GW_AGENT_SESSION_PERSIST_FAILED
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest_dir = Path(tmpdir) / 'state' / 'sessions' / sess_id
+            dest_dir.mkdir(parents=True, mode=0o700)
+            meta_path = dest_dir / 'meta.json'
+            meta_path.write_bytes(meta_data)
+            os.chmod(meta_path, 0o640)
+            hist_path = dest_dir / 'history.json'
+            hist_path.write_bytes(hist_data)
+            os.chmod(hist_path, 0o600)
+
+            audit_path = Path(tmpdir) / 'audit.jsonl'
+            digest = self._write_valid_audit(audit_path)
+
+            result = {
+                'schema_version': 1, 'status': 'DONE', 'code': None,
+                'run_id': 'a' * 24, 'session_id': sess_id,
+                'task_id': 'task-001', 'changed_paths': [],
+                'summary': 'done', 'served_model': 'fake-model',
+                'usage': {'status': 'REPORTED', 'calls': 1}, 'turns': 1,
+                'budget_used': {}, 'audit_sha256': digest,
+            }
+            res_path = Path(tmpdir) / 'result.json'
+            self._write_json(res_path, result)
+            res_path.chmod(0o600)
+
+            req = self.request()
+            req['session_id'] = sess_id
+            req['session_home'] = str(home)
+            with self.assertRaises(RouteError) as cm:
+                self.route.collect(tmpdir, req)
+            self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_PERSIST_FAILED')
 
 
 if __name__ == '__main__':

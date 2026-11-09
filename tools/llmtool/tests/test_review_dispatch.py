@@ -14,6 +14,8 @@ from llmtool.errors import LLMToolError
 
 TASK = 'a' * 32
 HEAD = 'b' * 40
+# What the fake screen returns in refusal-flow tests.
+SCREENED_EXCERPT = 'screened reply excerpt'
 
 
 def _runtime_parts(*pieces):
@@ -273,6 +275,62 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(later['state'], 'DISPATCHED')
         self.assertEqual(len(self.store.get(TASK)['review_dispatch_claim']), 2)
         self.assertEqual(len(self.sent), 0)
+
+    def test_used_version_on_another_head_is_refused_and_names_next_free_version(self):
+        def dispatch(head, version, pr_number=42, executor_task='executor-d6'):
+            executor = self.executor
+            preflight = (TASK, executor, head, 'd' * 40, 'claude-reviewer')
+            with patch.object(review_dispatch, '_preflight', side_effect=[preflight, preflight]), \
+                    patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                                 return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                    patch.object(review_dispatch, '_resolve_github_login',
+                                 return_value='reviewer-user'):
+                return review_dispatch.dispatch_review(
+                    store=self.store, task_id=TASK, executor_task=executor_task,
+                    pr_number=pr_number, version=version,
+                    create_d6=lambda **kw: self.created.append(kw),
+                    dispatch_session=lambda **kw: (self.sent.append(kw) or ('native-' + str(version))),
+                    bind_session=lambda **kw: self.bound.append(kw),
+                    prompt_renderer=lambda *_: 'prompt')
+
+        first = dispatch(HEAD, 1)
+        second = dispatch('c' * 40, 2)
+        third = dispatch('d' * 40, 3)
+        self.assertEqual(len(self.created), 3)
+        self.assertEqual(len(self.sent), 3)
+        created_count = len(self.created)
+        sent_count = len(self.sent)
+        claims_before = list(self.store.get(TASK)['review_dispatch_claim'])
+
+        with self.assertRaises(LLMToolError) as raised:
+            dispatch('e' * 40, 2)
+        self.assertEqual(raised.exception.review_dispatch_code,
+                         'REVIEW_DISPATCH_VERSION_USED')
+        self.assertEqual(
+            str(raised.exception),
+            'Review version 2 is already used for PR 42 on another head; use version 4.')
+        self.assertEqual(len(self.created), created_count)
+        self.assertEqual(len(self.sent), sent_count)
+        self.assertEqual(self.store.get(TASK)['review_dispatch_claim'], claims_before)
+
+        replayed = dispatch('c' * 40, 2)
+        self.assertEqual(replayed, second)
+        self.assertEqual(len(self.created), created_count)
+        self.assertEqual(len(self.sent), sent_count)
+
+        # Other PR and executor claims never block a new head dispatch.
+        dispatch('c' * 40, 4, pr_number=99)
+        dispatch('c' * 40, 4, executor_task='executor-other')
+        fourth = dispatch('e' * 40, 4)
+        self.assertEqual(fourth['state'], 'DISPATCHED')
+        self.assertEqual(fourth['version'], 4)
+        self.assertEqual(fourth['head_sha'], 'e' * 40)
+
+        # A new version on the same head also creates a new claim.
+        fifth = dispatch(HEAD, 5)
+        self.assertEqual(fifth['state'], 'DISPATCHED')
+        self.assertEqual(fifth['version'], 5)
+        self.assertEqual(fifth['head_sha'], HEAD)
 
     def test_github_login_resolution_uses_authenticated_account_and_validates_output(self):
         result = SimpleNamespace(returncode=0, stdout=b'authenticated-account\n')
@@ -602,6 +660,152 @@ class ReviewDispatchTests(unittest.TestCase):
                 raw, task_id=TASK, run_id='run', contract_digest='digest', head=HEAD)
         self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
 
+    def _parse(self, raw):
+        return review_dispatch._parse_codex_review(
+            raw, task_id=TASK, run_id='c' * 32, contract_digest='d' * 64, head=HEAD)
+
+    def _fake_screen(self):
+        # A fake screen: these tests check the refusal flow, not the detector.
+        return patch.object(task_submission_cli, '_screen_text',
+                            return_value=SCREENED_EXCERPT)
+
+    def _refusal(self, raw):
+        """Parse a refused reply with a fake screen; return the error and the fake."""
+        with self._fake_screen() as screen, self.assertRaises(LLMToolError) as raised:
+            self._parse(raw)
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        return raised.exception, screen
+
+    def assert_screened_excerpt_only(self, exc, screen, raw):
+        # The excerpt goes through the screen once, bounded, and only the
+        # screened text reaches the message.
+        screen.assert_called_once()
+        excerpt, limit = screen.call_args.args
+        self.assertEqual(limit, 2048)
+        self.assertTrue(review_dispatch._codex_final_message(raw).startswith(excerpt))
+        self.assertEqual(str(exc), 'Reviewer dispatch refused: ' + SCREENED_EXCERPT)
+
+    def test_wrong_or_missing_binding_line_refuses_with_a_right_json_reply(self):
+        text = _codex_review_text()
+        binding = text.splitlines()[-1]
+        cases = {
+            'wrong digest': (text.replace('contract=' + 'd' * 64, 'contract=' + 'e' * 64),
+                             'e' * 64),
+            'truncated digest': (text.replace('contract=' + 'd' * 64,
+                                              'contract=' + 'd' * 63), 'd' * 63),
+            'missing line': (text.replace('\n' + binding, ''), 'Verdict: PASS'),
+        }
+        for name, (review_text, returned) in cases.items():
+            for changes in ({}, {'contract_digest': 'd' * 64}):
+                with self.subTest(case=name, json=changes):
+                    raw = _codex_event_stream(review_text, **changes)
+                    exc, screen = self._refusal(raw)
+                    self.assertEqual(exc.review_failure_reason,
+                                     'REVIEW_BINDING_LINE_MISSING')
+                    self.assert_screened_excerpt_only(exc, screen, raw)
+                    for value in (returned, TASK, 'c' * 32, HEAD):
+                        self.assertNotIn(value, str(exc))
+
+    def test_json_contract_digest_value_is_ignored_when_the_binding_line_is_exact(self):
+        for value in ('d' * 63, 'd' * 64 + 'x', 'e' * 64, '', None, 7, ['d']):
+            with self.subTest(value=value):
+                parsed = self._parse(_codex_event_stream(
+                    _codex_review_text(), contract_digest=value))
+                self.assertEqual(parsed['verdict'], 'PASS')
+                self.assertEqual(parsed['review_text'], _codex_review_text())
+        parsed = self._parse(_codex_event_stream(_codex_review_text()))
+        self.assertEqual(parsed['verdict'], 'PASS')
+
+    def test_wrong_json_binding_key_refuses_and_names_only_that_key(self):
+        returned = {'task_id': 'e' * 32, 'run_id': 'f' * 32, 'head': 'e' * 40}
+        expected = {'task_id': TASK, 'run_id': 'c' * 32, 'head': HEAD}
+        for key, value in returned.items():
+            with self.subTest(key=key):
+                exc, screen = self._refusal(
+                    _codex_event_stream(_codex_review_text(), **{key: value}))
+                self.assertEqual(exc.review_failure_reason, 'VERDICT_BINDING_MISMATCH')
+                self.assertEqual(exc.review_binding_mismatch_keys, (key,))
+                self.assertEqual(str(exc), 'Reviewer dispatch refused: JSON binding keys '
+                                           'differ: ' + key)
+                self.assertNotIn(value, str(exc))
+                self.assertNotIn(expected[key], str(exc))
+                # A mismatch adds no reply excerpt, so nothing is screened.
+                screen.assert_not_called()
+        exc, screen = self._refusal(_codex_event_stream(_codex_review_text(), **returned))
+        screen.assert_not_called()
+        self.assertEqual(exc.review_failure_reason, 'VERDICT_BINDING_MISMATCH')
+        self.assertEqual(exc.review_binding_mismatch_keys, ('task_id', 'run_id', 'head'))
+        self.assertEqual(str(exc), 'Reviewer dispatch refused: JSON binding keys differ: '
+                                   'task_id, run_id, head')
+        for value in (*returned.values(), *expected.values(), 'd' * 64):
+            self.assertNotIn(value, str(exc))
+
+    def test_missing_or_extra_json_key_still_refuses_wrong_fields(self):
+        for drop, changes in ((('head',), {}), (('task_id',), {'contract_digest': 'd' * 64}),
+                              ((), {'note': 'extra'}),
+                              ((), {'contract_digest': 'd' * 64, 'note': 'extra'})):
+            with self.subTest(drop=drop, changes=changes):
+                raw = _codex_event_stream(_codex_review_text(), drop=drop, **changes)
+                exc, screen = self._refusal(raw)
+                self.assertEqual(exc.review_failure_reason, 'VERDICT_WRONG_FIELDS')
+                self.assertIsNone(getattr(exc, 'review_binding_mismatch_keys', None))
+                self.assert_screened_excerpt_only(exc, screen, raw)
+                for value in ('extra', TASK, 'c' * 32, HEAD, 'd' * 64):
+                    self.assertNotIn(value, str(exc))
+
+    def test_binding_mismatch_claim_is_unknown_and_holds_no_returned_value(self):
+        self.store.data.update({
+            'developer': {'provider_profile': 'claude'},
+            'run_id': 'c' * 32,
+            'task_binding': {'contract_digest': 'd' * 64},
+        })
+        wrong_head = 'e' * 40
+        raw = _codex_event_stream(_codex_review_text(), head=wrong_head)
+        with patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                          return_value=SimpleNamespace(root='/repo/reviewer-d6')), \
+                self.assertRaises(LLMToolError) as raised:
+            self.invoke(
+                preflight=[(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer'),
+                           (TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')],
+                codex_runner=lambda **_kw: self._parse(raw))
+        self.assertEqual(raised.exception.review_failure_reason, 'VERDICT_BINDING_MISMATCH')
+        self.assertNotIn(wrong_head, str(raised.exception))
+        claim = self.store.get(TASK)['review_dispatch_claim'][0]
+        self.assertEqual(claim['state'], 'UNKNOWN')
+        self.assertEqual(claim['failure_reason'], 'VERDICT_BINDING_MISMATCH')
+        # The claim names only the differing key, never its value.
+        self.assertEqual(claim['binding_mismatch_keys'], ['head'])
+        self.assertNotIn(wrong_head, json.dumps(claim))
+        self.assertNotIn('review_result', claim)
+
+    def test_other_codex_refusals_store_no_binding_mismatch_keys(self):
+        self.store.data.update({
+            'developer': {'provider_profile': 'claude'},
+            'run_id': 'c' * 32,
+            'task_binding': {'contract_digest': 'd' * 64},
+        })
+        text = _codex_review_text()
+        raw = _codex_event_stream(text.replace('contract=' + 'd' * 64,
+                                               'contract=' + 'e' * 64))
+        with patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                          return_value=SimpleNamespace(root='/repo/reviewer-d6')), \
+                self._fake_screen() as screen, \
+                self.assertRaises(LLMToolError) as raised:
+            self.invoke(
+                preflight=[(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer'),
+                           (TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')],
+                codex_runner=lambda **_kw: self._parse(raw))
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertEqual(raised.exception.review_failure_reason,
+                         'REVIEW_BINDING_LINE_MISSING')
+        self.assert_screened_excerpt_only(raised.exception, screen, raw)
+        self.assertNotIn('e' * 64, str(raised.exception))
+        claim = self.store.get(TASK)['review_dispatch_claim'][0]
+        self.assertEqual(claim['state'], 'UNKNOWN')
+        self.assertEqual(claim['failure_reason'], 'REVIEW_BINDING_LINE_MISSING')
+        self.assertNotIn('binding_mismatch_keys', claim)
+        self.assertNotIn('e' * 64, json.dumps(claim))
+
     def test_reviewer_selection_is_cross_family_and_unknown_is_refused(self):
         executor = SimpleNamespace(
             result_sha=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task')
@@ -724,7 +928,8 @@ class ReviewDispatchTests(unittest.TestCase):
     def test_cli_prints_review_dispatch_refusal_code(self):
         codes = ('PAUSED', 'REVIEWER_ROUTE_UNIMPLEMENTED',
                  'REVIEW_PROMPT_PR_HEAD_MISMATCH',
-                 'REVIEW_DISPATCH_CLAIM_MISMATCH', 'REVIEW_DISPATCH_OUTCOME_UNKNOWN')
+                 'REVIEW_DISPATCH_CLAIM_MISMATCH', 'REVIEW_DISPATCH_OUTCOME_UNKNOWN',
+                 'REVIEW_DISPATCH_VERSION_USED')
         for code in codes:
             error = LLMToolError('Reviewer dispatch refused; details omitted')
             error.review_dispatch_code = code
@@ -781,10 +986,13 @@ def _codex_review_text(*, run_id='c' * 32, contract='d' * 64, version=1):
             f'contract={contract} head={HEAD}')
 
 
-def _codex_event_stream(review_text):
-    verdict = {'task_id': TASK, 'run_id': 'c' * 32,
-               'contract_digest': 'd' * 64, 'head': HEAD,
+def _codex_event_stream(review_text, *, drop=(), **changes):
+    """Codex JSONL with the current reply shape; changes add or replace JSON keys."""
+    verdict = {'task_id': TASK, 'run_id': 'c' * 32, 'head': HEAD,
                'verdict': 'PASS', 'review': review_text}
+    verdict.update(changes)
+    for key in drop:
+        del verdict[key]
     events = [
         {'type': 'thread.started', 'thread_id': '0123456789abcdef'},
         {'type': 'item.completed', 'item': {
@@ -955,6 +1163,49 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
         self.assertNotIn(review_text, json.dumps(reopened.get(self.task_id)))
         self.assertNotEqual(stored_result['verdict'], 'PASS')
         self.assertEqual(calls, ['called'])
+
+    def test_binding_mismatch_unknown_claim_is_stored_by_a_real_task_store(self):
+        executor = SimpleNamespace(root='/repo/executor', common_dir='/repo/.git')
+        preflight = (self.task_id, executor, HEAD, 'e' * 40, 'codex-reviewer')
+        reviewer = SimpleNamespace(root='/repo/reviewer')
+        task = self.store.get(self.task_id)
+        run_id = task['run_id']
+        digest = task['task_binding']['contract_digest']
+        wrong_head = 'f' * 40
+        review_text = _codex_review_text(run_id=run_id, contract=digest)
+        raw = _codex_event_stream(review_text, run_id=run_id, head=wrong_head)
+
+        def run_codex(**_kw):
+            # The real parser checks the reply against this Task's binding.
+            return review_dispatch._parse_codex_review(
+                raw, task_id=self.task_id, run_id=run_id,
+                contract_digest=digest, head=HEAD)
+
+        with patch.object(review_dispatch, '_preflight', side_effect=[preflight, preflight]), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                             return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                patch.object(review_dispatch, '_resolve_github_login',
+                             return_value='reviewer-user'), \
+                patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                             return_value=reviewer), \
+                self.assertRaises(LLMToolError) as raised:
+            review_dispatch.dispatch_review(
+                store=self.store, task_id=self.task_id, executor_task='executor-d6',
+                pr_number=42, create_d6=lambda **_: None,
+                bind_session=lambda **_: None, prompt_renderer=lambda *_: 'prompt',
+                codex_runner=run_codex)
+        self.assertEqual(raised.exception.review_failure_reason, 'VERDICT_BINDING_MISMATCH')
+        self.assertNotIn(wrong_head, str(raised.exception))
+        # Reopen from disk: the real store kept the UNKNOWN claim and its key names.
+        reopened = task_store.TaskStore(Path(self.temp.name).resolve())
+        claims = reopened.get(self.task_id)['review_dispatch_claim']
+        self.assertEqual(len(claims), 1)
+        claim = claims[0]
+        self.assertEqual(claim['state'], 'UNKNOWN')
+        self.assertEqual(claim['failure_reason'], 'VERDICT_BINDING_MISMATCH')
+        self.assertEqual(claim['binding_mismatch_keys'], ['head'])
+        self.assertNotIn('review_result', claim)
+        self.assertNotIn(wrong_head, json.dumps(claim))
 
 
 if __name__ == '__main__':

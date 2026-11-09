@@ -195,6 +195,34 @@ class TaskReviewPromptTests(unittest.TestCase):
             f'Verdict: FAIL | Version: v3 | HEAD: {HEAD}',
             binding])
 
+    def test_codex_prompt_json_carries_no_digest_and_binding_lines_stay_exact(self):
+        lines = self.codex_prompt().splitlines()
+        binding = (f'LLMTOOL-REVIEW-BINDING v1 task={TASK_ID} run={RUN_ID} '
+                   f'contract={CONTRACT} head={HEAD}')
+        instruction = ('Return one JSON object with exactly these keys: task_id, run_id, '
+                       'head, verdict, review.')
+        self.assertIn(instruction, lines)
+        self.assertIn('The contract digest is bound only through the LLMTOOL-REVIEW-BINDING '
+                      'line; copy that line unchanged into the review text.', lines)
+        example = json.loads(lines[-1])
+        self.assertEqual(example, {'task_id': TASK_ID, 'run_id': RUN_ID, 'head': HEAD})
+        self.assertNotIn('contract_digest', '\n'.join(lines))
+        # The full digest stays only in the two exact binding lines.
+        self.assertEqual([line for line in lines if CONTRACT in line], [binding, binding])
+        start = lines.index('For PASS, use these exact lines:')
+        self.assertEqual(lines[start + 1:start + 5], [
+            '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->',
+            f'Verdict: PASS | Version: v1 | HEAD: {HEAD}',
+            task_completion._FORMAL_ACCEPT,
+            binding])
+        start = lines.index('For every non-PASS verdict (FIX, FAIL or BLOCKED), '
+                            'use these exact lines:')
+        self.assertEqual(lines[start + 1:start + 4], [
+            '<!-- activity: type=review_verdict actor=Codex target=PM status=FIX -->',
+            f'Verdict: FAIL | Version: v1 | HEAD: {HEAD}',
+            binding])
+        self.assertLess(lines.index(binding), lines.index(instruction))
+
     def test_codex_prompt_shows_the_accepted_receipt(self):
         store = FakeStore(provider_profile='claude')
         accepted = receipt()
@@ -211,6 +239,25 @@ class TaskReviewPromptTests(unittest.TestCase):
             f"tests run=12, seconds=3.5, receipt={accepted['receipt_digest'][:8]}",
             output.splitlines())
         self.assertEqual(output.count('EC2 remote-test: result='), 1)
+        self.assertNotIn('PRIVATE-EXCERPT', output)
+
+    def test_codex_prompt_shows_the_hosted_receipt(self):
+        store = FakeStore(provider_profile='claude')
+        accepted = receipt(actions={'run_id': 4567})
+        store.task['remote_test_receipts'] = [
+            accepted,
+            receipt(source_sha=SOURCE, result='FAIL'),
+            receipt(run_id='9' * 32, result='FAIL'),
+            receipt(executor_task='other-d6', result='FAIL'),
+            dict(receipt(result='FAIL'), receipt_digest='0' * 64),
+        ]
+        output = self.codex_prompt(store=store)
+        self.assertIn(
+            'remote-test (GitHub-hosted run 4567): result=PASS, modules=test_task_advance,test_task_review_prompt, '
+            f"tests run=12, seconds=3.5, receipt={accepted['receipt_digest'][:8]}",
+            output.splitlines())
+        self.assertEqual(output.count('remote-test (GitHub-hosted run 4567): result='), 1)
+        self.assertNotIn('EC2 remote-test: result=', output)
         self.assertNotIn('PRIVATE-EXCERPT', output)
 
     def test_codex_prompt_without_a_usable_receipt_has_the_fixed_line(self):
@@ -444,7 +491,7 @@ class TaskReviewPromptTests(unittest.TestCase):
         self.assertLess(output.index(actor), output.index(status))
         self.assertLess(output.index(status), output.index(task_completion._FORMAL_ACCEPT))
         self.assertLess(output.index(task_completion._FORMAL_ACCEPT), output.index(binding))
-        self.assertIn('contract_digest, head, verdict, review.', output)
+        self.assertIn('run_id, head, verdict, review.', output)
         self.assertIn(f'"task_id":"{TASK_ID}"', output)
 
     def test_agy_claude_model_uses_registered_codex_reviewer(self):
@@ -454,7 +501,7 @@ class TaskReviewPromptTests(unittest.TestCase):
         self.assertEqual(code, 0)
         actor = '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->'
         self.assertIn(actor, output)
-        self.assertIn('contract_digest, head, verdict, review.', output)
+        self.assertIn('run_id, head, verdict, review.', output)
 
     def test_head_the_shared_check_admits_gets_the_unchanged_prompt_at_that_head(self):
         _, expected = self.invoke(version=2)
@@ -734,7 +781,7 @@ class RealStoreReviewPromptTests(unittest.TestCase):
             self.write_raw(task_id, _json_bytes(record))
 
     def spy_validate(self, *, fail_for=None):
-        def spy(record):
+        def spy(record, *, strict=True):
             self.validated.append(record['task_id'])
             if record['task_id'] == fail_for:
                 raise LLMToolError('synthetic validation failure')

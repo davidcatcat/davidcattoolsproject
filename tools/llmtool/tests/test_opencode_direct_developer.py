@@ -13,6 +13,7 @@ from llmtool.opencode_direct_developer import (
     AGENT, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, MAX_SOURCE_FILE_BYTES, MODEL,
     DirectOpenCodeError, _classify_provider_error, _classify_provider_events,
     _recovered_transport_indices, configuration, parse_json_events, run,
+    summarize_events,
 )
 from llmtool.providers.cli_lifecycle import CLIHostTermination
 from llmtool import worker_dispatch
@@ -174,6 +175,55 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertEqual(text, 'change ready')
         self.assertEqual(usage, {'prompt_tokens': 11, 'completion_tokens': 7,
                                  'total_tokens': 18})
+
+    def test_summarize_events_counts_edit_tool_uses(self):
+        raw = ('\n'.join((
+            self.event('step_start'),
+            self.event('tool_use', part={'tool': 'edit',
+                                         'state': {'input': {'filePath': 'a.py'}}}),
+            self.event('tool_use', part={'tool': 'edit',
+                                         'state': {'input': {'filePath': 'b.py'}}}),
+            self.event('tool_use', part={'tool': 'read',
+                                         'state': {'input': {'filePath': 'c.py'}}}),
+            self.event('step_finish', part={}),
+            self.event('step_finish', part={}),
+            self.event('step_finish', part={}),
+        )) + '\n').encode()
+        summary = summarize_events(raw)
+        self.assertEqual(summary['event_counts'],
+                         {'step_start': 1, 'tool_use': 3, 'step_finish': 3})
+        self.assertEqual(summary['text_chars'], 0)
+        self.assertEqual(summary['tool_use_count'], 3)
+        self.assertEqual(summary['edit_tool_uses'], 2)
+        self.assertEqual(summary['edited_file_count'], 2)
+        self.assertEqual(summary['step_finishes'], 3)
+        self.assertEqual(summary['step_limit'], 12)
+
+    def test_summarize_events_reports_other_and_integer_only(self):
+        marker = 'marker-0123456789'
+        raw = ('\n'.join((
+            self.event('text', part={'text': marker}),
+            self.event('unknown'),
+        )) + '\n').encode()
+        summary = summarize_events(raw)
+        self.assertEqual(summary['event_counts']['other'], 1)
+        self.assertEqual(summary['text_chars'], len(marker))
+
+        def assert_int(value):
+            if isinstance(value, dict):
+                for child in value.values():
+                    assert_int(child)
+            else:
+                self.assertIs(type(value), int)
+
+        assert_int(summary)
+
+    def test_summarize_events_counts_valid_prefix_on_malformed_line(self):
+        raw = (self.event('step_start') + '\n' + '{not-json').encode()
+        summary = summarize_events(raw)
+        self.assertEqual(summary['event_counts'], {'step_start': 1})
+        self.assertEqual(summary['step_finishes'], 0)
+        self.assertEqual(summary['step_limit'], 12)
 
     def test_output_cap_is_16_mib_and_parser_accepts_output_over_1_mib(self):
         self.assertEqual(MAX_OUTPUT_BYTES, 16 * 1024 * 1024)
@@ -887,7 +937,8 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
     def test_version_probe_output_is_bounded(self):
         cli = self.fake_cli(self.event('step_start') + '\n',
                             version_output='x' * 5000)
-        with self.assertRaises(DirectOpenCodeError) as caught:
+        with patch('llmtool.opencode_direct_developer.VERSION_TIMEOUT_SECONDS', 120), \
+                self.assertRaises(DirectOpenCodeError) as caught:
             self.run_with_valid_binding(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
                 prompt='bounded task prompt', timeout_seconds=5, executable=cli)
         self.assertEqual(caught.exception.direct_opencode_code,

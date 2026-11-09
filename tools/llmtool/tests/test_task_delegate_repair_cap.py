@@ -1,7 +1,10 @@
 """Tests for the High Debug evidence required beyond the delegate repair cap."""
 
+import argparse
 import hashlib
+import io
 import unittest
+from contextlib import redirect_stderr
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,7 +21,7 @@ _HEAD = 'a' * 40
 
 
 class _Store:
-    def __init__(self, *, count, diagnosis=None, unreadable=False):
+    def __init__(self, *, count, diagnosis=None, unreadable=False, scan_fails=False):
         self.records = {
             f'{number:032x}': {
                 'completion': {'executor_task_id': _EXECUTOR_TASK},
@@ -34,10 +37,22 @@ class _Store:
             # record; get() raises for it below.
             self.records[_HIGH_DEBUG_TASK] = {}
         self.unreadable = unreadable
+        self.scan_fails = scan_fails
         self.recorded = []
 
     def task_ids(self):
         return list(self.records)
+
+    def completion_d6_task_ids(self, executor_task_id):
+        if self.scan_fails:
+            raise OSError('scan failed')
+        matching = []
+        for task_id, record in self.records.items():
+            completion = record.get('completion')
+            if (isinstance(completion, dict) and
+                    completion.get('executor_task_id') == executor_task_id):
+                matching.append(task_id)
+        return sorted(matching)
 
     def get(self, task_id):
         if task_id == _HIGH_DEBUG_TASK and self.unreadable:
@@ -64,7 +79,8 @@ _DIAGNOSIS_RUN = 'd' * 32
 
 def _entry(*, executor_task=_EXECUTOR_TASK, status='RCA_CONFIRMED',
            examined_sha=_HEAD, family='pr-938', recorded_at='2026-11-04T00:00:01Z',
-           report=_REPORT, report_sha256=None, model_observed='gpt-6.1-sol'):
+           report=_REPORT, report_sha256=None, model_observed='gpt-6.1-sol',
+           model_requested='gpt-6.1-sol'):
     from llmtool.high_debug import _d6_name
 
     return {
@@ -74,7 +90,7 @@ def _entry(*, executor_task=_EXECUTOR_TASK, status='RCA_CONFIRMED',
         'early_reason': None,
         'd6': _d6_name(executor_task, 1, examined_sha),
         'examined_sha': examined_sha,
-        'model_requested': 'gpt-6.1-sol',
+        'model_requested': model_requested,
         'model_observed': model_observed,
         'effort_observed': 'high',
         'report': report,
@@ -164,8 +180,13 @@ class DelegateRepairCapTests(unittest.TestCase):
 
         self.assertEqual(store.recorded, [])
 
-    def test_below_cap_rejects_unreadable_record(self):
+    def test_unrelated_unreadable_record_does_not_refuse(self):
         store = _Store(count=MAX_REPAIR_ATTEMPTS, unreadable=True)
+        task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_failing_scan_refuses(self):
+        store = _Store(count=0, scan_fails=True)
         with self.assertRaisesRegex(
                 LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
@@ -184,6 +205,25 @@ class DelegateRepairCapTests(unittest.TestCase):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.recorded, [])
 
+    def test_d6_record_unreadable_refuses_with_count_unavailable(self):
+        store = _Store(count=0)
+        unreadable_id = '1' * 32
+        store.records[unreadable_id] = {
+            'completion': {'executor_task_id': _EXECUTOR_TASK},
+        }
+        original_get = store.get
+
+        def failing_get(task_id):
+            if task_id == unreadable_id:
+                raise OSError('unreadable')
+            return original_get(task_id)
+
+        store.get = failing_get
+        with self.assertRaisesRegex(
+                LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
+
     def test_missing_high_debug_task_is_refused(self):
         store = self._at_cap(diagnosis=_diagnosis([_entry()]))
 
@@ -196,7 +236,7 @@ class DelegateRepairCapTests(unittest.TestCase):
         store = self._at_cap(diagnosis=None, unreadable=True)
 
         with self.assertRaisesRegex(
-                LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
+                LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.recorded, [])
 
@@ -242,7 +282,7 @@ class DelegateRepairCapTests(unittest.TestCase):
 
     def test_head_family_timestamp_and_reuse_are_rejected_without_override(self):
         cases = (
-            (_entry(examined_sha='b' * 40), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
+            (_entry(examined_sha='b' * 40), 'DELEGATE_HIGH_DEBUG_HEAD_MOVED', 'pr-938'),
             (_entry(family='other'), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
             (_entry(recorded_at='2026-11-04T00:00:00Z'), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
             (_entry(recorded_at='bad'), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
@@ -283,6 +323,46 @@ class DelegateRepairCapTests(unittest.TestCase):
             with self.assertRaisesRegex(
                     LLMToolError, 'D6_SOURCE_BINDING_MISMATCH'):
                 task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_head_moved_refuses_with_prefix_and_records_nothing(self):
+        examined = 'b' * 40
+        entry = _entry(examined_sha=examined)
+        store = self._at_cap(diagnosis=_diagnosis([entry]))
+        with self.assertRaises(LLMToolError) as caught:
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        message = str(caught.exception)
+        self.assertTrue(message.startswith('DELEGATE_HIGH_DEBUG_HEAD_MOVED'))
+        self.assertIn('a new High Debug must be taken on the current D6 head', message)
+        self.assertIn(examined[:12], message)
+        self.assertIn(_HEAD[:12], message)
+        self.assertNotIn(examined, message)
+        self.assertNotIn(_HEAD, message)
+        self.assertEqual(store.recorded, [])
+
+    def test_invalid_ref_names_accepted_forms_without_echoing_link(self):
+        store = self._at_cap(diagnosis=_diagnosis([_entry()]))
+        bad_ref = 'https://example.com/not-a-valid-link'
+        with self.assertRaises(LLMToolError) as caught:
+            task_submission_cli._check_delegate_repair_cap(
+                _args(high_debug_ref=bad_ref), store)
+        message = str(caught.exception)
+        self.assertTrue(message.startswith('DELEGATE_HIGH_DEBUG_REF_INVALID'))
+        self.assertIn('/issues/N#issuecomment-M', message)
+        self.assertIn('/issues/N/comments/M', message)
+        self.assertNotIn(bad_ref, message)
+        self.assertNotIn('github.com', message)
+        self.assertEqual(store.recorded, [])
+
+    def test_pull_request_comment_link_is_refused(self):
+        store = self._at_cap(diagnosis=_diagnosis([_entry()]))
+        pr_ref = 'https://github.com/example/project/pull/12#issuecomment-34'
+        with self.assertRaises(LLMToolError) as caught:
+            task_submission_cli._check_delegate_repair_cap(
+                _args(high_debug_ref=pr_ref), store)
+        message = str(caught.exception)
+        self.assertTrue(message.startswith('DELEGATE_HIGH_DEBUG_REF_INVALID'))
+        self.assertNotIn(pr_ref, message)
         self.assertEqual(store.recorded, [])
 
 
@@ -746,6 +826,17 @@ class HighDebugRunBindingTests(unittest.TestCase):
             with self.subTest(model=model):
                 self._refuses(_diagnosis([_entry(model_observed=model)]))
 
+    def test_claude_model_with_matching_request_passes(self):
+        self._passes(_diagnosis([_entry(model_requested='claude-opus-5-5',
+                                        model_observed='claude-opus-5-5')]))
+
+    def test_mixed_or_unknown_models_refuse(self):
+        for requested, observed in (('gpt-6.1-sol', 'claude-opus-5-5'),
+                                    ('claude-opus-5-5', 'gpt-6.1-sol')):
+            with self.subTest(requested=requested, observed=observed):
+                self._refuses(_diagnosis([_entry(
+                    model_requested=requested, model_observed=observed)]))
+
     def test_no_event_refuses(self):
         self._refuses(_diagnosis([_entry()], events=[]))
         diagnosis = _diagnosis([_entry()])
@@ -883,6 +974,48 @@ class HighDebugRunBindingTests(unittest.TestCase):
         self.assertEqual([event['event_id'] for event in diagnosis['completion_events']],
                          [result['event_id']])
         self._passes(diagnosis)
+
+
+class HighDebugRouteTests(unittest.TestCase):
+    """The high-debug action routes to Codex by default and forwards the route."""
+
+    def _parser(self):
+        parser = argparse.ArgumentParser()
+        actions = parser.add_subparsers(dest='action')
+        task_submission_cli.add_task_submission_parsers(actions)
+        return parser
+
+    def test_route_defaults_to_codex_and_accepts_claude(self):
+        parser = self._parser()
+        base = ['high-debug', 'a' * 32, '--executor-task', 'executor',
+                '--pr', '17', '--family', 'family', '--early', 'reason']
+
+        self.assertEqual(parser.parse_args(base).route, 'codex')
+        self.assertEqual(parser.parse_args(base + ['--route', 'claude']).route, 'claude')
+
+    def test_unknown_route_is_refused(self):
+        parser = self._parser()
+        base = ['high-debug', 'a' * 32, '--executor-task', 'executor',
+                '--pr', '17', '--family', 'family', '--early', 'reason']
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(base + ['--route', 'other'])
+
+    def _run(self, route=None):
+        values = {'task_id': 'a' * 32, 'executor_task': 'executor', 'pr': 17,
+                  'family': 'family', 'early': 'reason'}
+        if route is not None:
+            values['route'] = route
+        args = SimpleNamespace(**values)
+        with patch('llmtool.high_debug.run_high_debug') as runner:
+            task_submission_cli.run_task_high_debug(args, store=object())
+        return runner.call_args.kwargs
+
+    def test_route_is_forwarded(self):
+        self.assertEqual(self._run(route='claude')['route'], 'claude')
+
+    def test_missing_route_forwards_codex(self):
+        self.assertEqual(self._run()['route'], 'codex')
 
 
 # Invented comment URLs of valid shape for the trusted slug; neither names a

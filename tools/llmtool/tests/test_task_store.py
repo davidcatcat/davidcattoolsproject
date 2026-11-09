@@ -626,6 +626,82 @@ class TaskStoreTests(unittest.TestCase):
                         expected={'record_sha256': initial['record_sha256']},
                         review_dispatch_claim=[claim])
 
+    def _claimed_review_task(self):
+        """Create a task holding one CLAIMED review claim; return task and claim."""
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        claimed = {
+            'executor_task': 'executor-d6', 'pr': 42,
+            'head_sha': 'a' * 40, 'version': 1, 'state': 'CLAIMED',
+            'reviewer_task': 'reviewer-d6', 'native_session_id': None,
+            'account_mode': 'CODEX_CLI',
+            'claimed_at': '2026-10-27T00:00:00Z',
+            'updated_at': '2026-10-27T00:00:00Z',
+        }
+        initial = self.store.get(task['task_id'])
+        self.store.compare_and_update(
+            task['task_id'], expected={'record_sha256': initial['record_sha256']},
+            review_dispatch_claim=[claimed])
+        return task, claimed
+
+    def test_binding_mismatch_keys_are_stored_on_an_unknown_mismatch_claim(self):
+        for keys in (['head'], ['task_id'], ['run_id'], ['task_id', 'run_id', 'head'],
+                     ['head', 'task_id']):
+            with self.subTest(keys=keys):
+                task, claimed = self._claimed_review_task()
+                current = self.store.get(task['task_id'])
+                unknown = dict(claimed, state='UNKNOWN',
+                               updated_at='2026-10-27T00:01:00Z',
+                               failure_reason='VERDICT_BINDING_MISMATCH',
+                               binding_mismatch_keys=keys)
+                self.store.compare_and_update(
+                    task['task_id'], expected={'record_sha256': current['record_sha256']},
+                    review_dispatch_claim=[unknown])
+                self.assertEqual(
+                    self.store.get(task['task_id'])['review_dispatch_claim'], [unknown])
+
+    def test_binding_mismatch_keys_are_refused_outside_their_one_allowed_shape(self):
+        mismatch = {'failure_reason': 'VERDICT_BINDING_MISMATCH'}
+        cases = {
+            'empty list': dict(mismatch, binding_mismatch_keys=[]),
+            'repeated key': dict(mismatch, binding_mismatch_keys=['head', 'head']),
+            'unknown key': dict(mismatch, binding_mismatch_keys=['contract_digest']),
+            'value not name': dict(mismatch, binding_mismatch_keys=['e' * 40]),
+            'tuple': dict(mismatch, binding_mismatch_keys=('head',)),
+            'string': dict(mismatch, binding_mismatch_keys='head'),
+            'non-string item': dict(mismatch, binding_mismatch_keys=[1]),
+            'other reason': {'failure_reason': 'REVIEW_BINDING_LINE_MISSING',
+                             'binding_mismatch_keys': ['head']},
+            'no reason': {'binding_mismatch_keys': ['head']},
+        }
+        for name, extra in cases.items():
+            with self.subTest(case=name):
+                task, claimed = self._claimed_review_task()
+                current = self.store.get(task['task_id'])
+                unknown = dict(claimed, state='UNKNOWN',
+                               updated_at='2026-10-27T00:01:00Z', **extra)
+                with self.assertRaises(LLMToolError) as raised:
+                    self.store.compare_and_update(
+                        task['task_id'],
+                        expected={'record_sha256': current['record_sha256']},
+                        review_dispatch_claim=[unknown])
+                self.assertEqual(getattr(raised.exception, 'task_store_error_code', None),
+                                 'REVIEW_DISPATCH_CLAIM_INVALID')
+                self.assertEqual(
+                    self.store.get(task['task_id'])['review_dispatch_claim'], [claimed])
+        # Only an UNKNOWN claim may carry the field, even with the mismatch reason.
+        task, claimed = self._claimed_review_task()
+        current = self.store.get(task['task_id'])
+        dispatched = dict(claimed, state='DISPATCHED', native_session_id='native-1',
+                          failure_reason='VERDICT_BINDING_MISMATCH',
+                          binding_mismatch_keys=['head'])
+        with self.assertRaises(LLMToolError) as raised:
+            self.store.compare_and_update(
+                task['task_id'], expected={'record_sha256': current['record_sha256']},
+                review_dispatch_claim=[dispatched])
+        self.assertEqual(getattr(raised.exception, 'task_store_error_code', None),
+                         'REVIEW_DISPATCH_CLAIM_INVALID')
+
     def _claude_result_task(self, pm_session_id=None):
         task = self._codex_dispatch_task()
         if pm_session_id is not None:
@@ -895,6 +971,71 @@ class TaskStoreTests(unittest.TestCase):
                                  developer.get('progress'))
                 self.assertEqual(saved['developer'].get('execution'),
                                  developer.get('execution'))
+
+    def _allow_agy_by_fixture_policy(self):
+        """Self-contained v1 policy fixture with AGY ALLOWED; never the live file."""
+        evidence = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+        workers = {
+            key: {'dispatch': 'PAUSED', 'decided_by': 'Owner', 'decided_at': '2026-11-08',
+                  'reason': 'test fixture', 'evidence': evidence}
+            for key in worker_dispatch.WORKERS
+        }
+        workers['company-gw-agent'] = {
+            'dispatch': 'PAUSED', 'decided_by': 'PM', 'decided_at': '2026-11-08',
+            'reason': 'test fixture', 'evidence': worker_dispatch._GW_AGENT_PAUSED_REF}
+        workers['agy']['dispatch'] = 'ALLOWED'
+        temporary_policy = Path(self.temp.name) / 'worker-dispatch-agy-allowed.json'
+        temporary_policy.write_text(
+            json.dumps({'schema_version': 1, 'workers': workers}), encoding='utf-8')
+        patcher = patch.object(worker_dispatch, '_POLICY_PATH', temporary_policy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_agy_owner_assignment_ref_may_be_none_but_claude_still_needs_a_valid_ref(self):
+        # #785 M18: AGY dispatch is decided by the live gate, so the store
+        # accepts an AGY record whose ref is None. A supplied ref must still
+        # be valid, the key stays required for AGY, and Claude keeps its rule.
+        self._allow_agy_by_fixture_policy()
+        artifact = ('diff --git a/src.py b/src.py\n'
+                    '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        developer = self._developer_assignment(provider='agy', max_tokens=None)
+        developer.update(
+            state='DEVELOPER_RESPONDED', provider_type='agy-cli', model='gemini-test',
+            backend_session_semantics='CLI_REPORTED_SESSION_ID', owner_assignment_ref=None,
+            execution={
+                'status': 'DONE', 'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
+                'cleanup_status': 'CONFIRMED', 'usage_source': 'UNKNOWN',
+                'source_bytes': None, 'source_file_count': None,
+                'source_manifest_sha256': None,
+            },
+            artifact=artifact, artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=developer)
+        self.assertIn('owner_assignment_ref', saved['developer'])
+        self.assertIsNone(saved['developer']['owner_assignment_ref'])
+        task_store_module._validate(saved)
+
+        missing_key = dict(saved['developer'])
+        del missing_key['owner_assignment_ref']
+        refused = (
+            ('agy malformed ref', dict(saved['developer'],
+                                       owner_assignment_ref='https://example.invalid/x')),
+            ('agy non-string ref', dict(saved['developer'], owner_assignment_ref=7)),
+            ('agy missing key', missing_key),
+            ('claude None ref', dict(saved['developer'], provider_profile='claude',
+                                     provider_type='claude-cli')),
+            ('codex None ref', dict(saved['developer'], provider_profile='codex',
+                                    provider_type='codex-cli')),
+        )
+        for label, candidate in refused:
+            with self.subTest(label):
+                malformed = dict(saved, developer=candidate)
+                malformed['record_sha256'] = task_store_module._digest(malformed)
+                with self.assertRaises(LLMToolError):
+                    task_store_module._validate(malformed)
 
     def test_non_claude_d6_binding_refuses_second_live_task_for_each_route(self):
         store = TaskStore(Path(self.temp.name).resolve())
@@ -3585,6 +3726,235 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.task_store_error_code,
                          'PM_SESSION_ADOPTION_ABANDONED')
         self.assertEqual(self.store.get(value['task_id']), current)
+
+
+_NO_DEVELOPER_PATHS = object()
+
+
+class CompletionDocsOnlyAttributedPathsTests(unittest.TestCase):
+    """#1169: the completion docs-only rule uses Developer-attributed paths.
+
+    A clean merge of trusted main adds its own files to changed_paths only.
+    """
+
+    HEAD = 'c' * 40
+    DOCS = ['docs/guide.md', 'tools/llmtool/WORKFLOW.md']
+    MERGED = ['docs/guide.md', 'tools/llmtool/WORKFLOW.md',
+              'tools/llmtool/llmtool/cli.py', 'tools/llmtool/llmtool/task_store.py']
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = TaskStore(Path(self.temp.name).resolve() / 'tasks')
+
+    @staticmethod
+    def _task():
+        request = 'Bounded non-sensitive documentation task.'
+        task_id, run_id = new_id(), new_id()
+        task = _record(
+            task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED',
+            request_sha=hashlib.sha256(request.encode()).hexdigest())
+        task.update(
+            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                              'base_url': None},
+            response='PM returned a bounded task.', error_code=None,
+            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                           'goal': 'Update the guide.',
+                           'acceptance': ['the guide is updated']},
+        )
+        return task
+
+    def docs_test(self, paths, **overrides):
+        test = {'status': 'NOT_APPLICABLE_DOCS_ONLY', 'changed_paths': list(paths),
+                'source_sha': self.HEAD, 'docs_only': True}
+        test.update(overrides)
+        return test
+
+    def _completion_task(self, changed, developer, tests):
+        task = self._task()
+        result = {'task_id': task['task_id'], 'run_id': task['run_id'],
+                  'source_sha': 'a' * 40, 'result_head': self.HEAD,
+                  'changed_paths': list(changed), 'diff_sha256': 'd' * 64}
+        if developer is not _NO_DEVELOPER_PATHS:
+            result['developer_changed_paths'] = (
+                list(developer) if type(developer) is list else developer)
+        task['completion'] = {
+            'state': 'WAITING_PM', 'executor_task_id': 'executor-docs-1',
+            'reviewer_task_id': None,
+            'evidence': {
+                'task_id': task['task_id'], 'run_id': task['run_id'],
+                'contract_digest': task['task_binding']['contract_digest'],
+                'execution_mode': 'DIRECT_D6', 'result': result, 'tests': tests,
+                'review_pr_ci': {'stage': 'EXECUTOR_RESULT',
+                                 'formal_review_state': 'NOT_STARTED',
+                                 'ci_state': 'NOT_STARTED'},
+            },
+            'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+        }
+        return task
+
+    def save(self, changed, developer, tests):
+        task = self._completion_task(changed, developer, tests)
+        self.store.create(task)
+        return self.store.get(task['task_id'])
+
+    def assert_refused(self, changed, developer, tests):
+        task = self._completion_task(changed, developer, tests)
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.create(task)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
+        self.assertNotIn(task['task_id'], self.store.task_ids())
+
+    def test_main_merge_paths_do_not_fail_docs_only_completion(self):
+        saved = self.save(self.MERGED, self.DOCS, [self.docs_test(self.DOCS)])
+        result = saved['completion']['evidence']['result']
+        # changed_paths keeps the full source-to-head diff.
+        self.assertEqual(result['changed_paths'], self.MERGED)
+        self.assertEqual(result['developer_changed_paths'], self.DOCS)
+        self.assertEqual(saved['completion']['evidence']['tests'],
+                         [self.docs_test(self.DOCS)])
+
+    def test_developer_code_path_still_fails_docs_only_completion(self):
+        for developer in (['docs/guide.md', 'tools/llmtool/llmtool/cli.py'],
+                          ['tools/llmtool/llmtool/task_store.py']):
+            with self.subTest(developer=developer):
+                self.assert_refused(self.MERGED, developer, [self.docs_test(developer)])
+
+    def test_docs_only_test_paths_must_equal_developer_paths(self):
+        for test_paths in (self.MERGED, self.DOCS[:1], [], ['docs/other.md']):
+            with self.subTest(test_paths=test_paths):
+                self.assert_refused(self.MERGED, self.DOCS, [self.docs_test(test_paths)])
+
+    def test_docs_only_flag_and_source_sha_are_still_checked(self):
+        for overrides in ({'docs_only': False}, {'docs_only': None},
+                          {'docs_only': 'true'}, {'source_sha': 'e' * 40},
+                          {'source_sha': None}):
+            with self.subTest(overrides=overrides):
+                self.assert_refused(self.MERGED, self.DOCS,
+                                    [self.docs_test(self.DOCS, **overrides)])
+        test = self.docs_test(self.DOCS)
+        del test['docs_only']
+        self.assert_refused(self.MERGED, self.DOCS, [test])
+
+    # A present developer_changed_paths must be a non-empty list of unique,
+    # non-empty strings. Membership in changed_paths is not required.
+    MALFORMED_DEVELOPER = ([], None, 'docs/guide.md', ['docs/guide.md', 1],
+                           ['docs/guide.md', ''], ['docs/guide.md', 'docs/guide.md'])
+
+    def test_invalid_developer_changed_paths_make_the_record_invalid(self):
+        for developer in self.MALFORMED_DEVELOPER:
+            with self.subTest(developer=developer):
+                tests = [self.docs_test(developer if type(developer) is list
+                                        else self.DOCS)]
+                self.assert_refused(self.MERGED, developer, tests)
+
+    def test_record_without_developer_paths_keeps_changed_paths_rule(self):
+        saved = self.save(self.DOCS, _NO_DEVELOPER_PATHS, [self.docs_test(self.DOCS)])
+        self.assertNotIn('developer_changed_paths',
+                         saved['completion']['evidence']['result'])
+        # Without the key a main-merge .py file in changed_paths still fails.
+        self.assert_refused(self.MERGED, _NO_DEVELOPER_PATHS,
+                            [self.docs_test(self.MERGED)])
+        self.assert_refused(self.MERGED, _NO_DEVELOPER_PATHS,
+                            [self.docs_test(self.DOCS)])
+
+    def test_executed_test_rule_is_unchanged_with_developer_paths(self):
+        developer = ['docs/guide.md', 'tools/llmtool/llmtool/cli.py']
+        executed = {'status': 'PASS', 'source_sha': self.HEAD, 'exit_code': 0}
+        saved = self.save(self.MERGED, developer, [executed])
+        self.assertEqual(saved['completion']['evidence']['tests'], [executed])
+        for overrides in ({'exit_code': 1}, {'source_sha': 'e' * 40}):
+            with self.subTest(overrides=overrides):
+                self.assert_refused(self.MERGED, developer, [dict(executed, **overrides)])
+
+    def test_invalid_developer_paths_fail_with_executed_tests_only(self):
+        # Codex review v1: a present developer_changed_paths is checked in
+        # every completion record, not only when a docs-only test exists.
+        executed = {'status': 'PASS', 'source_sha': self.HEAD, 'exit_code': 0}
+        for developer in self.MALFORMED_DEVELOPER:
+            with self.subTest(developer=developer):
+                self.assert_refused(self.MERGED, developer, [executed])
+        saved = self.save(self.MERGED, _NO_DEVELOPER_PATHS, [executed])
+        self.assertEqual(saved['completion']['evidence']['tests'], [executed])
+        self.assertNotIn('developer_changed_paths',
+                         saved['completion']['evidence']['result'])
+
+    def test_malformed_developer_paths_fail_with_docs_only_test(self):
+        for developer in self.MALFORMED_DEVELOPER:
+            with self.subTest(developer=developer):
+                self.assert_refused(self.MERGED, developer, [self.docs_test(self.DOCS)])
+
+    def test_changed_paths_must_be_a_list_when_developer_paths_present(self):
+        executed = {'status': 'PASS', 'source_sha': self.HEAD, 'exit_code': 0}
+        for changed in (None, 'docs/guide.md', {'docs/guide.md': True}):
+            with self.subTest(changed=changed):
+                task = self._completion_task([], self.DOCS, [executed])
+                task['completion']['evidence']['result']['changed_paths'] = changed
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.create(task)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_STORE_INVALID')
+                self.assertNotIn(task['task_id'], self.store.task_ids())
+
+    def test_attributed_path_outside_changed_paths_is_saved(self):
+        # #1177 attribution can name a path that is not in the net diff, for
+        # example a rename-conflict source or a file added and later deleted.
+        developer = ['docs/guide.md', 'docs/other.md']
+        changed = ['docs/guide.md']
+        executed = {'status': 'PASS', 'source_sha': self.HEAD, 'exit_code': 0}
+        for tests in ([executed], [self.docs_test(developer)]):
+            with self.subTest(status=tests[0]['status']):
+                saved = self.save(changed, developer, tests)
+                result = saved['completion']['evidence']['result']
+                self.assertEqual(result['changed_paths'], changed)
+                self.assertEqual(result['developer_changed_paths'], developer)
+                self.assertEqual(saved['completion']['evidence']['tests'], tests)
+        # The docs-only test still compares with the attributed paths only.
+        self.assert_refused(changed, developer, [self.docs_test(changed)])
+
+    def test_legacy_docs_only_record_is_readable_but_not_writable(self):
+        # A legacy record whose NOT_APPLICABLE_DOCS_ONLY test matched
+        # changed_paths rather than developer_changed_paths is accepted on read
+        # through get(), but cannot be created or updated.
+        task = self._completion_task(self.DOCS, ['docs/attributed.md'],
+                                     [self.docs_test(self.DOCS)])
+        self.store._ensure_root()
+        path = self.store.root / f"{task['task_id']}.json"
+        task['record_sha256'] = task_store_module._digest(task)
+        path.write_bytes(task_store_module._json_bytes(task))
+        os.chmod(path, 0o600)
+
+        # get() reads it through lenient validation
+        loaded = self.store.get(task['task_id'])
+        self.assertEqual(loaded['task_id'], task['task_id'])
+
+        # Writing that record fails strict validation
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.update(task['task_id'], response='Updated response')
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
+
+        # Writing a new record with that shape fails
+        new_task = self._completion_task(self.DOCS, ['docs/attributed.md'],
+                                         [self.docs_test(self.DOCS)])
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.create(new_task)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
+
+        # A docs-only test whose paths include a non-.md file still fails on read
+        bad_paths = ['docs/guide.md', 'tools/script.py']
+        bad_task = self._completion_task(bad_paths, ['docs/attributed.md'],
+                                         [self.docs_test(bad_paths)])
+        bad_path = self.store.root / f"{bad_task['task_id']}.json"
+        bad_task['record_sha256'] = task_store_module._digest(bad_task)
+        bad_path.write_bytes(task_store_module._json_bytes(bad_task))
+        os.chmod(bad_path, 0o600)
+
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.get(bad_task['task_id'])
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
 
 
 if __name__ == '__main__':
