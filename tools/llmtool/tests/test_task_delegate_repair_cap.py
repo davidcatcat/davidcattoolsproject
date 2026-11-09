@@ -18,7 +18,7 @@ _HEAD = 'a' * 40
 
 
 class _Store:
-    def __init__(self, *, count, diagnosis=None, unreadable=False):
+    def __init__(self, *, count, diagnosis=None, unreadable=False, scan_fails=False):
         self.records = {
             f'{number:032x}': {
                 'completion': {'executor_task_id': _EXECUTOR_TASK},
@@ -34,10 +34,22 @@ class _Store:
             # record; get() raises for it below.
             self.records[_HIGH_DEBUG_TASK] = {}
         self.unreadable = unreadable
+        self.scan_fails = scan_fails
         self.recorded = []
 
     def task_ids(self):
         return list(self.records)
+
+    def completion_d6_task_ids(self, executor_task_id):
+        if self.scan_fails:
+            raise OSError('scan failed')
+        matching = []
+        for task_id, record in self.records.items():
+            completion = record.get('completion')
+            if (isinstance(completion, dict) and
+                    completion.get('executor_task_id') == executor_task_id):
+                matching.append(task_id)
+        return sorted(matching)
 
     def get(self, task_id):
         if task_id == _HIGH_DEBUG_TASK and self.unreadable:
@@ -164,8 +176,13 @@ class DelegateRepairCapTests(unittest.TestCase):
 
         self.assertEqual(store.recorded, [])
 
-    def test_below_cap_rejects_unreadable_record(self):
+    def test_unrelated_unreadable_record_does_not_refuse(self):
         store = _Store(count=MAX_REPAIR_ATTEMPTS, unreadable=True)
+        task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_failing_scan_refuses(self):
+        store = _Store(count=0, scan_fails=True)
         with self.assertRaisesRegex(
                 LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
