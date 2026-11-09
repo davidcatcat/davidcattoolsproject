@@ -1,0 +1,188 @@
+name: llmtool remote-test
+run-name: llmtool remote-test ${{ inputs.nonce }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Candidate commit SHA (40 lowercase hex)'
+        required: true
+        type: string
+      ref:
+        description: 'Candidate branch name or refs/pull/N/head'
+        required: true
+        type: string
+      modules:
+        description: 'Space-separated llmtool test module names (1 to 8)'
+        required: true
+        type: string
+      nonce:
+        description: 'Dispatch nonce (32 lowercase hex)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  remote-test:
+    name: remote-test
+    if: >-
+      vars.HOSTED_CI_ENABLED == 'true'
+      && github.repository == 'davidcatcat/davidcattoolsproject'
+      && github.ref == 'refs/heads/main'
+      && github.event_name == 'workflow_dispatch'
+      && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
+      && (github.triggering_actor == 'davidcatcat' || github.triggering_actor == 'ddavidccatssun')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check hosted runner boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::hosted runner boundary failed: $1"; exit 1; }
+          test "${RUNNER_ENVIRONMENT:-}" = "github-hosted" || fail "RUNNER_ENVIRONMENT must be github-hosted"
+          test "$(id -u)" -ne 0 || fail "job runs as root"
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_WEB_IDENTITY_TOKEN_FILE AWS_SHARED_CREDENTIALS_FILE GW_AGENT_API_KEY; do
+            if [ -n "${!name:-}" ] || [ "${!name+set}" = set ]; then
+              fail "unexpected credential variable present: $name"
+            fi
+          done
+
+      - name: Validate dispatch inputs
+        id: inputs
+        shell: bash
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+          INPUT_REF: ${{ inputs.ref }}
+          INPUT_MODULES: ${{ inputs.modules }}
+          INPUT_NONCE: ${{ inputs.nonce }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          fail() { echo "::error::invalid remote-test input: $1"; exit 1; }
+          case "$INPUT_SHA$INPUT_REF$INPUT_MODULES$INPUT_NONCE" in
+            *$'\n'*|*$'\r'*|*$'\t'*) fail "control character in input" ;;
+          esac
+          [[ "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "sha must be 40 lowercase hex"
+          [[ "$INPUT_REF" =~ ^(refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})$ ]] || fail "ref does not match _REF"
+          [[ "$INPUT_NONCE" =~ ^[0-9a-f]{32}$ ]] || fail "nonce must be 32 lowercase hex"
+          read -r -a mods <<< "$INPUT_MODULES"
+          if [ "${#mods[@]}" -lt 1 ] || [ "${#mods[@]}" -gt 8 ]; then
+            fail "modules must contain 1 to 8 words"
+          fi
+          seen=" "
+          for mod in "${mods[@]}"; do
+            [[ "$mod" =~ ^test_[a-z0-9_]{1,80}$ ]] || fail "module does not match _MODULE: $mod"
+            case "$seen" in
+              *" $mod "*) fail "duplicate module: $mod" ;;
+            esac
+            seen="$seen$mod "
+          done
+          {
+            printf 'sha=%s\n' "$INPUT_SHA"
+            printf 'ref=%s\n' "$INPUT_REF"
+            printf 'modules=%s\n' "${mods[*]}"
+            printf 'nonce=%s\n' "$INPUT_NONCE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout trusted runner
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.14'
+
+      - name: Check candidate ref on origin
+        id: ref
+        shell: bash
+        env:
+          SHA: ${{ steps.inputs.outputs.sha }}
+          REF: ${{ steps.inputs.outputs.ref }}
+          MODULES: ${{ steps.inputs.outputs.modules }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          if [[ "$REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
+            full_ref="$REF"
+          else
+            full_ref="refs/heads/$REF"
+          fi
+          read -r -a mods <<< "$MODULES"
+          if ! ls_out=$(cd trusted && git ls-remote origin "$full_ref"); then
+            ls_out=""
+          fi
+          fetch_head=none
+          if [ -n "$ls_out" ]; then
+            line_count=$(printf '%s\n' "$ls_out" | wc -l | tr -d ' ')
+            read -r listed_sha listed_ref extra <<< "$ls_out"
+            if [ "$line_count" = "1" ] && [ -z "$extra" ] && [ "$listed_ref" = "$full_ref" ] && [[ "$listed_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              fetch_head="$listed_sha"
+            fi
+          fi
+          if [ "$fetch_head" != "$SHA" ]; then
+            python -I -B trusted/tools/llmtool/scripts/remote_test_receipt.py mismatch \
+              --out "$RUNNER_TEMP/remote-test-receipt" \
+              --sha "$SHA" \
+              --fetch-head "$fetch_head" \
+              "${mods[@]}"
+            exit 1
+          fi
+          printf 'fetch_head=%s\n' "$fetch_head" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout candidate source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ steps.inputs.outputs.sha }}
+          path: src
+          persist-credentials: false
+
+      - name: Verify candidate source revision
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ steps.inputs.outputs.sha }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::source revision check failed: $1"; exit 1; }
+          head=$(git -C src rev-parse HEAD) || fail "cannot read src HEAD"
+          test "$head" = "$EXPECTED_SHA" || fail "checked out $head, expected $EXPECTED_SHA"
+
+      - name: Install candidate llmtool
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet -r src/tools/llmtool/requirements-ci.txt
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet --no-deps -e src/tools/llmtool
+
+      - name: Run trusted receipt builder
+        shell: bash
+        env:
+          SHA: ${{ steps.inputs.outputs.sha }}
+          FETCH_HEAD: ${{ steps.ref.outputs.fetch_head }}
+          MODULES: ${{ steps.inputs.outputs.modules }}
+        run: |
+          set -euo pipefail
+          read -r -a mods <<< "$MODULES"
+          python -I -B trusted/tools/llmtool/scripts/remote_test_receipt.py run \
+            --src "$GITHUB_WORKSPACE/src/tools/llmtool" \
+            --python "$RUNNER_TEMP/venv/bin/python" \
+            --out "$RUNNER_TEMP/remote-test-receipt" \
+            --sha "$SHA" \
+            --fetch-head "$FETCH_HEAD" \
+            "${mods[@]}"
+
+      - name: Upload remote test receipt
+        if: always() && steps.inputs.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: remote-test-receipt-${{ steps.inputs.outputs.nonce }}
+          path: ${{ runner.temp }}/remote-test-receipt/receipt.json
+          retention-days: 3
+          if-no-files-found: error
