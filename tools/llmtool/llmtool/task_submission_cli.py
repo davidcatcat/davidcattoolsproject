@@ -1348,6 +1348,9 @@ def run_task_advance(args, *, store=None, **adapters):
             integration_pr=getattr(args, 'integration_pr', None),
             merge=getattr(args, 'merge', False),
             reviewer_session_done=getattr(args, 'reviewer_session_done', False), **adapters)
+    if result.get('step') == 'CLOSED':
+        from . import gw_agent_sessions
+        gw_agent_sessions.sweep_quietly(TaskStore() if store is None else store)
     _print(result)
     return 1 if result.get('codes') else 0
 
@@ -1391,6 +1394,9 @@ def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapter
         # whatever step budget remains, and report only the refusal.
         _print(pm_caller.refusal(args.task_id, exc.code))
         return 1
+    if result.get('step') == 'CLOSED':
+        from . import gw_agent_sessions
+        gw_agent_sessions.sweep_quietly(store)
     _print(result)
     return 1 if result.get('codes') else 0
 
