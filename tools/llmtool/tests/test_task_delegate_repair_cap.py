@@ -1,7 +1,10 @@
 """Tests for the High Debug evidence required beyond the delegate repair cap."""
 
+import argparse
 import hashlib
+import io
 import unittest
+from contextlib import redirect_stderr
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -64,7 +67,8 @@ _DIAGNOSIS_RUN = 'd' * 32
 
 def _entry(*, executor_task=_EXECUTOR_TASK, status='RCA_CONFIRMED',
            examined_sha=_HEAD, family='pr-938', recorded_at='2026-11-04T00:00:01Z',
-           report=_REPORT, report_sha256=None, model_observed='gpt-6.1-sol'):
+           report=_REPORT, report_sha256=None, model_observed='gpt-6.1-sol',
+           model_requested='gpt-6.1-sol'):
     from llmtool.high_debug import _d6_name
 
     return {
@@ -74,7 +78,7 @@ def _entry(*, executor_task=_EXECUTOR_TASK, status='RCA_CONFIRMED',
         'early_reason': None,
         'd6': _d6_name(executor_task, 1, examined_sha),
         'examined_sha': examined_sha,
-        'model_requested': 'gpt-6.1-sol',
+        'model_requested': model_requested,
         'model_observed': model_observed,
         'effort_observed': 'high',
         'report': report,
@@ -746,6 +750,17 @@ class HighDebugRunBindingTests(unittest.TestCase):
             with self.subTest(model=model):
                 self._refuses(_diagnosis([_entry(model_observed=model)]))
 
+    def test_claude_model_with_matching_request_passes(self):
+        self._passes(_diagnosis([_entry(model_requested='claude-opus-5-5',
+                                        model_observed='claude-opus-5-5')]))
+
+    def test_mixed_or_unknown_models_refuse(self):
+        for requested, observed in (('gpt-6.1-sol', 'claude-opus-5-5'),
+                                    ('claude-opus-5-5', 'gpt-6.1-sol')):
+            with self.subTest(requested=requested, observed=observed):
+                self._refuses(_diagnosis([_entry(
+                    model_requested=requested, model_observed=observed)]))
+
     def test_no_event_refuses(self):
         self._refuses(_diagnosis([_entry()], events=[]))
         diagnosis = _diagnosis([_entry()])
@@ -883,6 +898,48 @@ class HighDebugRunBindingTests(unittest.TestCase):
         self.assertEqual([event['event_id'] for event in diagnosis['completion_events']],
                          [result['event_id']])
         self._passes(diagnosis)
+
+
+class HighDebugRouteTests(unittest.TestCase):
+    """The high-debug action routes to Codex by default and forwards the route."""
+
+    def _parser(self):
+        parser = argparse.ArgumentParser()
+        actions = parser.add_subparsers(dest='action')
+        task_submission_cli.add_task_submission_parsers(actions)
+        return parser
+
+    def test_route_defaults_to_codex_and_accepts_claude(self):
+        parser = self._parser()
+        base = ['high-debug', 'a' * 32, '--executor-task', 'executor',
+                '--pr', '17', '--family', 'family', '--early', 'reason']
+
+        self.assertEqual(parser.parse_args(base).route, 'codex')
+        self.assertEqual(parser.parse_args(base + ['--route', 'claude']).route, 'claude')
+
+    def test_unknown_route_is_refused(self):
+        parser = self._parser()
+        base = ['high-debug', 'a' * 32, '--executor-task', 'executor',
+                '--pr', '17', '--family', 'family', '--early', 'reason']
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(base + ['--route', 'other'])
+
+    def _run(self, route=None):
+        values = {'task_id': 'a' * 32, 'executor_task': 'executor', 'pr': 17,
+                  'family': 'family', 'early': 'reason'}
+        if route is not None:
+            values['route'] = route
+        args = SimpleNamespace(**values)
+        with patch('llmtool.high_debug.run_high_debug') as runner:
+            task_submission_cli.run_task_high_debug(args, store=object())
+        return runner.call_args.kwargs
+
+    def test_route_is_forwarded(self):
+        self.assertEqual(self._run(route='claude')['route'], 'claude')
+
+    def test_missing_route_forwards_codex(self):
+        self.assertEqual(self._run()['route'], 'codex')
 
 
 # Invented comment URLs of valid shape for the trusted slug; neither names a
