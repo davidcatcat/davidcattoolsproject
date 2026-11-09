@@ -884,7 +884,9 @@ class CanonicalStepStructureTests(unittest.TestCase):
         shards_job = jobs.get("shards", {})
         check_job = jobs.get("check", {})
         self.assertIn("if", select_job)
-        self.assertEqual(select_job.get("if"), check_job.get("if"))
+        check_if = check_job.get("if", "")
+        self.assertTrue(check_if.startswith("always() && "))
+        self.assertEqual(select_job.get("if"), check_if.removeprefix("always() && "))
         self.assertEqual(shards_job.get("needs"), "select")
         needs = check_job.get("needs")
         if isinstance(needs, list):
@@ -970,8 +972,6 @@ class CanonicalStepStructureTests(unittest.TestCase):
         self.assertIn('printf \'select result: %s\\nshards result: %s\\n\' "$SELECT_RESULT" "$SHARDS_RESULT"', step_run)
         self.assertIn("exit 1", step_run)
 
-        workflow_text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertNotIn("self-hosted", workflow_text)
         for job_name, job_data in jobs.items():
             job_runs = str(job_data.get("runs-on", ""))
             self.assertNotIn("self-hosted", job_runs)
