@@ -12,11 +12,9 @@ TIMINGS = ROOT / "ci" / "test-module-seconds.json"
 MAC_TIMINGS = ROOT / "ci" / "mac-test-module-seconds.json"
 
 
-def partition(shard_count, timings=None, *, timings_path=None):
+def partition(shard_count, timings=None):
     """Return test module filenames grouped into ``shard_count`` shards."""
-    path = timings_path if timings_path is not None else timings
-    if path is None:
-        path = TIMINGS
+    path = timings if timings is not None else TIMINGS
     timing_data = json.loads(Path(path).read_text(encoding="utf-8"))
     default = timing_data["default_seconds"]
     weights = timing_data["modules"]
