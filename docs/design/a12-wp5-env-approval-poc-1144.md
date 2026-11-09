@@ -2,13 +2,13 @@
 
 ## Requirement Source and Purpose
 - **Requirement Source**: Owner decision 1 relayed verbatim on [#1144 comment 6744205705](https://github.com/davidcatcat/davidcattoolsproject/issues/1144#issuecomment-6744205705).
-- **Foundation**: Builds upon [docs/design/a12-wp5-phase-b-workpackage-authorization-1144.md](file:///Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/tasks/wp5b-d2-envpoc-agy-1144-20261109/docs/design/a12-wp5-phase-b-workpackage-authorization-1144.md).
+- **Foundation**: Builds upon [a12-wp5-phase-b-workpackage-authorization-1144.md](a12-wp5-phase-b-workpackage-authorization-1144.md).
 - **Scope**: Minimal Proof-of-Concept (PoC) design only. It enables no execution authority and establishes that GitHub Environment Approval is a workflow job gate, not a ready work-package authorization system.
 
 ---
 
 ## 1. Owner Requirements Restated
-- **Identities**: Owner is `davidcatcat`; AI machine account is `ddavidccatssun` (via [`github_identity.py`](file:///Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/tasks/wp5b-d2-envpoc-agy-1144-20261109/tools/llmtool/llmtool/github_identity.py)).
+- **Identities**: Owner is `davidcatcat`; AI machine account is `ddavidccatssun` (via [`github_identity.py`](../../tools/llmtool/llmtool/github_identity.py)).
 - **Reviewer Restriction**: The required reviewer is the Owner account (`davidcatcat`) only.
 - **Rule Enforcement**: Prevent self-review is enabled and admin bypass is disabled (no bypass allowed).
 - **Authorization Binding**: Each authorization strictly binds repository, Issue, work scope, allowed operations, run cap, cost cap, and expiry.
@@ -28,7 +28,7 @@
   - Workflow Runs REST API: https://docs.github.com/en/rest/actions/workflow-runs
 - **Reviewer Limits**: Up to six required reviewers can be configured per environment.
 - **Plan Constraints**: On Free, Pro, and Team plans, required reviewers and the admin-bypass toggle function only for public repositories (this repository is public).
-- **Prevent Self-Review**: When enabled, the user who triggers or starts the workflow run cannot approve the deployment.
+- **Prevent Self-Review**: When enabled, the user who starts the run cannot approve it.
 - **Admin Bypass**: The setting "Allow administrators to bypass configured protection rules" defaults to ON and must be explicitly turned OFF.
 - **Deployment Branches**: Environment deployment can be restricted to selected branches (specifically `main`).
 - **Configuration Privilege**: Only a repository owner/admin can configure environment protection rules.
@@ -63,10 +63,10 @@ The PoC workflow will be implemented in a separate reviewed Task with CI.
 - **Concurrency**: `concurrency: wp5-env-approval-${{ inputs.issue }}`
 - **Permissions**: Empty mapping (`permissions: {}`).
 - **Job Structure**:
-  - Runs on `ubuntu-latest`.
+  - Runs on `ubuntu-24.04`.
   - Environment: `owner-approval`.
   - Isolation: No checkout (`actions/checkout` omitted), no third-party actions, no GitHub-owned actions, no secrets accessed.
-  - Execution: Single shell step printing `inputs.issue` and `inputs.digest` to `$GITHUB_STEP_SUMMARY`.
+  - Execution: Single shell step writing `inputs.issue` and `inputs.digest` to `$GITHUB_STEP_SUMMARY`.
 
 ---
 
@@ -94,7 +94,7 @@ llmtool Core polls the workflow run and validates all of the following condition
 ---
 
 ## 7. Key Findings & Sequencing (#1234)
-- **Self-Review Deadlock Finding**: Because the AI currently runs and dispatches workflows under the Owner's identity (`davidcatcat`), GitHub's "Prevent self-review" rule blocks the Owner from approving their own initiated runs.
+- **Self-Review Deadlock Finding**: Because the AI currently runs and dispatches workflows under the Owner's identity (`davidcatcat`), GitHub's "Prevent self-review" rule blocks the Owner from approving their own initiated runs. The PoC can only run after #1234 gives the AI its own `ddavidccatssun` `gh` login.
 - **Pre-requisite Ordering**:
   1. Complete #1234 to provide the AI with its isolated `ddavidccatssun` GitHub authentication (`gh` CLI credentials).
   2. The Owner manually configures the `owner-approval` environment with protection rules in repository settings.
