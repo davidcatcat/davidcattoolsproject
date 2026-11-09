@@ -2220,6 +2220,18 @@ def _labels_equal(labels, expected):
             set(labels) == set(expected))
 
 
+def _runner_label_alternatives(runner_labels):
+    """Turn github-hosted runner_labels into a list of label alternatives."""
+    if not isinstance(runner_labels, (list, tuple)) or not runner_labels:
+        return []
+    if all(type(label) is str for label in runner_labels):
+        return [runner_labels]
+    if all(isinstance(alt, (list, tuple)) and alt and
+           all(type(label) is str for label in alt) for alt in runner_labels):
+        return list(runner_labels)
+    return []
+
+
 def _trusted_ci_runner(job, *, mode, runner_names, runner_labels):
     """Exact runner identity from ci_trust; never prefix, substring or wildcard."""
     labels = job.get('labels')
@@ -2229,7 +2241,9 @@ def _trusted_ci_runner(job, *, mode, runner_names, runner_labels):
                 runner_name in runner_names and
                 (runner_labels is None or _labels_equal(labels, runner_labels)))
     if mode == 'github-hosted':
-        return (runner_labels is not None and _labels_equal(labels, runner_labels) and
+        alternatives = _runner_label_alternatives(runner_labels)
+        return (runner_labels is not None and
+                any(_labels_equal(labels, alt) for alt in alternatives) and
                 'self-hosted' not in labels and
                 job.get('runner_group_name') == _GITHUB_HOSTED_RUNNER_GROUP)
     return False
