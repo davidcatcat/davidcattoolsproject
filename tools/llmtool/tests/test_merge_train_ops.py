@@ -14,7 +14,13 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from llmtool import merge_train, merge_train_ops, merge_train_store, task_completion  # noqa: E402
+from llmtool import (  # noqa: E402
+    mac_full_suite,
+    merge_train,
+    merge_train_ops,
+    merge_train_store,
+    task_completion,
+)
 from llmtool.errors import LLMToolError  # noqa: E402
 
 TRAIN_ID = 'train-1182'
@@ -191,6 +197,11 @@ class MergeTrainOpsTest(unittest.TestCase):
                                     return_value=self.main)
         self.read_main = patcher.start()
         self.addCleanup(patcher.stop)
+        suite_patcher = mock.patch.object(
+            mac_full_suite, 'request_full_suite',
+            return_value=mac_full_suite.MAC_FULL_SUITE_DISPATCHED)
+        self.request_full_suite = suite_patcher.start()
+        self.addCleanup(suite_patcher.stop)
 
     def _set_train_head(self, head):
         self.github.pulls[TRAIN_PR] = _pull(TRAIN_PR, head)
@@ -252,6 +263,16 @@ class MergeTrainOpsTest(unittest.TestCase):
         # Member-head checks are never read.
         for head in (self.head_a, self.head_b):
             self.assertFalse(any(path.startswith('commits/' + head) for path in self.github.reads))
+
+    def test_clean_merge_mac_full_suite_dispatch_failed(self):
+        self._create()
+        self.request_full_suite.return_value = mac_full_suite.MAC_FULL_SUITE_DISPATCH_FAILED
+        result = self._merge()
+        self.assertEqual(result['step'], 'MERGED', result)
+        self.assertEqual(result['codes'], [mac_full_suite.MAC_FULL_SUITE_DISPATCH_FAILED])
+        self.assertEqual(self._record()['state'], 'MERGED')
+        self.assertEqual(self.request_full_suite.call_count, 1)
+        self.request_full_suite.assert_called_once_with(self.gh, self.root, self.github)
 
     def test_not_mergeable_without_train_pr(self):
         self._create(train_pr=None)
