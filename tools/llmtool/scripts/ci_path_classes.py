@@ -32,6 +32,9 @@ def classify_path(path: str) -> str:
         if "/" not in relative and relative.endswith(".md"):
             return "docs"
         return "runtime"
+    # Skills Python is code.
+    if path.startswith("skills/") and path.endswith(".py"):
+        return "other"
     if (path.endswith(".md") or path in {"AGENTS.md", "CLAUDE.md"}
             or path.startswith("skills/") or path.startswith("docs/")):
         return "docs"

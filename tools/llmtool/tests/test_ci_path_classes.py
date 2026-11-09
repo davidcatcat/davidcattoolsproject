@@ -147,6 +147,32 @@ class CIPathClassTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(ci_path_classes.classify_path(path), "runtime")
 
+    def test_classify_path_cases(self):
+        cases = (
+            ("scripts/llmtool_monitor.py", "other"),
+            ("scripts/test_llmtool_monitor.py", "other"),
+            ("skills/x/tool.py", "other"),
+            ("skills/x/test_tool.py", "other"),
+            ("skills/x/SKILL.md", "docs"),
+            ("skills/x/notes.txt", "docs"),
+            (".github/workflows/llmtool-mac-ci.yml", "workflow"),
+        )
+        for path, expected in cases:
+            with self.subTest(path=path):
+                self.assertEqual(ci_path_classes.classify_path(path), expected)
+
+    def test_linux_flags_cases(self):
+        cases = (
+            (["scripts/llmtool_monitor.py"], (True, False, False, False)),
+            (["skills/x/tool.py"], (True, False, False, False)),
+            (["skills/x/SKILL.md"], (False, True, False, False)),
+            ([".github/workflows/llmtool-mac-ci.yml"], (True, False, False, False)),
+        )
+        for paths, expected in cases:
+            with self.subTest(paths=paths):
+                path_bytes = b"\0".join(p.encode() for p in paths) + b"\0"
+                self.assertEqual(ci_path_classes.linux_flags(path_bytes), expected)
+
 
 if __name__ == "__main__":
     unittest.main()
