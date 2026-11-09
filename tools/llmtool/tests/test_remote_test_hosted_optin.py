@@ -423,6 +423,35 @@ class RemoteTestHostedOptinTests(unittest.TestCase):
                 if mock_run.called:
                     self.assertIs(mock_run.call_args.kwargs.get('hosted'), True)
 
+    def test_run_task_remote_test_namespace_without_hosted_passes_hosted_false(self):
+        args = argparse.Namespace(
+            task_id=TASK_ID,
+            executor_task=EXECUTOR_TASK,
+            sha=SHA,
+            ref=REF,
+            module=[MODULE],
+            pr=None,
+        )
+        self.assertFalse(hasattr(args, 'hosted'))
+
+        with patch('llmtool.remote_test.run_remote_test') as mock_run:
+            mock_run.return_value = {'result': 'PASS'}
+            out = io.StringIO()
+            res = task_submission_cli.run_task_remote_test(args, store=self.store, stdout=out)
+            self.assertIsNone(res)
+            self.assertEqual(json.loads(out.getvalue()), {'result': 'PASS'})
+            mock_run.assert_called_once_with(
+                TASK_ID,
+                executor_task=EXECUTOR_TASK,
+                sha=SHA,
+                ref=REF,
+                modules=[MODULE],
+                pr=None,
+                store=self.store,
+                hosted=False,
+            )
+            self.assertIs(mock_run.call_args.kwargs.get('hosted'), False)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -999,7 +999,8 @@ def run_task_remote_test(args, *, store=None, stdout=None):
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,
                              sha=args.sha, ref=args.ref, modules=args.module,
-                             pr=args.pr, store=store, hosted=args.hosted)
+                             pr=args.pr, store=store,
+                             hosted=getattr(args, 'hosted', False))
     return _print(result, stdout)
 
 
