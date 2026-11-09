@@ -238,6 +238,17 @@ class GuidanceDriftCheckTests(unittest.TestCase):
         repository = Path(__file__).resolve().parents[3]
         self.assertEqual(check(repository), [])
 
+    def test_claude_md_agy_model_matches_route_default(self):
+        repository = Path(__file__).resolve().parents[3]
+        claude_md = (repository / "CLAUDE.md").read_text(encoding="utf-8")
+        agy_lines = [line for line in claude_md.splitlines() if line.startswith("  - AGY: use `")]
+        self.assertEqual(len(agy_lines), 1)
+        model = agy_lines[0].split("`", 2)[1]
+        routes_path = repository / "tools" / "llmtool" / "developer-routes.json"
+        with routes_path.open(encoding="utf-8") as routes_file:
+            data = json.load(routes_file)
+        self.assertEqual(model, data["routes"]["agy"]["default_model"])
+
 
 if __name__ == "__main__":
     unittest.main()
