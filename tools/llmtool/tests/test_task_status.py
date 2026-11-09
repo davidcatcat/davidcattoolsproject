@@ -333,6 +333,19 @@ class TaskStatusTests(unittest.TestCase):
             self.assertEqual(task_status.task_status(store=store)['tasks'][0]['state'],
                              'ABANDONED')
 
+    def test_task_abandon_runs_gw_agent_session_sweep(self):
+        with patch("llmtool.gw_agent_sessions.sweep_quietly") as sweep:
+            with tempfile.TemporaryDirectory() as root:
+                saved = record(root)
+                store = TaskStore(Path(root).resolve() / 'tasks')
+                args = parser_for_cli().parse_args([
+                    'task', 'abandon', saved['task_id'], '--pm-session',
+                    saved['pm_session_id'], '--reason', 'No longer needed'])
+                output = io.StringIO()
+                self.assertEqual(run_task_abandon(args, store=store, stdout=output), 0)
+            sweep.assert_called_once_with(store)
+            self.assertIn('"state":"ABANDONED"', output.getvalue())
+
     def test_index_matches_full_scan_and_skips_unprinted_reads(self):
         with tempfile.TemporaryDirectory() as root:
             rows = [record(root, created_at=f'2026-10-2{i}T00:00:00Z',
