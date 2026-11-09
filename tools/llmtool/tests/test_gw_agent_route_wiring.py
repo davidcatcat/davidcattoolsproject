@@ -1063,7 +1063,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
 
         with patch.object(task_submission_cli, '_validate_repair_packet',
                           side_effect=lambda value: value):
-            self._delegate('gw-agent-repair.md', route_runner=runner,
+            self._delegate('gw-agent-first.md', route_runner=runner,
                            repair_packet={'reviewer_text_excerpt_untrusted_data':
                                           'synthetic finding'})
         self.assertEqual(seen['session_id'], binding['session_id'])
