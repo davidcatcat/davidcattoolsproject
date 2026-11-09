@@ -3320,6 +3320,82 @@ class TaskStore:
                 continue
         _fail('TASK_STORE_BUSY')
 
+    def append_remote_test_dispatch(self, task_id, entry):
+        """Append one validated remote test dispatch; replays are idempotent."""
+        if not _valid_remote_test_dispatch_entry(entry):
+            _fail('REMOTE_TEST_DISPATCH_INVALID')
+        if entry['state'] != 'DISPATCHED' or entry['run_id'] is not None:
+            _fail('REMOTE_TEST_DISPATCH_INVALID')
+        for _ in range(5):
+            current = self.get(task_id)
+            dispatches = list(current.get('remote_test_dispatches', []))
+            existing = next((item for item in dispatches
+                             if item['nonce'] == entry['nonce']), None)
+            if existing is not None:
+                if existing == entry:
+                    return existing
+                _fail('REMOTE_TEST_DISPATCH_CONFLICT')
+            if len(dispatches) >= MAX_REMOTE_TEST_DISPATCHES:
+                _fail('REMOTE_TEST_DISPATCH_LIMIT')
+            new_entry = dict(entry)
+            try:
+                self._update(task_id, expected={'record_sha256': current['record_sha256']},
+                             changes={'remote_test_dispatches': dispatches + [new_entry]})
+                return new_entry
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
+
+    def update_remote_test_dispatch(self, task_id, nonce, *, state, run_id=None):
+        """Update one remote test dispatch state along allowed transitions."""
+        if state not in _REMOTE_TEST_DISPATCH_STATES:
+            _fail('REMOTE_TEST_DISPATCH_INVALID')
+        if run_id is not None:
+            if (type(run_id) is not int or isinstance(run_id, bool) or
+                    not 1 <= run_id <= _REMOTE_TEST_DISPATCH_RUN_ID_MAX):
+                _fail('REMOTE_TEST_DISPATCH_INVALID')
+        for _ in range(5):
+            current = self.get(task_id)
+            dispatches = list(current.get('remote_test_dispatches', []))
+            position = next((index for index, item in enumerate(dispatches)
+                             if item['nonce'] == nonce), None)
+            if position is None:
+                _fail('REMOTE_TEST_DISPATCH_NOT_FOUND')
+            stored = dispatches[position]
+            old_state = stored['state']
+            old_run_id = stored['run_id']
+            if old_run_id is not None and run_id is not None and run_id != old_run_id:
+                _fail('REMOTE_TEST_DISPATCH_INVALID')
+            if state == old_state:
+                if run_id is not None and run_id != old_run_id:
+                    _fail('REMOTE_TEST_DISPATCH_INVALID')
+                return stored
+            if old_state == 'DISPATCHED' and state == 'RUN_FOUND':
+                if run_id is None:
+                    _fail('REMOTE_TEST_DISPATCH_INVALID')
+                new_run_id = run_id
+            elif old_state == 'RUN_FOUND' and state == 'RECORDED':
+                new_run_id = old_run_id
+            elif old_state == 'DISPATCHED' and state == 'ABANDONED':
+                if run_id is not None:
+                    _fail('REMOTE_TEST_DISPATCH_INVALID')
+                new_run_id = None
+            elif old_state == 'RUN_FOUND' and state == 'ABANDONED':
+                new_run_id = old_run_id
+            else:
+                _fail('REMOTE_TEST_DISPATCH_INVALID')
+            new_entry = dict(stored, state=state, run_id=new_run_id)
+            new_dispatches = list(dispatches)
+            new_dispatches[position] = new_entry
+            try:
+                self._update(task_id,
+                             expected={'record_sha256': current['record_sha256']},
+                             changes={'remote_test_dispatches': new_dispatches})
+                return new_entry
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
+
     def _change_completion_event(self, task_id, event_id, pm_session_id, change):
         if (not self._completion_hex(event_id, 32) or
                 not _safe_identifier(pm_session_id, SESSION_ID)):
