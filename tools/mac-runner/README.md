@@ -1,5 +1,9 @@
 # Mac self-hosted runner isolation (Issue #99)
 
+This self-hosted setup is retired (Owner #1253, 2026-11-09): Mac CI runs on
+GitHub-hosted `macos-15-intel`, these runners take no CI jobs, re-enabling
+needs a new Owner grant, and the page is kept as a record.
+
 The repository's CI runs on the Owner's Mac (`davidproject-self-action`,
 labels `self-hosted, macOS, X64, local-mac-ci`), not on paid GitHub-hosted
 runners. The runner runs as its own hidden, non-admin macOS account,
@@ -34,9 +38,12 @@ job log shows `runner isolation: dedicated account ghrunner` and
 
 ## Mac CI runs
 
-Pull requests run the Mac CI coverage selected for their changes. The PM
-triggers `workflow_dispatch` after each merge train to run the full main suite.
-The Mac CI workflow has no scheduled trigger.
+Mac CI runs on GitHub-hosted `macos-15-intel` with a 120-minute job limit
+([#1253](https://github.com/davidcatcat/davidcattoolsproject/issues/1253)).
+Pull requests run the Mac CI coverage selected for their changes when the PM
+adds the `mac-ci` label after formal PASS; without `mac-ci`, the PR check is
+`NOT_RUN`. The PM triggers `workflow_dispatch` after each merge train to run
+the full main suite. The Mac CI workflow has no scheduled trigger.
 
 ## A second runner (`davidproject-self-action-2`, trial)
 
@@ -75,7 +82,8 @@ runner under GitHub → Settings → Actions → Runners.
 ## Kill switch and rollback
 
 - Stop CI without touching the Mac: set the repository variable
-  `MAC_CI_ENABLED` to `false`; the job is skipped (NOT_RUN, never PASS).
+  `HOSTED_CI_ENABLED` (or `MAC_CI_ENABLED`) to `false`; the job is skipped
+  (NOT_RUN, never PASS).
 - Stop the runner and its pf rules: `sudo bash tools/mac-runner/install.sh --uninstall`
   (pf stays on with macOS's default rules until reboot; the account is kept).
 - Updating the runner: the root-owned copy cannot update itself. Update the

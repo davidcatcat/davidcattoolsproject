@@ -1,5 +1,10 @@
 # EC2 Linux runners
 
+The EC2 self-hosted runners are retired from CI (Owner #1253, 2026-11-09):
+Linux CI runs on GitHub-hosted `ubuntu-24.04`, re-enabling needs a new Owner
+grant, the machines are kept, and `llmtool task remote-test` is separate and
+not CI. The page is kept as a record.
+
 Four persistent GitHub Actions runners on the Owner's EC2 (CentOS Stream 9,
 x86_64) run [llmtool Linux CI](../../.github/workflows/llmtool-linux-ci.yml)
 (Issue #99). Runners 1-3 share the first host (4 vCPU / 8 GiB). Runner 4
