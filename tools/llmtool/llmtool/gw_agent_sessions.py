@@ -85,7 +85,7 @@ def classify_homes(store, now=None):
                 # 2. Lock check: try lock without creating lock file if missing.
                 lock_file = entry / _SESSION_LOCK_FILE
                 is_locked = False
-                if lock_file.lexists():
+                if os.path.lexists(lock_file):
                     lock = GwAgentSessionLock(entry)
                     try:
                         lock.acquire()
