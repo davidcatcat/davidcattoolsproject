@@ -712,6 +712,21 @@ class MacTestIdSelectionTests(unittest.TestCase):
         )
         self.assertIn(case_pattern, workflow)
 
+    def test_ec2_runner_readme_alone_selects_no_subset(self):
+        report = ci_mac_modules.selection_report(["tools/ec2-runner/README.md"], REPO_ROOT)
+        self.assertEqual(report["level"], "L0")
+        self.assertEqual(report["test_ids"], [])
+
+    def test_nlf_readme_alone_selects_no_subset(self):
+        report = ci_mac_modules.selection_report(["tools/nlf/README.md"], REPO_ROOT)
+        self.assertEqual(report["level"], "L0")
+        self.assertEqual(report["test_ids"], [])
+
+    def test_mac_runner_readme_alone_selects_no_subset(self):
+        report = ci_mac_modules.selection_report(["tools/mac-runner/README.md"], REPO_ROOT)
+        self.assertEqual(report["level"], "L0")
+        self.assertEqual(report["test_ids"], [])
+
 
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml"
 CANONICAL_STEP = "Offline canonical checks"
