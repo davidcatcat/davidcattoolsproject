@@ -44,7 +44,9 @@ class AgyRouteWiringTests(unittest.TestCase):
                           bind_result='BOUND', initial_native_session_id=None,
                           bound_registration_mutation=False, audit=None,
                           store=None, verified_model='gemini-test', build_manifest=None,
-                          read_manifest_files=None, ledger_record=None):
+                          read_manifest_files=None, ledger_record=None,
+                          owner_ref=('https://github.com/davidcatcat/davidcattoolsproject/'
+                                     'issues/289#issuecomment-1')):
         if build_manifest is None:
             build_manifest = Mock(return_value=_SKILL_MANIFEST)
         if read_manifest_files is None:
@@ -179,7 +181,7 @@ class AgyRouteWiringTests(unittest.TestCase):
             return 0
 
         args = Namespace(task_id=task_id, provider='agy', mode='direct',
-            owner_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-1',
+            owner_ref=owner_ref,
             context_stdin=False, selection_source='PM', acceptance=['the result is recorded'],
             egress_basis='Approved non-sensitive Task context.', executor_task='executor-d6',
             read_path=['src.py'], write_path=['src.py'], repair_packet=repair_packet)
@@ -244,12 +246,133 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(worker_dispatch.worker_key_for('agy'), 'agy')
 
         class UnreadStore:
-            def get(self, _task_id):
+            def __getattr__(self, name):
                 raise AssertionError('store must not be read before owner-ref validation')
 
-        args = Namespace(provider='agy', mode='direct', owner_ref=None)
-        with self.assertRaises(LLMToolError):
+        # #785 M18: a missing ref is optional, but a supplied malformed ref is
+        # still refused before any store read. run_task_delegate leaves this
+        # check to run_task_agy_delegate so the repair-cap and High Debug
+        # refusals come first; call the AGY runner directly here.
+        for owner_ref in ('https://example.invalid/x', 7):
+            with self.subTest(owner_ref=owner_ref):
+                args = Namespace(provider='agy', mode='direct', owner_ref=owner_ref,
+                                 task_id='a' * 32, background=False,
+                                 acceptance=['the result is recorded'])
+                with self.assertRaises(LLMToolError) as caught:
+                    task_submission_cli.run_task_agy_delegate(args, store=UnreadStore())
+                self.assertEqual(
+                    str(caught.exception),
+                    '--provider agy requires a valid --owner-ref before Task mutation')
+
+    def test_agy_delegate_without_owner_ref_reaches_the_store(self):
+        class SentinelStore:
+            def __init__(self):
+                self.gets = []
+
+            def task_ids(self):
+                return []
+
+            def get(self, task_id):
+                self.gets.append(task_id)
+                raise LLMToolError('SENTINEL_STORE_GET')
+
+        store = SentinelStore()
+        args = Namespace(provider='agy', mode='direct', owner_ref=None, task_id='a' * 32,
+                         background=False, context_stdin=False,
+                         acceptance=['the result is recorded'])
+        with self.assertRaises(LLMToolError) as caught:
+            task_submission_cli.run_task_delegate(args, store=store)
+        self.assertEqual(str(caught.exception), 'SENTINEL_STORE_GET')
+        self.assertEqual(store.gets, ['a' * 32])
+
+    def test_claude_delegate_without_owner_ref_is_still_refused_before_store_read(self):
+        class UnreadStore:
+            def __getattr__(self, name):
+                raise AssertionError('store must not be read before owner-ref validation')
+
+        args = Namespace(provider='claude', mode='direct', owner_ref=None, task_id='a' * 32,
+                         background=False, acceptance=['the result is recorded'])
+        with self.assertRaises(LLMToolError) as caught:
             task_submission_cli.run_task_delegate(args, store=UnreadStore())
+        self.assertEqual(str(caught.exception), '--provider claude requires --owner-ref')
+
+    def _fixture_policy(self, agy_row):
+        """Write a self-contained v1 policy fixture; never the live file."""
+        evidence = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+        workers = {
+            key: {'dispatch': 'PAUSED', 'decided_by': 'Owner', 'decided_at': '2026-11-08',
+                  'reason': 'test fixture', 'evidence': evidence}
+            for key in worker_dispatch.WORKERS
+        }
+        workers['company-gw-agent'] = {
+            'dispatch': 'PAUSED', 'decided_by': 'PM', 'decided_at': '2026-11-08',
+            'reason': 'test fixture', 'evidence': worker_dispatch._GW_AGENT_PAUSED_REF}
+        workers['agy'] = dict({'decided_by': 'Owner', 'decided_at': '2026-11-08',
+                               'reason': 'test fixture', 'evidence': evidence}, **agy_row)
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        path = Path(temp.name) / 'worker-dispatch.json'
+        path.write_text(json.dumps({'schema_version': 1, 'workers': workers}),
+                        encoding='utf-8')
+        return path
+
+    def test_agy_without_owner_ref_is_refused_by_restrictive_policy_without_store_write(self):
+        task_id = 'a' * 32
+        matching_ref = ('https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+                        '#issuecomment-1')
+        rows = {
+            'OWNER_ASSIGNMENT_ONLY': ({'dispatch': 'OWNER_ASSIGNMENT_ONLY', 'owner_assignments': [
+                {'task_id': task_id, 'owner_assignment_ref': matching_ref}]},
+                'OWNER_ASSIGNMENT_REQUIRED'),
+            'PAUSED': ({'dispatch': 'PAUSED'}, 'OWNER_PAUSED'),
+        }
+        task = {
+            'schema_version': 2, 'task_id': task_id, 'run_id': 'b' * 32,
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'AGY goal',
+            'task_binding': {'contract_digest': 'c' * 64},
+            'pm_assignment': {'route': 'agy', 'risk': 'LOW', 'goal': 'AGY goal',
+                              'acceptance': ['the result is recorded']},
+            'developer': None, 'completion': None,
+        }
+        registration = SimpleNamespace(task_id='executor-d6')
+        snapshot = SimpleNamespace(head='d' * 40)
+        for name, (agy_row, expected_code) in rows.items():
+            with self.subTest(policy=name):
+                policy_path = self._fixture_policy(agy_row)
+                writes = []
+
+                class Store:
+                    def get(self, _task_id):
+                        return dict(task)
+
+                    def __getattr__(self, attr):
+                        def record(*args, **kwargs):
+                            writes.append((attr, args, kwargs))
+                            raise AssertionError('no store write is allowed')
+                        return record
+
+                args = Namespace(task_id=task_id, provider='agy', mode='direct',
+                                 owner_ref=None, context_stdin=False, selection_source='PM',
+                                 acceptance=['the result is recorded'],
+                                 egress_basis='Approved non-sensitive Task context.',
+                                 executor_task='executor-d6', read_path=['src.py'],
+                                 write_path=['src.py'], repair_packet=None)
+                store = Store()
+                with patch.object(worker_dispatch, '_POLICY_PATH', policy_path), \
+                        patch.object(task_submission_cli.task_completion,
+                                     'validate_task_binding'), \
+                        patch.object(task_submission_cli, '_delegate_d6_binding',
+                                     return_value=(registration, snapshot)), \
+                        patch.object(task_submission_cli, '_reject_claude_reserved_d6'):
+                    with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
+                        task_submission_cli.run_task_agy_delegate(args, store=store)
+                self.assertEqual(caught.exception.dispatch_code, expected_code)
+                self.assertEqual(writes, [])
+
+    def test_agy_developer_record_stores_omitted_owner_ref_as_none(self):
+        _status, saved, _events, _prompts = self._run_agy_delegate(owner_ref=None)
+        self.assertIn('owner_assignment_ref', saved['developer'])
+        self.assertIsNone(saved['developer']['owner_assignment_ref'])
 
     def test_agy_developer_routes_to_claude_reviewer(self):
         task = {
