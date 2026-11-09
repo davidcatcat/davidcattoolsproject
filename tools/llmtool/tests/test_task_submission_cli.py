@@ -5059,13 +5059,32 @@ class DelegateRepairCapTests(unittest.TestCase):
                         self._args(task, 'opencode', high_debug_ref=ref), self.store)
 
     def test_unreadable_prior_record_refuses_with_task_id(self):
+        # A file with broken JSON refuses, naming the current Task ID.
         self._prior_assignments(1)
         broken = self.store.task_ids()[0]
         self.store.root.joinpath(broken + '.json').write_text('{broken', encoding='utf-8')
         task = self._task()
         with self.assertRaisesRegex(LLMToolError,
-                                    f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {broken}'):
+                                    f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task["task_id"]}'):
             submission_cli._check_delegate_repair_cap(self._args(task, 'opencode'), self.store)
+
+    def test_other_d6_record_failing_validation_does_not_refuse_this_d6(self):
+        # A record for another D6 that fails full validation does not refuse this D6.
+        self._prior_assignments(1, executor='executor-task-other')
+        other_id = self.store.task_ids()[0]
+        record = {
+            'task_id': other_id,
+            'completion': {'executor_task_id': 'executor-task-other'},
+            'invalid_field': 'fails full validation',
+        }
+        self.store.root.joinpath(other_id + '.json').write_text(
+            json.dumps(record), encoding='utf-8')
+        with self.assertRaises(LLMToolError):
+            self.store.get(other_id)
+
+        task = self._task()
+        self.assertIsNone(submission_cli._check_delegate_repair_cap(
+            self._args(task, 'opencode'), self.store))
 
 
 if __name__ == '__main__':

@@ -762,7 +762,7 @@ class RealStoreReviewPromptTests(unittest.TestCase):
             self.write_raw(task_id, _json_bytes(record))
 
     def spy_validate(self, *, fail_for=None):
-        def spy(record):
+        def spy(record, *, strict=True):
             self.validated.append(record['task_id'])
             if record['task_id'] == fail_for:
                 raise LLMToolError('synthetic validation failure')
