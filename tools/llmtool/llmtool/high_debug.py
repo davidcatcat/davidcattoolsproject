@@ -28,7 +28,8 @@ _EVIDENCE_LIMIT = 8192
 _RECORD_TOKEN = re.compile(r'[A-Za-z0-9._-]{1,64}\Z')
 _REFUSAL_CODES = frozenset((
     'HIGH_DEBUG_RUN_FAILED', 'HIGH_DEBUG_WROTE_FILES',
-    'HIGH_DEBUG_REPORT_INVALID'))
+    'HIGH_DEBUG_REPORT_INVALID', 'HIGH_DEBUG_QUOTA_EXHAUSTED',
+    'HIGH_DEBUG_MODEL_UNVERIFIED'))
 _SCREEN_HIT_LIMIT = 32
 _SCREEN_RULES = (
     ('private_key', re.compile(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----', re.I)),
@@ -71,7 +72,7 @@ _SCREEN_BATCH_KEYS = frozenset(('event', 'task_id', 'family', 'd6', 'refusal_id'
                                 'hits', 'classification', 'ref', 'recorded_at'))
 
 
-def _record_body(entry, task_id, refusal_code=None):
+def _record_body(entry, task_id, refusal_code=None, account=None):
     """Build a monitor-only comment using recorded metadata, never report text."""
     status = entry.get('status')
     marker_status = 'WAITING' if status in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED') else 'BLOCKED'
@@ -87,8 +88,10 @@ def _record_body(entry, task_id, refusal_code=None):
                               for key in ('input', 'cached', 'output', 'reasoning'))
     else:
         usage_text = 'UNKNOWN'
+    is_claude = entry.get('model_requested') == 'claude-opus-5-5' or account is not None
+    actor = 'Claude' if is_claude else 'Codex'
     lines = [
-        f'<!-- activity: type=developer_progress actor=Codex target=PM status={marker_status} -->',
+        f'<!-- activity: type=developer_progress actor={actor} target=PM status={marker_status} -->',
         f'Task: {task_id}',
         f'D6: {entry.get("d6", "UNKNOWN")}',
         f'Family: {entry.get("family", "UNKNOWN")}',
@@ -100,6 +103,9 @@ def _record_body(entry, task_id, refusal_code=None):
         f'Report SHA-256: {entry.get("report_sha256", "UNKNOWN")}',
         f'Usage: {usage_text}',
     ]
+    if is_claude:
+        account_val = account if type(account) is str and _RECORD_TOKEN.fullmatch(account) else 'UNKNOWN'
+        lines.append(f'Account: {account_val}')
     if entry.get('status') == 'RUN_FAILED':
         code = refusal_code if refusal_code in _REFUSAL_CODES else 'HIGH_DEBUG_RUN_FAILED'
         lines.append(f'Refusal code: {code}')
@@ -173,10 +179,10 @@ def _write_unposted(entry, pr_number, task_id, reason, body=None):
         pass
 
 
-def _post_record(entry, pr_number, repo_root, task_id, refusal_code=None):
+def _post_record(entry, pr_number, repo_root, task_id, refusal_code=None, account=None):
     """Return whether a comment was posted; never affect the diagnostic result."""
     try:
-        body = _record_body(entry, task_id, refusal_code)
+        body = _record_body(entry, task_id, refusal_code, account=account)
         if _emitted_sensitive(body):
             _write_unposted(entry, pr_number, task_id, 'SCREEN_REJECTED')
             return False
@@ -893,10 +899,10 @@ def confirm_screen_batch(task_id, family, d6, batch, hits, classification, ref, 
     return progress
 
 
-def _create_d6(*, task_id, base_sha, repo_root, executor_task):
+def _create_d6(*, task_id, base_sha, repo_root, executor_task, agent_id='codex-high-debug-gpt-6.1-sol'):
     lifecycle = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
     result = subprocess.run([sys.executable, '-B', str(lifecycle), '--task-id', task_id,
-        '--agent-id', 'codex-high-debug-gpt-6.1-sol', '--session-ref', 'pending-' + task_id,
+        '--agent-id', agent_id, '--session-ref', 'pending-' + task_id,
         '--lease-ref', f'high-debug {executor_task} at {base_sha}', '--branch',
         'llmtool/high-debug-' + task_id, '--base-sha', base_sha, '--repo-root', str(repo_root)],
         cwd=repo_root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -937,6 +943,22 @@ def _run_codex(*, prompt, cwd, output_path):
             stderr=subprocess.PIPE, check=False, timeout=1800)
 
 
+def _run_claude(*, prompt, cwd, output_path, config_dir):
+    from .developer_routes.claude import ClaudeRoute
+    route = ClaudeRoute({'executable': 'claude', 'config_dir': config_dir})
+    argv = [
+        'claude', '-p', '--output-format', 'json', '--model', 'claude-opus-5-5',
+        '--effort', 'high', '--no-session-persistence', '--restricted',
+        '--tools', 'Read,Glob,Grep', '--permission-mode', 'default',
+        '--permission-prompts', 'none', '--strict-mcp-config', '--', prompt,
+    ]
+    with tempfile.TemporaryDirectory(prefix='llmtool-high-debug-tmp-') as tmpdir:
+        return subprocess.run(
+            argv, stdin=subprocess.DEVNULL, cwd=cwd,
+            env=route.build_env(tmpdir), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=1800)
+
+
 def _d6_taken(repo_root, common_dir, d6):
     """True when a D6 id is already used (its branch or registry record exists).
 
@@ -959,14 +981,28 @@ def _d6_taken(repo_root, common_dir, d6):
 _D6_NAME_PROBES = 16
 
 
+def _claude_usage(raw_usage):
+    if not isinstance(raw_usage, dict):
+        return 'UNKNOWN'
+    input_tokens = raw_usage.get('input_tokens')
+    output_tokens = raw_usage.get('output_tokens')
+    cached_tokens = raw_usage.get('cache_read_input_tokens', 0)
+    if (type(input_tokens) is int and input_tokens >= 0 and
+            type(output_tokens) is int and output_tokens >= 0 and
+            type(cached_tokens) is int and cached_tokens >= 0):
+        return {'input': input_tokens, 'cached': cached_tokens,
+                'output': output_tokens, 'reasoning': 0}
+    return 'UNKNOWN'
+
+
 def _failed_entry(*, family, failed_corrections, early_reason, head, d6, code,
                   report=None,
-                  observed, effort, usage, recorded_at):
-    """The high_debug entry recording one Codex attempt that did not finish."""
+                  observed, effort, usage, recorded_at, model_requested='gpt-6.1-sol'):
+    """The high_debug entry recording one attempt that did not finish."""
     stored_report = code if report is None else report
     return {'family': family, 'failed_corrections': failed_corrections,
             'early_reason': early_reason, 'examined_sha': head, 'd6': d6,
-            'model_requested': 'gpt-6.1-sol', 'model_observed': observed,
+            'model_requested': model_requested, 'model_observed': observed,
             'effort_observed': effort, 'status': 'RUN_FAILED',
             'report_sha256': hashlib.sha256(stored_report.encode('utf-8')).hexdigest(),
             'report': stored_report, 'usage': usage, 'recorded_at': recorded_at}
