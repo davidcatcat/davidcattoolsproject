@@ -2,7 +2,9 @@
 
 Run: python3 -B -m unittest discover -s scripts -p 'test_llmtool_monitor.py'
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sqlite3
@@ -8045,16 +8047,56 @@ class ProcessTableFidelityTests(_TableFixture, unittest.TestCase):
             self.assertTrue(mon.run_ps_users({450}))
 
 
-DEEP_JSON = b"[" * 10_000 + b"]" * 10_000   # json.loads: RecursionError under Python 3.13
+JSON_NESTING_LIMIT = 1_000
+DEEP_JSON = b"[" * 10_000 + b"]" * 10_000   # The tests apply the fixed limit.
+
+
+@contextlib.contextmanager
+def json_nesting_limit():
+    """The real limit depends on Python version and stack size, so the same
+    payload can raise on one interpreter and parse on another; the monitor
+    calls json.loads through the json module, so it sees the same limit
+    (json.load reads through json.loads too)."""
+    real_loads = json.loads
+    needle = "[" * JSON_NESTING_LIMIT
+
+    def fake_loads(*args, **kwargs):
+        s = args[0] if args else kwargs.get("s")
+        if isinstance(s, (bytes, bytearray)):
+            text = s.decode("utf-8", "replace")
+        elif isinstance(s, str):
+            text = s
+        else:
+            text = None
+        if isinstance(text, str) and needle in text:
+            raise RecursionError("maximum recursion depth exceeded while parsing JSON")
+        return real_loads(*args, **kwargs)
+
+    with patch.object(json, "loads", fake_loads):
+        yield
 
 
 class DeepJsonTests(unittest.TestCase):
     """Codex review v3 (#637): JSON nested too deeply is a bad answer or a
     bad record like any other, never an exception out of a refresh."""
 
+    def setUp(self):
+        if hasattr(self, "enterContext"):
+            self.enterContext(json_nesting_limit())
+        else:
+            cm = json_nesting_limit()
+            cm.__enter__()
+            self.addCleanup(cm.__exit__, None, None, None)
+
     def test_the_payload_really_raises_recursion_error(self):
         with self.assertRaises(RecursionError):
             json.loads(DEEP_JSON)
+        with self.assertRaises(RecursionError):
+            json.load(io.BytesIO(DEEP_JSON))
+        self.assertEqual(
+            json.loads(b'[[1], {"a": "[["}]'),
+            [[1], {"a": "[["}],
+        )
 
     def test_direct_read_falls_back_to_gh_and_pauses(self):
         tests = DirectGitHubTests()

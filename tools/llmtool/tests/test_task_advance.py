@@ -3197,15 +3197,17 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
 
 
 class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
-    """#1019 row 31: task advance --merge refuses a head that lacks current main."""
+    """Owner decision #1317: task advance --merge allows mergeable heads behind main."""
 
     LINUX = {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
              'conclusion': 'success'}
     MACOS = dict(LINUX, name='check (macOS 3.13)')
     COMPARE_PATH = f'compare/{MAIN_SHA}...{HEAD}'
+    _MISSING = object()
 
     def merge(self, *, main_reply=None, compare_reply=None, check_runs=None,
-              labels=('mac-ci',)):
+              labels=('mac-ci',), mergeable_state='clean', mergeable=True,
+              pr_head=HEAD, current_pr_head=None):
         from llmtool.task_completion import _GITHUB_API_PATH
         main_reply = {'commit': {'sha': MAIN_SHA}} if main_reply is None else main_reply
         compare_reply = {'status': 'ahead'} if compare_reply is None else compare_reply
@@ -3217,8 +3219,10 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
                                     'review_result': {'verdict': 'PASS'}}],
             completion_events=[{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
                                 'outcome': 'REVIEW_PASS'}])
-        pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
-              'mergeable': True, 'labels': [{'name': name} for name in labels]}
+        pr = {'number': 17, 'head': {'sha': pr_head}, 'state': 'open', 'merged': False,
+              'mergeable': mergeable, 'labels': [{'name': name} for name in labels]}
+        if mergeable_state is not self._MISSING:
+            pr['mergeable_state'] = mergeable_state
         reads, calls, claims = [], [], []
 
         class Store:
@@ -3233,7 +3237,10 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
                 raise value
             return value
 
+        pulls_calls = 0
+
         def github_get(path):
+            nonlocal pulls_calls
             # The same validator guards the production GitHub read.
             self.assertTrue(_GITHUB_API_PATH.fullmatch(path), path)
             reads.append(path)
@@ -3246,6 +3253,9 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
             if path.endswith('/files?per_page=100'):
                 return [{'filename': 'src/module.py'}]
             if path == 'pulls/17':
+                pulls_calls += 1
+                if pulls_calls > 1 and current_pr_head is not None:
+                    return dict(pr, head={'sha': current_pr_head})
                 return pr
             return []
 
@@ -3267,15 +3277,20 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(claims, [])
 
-    def test_head_without_current_main_refuses_before_label_claim_and_merge(self):
+    def test_head_behind_or_diverged_from_main_merges_when_mergeable(self):
         for status in ('behind', 'diverged'):
-            for name, kwargs in (
-                    ('merge ready', {}),
-                    ('label would be added', {'check_runs': [self.LINUX], 'labels': ()})):
-                with self.subTest(status=status, case=name):
-                    self.assert_refused(
-                        self.merge(compare_reply={'status': status}, **kwargs),
-                        'MERGE_PR_BEHIND_MAIN')
+            for state in ('clean', 'behind', 'unstable', 'has_hooks'):
+                with self.subTest(status=status, state=state):
+                    result, _reads, calls, claims = self.merge(
+                        compare_reply={'status': status, 'behind_by': 2},
+                        mergeable_state=state)
+                    self.assertEqual(result['step'], 'MERGED')
+                    self.assertEqual(calls[0], ['pr', 'merge', '17', '--squash',
+                                                '--match-head-commit', HEAD])
+                    self.assertEqual(sum(call[1] == 'merge' for call in calls), 1)
+                    self.assertEqual([claim['state'] for claim in claims],
+                                     ['CLAIMED', 'MERGED'])
+                    self.assertEqual(result['result']['main_behind_by'], 2)
 
     def test_head_with_current_main_merges(self):
         for status in ('ahead', 'identical'):
@@ -3287,8 +3302,58 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
                 self.assertEqual(sum(call[1] == 'merge' for call in calls), 1)
                 self.assertEqual([claim['state'] for claim in claims],
                                  ['CLAIMED', 'MERGED'])
+                self.assertEqual(result['result']['main_behind_by'], 0)
                 self.assertEqual(reads[-3:], ['pulls/17', 'branches/main',
                                               self.COMPARE_PATH])
+
+    def test_behind_head_refusals(self):
+        cases = (
+            ('dirty mergeable_state', {'mergeable_state': 'dirty'}, 'MERGE_PR_CONFLICT'),
+            ('unknown mergeable_state', {'mergeable_state': 'unknown'}, 'MERGE_MERGEABLE_UNKNOWN'),
+            ('missing mergeable_state', {'mergeable_state': self._MISSING}, 'MERGE_MERGEABLE_UNKNOWN'),
+            ('None mergeable_state', {'mergeable_state': None}, 'MERGE_MERGEABLE_UNKNOWN'),
+            ('blocked mergeable_state', {'mergeable_state': 'blocked'}, 'MERGE_PR_NOT_MERGEABLE'),
+            ('mergeable False', {'mergeable': False}, 'MERGE_PR_NOT_MERGEABLE'),
+            ('behind_by missing', {'compare_reply': {'status': 'behind'}}, 'MERGE_CHECKS_UNAVAILABLE'),
+            ('behind_by 0', {'compare_reply': {'status': 'behind', 'behind_by': 0}}, 'MERGE_CHECKS_UNAVAILABLE'),
+            ('behind_by text', {'compare_reply': {'status': 'behind', 'behind_by': '2'}}, 'MERGE_CHECKS_UNAVAILABLE'),
+        )
+        for name, kwargs, expected_code in cases:
+            with self.subTest(name):
+                opts = {'compare_reply': {'status': 'behind', 'behind_by': 2}}
+                opts.update(kwargs)
+                self.assert_refused(self.merge(**opts), expected_code)
+
+    def test_behind_pr_with_stale_head_refuses_with_same_code(self):
+        other_head = 'b' * 40
+        self.assert_refused(
+            self.merge(compare_reply={'status': 'behind', 'behind_by': 2},
+                       current_pr_head=other_head),
+            'MERGE_STALE_HEAD')
+        self.assert_refused(
+            self.merge(compare_reply={'status': 'behind', 'behind_by': 2},
+                       pr_head=other_head),
+            'MERGE_STALE_HEAD')
+
+    def test_behind_pr_with_clean_mergeable_state_reaches_mac_label_step(self):
+        result, _reads, calls, claims = self.merge(
+            compare_reply={'status': 'behind', 'behind_by': 2},
+            check_runs=[self.LINUX], labels=(), mergeable_state='clean')
+        self.assertEqual(result['step'], 'WAITING_CI')
+        self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
+        self.assertEqual(claims, [])
+
+    def test_diverged_pr_with_clean_mergeable_state_merges(self):
+        result, _reads, calls, claims = self.merge(
+            compare_reply={'status': 'diverged', 'ahead_by': 5, 'behind_by': 3},
+            mergeable_state='clean', labels=('mac-ci',))
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual(calls[0], ['pr', 'merge', '17', '--squash',
+                                    '--match-head-commit', HEAD])
+        self.assertEqual(sum(call[1] == 'merge' for call in calls), 1)
+        self.assertEqual([claim['state'] for claim in claims],
+                         ['CLAIMED', 'MERGED'])
+        self.assertEqual(result['result']['main_behind_by'], 3)
 
     def test_current_main_still_reaches_the_mac_label_step(self):
         result, _reads, calls, claims = self.merge(check_runs=[self.LINUX], labels=())

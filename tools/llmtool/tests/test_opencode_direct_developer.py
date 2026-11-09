@@ -887,7 +887,8 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
     def test_version_probe_output_is_bounded(self):
         cli = self.fake_cli(self.event('step_start') + '\n',
                             version_output='x' * 5000)
-        with self.assertRaises(DirectOpenCodeError) as caught:
+        with patch('llmtool.opencode_direct_developer.VERSION_TIMEOUT_SECONDS', 120), \
+                self.assertRaises(DirectOpenCodeError) as caught:
             self.run_with_valid_binding(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
                 prompt='bounded task prompt', timeout_seconds=5, executable=cli)
         self.assertEqual(caught.exception.direct_opencode_code,

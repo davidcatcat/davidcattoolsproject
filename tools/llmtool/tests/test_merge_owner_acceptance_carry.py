@@ -256,7 +256,8 @@ class ExactHeadUnchangedTests(CarryTestCase):
         self.assertFalse(any(path.startswith('compare/') for path in reads))
         self.assertNotIn(H0_COMMIT, reads)
         result, calls, reads = self.merge_once(**{COMMENT_PATH: value})
-        self.assertEqual(result['result'], {'pr': 17, 'head': H1, 'owner_acceptance': URL})
+        self.assertEqual(result['result'], {'pr': 17, 'head': H1, 'owner_acceptance': URL,
+                                            'main_behind_by': 0})
         self.assertFalse(any(path.endswith('?per_page=100') and path.startswith('compare/')
                              for path in reads))
         provenance = [call[-1] for call in calls if call[:2] == ['pr', 'comment']]
