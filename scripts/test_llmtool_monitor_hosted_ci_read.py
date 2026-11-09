@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -33,6 +34,28 @@ spec.loader.exec_module(mon)
 GitHubSource = mon.GitHubSource
 Monitor = mon.Monitor
 Snapshot = mon.Snapshot
+
+_ISOLATED = tempfile.TemporaryDirectory()
+_RULE_ALERT_ISOLATED = tempfile.TemporaryDirectory()
+_RULE_ALERT_PATCH = mock.patch.object(
+    mon, "RULE_ALERT_FILE",
+    os.path.join(_RULE_ALERT_ISOLATED.name, "rule-file-alerts.json"))
+
+
+def setUpModule():
+    # Isolate session directories so tests never read developer agent sessions
+    for name in (
+        "CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS",
+        "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT"
+    ):
+        setattr(mon, name, os.path.join(_ISOLATED.name, name))
+    _RULE_ALERT_PATCH.start()
+
+
+def tearDownModule():
+    _RULE_ALERT_PATCH.stop()
+    _RULE_ALERT_ISOLATED.cleanup()
+    _ISOLATED.cleanup()
 
 
 class TestHostedCiRead(unittest.TestCase):
@@ -155,9 +178,14 @@ class TestHostedCiRead(unittest.TestCase):
         monitor.github = source
 
         empty_snapshot = Snapshot(processes=[], watched_groups={}, lingering=[])
-        with mock.patch("llmtool_monitor.collect", return_value=empty_snapshot):
-            with mock.patch("llmtool_monitor.scan_tasks", return_value=[]):
-                monitor.poll()
+        with mock.patch.object(mon, "collect", return_value=empty_snapshot), \
+             mock.patch.object(mon, "scan_tasks", return_value=[]), \
+             mock.patch.object(mon, "office_rows", return_value=[]), \
+             mock.patch.object(mon, "llmtool_task_records", return_value=[]), \
+             mock.patch.object(mon, "llmtool_route_outcomes", return_value={}), \
+             mock.patch.object(mon, "quota_warnings", return_value=[]), \
+             mock.patch.object(mon, "behind_main", return_value=[]):
+            monitor.poll()
 
         self.assertTrue(source.want_hosted_ci)
 
