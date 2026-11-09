@@ -1,6 +1,5 @@
 """Unit tests for _hosted_start in remote_test.py."""
 
-import dataclasses
 import hashlib
 import json
 import os
@@ -10,9 +9,18 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from llmtool import remote_test
-from llmtool.action_contract import TaskBinding
 from llmtool.task_store import TaskStore
-from llmtool.task_verification import parse_task_contract
+from llmtool.task_submission_cli import _record
+
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
 
 
 SHA = 'a' * 40
@@ -25,66 +33,21 @@ EXECUTOR_TASK = 'd6-task'
 
 
 def _make_task_record(task_id, run_id, pm_session_id):
-    contract_raw = {
-        'task_id': task_id,
-        'goal': 'Bounded test goal for hosted start',
-        'acceptance': ['Signature: _hosted_start returns run or outcome.'],
-        'read_paths': ['tools/llmtool/tests/test_remote_test.py'],
-        'write_paths': ['tools/llmtool/tests/test_remote_test.py'],
-    }
-    try:
-        contract = parse_task_contract(json.dumps(contract_raw, separators=(',', ':')))
-    except Exception:
-        contract_raw['schema_version'] = 1
-        contract = parse_task_contract(json.dumps(contract_raw, separators=(',', ':')))
-
-    binding = contract.binding(run_id)
-    if hasattr(binding, 'to_dict'):
-        binding_dict = binding.to_dict()
-    elif hasattr(binding, '_asdict'):
-        binding_dict = binding._asdict()
-    elif dataclasses.is_dataclass(binding):
-        binding_dict = dataclasses.asdict(binding)
-    elif hasattr(binding, '__dict__'):
-        binding_dict = dict(binding.__dict__)
-    else:
-        binding_dict = dict(binding)
-
-    if hasattr(contract, 'to_dict'):
-        c_raw = contract.to_dict()
-    elif hasattr(contract, '_asdict'):
-        c_raw = contract._asdict()
-    elif dataclasses.is_dataclass(contract):
-        c_raw = dataclasses.asdict(contract)
-    else:
-        c_raw = contract_raw
-
-    now_iso = datetime.now(timezone.utc).replace(microsecond=0).strftime('%Y-%m-%dT%H:%M:%SZ')
-    request = 'test request'
-    record = {
-        'schema_version': 2,
-        'task_id': task_id,
-        'run_id': run_id,
-        'pm_session_id': pm_session_id,
-        'pm_provider_profile': 'active-pm-runtime',
-        'pm_provider_type': 'active-pm-runtime',
-        'pm_model': None,
-        'backend_session_semantics': 'NOT_STARTED',
-        'native_session_id': None,
-        'state': 'PM_PENDING',
-        'created_at': now_iso,
-        'updated_at': now_iso,
-        'task_contract': c_raw,
-        'task_binding': binding_dict,
-        'request': request,
-        'request_sha256': hashlib.sha256(request.encode('utf-8')).hexdigest(),
-        'response': None,
-        'usage': None,
-        'error_code': None,
-        'developer': None,
-        'pm_assignment': None,
-    }
-    return record
+    request = 'Bounded remote test dispatch task.'
+    request_sha = hashlib.sha256(request.encode()).hexdigest()
+    task = _record(
+        task_id, run_id, pm_session_id, 'pm-profile', request,
+        state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+        backend='NO_NATIVE_SESSION_ID_EXPOSED', request_sha=request_sha)
+    task.update(
+        pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                          'base_url': None},
+        response='PM returned a bounded task.', error_code=None,
+        pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                       'goal': 'Produce a proposal diff.',
+                       'acceptance': ['the proposal is recorded']},
+    )
+    return task
 
 
 def _make_run(run_id, nonce):
@@ -102,7 +65,7 @@ class RemoteTestHostedStartTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
-        self.store = TaskStore(root=self.temp_dir.name)
+        self.store = TaskStore(Path(self.temp_dir.name).resolve() / 'tasks')
         self.record = _make_task_record(TASK_ID, RUN_ID, PM_SESSION_ID)
         self.task = self.store.create(self.record)
 
