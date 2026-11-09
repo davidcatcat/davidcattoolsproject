@@ -153,12 +153,14 @@ class RemoteTestHostedFinishTests(unittest.TestCase):
             'executor_task': EXECUTOR_TASK,
             'modules': list(MODULES),
             'dispatched_at': '2026-11-09T10:00:00Z',
-            'run_id': run_id,
-            'state': state,
+            'run_id': None,
+            'state': 'DISPATCHED',
         }
         self.store.append_remote_test_dispatch(TASK_ID, entry)
+        if state == 'RUN_FOUND':
+            self.store.update_remote_test_dispatch(TASK_ID, nonce, state='RUN_FOUND', run_id=run_id)
         self.task = self.store.get(TASK_ID)
-        return entry
+        return self.task['remote_test_dispatches'][-1]
 
     def test_pending_run_returns_outcome_and_keeps_dispatch_entry(self):
         self._append_dispatch(NONCE, state='RUN_FOUND', run_id=RUN_ID_INT)
