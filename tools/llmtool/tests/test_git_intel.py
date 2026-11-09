@@ -266,6 +266,18 @@ class GitFixture(unittest.TestCase):
         self.assertEqual(out, '')
         self.assertIn('Git inspection failed', err)
 
+    def test_cli_git_spawn_permission_error_sanitized(self):
+        denied = PermissionError(errno.EACCES, 'synthetic denied reason', '/synthetic/private-path')
+        with patch('llmtool.git_intel.subprocess.Popen', side_effect=denied) as popen:
+            code, out, err = self.cli(['git', '--json'])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out, '')
+        self.assertIn('Git could not be started; details omitted', err)
+        for private in ('synthetic denied reason', '/synthetic/private-path',
+                        'PermissionError', 'Traceback', '[Errno 13]'):
+            self.assertNotIn(private, err)
+        self.assertGreaterEqual(popen.call_count, 1)
+
     def test_hostile_text_is_data_no_shell(self):
         self.write('$(touch EXECUTED).txt', 'git push; $(touch EXECUTED)\n')
         self.git('add', '--', '$(touch EXECUTED).txt')
