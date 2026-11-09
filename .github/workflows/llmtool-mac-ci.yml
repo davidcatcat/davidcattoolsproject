@@ -151,11 +151,225 @@ jobs:
             exit 1
           fi
 
+  shards:
+    name: shards (${{ matrix.shard }}/3)
+    needs: select
+    if: needs.select.outputs.mode == 'full' && needs.select.outputs.run != 'false'
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || 'main' }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Source revision
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          fail() { echo "::error::source revision check failed: $1"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            EXPECTED_SHA=$(git rev-parse HEAD) || fail "cannot read checked-out main SHA"
+          fi
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected SHA is not a full commit id"
+          head=$(git rev-parse HEAD) || fail "cannot read HEAD"
+          test "$head" = "$EXPECTED_SHA" || fail "checked out $head, expected $EXPECTED_SHA"
+          echo "tested source HEAD: $head ($GITHUB_EVENT_NAME)"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            test "$head" != "$GITHUB_SHA" || fail "checked out the merge ref instead of the PR head"
+            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "missing PR base SHA"
+            if git merge-base --is-ancestor "$BASE_SHA" "$head"; then
+              echo "merge coverage: head contains base $BASE_SHA"
+            else
+              status=$?
+              test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
+              echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head (loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"
+            fi
+          fi
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+      - name: Check GitHub-hosted runner boundary
+        run: |
+          fail() { echo "::error::hosted runner boundary failed: $1"; exit 1; }
+          test "$RUNNER_ENVIRONMENT" = github-hosted || fail "not a GitHub-hosted runner"
+          test "$(id -u)" -ne 0 || fail "job runs as root"
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GW_AGENT_API_KEY; do
+            test -z "${!name+x}" || fail "credential environment $name present"
+          done
+          echo "Runner: $RUNNER_NAME ($RUNNER_ENVIRONMENT, $RUNNER_OS $RUNNER_ARCH); user: $(id -un)"
+      - name: Job-owned verified Python
+        run: |
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 13), sys.version'
+          src_exe="$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')"
+          dst="$RUNNER_TEMP/job-python"
+          python3 -m venv --copies "$dst"
+          chmod -R go-w "$dst"
+          exe="$dst/bin/python3"
+          fail() { echo "::error::job-owned Python check failed: $1"; exit 1; }
+          { test -f "$exe" && test ! -L "$exe"; } || fail "interpreter is not a regular file"
+          test "$(stat -f %u "$exe")" = "$(id -u)" || fail "interpreter not owned by job user"
+          test $(( 0$(stat -f %Lp "$exe") & 022 )) -eq 0 || fail "interpreter group/other writable"
+          # Scan physical entries only; the shared base runtime and libraries
+          # remain part of the audited Mac runner trust boundary.
+          # BEGIN status-checked verification
+          inventory=$(find "$dst" ! -type l \( -perm -020 -o -perm -002 \) -print -quit) || fail "cannot scan copy"
+          test -z "$inventory" || fail "writable file left in copy"
+          copy_hash=$(shasum -a 256 < "$exe") || fail "cannot hash copy"
+          source_hash=$(shasum -a 256 < "$src_exe") || fail "cannot hash source"
+          [[ "$copy_hash" =~ ^[0-9a-f]{64}[[:space:]][[:space:]]-$ ]] || fail "invalid copy hash"
+          [[ "$source_hash" =~ ^[0-9a-f]{64}[[:space:]][[:space:]]-$ ]] || fail "invalid source hash"
+          test "$copy_hash" = "$source_hash" || fail "interpreter bytes differ"
+          # END status-checked verification
+          "$exe" -c 'import os,sys; root=os.path.realpath(os.environ["RUNNER_TEMP"]); assert os.path.commonpath((root,os.path.realpath(sys.executable)))==root' \
+            || fail "copy does not run from RUNNER_TEMP"
+          echo "JOB_PYTHON=$exe" >> "$GITHUB_ENV"
+      - name: Install llmtool
+        run: |
+          "$JOB_PYTHON" -m pip install --requirement tools/llmtool/requirements-ci.txt
+          "$JOB_PYTHON" -m pip install --no-deps -e tools/llmtool
+      - name: Verifier failure-path checks
+        if: matrix.shard == 1 && needs.select.outputs.verify == 'true'
+        run: |
+          "$JOB_PYTHON" -B - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          import yaml
+
+          workflow = yaml.safe_load(Path('.github/workflows/llmtool-mac-ci.yml').read_text())
+          step = next(s for s in workflow['jobs']['shards']['steps']
+                      if s.get('name') == 'Job-owned verified Python')['run']
+          guard = step.split('# BEGIN status-checked verification\n', 1)[1].split(
+              '# END status-checked verification', 1)[0]
+          fail = next(line for line in step.splitlines() if line.startswith('fail()'))
+          # Run the actual guard, not a second implementation of its checks.
+          second_hash_error = ('shasum() { if test -e "$dst/hash-called"; then return 2; '
+                               'fi; : > "$dst/hash-called"; command shasum "$@"; }')
+          second_hash_empty = ('shasum() { if test -e "$dst/hash-called"; then return 0; '
+                               'fi; : > "$dst/hash-called"; command shasum "$@"; }')
+          cases = [
+              ('regular flow', '', None, None),
+              ('find error with empty stdout', 'find() { return 2; }', None, 'cannot scan copy'),
+              ('writable entry', '', 'writable', 'writable file left in copy'),
+              ('both hash tools fail', 'shasum() { return 2; }', None, 'cannot hash copy'),
+              ('source hash tool fails', second_hash_error, None, 'cannot hash source'),
+              ('copy hash empty success', 'shasum() { return 0; }', None, 'invalid copy hash'),
+              ('source hash empty success', second_hash_empty, None, 'invalid source hash'),
+              ('malformed hash', "shasum() { printf 'invalid\\n'; }", None, 'invalid copy hash'),
+              ('different bytes', '', 'different', 'interpreter bytes differ'),
+              ('copy unreadable', '', 'copy unreadable', 'cannot hash copy'),
+              ('source unreadable', '', 'source unreadable', 'cannot hash source'),
+              ('both unreadable', '', 'both unreadable', 'cannot hash copy'),
+          ]
+          if os.geteuid() == 0:
+              raise RuntimeError('read-failure probes require an unprivileged job')
+          for label, override, mutation, expected in cases:
+              with tempfile.TemporaryDirectory(prefix='wf87-verifier-') as temporary:
+                  root = Path(temporary)
+                  dst = root / 'copy'
+                  dst.mkdir()
+                  exe, source = dst / 'python', root / 'source-python'
+                  for path in (exe, source):
+                      path.write_bytes(b'identical synthetic interpreter bytes\n')
+                      path.chmod(0o600)
+                  if mutation == 'writable':
+                      (dst / 'writable').write_bytes(b'fixture')
+                      (dst / 'writable').chmod(0o666)
+                  if mutation == 'different':
+                      source.write_bytes(b'different synthetic interpreter bytes\n')
+                  unreadable = {'copy unreadable': (exe,), 'source unreadable': (source,),
+                                'both unreadable': (exe, source)}.get(mutation, ())
+                  for path in unreadable:
+                      path.chmod(0o111)
+                  try:
+                      result = subprocess.run(
+                          ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
+                           fail + '\n' + override + '\n' + guard],
+                          env={**os.environ, 'dst': str(dst), 'exe': str(exe),
+                               'src_exe': str(source)}, capture_output=True, text=True, timeout=10)
+                      if expected is None:
+                          assert result.returncode == 0, label
+                      else:
+                          assert result.returncode == 1, label
+                          assert 'job-owned Python check failed: ' + expected in result.stdout, label
+                          if unreadable:
+                              assert 'Permission denied' in result.stderr, label
+                      print(label + ': PASS')
+                  finally:
+                      for path in unreadable:
+                          path.chmod(0o600)
+          print('Verifier checks: 12/12 PASS; no skips')
+          PY
+      - name: Offline canonical shard checks
+        timeout-minutes: 45
+        run: |
+          # Fail closed: the result stays INCOMPLETE until the last line.
+          # An early exit, signal or timeout reports INCOMPLETE or FAIL.
+          started=$SECONDS
+          result=INCOMPLETE
+          test_count=0
+          module_count=0
+          report_result() {
+            status=$?
+            if [ "$status" -ne 0 ]; then result=FAIL; fi
+            printf 'canonical shard: shard %s/3 (%s modules)\ncanonical exact HEAD: %s\ncanonical unittest test-case count: %s\ncanonical elapsed seconds: %s\ncanonical result: %s\n' "${{ matrix.shard }}" "$module_count" "$(git rev-parse HEAD)" "$test_count" "$((SECONDS - started))" "$result"
+            if [ "$result" != PASS ]; then
+              if [ "$status" -eq 0 ]; then status=1; fi
+              exit "$status"
+            fi
+          }
+          collect_count() { observed=$(awk '/^Ran [0-9]+ tests?/ { total += $2 } END { print total + 0 }' "$1"); test_count=$((test_count + observed)); }
+          trap report_result EXIT
+          make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
+          "$JOB_PYTHON" tools/llmtool/scripts/ci_test_shards.py 3 "${{ matrix.shard }}" --timings tools/llmtool/ci/mac-test-module-seconds.json > "$RUNNER_TEMP/mac-shard-modules"
+          module_count=$(wc -l < "$RUNNER_TEMP/mac-shard-modules" | tr -d ' ')
+          while IFS= read -r module <&3; do
+            output="$RUNNER_TEMP/mac-test-output"
+            test_started=$SECONDS
+            test_id="${module%.py}"
+            set +e
+            "$JOB_PYTHON" -I -B -c 'import sys,unittest; sys.path[:0]=["tools/llmtool/tests","tools/llmtool"]; suite=unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(not result.wasSuccessful())' "$test_id" 2>&1 | tee "$output"
+            pipe_status=("${PIPESTATUS[@]}")
+            set -e
+            # The test command's status wins; a failing tee also fails.
+            status=${pipe_status[0]}
+            if [ "$status" -eq 0 ]; then status=${pipe_status[1]}; fi
+            collect_count "$output"
+            printf 'canonical test module: %s\ncanonical test module elapsed seconds: %s\n' "$module" "$((SECONDS - test_started))"
+            test "$status" -eq 0 || exit "$status"
+          done 3< "$RUNNER_TEMP/mac-shard-modules" < /dev/null
+          if [ "$test_count" -eq 0 ]; then
+            echo "::error::canonical checks ran no test cases"
+            exit 1
+          fi
+          result=PASS
+      - name: Monitor script checks
+        if: matrix.shard == 1
+        run: |
+          "$JOB_PYTHON" -B -m unittest discover -s scripts
+      - name: Working tree is clean
+        run: |
+          status=$(git status --porcelain)
+          if [ -n "$status" ]; then
+            echo "::error::the CI run changed tracked files or left untracked files:"
+            printf '%s\n' "$status"
+            exit 1
+          fi
+          echo "working tree clean"
+
   check:
     name: check (macOS 3.13)
-    needs: select
-    if: vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci' || github.event.label.name == 'mac-ci-intel')
-    runs-on: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'mac-ci-intel') && 'macos-15' || 'macos-15-intel' }}
+    needs: [select, shards]
+    if: always() && vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci' || github.event.label.name == 'mac-ci-intel')
+    runs-on: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'mac-ci-intel') && needs.select.outputs.mode != 'full' && 'macos-15' || 'macos-15-intel' }}
     # Owner #1253: up to 120 minutes while the hosted full suite is measured (#1220).
     timeout-minutes: 120
     steps:
@@ -193,6 +407,17 @@ jobs:
               echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head (loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"
             fi
           fi
+      - name: Shard results
+        if: always() && (needs.select.outputs.mode == 'full' || needs.select.result != 'success') && needs.select.outputs.run != 'false'
+        env:
+          SELECT_RESULT: ${{ needs.select.result }}
+          SHARDS_RESULT: ${{ needs.shards.result }}
+        run: |
+          printf 'select result: %s\nshards result: %s\n' "$SELECT_RESULT" "$SHARDS_RESULT"
+          if [ "$SELECT_RESULT" != "success" ] || [ "$SHARDS_RESULT" != "success" ]; then
+            echo "::error::full mode requires select and shards to succeed"
+            exit 1
+          fi
       - name: Populate test IDs
         if: needs.select.outputs.run != 'false' && needs.select.outputs.mode == 'mac-subset'
         env:
@@ -202,7 +427,7 @@ jobs:
             echo "$id"
           done > "$RUNNER_TEMP/mac-test-ids"
       - name: Set up Python 3.13
-        if: needs.select.outputs.run != 'false'
+        if: needs.select.outputs.run != 'false' && needs.select.outputs.mode != 'full'
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: '3.13'
@@ -219,7 +444,7 @@ jobs:
       # The trusted-runtime check refuses a group/other-writable interpreter;
       # the copy is checked byte-for-byte without changing the shared Python.
       - name: Job-owned verified Python
-        if: needs.select.outputs.run != 'false'
+        if: needs.select.outputs.run != 'false' && needs.select.outputs.mode != 'full'
         run: |
           python3 -c 'import sys; assert sys.version_info[:2] == (3, 13), sys.version'
           src_exe="$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')"
@@ -246,12 +471,12 @@ jobs:
             || fail "copy does not run from RUNNER_TEMP"
           echo "JOB_PYTHON=$exe" >> "$GITHUB_ENV"
       - name: Install llmtool
-        if: needs.select.outputs.run != 'false'
+        if: needs.select.outputs.run != 'false' && needs.select.outputs.mode != 'full'
         run: |
           "$JOB_PYTHON" -m pip install --requirement tools/llmtool/requirements-ci.txt
           "$JOB_PYTHON" -m pip install --no-deps -e tools/llmtool
       - name: Verifier failure-path checks
-        if: needs.select.outputs.run != 'false' && needs.select.outputs.verify == 'true'
+        if: needs.select.outputs.run != 'false' && needs.select.outputs.mode != 'full' && needs.select.outputs.verify == 'true'
         run: |
           "$JOB_PYTHON" -B - <<'PY'
           import os
@@ -324,11 +549,9 @@ jobs:
                           path.chmod(0o600)
           print('Verifier checks: 12/12 PASS; no skips')
           PY
-      # Full runs get 110 minutes and other modes 45. The 120-minute job
-      # limit stays the outer stop.
       - name: Offline canonical checks
-        if: needs.select.outputs.run != 'false' && needs.select.outputs.mode != 'monitor-only' && needs.select.outputs.mode != 'docs-only'
-        timeout-minutes: ${{ needs.select.outputs.mode == 'full' && 110 || 45 }}
+        if: needs.select.outputs.run != 'false' && needs.select.outputs.mode == 'mac-subset'
+        timeout-minutes: 45
         run: |
           # Fail closed: the result stays INCOMPLETE until the last line.
           # An early exit, signal or timeout reports INCOMPLETE or FAIL.
@@ -346,41 +569,28 @@ jobs:
           }
           collect_count() { observed=$(awk '/^Ran [0-9]+ tests?/ { total += $2 } END { print total + 0 }' "$1"); test_count=$((test_count + observed)); }
           trap report_result EXIT
-          if [ "${{ needs.select.outputs.mode }}" = mac-subset ]; then
-            make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
-            while IFS= read -r test_id <&3; do
-              output="$RUNNER_TEMP/mac-test-output"
-              test_started=$SECONDS
-              set +e
-              "$JOB_PYTHON" -I -B -c 'import sys,unittest; sys.path[:0]=["tools/llmtool/tests","tools/llmtool"]; suite=unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(not result.wasSuccessful())' "$test_id" 2>&1 | tee "$output"
-              pipe_status=("${PIPESTATUS[@]}")
-              set -e
-              # The test command's status wins; a failing tee also fails.
-              status=${pipe_status[0]}
-              if [ "$status" -eq 0 ]; then status=${pipe_status[1]}; fi
-              collect_count "$output"
-              printf 'canonical test ID: %s\ncanonical test ID elapsed seconds: %s\n' "$test_id" "$((SECONDS - test_started))"
-              test "$status" -eq 0 || exit "$status"
-            done 3< "$RUNNER_TEMP/mac-test-ids" < /dev/null
-          else
+          make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
+          while IFS= read -r test_id <&3; do
             output="$RUNNER_TEMP/mac-test-output"
+            test_started=$SECONDS
             set +e
-            make -C tools/llmtool check PYTHON="$JOB_PYTHON" 2>&1 | tee "$output"
+            "$JOB_PYTHON" -I -B -c 'import sys,unittest; sys.path[:0]=["tools/llmtool/tests","tools/llmtool"]; suite=unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(not result.wasSuccessful())' "$test_id" 2>&1 | tee "$output"
             pipe_status=("${PIPESTATUS[@]}")
             set -e
             # The test command's status wins; a failing tee also fails.
             status=${pipe_status[0]}
             if [ "$status" -eq 0 ]; then status=${pipe_status[1]}; fi
             collect_count "$output"
+            printf 'canonical test ID: %s\ncanonical test ID elapsed seconds: %s\n' "$test_id" "$((SECONDS - test_started))"
             test "$status" -eq 0 || exit "$status"
-          fi
+          done 3< "$RUNNER_TEMP/mac-test-ids" < /dev/null
           if [ "$test_count" -eq 0 ]; then
             echo "::error::canonical checks ran no test cases"
             exit 1
           fi
           result=PASS
       - name: Monitor script checks
-        if: needs.select.outputs.run != 'false'
+        if: needs.select.outputs.run != 'false' && needs.select.outputs.mode != 'full'
         run: |
           "$JOB_PYTHON" -B -m unittest discover -s scripts
       - name: Working tree is clean
