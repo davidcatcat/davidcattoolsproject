@@ -201,6 +201,25 @@ class DelegateRepairCapTests(unittest.TestCase):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.recorded, [])
 
+    def test_d6_record_unreadable_refuses_with_count_unavailable(self):
+        store = _Store(count=0)
+        unreadable_id = '1' * 32
+        store.records[unreadable_id] = {
+            'completion': {'executor_task_id': _EXECUTOR_TASK},
+        }
+        original_get = store.get
+
+        def failing_get(task_id):
+            if task_id == unreadable_id:
+                raise OSError('unreadable')
+            return original_get(task_id)
+
+        store.get = failing_get
+        with self.assertRaisesRegex(
+                LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
+
     def test_missing_high_debug_task_is_refused(self):
         store = self._at_cap(diagnosis=_diagnosis([_entry()]))
 
