@@ -22,9 +22,11 @@ from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes
 
 # Outcomes that remote_test.py records as UNAVAILABLE: nothing ran on EC2, so
-# the next advance step may retry the same head.
+# the next advance step may retry the same head. A hosted run is read back by
+# its nonce on the next step and never dispatched twice.
 _REMOTE_TEST_RETRY_CODES = frozenset((
-    'SSH_UNAVAILABLE', 'SSH_FAILED', 'REMOTE_BUSY', 'REMOTE_LOCK_UNSAFE'))
+    'SSH_UNAVAILABLE', 'SSH_FAILED', 'REMOTE_BUSY', 'REMOTE_LOCK_UNSAFE',
+    'HOSTED_PENDING', 'HOSTED_QUEUE_FULL', 'HOSTED_DISPATCH_UNCONFIRMED'))
 
 
 class _PublishRefusal(Exception):
@@ -593,20 +595,29 @@ def _remote_test_receipt_summary(record, head):
                 return None
         except Exception:
             return None
+        actions = receipt.get('actions')
+        hosted_run_id = (actions.get('run_id')
+                         if type(actions) is dict and type(actions.get('run_id')) is int and actions['run_id'] > 0
+                         else None)
         return {
             'result': receipt.get('result'),
             'modules': receipt.get('modules'),
             'ran_total': receipt.get('ran_total'),
             'elapsed_s': receipt.get('elapsed_s'),
             'receipt_digest': digest[:8],
+            'hosted_run_id': hosted_run_id,
         }
     return None
 
 
 def _post_remote_test_comment(gh_runner, root, number, task_id, d6, head, summary):
     modules = ','.join(summary['modules'])
+    hosted_run_id = summary.get('hosted_run_id')
+    prefix = (f"remote-test (GitHub-hosted run {hosted_run_id}), result="
+              if hosted_run_id is not None
+              else "EC2 remote-test, result=")
     body = ('<!-- activity: type=task actor=PM target=PR status=TRACKING -->\n'
-            f"EC2 remote-test, result={summary['result']}, modules={modules}, "
+            f"{prefix}{summary['result']}, modules={modules}, "
             f"tests run={summary['ran_total']}, seconds={summary['elapsed_s']}, "
             f"receipt={summary['receipt_digest']}, Task={task_id}, D6={d6.get('task_id')}, head={head}")
     response = gh_runner(root, ['pr', 'comment', str(number), '--body', body])

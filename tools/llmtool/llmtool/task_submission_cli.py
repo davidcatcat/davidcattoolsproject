@@ -1014,7 +1014,11 @@ def _review_ec2_line(task, head):
         return _REVIEW_EC2_NONE
     if summary is None:
         return _REVIEW_EC2_NONE
-    return (f"EC2 remote-test: result={summary['result']}, "
+    hosted_run_id = summary.get('hosted_run_id')
+    prefix = (f"remote-test (GitHub-hosted run {hosted_run_id}): result="
+              if hosted_run_id is not None
+              else "EC2 remote-test: result=")
+    return (f"{prefix}{summary['result']}, "
             f"modules={','.join(summary['modules'])}, tests run={summary['ran_total']}, "
             f"seconds={summary['elapsed_s']}, receipt={summary['receipt_digest']}")
 

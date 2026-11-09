@@ -48,7 +48,7 @@ def d6(clean=True, recorded=HEAD):
 
 
 def remote_receipt(record, *, source_sha=HEAD, result='PASS', excerpt=None,
-                   executor_task='executor-1'):
+                   executor_task='executor-1', **changes):
     receipt = {
         'task_id': record['task_id'], 'run_id': record['run_id'],
         'executor_task': executor_task, 'source_sha': source_sha,
@@ -57,6 +57,7 @@ def remote_receipt(record, *, source_sha=HEAD, result='PASS', excerpt=None,
     }
     if excerpt is not None:
         receipt['failure_excerpt'] = excerpt
+    receipt.update(changes)
     receipt['receipt_digest'] = hashlib.sha256(_json_bytes(receipt)).hexdigest()
     return receipt
 
@@ -348,7 +349,8 @@ class TaskAdvanceTests(unittest.TestCase):
             'remote_test': {'result': 'PASS', 'modules': ['test_task_advance'],
                             'ran_total': 1, 'elapsed_s': 0.01,
                             'receipt_digest': store.record['remote_test_receipts'][0]
-                                ['receipt_digest'][:8]}})
+                                ['receipt_digest'][:8],
+                            'hosted_run_id': None}})
         self.assertEqual(second['step'], 'DISPATCH_REVIEW')
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls, [(HEAD, 'executor-1', 'refs/pull/17/head')])
@@ -1517,7 +1519,8 @@ class TaskAdvanceCiGateTests(unittest.TestCase):
         summary = result['result']['remote_test']
         self.assertEqual(summary, {'result': 'FAIL', 'modules': ['test_task_advance'],
             'ran_total': 12, 'elapsed_s': 3.5,
-            'receipt_digest': receipt['receipt_digest'][:8]})
+            'receipt_digest': receipt['receipt_digest'][:8],
+            'hosted_run_id': None})
         self.assertEqual(result['step'], 'RUN_REMOTE_TEST')
         self.assertEqual(calls[0][:3], ['pr', 'comment', '17'])
         body = calls[0][calls[0].index('--body') + 1]
@@ -1527,6 +1530,69 @@ class TaskAdvanceCiGateTests(unittest.TestCase):
         self.assertIn('D6=executor-1', body)
         self.assertNotIn(d6()['root'], body)
         self.assertNotIn('private failure text', body)
+
+    def test_remote_test_comment_text_and_malformed_actions(self):
+        record = base_record(remote_test_outcomes=[])
+        d6_obj = {'task_id': 'executor-1', 'root': '/repo'}
+        calls = []
+
+        def gh_runner(_root, argv):
+            calls.append(argv)
+            return type('Response', (), {'returncode': 0})()
+
+        # EC2 receipt: body text after marker line starts with 'EC2 remote-test, result='
+        ec2_receipt = remote_receipt(record, result='PASS')
+        summary_ec2 = task_advance._remote_test_receipt_summary(
+            {'remote_test_receipts': [ec2_receipt]}, HEAD)
+        self.assertIsNotNone(summary_ec2)
+        self.assertIsNone(summary_ec2['hosted_run_id'])
+        task_advance._post_remote_test_comment(gh_runner, '/repo', 17, record['task_id'], d6_obj, HEAD, summary_ec2)
+        body_ec2 = calls[-1][calls[-1].index('--body') + 1]
+        marker, rest_ec2 = body_ec2.split('\n', 1)
+        self.assertEqual(marker, '<!-- activity: type=task actor=PM target=PR status=TRACKING -->')
+        self.assertEqual(
+            rest_ec2,
+            f"EC2 remote-test, result=PASS, modules=test_task_advance, tests run=1, seconds=0.01, receipt={ec2_receipt['receipt_digest'][:8]}, Task={record['task_id']}, D6=executor-1, head={HEAD}")
+
+        # Hosted receipt: body text after marker line starts with 'remote-test (GitHub-hosted run <id>), result='
+        hosted_receipt = remote_receipt(record, result='PASS', actions={'run_id': 7890})
+        summary_hosted = task_advance._remote_test_receipt_summary(
+            {'remote_test_receipts': [hosted_receipt]}, HEAD)
+        self.assertIsNotNone(summary_hosted)
+        self.assertEqual(summary_hosted['hosted_run_id'], 7890)
+        task_advance._post_remote_test_comment(gh_runner, '/repo', 17, record['task_id'], d6_obj, HEAD, summary_hosted)
+        body_hosted = calls[-1][calls[-1].index('--body') + 1]
+        marker, rest_hosted = body_hosted.split('\n', 1)
+        self.assertEqual(marker, '<!-- activity: type=task actor=PM target=PR status=TRACKING -->')
+        self.assertEqual(
+            rest_hosted,
+            f"remote-test (GitHub-hosted run 7890), result=PASS, modules=test_task_advance, tests run=1, seconds=0.01, receipt={hosted_receipt['receipt_digest'][:8]}, Task={record['task_id']}, D6=executor-1, head={HEAD}")
+
+        # Malformed actions blocks give no run id and the EC2 text
+        malformed = (
+            'not-a-dict',
+            {},
+            {'run_id': 'bad'},
+            {'run_id': 0},
+            {'run_id': -1},
+            {'run_id': None},
+            {'run_id': True},
+            {'run_id': 3.14},
+        )
+        for bad_actions in malformed:
+            with self.subTest(bad_actions=bad_actions):
+                bad_receipt = remote_receipt(record, result='PASS', actions=bad_actions)
+                summary_bad = task_advance._remote_test_receipt_summary(
+                    {'remote_test_receipts': [bad_receipt]}, HEAD)
+                self.assertIsNotNone(summary_bad)
+                self.assertIsNone(summary_bad['hosted_run_id'])
+                task_advance._post_remote_test_comment(gh_runner, '/repo', 17, record['task_id'], d6_obj, HEAD, summary_bad)
+                body_bad = calls[-1][calls[-1].index('--body') + 1]
+                marker, rest_bad = body_bad.split('\n', 1)
+                self.assertEqual(marker, '<!-- activity: type=task actor=PM target=PR status=TRACKING -->')
+                self.assertEqual(
+                    rest_bad,
+                    f"EC2 remote-test, result=PASS, modules=test_task_advance, tests run=1, seconds=0.01, receipt={bad_receipt['receipt_digest'][:8]}, Task={record['task_id']}, D6=executor-1, head={HEAD}")
 
     def test_remote_test_comment_failure_adds_only_warning_code(self):
         record = base_record(remote_test_outcomes=[])
@@ -1740,6 +1806,44 @@ class TaskAdvancePublishTests(unittest.TestCase):
 
         self.assertEqual(opened['pr'], 23)
         self.assertEqual(refs, [f'refs/heads/{self.BRANCH}'] * 3)
+
+    def test_hosted_remote_test_codes_hold_at_waiting_remote_test_and_are_not_fail(self):
+        new_codes = ('HOSTED_PENDING', 'HOSTED_QUEUE_FULL', 'HOSTED_DISPATCH_UNCONFIRMED')
+        for code in new_codes:
+            with self.subTest(code=code):
+                self.change_file(f'{code}\n')
+                store = self.gated_store()
+                def remote_test(args, *, store):
+                    print(json.dumps({'result': 'UNAVAILABLE', 'code': code}))
+                    return 0
+
+                held = self.advance_gated(store, remote_test, dirty=True)
+                self.assertEqual((held['step'], held['codes'], held['pr']),
+                                 ('WAITING_REMOTE_TEST', ['REMOTE_TEST_UNAVAILABLE', code], None))
+                self.assertEqual(held['next'], 'WAITING_REMOTE_TEST')
+                self.assertNotIn('REMOTE_TEST_FAIL', held['codes'])
+                self.assertNotEqual(held['step'], 'RUN_REMOTE_TEST')
+                self.assertNotEqual(held['next'], 'REPAIR_REVIEW')
+                self.assert_no_pr()
+
+    def test_pre_pr_remote_gate_hosted_codes_hold_at_waiting_remote_test_and_are_not_fail(self):
+        new_codes = ('HOSTED_PENDING', 'HOSTED_QUEUE_FULL', 'HOSTED_DISPATCH_UNCONFIRMED')
+        for code in new_codes:
+            with self.subTest(code=code):
+                self.change_file(f'clean-{code}\n')
+                store = self.gated_store()
+                def remote_test(args, *, store):
+                    print(json.dumps({'result': 'UNAVAILABLE', 'code': code}))
+                    return 0
+
+                held = self.advance_gated(store, remote_test, dirty=False)
+                self.assertEqual((held['step'], held['codes'], held['pr']),
+                                 ('WAITING_REMOTE_TEST', ['REMOTE_TEST_UNAVAILABLE', code], None))
+                self.assertEqual(held['next'], 'WAITING_REMOTE_TEST')
+                self.assertNotIn('REMOTE_TEST_FAIL', held['codes'])
+                self.assertNotEqual(held['step'], 'RUN_REMOTE_TEST')
+                self.assertNotEqual(held['next'], 'REPAIR_REVIEW')
+                self.assert_no_pr()
 
     def test_docs_only_or_no_module_head_opens_pr_then_uses_pr_ref_step(self):
         self.change_file()
