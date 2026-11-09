@@ -27,6 +27,7 @@ import os
 import re
 import stat
 
+from . import mac_full_suite
 from . import merge_train as _train_build
 from . import merge_train_store, task_advance, task_completion
 
@@ -200,7 +201,8 @@ def _provenance(record, merge_sha):
     return '\n'.join(lines)
 
 
-def _finish_merged(record, expected_sha256, attempt, merge_sha, gh_runner, root, train_root):
+def _finish_merged(record, expected_sha256, attempt, merge_sha, gh_runner, root, train_root,
+                   github_get=None):
     """Record a merge seen at the exact train head, then post one provenance comment.
 
     The comment follows only a durable MERGED write. When both writes fail the
@@ -229,6 +231,10 @@ def _finish_merged(record, expected_sha256, attempt, merge_sha, gh_runner, root,
             codes.append(TRAIN_PROVENANCE_COMMENT_FAILED)
     except Exception:
         codes.append(TRAIN_PROVENANCE_COMMENT_FAILED)
+    suite_code = mac_full_suite.request_full_suite(gh_runner, root, github_get)
+    if suite_code not in (mac_full_suite.MAC_FULL_SUITE_DISPATCHED,
+                          mac_full_suite.MAC_FULL_SUITE_ALREADY_QUEUED):
+        codes.append(suite_code)
     return _result('MERGED', codes, outcome)
 
 
@@ -249,7 +255,7 @@ def _resolve_unknown(record, github_get, gh_runner, root, train_root):
             attempt.get('head_sha') != record['train_head']):
         return _refused(TRAIN_NOT_MERGEABLE)
     return _finish_merged(record, record['record_sha256'], attempt, merge_sha,
-                          gh_runner, root, train_root)
+                          gh_runner, root, train_root, github_get)
 
 
 def _record_unknown(train_id, expected_sha256, attempt, train_root):
@@ -280,7 +286,7 @@ def _recover_claimed(record, github_get, gh_runner, root, train_root):
     merge_sha = _merged_at(_read_pr(github_get, train_pr), train_head)
     if merge_sha is not None:
         return _finish_merged(record, record['record_sha256'], attempt, merge_sha,
-                              gh_runner, root, train_root)
+                              gh_runner, root, train_root, github_get)
     _record_unknown(record['train_id'], record['record_sha256'], attempt, train_root)
     return _refused(TRAIN_MERGE_OUTCOME_UNKNOWN,
                     {'train_id': record['train_id'], 'pr': train_pr, 'head': train_head})
@@ -412,7 +418,7 @@ def _merge_locked(train_id, store, github_get, gh_runner, root, train_root):
         return _refused(TRAIN_MERGE_OUTCOME_UNKNOWN,
                         {'train_id': train_id, 'pr': train_pr, 'head': train_head})
     return _finish_merged(claimed, claimed['record_sha256'], attempt, merge_sha,
-                          gh_runner, root, train_root)
+                          gh_runner, root, train_root, github_get)
 
 
 def _member_pr_comment(record):

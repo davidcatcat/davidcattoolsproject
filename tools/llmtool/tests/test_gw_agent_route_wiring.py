@@ -16,7 +16,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from llmtool import review_dispatch, task_completion, task_submission_cli, worker_dispatch
+from llmtool import (
+    gw_agent_sessions,
+    review_dispatch,
+    task_completion,
+    task_status,
+    task_submission_cli,
+    worker_dispatch,
+)
 from llmtool.developer_routes import GwAgentRoute, RouteError, load_route_config
 from llmtool.developer_routes.gw_agent import cleanup_audit_copies
 from llmtool.errors import LLMToolError
@@ -938,7 +945,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
     def _delegate(self, target, *, usage=(1026, 49), served_model='qwen3.8-27b',
                   provider_model='gw', reject_responded=False, route_runner=None,
                   wrap_store=None, gate=None, authorize=None, route_factory=None,
-                  content='hello synthetic\n', bind=None):
+                  content='hello synthetic\n', bind=None, repair_packet=None):
         # #1072: without ``bind`` the D6 session step keeps today's unbound
         # result; with it the real step runs against that fake lifecycle helper.
         task_id = self.task_id = self._active_pm_task(target)
@@ -961,6 +968,8 @@ class GwAgentRealStoreTests(unittest.TestCase):
             acceptance=[f'Only {target} is created.'], selection_source='PM',
             executor_task='executor-d6', read_path=[target], write_path=[target],
             cwd=str(self.root))
+        if repair_packet is not None:
+            args.repair_packet = repair_packet
         real_config = load_route_config()
         real_config['routes']['gw-agent']['package_path'] = str(
             Path(__file__).resolve().parents[2] / 'api-agent-gateway')
@@ -1044,6 +1053,70 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertIn('+hello synthetic\n', developer['artifact'])
         self.assertEqual((self.root / target).read_text(), 'hello synthetic\n')
         self.assertEqual(self._git('status', '--porcelain'), f'?? {target}')
+
+    def test_repair_run_resumes_bound_gateway_session(self):
+        self._delegate("gw-agent-first.md")
+        first_task = self.task_id
+        root_record_before = self.store.get(first_task)
+        home = Path(self.store_root).parent / 'gw-agent-sessions' / 'executor-d6'
+        from llmtool.developer_routes import gw_agent
+        binding = gw_agent.read_session_binding(home, executor_task_id='executor-d6')
+        self.assertEqual(binding['root_task_id'], first_task)
+        initial_scope_digest = binding['scope_digest']
+        (self.root / 'gw-agent-first.md').unlink()
+
+        root_record = self.store.get(first_task)
+        self.assertNotIn(task_status.derive_state(root_record), ('ABANDONED', 'COMPLETED'))
+        binding_before = gw_agent.read_session_binding(home, executor_task_id='executor-d6')
+        self.assertEqual(binding_before['root_task_id'], first_task)
+
+        seen = {}
+
+        def runner(route, request, **kwargs):
+            seen.update(request)
+            raise RouteError(
+                'GW_AGENT_MODEL_ERROR_HTTP_429',
+                facts={'gateway_code': 'HTTP_429'})
+
+        with patch('llmtool.gw_agent_sessions.sweep_quietly',
+                   wraps=gw_agent_sessions.sweep_quietly) as sweep_spy, \
+             patch.object(task_submission_cli, '_validate_repair_packet',
+                          side_effect=lambda value: value):
+            _code, repair_task_record = self._delegate(
+                'gw-agent-first.md', route_runner=runner,
+                repair_packet={'reviewer_text_excerpt_untrusted_data':
+                               'synthetic finding'})
+
+        sweep_spy.assert_called_with(self.store)
+        self.assertTrue(home.exists())
+        binding_after = gw_agent.read_session_binding(home, executor_task_id='executor-d6')
+        self.assertEqual(binding_after['session_id'], binding['session_id'])
+        self.assertEqual(binding_after['scope_digest'], initial_scope_digest)
+        self.assertEqual(seen['session_id'], binding['session_id'])
+        self.assertEqual(seen['task']['task_id'], first_task)
+        self.assertEqual(seen['task']['findings'], ['synthetic finding'])
+
+        repair_task = self.task_id
+        self.assertNotEqual(repair_task, first_task)
+        self.assertEqual(repair_task_record['task_id'], repair_task)
+        self.assertEqual(self.store.get(first_task), root_record_before)
+        self._release_d6()
+
+    def test_abandoned_task_session_is_cleared_by_sweep(self):
+        target = 'gw-agent-sweep-abandoned.md'
+        self._delegate(target)
+        first_task = self.task_id
+        home = Path(self.store_root).parent / 'gw-agent-sessions' / 'executor-d6'
+        self.assertTrue(home.exists())
+        from llmtool.developer_routes import gw_agent
+        binding = gw_agent.read_session_binding(home, executor_task_id='executor-d6')
+        self.assertEqual(binding['root_task_id'], first_task)
+        (self.root / target).unlink()
+        self._release_d6()
+        reloaded_root = self.store.get(first_task)
+        self.assertEqual(task_status.derive_state(reloaded_root), 'ABANDONED')
+        gw_agent_sessions.sweep_quietly(self.store)
+        self.assertFalse(home.exists())
 
     def test_docs_success_persists_and_reaches_the_active_pm(self):
         target = 'gw-agent-synthetic.md'
