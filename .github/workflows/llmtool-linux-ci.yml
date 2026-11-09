@@ -201,7 +201,7 @@ jobs:
             else
               status=$?
               test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
-              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+              echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head (loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"
             fi
           fi
 
@@ -269,7 +269,7 @@ jobs:
             else
               status=$?
               test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
-              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+              echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head (loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"
             fi
           fi
       # A job-owned venv in RUNNER_TEMP, built from the setup-python interpreter.
@@ -393,7 +393,7 @@ jobs:
             else
               status=$?
               test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
-              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+              echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head (loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"
             fi
           fi
       - name: Set up Python 3.14
