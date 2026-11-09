@@ -447,3 +447,12 @@ def sweep(store, now=None, *, runner=None, package_path=None):
 
     except Exception:
         return []
+
+
+def sweep_quietly(store, now=None):
+    """Run sweep and return outcome list; return empty list on any Exception."""
+    try:
+        return sweep(store, now=now)
+    except Exception:
+        return []
+
