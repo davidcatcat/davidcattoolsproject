@@ -8923,6 +8923,10 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
 
 
 def main(argv: list[str] | None = None) -> int:
+    # #1234: GitHub reads use the AI login (gh-ai config) when it exists.
+    ai_gh = os.path.expanduser("~/.config/gh-ai")
+    if os.path.isdir(ai_gh):
+        os.environ.setdefault("GH_CONFIG_DIR", ai_gh)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interval", type=float, default=1.0,
                         help="seconds between snapshots (default 1; minimum 0.5)")
