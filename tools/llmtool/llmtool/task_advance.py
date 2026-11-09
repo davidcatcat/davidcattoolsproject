@@ -395,13 +395,6 @@ def _owner_acceptance_required(files):
     return False
 
 
-def _scripts_only_ci(paths):
-    """Return whether every changed path is under scripts/ (not docs-only)."""
-    return (type(paths) is list and bool(paths) and
-            all(type(path) is str and path.startswith('scripts/') for path in paths) and
-            not task_completion._docs_only_ci(paths))
-
-
 def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False,
                   owner_acceptance=None, acceptance_out=None):
     """Check every exact-head merge gate; return None or one refusal code.
@@ -437,9 +430,6 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     docs_only = task_completion._docs_only_ci(paths)
     if docs_only:
         required_checks = ['check (docs)']
-    elif _scripts_only_ci(paths):
-        # A scripts/-only PR needs no Linux job; macOS and mac-ci stay required.
-        required_checks = []
     else:
         required_checks = ['check (Linux 3.14)']
     requires_macos = not docs_only
@@ -543,9 +533,6 @@ def _review_ci_gate(number, head, github_get):
             return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
         paths.append(path)
     docs_only = task_completion._docs_only_ci(paths)
-    if not docs_only and _scripts_only_ci(paths):
-        # Review does not wait for a Linux job a scripts/-only PR does not need.
-        return None, None
     required_name = 'check (docs)' if docs_only else 'check (Linux 3.14)'
     runs = checks['check_runs']
     if any(type(item) is not dict for item in runs):
