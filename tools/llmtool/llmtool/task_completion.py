@@ -86,6 +86,8 @@ _FORMAL_ACCEPT = 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT'
 _REVIEW_VERDICT_ACTIVITY_LINE = '<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->'
 _GITHUB_API_PATH = re.compile(
     r'(?!/)(?!.*(?:^|/)\.\.(?:/|$))(?:compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}|'
+    r'issues/[0-9]{1,7}/comments\?per_page=[0-9]{1,3}&page=[0-9]{1,3}'
+    r'&since=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z|'
     r'(?!compare/)[A-Za-z0-9_./?=&-]{1,256})\Z')
 
 

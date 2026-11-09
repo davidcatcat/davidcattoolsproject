@@ -285,3 +285,54 @@ class TaskStoreProxy:
     def __new__(cls, store):
         from llmtool.task_store import TaskStore
         return TaskStore(store.root)
+
+from unittest import TestCase
+
+class GitHubApiPathSincePattern(TestCase):
+    """Exact since query path validation for task_completion._GITHUB_API_PATH."""
+
+    def _fullmatch(self):
+        from llmtool import task_completion
+        return task_completion._GITHUB_API_PATH.fullmatch
+
+    def test_since_path_poller_builds_is_accepted(self):
+        fullmatch = self._fullmatch()
+        self.assertTrue(fullmatch(
+            'issues/88/comments?per_page=100&page=1&since=2025-01-01T00:00:00Z'))
+        self.assertTrue(fullmatch(
+            'issues/1234567/comments?per_page=1&page=999&since=2025-12-31T23:59:59Z'))
+
+    def test_since_path_refusals(self):
+        fullmatch = self._fullmatch()
+        refused = [
+            'issues/88/comments?per_page=100&page=1&since=2025-01-01T00:00:00+00:00',
+            'issues/88/comments?per_page=100&page=1&since=2025-01-01T00:00:00.123Z',
+            'issues/88/comments?per_page=100&page=1&since=2025-01-01T00:00:00',
+            'issues/12345678/comments?per_page=100&page=1&since=2025-01-01T00:00:00Z',
+            'issues/88/comments?per_page=1000&page=1&since=2025-01-01T00:00:00Z',
+            'issues/88/comments?per_page=100&page=1000&since=2025-01-01T00:00:00Z',
+            'issues/88/comments?per_page=100&page=1&since=2025-01-01T00:00:0Z',
+            'issues/88/comments?per_page=100&page=1&since=2025-01-01T00:00:00Z&extra=1',
+            'issues/88/comments?per_page=100&page=1&since=2025-01-01T00:00:00Zx',
+            'issues/../88/comments?per_page=100&page=1&since=2025-01-01T00:00:00Z',
+            '/issues/88/comments?per_page=100&page=1&since=2025-01-01T00:00:00Z',
+            'issues/88/comments?per_page=100&page=1&since=2025-01-01T00:00:00Z%00',
+            'issues/88/comments?per_page=100&page=1&since=2025-01-01T00:00:00Z' + ' ',
+            'issues/88/comments?per_page=100&page=1&since=2025-01-01T00:00:00Z\n',
+            'issues/88:comments?per_page=100&page=1&since=2025-01-01T00:00:00Z',
+            'issues/88/comments?per_page=100&page=1&since=2025-01-01T00:00:00Z&other=1:2',
+        ]
+        for path in refused:
+            with self.subTest(path=path):
+                self.assertIsNone(fullmatch(path))
+
+    def test_existing_accepted_paths_stay_accepted(self):
+        fullmatch = self._fullmatch()
+        accepted = [
+            'pulls/88',
+            'issues/88/comments?per_page=100&page=1',
+            'compare/' + 'a' * 40 + '...' + 'b' * 40,
+        ]
+        for path in accepted:
+            with self.subTest(path=path):
+                self.assertTrue(fullmatch(path))
