@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import errno
+import fcntl
 import hashlib
 import importlib
 import importlib.util
@@ -593,4 +595,399 @@ class GwAgentRoute(DeveloperRoute):
             raise
         except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
             raise RouteError('GW_AGENT_OUTPUT_INVALID') from None
+
+
+_BINDING_SESSION_ID_WRITE = re.compile(r'[0-9a-fA-F-]{16,64}\Z')
+_BINDING_SESSION_ID_READ = re.compile(r'[0-9a-f]{32}\Z')
+_BINDING_SCOPE_DIGEST = re.compile(r'[0-9a-f]{64}\Z')
+_BINDING_FIELDS = frozenset({
+    'data_class', 'executor_task_id', 'root_task_id',
+    'schema_version', 'scope_digest', 'session_id'
+})
+_SESSION_HOME_PARENT_DIR = 'gw-agent-sessions'
+_SESSION_BINDING_FILE = 'binding.json'
+_SESSION_LOCK_FILE = 'lock'
+_SESSION_BINDING_MAX_BYTES = 64 * 1024
+
+
+def _is_private_dir(path: Path) -> bool:
+    """Return True if path is a directory owned by user with mode 0700 (no group/world bits)."""
+    try:
+        info = Path(path).lstat()
+        return (not stat.S_ISLNK(info.st_mode) and
+                stat.S_ISDIR(info.st_mode) and
+                info.st_uid == os.getuid() and
+                (stat.S_IMODE(info.st_mode) & 0o077) == 0)
+    except OSError:
+        return False
+
+
+def _is_inside_git(path: Path) -> bool:
+    """Return True if path or any of its ancestors contains a .git entry."""
+    try:
+        cur = Path(path).absolute()
+        for candidate in (cur, *cur.parents):
+            if os.path.lexists(candidate / '.git'):
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _ensure_private_dir(path: Path) -> None:
+    """Create directory 0700 if missing; check ownership and mode if existing."""
+    try:
+        created = False
+        try:
+            path.mkdir(mode=0o700)
+            created = True
+        except FileExistsError:
+            pass
+        if created:
+            os.chmod(path, 0o700)
+        if not _is_private_dir(path):
+            raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE')
+    except RouteError:
+        raise
+    except (OSError, ValueError):
+        raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE') from None
+
+
+def open_session_home(store_root, executor_task_id):
+    """Open or create a private session home directory for an executor task."""
+    if type(executor_task_id) is not str or _TASK_ID.fullmatch(executor_task_id) is None:
+        raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE')
+    try:
+        store_path = Path(store_root).absolute()
+    except (TypeError, ValueError, OSError):
+        raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE') from None
+
+    sessions_parent = store_path.parent / _SESSION_HOME_PARENT_DIR
+    home = sessions_parent / executor_task_id
+
+    _ensure_private_dir(sessions_parent)
+    _ensure_private_dir(home)
+
+    if _is_inside_git(home):
+        raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE')
+
+    return home
+
+
+def private_read(path, max_bytes=_SESSION_BINDING_MAX_BYTES):
+    """Read a private regular file with strict permissions and bounded size."""
+    p = Path(path)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    if hasattr(os, 'O_CLOEXEC'):
+        flags |= os.O_CLOEXEC
+    try:
+        fd = os.open(p, flags)
+    except OSError as exc:
+        raise ValueError('unable to open file') from exc
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or
+                info.st_uid != os.getuid() or
+                info.st_nlink != 1 or
+                (stat.S_IMODE(info.st_mode) & 0o077) != 0 or
+                info.st_size > max_bytes):
+            raise ValueError('file violates private read constraints')
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError('file exceeds byte limit')
+            chunks.append(chunk)
+        return b''.join(chunks)
+    finally:
+        os.close(fd)
+
+
+_private_read = private_read
+
+
+def private_write(target_path, data):
+    """Write data to target_path atomically using a mode 0600 temp file and rename."""
+    target = Path(target_path)
+    folder = target.parent
+    if isinstance(data, str):
+        payload = data.encode('utf-8')
+    elif isinstance(data, (bytes, bytearray)):
+        payload = bytes(data)
+    else:
+        raise TypeError('data must be bytes or str')
+
+    temp_name = f'.tmp-{target.name}-{os.urandom(8).hex()}'
+    temp_path = folder / temp_name
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    if hasattr(os, 'O_CLOEXEC'):
+        flags |= os.O_CLOEXEC
+
+    fd = os.open(temp_path, flags, 0o600)
+    renamed = False
+    try:
+        os.fchmod(fd, 0o600)
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        os.rename(temp_path, target)
+        renamed = True
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if not renamed:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+    return target
+
+
+_private_write = private_write
+
+
+class _LockAcquireDescriptor:
+    """Descriptor enabling GwAgentSessionLock.acquire to be used on class or instance."""
+
+    def __init__(self, func):
+        self.func = func
+
+    def __get__(self, instance, owner):
+        if instance is None:
+            def class_acquire(home, *args, **kwargs):
+                lock = owner(home)
+                lock.acquire(home, *args, **kwargs)
+                return lock
+            return class_acquire
+        return self.func.__get__(instance, owner)
+
+
+class GwAgentSessionLock:
+    """Advisory flock-based lock bound to a session home directory."""
+
+    def __init__(self, home=None):
+        self._home = Path(home) if home is not None else None
+        self._fd = None
+        self._acquired = False
+
+    def _acquire_impl(self, home=None):
+        if self._acquired or self._fd is not None:
+            raise RouteError('GW_AGENT_SESSION_LOCKED')
+        target_home = Path(home) if home is not None else self._home
+        if target_home is None:
+            raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE')
+        self._home = target_home
+
+        try:
+            if not _is_private_dir(target_home) or _is_inside_git(target_home):
+                raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE')
+
+            lock_path = target_home / _SESSION_LOCK_FILE
+            create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            if hasattr(os, 'O_CLOEXEC'):
+                create_flags |= os.O_CLOEXEC
+            try:
+                cfd = os.open(lock_path, create_flags, 0o600)
+                try:
+                    os.fchmod(cfd, 0o600)
+                finally:
+                    os.close(cfd)
+            except FileExistsError:
+                pass
+
+            open_flags = os.O_RDWR | os.O_NOFOLLOW
+            if hasattr(os, 'O_CLOEXEC'):
+                open_flags |= os.O_CLOEXEC
+            ofd = os.open(lock_path, open_flags)
+            try:
+                info = os.fstat(ofd)
+                if (not stat.S_ISREG(info.st_mode) or
+                        info.st_uid != os.getuid() or
+                        info.st_nlink != 1 or
+                        (stat.S_IMODE(info.st_mode) & 0o077) != 0):
+                    raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE')
+
+                try:
+                    fcntl.flock(ofd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except (BlockingIOError, OSError) as exc:
+                    if (isinstance(exc, BlockingIOError) or
+                            getattr(exc, 'errno', None) in (
+                                errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK)):
+                        raise RouteError('GW_AGENT_SESSION_LOCKED') from None
+                    raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE') from None
+
+                self._fd = ofd
+                self._acquired = True
+            except BaseException:
+                os.close(ofd)
+                raise
+        except RouteError:
+            raise
+        except (OSError, ValueError):
+            raise RouteError('GW_AGENT_SESSION_HOME_UNSAFE') from None
+        return self
+
+    acquire = _LockAcquireDescriptor(_acquire_impl)
+
+    def release(self):
+        """Release the held lock; safe to call multiple times."""
+        if self._fd is not None:
+            fd = self._fd
+            self._fd = None
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
+            except OSError:
+                pass
+
+    def __enter__(self):
+        if not self._acquired:
+            self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
+
+def session_binding_exists(home):
+    """Return True if binding.json exists (lexists) in the session home."""
+    try:
+        return os.path.lexists(Path(home) / _SESSION_BINDING_FILE)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def write_session_binding(home, binding_or_root=None, executor_task_id=None,
+                          session_id=None, data_class=None, scope_digest=None,
+                          *, root_task_id=None, **kwargs):
+    """Write canonical binding.json to session home with private write."""
+    try:
+        home_path = Path(home)
+        if not _is_private_dir(home_path) or _is_inside_git(home_path):
+            raise RouteError('GW_AGENT_SESSION_BINDING_FAILED')
+
+        if isinstance(binding_or_root, dict):
+            allowed_keys = {'schema_version', 'root_task_id', 'executor_task_id',
+                            'session_id', 'data_class', 'scope_digest'}
+            if set(binding_or_root.keys()) - allowed_keys:
+                raise RouteError('GW_AGENT_SESSION_BINDING_FAILED')
+            if kwargs or executor_task_id is not None or session_id is not None:
+                raise RouteError('GW_AGENT_SESSION_BINDING_FAILED')
+            schema_ver = binding_or_root.get('schema_version', 1)
+            if type(schema_ver) is not int or schema_ver != 1:
+                raise RouteError('GW_AGENT_SESSION_BINDING_FAILED')
+            root_task_id = binding_or_root.get('root_task_id')
+            executor_task_id = binding_or_root.get('executor_task_id')
+            session_id = binding_or_root.get('session_id')
+            data_class = binding_or_root.get('data_class')
+            scope_digest = binding_or_root.get('scope_digest')
+        else:
+            if root_task_id is None:
+                root_task_id = binding_or_root
+            elif binding_or_root is not None:
+                raise RouteError('GW_AGENT_SESSION_BINDING_FAILED')
+            if 'data_class' in kwargs:
+                data_class = kwargs.pop('data_class')
+            if 'scope_digest' in kwargs:
+                scope_digest = kwargs.pop('scope_digest')
+            if 'session_id' in kwargs:
+                session_id = kwargs.pop('session_id')
+            if 'executor_task_id' in kwargs:
+                executor_task_id = kwargs.pop('executor_task_id')
+            if 'schema_version' in kwargs:
+                s_ver = kwargs.pop('schema_version')
+                if type(s_ver) is not int or s_ver != 1:
+                    raise RouteError('GW_AGENT_SESSION_BINDING_FAILED')
+            if kwargs:
+                raise RouteError('GW_AGENT_SESSION_BINDING_FAILED')
+
+        if (type(root_task_id) is not str or _TASK_ID.fullmatch(root_task_id) is None or
+                type(executor_task_id) is not str or _TASK_ID.fullmatch(executor_task_id) is None or
+                type(session_id) is not str or _BINDING_SESSION_ID_WRITE.fullmatch(session_id) is None or
+                type(data_class) is not str or not 1 <= len(data_class) <= 64 or
+                type(scope_digest) is not str or _BINDING_SCOPE_DIGEST.fullmatch(scope_digest) is None):
+            raise RouteError('GW_AGENT_SESSION_BINDING_FAILED')
+
+        payload_dict = {
+            'data_class': data_class,
+            'executor_task_id': executor_task_id,
+            'root_task_id': root_task_id,
+            'schema_version': 1,
+            'scope_digest': scope_digest,
+            'session_id': session_id,
+        }
+        encoded = _canonical(payload_dict) + b'\n'
+        private_write(home_path / _SESSION_BINDING_FILE, encoded)
+    except RouteError:
+        raise
+    except Exception:
+        raise RouteError('GW_AGENT_SESSION_BINDING_FAILED') from None
+
+
+def read_session_binding(home, *args, executor_task_id=None):
+    """Read and validate binding.json from home for the given executor task ID."""
+    if args:
+        if executor_task_id is None and len(args) == 1:
+            executor_task_id = args[0]
+        else:
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+    if type(executor_task_id) is not str or _TASK_ID.fullmatch(executor_task_id) is None:
+        raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+
+    try:
+        home_path = Path(home)
+        if not _is_private_dir(home_path) or _is_inside_git(home_path):
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+
+        raw = private_read(home_path / _SESSION_BINDING_FILE, max_bytes=_SESSION_BINDING_MAX_BYTES)
+        parsed = json.loads(
+            raw.decode('utf-8'),
+            object_pairs_hook=_unique_pairs,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError())
+        )
+        if type(parsed) is not dict or set(parsed.keys()) != _BINDING_FIELDS:
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+
+        if type(parsed['schema_version']) is not int or parsed['schema_version'] != 1:
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+
+        if parsed['executor_task_id'] != executor_task_id:
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+
+        if (type(parsed['session_id']) is not str or
+                _BINDING_SESSION_ID_READ.fullmatch(parsed['session_id']) is None):
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+
+        if (type(parsed['root_task_id']) is not str or
+                _TASK_ID.fullmatch(parsed['root_task_id']) is None):
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+
+        if (type(parsed['data_class']) is not str or
+                not 1 <= len(parsed['data_class']) <= 64):
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+
+        if (type(parsed['scope_digest']) is not str or
+                _BINDING_SCOPE_DIGEST.fullmatch(parsed['scope_digest']) is None):
+            raise RouteError('GW_AGENT_SESSION_UNAVAILABLE')
+
+        return parsed
+    except RouteError:
+        raise
+    except Exception:
+        raise RouteError('GW_AGENT_SESSION_UNAVAILABLE') from None
+
 
