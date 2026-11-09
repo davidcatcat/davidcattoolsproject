@@ -3,7 +3,7 @@
   "routes": {
     "agy": {
       "executable": "agy",
-      "default_model": "gemini-4-argon-medium",
+      "default_model": "gemini-3.8-flash-medium",
       "default_effort": "medium",
       "denied_dirs": [".gemini"],
       "state_dirs": {"policy": "private-temp-only"}
