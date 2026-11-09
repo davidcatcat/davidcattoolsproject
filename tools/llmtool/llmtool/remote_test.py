@@ -40,12 +40,9 @@ _HOSTED_ZIP_MEMBER_LIMIT = 32768
 _ZIP_LIMIT = 65536
 _ZIP_MEMBER_LIMIT = 32768
 _MEMBER_LIMIT = 32768
-<<<<<<< HEAD
 _HOSTED_PAGE_LIMIT = 10
 _HOSTED_ARTIFACT_PAGE_LIMIT = 10
 _ARTIFACT_ZIP_PATH = re.compile(r'actions/artifacts/[0-9]+/zip\Z')
-=======
->>>>>>> origin/main
 _HOSTED_DISPATCH_PATH = 'actions/workflows/llmtool-remote-test.yml/dispatches'
 _GH_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
 _REMOTE_LIMIT = 32768
@@ -723,49 +720,6 @@ def _hosted_find_run(nonce, *, get=None):
     return 'AMBIGUOUS'
 
 
-<<<<<<< HEAD
-def _hosted_check_run(job, head_sha, get):
-    """Return the job's check run, or a failure code when it cannot be read."""
-    url = job.get('check_run_url')
-    match = (re.fullmatch(
-        r'https://api\.github\.com/repos/[^/\s]+/[^/\s]+/check-runs/([1-9][0-9]{0,18})',
-        url) if type(url) is str else None)
-    if match is None:
-        return 'HOSTED_RUNNER_UNTRUSTED'
-    check_id = int(match.group(1))
-    try:
-        listing = get(f'commits/{head_sha}/check-runs?per_page=100')
-    except Exception:
-        listing = None
-    checks = listing.get('check_runs') if isinstance(listing, dict) else None
-    if isinstance(checks, list):
-        matching = [item for item in checks
-                    if isinstance(item, dict) and item.get('id') == check_id]
-        if len(matching) != 1:
-            return 'HOSTED_RUNNER_UNTRUSTED'
-        return matching[0]
-    # Fall back to the job's direct check-run URL when the listing cannot
-    # supply the check run this job points at.
-    try:
-        check = get(f'check-runs/{check_id}')
-    except Exception:
-        return 'UNREADABLE'
-    if not isinstance(check, dict) or 'app' not in check or 'head_sha' not in check:
-        return 'HOSTED_RUNNER_UNTRUSTED'
-    return check
-
-
-def _hosted_job(run, *, get=None):
-    """Return one remote-test job, or a failure code for an unmatched run."""
-    if get is None:
-        get = _github_get
-    if (type(run) is not dict or type(run.get('id')) is not int or
-            run['id'] <= 0 or type(run.get('head_sha')) is not str or
-            not _SHA.fullmatch(run['head_sha'])):
-        return 'UNREADABLE'
-    try:
-        data = get(f'actions/runs/{run["id"]}/jobs?per_page=100')
-=======
 def _extract_check_run_id(job):
     """Extract check-run ID string from a job dict, or return None."""
     if not isinstance(job, dict):
@@ -791,42 +745,21 @@ def _hosted_job(run, *, get=None):
     path = f'actions/runs/{run_id}/jobs'
     try:
         data = get(path)
->>>>>>> origin/main
     except Exception:
         return 'UNREADABLE'
     if not isinstance(data, dict):
         return 'UNREADABLE'
     jobs = data.get('jobs')
-<<<<<<< HEAD
-    if not isinstance(jobs, list) or any(not isinstance(job, dict) for job in jobs):
-        return 'UNREADABLE'
-=======
     if not isinstance(jobs, list):
         return 'UNREADABLE'
     for job in jobs:
         if not isinstance(job, dict):
             return 'UNREADABLE'
->>>>>>> origin/main
     matching = [job for job in jobs if job.get('name') == _HOSTED_JOB_NAME]
     if len(matching) != 1:
         return 'HOSTED_JOB_MISSING'
     job = matching[0]
     status = job.get('status')
-<<<<<<< HEAD
-    if status != 'completed':
-        if status in ('queued', 'in_progress'):
-            return job
-        return 'HOSTED_RUNNER_UNTRUSTED'
-    if (job.get('labels') != list(_HOSTED_LABELS) or
-            job.get('runner_group_name') != _HOSTED_RUNNER_GROUP):
-        return 'HOSTED_RUNNER_UNTRUSTED'
-    check = _hosted_check_run(job, run['head_sha'], get)
-    if not isinstance(check, dict):
-        return check
-    app = check.get('app')
-    if (check.get('head_sha') != run['head_sha'] or
-            not isinstance(app, dict) or app.get('id') != _HOSTED_APP_ID):
-=======
     if status in ('queued', 'in_progress'):
         return job
     if status != 'completed':
@@ -849,12 +782,10 @@ def _hosted_job(run, *, get=None):
         return 'HOSTED_RUNNER_UNTRUSTED'
     run_head = run.get('head_sha')
     if not isinstance(run_head, str) or check_run.get('head_sha') != run_head:
->>>>>>> origin/main
         return 'HOSTED_RUNNER_UNTRUSTED'
     return job
 
 
-<<<<<<< HEAD
 def _hosted_get_bytes(path, *, limit=_HOSTED_ZIP_LIMIT + 1):
     """Make one GET to download an artifact zip using gh CLI."""
     if type(path) is not str or not _ARTIFACT_ZIP_PATH.fullmatch(path):
@@ -1038,5 +969,3 @@ def _hosted_artifact(run_id, nonce, *, get=None, get_bytes=None):
     except Exception:
         return None
 
-=======
->>>>>>> origin/main
