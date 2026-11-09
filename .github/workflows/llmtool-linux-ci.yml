@@ -34,6 +34,8 @@ on:
       - 'docs/**'
       - 'tools/llmtool/*.md'
       - '*.md'
+      - 'scripts/**'
+      - '.github/workflows/**'
   pull_request:
     # Top-level llmtool Markdown triggers docs validation only; deeper paths remain included.
     paths:
@@ -50,6 +52,8 @@ on:
       - 'docs/**'
       - 'tools/llmtool/*.md'
       - '*.md'
+      - 'scripts/**'
+      - '.github/workflows/**'
   workflow_dispatch:
     inputs:
       python39:
@@ -201,7 +205,7 @@ jobs:
             else
               status=$?
               test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
-              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+              echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head (loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"
             fi
           fi
 
@@ -269,7 +273,7 @@ jobs:
             else
               status=$?
               test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
-              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+              echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head (loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"
             fi
           fi
       # A job-owned venv in RUNNER_TEMP, built from the setup-python interpreter.
@@ -311,6 +315,24 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
           "$JOB_PYTHON" -B -m unittest discover -s tools/safe-git -p test_preflight.py
+      # Audit #1174 found monitor PRs merged with no Linux job; Python 3.9 is
+      # skipped because it is a manual pre-release check; it runs before the
+      # clean-tree check so leftover files fail the job.
+      - name: Repository script tests
+        if: matrix.shard == 1 && matrix.python == '3.14'
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          "$JOB_PYTHON" -B -m unittest discover -s scripts -p 'test_*.py' < /dev/null
+          folders=$(find skills -name 'test_*.py' -exec dirname {} + | sort -u)
+          if [ -z "$folders" ]; then
+            echo "nothing to run"
+            exit 0
+          fi
+          for folder in $folders; do
+            "$JOB_PYTHON" -B -m unittest discover -s "$folder" -p 'test_*.py' < /dev/null
+          done
       - name: Working tree is clean
         shell: bash
         run: |
@@ -393,7 +415,7 @@ jobs:
             else
               status=$?
               test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
-              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+              echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head (loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"
             fi
           fi
       - name: Set up Python 3.14

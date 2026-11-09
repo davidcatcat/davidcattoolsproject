@@ -1,5 +1,9 @@
 # Actions Billing & Cost — 計費及節費決策
 
+## 2026-11-09 Public repository 與 GitHub-hosted CI
+
+Repository 已改為 public，llmtool Linux 與 Mac CI 再次使用 GitHub-hosted runners（Owner [#1253](https://github.com/davidcatcat/davidcattoolsproject/issues/1253)、[#1256](https://github.com/davidcatcat/davidcattoolsproject/issues/1256)）。下方「2026-10-25 Owner 決策與止費狀態」保留為歷史。實際 USD 費用仍為 **UNKNOWN**，須待 GitHub Billing 資料核對；不可從這次變更推算費用。
+
 ## 2026-10-25 Owner 決策與止費狀態
 
 Private repository 保持不變，付費 GitHub-hosted Runner 不再使用。`llmtool CI`、`nlf CI` 與 `ai-loop helper CI` 的 GitHub workflow 狀態已設為 `disabled_manually`；最後已啟動的 [llmtool run 40113971497](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/40113971497) 已取消。新的 Mac self-hosted workflow 在 Runner 隔離及正式審查前不執行 PR 程式碼。Linux Python 3.9／3.14、Windows 與停用的 nlf／ai-loop 正式 CI 均為 **NOT_RUN**。止費後的「沒有新付費執行」及實際 USD 仍須用 GitHub Runs/Jobs 與 Usage/Billing 逐筆確認；目前 USD 為 **UNKNOWN**，不能從 workflow disabled 推算為零費用。

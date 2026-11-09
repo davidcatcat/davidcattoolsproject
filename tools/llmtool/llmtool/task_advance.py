@@ -22,9 +22,11 @@ from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes
 
 # Outcomes that remote_test.py records as UNAVAILABLE: nothing ran on EC2, so
-# the next advance step may retry the same head.
+# the next advance step may retry the same head. A hosted run is read back by
+# its nonce on the next step and never dispatched twice.
 _REMOTE_TEST_RETRY_CODES = frozenset((
-    'SSH_UNAVAILABLE', 'SSH_FAILED', 'REMOTE_BUSY', 'REMOTE_LOCK_UNSAFE'))
+    'SSH_UNAVAILABLE', 'SSH_FAILED', 'REMOTE_BUSY', 'REMOTE_LOCK_UNSAFE',
+    'HOSTED_PENDING', 'HOSTED_QUEUE_FULL', 'HOSTED_DISPATCH_UNCONFIRMED'))
 
 
 class _PublishRefusal(Exception):
@@ -393,13 +395,6 @@ def _owner_acceptance_required(files):
     return False
 
 
-def _scripts_only_ci(paths):
-    """Return whether every changed path is under scripts/ (not docs-only)."""
-    return (type(paths) is list and bool(paths) and
-            all(type(path) is str and path.startswith('scripts/') for path in paths) and
-            not task_completion._docs_only_ci(paths))
-
-
 def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False,
                   owner_acceptance=None, acceptance_out=None):
     """Check every exact-head merge gate; return None or one refusal code.
@@ -435,9 +430,6 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     docs_only = task_completion._docs_only_ci(paths)
     if docs_only:
         required_checks = ['check (docs)']
-    elif _scripts_only_ci(paths):
-        # A scripts/-only PR needs no Linux job; macOS and mac-ci stay required.
-        required_checks = []
     else:
         required_checks = ['check (Linux 3.14)']
     requires_macos = not docs_only
@@ -486,24 +478,39 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     return None
 
 
-def _merge_main_gate(head, github_get):
-    """Require the PR head to contain current main; any doubt fails closed."""
+def _merge_main_gate(head, github_get, pr):
+    """Owner decision #1317 (loose merge rule): a head behind main may merge
+    when GitHub reports it mergeable; exact-head review and CI evidence stay
+    required; any doubt fails closed."""
     try:
         branch = github_get('branches/main')
         commit = branch.get('commit') if type(branch) is dict else None
         main_sha = commit.get('sha') if type(commit) is dict else None
         if type(main_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', main_sha) is None:
-            return 'MERGE_CHECKS_UNAVAILABLE'
+            return 'MERGE_CHECKS_UNAVAILABLE', None
         # The GitHub read path admits compare only between two exact SHAs.
         compare = github_get(f'compare/{main_sha}...{head}')
     except Exception:
-        return 'MERGE_CHECKS_UNAVAILABLE'
+        return 'MERGE_CHECKS_UNAVAILABLE', None
     status = compare.get('status') if type(compare) is dict else None
     if status in ('ahead', 'identical'):
-        return None
+        return None, 0
     if status in ('behind', 'diverged'):
-        return 'MERGE_PR_BEHIND_MAIN'
-    return 'MERGE_CHECKS_UNAVAILABLE'
+        # Owner decision #1317 (loose merge rule): a head behind main may merge
+        # when GitHub reports it mergeable; exact-head review and CI evidence stay
+        # required; any doubt fails closed.
+        behind_by = compare.get('behind_by') if type(compare) is dict else None
+        if type(behind_by) is not int or isinstance(behind_by, bool) or behind_by < 1:
+            return 'MERGE_CHECKS_UNAVAILABLE', None
+        mergeable_state = pr.get('mergeable_state') if type(pr) is dict else None
+        if mergeable_state == 'dirty':
+            return 'MERGE_PR_CONFLICT', None
+        if type(mergeable_state) is not str or mergeable_state == 'unknown':
+            return 'MERGE_MERGEABLE_UNKNOWN', None
+        if mergeable_state in ('clean', 'behind', 'unstable', 'has_hooks'):
+            return None, behind_by
+        return 'MERGE_PR_NOT_MERGEABLE', None
+    return 'MERGE_CHECKS_UNAVAILABLE', None
 
 
 def _review_ci_gate(number, head, github_get):
@@ -526,9 +533,6 @@ def _review_ci_gate(number, head, github_get):
             return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
         paths.append(path)
     docs_only = task_completion._docs_only_ci(paths)
-    if not docs_only and _scripts_only_ci(paths):
-        # Review does not wait for a Linux job a scripts/-only PR does not need.
-        return None, None
     required_name = 'check (docs)' if docs_only else 'check (Linux 3.14)'
     runs = checks['check_runs']
     if any(type(item) is not dict for item in runs):
@@ -578,20 +582,29 @@ def _remote_test_receipt_summary(record, head):
                 return None
         except Exception:
             return None
+        actions = receipt.get('actions')
+        hosted_run_id = (actions.get('run_id')
+                         if type(actions) is dict and type(actions.get('run_id')) is int and actions['run_id'] > 0
+                         else None)
         return {
             'result': receipt.get('result'),
             'modules': receipt.get('modules'),
             'ran_total': receipt.get('ran_total'),
             'elapsed_s': receipt.get('elapsed_s'),
             'receipt_digest': digest[:8],
+            'hosted_run_id': hosted_run_id,
         }
     return None
 
 
 def _post_remote_test_comment(gh_runner, root, number, task_id, d6, head, summary):
     modules = ','.join(summary['modules'])
+    hosted_run_id = summary.get('hosted_run_id')
+    prefix = (f"remote-test (GitHub-hosted run {hosted_run_id}), result="
+              if hosted_run_id is not None
+              else "EC2 remote-test, result=")
     body = ('<!-- activity: type=task actor=PM target=PR status=TRACKING -->\n'
-            f"EC2 remote-test, result={summary['result']}, modules={modules}, "
+            f"{prefix}{summary['result']}, modules={modules}, "
             f"tests run={summary['ran_total']}, seconds={summary['elapsed_s']}, "
             f"receipt={summary['receipt_digest']}, Task={task_id}, D6={d6.get('task_id')}, head={head}")
     response = gh_runner(root, ['pr', 'comment', str(number), '--body', body])
@@ -963,7 +976,7 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         return _merge_refusal('MERGE_PR_NOT_OPEN')
     if current_pr.get('mergeable') is not True:
         return _merge_refusal('MERGE_PR_NOT_MERGEABLE')
-    main_code = _merge_main_gate(head, github_get)
+    main_code, behind_by = _merge_main_gate(head, github_get, current_pr)
     if main_code:
         return _merge_refusal(main_code)
     if code in ('MERGE_MACOS_CHECK_MISSING', 'MERGE_MACOS_CHECK_SKIPPED'):
@@ -1035,9 +1048,11 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
                         dict(claim, state='CLAIMED')}, merge_attempt=claim)
                 except Exception:
                     warning_codes.append('MERGE_RESULT_RECORD_FAILED')
-            return _merge_success(record, number, head, review_version, gh_runner, root,
-                                  warning_codes, owner_acceptance=owner_acceptance,
-                                  acceptance_carry=acceptance_carry)
+            outcome = _merge_success(record, number, head, review_version, gh_runner, root,
+                                     warning_codes, owner_acceptance=owner_acceptance,
+                                     acceptance_carry=acceptance_carry)
+            outcome['result']['main_behind_by'] = behind_by
+            return outcome
         claim['state'] = 'UNKNOWN'
         try:
             store.compare_and_update(record['task_id'], expected={'merge_attempt':
@@ -1059,9 +1074,11 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         except Exception:
             pass
         warning_codes.append('MERGE_RESULT_RECORD_FAILED')
-    return _merge_success(record, number, head, review_version, gh_runner, root,
-                          warning_codes, owner_acceptance=owner_acceptance,
-                          acceptance_carry=acceptance_carry)
+    outcome = _merge_success(record, number, head, review_version, gh_runner, root,
+                             warning_codes, owner_acceptance=owner_acceptance,
+                             acceptance_carry=acceptance_carry)
+    outcome['result']['main_behind_by'] = behind_by
+    return outcome
 
 
 def _merge_success(record, number, head, review_version, gh_runner, root, warning_codes,

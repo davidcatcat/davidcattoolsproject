@@ -2406,6 +2406,7 @@ class TaskListTests(Base):
 
     drive = WidgetTests.drive
     idle = staticmethod(WidgetTests.idle)
+    until = staticmethod(WidgetTests.until)
     store_records = TaskModeTests.store_records
 
     def setUp(self):
@@ -2533,7 +2534,9 @@ class TaskListTests(Base):
     def test_w60_f3_list_drag_selects_copies_and_shift_c_copies_the_whole_list(self):
         seen = {}
 
-        def render(ui):
+        async def render(ui):
+            await self.until(ui, lambda ui: ui.list_view.text == ''.join(
+                text for _style, text in ui._list_fragments(full=True)), 'list view synced')
             ui.app.renderer.render(ui.app, ui.app.layout)
 
         async def dragged(ui):
@@ -2541,13 +2544,14 @@ class TaskListTests(Base):
             self.assertIn('拖曳即複製', ui.status_text())
             seen['copies'] = copies = self.w60_copier(ui.list_view)
             await self.w60_drag_row(ui, 2)
+            await self.until(ui, lambda _ui: bool(copies), 'drag copy')
             self.assertTrue(ui.list_view.wait_copy())
             row = ui.list_view.text.splitlines()[2]
             self.assertTrue(copies and row.startswith(copies[-1]), (copies, row))
             self.assertIn('Cmd+V 貼上', ui.status_text())
             self.assertNotIn('Cmd+C', ui.status_text())
             ui.app.input.send_text('\x03')                      # Ctrl-C copies it again
-            await asyncio.sleep(0.1)
+            await self.until(ui, lambda _ui: len(copies) >= 2, 'ctrl-c copy')
             self.assertTrue(ui.list_view.wait_copy())
             self.assertEqual(copies[-1], copies[-2])
             self.assertFalse(ui.quit_pending)
@@ -2556,7 +2560,7 @@ class TaskListTests(Base):
         async def copied_all(ui):
             copies = seen['copies']
             ui.app.input.send_text('C')
-            await asyncio.sleep(0.1)
+            await self.until(ui, lambda _ui: len(copies) >= 3, 'shift-c copy all')
             self.assertTrue(ui.list_view.wait_copy())
             text = copies[-1]
             for record in ui.list_records:

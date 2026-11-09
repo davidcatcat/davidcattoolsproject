@@ -516,6 +516,34 @@ class TaskDriveTests(unittest.TestCase):
         self.assertEqual(output, [{'task_id': 'task-1', 'step': 'CLOSED',
                                    'codes': [], 'steps': 1}])
 
+    def test_drive_adapter_sweeps_gw_agent_sessions_after_closed(self):
+        native = '3f2b8c1e-4d5a-4b6c-8d7e-9f0a1b2c3d4e'
+        args = parser_for_cli().parse_args(['task', 'drive', 'task-1',
+                                            '--pm-session', native])
+        owner_store = type('Store', (), {
+            'get': lambda self, _task_id: {'pm_session_id': 'pm-' + native}})()
+        output = []
+        with patch.object(task_submission_cli, '_print', side_effect=output.append), \
+                patch.dict('os.environ', {'CLAUDE_CODE_SESSION_ID': '',
+                                          'CODEX_THREAD_ID': ''}), \
+                patch('llmtool.gw_agent_sessions.sweep_quietly') as sweep:
+            code = task_submission_cli.run_task_drive(
+                args, store=owner_store, advance_call=lambda **_kwargs: {
+                    'task_id': 'task-1', 'step': 'CLOSED', 'codes': []})
+        self.assertEqual(code, 0)
+        sweep.assert_called_once_with(owner_store)
+
+        with patch.object(task_submission_cli, '_print', side_effect=output.append), \
+                patch.dict('os.environ', {'CLAUDE_CODE_SESSION_ID': '',
+                                          'CODEX_THREAD_ID': ''}), \
+                patch('llmtool.gw_agent_sessions.sweep_quietly') as sweep:
+            code = task_submission_cli.run_task_drive(
+                args, store=owner_store, advance_call=lambda **_kwargs: {
+                    'task_id': 'task-1', 'step': 'READY_FOR_INTEGRATION',
+                    'codes': []})
+        self.assertEqual(code, 0)
+        sweep.assert_not_called()
+
     def test_without_merge_stops_at_integration_ready(self):
         advance, calls = self.adapter([
             {'task_id': 't', 'step': 'READY_FOR_INTEGRATION',

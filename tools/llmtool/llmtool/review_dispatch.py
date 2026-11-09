@@ -466,6 +466,26 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             except Exception:
                 _refuse('REVIEW_DISPATCH_OUTCOME_UNKNOWN')
         return prior
+    # Refuse when a stored claim already used this version on a different head.
+    used = next((claim for claim in claims if
+                 type(claim) is dict and
+                 claim.get('executor_task') == executor_task and
+                 claim.get('pr') == pr_number and
+                 claim.get('version') == version and
+                 claim.get('head_sha') != head), None)
+    if used is not None:
+        pr_versions = [
+            claim['version'] for claim in claims
+            if type(claim) is dict and
+            claim.get('executor_task') == executor_task and
+            claim.get('pr') == pr_number and
+            type(claim.get('version')) is int
+        ]
+        next_version = max(pr_versions) + 1
+        _refuse(
+            'REVIEW_DISPATCH_VERSION_USED',
+            f'Review version {version} is already used for PR {pr_number} '
+            f'on another head; use version {next_version}.')
     reviewer_role = role_config.resolve_role(
         'reviewer' if reviewer_key == 'claude-reviewer' else 'codex-reviewer')
     config_dir = reviewer_role['config_dir'] if reviewer_role is not None else None

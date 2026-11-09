@@ -36,11 +36,11 @@ For D8 Host/Worker admission and review controls, see the [D8 Host/Worker refere
 | Company `gw` Developer | Proposes patches, tests and self-review; cannot execute them | PM, through llmtool for eligible small, low-risk Tasks | No shell, filesystem, Git, credentials or approval authority; authorized environment applies patches and checks; independent review and CI |
 | Claude Reviewer | Formal independent Reviewer for Codex-authored changes | PM, after a pinned candidate is ready | Separate read-only context and D6 reviewer record; exact-head review; never reviews own change |
 | Codex Reviewer (`codex-reviewer`) | Formal independent Reviewer | PM, after a pinned candidate is ready | Separate read-only context and D6 reviewer record; exact-head review; never reviews own change; must be qualified and cross-family |
-| EC2 remote-test runner | Runs focused remote test modules and returns a receipt via `llmtool task remote-test` | PM dispatches the task for selected focused modules | Focused modules only; receipt is required evidence and does not replace formal review or CI |
-| Self-hosted Mac CI | Runs Mac-relevant CI checks | PR workflow for PRs; PM adds `mac-ci` after formal PASS and manually dispatches the full suite after each merge train | Two runners on one host; 45-minute job limit set in the workflow; exact-head PR check; without `mac-ci`, the PR check is `NOT_RUN` |
-| Linux CI on EC2 | Runs the full Linux suite, sharded across runners | Automatically on each PR and main push | Three EC2 runners; exact-head `check (Linux 3.14)`; Linux 3.9 is manual pre-release only |
+| EC2 remote-test runner | Runs focused remote test modules and returns a receipt via `llmtool task remote-test` | PM dispatches the task for selected focused modules | PM pre-review tool on private infrastructure, not CI; focused modules only; receipt is required evidence and does not replace formal review or CI |
+| Mac CI (GitHub-hosted) | Runs Mac-relevant CI checks | PR workflow for PRs; PM adds `mac-ci` after formal PASS and manually dispatches the full suite after each merge train | GitHub-hosted `macos-15-intel`; 120-minute job limit set in the workflow ([#1253](https://github.com/davidcatcat/davidcattoolsproject/issues/1253)); exact-head PR check; without `mac-ci`, the PR check is `NOT_RUN` |
+| Linux CI (GitHub-hosted) | Runs the full Linux suite sharded across parallel jobs | Automatically on each PR and main push | GitHub-hosted `ubuntu-24.04`; exact-head `check (Linux 3.14)`; Linux 3.9 is manual pre-release only |
 
-The EC2 remote-test runner is invoked by the PM with `llmtool task remote-test` for selected focused modules; its receipt is required evidence and does not replace formal review or CI.
+The EC2 remote-test runner is a PM pre-review tool on private infrastructure, not CI. The PM invokes it with `llmtool task remote-test` for selected focused modules; its receipt is required evidence and does not replace formal review or CI.
 
 ## Developer convergence and formal review
 
@@ -50,12 +50,25 @@ Submit one consolidated exact-SHA candidate to a qualified, authorized formal Re
 
 After review and exact-head CI pass, reconcile the tested SHA against the current target, assess integration changes, and merge only when every task-required gate passes under [safe-git](../safe-git/SKILL.md). A relevant source change invalidates affected checks and review.
 
+**Owner acceptance is a separate gate (#1208).** Owner product acceptance and formal cross-family review are two independent gates. When a Task needs Owner acceptance, its PR needs both, plus exact-head CI. A relayed Owner acceptance never replaces formal review or CI, and a formal PASS never replaces Owner acceptance. #888 is the case that must not repeat.
+
 **Company LLM Developer route:** Follow the authority, eligible task scope, privacy, execution and acceptance requirements in [AGENTS.md](../../AGENTS.md). A `gw` assignment is not evidence of live dispatch, patch application, full formal review or Task closure. Do not claim quality or net savings from one trial.
 
 <a id="p0--sole-owner-escalation-rule-owner-decision-2026-10-10"></a>
 ### P0 owner escalation pointer (current in AGENTS)
 
 Current Owner escalation is defined in [AGENTS.md](../../AGENTS.md); see the [normative defect triage reference](defect-triage.md) for issue disposition.
+
+## Test data rule (Owner #763 A, 2026-11-08)
+
+[Owner decision, relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6717848625). The rule binds every Developer route: Claude Developer, AGY, OpenCode, Codex (including repair runs), company `gw` and `gw-agent`. It also binds every Developer spec the PM writes. llmtool adds the same rule text to each route's prompt.
+
+1. Ordinary tests never contain password-, API-key-, token- or other credential-shaped strings.
+2. A test of a refusal flow uses mock, monkeypatch or dependency injection of the screen function, and still checks the real behaviour.
+3. Only tests of the sensitive detector itself may use the #763/#981 synthetic-data exception: labelled synthetic, independently reviewed, never real credentials. See [Sensitive-screen refusals](pm-continuation.md#sensitive-screen-refusals-owner-2026-11-05-981).
+4. Never disable, bypass or weaken a production check for test convenience.
+
+For what to do when the screen refuses a Task, see [Sensitive-screen refusals](pm-continuation.md#sensitive-screen-refusals-owner-2026-11-05-981).
 
 ## Defect triage and repair bounds
 

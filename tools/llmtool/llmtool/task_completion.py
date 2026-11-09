@@ -44,7 +44,7 @@ _GIT_LIMIT = 2 * 1024 * 1024
 _PROPOSAL_FILE_LIMIT = 128
 _PROPOSAL_TREE_LIMIT = 8 * 1024 * 1024
 _TIMEOUT = 10
-_TEST_TIMEOUT = 180
+_TEST_TIMEOUT = 300  # seconds; the gw-agent wiring module needs about 220-240 s on the Mac
 _TEST_OUTPUT_LIMIT = 256 * 1024
 # Legacy CI values, kept only for ``llmtool trust verify-legacy`` until #369
 # PR-10. The completion gate reads ``ci_trust`` from trust.json at use time
@@ -86,6 +86,8 @@ _FORMAL_ACCEPT = 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT'
 _REVIEW_VERDICT_ACTIVITY_LINE = '<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->'
 _GITHUB_API_PATH = re.compile(
     r'(?!/)(?!.*(?:^|/)\.\.(?:/|$))(?:compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}|'
+    r'issues/[0-9]{1,7}/comments\?per_page=[0-9]{1,3}&page=[0-9]{1,3}'
+    r'&since=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z|'
     r'(?!compare/)[A-Za-z0-9_./?=&-]{1,256})\Z')
 
 
@@ -1817,20 +1819,6 @@ def _docs_only_ci(paths):
     return True
 
 
-# The trusted workflow whose code check a scripts/-only change does not run.
-_SCRIPTS_ONLY_SKIPPED_CODE_CHECK = 'check (Linux 3.14)'
-
-
-def _scripts_only_ci(paths):
-    """Return whether every changed path is under scripts/ (not docs-only).
-
-    Same rule as task_advance._scripts_only_ci: such a change runs no Linux job.
-    """
-    return (type(paths) is list and bool(paths) and
-            all(type(path) is str and path.startswith('scripts/') for path in paths) and
-            not _docs_only_ci(paths))
-
-
 def _committed_changed_paths(root, source_sha, result_sha):
     """Read all paths changed between the task source and exact result."""
     raw = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv',
@@ -2152,6 +2140,47 @@ def _review_family_compatible(developer, reviewer_identity):
     return reviewer_family != developer_family
 
 
+def _company_gw_text_proposal_pm_session(task_record, executor_identity):
+    """Return the PM session of a PM-applied company-gw text-proposal Task, else None.
+
+    Only an exact company-gw Developer record qualifies: no exposed native
+    session, a responded unified diff with a sha256, applied in the D6
+    registered to the company-gw trusted agent, and a known PM session.
+    """
+    if type(task_record) is not dict or executor_identity != 'company-gw':
+        return None
+    developer = task_record.get('developer')
+    pm_session = task_record.get('pm_session_id')
+    if (type(developer) is not dict or
+            developer.get('provider_profile') != 'company-gw' or
+            developer.get('backend_session_semantics') != 'NO_NATIVE_SESSION_ID_EXPOSED' or
+            developer.get('state') != 'DEVELOPER_RESPONDED' or
+            developer.get('artifact_format') != 'unified_diff' or
+            type(developer.get('artifact_sha256')) is not str or
+            _HEX64.fullmatch(developer['artifact_sha256']) is None or
+            _native_session_identity(pm_session) is None):
+        return None
+    return pm_session
+
+
+def _native_session_identity(value):
+    """Return a comparable native session identity, else None.
+
+    A Task stores a UUID-backed PM session as ``pm-<native UUID>`` while D6
+    records hold the raw native UUID, so one ``pm-`` prefix is removed and the
+    rest is case-folded. Empty or UNKNOWN identities give None.
+    """
+    if type(value) is not str:
+        return None
+    identity = value.strip()
+    if identity[:3].casefold() == 'pm-':
+        identity = identity[3:].strip()
+    identity = identity.casefold()
+    if not identity or identity == 'unknown':
+        return None
+    return identity
+
+
 def _review_binding_line(task_id, run_id, contract_digest, result_sha):
     return (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
             f'contract={contract_digest} head={result_sha}')
@@ -2179,6 +2208,18 @@ def _labels_equal(labels, expected):
             set(labels) == set(expected))
 
 
+def _runner_label_alternatives(runner_labels):
+    """Turn github-hosted runner_labels into a list of label alternatives."""
+    if not isinstance(runner_labels, (list, tuple)) or not runner_labels:
+        return []
+    if all(type(label) is str for label in runner_labels):
+        return [runner_labels]
+    if all(isinstance(alt, (list, tuple)) and alt and
+           all(type(label) is str for label in alt) for alt in runner_labels):
+        return list(runner_labels)
+    return []
+
+
 def _trusted_ci_runner(job, *, mode, runner_names, runner_labels):
     """Exact runner identity from ci_trust; never prefix, substring or wildcard."""
     labels = job.get('labels')
@@ -2188,7 +2229,9 @@ def _trusted_ci_runner(job, *, mode, runner_names, runner_labels):
                 runner_name in runner_names and
                 (runner_labels is None or _labels_equal(labels, runner_labels)))
     if mode == 'github-hosted':
-        return (runner_labels is not None and _labels_equal(labels, runner_labels) and
+        alternatives = _runner_label_alternatives(runner_labels)
+        return (runner_labels is not None and
+                any(_labels_equal(labels, alt) for alt in alternatives) and
                 'self-hosted' not in labels and
                 job.get('runner_group_name') == _GITHUB_HOSTED_RUNNER_GROUP)
     return False
@@ -2329,19 +2372,14 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
     Code path: every ci_trust workflow with a ``code_check`` must succeed and
     the first such workflow is primary; the docs-only path does the same with
     ``docs_check``. With the Owner's values this is the Mac + Linux code gate
-    and the Linux ``check (docs)`` docs gate. A scripts/-only change runs no
-    Linux job (as in task advance), so its code path leaves out the workflow
-    whose code check is ``check (Linux 3.14)`` and requires the Mac check only.
+    and the Linux ``check (docs)`` docs gate.
     """
     ci_trust = _ci_trust()
     docs_only = _docs_only_ci(changed_paths)
-    scripts_only = _scripts_only_ci(changed_paths)
-    linux_required = not scripts_only
+    linux_required = True
     field = 'docs_check' if docs_only else 'code_check'
     selected = [workflow for workflow in ci_trust['workflows']
-                if workflow[field] is not None and
-                not (scripts_only and field == 'code_check' and
-                     workflow['code_check'] == _SCRIPTS_ONLY_SKIPPED_CODE_CHECK)]
+                if workflow[field] is not None]
     if not selected:
         _stop('TRUST_CI_INVALID')
     results = []
@@ -2420,16 +2458,12 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
             'workflow_name': primary_workflow['name']}
 
 
-def _not_run_checks(docs_only, scripts_only=False):
+def _not_run_checks(docs_only):
     """Display-only NOT_RUN names: ci_trust not_run_checks, plus skipped code checks."""
     ci_trust = _ci_trust()
     base = tuple(ci_trust['not_run_checks'])
     skipped = tuple(workflow['code_check'] for workflow in ci_trust['workflows']
                     if docs_only and workflow['code_check'] is not None)
-    if scripts_only and not docs_only:
-        skipped = tuple(workflow['code_check'] for workflow in ci_trust['workflows']
-                        if workflow['code_check'] == _SCRIPTS_ONLY_SKIPPED_CODE_CHECK and
-                        workflow['code_check'] not in base)
     return base + skipped
 
 
@@ -2681,7 +2715,25 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
     if reviewer.native_session_id in (None, 'UNKNOWN'):
         missing.append('REVIEWER_NATIVE_SESSION_UNVERIFIED')
     elif executor_native_session_id in (None, 'UNKNOWN'):
-        missing.append('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT')
+        # #1241: company-gw only proposes a text diff and exposes no native
+        # session; the PM applies it in the registered company-gw D6. There,
+        # independence rests on the bound cross-family Reviewer on its own D6,
+        # whose native session must differ from the PM session. Both sides are
+        # compared as normalized identities (the Task stores `pm-<native>`).
+        # Every other route, and any company-gw record that does not match
+        # exactly, keeps the fail-closed rule.
+        pm_session = None
+        if executor_identity == 'company-gw':
+            try:
+                pm_session = _company_gw_text_proposal_pm_session(
+                    load_completion_task_record(), executor_identity)
+            except LLMToolError:
+                pm_session = None
+        pm_identity = _native_session_identity(pm_session)
+        reviewer_identity = _native_session_identity(reviewer.native_session_id)
+        if (pm_identity is None or reviewer_identity is None or
+                reviewer_identity == pm_identity):
+            missing.append('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT')
     elif reviewer.native_session_id == executor_native_session_id:
         missing.append('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT')
     if reviewer.github_login is None:
@@ -2740,8 +2792,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             'required_checks': sorted(required_checks),
             'successful_checks': sorted(successful), 'ci_head_sha': result_sha,
             'not_run_checks': [{'name': name, 'status': 'NOT_RUN'}
-                               for name in _not_run_checks(
-                                   ci['docs_only'], _scripts_only_ci(changed_paths))],
+                               for name in _not_run_checks(ci['docs_only'])],
             'ci_workflow_path': ci['workflow_path'],
             'ci_workflow_name': ci['workflow_name'],
             'ci_workflow_id': ci['workflow_id'], 'ci_run_id': ci['run_id'],

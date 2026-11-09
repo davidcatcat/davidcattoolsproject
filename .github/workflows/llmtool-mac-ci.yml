@@ -3,8 +3,10 @@ name: llmtool Mac CI
 # Feature branches are tested through their pull request, not again on push:
 # a branch push plus its PR used to run the same commit twice (Issue #99).
 # The PM triggers workflow_dispatch after each merge train for main's full
-# suite. Jobs run on GitHub-hosted macos-15-intel (#1253, Owner 2026-11-09:
-# the repository is public; the Owner's Mac no longer takes CI jobs). Python
+# suite. pull_request jobs run on macos-15 unless the PR has the mac-ci-intel
+# label, and workflow_dispatch (main full suite) runs on macos-15-intel (#1253,
+# Owner 2026-11-09: the repository is public; the Owner's Mac no longer takes
+# CI jobs). Python
 # 3.13 comes from actions/setup-python (pinned by SHA) and is copied into a
 # job-owned venv that the verified-Python step checks byte for byte. The
 # company LLM, its VPN and any company configuration are never used here; all
@@ -21,6 +23,7 @@ on:
       - '!tools/llmtool/*.md'
       - 'scripts/llmtool_monitor.py'
       - 'scripts/test_llmtool_monitor.py'
+      - 'scripts/test_llmtool_monitor_github_reads.py'
       - '.github/workflows/llmtool-mac-ci.yml'
       - 'tools/mac-runner/**'
       - 'tools/safe-git/**'
@@ -33,11 +36,11 @@ permissions:
 jobs:
   check:
     name: check (macOS 3.13)
-    if: vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci')
+    if: vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci' || github.event.label.name == 'mac-ci-intel')
     concurrency:
       group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
       cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
-    runs-on: macos-15-intel
+    runs-on: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'mac-ci-intel') && 'macos-15' || 'macos-15-intel' }}
     # Owner #1253: up to 120 minutes while the hosted full suite is measured (#1220).
     timeout-minutes: 120
     steps:
@@ -48,10 +51,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || 'main' }}
           fetch-depth: 0
           persist-credentials: false
-      # Without the merge ref, merge coverage holds only if the head already
-      # contains the PR base; otherwise fail rather than pass untested. The
-      # base is fixed at event time, so the merge itself must still recheck
-      # live main and bind to this head (Issue #99 / PR #100).
+      # Without the merge ref, a head behind the base is reported as a notice
+      # under the loose merge rule (#1317) and the merge still binds this
+      # exact head and rechecks live main and mergeability.
       - name: Source revision
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha || '' }}
@@ -73,7 +75,7 @@ jobs:
             else
               status=$?
               test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
-              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+              echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head (loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"
             fi
           fi
       # PRs use the validated Mac-required IDs plus changed/mapped test IDs.
@@ -107,7 +109,7 @@ jobs:
                   .github/workflows/*|tools/llmtool/scripts/ci_*.py) verify=true ;;
                 esac
                 case "$path" in
-                  scripts/llmtool_monitor.py|scripts/test_llmtool_monitor.py) ;;
+                  scripts/llmtool_monitor.py|scripts/test_llmtool_monitor.py|scripts/test_llmtool_monitor_github_reads.py) ;;
                   *) mode=mac-subset ;;
                 esac
               done < "$paths"
@@ -292,13 +294,26 @@ jobs:
                           path.chmod(0o600)
           print('Verifier checks: 12/12 PASS; no skips')
           PY
+      # Full runs get 110 minutes and other modes 45. The 120-minute job
+      # limit stays the outer stop.
       - name: Offline canonical checks
         if: steps.full-due.outputs.run != 'false' && steps.coverage.outputs.mode != 'monitor-only' && steps.coverage.outputs.mode != 'docs-only'
+        timeout-minutes: ${{ steps.coverage.outputs.mode == 'full' && 110 || 45 }}
         run: |
+          # Fail closed: the result stays INCOMPLETE until the last line.
+          # An early exit, signal or timeout reports INCOMPLETE or FAIL.
           started=$SECONDS
-          result=PASS
+          result=INCOMPLETE
           test_count=0
-          report_result() { status=$?; if [ "$status" -ne 0 ]; then result=FAIL; fi; printf 'canonical exact HEAD: %s\ncanonical unittest test-case count: %s\ncanonical elapsed seconds: %s\ncanonical result: %s\n' "$(git rev-parse HEAD)" "$test_count" "$((SECONDS - started))" "$result"; return "$status"; }
+          report_result() {
+            status=$?
+            if [ "$status" -ne 0 ]; then result=FAIL; fi
+            printf 'canonical exact HEAD: %s\ncanonical unittest test-case count: %s\ncanonical elapsed seconds: %s\ncanonical result: %s\n' "$(git rev-parse HEAD)" "$test_count" "$((SECONDS - started))" "$result"
+            if [ "$result" != PASS ]; then
+              if [ "$status" -eq 0 ]; then status=1; fi
+              exit "$status"
+            fi
+          }
           collect_count() { observed=$(awk '/^Ran [0-9]+ tests?/ { total += $2 } END { print total + 0 }' "$1"); test_count=$((test_count + observed)); }
           trap report_result EXIT
           if [ "${{ steps.coverage.outputs.mode }}" = mac-subset ]; then
@@ -308,8 +323,11 @@ jobs:
               test_started=$SECONDS
               set +e
               "$JOB_PYTHON" -I -B -c 'import sys,unittest; sys.path[:0]=["tools/llmtool/tests","tools/llmtool"]; suite=unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(not result.wasSuccessful())' "$test_id" 2>&1 | tee "$output"
-              status=${PIPESTATUS[0]}
+              pipe_status=("${PIPESTATUS[@]}")
               set -e
+              # The test command's status wins; a failing tee also fails.
+              status=${pipe_status[0]}
+              if [ "$status" -eq 0 ]; then status=${pipe_status[1]}; fi
               collect_count "$output"
               printf 'canonical test ID: %s\ncanonical test ID elapsed seconds: %s\n' "$test_id" "$((SECONDS - test_started))"
               test "$status" -eq 0 || exit "$status"
@@ -318,11 +336,19 @@ jobs:
             output="$RUNNER_TEMP/mac-test-output"
             set +e
             make -C tools/llmtool check PYTHON="$JOB_PYTHON" 2>&1 | tee "$output"
-            status=${PIPESTATUS[0]}
+            pipe_status=("${PIPESTATUS[@]}")
             set -e
+            # The test command's status wins; a failing tee also fails.
+            status=${pipe_status[0]}
+            if [ "$status" -eq 0 ]; then status=${pipe_status[1]}; fi
             collect_count "$output"
             test "$status" -eq 0 || exit "$status"
           fi
+          if [ "$test_count" -eq 0 ]; then
+            echo "::error::canonical checks ran no test cases"
+            exit 1
+          fi
+          result=PASS
       - name: Monitor script checks
         if: steps.full-due.outputs.run != 'false'
         run: |

@@ -48,7 +48,7 @@ def d6(clean=True, recorded=HEAD):
 
 
 def remote_receipt(record, *, source_sha=HEAD, result='PASS', excerpt=None,
-                   executor_task='executor-1'):
+                   executor_task='executor-1', **changes):
     receipt = {
         'task_id': record['task_id'], 'run_id': record['run_id'],
         'executor_task': executor_task, 'source_sha': source_sha,
@@ -57,6 +57,7 @@ def remote_receipt(record, *, source_sha=HEAD, result='PASS', excerpt=None,
     }
     if excerpt is not None:
         receipt['failure_excerpt'] = excerpt
+    receipt.update(changes)
     receipt['receipt_digest'] = hashlib.sha256(_json_bytes(receipt)).hexdigest()
     return receipt
 
@@ -348,7 +349,8 @@ class TaskAdvanceTests(unittest.TestCase):
             'remote_test': {'result': 'PASS', 'modules': ['test_task_advance'],
                             'ran_total': 1, 'elapsed_s': 0.01,
                             'receipt_digest': store.record['remote_test_receipts'][0]
-                                ['receipt_digest'][:8]}})
+                                ['receipt_digest'][:8],
+                            'hosted_run_id': None}})
         self.assertEqual(second['step'], 'DISPATCH_REVIEW')
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls, [(HEAD, 'executor-1', 'refs/pull/17/head')])
@@ -1517,7 +1519,8 @@ class TaskAdvanceCiGateTests(unittest.TestCase):
         summary = result['result']['remote_test']
         self.assertEqual(summary, {'result': 'FAIL', 'modules': ['test_task_advance'],
             'ran_total': 12, 'elapsed_s': 3.5,
-            'receipt_digest': receipt['receipt_digest'][:8]})
+            'receipt_digest': receipt['receipt_digest'][:8],
+            'hosted_run_id': None})
         self.assertEqual(result['step'], 'RUN_REMOTE_TEST')
         self.assertEqual(calls[0][:3], ['pr', 'comment', '17'])
         body = calls[0][calls[0].index('--body') + 1]
@@ -1527,6 +1530,69 @@ class TaskAdvanceCiGateTests(unittest.TestCase):
         self.assertIn('D6=executor-1', body)
         self.assertNotIn(d6()['root'], body)
         self.assertNotIn('private failure text', body)
+
+    def test_remote_test_comment_text_and_malformed_actions(self):
+        record = base_record(remote_test_outcomes=[])
+        d6_obj = {'task_id': 'executor-1', 'root': '/repo'}
+        calls = []
+
+        def gh_runner(_root, argv):
+            calls.append(argv)
+            return type('Response', (), {'returncode': 0})()
+
+        # EC2 receipt: body text after marker line starts with 'EC2 remote-test, result='
+        ec2_receipt = remote_receipt(record, result='PASS')
+        summary_ec2 = task_advance._remote_test_receipt_summary(
+            {'remote_test_receipts': [ec2_receipt]}, HEAD)
+        self.assertIsNotNone(summary_ec2)
+        self.assertIsNone(summary_ec2['hosted_run_id'])
+        task_advance._post_remote_test_comment(gh_runner, '/repo', 17, record['task_id'], d6_obj, HEAD, summary_ec2)
+        body_ec2 = calls[-1][calls[-1].index('--body') + 1]
+        marker, rest_ec2 = body_ec2.split('\n', 1)
+        self.assertEqual(marker, '<!-- activity: type=task actor=PM target=PR status=TRACKING -->')
+        self.assertEqual(
+            rest_ec2,
+            f"EC2 remote-test, result=PASS, modules=test_task_advance, tests run=1, seconds=0.01, receipt={ec2_receipt['receipt_digest'][:8]}, Task={record['task_id']}, D6=executor-1, head={HEAD}")
+
+        # Hosted receipt: body text after marker line starts with 'remote-test (GitHub-hosted run <id>), result='
+        hosted_receipt = remote_receipt(record, result='PASS', actions={'run_id': 7890})
+        summary_hosted = task_advance._remote_test_receipt_summary(
+            {'remote_test_receipts': [hosted_receipt]}, HEAD)
+        self.assertIsNotNone(summary_hosted)
+        self.assertEqual(summary_hosted['hosted_run_id'], 7890)
+        task_advance._post_remote_test_comment(gh_runner, '/repo', 17, record['task_id'], d6_obj, HEAD, summary_hosted)
+        body_hosted = calls[-1][calls[-1].index('--body') + 1]
+        marker, rest_hosted = body_hosted.split('\n', 1)
+        self.assertEqual(marker, '<!-- activity: type=task actor=PM target=PR status=TRACKING -->')
+        self.assertEqual(
+            rest_hosted,
+            f"remote-test (GitHub-hosted run 7890), result=PASS, modules=test_task_advance, tests run=1, seconds=0.01, receipt={hosted_receipt['receipt_digest'][:8]}, Task={record['task_id']}, D6=executor-1, head={HEAD}")
+
+        # Malformed actions blocks give no run id and the EC2 text
+        malformed = (
+            'not-a-dict',
+            {},
+            {'run_id': 'bad'},
+            {'run_id': 0},
+            {'run_id': -1},
+            {'run_id': None},
+            {'run_id': True},
+            {'run_id': 3.14},
+        )
+        for bad_actions in malformed:
+            with self.subTest(bad_actions=bad_actions):
+                bad_receipt = remote_receipt(record, result='PASS', actions=bad_actions)
+                summary_bad = task_advance._remote_test_receipt_summary(
+                    {'remote_test_receipts': [bad_receipt]}, HEAD)
+                self.assertIsNotNone(summary_bad)
+                self.assertIsNone(summary_bad['hosted_run_id'])
+                task_advance._post_remote_test_comment(gh_runner, '/repo', 17, record['task_id'], d6_obj, HEAD, summary_bad)
+                body_bad = calls[-1][calls[-1].index('--body') + 1]
+                marker, rest_bad = body_bad.split('\n', 1)
+                self.assertEqual(marker, '<!-- activity: type=task actor=PM target=PR status=TRACKING -->')
+                self.assertEqual(
+                    rest_bad,
+                    f"EC2 remote-test, result=PASS, modules=test_task_advance, tests run=1, seconds=0.01, receipt={bad_receipt['receipt_digest'][:8]}, Task={record['task_id']}, D6=executor-1, head={HEAD}")
 
     def test_remote_test_comment_failure_adds_only_warning_code(self):
         record = base_record(remote_test_outcomes=[])
@@ -1740,6 +1806,44 @@ class TaskAdvancePublishTests(unittest.TestCase):
 
         self.assertEqual(opened['pr'], 23)
         self.assertEqual(refs, [f'refs/heads/{self.BRANCH}'] * 3)
+
+    def test_hosted_remote_test_codes_hold_at_waiting_remote_test_and_are_not_fail(self):
+        new_codes = ('HOSTED_PENDING', 'HOSTED_QUEUE_FULL', 'HOSTED_DISPATCH_UNCONFIRMED')
+        for code in new_codes:
+            with self.subTest(code=code):
+                self.change_file(f'{code}\n')
+                store = self.gated_store()
+                def remote_test(args, *, store):
+                    print(json.dumps({'result': 'UNAVAILABLE', 'code': code}))
+                    return 0
+
+                held = self.advance_gated(store, remote_test, dirty=True)
+                self.assertEqual((held['step'], held['codes'], held['pr']),
+                                 ('WAITING_REMOTE_TEST', ['REMOTE_TEST_UNAVAILABLE', code], None))
+                self.assertEqual(held['next'], 'WAITING_REMOTE_TEST')
+                self.assertNotIn('REMOTE_TEST_FAIL', held['codes'])
+                self.assertNotEqual(held['step'], 'RUN_REMOTE_TEST')
+                self.assertNotEqual(held['next'], 'REPAIR_REVIEW')
+                self.assert_no_pr()
+
+    def test_pre_pr_remote_gate_hosted_codes_hold_at_waiting_remote_test_and_are_not_fail(self):
+        new_codes = ('HOSTED_PENDING', 'HOSTED_QUEUE_FULL', 'HOSTED_DISPATCH_UNCONFIRMED')
+        for code in new_codes:
+            with self.subTest(code=code):
+                self.change_file(f'clean-{code}\n')
+                store = self.gated_store()
+                def remote_test(args, *, store):
+                    print(json.dumps({'result': 'UNAVAILABLE', 'code': code}))
+                    return 0
+
+                held = self.advance_gated(store, remote_test, dirty=False)
+                self.assertEqual((held['step'], held['codes'], held['pr']),
+                                 ('WAITING_REMOTE_TEST', ['REMOTE_TEST_UNAVAILABLE', code], None))
+                self.assertEqual(held['next'], 'WAITING_REMOTE_TEST')
+                self.assertNotIn('REMOTE_TEST_FAIL', held['codes'])
+                self.assertNotEqual(held['step'], 'RUN_REMOTE_TEST')
+                self.assertNotEqual(held['next'], 'REPAIR_REVIEW')
+                self.assert_no_pr()
 
     def test_docs_only_or_no_module_head_opens_pr_then_uses_pr_ref_step(self):
         self.change_file()
@@ -3197,15 +3301,17 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
 
 
 class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
-    """#1019 row 31: task advance --merge refuses a head that lacks current main."""
+    """Owner decision #1317: task advance --merge allows mergeable heads behind main."""
 
     LINUX = {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
              'conclusion': 'success'}
     MACOS = dict(LINUX, name='check (macOS 3.13)')
     COMPARE_PATH = f'compare/{MAIN_SHA}...{HEAD}'
+    _MISSING = object()
 
     def merge(self, *, main_reply=None, compare_reply=None, check_runs=None,
-              labels=('mac-ci',)):
+              labels=('mac-ci',), mergeable_state='clean', mergeable=True,
+              pr_head=HEAD, current_pr_head=None):
         from llmtool.task_completion import _GITHUB_API_PATH
         main_reply = {'commit': {'sha': MAIN_SHA}} if main_reply is None else main_reply
         compare_reply = {'status': 'ahead'} if compare_reply is None else compare_reply
@@ -3217,8 +3323,10 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
                                     'review_result': {'verdict': 'PASS'}}],
             completion_events=[{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
                                 'outcome': 'REVIEW_PASS'}])
-        pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
-              'mergeable': True, 'labels': [{'name': name} for name in labels]}
+        pr = {'number': 17, 'head': {'sha': pr_head}, 'state': 'open', 'merged': False,
+              'mergeable': mergeable, 'labels': [{'name': name} for name in labels]}
+        if mergeable_state is not self._MISSING:
+            pr['mergeable_state'] = mergeable_state
         reads, calls, claims = [], [], []
 
         class Store:
@@ -3233,7 +3341,10 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
                 raise value
             return value
 
+        pulls_calls = 0
+
         def github_get(path):
+            nonlocal pulls_calls
             # The same validator guards the production GitHub read.
             self.assertTrue(_GITHUB_API_PATH.fullmatch(path), path)
             reads.append(path)
@@ -3246,6 +3357,9 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
             if path.endswith('/files?per_page=100'):
                 return [{'filename': 'src/module.py'}]
             if path == 'pulls/17':
+                pulls_calls += 1
+                if pulls_calls > 1 and current_pr_head is not None:
+                    return dict(pr, head={'sha': current_pr_head})
                 return pr
             return []
 
@@ -3267,15 +3381,20 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(claims, [])
 
-    def test_head_without_current_main_refuses_before_label_claim_and_merge(self):
+    def test_head_behind_or_diverged_from_main_merges_when_mergeable(self):
         for status in ('behind', 'diverged'):
-            for name, kwargs in (
-                    ('merge ready', {}),
-                    ('label would be added', {'check_runs': [self.LINUX], 'labels': ()})):
-                with self.subTest(status=status, case=name):
-                    self.assert_refused(
-                        self.merge(compare_reply={'status': status}, **kwargs),
-                        'MERGE_PR_BEHIND_MAIN')
+            for state in ('clean', 'behind', 'unstable', 'has_hooks'):
+                with self.subTest(status=status, state=state):
+                    result, _reads, calls, claims = self.merge(
+                        compare_reply={'status': status, 'behind_by': 2},
+                        mergeable_state=state)
+                    self.assertEqual(result['step'], 'MERGED')
+                    self.assertEqual(calls[0], ['pr', 'merge', '17', '--squash',
+                                                '--match-head-commit', HEAD])
+                    self.assertEqual(sum(call[1] == 'merge' for call in calls), 1)
+                    self.assertEqual([claim['state'] for claim in claims],
+                                     ['CLAIMED', 'MERGED'])
+                    self.assertEqual(result['result']['main_behind_by'], 2)
 
     def test_head_with_current_main_merges(self):
         for status in ('ahead', 'identical'):
@@ -3287,8 +3406,58 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
                 self.assertEqual(sum(call[1] == 'merge' for call in calls), 1)
                 self.assertEqual([claim['state'] for claim in claims],
                                  ['CLAIMED', 'MERGED'])
+                self.assertEqual(result['result']['main_behind_by'], 0)
                 self.assertEqual(reads[-3:], ['pulls/17', 'branches/main',
                                               self.COMPARE_PATH])
+
+    def test_behind_head_refusals(self):
+        cases = (
+            ('dirty mergeable_state', {'mergeable_state': 'dirty'}, 'MERGE_PR_CONFLICT'),
+            ('unknown mergeable_state', {'mergeable_state': 'unknown'}, 'MERGE_MERGEABLE_UNKNOWN'),
+            ('missing mergeable_state', {'mergeable_state': self._MISSING}, 'MERGE_MERGEABLE_UNKNOWN'),
+            ('None mergeable_state', {'mergeable_state': None}, 'MERGE_MERGEABLE_UNKNOWN'),
+            ('blocked mergeable_state', {'mergeable_state': 'blocked'}, 'MERGE_PR_NOT_MERGEABLE'),
+            ('mergeable False', {'mergeable': False}, 'MERGE_PR_NOT_MERGEABLE'),
+            ('behind_by missing', {'compare_reply': {'status': 'behind'}}, 'MERGE_CHECKS_UNAVAILABLE'),
+            ('behind_by 0', {'compare_reply': {'status': 'behind', 'behind_by': 0}}, 'MERGE_CHECKS_UNAVAILABLE'),
+            ('behind_by text', {'compare_reply': {'status': 'behind', 'behind_by': '2'}}, 'MERGE_CHECKS_UNAVAILABLE'),
+        )
+        for name, kwargs, expected_code in cases:
+            with self.subTest(name):
+                opts = {'compare_reply': {'status': 'behind', 'behind_by': 2}}
+                opts.update(kwargs)
+                self.assert_refused(self.merge(**opts), expected_code)
+
+    def test_behind_pr_with_stale_head_refuses_with_same_code(self):
+        other_head = 'b' * 40
+        self.assert_refused(
+            self.merge(compare_reply={'status': 'behind', 'behind_by': 2},
+                       current_pr_head=other_head),
+            'MERGE_STALE_HEAD')
+        self.assert_refused(
+            self.merge(compare_reply={'status': 'behind', 'behind_by': 2},
+                       pr_head=other_head),
+            'MERGE_STALE_HEAD')
+
+    def test_behind_pr_with_clean_mergeable_state_reaches_mac_label_step(self):
+        result, _reads, calls, claims = self.merge(
+            compare_reply={'status': 'behind', 'behind_by': 2},
+            check_runs=[self.LINUX], labels=(), mergeable_state='clean')
+        self.assertEqual(result['step'], 'WAITING_CI')
+        self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
+        self.assertEqual(claims, [])
+
+    def test_diverged_pr_with_clean_mergeable_state_merges(self):
+        result, _reads, calls, claims = self.merge(
+            compare_reply={'status': 'diverged', 'ahead_by': 5, 'behind_by': 3},
+            mergeable_state='clean', labels=('mac-ci',))
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual(calls[0], ['pr', 'merge', '17', '--squash',
+                                    '--match-head-commit', HEAD])
+        self.assertEqual(sum(call[1] == 'merge' for call in calls), 1)
+        self.assertEqual([claim['state'] for claim in claims],
+                         ['CLAIMED', 'MERGED'])
+        self.assertEqual(result['result']['main_behind_by'], 3)
 
     def test_current_main_still_reaches_the_mac_label_step(self):
         result, _reads, calls, claims = self.merge(check_runs=[self.LINUX], labels=())
@@ -4097,7 +4266,7 @@ class MergeNewerClaimVetoTests(unittest.TestCase):
 
 
 class ScriptsOnlyCiTests(unittest.TestCase):
-    """#1139: a scripts/-only PR needs no Linux job; macOS stays required."""
+    """#1208: a scripts/-only PR requires Linux CI and macOS CI like any code PR."""
 
     PR = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'mergeable': True}
 
@@ -4115,18 +4284,21 @@ class ScriptsOnlyCiTests(unittest.TestCase):
 
     def test_merge_and_review_ci_rules_by_changed_paths(self):
         scripts = ['scripts/llmtool_monitor.py', 'scripts/tool.sh']
-        mac = ['check (macOS 3.13)']
+        code_checks = ['check (Linux 3.14)', 'check (macOS 3.13)']
         cases = (
-            ('scripts only with macOS', scripts, mac, 'success', None, (None, None)),
+            ('scripts only with Linux and macOS', scripts, code_checks, 'success',
+             None, (None, None)),
             ('scripts only without checks', scripts, [], 'success',
-             'MERGE_CHECKS_MISSING', (None, None)),
+             'MERGE_CHECKS_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
             ('scripts only with Linux only', scripts, ['check (Linux 3.14)'], 'success',
              'MERGE_REQUIRED_CHECK_MISSING', (None, None)),
-            ('scripts only with skipped macOS', scripts, mac, 'skipped',
-             'MERGE_MACOS_CHECK_REQUIRED', (None, None)),
-            ('one other path', scripts + ['src/module.py'], mac, 'success',
+            ('scripts only with macOS only', scripts, ['check (macOS 3.13)'], 'success',
              'MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
-            ('docs only', ['docs/guide.md'], mac, 'success',
+            ('scripts only with skipped checks', scripts, code_checks, 'skipped',
+             'MERGE_REQUIRED_CHECK_SKIPPED', ('CI_FAILED', 'LINUX_CI_FAILED')),
+            ('one other path', scripts + ['src/module.py'], ['check (macOS 3.13)'], 'success',
+             'MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
+            ('docs only', ['docs/guide.md'], ['check (macOS 3.13)'], 'success',
              'MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
         )
         for label, paths, names, conclusion, merge_code, review in cases:
@@ -4135,9 +4307,15 @@ class ScriptsOnlyCiTests(unittest.TestCase):
                 self.assertEqual(task_advance._merge_checks({}, 17, HEAD, self.PR, get),
                                  merge_code)
                 self.assertEqual(task_advance._review_ci_gate(17, HEAD, get), review)
-        self.assertTrue(task_advance._scripts_only_ci(scripts))
-        for paths in ([], ['scripts'], ['tools/scripts/a.py'], [None]):
-            self.assertFalse(task_advance._scripts_only_ci(paths))
+
+    def test_review_of_scripts_only_pr_waits_for_exact_head_linux_check(self):
+        scripts = ['scripts/llmtool_monitor.py', 'scripts/tool.sh']
+        get_waiting = self.reader(scripts, ['check (macOS 3.13)'], 'success')
+        self.assertEqual(task_advance._review_ci_gate(17, HEAD, get_waiting),
+                         ('WAITING_CI', 'LINUX_CI_PENDING'))
+        get_ready = self.reader(scripts, ['check (Linux 3.14)'], 'success')
+        self.assertEqual(task_advance._review_ci_gate(17, HEAD, get_ready),
+                         (None, None))
 
 
 class IntegrationDeltaRealGitTests(unittest.TestCase):

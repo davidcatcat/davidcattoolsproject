@@ -48,6 +48,7 @@ from .developer_routes.agy import (
     MAX_PROMPT_BYTES as AGY_MAX_PROMPT_BYTES,
     _CONVERSATION as AGY_CONVERSATION,
 )
+from . import gw_agent_callsite, gw_agent_wiring
 from .developer_routes.claude import MAX_PROMPT_BYTES as CLAUDE_MAX_PROMPT_BYTES
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_data_rule import TEST_DATA_RULE
@@ -805,7 +806,8 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--acceptance', action='append', required=True, help='bounded acceptance condition; repeat as needed')
     delegate.add_argument('--egress-basis', required=True, help='task-specific non-sensitive data authorization basis')
     delegate.add_argument('--data-class', help='required data classification for gw-agent direct Tasks')
-    delegate.add_argument('--owner-ref', help='required Owner assignment comment URL for AGY or Claude direct Tasks')
+    delegate.add_argument('--owner-ref', help=('Owner assignment comment URL: required for Claude direct Tasks; '
+                                'optional for AGY, validated when given'))
     delegate.add_argument('--high-debug-ref',
                           help='trusted GitHub comment URL authorizing a repair-cap override')
     delegate.add_argument('--high-debug-task',
@@ -894,7 +896,7 @@ def add_task_submission_parsers(actions):
                                help='review verdict version (1-9999; default 1)')
     review_result.add_argument('--reviewer-session-done', action='store_true',
                                help='record REVIEW_BLOCKED when no verdict exists')
-    high_debug = actions.add_parser('high-debug', help='Run one read-only Codex diagnosis of an Executor D6')
+    high_debug = actions.add_parser('high-debug', help='Run one read-only Codex or Claude diagnosis of an Executor D6')
     high_debug.add_argument('task_id')
     high_debug.add_argument('--executor-task', required=True)
     high_debug.add_argument('--pr', required=True, type=int)
@@ -903,6 +905,7 @@ def add_task_submission_parsers(actions):
     choice.add_argument('--failed-corrections', type=int)
     choice.add_argument('--early')
     high_debug.add_argument('--evidence-file')
+    high_debug.add_argument('--route', choices=('codex', 'claude'), default='codex')
     repair = actions.add_parser(
         'repair', help='Dispatch one bounded repair for the newest failed formal review')
     repair.add_argument('task_id', help='existing durable Task ID')
@@ -983,6 +986,8 @@ def run_task_abandon(args, *, store=None, stdout=None):
     store = TaskStore() if store is None else store
     key = active_pm_inbox.pm_session_key(args.pm_session)
     saved = store.abandon(args.task_id, pm_session_id=key, reason=args.reason)
+    from . import gw_agent_sessions
+    gw_agent_sessions.sweep_quietly(store)
     _print({'task_id': saved['task_id'], 'state': 'ABANDONED',
             'abandonment': saved['abandonment']}, stdout=stdout)
     return 0
@@ -1014,7 +1019,11 @@ def _review_ec2_line(task, head):
         return _REVIEW_EC2_NONE
     if summary is None:
         return _REVIEW_EC2_NONE
-    return (f"EC2 remote-test: result={summary['result']}, "
+    hosted_run_id = summary.get('hosted_run_id')
+    prefix = (f"remote-test (GitHub-hosted run {hosted_run_id}): result="
+              if hosted_run_id is not None
+              else "EC2 remote-test: result=")
+    return (f"{prefix}{summary['result']}, "
             f"modules={','.join(summary['modules'])}, tests run={summary['ran_total']}, "
             f"seconds={summary['elapsed_s']}, receipt={summary['receipt_digest']}")
 
@@ -1341,6 +1350,9 @@ def run_task_advance(args, *, store=None, **adapters):
             integration_pr=getattr(args, 'integration_pr', None),
             merge=getattr(args, 'merge', False),
             reviewer_session_done=getattr(args, 'reviewer_session_done', False), **adapters)
+    if result.get('step') == 'CLOSED':
+        from . import gw_agent_sessions
+        gw_agent_sessions.sweep_quietly(TaskStore() if store is None else store)
     _print(result)
     return 1 if result.get('codes') else 0
 
@@ -1384,6 +1396,9 @@ def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapter
         # whatever step budget remains, and report only the refusal.
         _print(pm_caller.refusal(args.task_id, exc.code))
         return 1
+    if result.get('step') == 'CLOSED':
+        from . import gw_agent_sessions
+        gw_agent_sessions.sweep_quietly(store)
     _print(result)
     return 1 if result.get('codes') else 0
 
@@ -1530,7 +1545,7 @@ def run_task_high_debug(args, *, store=None, runner=None, create_d6=None):
         task_id=args.task_id, executor_task=args.executor_task, pr_number=args.pr,
         family=args.family, failed_corrections=getattr(args, 'failed_corrections', None),
         early_reason=getattr(args, 'early', None), evidence=getattr(args, 'evidence_file', None),
-        runner=runner, create_d6=create_d6)
+        runner=runner, create_d6=create_d6, route=getattr(args, 'route', 'codex'))
 
 
 _DIFF_HEADER = re.compile(r'^diff --git a/([^\r\n]+) b/([^\r\n]+)$')
@@ -2560,50 +2575,11 @@ def _remote_task_test_paths(task, *, read_paths=()):
     return tuple(sorted(set(paths)))
 
 
-def _remote_test_config_state(config_loader=None):
-    """Classify remote-test config without exposing its path or values."""
-    loader = remote_test._config if config_loader is None else config_loader
-    try:
-        loader()
-        return 'VALID'
-    except FileNotFoundError:
-        return 'MISSING'
-    except LLMToolError as exc:
-        if (config_loader is None and
-                str(exc) == 'ADMISSION_DENIED: remote test config is missing or invalid'):
-            try:
-                (Path.home() / '.config/llmtool/remote-test.json').lstat()
-            except FileNotFoundError:
-                return 'MISSING'
-            except OSError:
-                pass
-        return 'INVALID'
-    except Exception:
-        return 'INVALID'
-
-
-def _remote_test_config_invalid_error():
-    error = LLMToolError('REMOTE_TEST_CONFIG_INVALID')
-    error.completion_code = 'REMOTE_TEST_CONFIG_INVALID'
-    return error
-
-
-def _reject_invalid_remote_test_config(task, read_paths, config_loader=None):
-    """Fail closed before local tests when a remote-test config exists but is invalid."""
-    if (not _remote_task_test_paths(task, read_paths=read_paths) or
-            _remote_test_config_state(config_loader) != 'INVALID'):
-        return
-    raise _remote_test_config_invalid_error()
-
-
 def _remote_receipt_test_policy(task, *, read_paths=(), config_loader=None):
-    """Select remote testing only for configured Tasks with fully admitted modules."""
-    if not _remote_task_test_paths(task, read_paths=read_paths):
-        return 'LOCAL'
-    state = _remote_test_config_state(config_loader)
-    if state == 'INVALID':
-        raise _remote_test_config_invalid_error()
-    return 'LOCAL' if state == 'MISSING' else 'REMOTE_RECEIPT'
+    """Select remote testing for Tasks with fully admitted modules."""
+    return ('REMOTE_RECEIPT'
+            if _remote_task_test_paths(task, read_paths=read_paths)
+            else 'LOCAL')
 
 
 def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
@@ -2648,8 +2624,6 @@ def _direct_result_tests(task, evidence, result, developer, *, config_loader=Non
             path, evidence['source_sha'], diff_sha256=result['diff_sha256'])
                 for path in _remote_task_test_paths(
                     task, read_paths=developer['read_paths'])]
-    _reject_invalid_remote_test_config(task, developer['read_paths'],
-                                       config_loader=config_loader)
     return task_completion.run_bounded_worktree_tests(
         root=evidence['root'], source_sha=evidence['source_sha'],
         diff_sha256=result['diff_sha256'], changed_paths=result['changed_paths'],
@@ -3647,12 +3621,24 @@ def _codex_developer_profile():
     return provider, effort
 
 
-def run_task_agy_delegate(args, *, store, route_runner=None):
-    """Run the provider-neutral AGY adapter against its registered D6 task."""
+def _optional_agy_owner_ref(args):
+    """Return the AGY --owner-ref, which may be None (#785 M18).
+
+    The live dispatch gate decides: PAUSED or OWNER_ASSIGNMENT_ONLY still
+    refuse without a matching ref. A supplied ref must still be a valid Owner
+    comment URL, checked before any store read or Task mutation.
+    """
     owner_ref = getattr(args, 'owner_ref', None)
-    if (type(owner_ref) is not str or
+    if owner_ref is not None and (
+            type(owner_ref) is not str or
             worker_dispatch.owner_comment_ref().fullmatch(owner_ref) is None):
         raise LLMToolError('--provider agy requires a valid --owner-ref before Task mutation')
+    return owner_ref
+
+
+def run_task_agy_delegate(args, *, store, route_runner=None):
+    """Run the provider-neutral AGY adapter against its registered D6 task."""
+    owner_ref = _optional_agy_owner_ref(args)
     if getattr(args, 'mode', None) != 'direct':
         raise LLMToolError('--provider agy requires --mode direct')
     if getattr(args, 'context_stdin', False):
@@ -4158,6 +4144,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
 
 def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     """Run the company Gw Agent Gateway route against its registered D6 task."""
+    from . import gw_agent_sessions
+    gw_agent_sessions.sweep_quietly(store)
     if getattr(args, 'mode', None) != 'direct':
         raise LLMToolError('--provider gw-agent requires --mode direct')
     if getattr(args, 'context_stdin', False):
@@ -4407,14 +4395,16 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             return decision
         owner_gate_denied = True
         return False
+    site = None
     try:
         execute = run_route if route_runner is None else route_runner
+        site = gw_agent_callsite.SessionCallSite(store.root, executor_task_id=registration.task_id, task_id=task['task_id'], repair_excerpt=None, data_class=data_class).__enter__()
         try:
             result = execute(route, {'root': registration.root, 'model': model, 'effort': effort,
                 'expected_branch': registration.branch, 'expected_head': snapshot.head,
                 'write_paths': write_paths, 'executable': sys.executable,
                 'prompt': prompt, 'task': task_input, 'timeout': 600,
-                'state_dirs': ()}, gate=route_gate, boundary=for_platform(),
+                'state_dirs': (), **site.route_fields()}, gate=route_gate, boundary=for_platform(),
                 snapshot=capture_snapshot)
         finally:
             cleanup_audit_copies()
@@ -4451,10 +4441,13 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None})
+        site.after_result(result.session_id, task_input)
         _bind_direct_native_session(registration, developer, completion, _GW_AGENT_SESSION)
     except _D6SessionRefused:
         return persist_failure('DEVELOPER_GW_AGENT_D6_SESSION_REFUSED',
                                state='DEVELOPER_OUTCOME_UNKNOWN')
+    except gw_agent_wiring.WiringRefused as exc:
+        return persist_failure(exc.code)
     except RouteError as exc:
         code = 'DEVELOPER_' + (exc.code if not owner_gate_denied else 'DISPATCH_DENIED')
         gateway_code = exc.facts.get('gateway_code') if type(exc.facts) is dict else None
@@ -4471,6 +4464,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     except BaseException:
         persist_interrupted()
         raise
+    finally:
+        if site is not None:
+            site.__exit__(None, None, None)
     try:
         store.compare_and_update(
             task['task_id'], expected={'developer': expected_developer},
@@ -5199,7 +5195,7 @@ def _collect_ec2_repair_task_ids(record, new_ids, legacy_ids):
         (new_ids if kind == 'NEW' else legacy_ids).add(repair_task_id)
 
 
-_HIGH_DEBUG_MODEL = 'gpt-6.1-sol'
+_HIGH_DEBUG_MODELS = frozenset(('gpt-6.1-sol', 'claude-opus-5-5'))
 
 
 def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
@@ -5218,7 +5214,10 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
     if (type(completion) is not dict or type(executor_task) is not str or
             completion.get('executor_task_id') != executor_task):
         raise ValueError
-    if entry.get('model_observed') != _HIGH_DEBUG_MODEL:
+    model_observed = entry.get('model_observed')
+    if (type(model_observed) is not str or
+            model_observed not in _HIGH_DEBUG_MODELS or
+            model_observed != entry.get('model_requested')):
         raise ValueError
     report = entry.get('report')
     report_sha256 = entry.get('report_sha256')
@@ -5267,7 +5266,7 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     executor_task = getattr(args, 'executor_task', None)
     current_task_id = getattr(args, 'task_id', None)
     try:
-        task_ids = store.task_ids()
+        task_ids = store.completion_d6_task_ids(executor_task)
     except Exception:
         raise LLMToolError(
             f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
@@ -5371,9 +5370,11 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
                  r'/issues/[1-9][0-9]*(?:/comments/[1-9][0-9]*|#issuecomment-[1-9][0-9]*)',
                  ref) is not None)
     if not valid:
-        code = ('DELEGATE_HIGH_DEBUG_REF_INVALID' if ref is not None else
-                'DELEGATE_REPAIR_LIMIT_REACHED')
-        raise LLMToolError(code)
+        if ref is not None:
+            raise LLMToolError(
+                'DELEGATE_HIGH_DEBUG_REF_INVALID: an Issue comment link on this repository '
+                'whose path ends in /issues/N#issuecomment-M or /issues/N/comments/M')
+        raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
     if high_debug_task is None:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_REQUIRED')
     if (type(high_debug_task) is not str or
@@ -5430,8 +5431,13 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
         except Exception:
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
     _registration, snapshot = d6_binding
-    if examined_sha != getattr(snapshot, 'head', None):
-        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID')
+    current_head = getattr(snapshot, 'head', None)
+    if examined_sha != current_head:
+        head_prefix = current_head[:12] if type(current_head) is str else ''
+        examined_prefix = examined_sha[:12] if type(examined_sha) is str else ''
+        raise LLMToolError(
+            f'DELEGATE_HIGH_DEBUG_HEAD_MOVED: a new High Debug must be taken on '
+            f'the current D6 head {head_prefix}; examined SHA {examined_prefix}')
     try:
         store.record_repair_cap_override(
             current_task_id, ref=ref, rounds=max(3, count + 1))
@@ -5505,8 +5511,9 @@ def run_task_delegate(args, *, store=None):
     if args.provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider agy requires --mode direct')
-        if getattr(args, 'owner_ref', None) is None:
-            raise LLMToolError('--provider agy requires --owner-ref')
+        # #785 M18: no owner-ref check here. The repair cap and High Debug
+        # refusals come first; run_task_agy_delegate validates a supplied ref
+        # (None accepted) before any store read or Task mutation.
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         _check_delegate_repair_cap(args, store)
         return run_task_agy_delegate(args, store=store)
@@ -6324,7 +6331,6 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             if receipt_gate is not None:
                 missing.append(receipt_gate)
         else:
-            _reject_invalid_remote_test_config(task, developer['read_paths'])
             tests = task_completion.run_bounded_tests(root=git_evidence['root'],
                 source_sha=developer['source_sha'],
                 result_sha=git_evidence['result_head'], read_paths=developer['read_paths'],

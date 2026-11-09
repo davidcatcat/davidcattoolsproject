@@ -241,6 +241,25 @@ class TaskReviewPromptTests(unittest.TestCase):
         self.assertEqual(output.count('EC2 remote-test: result='), 1)
         self.assertNotIn('PRIVATE-EXCERPT', output)
 
+    def test_codex_prompt_shows_the_hosted_receipt(self):
+        store = FakeStore(provider_profile='claude')
+        accepted = receipt(actions={'run_id': 4567})
+        store.task['remote_test_receipts'] = [
+            accepted,
+            receipt(source_sha=SOURCE, result='FAIL'),
+            receipt(run_id='9' * 32, result='FAIL'),
+            receipt(executor_task='other-d6', result='FAIL'),
+            dict(receipt(result='FAIL'), receipt_digest='0' * 64),
+        ]
+        output = self.codex_prompt(store=store)
+        self.assertIn(
+            'remote-test (GitHub-hosted run 4567): result=PASS, modules=test_task_advance,test_task_review_prompt, '
+            f"tests run=12, seconds=3.5, receipt={accepted['receipt_digest'][:8]}",
+            output.splitlines())
+        self.assertEqual(output.count('remote-test (GitHub-hosted run 4567): result='), 1)
+        self.assertNotIn('EC2 remote-test: result=', output)
+        self.assertNotIn('PRIVATE-EXCERPT', output)
+
     def test_codex_prompt_without_a_usable_receipt_has_the_fixed_line(self):
         unsafe = FakeStore(provider_profile='claude')
         unsafe.task['remote_test_receipts'] = [
@@ -762,7 +781,7 @@ class RealStoreReviewPromptTests(unittest.TestCase):
             self.write_raw(task_id, _json_bytes(record))
 
     def spy_validate(self, *, fail_for=None):
-        def spy(record):
+        def spy(record, *, strict=True):
             self.validated.append(record['task_id'])
             if record['task_id'] == fail_for:
                 raise LLMToolError('synthetic validation failure')

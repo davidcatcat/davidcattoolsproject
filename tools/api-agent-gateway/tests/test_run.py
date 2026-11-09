@@ -237,6 +237,8 @@ class StandaloneTests(unittest.TestCase):
                                   capture_output=True, text=True)
             allowed = {
                 os.path.join(llmtool, 'llmtool', 'developer_routes', 'gw_agent.py'),
+                # This only launches the gateway as a subprocess.
+                os.path.join(llmtool, 'llmtool', 'gw_agent_sessions.py'),
                 os.path.join(llmtool, 'tests', 'test_developer_route_gw_agent.py'),
                 os.path.join(llmtool, 'tests', 'test_gw_agent_route_wiring.py'),
                 # This only names a path string.
