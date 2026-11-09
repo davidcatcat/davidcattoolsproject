@@ -43,16 +43,23 @@ def _make_task_record(task_id, run_id, pm_session_id):
     request = 'Bounded remote test finish task.'
     request_sha = hashlib.sha256(request.encode()).hexdigest()
     task = _record(
-        task_id, run_id, pm_session_id, 'pm-profile', request,
-        state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
-        backend='NO_NATIVE_SESSION_ID_EXPOSED', request_sha=request_sha)
+        task_id, run_id, pm_session_id, 'active-pm-runtime', request,
+        state='PM_RESPONDED', provider_type='active-pm-runtime', model=None,
+        backend='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL', request_sha=request_sha)
+    assignment = {'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                  'goal': 'Produce a proposal diff.',
+                  'acceptance': ['the proposal is recorded']}
     task.update(
-        pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+        pm_route_binding={'type': 'active-pm-runtime', 'model': None,
                           'base_url': None},
-        response='PM returned a bounded task.', error_code=None,
-        pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
-                       'goal': 'Produce a proposal diff.',
-                       'acceptance': ['the proposal is recorded']},
+        response=json.dumps({'schema_version': 1, 'summary': 'bounded',
+                             'developer_assignment': assignment}),
+        usage=None, error_code=None,
+        pm_assignment=assignment,
+        pm_provenance={'source': 'ACTIVE_PM_RUNTIME', 'provider_invoked': False,
+                       'native_session_id_status': 'UNAVAILABLE',
+                       'usage_status': 'UNKNOWN', 'session_restored': False,
+                       'automatic_callback': False},
     )
     return task
 
@@ -370,9 +377,9 @@ class RemoteTestHostedFinishTests(unittest.TestCase):
     def test_missing_actions_block_records_outcome_and_marks_entry_recorded(self):
         self._append_dispatch(NONCE, state='RUN_FOUND', run_id=RUN_ID_INT)
         run = _make_run(RUN_ID_INT, NONCE, status='completed', conclusion='success')
-        # Missing or invalid runner_group causes _hosted_actions_block to return None
-        job = _make_job(JOB_ID_INT, CHECK_RUN_ID_INT, status='completed', conclusion='success',
-                        runner_group_name='')
+        # run_attempt <= 0 causes _hosted_actions_block to return None while _hosted_job succeeds
+        run['run_attempt'] = 0
+        job = _make_job(JOB_ID_INT, CHECK_RUN_ID_INT, status='completed', conclusion='success')
         receipt_dict = _make_receipt_dict('PASS')
         zip_bytes = _make_artifact_zip(receipt_dict)
 
