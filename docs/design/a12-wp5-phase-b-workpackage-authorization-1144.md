@@ -57,12 +57,12 @@ AI conversational text, GitHub comment text, matching the Owner's username, or a
 ### Research Fact A: ChatGPT Confirmations
 - *References*: [OpenAI Developer Mode Guide](https://developers.openai.com/api/docs/guides/developer-mode), [ChatGPT Connectors Documentation](https://help.openai.com/en/articles/11487775-connectors-in-chatgpt).
 - *Observed Behavior*: ChatGPT prompts users to confirm write actions by default, supports saving authorization per conversation, and provides a "Never ask" setting.
-- *Verifiable Limit*: ChatGPT tool calls do not transmit cryptographic proof or signed user confirmation tokens to the target tool server. Therefore, llmtool cannot independently verify whether a human user confirmed an action inside the ChatGPT UI.
+- *Platform Limit*: The cited docs show no signed confirmation evidence reaching the tool server, so a ChatGPT confirmation is not verifiable by llmtool.
 
 ### Research Fact B: GitHub Environment Reviewers
 - *References*: [GitHub REST API Workflow Runs](https://docs.github.com/en/rest/actions/workflow-runs), [GitHub Mobile Deployment Reviews](https://github.blog/changelog/2021-04-01-reviewing-deployments-on-github-mobile).
 - *Observed Behavior*: GitHub Environments with required reviewers block workflow execution until an authorized user approves via web or GitHub Mobile. `GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals` exposes approval status, user login, environment name, and review comments.
-- *Verifiable Limit*: Environment review approvals can also be submitted programmatically through the REST API using any personal access token with appropriate repo scope.
+- *Platform Limit*: An environment approval can also be made through the REST API with the reviewer's token; under #926 decision B it is an accident guard, not proof that a human approved.
 
 ### Trust-Boundary Analysis (#926)
 As established in issue #926 (closed under Owner decision B, issuecomment-6697226334), local agents and llmtool processes execute under the same macOS user account (`uid`) and have local filesystem access to the Owner's GitHub tokens and SSH credentials. Consequently, a GitHub approval submitted by the Owner account serves as an accident and operational guard, not a cryptographic boundary against local processes. Strong identity separation requires completing the Owner/AI account split (#1234) before GitHub approvals can be treated as verifiable human attestations.
@@ -95,10 +95,10 @@ This record grants authority only for its scoped requirement; it is never a blan
 The record interfaces directly with existing codebase functions and fields:
 - `github_identity.py`: Resolves `owner_login()`, `ai_login()`, and config isolation via `ai_gh_config_dir()`.
 - `github_sync_contract.py`: Parses envelopes via `parse_comment()`; validates `SyncMessage` (`request_id`, `revision`, `scope`, `operation`); computes `AuthorityDecision` using `_Authorization` fields.
-- `authorization_policy.py`: Maps work packages into `PolicyContract` (`policy_id`, `task`, `kinds`, `scope`); checks `Requirement` classifications (`NEW_COST`, `NEW_DATA_EGRESS`, `OWNER_P0_*`).
-- `authorization_ledger.py`: Enforces at-most-once execution using `ReceiptBinding` and atomic SQLite state transitions (`BEGIN IMMEDIATE`, `ISSUED` -> `CONSUMED` -> `EFFECT_DONE`).
-- `worker_dispatch.py`: Rereads policies via `_read_policy_file()`; checks dispatch switches (`evaluate()`); verifies `owner_comment_ref()`; logs via `audit_dispatch()`.
-- `task_store.py`: Persists task state and execution audits via `TaskStore` (`TaskBinding`, `dispatch_audit`, `completion`, `pm_assignment`).
+- `authorization_policy.py`: Maps work packages into `PolicyContract` (`policy_id`, `task`, `kinds`, `scope`); defines `ReceiptBinding`; checks `Requirement` classifications (`NEW_COST`, `NEW_DATA_EGRESS`, `OWNER_P0_*`).
+- `authorization_ledger.py`: Enforces at-most-once execution using `ReceiptBinding` (imported from `authorization_policy.py`) and atomic SQLite state transitions (`BEGIN IMMEDIATE`, `ISSUED` -> `CONSUMED` -> `EFFECT_DONE`).
+- `worker_dispatch.py`: Rereads policies via `_read_policy_file()`; checks dispatch switches (`evaluate()`); verifies `owner_comment_ref()`; logs via `audit_entry(decision, action, *, binding=None, authorization_id=None)`.
+- `task_store.py`: Persists task state and execution audits via `TaskStore` (`TaskBinding` imported from `action_contract.py`, `dispatch_audit`, `completion`, `pm_assignment`).
 
 ---
 
