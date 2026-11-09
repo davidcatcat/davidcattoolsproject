@@ -348,6 +348,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             _refuse('REPAIR_COUNT_UNAVAILABLE')
         if type(other_record) is not dict:
             _refuse('REPAIR_COUNT_UNAVAILABLE')
+        if other_record.get('task_id') == task_id:
+            continue
         other_claims = other_record.get('review_repair_claims')
         if type(other_claims) is not list:
             continue

@@ -43,11 +43,14 @@ class TempTaskStore:
         self.root = Path(root)
         self.path = self.root / 'task.json'
         records = record if isinstance(record, (list, tuple)) else [record]
-        for item in records:
-            self._write_record(item)
+        for index, item in enumerate(records):
+            self._write_record(item, is_primary=(index == 0))
 
-    def _write_record(self, item):
-        if isinstance(item, dict) and 'task_id' in item:
+    def _write_record(self, item, is_primary=False):
+        if is_primary:
+            (self.root / 'task.json').write_text(
+                item if isinstance(item, str) else json.dumps(item))
+        elif isinstance(item, dict) and 'task_id' in item:
             (self.root / f"{item['task_id']}.json").write_text(json.dumps(item))
         elif isinstance(item, tuple) and len(item) == 2:
             task_id, content = item
@@ -57,13 +60,23 @@ class TempTaskStore:
             (self.root / 'task.json').write_text(json.dumps(item))
 
     def put(self, item):
-        self._write_record(item)
+        self._write_record(item, is_primary=(isinstance(item, dict) and item.get('task_id') == TASK))
         return item
 
     def task_ids(self):
-        ids = [p.stem for p in sorted(self.root.glob('*.json')) if p.stem != 'task']
-        if not ids and (self.root / 'task.json').exists():
-            return ['task']
+        ids = []
+        if (self.root / 'task.json').exists():
+            try:
+                data = json.loads((self.root / 'task.json').read_text())
+                if isinstance(data, dict) and 'task_id' in data:
+                    ids.append(data['task_id'])
+                else:
+                    ids.append('task')
+            except Exception:
+                ids.append('task')
+        for p in sorted(self.root.glob('*.json')):
+            if p.stem != 'task' and p.stem not in ids:
+                ids.append(p.stem)
         return ids
 
     def get(self, task_id):
@@ -73,7 +86,10 @@ class TempTaskStore:
         fallback = self.root / 'task.json'
         if fallback.exists():
             data = json.loads(fallback.read_text())
-            if isinstance(data, dict) and data.get('task_id') == task_id:
+            if isinstance(data, dict):
+                if data.get('task_id') == task_id or task_id == 'task':
+                    return data
+            elif task_id == 'task':
                 return data
         raise KeyError(task_id)
 
