@@ -4,6 +4,7 @@ Real Git repository and real merge-train records in temporary directories; only
 the GitHub PR snapshots are fakes.
 """
 
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -14,6 +15,9 @@ from unittest.mock import patch
 from llmtool import merge_train
 from llmtool import merge_train_store
 from llmtool import task_advance
+from llmtool import task_drive
+from llmtool import task_submission_cli
+from llmtool.task_store import TaskStore
 
 
 TASK_A = 'a1' * 16

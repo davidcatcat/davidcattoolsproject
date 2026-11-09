@@ -2047,6 +2047,80 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
     return None
 
 
+def _closed_train_member_head(record, task_id, store):
+    """Return matching member head if record has a verified train-closed merge event."""
+    if type(record) is not dict or type(task_id) is not str:
+        return None
+    events = record.get('completion_events')
+    if type(events) is not list or not events:
+        return None
+    task_head = None
+    completion = record.get('completion')
+    if type(completion) is dict:
+        evidence = completion.get('evidence')
+        if type(evidence) is dict:
+            result = evidence.get('result')
+            if type(result) is dict:
+                candidate = result.get('result_head')
+                if type(candidate) is str and _HEX40.fullmatch(candidate):
+                    task_head = candidate
+    if task_head is None:
+        executor_task = (completion or {}).get('executor_task_id')
+        if type(executor_task) is str:
+            try:
+                d6 = _d6_snapshot(record, executor_task)
+                if type(d6) is dict:
+                    candidate = d6.get('result_head')
+                    if type(candidate) is str and _HEX40.fullmatch(candidate):
+                        task_head = candidate
+            except Exception:
+                pass
+    if task_head is None:
+        return None
+    from . import merge_train_store
+    for event in reversed(events):
+        if type(event) is not dict:
+            continue
+        outcome = event.get('outcome') or event.get('state')
+        if outcome != 'MERGED':
+            continue
+        event_type = event.get('event_type') or event.get('type')
+        if event_type is not None and event_type != 'merge':
+            continue
+        source = event.get('source')
+        is_github = source in ('GITHUB', 'github-task-advance') or (
+            type(source) is str and 'github' in source.lower())
+        if not is_github and event_type != 'merge':
+            continue
+        pr = event.get('pr')
+        if type(pr) is not int or not 1 <= pr <= 9999999:
+            pr = event.get('pr_number')
+        if type(pr) is not int or not 1 <= pr <= 9999999:
+            continue
+        merge_sha = event.get('source_sha') or event.get('merge_sha') or event.get('sha')
+        if type(merge_sha) is not str or not _HEX40.fullmatch(merge_sha):
+            continue
+        try:
+            train = merge_train_store.find_by_pr(
+                pr, root=getattr(store, 'root', None))
+        except Exception:
+            # A store read error never yields CLOSED.
+            continue
+        if type(train) is not dict or train.get('state') not in ('MERGED', 'CLOSED'):
+            continue
+        if train.get('train_pr') != pr:
+            continue
+        if train.get('merge_sha') != merge_sha:
+            continue
+        members = train.get('members')
+        if type(members) is not list:
+            continue
+        if any(type(m) is dict and m.get('task_id') == task_id and m.get('head') == task_head
+               for m in members):
+            return task_head
+    return None
+
+
 def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=False,
             reviewer_session_done=False, dispatch_review_call=None,
             record_review_result_call=None, repair_review_call=None,
@@ -2066,6 +2140,12 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     except Exception:
         return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
                 'next': 'REFUSED', 'codes': ['TASK_RECORD_UNAVAILABLE'], 'acked': []}
+    if integration_pr is None:
+        closed_head = _closed_train_member_head(record, task_id, store)
+        if closed_head is not None:
+            return _ack_consumed_events(
+                {'task_id': task_id, 'step': 'CLOSED', 'result': None,
+                 'next': 'CLOSED', 'codes': []}, record, store, closed_head)
     executor_task = (record.get('completion') or {}).get('executor_task_id')
     number = _pr_number(record, pr_number)
     get = task_completion._github_get if github_get is None else github_get
