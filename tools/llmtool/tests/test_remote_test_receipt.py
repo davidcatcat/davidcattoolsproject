@@ -754,9 +754,52 @@ class RemoteTestReceiptTests(unittest.TestCase):
         self.assertEqual(validated["result"], "FAIL")
         self.assertNotEqual(validated["exit_code"], 0)
         self.assertEqual(validated["failures"], ["test_alpha"])
-        self.assertIn(remote_test_receipt.LAUNCH_REASON, validated["final"])
+        self.assertEqual(validated["final"], [remote_test_receipt.LAUNCH_REASON])
         self.assertIn(remote_test_receipt.LAUNCH_REASON, printed)
         self.assertTrue(printed.endswith("FAIL\n"))
+
+    def test_run_tree_unresolvable_writes_null_tree(self):
+        out_dir = self.root / "out-tree-null"
+
+        def success_runner(python, src, module, timeout):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=b"Ran 1 test\nOK\n",
+                stderr=b"",
+                timed_out=False,
+                home=None,
+            )
+
+        def custom_git(cmd):
+            cmd = list(cmd)
+            if "rev-parse" in cmd and "HEAD" in cmd:
+                return SimpleNamespace(returncode=0, stdout=SHA.encode("ascii"), stderr=b"")
+            if "status" in cmd:
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+            if "rev-parse" in cmd and any(arg.endswith("^{tree}") for arg in cmd):
+                return SimpleNamespace(returncode=128, stdout=b"", stderr=b"fatal: bad tree")
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        code, _ = self.invoke(
+            [
+                "run",
+                "--src", str(self.src),
+                "--python", str(self.venv_py),
+                "--out", str(out_dir),
+                "--sha", SHA,
+                "--fetch-head", SHA,
+                "test_alpha",
+            ],
+            runner=success_runner,
+            git=custom_git,
+        )
+
+        self.assertEqual(code, 0)
+        raw = (out_dir / "receipt.json").read_bytes()
+        validated = remote_test._validate_remote_receipt(raw, sha=SHA, modules=("test_alpha",))
+        self.assertIsNotNone(validated)
+        self.assertEqual(validated["result"], "PASS")
+        self.assertIsNone(validated["tree"])
 
     def test_run_module_oserror_on_non_executable_python(self):
         res = remote_test_receipt.run_module(str(self.venv_py), str(self.src), "test_alpha", 120)

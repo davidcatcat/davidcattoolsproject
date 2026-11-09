@@ -244,7 +244,7 @@ def _resolve_tree(src, sha, git=None):
             candidate = stdout.decode("ascii", "replace").strip()
             if _SHA.fullmatch(candidate):
                 return candidate
-    return hashlib.sha1(f"tree {sha}".encode("ascii")).hexdigest()
+    return None
 
 
 def _verify_checkout(src, sha, git_runner):
@@ -464,6 +464,7 @@ def main(argv=None, *, runner=None, clock=None, git=None):
             printed_summaries.append((None, "NO_FINAL"))
             break
         limit = min(_MODULE_TIMEOUT, remaining)
+        launch_failed = False
         try:
             raw_res = execute_module(args.python, args.src, mod, limit)
             returncode, stdout, stderr, timed_out, mod_home = _normalize_run_result(raw_res)
@@ -479,17 +480,22 @@ def main(argv=None, *, runner=None, clock=None, git=None):
             stderr = f"ERROR: {mod}\n{LAUNCH_REASON}\n".encode("utf-8")
             timed_out = False
             mod_home = None
+            launch_failed = True
 
         if mod_home:
             homes.append(mod_home)
         test_output = stdout + stderr
         log += test_output
+        if not launch_failed and stderr == f"ERROR: {mod}\n{LAUNCH_REASON}\n".encode("utf-8"):
+            launch_failed = True
         lines = [
             x.decode("utf8", "replace").strip()
             for x in test_output.splitlines()
             if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x
         ]
         final = final_line(lines)[:512]
+        if launch_failed:
+            final = LAUNCH_REASON
         finals.append(final)
         ran_match = re.search(rb"Ran (\d+) tests?", test_output)
         ran += int(ran_match.group(1)) if ran_match else 0
