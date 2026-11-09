@@ -1217,3 +1217,105 @@ def _hosted_start(store, task_id, task, *, executor_task, sha, ref, modules,
 
     return ('OUTCOME', 'UNAVAILABLE', 'HOSTED_PENDING', nonce)
 
+
+def _hosted_finish(store, task_id, task, run, nonce, *, executor_task, sha, ref, modules,
+                   get=None, get_bytes=None):
+    """Read a found hosted run's job and receipt artifact, fail-closed, and store receipt or outcome."""
+    modules_list = list(modules)
+    if not isinstance(run, dict) or run.get('status') != 'completed':
+        return _record_outcome(store, task_id, task, result='UNAVAILABLE',
+                               code='HOSTED_PENDING', executor_task=executor_task,
+                               sha=sha, modules=modules_list)
+
+    job = _hosted_job(run, get=get)
+    if isinstance(job, dict) and job.get('status') != 'completed':
+        return _record_outcome(store, task_id, task, result='UNAVAILABLE',
+                               code='HOSTED_PENDING', executor_task=executor_task,
+                               sha=sha, modules=modules_list)
+
+    run_id = run.get('id')
+    raw = _hosted_artifact(run_id, nonce, get=get, get_bytes=get_bytes) if isinstance(job, dict) else None
+    outcome = _hosted_outcome(run, job, raw, sha=sha, modules=modules_list)
+
+    if outcome[0] == 'RECEIPT':
+        receipt = outcome[1]
+        actions = _hosted_actions_block(run, job, nonce)
+        if actions is None:
+            out = _record_outcome(store, task_id, task, result='UNKNOWN', code='RECEIPT_INVALID',
+                                  executor_task=executor_task, sha=sha, modules=modules_list)
+            store.update_remote_test_dispatch(task_id, nonce, state='RECORDED')
+            dispatches = task.get('remote_test_dispatches')
+            if isinstance(dispatches, list):
+                for item in dispatches:
+                    if isinstance(item, dict) and item.get('nonce') == nonce:
+                        item['state'] = 'RECORDED'
+                        break
+            return out
+
+        command_digest = _hosted_command_digest(
+            actions['workflow_path'], actions['workflow_sha'],
+            sha=sha, ref=ref, modules=modules_list, nonce=nonce,
+        )
+        stored_receipt = dict(
+            receipt,
+            task_id=task_id,
+            run_id=task['run_id'],
+            executor_task=executor_task,
+            pm_session=task['pm_session_id'],
+            command_digest=command_digest,
+            actions=actions,
+        )
+        stored_receipt['receipt_digest'] = hashlib.sha256(_json_bytes(stored_receipt)).hexdigest()
+        saved = store.append_remote_test_receipt(task_id, stored_receipt)
+        record_remote_test_event(store, task_id, saved)
+        store.update_remote_test_dispatch(task_id, nonce, state='RECORDED')
+        dispatches = task.get('remote_test_dispatches')
+        if isinstance(dispatches, list):
+            for item in dispatches:
+                if isinstance(item, dict) and item.get('nonce') == nonce:
+                    item['state'] = 'RECORDED'
+                    break
+        return saved
+
+    if outcome[0] == 'OUTCOME':
+        _, result, code = outcome
+        out = _record_outcome(store, task_id, task, result=result, code=code,
+                              executor_task=executor_task, sha=sha, modules=modules_list)
+        if code != 'HOSTED_PENDING':
+            store.update_remote_test_dispatch(task_id, nonce, state='RECORDED')
+            dispatches = task.get('remote_test_dispatches')
+            if isinstance(dispatches, list):
+                for item in dispatches:
+                    if isinstance(item, dict) and item.get('nonce') == nonce:
+                        item['state'] = 'RECORDED'
+                        break
+        return out
+
+    out = _record_outcome(store, task_id, task, result='UNKNOWN', code='HOSTED_RUN_UNKNOWN',
+                          executor_task=executor_task, sha=sha, modules=modules_list)
+    store.update_remote_test_dispatch(task_id, nonce, state='RECORDED')
+    return out
+
+
+def _run_hosted(store, task_id, task, *, executor_task, sha, ref, modules,
+                get=None, post=None, get_bytes=None, now=None):
+    """Run one GitHub-hosted remote test step: start dispatch then finish if run is found."""
+    start_res = _hosted_start(
+        store, task_id, task,
+        executor_task=executor_task, sha=sha, ref=ref, modules=modules,
+        get=get, post=post, now=now,
+    )
+    if start_res[0] == 'OUTCOME':
+        _, result, code, _ = start_res
+        return _record_outcome(store, task_id, task, result=result, code=code,
+                               executor_task=executor_task, sha=sha, modules=modules)
+    if start_res[0] == 'RUN':
+        _, run, nonce = start_res
+        return _hosted_finish(
+            store, task_id, task, run, nonce,
+            executor_task=executor_task, sha=sha, ref=ref, modules=modules,
+            get=get, get_bytes=get_bytes,
+        )
+    return _record_outcome(store, task_id, task, result='UNKNOWN', code='HOSTED_RUN_UNKNOWN',
+                           executor_task=executor_task, sha=sha, modules=modules)
+
