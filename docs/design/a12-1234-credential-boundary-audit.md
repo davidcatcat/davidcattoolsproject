@@ -8,7 +8,7 @@
 ---
 
 ## 1. Boundary Goal
-Per the Owner decision:
+Per the Owner text:
 - AI runs never read or use the Owner's GitHub login material, SSH private keys, or other Owner secrets.
 - A separate `GH_CONFIG_DIR` or a different account name alone does not pass.
 - The AI account (`ddavidccatssun`) gets only normal development, PR, and post-approval merge rights.
@@ -19,18 +19,18 @@ Per the Owner decision:
 ## 2. Owner Secret Access Paths Under the Same macOS User
 Under a single macOS user (`uid`), an AI process shares the host environment. The table below lists Owner secret access paths a same-user process can reach.
 
-| Owner Secret Access Path | Why Same `uid` Reaches It | Probe |
-| --- | --- | --- |
-| `gh` default config dir `~/.config/gh` and its keyring entry in the login Keychain | Files under `~/.config/gh/` are owned by the user, and the login Keychain is unlocked for any process running under the same user session. | Check directory existence/readability (`test -d ~/.config/gh`); query existence of `gh` token entry in login Keychain without printing secret. |
-| `GH_TOKEN`, `GITHUB_TOKEN`, and `GH_ENTERPRISE_TOKEN` environment names | Ambient process environment variables are inherited from the launching user shell or session. | Python `name in os.environ` presence check that tests variable names without printing values. |
-| `~/.ssh` | Standard directory mode `0700` permits read and traversal access to the owning `uid`. | Test reachability of the directory as a whole (`test -d ~/.ssh && test -r ~/.ssh`); never list file names. |
-| The ssh-agent socket (`SSH_AUTH_SOCK`, plus macOS launchd agent and ssh config Keychain use) | The UNIX domain socket in `/private/tmp` is owned by `uid`; the launchd user agent and `UseKeychain` in `~/.ssh/config` access unlocked keys. | Execute `ssh-add -l >/dev/null 2>&1` and record only exit code (`0` has keys, `1` none, `2` no agent). |
-| Login Keychain items | The macOS login Keychain automatically unlocks upon user login and permits same-user processes to query items. | Query presence of generic or internet passwords for `github.com` via Keychain services. |
-| Git credential helpers (`osxkeychain`, store file `~/.git-credentials`, `~/.netrc`) | Global Git configuration invokes `osxkeychain`; credential files in the home directory are readable by the owning `uid`. | Inspect `git config --get-all credential.helper`; test file presence (`test -r ~/.git-credentials`, `test -r ~/.netrc`). |
-| Browser sessions signed in to `github.com` (browser automation tools act with those sessions) | Browser cookies, profile directories, and session databases under `~/Library/Application Support/` are readable by the same `uid`. | Test presence of browser profile directories and inspect running processes for active browser instances. |
-| Environments of other same-user processes (ps can show them) | Same-user process listings (`ps -E`, `sysctl`) expose environment blocks of sibling processes running under the same `uid`. | Test inspection of process table environment strings for sibling processes of the same `uid`. |
-| Shell history files | History files (`~/.zsh_history`, `~/.bash_history`) record interactive commands and potential inline secrets, readable by the user. | Test existence and readability of history files (`test -r ~/.zsh_history`, `test -r ~/.bash_history`). |
-| AI tool config dirs | Configuration paths (`~/.config/llmtool`, `~/.gemini`, etc.) reside in the user's home directory and are readable by default. | Test existence and permissions of AI tool configuration directories (`test -d ~/.config/llmtool`). |
+| Owner Secret Access Path | Why Same `uid` Reaches It | Probe | Class |
+| --- | --- | --- | --- |
+| `gh` default config dir `~/.config/gh` and its keyring entry in the login Keychain | Files under `~/.config/gh/` are owned by the user, and the login Keychain is unlocked for any process running under the same user session. | Check directory existence/readability (`test -d ~/.config/gh`); query existence of `gh` token entry in login Keychain without printing secret. | O |
+| `GH_TOKEN`, `GITHUB_TOKEN`, and `GH_ENTERPRISE_TOKEN` environment names | Ambient process environment variables are inherited from the launching user shell or session. | Python `name in os.environ` presence check that tests variable names without printing values. | M |
+| `~/.ssh` | Standard directory mode `0700` permits read and traversal access to the owning `uid`. | Test reachability of the directory as a whole (`test -d ~/.ssh && test -r ~/.ssh`); never list file names. | M |
+| The ssh-agent socket (`SSH_AUTH_SOCK`, plus macOS launchd agent and ssh config Keychain use) | The UNIX domain socket in `/private/tmp` is owned by `uid`; the launchd user agent and `UseKeychain` in `~/.ssh/config` access unlocked keys. | `ssh-add -l >/dev/null 2>&1` with all output discarded and only exit code kept (`0` has keys, `1` none, `2` no agent). | M |
+| Login Keychain items | The macOS login Keychain automatically unlocks upon user login and permits same-user processes to query items. | Query presence of generic or internet passwords for `github.com` via Keychain services without printing values. | O |
+| Git credential helpers (`osxkeychain`, store file `~/.git-credentials`, `~/.netrc`) | Global Git configuration invokes `osxkeychain`; credential files in the home directory are readable by the owning `uid`. | Inspect helper presence reduced to yes/no (`git config --get-all credential.helper >/dev/null` exit code check); file presence check (`test -r ~/.git-credentials`, `test -r ~/.netrc`). | M |
+| Browser sessions signed in to `github.com` (browser automation tools act with those sessions) | Browser cookies, profile directories, and session databases under `~/Library/Application Support/` are readable by the same `uid`. | Query active browser process and profile session state for `github.com` without reading or extracting session tokens. | O |
+| Environments of other same-user processes (`ps` can show them) | Same-user process listings (`ps -E`, `sysctl`) expose environment blocks of sibling processes running under the same `uid`. | Inspect sibling process table environment blocks for secret names; reading process environment strings is forbidden for AI. | O |
+| Shell history files | History files (`~/.zsh_history`, `~/.bash_history`) record interactive commands and potential inline secrets, readable by the user. | Test existence and readability of history files (`test -r ~/.zsh_history`, `test -r ~/.bash_history`) without printing contents. | M |
+| AI tool config dirs | Configuration paths (`~/.config/llmtool`, `~/.gemini`, etc.) reside in the user's home directory and are readable by default. | Test existence and permissions of AI tool configuration directories (`test -d ~/.config/llmtool`) without printing contents. | M |
 
 ---
 
@@ -49,13 +49,13 @@ Under a single macOS user (`uid`), an AI process shares the host environment. Th
 - Keep every probe output inside the local run; publish only the probe ID, class, and exit code.
 - Each probe is run twice:
   1. In the current AI runtime.
-  2. Under `llmtool_identity.ai_github_env` (`tools/llmtool/llmtool/github_identity.py`).
-- **Meaning of Results**: The first run reveals ambient Owner secret exposure in the current execution context. The second run under `ai_github_env` verifies that child environment scrubbing drops `GH_`, `GITHUB_`, `SSH_`, and Git config variables; if a probe still reaches an asset under `ai_github_env` (e.g. Keychain, filesystem paths, or socket), it demonstrates that environment variable scrubbing alone does not prevent access.
+  2. Under `github_identity.ai_github_env` (`tools/llmtool/llmtool/github_identity.py`).
+- **Meaning of Results**: The first run reveals ambient Owner secret exposure in the current execution context. The second run under `github_identity.ai_github_env` verifies that child environment scrubbing drops `GH_`, `GITHUB_`, `SSH_`, and Git config variables; if a probe still reaches an asset under `github_identity.ai_github_env` (e.g., Keychain, filesystem paths, or socket), it demonstrates that environment variable scrubbing alone does not prevent access.
 
 ---
 
 ## 4. Finding Stated Plainly
-Under one macOS `uid`, file mode bits, the login Keychain, the ssh-agent socket, and process environments are all shared, so same-user isolation cannot be proven by settings alone. The helper `ai_github_env` only scrubs `GH_`, `GITHUB_`, `SSH_`, and git config variables for child processes, which is an accident guard (#926 decision B), not a boundary.
+Under one macOS `uid`, file mode bits, the login Keychain, the ssh-agent socket, and process environments are all shared, so same-user isolation cannot be proven by settings alone; `ai_github_env` only scrubs `GH_`, `GITHUB_`, `SSH_`, and git config variables for child processes, which is an accident guard (#926 decision B), not a boundary.
 
 ---
 
@@ -75,24 +75,25 @@ Under one macOS `uid`, file mode bits, the login Keychain, the ssh-agent socket,
 
 ---
 
-## 6. Owner steps (the Owner runs these; AI never does)
-Option A is entirely an Owner action. The Owner runs these steps manually; AI never does.
-1. Invite `ddavidccatssun` as Write collaborator (web, davidcatcat settings) and accept it as `ddavidccatssun`.
-2. `GH_CONFIG_DIR=$HOME/.config/gh-ai gh auth login --hostname github.com --git-protocol https --web` while signed in to the web as `ddavidccatssun`.
-3. `gh auth logout --hostname github.com --user davidcatcat`
-4. `ssh-add -D` to empty the agent, then remove davidcatcat SSH keys from this user or from the davidcatcat GitHub account.
-5. `security delete-internet-password -s github.com` repeated until it reports none, or delete the github.com items in Keychain Access.
-6. Sign davidcatcat out of github.com in every browser on this user.
-7. Revoke the old gh OAuth grant in davidcatcat settings.
+## 6. Owner Steps (the Owner runs these; AI never does)
+The Owner runs these steps manually; AI never does:
+1. Invite `ddavidccatssun` as Write collaborator and accept it.
+2. `GH_CONFIG_DIR=$HOME/.config/gh-ai gh auth login --hostname github.com --git-protocol https --web` signed in on the web as `ddavidccatssun`, with the `workflow` scope (needed for `.github/workflows` PRs, #1333 lesson).
+3. The PM switches llmtool and PM GitHub writes to the `gh-ai` config and verifies it (`gh api user` shows the AI login; a PR, comment, and `task advance` merge work), since today they run as `davidcatcat`; only then:
+4. `gh auth logout --hostname github.com --user davidcatcat`
+5. `ssh-add -D` and remove `davidcatcat` SSH keys.
+6. `security delete-internet-password -s github.com` until none.
+7. Browser sign-out of `github.com`.
+8. Revoke the old `gh` OAuth grant in `davidcatcat` settings.
 
-AI never sees a code, key or secret.
+Where the Owner still uses `davidcatcat` after the change: GitHub Mobile on the phone and a browser outside this macOS user (or a separate macOS user), never this user. AI never sees a code, key or secret.
 
 ---
 
 ## 7. Isolation Acceptance Checklist
 Run after the Owner steps:
 - [ ] All Class M probes show no Owner path reachable.
-- [ ] `gh api user` under the AI env returns the AI login `ddavidccatssun` (a login is not a secret).
+- [ ] `gh api user` under the AI env returns the AI login (`ddavidccatssun`; a login is not a secret).
 - [ ] A negative test where the AI account tries to approve an owner-approval environment deployment is refused.
 - [ ] An Owner-run Keychain and browser check is recorded by the PM as relayed.
 - [ ] Only then may Phase B formal authorization be enabled.
