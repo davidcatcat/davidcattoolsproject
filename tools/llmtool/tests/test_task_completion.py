@@ -6567,5 +6567,10 @@ class CompletionAttributedPathsStoreTests(unittest.TestCase):
         self.assertNotIn(scratch, result['changed_paths'])
 
 
+class CompletionTestTimeoutTests(unittest.TestCase):
+    def test_registered_test_timeout_is_300_seconds(self):
+        self.assertEqual(task_completion._TEST_TIMEOUT, 300)
+
+
 if __name__ == '__main__':
     unittest.main()
