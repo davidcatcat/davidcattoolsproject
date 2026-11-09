@@ -9,12 +9,28 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml"
 
 EXPECTED_JOB_NAME = "check (macOS 3.13)"
+EXPECTED_SELECT_JOB_NAME = "select"
 EXPECTED_RUNS_ON = (
     "${{ github.event_name == 'pull_request' && "
     "!contains(github.event.pull_request.labels.*.name, 'mac-ci-intel') && "
     "'macos-15' || 'macos-15-intel' }}"
 )
 EXPECTED_IF = (
+    "vars.HOSTED_CI_ENABLED == 'true' && "
+    "(github.event_name != 'pull_request' || "
+    "contains(github.event.pull_request.labels.*.name, 'mac-ci')) && "
+    "(github.event.action != 'labeled' || "
+    "github.event.label.name == 'mac-ci' || "
+    "github.event.label.name == 'mac-ci-intel')"
+)
+EXPECTED_CHECK_RUNS_ON = (
+    "${{ github.event_name == 'pull_request' && "
+    "!contains(github.event.pull_request.labels.*.name, 'mac-ci-intel') && "
+    "needs.select.outputs.mode != 'full' && "
+    "'macos-15' || 'macos-15-intel' }}"
+)
+EXPECTED_CHECK_IF = (
+    "always() && "
     "vars.HOSTED_CI_ENABLED == 'true' && "
     "(github.event_name != 'pull_request' || "
     "contains(github.event.pull_request.labels.*.name, 'mac-ci')) && "
@@ -43,7 +59,7 @@ def evaluate_if(
     action: str | None = None,
     label_name: str | None = None,
 ) -> bool:
-    """Evaluate if condition matching the check job if in llmtool-mac-ci.yml.
+    """Evaluate if condition matching the select job if in llmtool-mac-ci.yml.
 
     Expression:
     vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci' || github.event.label.name == 'mac-ci-intel')
@@ -71,17 +87,25 @@ class MacCIRunnerSelectionTests(unittest.TestCase):
     def test_workflow_exact_strings_and_job_name(self):
         workflow = self._load_workflow()
         self.assertIn("jobs", workflow)
+        self.assertIn("select", workflow["jobs"])
         self.assertIn("check", workflow["jobs"])
-        job = workflow["jobs"]["check"]
 
-        self.assertEqual(job.get("name"), EXPECTED_JOB_NAME)
-        self.assertEqual(job.get("runs-on"), EXPECTED_RUNS_ON)
-        self.assertEqual(job.get("if"), EXPECTED_IF)
+        select_job = workflow["jobs"]["select"]
+        self.assertEqual(select_job.get("name"), EXPECTED_SELECT_JOB_NAME)
+        self.assertEqual(select_job.get("runs-on"), EXPECTED_RUNS_ON)
+        self.assertEqual(select_job.get("if"), EXPECTED_IF)
+
+        check_job = workflow["jobs"]["check"]
+        self.assertEqual(check_job.get("name"), EXPECTED_JOB_NAME)
+        self.assertEqual(check_job.get("runs-on"), EXPECTED_CHECK_RUNS_ON)
+        self.assertEqual(check_job.get("if"), EXPECTED_CHECK_IF)
 
     def test_workflow_text_contains_expressions(self):
         workflow_text = WORKFLOW_PATH.read_text(encoding="utf-8")
         self.assertIn(EXPECTED_RUNS_ON, workflow_text)
         self.assertIn(EXPECTED_IF, workflow_text)
+        self.assertIn(EXPECTED_CHECK_RUNS_ON, workflow_text)
+        self.assertIn(EXPECTED_CHECK_IF, workflow_text)
 
     def test_evaluate_runner_cases(self):
         # Case 1: pull_request with labels [mac-ci] gives macos-15

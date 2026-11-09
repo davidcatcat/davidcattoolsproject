@@ -533,8 +533,8 @@ class SourceRevisionLooseMergeTests(unittest.TestCase):
         return [textwrap.dedent(m.group("script")) for m in pattern.finditer(workflow)]
 
     def test_extracted_script_counts(self):
-        # One Source revision step in Mac workflow, three in Linux workflow.
-        self.assertEqual(len(self.mac_scripts), 1)
+        # Two Source revision steps in Mac workflow (check and shards), three in Linux workflow.
+        self.assertEqual(len(self.mac_scripts), 2)
         self.assertEqual(len(self.linux_scripts), 3)
 
     def test_text_requirements_in_extracted_scripts(self):
