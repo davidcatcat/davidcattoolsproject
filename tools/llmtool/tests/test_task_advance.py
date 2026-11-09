@@ -4266,7 +4266,7 @@ class MergeNewerClaimVetoTests(unittest.TestCase):
 
 
 class ScriptsOnlyCiTests(unittest.TestCase):
-    """#1139: a scripts/-only PR needs no Linux job; macOS stays required."""
+    """#1208: a scripts/-only PR requires Linux CI and macOS CI like any code PR."""
 
     PR = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'mergeable': True}
 
@@ -4284,18 +4284,21 @@ class ScriptsOnlyCiTests(unittest.TestCase):
 
     def test_merge_and_review_ci_rules_by_changed_paths(self):
         scripts = ['scripts/llmtool_monitor.py', 'scripts/tool.sh']
-        mac = ['check (macOS 3.13)']
+        code_checks = ['check (Linux 3.14)', 'check (macOS 3.13)']
         cases = (
-            ('scripts only with macOS', scripts, mac, 'success', None, (None, None)),
+            ('scripts only with Linux and macOS', scripts, code_checks, 'success',
+             None, (None, None)),
             ('scripts only without checks', scripts, [], 'success',
-             'MERGE_CHECKS_MISSING', (None, None)),
+             'MERGE_CHECKS_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
             ('scripts only with Linux only', scripts, ['check (Linux 3.14)'], 'success',
              'MERGE_REQUIRED_CHECK_MISSING', (None, None)),
-            ('scripts only with skipped macOS', scripts, mac, 'skipped',
-             'MERGE_MACOS_CHECK_REQUIRED', (None, None)),
-            ('one other path', scripts + ['src/module.py'], mac, 'success',
+            ('scripts only with macOS only', scripts, ['check (macOS 3.13)'], 'success',
              'MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
-            ('docs only', ['docs/guide.md'], mac, 'success',
+            ('scripts only with skipped checks', scripts, code_checks, 'skipped',
+             'MERGE_REQUIRED_CHECK_SKIPPED', ('CI_FAILED', 'LINUX_CI_FAILED')),
+            ('one other path', scripts + ['src/module.py'], ['check (macOS 3.13)'], 'success',
+             'MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
+            ('docs only', ['docs/guide.md'], ['check (macOS 3.13)'], 'success',
              'MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')),
         )
         for label, paths, names, conclusion, merge_code, review in cases:
@@ -4304,9 +4307,15 @@ class ScriptsOnlyCiTests(unittest.TestCase):
                 self.assertEqual(task_advance._merge_checks({}, 17, HEAD, self.PR, get),
                                  merge_code)
                 self.assertEqual(task_advance._review_ci_gate(17, HEAD, get), review)
-        self.assertTrue(task_advance._scripts_only_ci(scripts))
-        for paths in ([], ['scripts'], ['tools/scripts/a.py'], [None]):
-            self.assertFalse(task_advance._scripts_only_ci(paths))
+
+    def test_review_of_scripts_only_pr_waits_for_exact_head_linux_check(self):
+        scripts = ['scripts/llmtool_monitor.py', 'scripts/tool.sh']
+        get_waiting = self.reader(scripts, ['check (macOS 3.13)'], 'success')
+        self.assertEqual(task_advance._review_ci_gate(17, HEAD, get_waiting),
+                         ('WAITING_CI', 'LINUX_CI_PENDING'))
+        get_ready = self.reader(scripts, ['check (Linux 3.14)'], 'success')
+        self.assertEqual(task_advance._review_ci_gate(17, HEAD, get_ready),
+                         (None, None))
 
 
 class IntegrationDeltaRealGitTests(unittest.TestCase):
