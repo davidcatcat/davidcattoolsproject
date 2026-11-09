@@ -50,12 +50,25 @@ Submit one consolidated exact-SHA candidate to a qualified, authorized formal Re
 
 After review and exact-head CI pass, reconcile the tested SHA against the current target, assess integration changes, and merge only when every task-required gate passes under [safe-git](../safe-git/SKILL.md). A relevant source change invalidates affected checks and review.
 
+**Owner acceptance is a separate gate (#1208).** Owner product acceptance and formal cross-family review are two independent gates. When a Task needs Owner acceptance, its PR needs both, plus exact-head CI. A relayed Owner acceptance never replaces formal review or CI, and a formal PASS never replaces Owner acceptance. #888 is the case that must not repeat.
+
 **Company LLM Developer route:** Follow the authority, eligible task scope, privacy, execution and acceptance requirements in [AGENTS.md](../../AGENTS.md). A `gw` assignment is not evidence of live dispatch, patch application, full formal review or Task closure. Do not claim quality or net savings from one trial.
 
 <a id="p0--sole-owner-escalation-rule-owner-decision-2026-10-10"></a>
 ### P0 owner escalation pointer (current in AGENTS)
 
 Current Owner escalation is defined in [AGENTS.md](../../AGENTS.md); see the [normative defect triage reference](defect-triage.md) for issue disposition.
+
+## Test data rule (Owner #763 A, 2026-11-08)
+
+[Owner decision, relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6717848625). The rule binds every Developer route: Claude Developer, AGY, OpenCode, Codex (including repair runs), company `gw` and `gw-agent`. It also binds every Developer spec the PM writes. llmtool adds the same rule text to each route's prompt.
+
+1. Ordinary tests never contain password-, API-key-, token- or other credential-shaped strings.
+2. A test of a refusal flow uses mock, monkeypatch or dependency injection of the screen function, and still checks the real behaviour.
+3. Only tests of the sensitive detector itself may use the #763/#981 synthetic-data exception: labelled synthetic, independently reviewed, never real credentials. See [Sensitive-screen refusals](pm-continuation.md#sensitive-screen-refusals-owner-2026-11-05-981).
+4. Never disable, bypass or weaken a production check for test convenience.
+
+For what to do when the screen refuses a Task, see [Sensitive-screen refusals](pm-continuation.md#sensitive-screen-refusals-owner-2026-11-05-981).
 
 ## Defect triage and repair bounds
 

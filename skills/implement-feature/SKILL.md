@@ -37,6 +37,7 @@ Deliver a working change, not just code generation.
 - Prefer the smallest correct implementation.
 - Do not add speculative features.
 - Do not weaken tests to obtain a green build.
+- Follow the [test data rule](../ai-team-delivery/SKILL.md#test-data-rule-owner-763-a-2026-11-08) (Owner #763 A) in every test you write.
 - Preserve unrelated work.
 - Provider or agent integration must not treat technical capability as permission to execute actions.
 - Do not add execution before the affected workflow has a diagnosable failure path. New mutations should emit enough structured diagnostics/audit evidence to identify what ran, what failed, and why without exposing secrets.
