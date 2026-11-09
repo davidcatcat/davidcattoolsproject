@@ -195,12 +195,6 @@ def _is_other_tool_markdown(path: str) -> bool:
     return True
 
 
-_other_tool_markdown = _is_other_tool_markdown
-_other_tool_md = _is_other_tool_markdown
-_is_other_tool_md = _is_other_tool_markdown
-is_other_tool_markdown = _is_other_tool_markdown
-
-
 def select_test_ids(
     changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT,
     rejection_reasons: list[str] | None = None,
