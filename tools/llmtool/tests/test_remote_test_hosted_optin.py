@@ -295,8 +295,7 @@ class RemoteTestHostedOptinTests(unittest.TestCase):
         with patch.object(remote_test, 'read_d6_registration',
                           return_value=SimpleNamespace(result_sha=SHA)), \
              patch.object(remote_test, '_config', return_value=config_val), \
-             patch.object(remote_test, '_run_hosted',
-                          side_effect=AssertionError('_run_hosted must not be called when hosted=False')):
+             patch.object(remote_test, '_run_hosted') as mock_run_hosted:
             res_explicit = remote_test.run_remote_test(
                 TASK_ID,
                 executor_task=EXECUTOR_TASK,
@@ -320,16 +319,21 @@ class RemoteTestHostedOptinTests(unittest.TestCase):
             )
             self.assertEqual(res_default.get('result'), 'PASS')
 
-        self.assertEqual(len(transport_called), 2)
+        mock_run_hosted.assert_not_called()
+        self.assertEqual(mock_run_hosted.call_count, 0)
 
     def test_cli_parser_remote_test_help_and_hosted_flag(self):
         parser = argparse.ArgumentParser()
         actions = parser.add_subparsers(dest='subcommand')
         task_submission_cli.add_task_submission_parsers(actions)
 
+        parent_help = parser.format_help()
+        self.assertIn('unless --hosted', parent_help)
+
         remote_test_parser = actions.choices['remote-test']
         sub_help = remote_test_parser.format_help()
-        self.assertIn('EC2 unless --hosted is given', sub_help)
+        self.assertIn('--hosted', sub_help)
+        self.assertIn('run on the GitHub-hosted workflow instead of EC2', sub_help)
 
         hosted_action = next((a for a in remote_test_parser._actions if '--hosted' in a.option_strings), None)
         self.assertIsNotNone(hosted_action)
@@ -352,8 +356,9 @@ class RemoteTestHostedOptinTests(unittest.TestCase):
         with patch('llmtool.remote_test.run_remote_test') as mock_run:
             mock_run.return_value = {'result': 'PASS'}
             out = io.StringIO()
-            code = task_submission_cli.run_task_remote_test(args, store=self.store, stdout=out)
-            self.assertEqual(code, 0)
+            res = task_submission_cli.run_task_remote_test(args, store=self.store, stdout=out)
+            self.assertIsNone(res)
+            self.assertEqual(json.loads(out.getvalue()), {'result': 'PASS'})
             mock_run.assert_called_once_with(
                 TASK_ID,
                 executor_task=EXECUTOR_TASK,
@@ -381,8 +386,9 @@ class RemoteTestHostedOptinTests(unittest.TestCase):
         with patch('llmtool.remote_test.run_remote_test') as mock_run:
             mock_run.return_value = {'result': 'PASS'}
             out = io.StringIO()
-            code = task_submission_cli.run_task_remote_test(args, store=self.store, stdout=out)
-            self.assertEqual(code, 0)
+            res = task_submission_cli.run_task_remote_test(args, store=self.store, stdout=out)
+            self.assertIsNone(res)
+            self.assertEqual(json.loads(out.getvalue()), {'result': 'PASS'})
             mock_run.assert_called_once_with(
                 TASK_ID,
                 executor_task=EXECUTOR_TASK,
