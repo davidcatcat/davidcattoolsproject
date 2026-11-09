@@ -5,9 +5,15 @@ from contextlib import redirect_stdout
 import copy
 import io
 import json
+import os
 from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -663,11 +669,237 @@ class MacTestIdSelectionTests(unittest.TestCase):
         self.assertIn('"$test_id" 2>&1 | tee "$output"', workflow)
         self.assertIn("while IFS= read -r test_id <&3; do", workflow)
         self.assertIn('done 3< "$RUNNER_TEMP/mac-test-ids" < /dev/null', workflow)
-        self.assertIn("status=${PIPESTATUS[0]}", workflow)
+        self.assertIn('pipe_status=("${PIPESTATUS[@]}")', workflow)
         self.assertIn("canonical exact HEAD:", workflow)
         self.assertIn("canonical test ID elapsed seconds:", workflow)
         self.assertIn("canonical unittest test-case count:", workflow)
         self.assertIn("verify=true", workflow)
+
+
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml"
+CANONICAL_STEP = "Offline canonical checks"
+MODE_EXPRESSION = "${{ steps.coverage.outputs.mode }}"
+STEP_LIMIT = "${{ steps.coverage.outputs.mode == 'full' && 110 || 45 }}"
+# Synthetic commit id for the fake git; not a real revision.
+SYNTHETIC_HEAD = "f" * 40
+# Shared body of the fake test commands. FAKE_STARTED makes the command
+# slow (it marks that it started, then sleeps); FAKE_RAN lists the counts
+# for the "Ran N tests" lines; FAKE_STATUS is the exit status.
+FAKE_RUN = r"""if [ -n "$FAKE_STARTED" ]; then
+  : > "$FAKE_STARTED"
+  sleep 120
+fi
+for count in $FAKE_RAN; do
+  printf 'synthetic_case (test_synthetic.SyntheticTests) ... ok\n\nRan %s tests in 0.001s\n\nOK\n' "$count"
+done
+exit "${FAKE_STATUS:-0}"
+"""
+FAKE_TOOLS = {
+    "make": "#!/bin/sh\n# Synthetic make: the syntax target passes.\n"
+            'if [ "$3" = syntax ]; then exit 0; fi\n' + FAKE_RUN,
+    "python3": "#!/bin/sh\n# Synthetic test runner.\n" + FAKE_RUN,
+    "git": "#!/bin/sh\n# Synthetic git: answers rev-parse HEAD only.\n"
+           '[ "$1 $2" = "rev-parse HEAD" ] || exit 2\n'
+           f"echo {SYNTHETIC_HEAD}\n",
+}
+# Installed only when a test asks for it: records and prints its input,
+# then fails with FAKE_TEE_STATUS.
+FAKE_TEE = ("#!/bin/sh\n# Synthetic tee that fails after it records its input.\n"
+            'cat > "$1"\ncat "$1"\nexit "$FAKE_TEE_STATUS"\n')
+SUBSET_IDS = ("test_alpha.AlphaTests", "test_beta")
+REPORT_BLOCK = re.compile(
+    r"^canonical exact HEAD: (.*)\n"
+    r"canonical unittest test-case count: (\d+)\n"
+    r"canonical elapsed seconds: (\d+)\n"
+    r"canonical result: (\w+)$",
+    re.MULTILINE,
+)
+
+
+def workflow_step(name):
+    """Return the raw lines of one check-job step, found by its name."""
+    lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
+    start = lines.index(f"      - name: {name}")
+    end = start + 1
+    while end < len(lines) and (not lines[end].strip()
+                                or lines[end].startswith(" " * 8)):
+        end += 1
+    return lines[start:end]
+
+
+def canonical_script():
+    """Return the run script of the canonical step, as GitHub passes it."""
+    step = workflow_step(CANONICAL_STEP)
+    body = []
+    for line in step[step.index("        run: |") + 1:]:
+        if line.strip() and not line.startswith(" " * 10):
+            break
+        body.append(line[10:])
+    return "\n".join(body).rstrip("\n") + "\n"
+
+
+class CanonicalStepStructureTests(unittest.TestCase):
+    def test_script_sets_pass_only_on_its_last_line_with_one_exit_trap(self):
+        script = canonical_script()
+        lines = [line.strip() for line in script.splitlines() if line.strip()]
+        commands = [line for line in lines if not line.startswith("#")]
+        self.assertEqual(lines[-1], "result=PASS")
+        self.assertEqual(sum("result=PASS" in line for line in lines), 1)
+        self.assertLess(commands.index("result=INCOMPLETE"),
+                        commands.index("trap report_result EXIT"))
+        self.assertIn("test_count=0", commands)
+        traps = [line for line in commands if re.search(r"\btrap\b", line)]
+        self.assertEqual(traps, ["trap report_result EXIT"])
+        self.assertIn('echo "::error::canonical checks ran no test cases"', commands)
+
+    def test_job_limit_is_120_and_only_canonical_step_has_a_mode_limit(self):
+        lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
+        limits = [line for line in lines if line.strip().startswith("timeout-minutes:")]
+        self.assertEqual(limits, [
+            "    timeout-minutes: 120",
+            f"        timeout-minutes: {STEP_LIMIT}",
+        ])
+        job = lines.index("  check:")
+        steps = lines.index("    steps:")
+        self.assertTrue(job < lines.index(limits[0]) < steps)
+        self.assertIn(limits[1], workflow_step(CANONICAL_STEP))
+
+
+@unittest.skipUnless(os.name == "posix", "the step script runs under POSIX bash")
+class CanonicalStepRunTests(unittest.TestCase):
+    """Run the real canonical step script with fake make, python3 and git."""
+
+    def run_step(self, mode, *, ran="2 3", status=0, terminate=False, tee_status=None):
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "bash is required on POSIX systems")
+        script = canonical_script()
+        self.assertEqual(script.count(MODE_EXPRESSION), 1)
+        script = script.replace(MODE_EXPRESSION, mode)
+        self.assertNotIn("${{", script)
+        tools = dict(FAKE_TOOLS)
+        if tee_status is not None:
+            tools["tee"] = FAKE_TEE
+        with tempfile.TemporaryDirectory(prefix="mac-ci-step-") as temporary:
+            root = Path(temporary)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            for name, body in tools.items():
+                tool = bin_dir / name
+                tool.write_text(body, encoding="utf-8")
+                tool.chmod(0o755)
+            (root / "mac-test-ids").write_text(
+                "".join(f"{test_id}\n" for test_id in SUBSET_IDS), encoding="utf-8")
+            script_path = root / "step.sh"
+            script_path.write_text(script, encoding="utf-8")
+            started = root / "started"
+            env = {
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
+                "HOME": str(root),
+                "RUNNER_TEMP": str(root),
+                "JOB_PYTHON": "python3",
+                "FAKE_RAN": ran,
+                "FAKE_STATUS": str(status),
+            }
+            if terminate:
+                env["FAKE_STARTED"] = str(started)
+            if tee_status is not None:
+                env["FAKE_TEE_STATUS"] = str(tee_status)
+            output_path = root / "output"
+            with output_path.open("wb") as output:
+                process = subprocess.Popen(
+                    [bash, "--noprofile", "--norc", "-eo", "pipefail", str(script_path)],
+                    cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=output,
+                    stderr=subprocess.STDOUT, start_new_session=True,
+                )
+            try:
+                if terminate:
+                    deadline = time.monotonic() + 30
+                    while not started.exists():
+                        if process.poll() is not None or time.monotonic() > deadline:
+                            self.fail("the slow fake command did not start")
+                        time.sleep(0.05)
+                    os.kill(process.pid, signal.SIGTERM)
+                    try:
+                        returncode = process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        self.fail("the step shell did not exit promptly after SIGTERM")
+                else:
+                    returncode = process.wait(timeout=60)
+            finally:
+                # The slow fake command outlives the shell; stop the whole group.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    # The group is already gone (macOS may report EPERM).
+                    pass
+                process.wait(timeout=10)
+            text = output_path.read_text(encoding="utf-8", errors="replace")
+        return returncode, text
+
+    def report(self, text):
+        blocks = REPORT_BLOCK.findall(text)
+        self.assertEqual(len(blocks), 1, text)
+        self.assertEqual(text.count("canonical result:"), 1, text)
+        head, count, _elapsed, result = blocks[0]
+        self.assertEqual(head, SYNTHETIC_HEAD)
+        return int(count), result
+
+    def test_pass_sums_counts_in_both_modes(self):
+        # Each fake run prints "Ran 2" and "Ran 3"; the subset runs two IDs.
+        for mode, expected in (("full", 5), ("mac-subset", 10)):
+            with self.subTest(mode=mode):
+                returncode, text = self.run_step(mode)
+                self.assertEqual(returncode, 0, text)
+                self.assertEqual(self.report(text), (expected, "PASS"))
+                self.assertNotIn("::error::", text)
+                if mode == "mac-subset":
+                    for test_id in SUBSET_IDS:
+                        self.assertRegex(text, re.compile(
+                            rf"^canonical test ID: {re.escape(test_id)}\n"
+                            r"canonical test ID elapsed seconds: \d+$", re.MULTILINE))
+
+    def test_failing_command_reports_fail_with_its_own_status(self):
+        for mode in ("full", "mac-subset"):
+            with self.subTest(mode=mode):
+                returncode, text = self.run_step(mode, status=3)
+                self.assertEqual(returncode, 3, text)
+                self.assertEqual(self.report(text), (5, "FAIL"))
+                if mode == "mac-subset":
+                    self.assertIn(f"canonical test ID: {SUBSET_IDS[0]}\n", text)
+                    self.assertNotIn(f"canonical test ID: {SUBSET_IDS[1]}\n", text)
+
+    def test_failing_tee_is_not_a_pass(self):
+        # The fake tee records the "Ran N tests" lines and then fails.
+        for mode in ("full", "mac-subset"):
+            with self.subTest(mode=mode, command_status=0):
+                returncode, text = self.run_step(mode, tee_status=4)
+                self.assertEqual(returncode, 4, text)
+                self.assertEqual(self.report(text), (5, "FAIL"))
+                if mode == "mac-subset":
+                    self.assertIn(f"canonical test ID: {SUBSET_IDS[0]}\n", text)
+                    self.assertNotIn(f"canonical test ID: {SUBSET_IDS[1]}\n", text)
+            with self.subTest(mode=mode, command_status=3):
+                # When both fail, the step exits with the command's own status.
+                returncode, text = self.run_step(mode, status=3, tee_status=4)
+                self.assertEqual(returncode, 3, text)
+                self.assertEqual(self.report(text), (5, "FAIL"))
+
+    def test_zero_test_cases_is_not_a_pass(self):
+        for mode in ("full", "mac-subset"):
+            for ran in ("0", ""):
+                with self.subTest(mode=mode, ran=ran):
+                    returncode, text = self.run_step(mode, ran=ran)
+                    self.assertEqual(returncode, 1, text)
+                    self.assertEqual(self.report(text), (0, "FAIL"))
+                    self.assertIn("::error::canonical checks ran no test cases", text)
+
+    def test_sigterm_during_slow_command_is_not_a_pass(self):
+        for mode in ("full", "mac-subset"):
+            with self.subTest(mode=mode):
+                returncode, text = self.run_step(mode, terminate=True)
+                self.assertNotEqual(returncode, 0, text)
+                _count, result = self.report(text)
+                self.assertIn(result, ("INCOMPLETE", "FAIL"))
 
 
 if __name__ == "__main__":
