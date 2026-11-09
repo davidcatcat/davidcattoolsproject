@@ -27,9 +27,12 @@ _MAX_TRAVERSAL_LEVELS = 8
 _MAX_TRAVERSAL_ENTRIES = 10000
 
 
-def _orphan_newest_mtime(home: Path) -> float:
+def _orphan_newest_mtime(home: Path, home_mtime: float | None = None) -> float:
     """Return the newest mtime among home and its files without following symlinks."""
-    newest = home.lstat().st_mtime
+    if home_mtime is not None:
+        newest = float(home_mtime)
+    else:
+        newest = home.lstat().st_mtime
     entries_visited = 1
     stack = [(home, 0)]
     while stack and entries_visited < _MAX_TRAVERSAL_ENTRIES:
@@ -43,6 +46,9 @@ def _orphan_newest_mtime(home: Path) -> float:
                         break
                     entries_visited += 1
                     try:
+                        # Lock file never counts toward orphan age.
+                        if depth == 0 and entry.name == _SESSION_LOCK_FILE:
+                            continue
                         stat_res = entry.stat(follow_symlinks=False)
                         if stat_res.st_mtime > newest:
                             newest = stat_res.st_mtime
@@ -55,7 +61,14 @@ def _orphan_newest_mtime(home: Path) -> float:
     return newest
 
 
-def _classify_single_home(entry: Path, store, effective_now: float, *, check_lock: bool = True) -> str:
+def _classify_single_home(
+    entry: Path,
+    store,
+    effective_now: float,
+    *,
+    check_lock: bool = True,
+    pre_lock_home_mtime: float | None = None,
+) -> str:
     """Classify a single session home directory."""
     executor_task_id = entry.name
     # 1. Safety check: name, symlink, directory, and private permissions.
@@ -121,7 +134,7 @@ def _classify_single_home(entry: Path, store, effective_now: float, *, check_loc
     # 4. State resolution: orphan age or task lifecycle state.
     if is_orphan:
         try:
-            newest_mtime = _orphan_newest_mtime(entry)
+            newest_mtime = _orphan_newest_mtime(entry, home_mtime=pre_lock_home_mtime)
             if effective_now - newest_mtime > ORPHAN_TTL_SECONDS:
                 return 'ORPHAN_EXPIRED'
             return 'ORPHAN_RECENT'
@@ -335,6 +348,13 @@ def sweep(store, now=None, *, runner=None, package_path=None):
                 results.append({'executor_task_id': executor_task_id, 'outcome': 'SKIPPED_OPEN'})
                 continue
 
+            # Measure home mtime before taking lock so lock creation does not make orphans recent.
+            pre_lock_home_mtime = None
+            try:
+                pre_lock_home_mtime = home.lstat().st_mtime
+            except OSError:
+                pass
+
             # Hold lock for the whole end-and-remove; non-blocking.
             lock = GwAgentSessionLock(home)
             try:
@@ -351,7 +371,13 @@ def sweep(store, now=None, *, runner=None, package_path=None):
 
             try:
                 # Re-check state under lock.
-                rechecked = _classify_single_home(home, store, effective_now, check_lock=False)
+                rechecked = _classify_single_home(
+                    home,
+                    store,
+                    effective_now,
+                    check_lock=False,
+                    pre_lock_home_mtime=pre_lock_home_mtime,
+                )
                 if rechecked not in ('ENDED', 'ORPHAN_EXPIRED'):
                     lock.release()
                     if rechecked == 'SKIPPED_UNSAFE':

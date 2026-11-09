@@ -451,6 +451,36 @@ class GwAgentSessionsTests(unittest.TestCase):
         self.assertFalse(home_exp.exists())
         self.assertTrue(home_rec.exists())
 
+    def test_sweep_orphan_with_recent_file_kept_and_existing_lock_expired_removed(self):
+        fixed_now = 2_000_000.0
+
+        # Expired orphan with an existing lock file already present.
+        exec_lock_exp = 'task-exec-synthetic-orphan-lock-10'
+        home_lock_exp = open_session_home(self.store_root, exec_lock_exp)
+        lock_file = home_lock_exp / 'lock'
+        lock_file.touch(mode=0o600)
+        os.chmod(lock_file, 0o600)
+        exp_time = fixed_now - 9 * 86400
+        os.utime(home_lock_exp, (exp_time, exp_time))
+        os.utime(lock_file, (exp_time, exp_time))
+
+        # Orphan with old home folder but a recent file inside.
+        exec_recent_file = 'task-exec-synthetic-orphan-file-10'
+        home_recent_file = open_session_home(self.store_root, exec_recent_file)
+        recent_child = home_recent_file / 'child.txt'
+        recent_child.write_text('synthetic_content\n')
+        recent_time = fixed_now - 2 * 86400
+        os.utime(home_recent_file, (exp_time, exp_time))
+        os.utime(recent_child, (recent_time, recent_time))
+
+        results = sweep(self.store, now=fixed_now)
+        by_id = {item['executor_task_id']: item['outcome'] for item in results}
+
+        self.assertEqual(by_id.get(exec_lock_exp), 'ORPHAN_REMOVED')
+        self.assertEqual(by_id.get(exec_recent_file), 'SKIPPED_OPEN')
+        self.assertFalse(home_lock_exp.exists())
+        self.assertTrue(home_recent_file.exists())
+
     def test_sweep_end_failure_and_timeout_still_remove_history(self):
         # 1. End command fails with non-zero exit code
         root_fail = 'task-root-synthetic-fail-10'
