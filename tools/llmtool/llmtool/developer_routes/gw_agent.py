@@ -41,6 +41,8 @@ _AUDIT_TOOLS = frozenset({'list_dir', 'read_file', 'grep', 'apply_edit', 'finish
 # The Task error code is at most 64 characters and starts with
 # DEVELOPER_GW_AGENT_BLOCKED_, so a longer reason would be cut off.
 _TOOL_FAILURE = re.compile(r'[A-Z0-9_]{1,37}\Z')
+_SAFE_PATH_LAUNCHER = "import runpy, sys; del sys.path[0]; runpy.run_module('api_agent_gateway', run_name='__main__', alter_sys=True)"
+_HAS_SAFE_PATH_FLAG = sys.version_info >= (3, 11)
 
 
 def _normalize_gw_agent_usage(value):
@@ -371,7 +373,16 @@ class GwAgentRoute(DeveloperRoute):
 
     def build_argv(self, executable, request):
         tmp = request['_route_tmpdir']
-        return [sys.executable, '-B', '-P', '-m', 'api_agent_gateway', 'run',
+        if _HAS_SAFE_PATH_FLAG:
+            return [sys.executable, '-B', '-P', '-m', 'api_agent_gateway', 'run',
+                    '--authorization-file', str(Path(tmp) / 'authorization.json'),
+                    '--workdir', request['root'], '--profile', self.profile_name,
+                    '--task-file', str(Path(tmp) / 'task.json'),
+                    '--result-file', str(Path(tmp) / 'result.json'),
+                    '--audit-file', str(Path(tmp) / 'audit.jsonl'),
+                    '--profiles-file', str(Path(tmp) / 'profiles.json'),
+                    '--state-dir', str(Path(tmp) / 'state')]
+        return [sys.executable, '-B', '-c', _SAFE_PATH_LAUNCHER, 'run',
                 '--authorization-file', str(Path(tmp) / 'authorization.json'),
                 '--workdir', request['root'], '--profile', self.profile_name,
                 '--task-file', str(Path(tmp) / 'task.json'),
