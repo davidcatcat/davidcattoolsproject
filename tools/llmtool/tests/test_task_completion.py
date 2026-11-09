@@ -2876,6 +2876,148 @@ class TaskCompletionTests(unittest.TestCase):
                          'native-reviewer-session')
         self.assertEqual(evidence['missing_gates'], [])
 
+    def _company_gw_review_fixture(self, reviewer='codex-reviewer'):
+        """Same PR, bound APPROVED review and checks as the D6 actor-session test."""
+        result_sha, _ = self._make_result()
+        reviewer_root = self.base / 'reviewer'
+        self._git('worktree', 'add', '-b', 'review/branch', str(reviewer_root), result_sha)
+        pr = {'state': 'open', 'merged': False,
+              'head': {'sha': result_sha}, 'base': {'repo': {'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'user': {'login': 'author-user'}}
+        review = [{'state': 'APPROVED', 'commit_id': result_sha,
+                   'user': {'login': 'reviewer-user'},
+                   'submitted_at': '2026-10-21T10:00:00Z',
+                   'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+                           self._review_binding(head=result_sha)}]
+        checks = {'total_count': 1, 'check_runs': [
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+
+        def register(identity):
+            self._write_registration('reviewer-task', identity, 'Reviewer session',
+                reviewer_root, 'review/branch', result_sha, result_sha,
+                native_session_id='native-reviewer', github_login='reviewer-user',
+                state='REVIEW_PENDING')
+
+        def collect(task_record, **overrides):
+            kwargs = {'executor_identity': 'company-gw',
+                      'executor_native_session_id': None,
+                      'task_record': task_record}
+            kwargs.update(overrides)
+            with patch('llmtool.task_completion._github_get',
+                       side_effect=self._github_response_sequence(
+                           result_sha, pr, review, checks)):
+                return task_completion.collect_github_evidence(
+                    **self._github_kwargs(result_sha, **kwargs))
+
+        register(reviewer)
+        return register, collect
+
+    @staticmethod
+    def _company_gw_task_record(*, pm_session_id='pm-session-synthetic', **developer):
+        record = {'task_id': '1' * 32, 'run_id': '2' * 32,
+                  'pm_session_id': pm_session_id,
+                  'developer': {
+                      'provider_profile': 'company-gw',
+                      'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
+                      'state': 'DEVELOPER_RESPONDED',
+                      'artifact_format': 'unified_diff',
+                      'artifact_sha256': hashlib.sha256(
+                          b'synthetic unified diff\n').hexdigest()}}
+        record['developer'].update(developer)
+        return record
+
+    def test_company_gw_text_proposal_accepts_missing_executor_native_session(self):
+        _, collect = self._company_gw_review_fixture()
+        for executor_native in (None, 'UNKNOWN'):
+            with self.subTest(executor_native=executor_native):
+                evidence = collect(self._company_gw_task_record(),
+                                   executor_native_session_id=executor_native)
+                self.assertNotIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                                 evidence['missing_gates'])
+                self.assertEqual(evidence['evidence']['formal_review_state'], 'ACCEPTED')
+                self.assertEqual(evidence['missing_gates'], [])
+
+    def test_company_gw_text_proposal_keeps_family_and_pm_session_gates(self):
+        register, collect = self._company_gw_review_fixture(reviewer='claude-reviewer')
+        same_family = collect(self._company_gw_task_record(model='claude-sonnet-synthetic'))
+        self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED', same_family['missing_gates'])
+        self.assertEqual(same_family['evidence']['formal_review_state'], 'UNVERIFIED')
+        register('codex-reviewer')
+        same_family = collect(self._company_gw_task_record(model='gpt-synthetic'))
+        self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED', same_family['missing_gates'])
+        self.assertEqual(same_family['evidence']['formal_review_state'], 'UNVERIFIED')
+        pm_is_reviewer = collect(self._company_gw_task_record(pm_session_id='native-reviewer'))
+        self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                      pm_is_reviewer['missing_gates'])
+        self.assertEqual(pm_is_reviewer['evidence']['formal_review_state'], 'UNVERIFIED')
+        same_executor = collect(self._company_gw_task_record(),
+                                executor_native_session_id='native-reviewer')
+        self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                      same_executor['missing_gates'])
+        d6_not_independent = collect(self._company_gw_task_record(),
+                                     executor_session_ref='Reviewer session')
+        self.assertIn('REVIEWER_D6_SESSION_NOT_INDEPENDENT',
+                      d6_not_independent['missing_gates'])
+        self.assertEqual(d6_not_independent['evidence']['formal_review_state'], 'UNVERIFIED')
+
+    def test_company_gw_pm_session_gate_compares_normalized_native_identity(self):
+        # A UUID-backed PM session is stored as `pm-<native>` on the Task while
+        # the Reviewer D6 holds the raw native id; the gate must still match.
+        _, collect = self._company_gw_review_fixture()
+        for pm_session in ('pm-native-reviewer', 'PM-NATIVE-REVIEWER',
+                           'pm-Native-Reviewer', ' pm-native-reviewer ',
+                           'NATIVE-REVIEWER'):
+            with self.subTest(pm_session=pm_session):
+                evidence = collect(self._company_gw_task_record(pm_session_id=pm_session))
+                self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                              evidence['missing_gates'])
+                self.assertEqual(evidence['evidence']['formal_review_state'], 'UNVERIFIED')
+        for pm_session in ('pm-', 'pm-UNKNOWN', 'unknown', ''):
+            with self.subTest(pm_session=pm_session):
+                evidence = collect(self._company_gw_task_record(pm_session_id=pm_session))
+                self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                              evidence['missing_gates'])
+                self.assertEqual(evidence['evidence']['formal_review_state'], 'UNVERIFIED')
+        with self.subTest(pm_session='pm-native-pm-synthetic'):
+            evidence = collect(self._company_gw_task_record(
+                pm_session_id='pm-native-pm-synthetic'))
+            self.assertNotIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                             evidence['missing_gates'])
+            self.assertEqual(evidence['evidence']['formal_review_state'], 'ACCEPTED')
+            self.assertEqual(evidence['missing_gates'], [])
+
+    def test_missing_executor_native_session_stays_not_independent_off_company_gw(self):
+        _, collect = self._company_gw_review_fixture()
+        cases = {
+            'claude': self._company_gw_task_record(provider_profile='claude'),
+            'agy': self._company_gw_task_record(provider_profile='agy',
+                                                model='gemini-synthetic'),
+            'opencode': self._company_gw_task_record(provider_profile='opencode'),
+            'codex': self._company_gw_task_record(provider_profile='codex'),
+            'gw-agent': self._company_gw_task_record(provider_profile='gw-agent'),
+            'company-gw-agent': self._company_gw_task_record(
+                provider_profile='company-gw-agent'),
+            'missing artifact_sha256': self._company_gw_task_record(artifact_sha256=None),
+            'short artifact_sha256': self._company_gw_task_record(artifact_sha256='a' * 40),
+            'other backend': self._company_gw_task_record(
+                backend_session_semantics='CLI_REPORTED_SESSION_ID'),
+            'not responded': self._company_gw_task_record(state='DEVELOPER_PENDING'),
+            'other artifact format': self._company_gw_task_record(artifact_format='text'),
+            'missing pm session': self._company_gw_task_record(pm_session_id=None),
+        }
+        for name, record in cases.items():
+            with self.subTest(case=name):
+                evidence = collect(record)
+                self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                              evidence['missing_gates'])
+                self.assertEqual(evidence['evidence']['formal_review_state'], 'UNVERIFIED')
+        with self.subTest(case='other executor identity'):
+            evidence = collect(self._company_gw_task_record(),
+                               executor_identity='executor-agent')
+            self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT', evidence['missing_gates'])
+            self.assertEqual(evidence['evidence']['formal_review_state'], 'UNVERIFIED')
+
     def test_codex_formal_pass_requires_claude_task_and_completed_claim(self):
         result_sha, _ = self._make_result()
         pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},
