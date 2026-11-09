@@ -1,12 +1,15 @@
 """Tests for GitHub-hosted remote-test job lookup and runner trust."""
 
 import unittest
+from unittest.mock import patch
 
 from llmtool import remote_test
 
 
 _SHA = '0123456789abcdef0123456789abcdef01234567'
 _DIFF_SHA = 'fedcba9876543210fedcba9876543210fedcba98'
+_DEFAULT = object()
+_OMIT = object()
 
 
 class HostedJobTests(unittest.TestCase):
@@ -24,10 +27,11 @@ class HostedJobTests(unittest.TestCase):
         name='remote-test',
         status='completed',
         conclusion='success',
-        labels=None,
-        runner_group_name='GitHub Actions',
+        labels=_DEFAULT,
+        runner_group_name=_DEFAULT,
         check_run_id=5001,
         include_check_run_url=True,
+        include_check_run_id=False,
     ):
         job = {
             'id': job_id,
@@ -35,13 +39,23 @@ class HostedJobTests(unittest.TestCase):
             'name': name,
             'status': status,
             'conclusion': conclusion,
-            'labels': ['ubuntu-24.04'] if labels is None else labels,
-            'runner_group_name': runner_group_name,
         }
+        if labels is _DEFAULT:
+            job['labels'] = ['ubuntu-24.04']
+        elif labels is not _OMIT:
+            job['labels'] = labels
+
+        if runner_group_name is _DEFAULT:
+            job['runner_group_name'] = 'GitHub Actions'
+        elif runner_group_name is not _OMIT:
+            job['runner_group_name'] = runner_group_name
+
         if include_check_run_url:
             job['check_run_url'] = (
                 f'https://api.github.com/repos/davidcatcat/davidcattoolsproject/check-runs/{check_run_id}'
             )
+        if include_check_run_id:
+            job['check_run_id'] = check_run_id
         return job
 
     def make_check_run(
@@ -73,6 +87,37 @@ class HostedJobTests(unittest.TestCase):
         def fake_get(path):
             if path == 'actions/runs/1001/jobs':
                 return {'total_count': 1, 'jobs': [job]}
+            if path == 'check-runs/5001':
+                return check_run
+            self.fail(f'Unexpected path: {path}')
+
+        result = remote_test._hosted_job(run, get=fake_get)
+        self.assertEqual(result, job)
+
+    def test_one_trusted_job_via_check_run_id_integer(self):
+        run = self.make_run()
+        job = self.make_job(include_check_run_url=False, include_check_run_id=True, check_run_id=5001)
+        check_run = self.make_check_run(check_run_id=5001)
+
+        def fake_get(path):
+            if path == 'actions/runs/1001/jobs':
+                return {'total_count': 1, 'jobs': [job]}
+            if path == 'check-runs/5001':
+                return check_run
+            self.fail(f'Unexpected path: {path}')
+
+        result = remote_test._hosted_job(run, get=fake_get)
+        self.assertEqual(result, job)
+
+    def test_one_trusted_job_among_multiple(self):
+        run = self.make_run()
+        job = self.make_job()
+        other_job = self.make_job(job_id=2002, name='setup')
+        check_run = self.make_check_run()
+
+        def fake_get(path):
+            if path == 'actions/runs/1001/jobs':
+                return {'total_count': 2, 'jobs': [other_job, job]}
             if path == 'check-runs/5001':
                 return check_run
             self.fail(f'Unexpected path: {path}')
@@ -121,6 +166,10 @@ class HostedJobTests(unittest.TestCase):
             ['ubuntu-24.04', 'self-hosted'],
             ['ubuntu-24.04', 'extra'],
             None,
+            _OMIT,
+            'ubuntu-24.04',
+            123,
+            ['UBUNTU-24.04'],
         ):
             with self.subTest(bad_labels=bad_labels):
                 job = self.make_job(labels=bad_labels)
@@ -134,7 +183,7 @@ class HostedJobTests(unittest.TestCase):
 
     def test_wrong_runner_group(self):
         run = self.make_run()
-        for bad_group in ('Default', 'Self-hosted Runners', '', None):
+        for bad_group in ('Default', 'Self-hosted Runners', '', None, _OMIT, 123, 'github actions'):
             with self.subTest(bad_group=bad_group):
                 job = self.make_job(runner_group_name=bad_group)
 
@@ -162,20 +211,53 @@ class HostedJobTests(unittest.TestCase):
                 result = remote_test._hosted_job(run, get=fake_get)
                 self.assertEqual(result, 'HOSTED_RUNNER_UNTRUSTED')
 
+        for bad_check_run in (
+            {'id': 5001, 'head_sha': _SHA, 'app': None},
+            {'id': 5001, 'head_sha': _SHA},
+            {'id': 5001, 'head_sha': _SHA, 'app': 'not a dict'},
+        ):
+            with self.subTest(bad_check_run=bad_check_run):
+                def fake_get(path):
+                    if path == 'actions/runs/1001/jobs':
+                        return {'total_count': 1, 'jobs': [job]}
+                    if path == 'check-runs/5001':
+                        return bad_check_run
+                    self.fail(f'Unexpected path: {path}')
+
+                result = remote_test._hosted_job(run, get=fake_get)
+                self.assertEqual(result, 'HOSTED_RUNNER_UNTRUSTED')
+
     def test_wrong_head_sha(self):
         run = self.make_run(head_sha=_SHA)
         job = self.make_job()
-        check_run = self.make_check_run(head_sha=_DIFF_SHA)
+        for bad_head_sha in (_DIFF_SHA, None, '', 12345):
+            with self.subTest(bad_head_sha=bad_head_sha):
+                check_run = self.make_check_run(head_sha=bad_head_sha)
 
-        def fake_get(path):
-            if path == 'actions/runs/1001/jobs':
-                return {'total_count': 1, 'jobs': [job]}
-            if path == 'check-runs/5001':
-                return check_run
-            self.fail(f'Unexpected path: {path}')
+                def fake_get(path):
+                    if path == 'actions/runs/1001/jobs':
+                        return {'total_count': 1, 'jobs': [job]}
+                    if path == 'check-runs/5001':
+                        return check_run
+                    self.fail(f'Unexpected path: {path}')
 
-        result = remote_test._hosted_job(run, get=fake_get)
-        self.assertEqual(result, 'HOSTED_RUNNER_UNTRUSTED')
+                result = remote_test._hosted_job(run, get=fake_get)
+                self.assertEqual(result, 'HOSTED_RUNNER_UNTRUSTED')
+
+        for bad_run_head in (None, 12345, _DIFF_SHA):
+            with self.subTest(bad_run_head=bad_run_head):
+                bad_run = {'id': 1001, 'head_sha': bad_run_head}
+                check_run = self.make_check_run(head_sha=_SHA)
+
+                def fake_get(path):
+                    if path == 'actions/runs/1001/jobs':
+                        return {'total_count': 1, 'jobs': [job]}
+                    if path == 'check-runs/5001':
+                        return check_run
+                    self.fail(f'Unexpected path: {path}')
+
+                result = remote_test._hosted_job(bad_run, get=fake_get)
+                self.assertEqual(result, 'HOSTED_RUNNER_UNTRUSTED')
 
     def test_queued_job(self):
         run = self.make_run()
@@ -194,6 +276,19 @@ class HostedJobTests(unittest.TestCase):
 
                 result = remote_test._hosted_job(run, get=fake_get)
                 self.assertEqual(result, queued_job)
+
+    def test_untrusted_job_status(self):
+        run = self.make_run()
+        for bad_status in ('waiting', 'cancelled', 'failure', '', None, 123):
+            with self.subTest(bad_status=bad_status):
+                job = self.make_job(status=bad_status)
+
+                def fake_get(path):
+                    self.assertEqual(path, 'actions/runs/1001/jobs')
+                    return {'total_count': 1, 'jobs': [job]}
+
+                result = remote_test._hosted_job(run, get=fake_get)
+                self.assertEqual(result, 'HOSTED_RUNNER_UNTRUSTED')
 
     def test_read_error(self):
         run = self.make_run()
@@ -262,7 +357,7 @@ class HostedJobTests(unittest.TestCase):
 
     def test_missing_check_run_reference(self):
         run = self.make_run()
-        job = self.make_job(include_check_run_url=False)
+        job = self.make_job(include_check_run_url=False, include_check_run_id=False)
 
         def fake_get(path):
             self.assertEqual(path, 'actions/runs/1001/jobs')
@@ -270,6 +365,46 @@ class HostedJobTests(unittest.TestCase):
 
         result = remote_test._hosted_job(run, get=fake_get)
         self.assertEqual(result, 'HOSTED_RUNNER_UNTRUSTED')
+
+    def test_extract_check_run_id(self):
+        self.assertIsNone(remote_test._extract_check_run_id(None))
+        self.assertIsNone(remote_test._extract_check_run_id('not a dict'))
+        self.assertIsNone(remote_test._extract_check_run_id({}))
+        self.assertIsNone(remote_test._extract_check_run_id({'check_run_id': -1}))
+        self.assertIsNone(remote_test._extract_check_run_id({'check_run_id': 0}))
+        self.assertIsNone(remote_test._extract_check_run_id({'check_run_id': '5001'}))
+        self.assertIsNone(remote_test._extract_check_run_id({'check_run_url': 'invalid-url'}))
+
+        self.assertEqual(
+            remote_test._extract_check_run_id(
+                {'check_run_url': 'https://api.github.com/repos/davidcatcat/davidcattoolsproject/check-runs/98765'}
+            ),
+            '98765',
+        )
+        self.assertEqual(
+            remote_test._extract_check_run_id({'check_run_id': 98765}),
+            '98765',
+        )
+
+    def test_default_get_calls_github_get(self):
+        run = self.make_run()
+        job = self.make_job()
+        check_run = self.make_check_run()
+
+        calls = []
+
+        def fake_github_get(path):
+            calls.append(path)
+            if path == 'actions/runs/1001/jobs':
+                return {'total_count': 1, 'jobs': [job]}
+            if path == 'check-runs/5001':
+                return check_run
+            self.fail(f'Unexpected path: {path}')
+
+        with patch.object(remote_test, '_github_get', fake_github_get):
+            result = remote_test._hosted_job(run)
+            self.assertEqual(result, job)
+            self.assertEqual(calls, ['actions/runs/1001/jobs', 'check-runs/5001'])
 
 
 if __name__ == '__main__':
