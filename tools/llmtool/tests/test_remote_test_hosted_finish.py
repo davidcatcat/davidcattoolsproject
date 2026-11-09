@@ -266,7 +266,7 @@ class RemoteTestHostedFinishTests(unittest.TestCase):
         self.assertEqual(stored_entry['state'], 'RECORDED')
 
         events = stored_task.get('completion_events', [])
-        self.assertTrue(any(e.get('source') == 'EC2_REMOTE_TEST' for e in events))
+        self.assertTrue(any(e.get('source') == 'GITHUB_REMOTE_TEST' for e in events))
 
     def test_fail_receipt_stored_with_actions_block_and_entry_recorded(self):
         self._append_dispatch(NONCE, state='RUN_FOUND', run_id=RUN_ID_INT)
