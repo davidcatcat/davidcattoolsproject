@@ -1416,6 +1416,9 @@ class TaskCompletionTests(unittest.TestCase):
                 if in_scope:
                     self.assertEqual(code, 0)
                     tests.assert_called_once()
+                    # task complete hands the authenticated main pin to the tests.
+                    self.assertEqual(tests.call_args.kwargs['trusted_base_sha'],
+                                     head['trusted_base'])
                     self.assertEqual(completion['state'], 'PM_EVIDENCE_READY')
                     self.assertEqual(completion['missing_gates'], [])
                     result = completion['evidence']['result']
@@ -2657,6 +2660,140 @@ class TaskCompletionTests(unittest.TestCase):
                 read_paths=[], write_paths=[])
         self.assertEqual(raised.exception.completion_code, 'TEST_SCOPE_MISSING')
 
+    # #1169: bounded tests count only Developer-attributed paths when the
+    # authenticated main pin is supplied.
+    _MAIN_CODE_PATH = 'tools/llmtool/llmtool/from_main.py'
+
+    def _trusted_main_with_code(self, *, extra=None):
+        """Commit a code file (and optional extra files) on a trusted main branch."""
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        files = {self._MAIN_CODE_PATH: 'VALUE = 1\n', **(extra or {})}
+        for path, content in files.items():
+            target = self.root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        self._git('add', *files)
+        self._git('commit', '-m', 'main code change')
+        main_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        return main_sha
+
+    def _commit_paths(self, files, message):
+        for path, content in files.items():
+            target = self.root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        self._git('add', *files)
+        self._git('commit', '-m', message)
+        return self._git('rev-parse', 'HEAD')
+
+    def _bounded_tests(self, result_sha, *, read_paths=(), trusted_base_sha=None):
+        return task_completion.run_bounded_tests(
+            root=str(self.root), source_sha=self.source_sha, result_sha=result_sha,
+            read_paths=list(read_paths), write_paths=[],
+            **({'trusted_base_sha': trusted_base_sha}
+               if trusted_base_sha is not None else {}))
+
+    def _assert_bounded_stop(self, code, result_sha, **kwargs):
+        with self.assertRaises(LLMToolError) as raised:
+            self._bounded_tests(result_sha, **kwargs)
+        self.assertEqual(raised.exception.completion_code, code)
+
+    def test_docs_only_task_stays_docs_only_after_clean_trusted_main_merge(self):
+        main_sha = self._trusted_main_with_code()
+        self._commit_paths({'docs/guide.md': 'Documentation.\n'}, 'developer docs')
+        self._git('merge', '--no-ff', 'main', '-m', 'merge trusted main')
+        result_sha = self._git('rev-parse', 'HEAD')
+        self.assertIn(self._MAIN_CODE_PATH,
+                      self._git('diff', '--name-only', self.source_sha, result_sha))
+
+        evidence = self._bounded_tests(result_sha, trusted_base_sha=main_sha)
+        self.assertEqual(evidence, [{'status': 'NOT_APPLICABLE_DOCS_ONLY',
+                                     'changed_paths': ['docs/guide.md'],
+                                     'source_sha': result_sha, 'docs_only': True}])
+        # Control: without the pin the plain diff still decides, as before.
+        self._assert_bounded_stop('TEST_SCOPE_MISSING', result_sha)
+
+    def test_developer_code_change_still_needs_registered_scope_with_trusted_main(self):
+        # The alone case runs first, so the main branch is created only once.
+        for merge_main in (False, True):
+            with self.subTest(merge_main=merge_main):
+                self._git('reset', '--hard', self.source_sha)
+                trusted = (self._trusted_main_with_code() if merge_main
+                           else self.source_sha)
+                target = self.root / self.source_path
+                self._commit_paths({self.source_path: target.read_text() +
+                                    '# developer change\n'}, 'developer code')
+                if merge_main:
+                    self._git('merge', '--no-ff', 'main', '-m', 'merge trusted main')
+                result_sha = self._git('rev-parse', 'HEAD')
+                self._assert_bounded_stop('TEST_SCOPE_MISSING', result_sha,
+                                          trusted_base_sha=trusted)
+                evidence = self._bounded_tests(result_sha, read_paths=[self.source_path],
+                                               trusted_base_sha=trusted)
+                self.assertEqual([item['path'] for item in evidence], [self.source_path])
+                self.assertEqual(evidence[0]['status'], 'PASSED')
+                self.assertEqual(evidence[0]['source_sha'], result_sha)
+
+    def test_untrusted_second_parent_merge_paths_still_count(self):
+        main_sha = self._trusted_main_with_code(extra={'README.md': 'Main docs.\n'})
+        self._git('checkout', '-b', 'side-branch', self.source_sha)
+        self._commit_paths({'tools/llmtool/llmtool/side.py': 'VALUE = 2\n'}, 'side code')
+        self._git('checkout', 'feat/executor')
+        self._commit_paths({'docs/guide.md': 'Documentation.\n'}, 'developer docs')
+        self._git('merge', '--no-ff', 'side-branch', '-m', 'merge untrusted branch')
+        result_sha = self._git('rev-parse', 'HEAD')
+        self._assert_bounded_stop('TEST_SCOPE_MISSING', result_sha,
+                                  trusted_base_sha=main_sha)
+
+    def test_hand_resolved_trusted_main_merge_paths_still_count(self):
+        main_sha = self._trusted_main_with_code()
+        self._commit_paths({'docs/guide.md': 'Documentation.\n'}, 'developer docs')
+        self._git('merge', '--no-ff', '--no-commit', 'main')
+        (self.root / self._MAIN_CODE_PATH).write_text('VALUE = 99\n')
+        self._git('add', self._MAIN_CODE_PATH)
+        self._git('commit', '-m', 'merge trusted main with a hand edit')
+        result_sha = self._git('rev-parse', 'HEAD')
+        self.assertEqual(len(self._git('rev-list', '--parents', '-n', '1',
+                                       result_sha).split()), 3)
+        self._assert_bounded_stop('TEST_SCOPE_MISSING', result_sha,
+                                  trusted_base_sha=main_sha)
+
+    def test_conflicted_trusted_main_merge_paths_still_count(self):
+        target = self.root / self.source_path
+        original = target.read_text()
+        main_sha = self._trusted_main_with_code(
+            extra={self.source_path: original + '# main side\n'})
+        self._commit_paths({self.source_path: original + '# developer side\n'},
+                           'developer code')
+        merge = subprocess.run(['/usr/bin/git', 'merge', '--no-ff', 'main', '-m',
+                                'merge trusted main'], cwd=self.root, text=True,
+                               capture_output=True)
+        self.assertNotEqual(merge.returncode, 0, merge.stdout + merge.stderr)
+        # Resolve to trusted main's version; the conflict path still counts.
+        self._git('checkout', '--theirs', self.source_path)
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'resolve to main')
+        result_sha = self._git('rev-parse', 'HEAD')
+        self.assertEqual(self._git('rev-parse', result_sha + ':' + self.source_path),
+                         self._git('rev-parse', main_sha + ':' + self.source_path))
+        self._assert_bounded_stop('TEST_SCOPE_MISSING', result_sha,
+                                  trusted_base_sha=main_sha)
+
+    def test_empty_developer_paths_stop_as_test_path_invalid(self):
+        with self.subTest(case='no commits'):
+            self._assert_bounded_stop('TEST_PATH_INVALID', self.source_sha,
+                                      trusted_base_sha=self.source_sha)
+        with self.subTest(case='only a clean trusted main merge'):
+            main_sha = self._trusted_main_with_code()
+            self._git('merge', '--no-ff', 'main', '-m', 'merge trusted main')
+            result_sha = self._git('rev-parse', 'HEAD')
+            self._assert_bounded_stop('TEST_PATH_INVALID', result_sha,
+                                      trusted_base_sha=main_sha)
+            # Control: the plain diff sees main's code file.
+            self._assert_bounded_stop('TEST_SCOPE_MISSING', result_sha)
+
     def test_github_review_requires_d6_actor_session_and_live_exact_head(self):
         result_sha, _ = self._make_result()
         reviewer_root = self.base / 'reviewer'
@@ -2738,6 +2875,148 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(evidence['evidence']['reviewer_session_ref'],
                          'native-reviewer-session')
         self.assertEqual(evidence['missing_gates'], [])
+
+    def _company_gw_review_fixture(self, reviewer='codex-reviewer'):
+        """Same PR, bound APPROVED review and checks as the D6 actor-session test."""
+        result_sha, _ = self._make_result()
+        reviewer_root = self.base / 'reviewer'
+        self._git('worktree', 'add', '-b', 'review/branch', str(reviewer_root), result_sha)
+        pr = {'state': 'open', 'merged': False,
+              'head': {'sha': result_sha}, 'base': {'repo': {'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'user': {'login': 'author-user'}}
+        review = [{'state': 'APPROVED', 'commit_id': result_sha,
+                   'user': {'login': 'reviewer-user'},
+                   'submitted_at': '2026-10-21T10:00:00Z',
+                   'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+                           self._review_binding(head=result_sha)}]
+        checks = {'total_count': 1, 'check_runs': [
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+
+        def register(identity):
+            self._write_registration('reviewer-task', identity, 'Reviewer session',
+                reviewer_root, 'review/branch', result_sha, result_sha,
+                native_session_id='native-reviewer', github_login='reviewer-user',
+                state='REVIEW_PENDING')
+
+        def collect(task_record, **overrides):
+            kwargs = {'executor_identity': 'company-gw',
+                      'executor_native_session_id': None,
+                      'task_record': task_record}
+            kwargs.update(overrides)
+            with patch('llmtool.task_completion._github_get',
+                       side_effect=self._github_response_sequence(
+                           result_sha, pr, review, checks)):
+                return task_completion.collect_github_evidence(
+                    **self._github_kwargs(result_sha, **kwargs))
+
+        register(reviewer)
+        return register, collect
+
+    @staticmethod
+    def _company_gw_task_record(*, pm_session_id='pm-session-synthetic', **developer):
+        record = {'task_id': '1' * 32, 'run_id': '2' * 32,
+                  'pm_session_id': pm_session_id,
+                  'developer': {
+                      'provider_profile': 'company-gw',
+                      'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
+                      'state': 'DEVELOPER_RESPONDED',
+                      'artifact_format': 'unified_diff',
+                      'artifact_sha256': hashlib.sha256(
+                          b'synthetic unified diff\n').hexdigest()}}
+        record['developer'].update(developer)
+        return record
+
+    def test_company_gw_text_proposal_accepts_missing_executor_native_session(self):
+        _, collect = self._company_gw_review_fixture()
+        for executor_native in (None, 'UNKNOWN'):
+            with self.subTest(executor_native=executor_native):
+                evidence = collect(self._company_gw_task_record(),
+                                   executor_native_session_id=executor_native)
+                self.assertNotIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                                 evidence['missing_gates'])
+                self.assertEqual(evidence['evidence']['formal_review_state'], 'ACCEPTED')
+                self.assertEqual(evidence['missing_gates'], [])
+
+    def test_company_gw_text_proposal_keeps_family_and_pm_session_gates(self):
+        register, collect = self._company_gw_review_fixture(reviewer='claude-reviewer')
+        same_family = collect(self._company_gw_task_record(model='claude-sonnet-synthetic'))
+        self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED', same_family['missing_gates'])
+        self.assertEqual(same_family['evidence']['formal_review_state'], 'UNVERIFIED')
+        register('codex-reviewer')
+        same_family = collect(self._company_gw_task_record(model='gpt-synthetic'))
+        self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED', same_family['missing_gates'])
+        self.assertEqual(same_family['evidence']['formal_review_state'], 'UNVERIFIED')
+        pm_is_reviewer = collect(self._company_gw_task_record(pm_session_id='native-reviewer'))
+        self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                      pm_is_reviewer['missing_gates'])
+        self.assertEqual(pm_is_reviewer['evidence']['formal_review_state'], 'UNVERIFIED')
+        same_executor = collect(self._company_gw_task_record(),
+                                executor_native_session_id='native-reviewer')
+        self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                      same_executor['missing_gates'])
+        d6_not_independent = collect(self._company_gw_task_record(),
+                                     executor_session_ref='Reviewer session')
+        self.assertIn('REVIEWER_D6_SESSION_NOT_INDEPENDENT',
+                      d6_not_independent['missing_gates'])
+        self.assertEqual(d6_not_independent['evidence']['formal_review_state'], 'UNVERIFIED')
+
+    def test_company_gw_pm_session_gate_compares_normalized_native_identity(self):
+        # A UUID-backed PM session is stored as `pm-<native>` on the Task while
+        # the Reviewer D6 holds the raw native id; the gate must still match.
+        _, collect = self._company_gw_review_fixture()
+        for pm_session in ('pm-native-reviewer', 'PM-NATIVE-REVIEWER',
+                           'pm-Native-Reviewer', ' pm-native-reviewer ',
+                           'NATIVE-REVIEWER'):
+            with self.subTest(pm_session=pm_session):
+                evidence = collect(self._company_gw_task_record(pm_session_id=pm_session))
+                self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                              evidence['missing_gates'])
+                self.assertEqual(evidence['evidence']['formal_review_state'], 'UNVERIFIED')
+        for pm_session in ('pm-', 'pm-UNKNOWN', 'unknown', ''):
+            with self.subTest(pm_session=pm_session):
+                evidence = collect(self._company_gw_task_record(pm_session_id=pm_session))
+                self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                              evidence['missing_gates'])
+                self.assertEqual(evidence['evidence']['formal_review_state'], 'UNVERIFIED')
+        with self.subTest(pm_session='pm-native-pm-synthetic'):
+            evidence = collect(self._company_gw_task_record(
+                pm_session_id='pm-native-pm-synthetic'))
+            self.assertNotIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                             evidence['missing_gates'])
+            self.assertEqual(evidence['evidence']['formal_review_state'], 'ACCEPTED')
+            self.assertEqual(evidence['missing_gates'], [])
+
+    def test_missing_executor_native_session_stays_not_independent_off_company_gw(self):
+        _, collect = self._company_gw_review_fixture()
+        cases = {
+            'claude': self._company_gw_task_record(provider_profile='claude'),
+            'agy': self._company_gw_task_record(provider_profile='agy',
+                                                model='gemini-synthetic'),
+            'opencode': self._company_gw_task_record(provider_profile='opencode'),
+            'codex': self._company_gw_task_record(provider_profile='codex'),
+            'gw-agent': self._company_gw_task_record(provider_profile='gw-agent'),
+            'company-gw-agent': self._company_gw_task_record(
+                provider_profile='company-gw-agent'),
+            'missing artifact_sha256': self._company_gw_task_record(artifact_sha256=None),
+            'short artifact_sha256': self._company_gw_task_record(artifact_sha256='a' * 40),
+            'other backend': self._company_gw_task_record(
+                backend_session_semantics='CLI_REPORTED_SESSION_ID'),
+            'not responded': self._company_gw_task_record(state='DEVELOPER_PENDING'),
+            'other artifact format': self._company_gw_task_record(artifact_format='text'),
+            'missing pm session': self._company_gw_task_record(pm_session_id=None),
+        }
+        for name, record in cases.items():
+            with self.subTest(case=name):
+                evidence = collect(record)
+                self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+                              evidence['missing_gates'])
+                self.assertEqual(evidence['evidence']['formal_review_state'], 'UNVERIFIED')
+        with self.subTest(case='other executor identity'):
+            evidence = collect(self._company_gw_task_record(),
+                               executor_identity='executor-agent')
+            self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT', evidence['missing_gates'])
+            self.assertEqual(evidence['evidence']['formal_review_state'], 'UNVERIFIED')
 
     def test_codex_formal_pass_requires_claude_task_and_completed_claim(self):
         result_sha, _ = self._make_result()
@@ -6098,6 +6377,197 @@ class TaskCompletionTests(unittest.TestCase):
                 write_paths=[self.source_path], artifact=None, artifact_sha256=None)
         self.assertEqual(caught.exception.completion_code,
                          'DEVELOPER_ARTIFACT_BINDING_INVALID')
+
+
+class CompletionAttributedPathsStoreTests(unittest.TestCase):
+    """#1169: task complete saves records whose attributed paths leave the net diff.
+
+    Developer attribution (#1177) can name paths outside changed_paths: a
+    rename-conflict source or a file added and later deleted. The store must
+    save these completion records. The fixture helpers are reused from
+    TaskCompletionTests without inheriting (and so re-running) its tests.
+    """
+
+    setUp = TaskCompletionTests.setUp
+    _git = TaskCompletionTests._git
+    _write_registration = TaskCompletionTests._write_registration
+    _write_env2_marker = TaskCompletionTests._write_env2_marker
+    _trusted_main_ref = TaskCompletionTests._trusted_main_ref
+    _make_path_result = TaskCompletionTests._make_path_result
+    _segment_head = TaskCompletionTests._segment_head
+    _RENAME_CONFLICT_SHAPES = TaskCompletionTests._RENAME_CONFLICT_SHAPES
+    _complete_company_gw_task = TaskCompletionTests._complete_company_gw_task
+    _active_pm_task = TaskCompletionTests._active_pm_task
+    _task = TaskCompletionTests._task
+
+    DOC_PATH = 'docs/guide.md'
+
+    def _markdown_rename_conflict_head(self, shape):
+        """Same rename conflict as _rename_conflict_head, with only Markdown changes.
+
+        The Developer branch changes only README.md before the segment, and
+        the segment's own commit adds a Markdown guide, so every attributed
+        path ends in .md.
+        """
+        main_name, developer_name, dropped, hidden = self._RENAME_CONFLICT_SHAPES[shape]
+        original = 'README.md'
+        self._git('checkout', '-f', 'feat/executor')
+        self._git('reset', '--hard', self.source_sha)
+        self._write_registration(self.task_id, 'executor-agent', 'Executor D6 session',
+                                 self.root, 'feat/executor', self.source_sha, self.source_sha,
+                                 native_session_id='native-executor')
+        main_branch = 'docs-main-' + shape
+        self._git('checkout', '-b', main_branch)
+        if main_name is None:
+            self._git('rm', original)
+        else:
+            self._git('mv', original, main_name)
+        self._git('commit', '-m', 'trusted main moves README')
+        trusted_base = self._git('rev-parse', 'HEAD')
+
+        self._git('checkout', 'feat/executor')
+        if developer_name is None:
+            self._git('rm', original)
+        else:
+            self._git('mv', original, developer_name)
+        self._git('commit', '-m', 'developer moves README')
+        segment_start = self._git('rev-parse', 'HEAD')
+
+        merge = subprocess.run(
+            ['/usr/bin/git', '-c', 'merge.renames=true', '-c', 'diff.renames=true',
+             'merge', '--no-ff', main_branch, '-m', 'merge trusted main'],
+            cwd=self.root, text=True, capture_output=True)
+        self.assertNotEqual(merge.returncode, 0, merge.stdout + merge.stderr)
+        stages = self._git('ls-files', '-u')
+        conflicts = {line.split('\t', 1)[1] for line in stages.splitlines()}
+        self.assertLessEqual(set(hidden), conflicts, stages)
+        if dropped is not None:
+            (self.root / dropped).unlink()
+        self._git('add', '-A')
+        self._git('commit', '-m', 'resolve ' + shape)
+        merge_sha = self._git('rev-parse', 'HEAD')
+        self.assertEqual(self._git('ls-files', '-u'), '')
+        self.assertEqual(self._git('rev-parse', merge_sha + '^1'), segment_start)
+        self.assertEqual(self._git('rev-parse', merge_sha + '^2'), trusted_base)
+        result_sha = self._make_path_result(self.DOC_PATH, 'Developer guide.\n')
+        attributed = conflicts | {self.DOC_PATH}
+        self.assertTrue(all(path.endswith('.md') for path in attributed), attributed)
+        return self._segment_head(result_sha, trusted_base, segment_start, attributed)
+
+    def _register_head(self, result_sha):
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = result_sha
+        self._write_env2_marker(record, self.root, submitted_head=result_sha,
+                                current_head=result_sha)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+
+    def _bound_task(self, head):
+        task = self._active_pm_task(self._task(), route='company-gw')
+        paths = list(head['attributed'])
+        task['developer'].update(
+            source_sha=head['segment_start'], read_paths=paths, write_paths=paths,
+            artifact=head['artifact'], artifact_sha256=head['artifact_sha256'])
+        task['completion']['evidence'].update(
+            source_sha=head['segment_start'], result_head=head['segment_start'],
+            executor_native_session_id='native-executor',
+            executor_native_session='VERIFIED')
+        return task
+
+    def _complete_with_real_tests(self, store, task, *, trusted_base):
+        """Run task complete with the real collector and the real docs-only gate."""
+        real_collector = task_completion.collect_executor_result
+        real_tests = task_completion.run_bounded_tests
+
+        def github_get(path):
+            self.assertEqual(path, 'git/ref/heads/main')
+            return {'ref': 'refs/heads/main',
+                    'object': {'type': 'commit', 'sha': trusted_base}}
+
+        with patch.object(task_completion, '_github_get', side_effect=github_get), \
+             patch.object(task_completion, 'collect_executor_result',
+                          wraps=real_collector) as collect, \
+             patch.object(task_completion, 'run_bounded_tests',
+                          wraps=real_tests) as tests, \
+             patch('llmtool.task_submission_cli._remote_test_config_state',
+                   return_value='MISSING'), \
+             patch('llmtool.task_submission_cli.resolve_profile_config',
+                   side_effect=AssertionError('unexpected provider')) as resolve, \
+             patch.object(task_completion, 'collect_github_evidence',
+                          side_effect=AssertionError('unexpected review/CI')) as github, \
+             redirect_stdout(StringIO()):
+            code = run_task_complete(Namespace(
+                task_id=task['task_id'], executor_task=self.task_id,
+                reviewer_task=None, pr=None), store=store)
+        collect.assert_called_once()
+        tests.assert_called_once()
+        self.assertEqual(tests.call_args.kwargs['trusted_base_sha'], trusted_base)
+        resolve.assert_not_called()
+        github.assert_not_called()
+        return code, store.get(task['task_id'])['completion']
+
+    def test_markdown_rename_conflict_docs_only_completion_is_saved(self):
+        outside_net_diff = {}
+        for shape in self._RENAME_CONFLICT_SHAPES:
+            with self.subTest(shape=shape):
+                head = self._markdown_rename_conflict_head(shape)
+                store = TaskStore(self.base / ('docs-rename-conflict-' + shape))
+                task = self._bound_task(head)
+                store.create(task)
+                code, completion = self._complete_with_real_tests(
+                    store, task, trusted_base=head['trusted_base'])
+                self.assertEqual(code, 0)
+                self.assertEqual(completion['state'], 'PM_EVIDENCE_READY')
+                self.assertEqual(completion['missing_gates'], [])
+                self.assertEqual(completion['pm_dispatch'], 'NOT_STARTED')
+                result = completion['evidence']['result']
+                self.assertEqual(result['source_sha'], head['segment_start'])
+                self.assertEqual(result['result_head'], head['result_sha'])
+                self.assertEqual(result['developer_changed_paths'], head['attributed'])
+                self.assertEqual(completion['evidence']['tests'], [{
+                    'status': 'NOT_APPLICABLE_DOCS_ONLY',
+                    'changed_paths': head['attributed'],
+                    'source_sha': head['result_sha'], 'docs_only': True}])
+                outside_net_diff[shape] = (set(result['developer_changed_paths']) -
+                                           set(result['changed_paths']))
+        # README.md is renamed away on both sides, so it is attributed but is
+        # not in the net diff: the record the old subset rule refused.
+        self.assertIn('README.md', outside_net_diff['rename-rename-keep-both'])
+
+    def test_added_then_deleted_path_is_attributed_and_completion_is_saved(self):
+        scratch = 'docs/scratch.md'
+        self._git('checkout', '-f', 'feat/executor')
+        self._git('reset', '--hard', self.source_sha)
+        source = self.root / self.source_path
+        source.write_text(source.read_text() + '\n# scoped developer change\n')
+        (self.root / 'docs').mkdir(exist_ok=True)
+        (self.root / scratch).write_text('Temporary Developer notes.\n')
+        self._git('add', self.source_path, scratch)
+        self._git('commit', '-m', 'developer change with scratch notes')
+        self._git('rm', scratch)
+        self._git('commit', '-m', 'developer removes scratch notes')
+        result_sha = self._git('rev-parse', 'HEAD')
+        self._register_head(result_sha)
+        head = self._segment_head(result_sha, self.source_sha, self.source_sha,
+                                  {self.source_path, scratch})
+
+        store = TaskStore(self.base / 'added-then-deleted')
+        task = self._bound_task(head)
+        store.create(task)
+        code, tests, collect, completion = self._complete_company_gw_task(
+            store, task, trusted_base=self.source_sha, tested_head=result_sha)
+        self.assertEqual(code, 0)
+        tests.assert_called_once()
+        self.assertEqual(completion['state'], 'PM_EVIDENCE_READY')
+        self.assertEqual(completion['missing_gates'], [])
+        result = completion['evidence']['result']
+        self.assertEqual(result['result_head'], result_sha)
+        self.assertEqual(result['changed_paths'], [self.source_path])
+        self.assertEqual(result['developer_changed_paths'],
+                         sorted([self.source_path, scratch]))
+        self.assertNotIn(scratch, result['changed_paths'])
+
 
 if __name__ == '__main__':
     unittest.main()
