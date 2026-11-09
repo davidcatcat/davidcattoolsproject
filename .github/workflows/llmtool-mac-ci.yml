@@ -48,10 +48,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || 'main' }}
           fetch-depth: 0
           persist-credentials: false
-      # Without the merge ref, merge coverage holds only if the head already
-      # contains the PR base; otherwise fail rather than pass untested. The
-      # base is fixed at event time, so the merge itself must still recheck
-      # live main and bind to this head (Issue #99 / PR #100).
+      # Without the merge ref, a head behind the base is reported as a notice
+      # under the loose merge rule (#1317) and the merge still binds this
+      # exact head and rechecks live main and mergeability.
       - name: Source revision
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha || '' }}
@@ -73,7 +72,7 @@ jobs:
             else
               status=$?
               test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
-              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+              echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head (loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"
             fi
           fi
       # PRs use the validated Mac-required IDs plus changed/mapped test IDs.

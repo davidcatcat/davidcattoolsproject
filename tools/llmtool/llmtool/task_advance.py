@@ -486,24 +486,39 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     return None
 
 
-def _merge_main_gate(head, github_get):
-    """Require the PR head to contain current main; any doubt fails closed."""
+def _merge_main_gate(head, github_get, pr):
+    """Owner decision #1317 (loose merge rule): a head behind main may merge
+    when GitHub reports it mergeable; exact-head review and CI evidence stay
+    required; any doubt fails closed."""
     try:
         branch = github_get('branches/main')
         commit = branch.get('commit') if type(branch) is dict else None
         main_sha = commit.get('sha') if type(commit) is dict else None
         if type(main_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', main_sha) is None:
-            return 'MERGE_CHECKS_UNAVAILABLE'
+            return 'MERGE_CHECKS_UNAVAILABLE', None
         # The GitHub read path admits compare only between two exact SHAs.
         compare = github_get(f'compare/{main_sha}...{head}')
     except Exception:
-        return 'MERGE_CHECKS_UNAVAILABLE'
+        return 'MERGE_CHECKS_UNAVAILABLE', None
     status = compare.get('status') if type(compare) is dict else None
     if status in ('ahead', 'identical'):
-        return None
+        return None, 0
     if status in ('behind', 'diverged'):
-        return 'MERGE_PR_BEHIND_MAIN'
-    return 'MERGE_CHECKS_UNAVAILABLE'
+        # Owner decision #1317 (loose merge rule): a head behind main may merge
+        # when GitHub reports it mergeable; exact-head review and CI evidence stay
+        # required; any doubt fails closed.
+        behind_by = compare.get('behind_by') if type(compare) is dict else None
+        if type(behind_by) is not int or isinstance(behind_by, bool) or behind_by < 1:
+            return 'MERGE_CHECKS_UNAVAILABLE', None
+        mergeable_state = pr.get('mergeable_state') if type(pr) is dict else None
+        if mergeable_state == 'dirty':
+            return 'MERGE_PR_CONFLICT', None
+        if type(mergeable_state) is not str or mergeable_state == 'unknown':
+            return 'MERGE_MERGEABLE_UNKNOWN', None
+        if mergeable_state in ('clean', 'behind', 'unstable', 'has_hooks'):
+            return None, behind_by
+        return 'MERGE_PR_NOT_MERGEABLE', None
+    return 'MERGE_CHECKS_UNAVAILABLE', None
 
 
 def _review_ci_gate(number, head, github_get):
@@ -963,7 +978,7 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         return _merge_refusal('MERGE_PR_NOT_OPEN')
     if current_pr.get('mergeable') is not True:
         return _merge_refusal('MERGE_PR_NOT_MERGEABLE')
-    main_code = _merge_main_gate(head, github_get)
+    main_code, behind_by = _merge_main_gate(head, github_get, current_pr)
     if main_code:
         return _merge_refusal(main_code)
     if code in ('MERGE_MACOS_CHECK_MISSING', 'MERGE_MACOS_CHECK_SKIPPED'):
@@ -1035,9 +1050,11 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
                         dict(claim, state='CLAIMED')}, merge_attempt=claim)
                 except Exception:
                     warning_codes.append('MERGE_RESULT_RECORD_FAILED')
-            return _merge_success(record, number, head, review_version, gh_runner, root,
-                                  warning_codes, owner_acceptance=owner_acceptance,
-                                  acceptance_carry=acceptance_carry)
+            outcome = _merge_success(record, number, head, review_version, gh_runner, root,
+                                     warning_codes, owner_acceptance=owner_acceptance,
+                                     acceptance_carry=acceptance_carry)
+            outcome['result']['main_behind_by'] = behind_by
+            return outcome
         claim['state'] = 'UNKNOWN'
         try:
             store.compare_and_update(record['task_id'], expected={'merge_attempt':
@@ -1059,9 +1076,11 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         except Exception:
             pass
         warning_codes.append('MERGE_RESULT_RECORD_FAILED')
-    return _merge_success(record, number, head, review_version, gh_runner, root,
-                          warning_codes, owner_acceptance=owner_acceptance,
-                          acceptance_carry=acceptance_carry)
+    outcome = _merge_success(record, number, head, review_version, gh_runner, root,
+                             warning_codes, owner_acceptance=owner_acceptance,
+                             acceptance_carry=acceptance_carry)
+    outcome['result']['main_behind_by'] = behind_by
+    return outcome
 
 
 def _merge_success(record, number, head, review_version, gh_runner, root, warning_codes,

@@ -159,7 +159,8 @@ class AcceptTests(OwnerAcceptanceTestCase):
         self.assertEqual(result['step'], 'MERGED')
         self.assertEqual(result['codes'], [])
         self.assertEqual(result['result'],
-                         {'pr': 17, 'head': HEAD, 'owner_acceptance': URL})
+                         {'pr': 17, 'head': HEAD, 'owner_acceptance': URL,
+                          'main_behind_by': 0})
         self.assertEqual(sum(call[:2] == ['pr', 'merge'] for call in calls), 1)
         provenance = [call for call in calls if call[:2] == ['pr', 'comment']]
         self.assertEqual(len(provenance), 1)
@@ -199,7 +200,7 @@ class UnchangedWithoutOptionTests(OwnerAcceptanceTestCase):
     def test_merge_without_option_keeps_provenance_and_result(self):
         result, calls, reads = self.merge_once(files=CODE_FILES)
         self.assertEqual(result, {'step': 'MERGED', 'codes': [],
-                                  'result': {'pr': 17, 'head': HEAD}})
+                                  'result': {'pr': 17, 'head': HEAD, 'main_behind_by': 0}})
         provenance = [call for call in calls if call[:2] == ['pr', 'comment']]
         self.assertEqual(provenance[0][-1], (
             f'llmtool task advance merge provenance: task={"1" * 32} '

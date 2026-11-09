@@ -3850,6 +3850,47 @@ class CompletionDocsOnlyAttributedPathsTests(unittest.TestCase):
         # The docs-only test still compares with the attributed paths only.
         self.assert_refused(changed, developer, [self.docs_test(changed)])
 
+    def test_legacy_docs_only_record_is_readable_but_not_writable(self):
+        # A legacy record whose NOT_APPLICABLE_DOCS_ONLY test matched
+        # changed_paths rather than developer_changed_paths is accepted on read
+        # through get(), but cannot be created or updated.
+        task = self._completion_task(self.DOCS, ['docs/attributed.md'],
+                                     [self.docs_test(self.DOCS)])
+        self.store._ensure_root()
+        path = self.store.root / f"{task['task_id']}.json"
+        task['record_sha256'] = task_store_module._digest(task)
+        path.write_bytes(task_store_module._json_bytes(task))
+        os.chmod(path, 0o600)
+
+        # get() reads it through lenient validation
+        loaded = self.store.get(task['task_id'])
+        self.assertEqual(loaded['task_id'], task['task_id'])
+
+        # Writing that record fails strict validation
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.update(task['task_id'], response='Updated response')
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
+
+        # Writing a new record with that shape fails
+        new_task = self._completion_task(self.DOCS, ['docs/attributed.md'],
+                                         [self.docs_test(self.DOCS)])
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.create(new_task)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
+
+        # A docs-only test whose paths include a non-.md file still fails on read
+        bad_paths = ['docs/guide.md', 'tools/script.py']
+        bad_task = self._completion_task(bad_paths, ['docs/attributed.md'],
+                                         [self.docs_test(bad_paths)])
+        bad_path = self.store.root / f"{bad_task['task_id']}.json"
+        bad_task['record_sha256'] = task_store_module._digest(bad_task)
+        bad_path.write_bytes(task_store_module._json_bytes(bad_task))
+        os.chmod(bad_path, 0o600)
+
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.get(bad_task['task_id'])
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
+
 
 if __name__ == '__main__':
     unittest.main()

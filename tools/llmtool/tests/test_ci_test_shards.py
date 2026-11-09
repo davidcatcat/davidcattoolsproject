@@ -141,5 +141,192 @@ class CiTestShardsTests(unittest.TestCase):
         )
 
 
+import shutil
+
+
+class SourceRevisionLooseMergeTests(unittest.TestCase):
+    """Verifies loose merge and exact-head assertions in CI Source revision steps."""
+
+    @classmethod
+    def setUpClass(cls):
+        mac_workflow = (
+            TOOLS_ROOT.parent.parent / ".github/workflows/llmtool-mac-ci.yml"
+        ).read_text(encoding="utf-8")
+        linux_workflow = (
+            TOOLS_ROOT.parent.parent / ".github/workflows/llmtool-linux-ci.yml"
+        ).read_text(encoding="utf-8")
+        cls.mac_scripts = cls._extract_scripts(mac_workflow)
+        cls.linux_scripts = cls._extract_scripts(linux_workflow)
+        cls.all_scripts = cls.mac_scripts + cls.linux_scripts
+
+    @staticmethod
+    def _extract_scripts(workflow: str) -> list[str]:
+        # Extract each '- name: Source revision' step's run script after 'run: |'
+        pattern = re.compile(
+            r"(?ms)^ +- name: Source revision\b.*?^ +run: \|\n"
+            r"(?P<script>(?:^ {10}[^\n]*\n)+)"
+        )
+        return [textwrap.dedent(m.group("script")) for m in pattern.finditer(workflow)]
+
+    def test_extracted_script_counts(self):
+        # One Source revision step in Mac workflow, three in Linux workflow.
+        self.assertEqual(len(self.mac_scripts), 1)
+        self.assertEqual(len(self.linux_scripts), 3)
+
+    def test_text_requirements_in_extracted_scripts(self):
+        notice_line = (
+            'echo "::notice::head does not contain base $BASE_SHA; CI tested the exact PR head '
+            '(loose merge rule, Issue #1317); the merge gate checks GitHub mergeability"'
+        )
+        for i, script in enumerate(self.all_scripts):
+            with self.subTest(script_index=i):
+                self.assertIn("::notice::", script)
+                self.assertIn("does not contain base", script)
+                self.assertIn(notice_line, script)
+                self.assertIn('test "$head" = "$EXPECTED_SHA"', script)
+                self.assertIn('test "$head" != "$GITHUB_SHA"', script)
+                self.assertIn('git merge-base --is-ancestor "$BASE_SHA" "$head"', script)
+                self.assertIn("cannot compare head with base", script)
+                self.assertNotIn("update the branch", script)
+                self.assertNotIn('fail "head does not contain base', script)
+
+    def test_bash_loose_merge_and_head_refusals(self):
+        # Skip only if bash or git is missing.
+        if shutil.which("bash") is None or shutil.which("git") is None:
+            self.skipTest("bash or git is missing")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repo = temp_path / "repo"
+            repo.mkdir()
+
+            git_env = {
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": str(temp_path),
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
+
+            def run_git(*args):
+                subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    env=git_env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+            # Local identity and gpgsign disabled without reading global git config
+            run_git("init")
+            run_git("config", "user.name", "Test User")
+            run_git("config", "user.email", "test@example.com")
+            run_git("config", "commit.gpgsign", "false")
+
+            # Commit A parent
+            (repo / "file.txt").write_text("initial content\n", encoding="utf-8")
+            run_git("add", "file.txt")
+            run_git("commit", "-m", "initial commit")
+            parent_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                env=git_env,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            # Commit A
+            (repo / "file.txt").write_text("commit A content\n", encoding="utf-8")
+            run_git("commit", "-am", "commit A")
+            sha_a = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                env=git_env,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            # Commit B from A's parent on another branch so B does not contain A
+            run_git("checkout", "-b", "branch-b", parent_sha)
+            (repo / "file_b.txt").write_text("commit B content\n", encoding="utf-8")
+            run_git("add", "file_b.txt")
+            run_git("commit", "-m", "commit B")
+            sha_b = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                env=git_env,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            dummy_github_sha = "f" * 40
+
+            for i, script in enumerate(self.all_scripts):
+                with self.subTest(script_index=i):
+                    # B does not contain A: exit 0 and stdout contains ::notice::
+                    env_loose = {
+                        "PATH": os.environ.get("PATH", ""),
+                        "HOME": str(temp_path),
+                        "GITHUB_EVENT_NAME": "pull_request",
+                        "EXPECTED_SHA": sha_b,
+                        "BASE_SHA": sha_a,
+                        "GITHUB_SHA": dummy_github_sha,
+                    }
+                    proc = subprocess.run(
+                        ["bash", "-c", script],
+                        cwd=repo,
+                        env=env_loose,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(
+                        proc.returncode,
+                        0,
+                        msg=f"script {i} failed: stdout={proc.stdout}, stderr={proc.stderr}",
+                    )
+                    self.assertIn("::notice::", proc.stdout)
+
+                    # Contained base (parent of B): exit 0 and stdout contains 'merge coverage'
+                    env_contained = dict(env_loose, BASE_SHA=parent_sha)
+                    proc = subprocess.run(
+                        ["bash", "-c", script],
+                        cwd=repo,
+                        env=env_contained,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(
+                        proc.returncode,
+                        0,
+                        msg=f"script {i} failed: stdout={proc.stdout}, stderr={proc.stderr}",
+                    )
+                    self.assertIn("merge coverage", proc.stdout)
+
+                    # EXPECTED_SHA does not match checked-out HEAD: nonzero exit
+                    env_wrong_expected = dict(env_loose, EXPECTED_SHA=sha_a)
+                    proc = subprocess.run(
+                        ["bash", "-c", script],
+                        cwd=repo,
+                        env=env_wrong_expected,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(proc.returncode, 0)
+
+                    # GITHUB_SHA matches HEAD (merge-ref check): nonzero exit
+                    env_merge_ref = dict(env_loose, GITHUB_SHA=sha_b)
+                    proc = subprocess.run(
+                        ["bash", "-c", script],
+                        cwd=repo,
+                        env=env_merge_ref,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(proc.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
