@@ -761,8 +761,8 @@ class MacTestIdSelectionTests(unittest.TestCase):
 
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml"
 CANONICAL_STEP = "Offline canonical checks"
-MODE_EXPRESSION = "${{ needs.select.outputs.mode }}"
-STEP_LIMIT = "${{ needs.select.outputs.mode == 'full' && 110 || 45 }}"
+CANONICAL_SHARD_STEP = "Offline canonical shard checks"
+CANONICAL_SUBSET_STEP = "Offline canonical checks"
 # Synthetic commit id for the fake git; not a real revision.
 SYNTHETIC_HEAD = "f" * 40
 # Shared body of the fake test commands. FAKE_STARTED makes the command
@@ -777,10 +777,19 @@ for count in $FAKE_RAN; do
 done
 exit "${FAKE_STATUS:-0}"
 """
+FAKE_PYTHON = r"""#!/bin/sh
+# Synthetic test runner and shard generator.
+case "$1" in
+  *ci_test_shards.py)
+    echo "test_shard_alpha.py"
+    exit 0
+    ;;
+esac
+""" + FAKE_RUN
 FAKE_TOOLS = {
     "make": "#!/bin/sh\n# Synthetic make: the syntax target passes.\n"
             'if [ "$3" = syntax ]; then exit 0; fi\n' + FAKE_RUN,
-    "python3": "#!/bin/sh\n# Synthetic test runner.\n" + FAKE_RUN,
+    "python3": FAKE_PYTHON,
     "git": "#!/bin/sh\n# Synthetic git: answers rev-parse HEAD only.\n"
            '[ "$1 $2" = "rev-parse HEAD" ] || exit 2\n'
            f"echo {SYNTHETIC_HEAD}\n",
@@ -799,10 +808,13 @@ REPORT_BLOCK = re.compile(
 )
 
 
-def workflow_step(name):
-    """Return the raw lines of one check-job step, found by its name."""
+def workflow_step(name, job=None):
+    """Return the raw lines of one workflow step, found by its name."""
     lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
-    start = lines.index(f"      - name: {name}")
+    start_index = 0
+    if job:
+        start_index = lines.index(f"  {job}:")
+    start = lines.index(f"      - name: {name}", start_index)
     end = start + 1
     while end < len(lines) and (not lines[end].strip()
                                 or lines[end].startswith(" " * 8)):
@@ -810,9 +822,12 @@ def workflow_step(name):
     return lines[start:end]
 
 
-def canonical_script():
+def canonical_script(mode="full"):
     """Return the run script of the canonical step, as GitHub passes it."""
-    step = workflow_step(CANONICAL_STEP)
+    if mode == "full":
+        step = workflow_step(CANONICAL_SHARD_STEP, job="shards")
+    else:
+        step = workflow_step(CANONICAL_SUBSET_STEP, job="check")
     body = []
     for line in step[step.index("        run: |") + 1:]:
         if line.strip() and not line.startswith(" " * 10):
@@ -823,17 +838,19 @@ def canonical_script():
 
 class CanonicalStepStructureTests(unittest.TestCase):
     def test_script_sets_pass_only_on_its_last_line_with_one_exit_trap(self):
-        script = canonical_script()
-        lines = [line.strip() for line in script.splitlines() if line.strip()]
-        commands = [line for line in lines if not line.startswith("#")]
-        self.assertEqual(lines[-1], "result=PASS")
-        self.assertEqual(sum("result=PASS" in line for line in lines), 1)
-        self.assertLess(commands.index("result=INCOMPLETE"),
-                        commands.index("trap report_result EXIT"))
-        self.assertIn("test_count=0", commands)
-        traps = [line for line in commands if re.search(r"\btrap\b", line)]
-        self.assertEqual(traps, ["trap report_result EXIT"])
-        self.assertIn('echo "::error::canonical checks ran no test cases"', commands)
+        for mode in ("full", "mac-subset"):
+            with self.subTest(mode=mode):
+                script = canonical_script(mode)
+                lines = [line.strip() for line in script.splitlines() if line.strip()]
+                commands = [line for line in lines if not line.startswith("#")]
+                self.assertEqual(lines[-1], "result=PASS")
+                self.assertEqual(sum("result=PASS" in line for line in lines), 1)
+                self.assertLess(commands.index("result=INCOMPLETE"),
+                                commands.index("trap report_result EXIT"))
+                self.assertIn("test_count=0", commands)
+                traps = [line for line in commands if re.search(r"\btrap\b", line)]
+                self.assertEqual(traps, ["trap report_result EXIT"])
+                self.assertIn('echo "::error::canonical checks ran no test cases"', commands)
 
     def test_job_limit_is_120_and_only_canonical_step_has_a_mode_limit(self):
         lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
@@ -841,29 +858,39 @@ class CanonicalStepStructureTests(unittest.TestCase):
         self.assertEqual(limits, [
             "    timeout-minutes: 120",
             "    timeout-minutes: 120",
-            f"        timeout-minutes: {STEP_LIMIT}",
+            "        timeout-minutes: 45",
+            "    timeout-minutes: 120",
+            "        timeout-minutes: 45",
         ])
         select_job = lines.index("  select:")
         select_steps = lines.index("    steps:", select_job)
         self.assertTrue(select_job < lines.index(limits[0], select_job) < select_steps)
+        shards_job = lines.index("  shards:")
+        shards_steps = lines.index("    steps:", shards_job)
+        self.assertTrue(shards_job < lines.index(limits[1], shards_job) < shards_steps)
         check_job = lines.index("  check:")
         check_steps = lines.index("    steps:", check_job)
-        self.assertTrue(check_job < lines.index(limits[1], check_job) < check_steps)
-        self.assertIn(limits[2], workflow_step(CANONICAL_STEP))
+        self.assertTrue(check_job < lines.index(limits[3], check_job) < check_steps)
+        self.assertIn("        timeout-minutes: 45", workflow_step(CANONICAL_SHARD_STEP, job="shards"))
+        self.assertIn("        timeout-minutes: 45", workflow_step(CANONICAL_SUBSET_STEP, job="check"))
 
     def test_selection_job_exists_and_check_job_needs_it(self):
         workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
         jobs = workflow.get("jobs", {})
         self.assertIn("select", jobs)
+        self.assertIn("shards", jobs)
+        self.assertIn("check", jobs)
         select_job = jobs.get("select", {})
+        shards_job = jobs.get("shards", {})
         check_job = jobs.get("check", {})
         self.assertIn("if", select_job)
         self.assertEqual(select_job.get("if"), check_job.get("if"))
+        self.assertEqual(shards_job.get("needs"), "select")
         needs = check_job.get("needs")
         if isinstance(needs, list):
-            self.assertIn("select", needs)
+            self.assertEqual(needs, ["select", "shards"])
         else:
-            self.assertEqual(needs, "select")
+            self.fail(f"check job needs must be a list: {needs}")
         check_names = [
             j.get("name")
             for j in jobs.values()
@@ -872,8 +899,9 @@ class CanonicalStepStructureTests(unittest.TestCase):
         self.assertEqual(len(check_names), 1)
         workflow_text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("  select:", workflow_text)
+        self.assertIn("  shards:", workflow_text)
         self.assertIn("  check:", workflow_text)
-        self.assertIn("needs: select", workflow_text)
+        self.assertIn("needs: [select, shards]", workflow_text)
         self.assertEqual(workflow_text.count("name: check (macOS 3.13)"), 1)
 
     def test_concurrency_block_placement_on_select_job_only(self):
@@ -894,17 +922,76 @@ class CanonicalStepStructureTests(unittest.TestCase):
         check_job = jobs.get("check", {})
         self.assertNotIn("concurrency", check_job)
 
+    def test_shards_matrix_and_check_layout_meets_acceptance_5(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        jobs = workflow.get("jobs", {})
+
+        check_jobs = [
+            (job_id, job)
+            for job_id, job in jobs.items()
+            if isinstance(job, dict) and job.get("name") == "check (macOS 3.13)"
+        ]
+        self.assertEqual(len(check_jobs), 1)
+        check_id, check_job = check_jobs[0]
+        self.assertEqual(check_id, "check")
+
+        runs_on = check_job.get("runs-on", "")
+        self.assertIn("macos-15-intel", runs_on)
+        self.assertIn("needs.select.outputs.mode != 'full'", runs_on)
+
+        self.assertEqual(check_job.get("needs"), ["select", "shards"])
+
+        self.assertIn("shards", jobs)
+        shards_job = jobs["shards"]
+        self.assertEqual(shards_job.get("needs"), "select")
+        self.assertEqual(shards_job.get("runs-on"), "macos-15-intel")
+        strategy = shards_job.get("strategy", {})
+        self.assertFalse(strategy.get("fail-fast"))
+        matrix = strategy.get("matrix", {})
+        self.assertEqual(matrix.get("shard"), [1, 2, 3])
+        self.assertEqual(
+            shards_job.get("if"),
+            "needs.select.outputs.mode == 'full' && needs.select.outputs.run != 'false'",
+        )
+
+        shard_results_step = next(
+            s for s in check_job.get("steps", [])
+            if s.get("name") == "Shard results"
+        )
+        self.assertEqual(
+            shard_results_step.get("if"),
+            "always() && (needs.select.outputs.mode == 'full' || needs.select.result != 'success') && needs.select.outputs.run != 'false'",
+        )
+        env = shard_results_step.get("env", {})
+        self.assertEqual(env.get("SELECT_RESULT"), "${{ needs.select.result }}")
+        self.assertEqual(env.get("SHARDS_RESULT"), "${{ needs.shards.result }}")
+        step_run = shard_results_step.get("run", "")
+        self.assertIn('[ "$SELECT_RESULT" != "success" ] || [ "$SHARDS_RESULT" != "success" ]', step_run)
+        self.assertIn('printf \'select result: %s\\nshards result: %s\\n\' "$SELECT_RESULT" "$SHARDS_RESULT"', step_run)
+        self.assertIn("exit 1", step_run)
+
+        workflow_text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("self-hosted", workflow_text)
+        for job_name, job_data in jobs.items():
+            job_runs = str(job_data.get("runs-on", ""))
+            self.assertNotIn("self-hosted", job_runs)
+            self.assertTrue(
+                "macos-15" in job_runs or "macos-15-intel" in job_runs,
+                f"Job {job_name} runs-on ({job_runs}) must use hosted runner",
+            )
+
 
 @unittest.skipUnless(os.name == "posix", "the step script runs under POSIX bash")
 class CanonicalStepRunTests(unittest.TestCase):
     """Run the real canonical step script with fake make, python3 and git."""
 
-    def run_step(self, mode, *, ran="2 3", status=0, terminate=False, tee_status=None):
+    def run_step(self, mode, *, ran="2 3", status=0, terminate=False, tee_status=None, shard=1):
         bash = shutil.which("bash")
         self.assertIsNotNone(bash, "bash is required on POSIX systems")
-        script = canonical_script()
-        self.assertEqual(script.count(MODE_EXPRESSION), 1)
-        script = script.replace(MODE_EXPRESSION, mode)
+        script = canonical_script(mode)
+        if mode == "full":
+            self.assertIn("${{ matrix.shard }}", script)
+            script = script.replace("${{ matrix.shard }}", str(shard))
         self.assertNotIn("${{", script)
         tools = dict(FAKE_TOOLS)
         if tee_status is not None:
@@ -975,14 +1062,19 @@ class CanonicalStepRunTests(unittest.TestCase):
         return int(count), result
 
     def test_pass_sums_counts_in_both_modes(self):
-        # Each fake run prints "Ran 2" and "Ran 3"; the subset runs two IDs.
+        # Each fake run prints "Ran 2" and "Ran 3"; shard runs 1 module, subset runs two IDs.
         for mode, expected in (("full", 5), ("mac-subset", 10)):
             with self.subTest(mode=mode):
                 returncode, text = self.run_step(mode)
                 self.assertEqual(returncode, 0, text)
                 self.assertEqual(self.report(text), (expected, "PASS"))
                 self.assertNotIn("::error::", text)
-                if mode == "mac-subset":
+                if mode == "full":
+                    self.assertIn("canonical shard: shard 1/3 (1 modules)\n", text)
+                    self.assertRegex(text, re.compile(
+                        r"^canonical test module: test_shard_alpha\.py\n"
+                        r"canonical test module elapsed seconds: \d+$", re.MULTILINE))
+                elif mode == "mac-subset":
                     for test_id in SUBSET_IDS:
                         self.assertRegex(text, re.compile(
                             rf"^canonical test ID: {re.escape(test_id)}\n"
@@ -994,7 +1086,9 @@ class CanonicalStepRunTests(unittest.TestCase):
                 returncode, text = self.run_step(mode, status=3)
                 self.assertEqual(returncode, 3, text)
                 self.assertEqual(self.report(text), (5, "FAIL"))
-                if mode == "mac-subset":
+                if mode == "full":
+                    self.assertIn("canonical test module: test_shard_alpha.py\n", text)
+                elif mode == "mac-subset":
                     self.assertIn(f"canonical test ID: {SUBSET_IDS[0]}\n", text)
                     self.assertNotIn(f"canonical test ID: {SUBSET_IDS[1]}\n", text)
 
@@ -1005,7 +1099,9 @@ class CanonicalStepRunTests(unittest.TestCase):
                 returncode, text = self.run_step(mode, tee_status=4)
                 self.assertEqual(returncode, 4, text)
                 self.assertEqual(self.report(text), (5, "FAIL"))
-                if mode == "mac-subset":
+                if mode == "full":
+                    self.assertIn("canonical test module: test_shard_alpha.py\n", text)
+                elif mode == "mac-subset":
                     self.assertIn(f"canonical test ID: {SUBSET_IDS[0]}\n", text)
                     self.assertNotIn(f"canonical test ID: {SUBSET_IDS[1]}\n", text)
             with self.subTest(mode=mode, command_status=3):
