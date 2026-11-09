@@ -188,7 +188,7 @@ class CiTestShardsTests(unittest.TestCase):
             if line.strip().startswith("-")
         ]
         self.assertEqual(push_paths, expected_paths)
-        self.assertEqual(push_paths[-2:], ["scripts/**", ".github/workflows/**"])
+        self.assertEqual(push_paths[-2:], ["**/*.md", "reports/**"])
         idx_llmtool = push_paths.index("tools/llmtool/**")
         self.assertEqual(push_paths[idx_llmtool + 1], "!tools/llmtool/*.md")
 
@@ -198,7 +198,7 @@ class CiTestShardsTests(unittest.TestCase):
             if line.strip().startswith("-")
         ]
         self.assertEqual(pr_paths, expected_paths)
-        self.assertEqual(pr_paths[-2:], ["scripts/**", ".github/workflows/**"])
+        self.assertEqual(pr_paths[-2:], ["**/*.md", "reports/**"])
         idx_llmtool_pr = pr_paths.index("tools/llmtool/**")
         self.assertEqual(pr_paths[idx_llmtool_pr + 1], "!tools/llmtool/*.md")
 
