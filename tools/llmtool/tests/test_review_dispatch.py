@@ -276,6 +276,62 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(len(self.store.get(TASK)['review_dispatch_claim']), 2)
         self.assertEqual(len(self.sent), 0)
 
+    def test_used_version_on_another_head_is_refused_and_names_next_free_version(self):
+        def dispatch(head, version, pr_number=42, executor_task='executor-d6'):
+            executor = self.executor
+            preflight = (TASK, executor, head, 'd' * 40, 'claude-reviewer')
+            with patch.object(review_dispatch, '_preflight', side_effect=[preflight, preflight]), \
+                    patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                                 return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                    patch.object(review_dispatch, '_resolve_github_login',
+                                 return_value='reviewer-user'):
+                return review_dispatch.dispatch_review(
+                    store=self.store, task_id=TASK, executor_task=executor_task,
+                    pr_number=pr_number, version=version,
+                    create_d6=lambda **kw: self.created.append(kw),
+                    dispatch_session=lambda **kw: (self.sent.append(kw) or ('native-' + str(version))),
+                    bind_session=lambda **kw: self.bound.append(kw),
+                    prompt_renderer=lambda *_: 'prompt')
+
+        first = dispatch(HEAD, 1)
+        second = dispatch('c' * 40, 2)
+        third = dispatch('d' * 40, 3)
+        self.assertEqual(len(self.created), 3)
+        self.assertEqual(len(self.sent), 3)
+        created_count = len(self.created)
+        sent_count = len(self.sent)
+        claims_before = list(self.store.get(TASK)['review_dispatch_claim'])
+
+        with self.assertRaises(LLMToolError) as raised:
+            dispatch('e' * 40, 2)
+        self.assertEqual(raised.exception.review_dispatch_code,
+                         'REVIEW_DISPATCH_VERSION_USED')
+        self.assertEqual(
+            str(raised.exception),
+            'Review version 2 is already used for PR 42 on another head; use version 4.')
+        self.assertEqual(len(self.created), created_count)
+        self.assertEqual(len(self.sent), sent_count)
+        self.assertEqual(self.store.get(TASK)['review_dispatch_claim'], claims_before)
+
+        replayed = dispatch('c' * 40, 2)
+        self.assertEqual(replayed, second)
+        self.assertEqual(len(self.created), created_count)
+        self.assertEqual(len(self.sent), sent_count)
+
+        # Other PR and executor claims never block a new head dispatch.
+        dispatch('c' * 40, 4, pr_number=99)
+        dispatch('c' * 40, 4, executor_task='executor-other')
+        fourth = dispatch('e' * 40, 4)
+        self.assertEqual(fourth['state'], 'DISPATCHED')
+        self.assertEqual(fourth['version'], 4)
+        self.assertEqual(fourth['head_sha'], 'e' * 40)
+
+        # A new version on the same head also creates a new claim.
+        fifth = dispatch(HEAD, 5)
+        self.assertEqual(fifth['state'], 'DISPATCHED')
+        self.assertEqual(fifth['version'], 5)
+        self.assertEqual(fifth['head_sha'], HEAD)
+
     def test_github_login_resolution_uses_authenticated_account_and_validates_output(self):
         result = SimpleNamespace(returncode=0, stdout=b'authenticated-account\n')
         with patch.object(review_dispatch.shutil, 'which', return_value='/bin/gh') as which, \
@@ -872,7 +928,8 @@ class ReviewDispatchTests(unittest.TestCase):
     def test_cli_prints_review_dispatch_refusal_code(self):
         codes = ('PAUSED', 'REVIEWER_ROUTE_UNIMPLEMENTED',
                  'REVIEW_PROMPT_PR_HEAD_MISMATCH',
-                 'REVIEW_DISPATCH_CLAIM_MISMATCH', 'REVIEW_DISPATCH_OUTCOME_UNKNOWN')
+                 'REVIEW_DISPATCH_CLAIM_MISMATCH', 'REVIEW_DISPATCH_OUTCOME_UNKNOWN',
+                 'REVIEW_DISPATCH_VERSION_USED')
         for code in codes:
             error = LLMToolError('Reviewer dispatch refused; details omitted')
             error.review_dispatch_code = code
