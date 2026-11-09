@@ -1931,14 +1931,28 @@ def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
     return evidence
 
 
-def run_bounded_tests(*, root, source_sha, result_sha, read_paths, write_paths):
-    """Run fixed registered tests or record an actual Git-derived docs-only result."""
+def run_bounded_tests(*, root, source_sha, result_sha, read_paths, write_paths,
+                      trusted_base_sha=None):
+    """Run fixed registered tests or record an actual Git-derived docs-only result.
+
+    With trusted_base_sha the docs-only decision uses only Developer-attributed
+    paths: files that a clean merge of trusted main brought in are not Task
+    changes. A merge whose second parent is not in trusted main, or that has a
+    conflict or hand resolution, still counts its paths. Without it the plain
+    source_sha..result_sha diff decides, as before.
+    """
     eligible = sorted({(p, _registered_test(p)) for p in (*read_paths, *write_paths)
                        if _registered_test(p) is not None})
     before = collect_git_snapshot(root)
     if before.head != result_sha or not before.clean:
         _stop('TEST_SOURCE_MISMATCH')
-    changed_paths = _committed_changed_paths(root, source_sha, result_sha)
+    if trusted_base_sha is None:
+        changed_paths = _committed_changed_paths(root, source_sha, result_sha)
+    else:
+        changed_paths = list(_developer_changed_paths(
+            root, source_sha, result_sha, trusted_base_sha))
+        if not changed_paths or len(changed_paths) > _PROPOSAL_FILE_LIMIT:
+            _stop('TEST_PATH_INVALID')
     if _docs_only(changed_paths):
         return [{'status': 'NOT_APPLICABLE_DOCS_ONLY', 'changed_paths': changed_paths,
                  'source_sha': result_sha, 'docs_only': True}]
@@ -2136,6 +2150,47 @@ def _review_family_compatible(developer, reviewer_identity):
     if developer_family is None or reviewer_family is None:
         return False
     return reviewer_family != developer_family
+
+
+def _company_gw_text_proposal_pm_session(task_record, executor_identity):
+    """Return the PM session of a PM-applied company-gw text-proposal Task, else None.
+
+    Only an exact company-gw Developer record qualifies: no exposed native
+    session, a responded unified diff with a sha256, applied in the D6
+    registered to the company-gw trusted agent, and a known PM session.
+    """
+    if type(task_record) is not dict or executor_identity != 'company-gw':
+        return None
+    developer = task_record.get('developer')
+    pm_session = task_record.get('pm_session_id')
+    if (type(developer) is not dict or
+            developer.get('provider_profile') != 'company-gw' or
+            developer.get('backend_session_semantics') != 'NO_NATIVE_SESSION_ID_EXPOSED' or
+            developer.get('state') != 'DEVELOPER_RESPONDED' or
+            developer.get('artifact_format') != 'unified_diff' or
+            type(developer.get('artifact_sha256')) is not str or
+            _HEX64.fullmatch(developer['artifact_sha256']) is None or
+            _native_session_identity(pm_session) is None):
+        return None
+    return pm_session
+
+
+def _native_session_identity(value):
+    """Return a comparable native session identity, else None.
+
+    A Task stores a UUID-backed PM session as ``pm-<native UUID>`` while D6
+    records hold the raw native UUID, so one ``pm-`` prefix is removed and the
+    rest is case-folded. Empty or UNKNOWN identities give None.
+    """
+    if type(value) is not str:
+        return None
+    identity = value.strip()
+    if identity[:3].casefold() == 'pm-':
+        identity = identity[3:].strip()
+    identity = identity.casefold()
+    if not identity or identity == 'unknown':
+        return None
+    return identity
 
 
 def _review_binding_line(task_id, run_id, contract_digest, result_sha):
@@ -2667,7 +2722,25 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
     if reviewer.native_session_id in (None, 'UNKNOWN'):
         missing.append('REVIEWER_NATIVE_SESSION_UNVERIFIED')
     elif executor_native_session_id in (None, 'UNKNOWN'):
-        missing.append('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT')
+        # #1241: company-gw only proposes a text diff and exposes no native
+        # session; the PM applies it in the registered company-gw D6. There,
+        # independence rests on the bound cross-family Reviewer on its own D6,
+        # whose native session must differ from the PM session. Both sides are
+        # compared as normalized identities (the Task stores `pm-<native>`).
+        # Every other route, and any company-gw record that does not match
+        # exactly, keeps the fail-closed rule.
+        pm_session = None
+        if executor_identity == 'company-gw':
+            try:
+                pm_session = _company_gw_text_proposal_pm_session(
+                    load_completion_task_record(), executor_identity)
+            except LLMToolError:
+                pm_session = None
+        pm_identity = _native_session_identity(pm_session)
+        reviewer_identity = _native_session_identity(reviewer.native_session_id)
+        if (pm_identity is None or reviewer_identity is None or
+                reviewer_identity == pm_identity):
+            missing.append('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT')
     elif reviewer.native_session_id == executor_native_session_id:
         missing.append('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT')
     if reviewer.github_login is None:
