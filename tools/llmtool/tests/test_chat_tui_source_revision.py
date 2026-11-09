@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import unittest
@@ -44,6 +45,20 @@ class SourceRevisionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             source_dir, module = _source_tree(root)
             _write_head(source_dir.parents[8] / ".git")
+            with patch("subprocess.run", side_effect=AssertionError("Git must not run")):
+                self.assertIsNone(chat_tui._source_revision(str(module)))
+
+    def test_no_git_returns_none_without_running_git(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source_dir = Path(os.path.abspath(temp))
+            if len(list(source_dir.parents)) >= 8:
+                self.skipTest("temp directory has too many parents")
+            if any(os.path.lexists(str(parent / ".git")) for parent in [source_dir, *source_dir.parents]):
+                self.skipTest("ancestor already holds .git")
+            package = source_dir / "pkg"
+            package.mkdir()
+            module = package / "module.py"
+            module.write_text("", encoding="utf-8")
             with patch("subprocess.run", side_effect=AssertionError("Git must not run")):
                 self.assertIsNone(chat_tui._source_revision(str(module)))
 
