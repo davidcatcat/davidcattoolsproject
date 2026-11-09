@@ -10253,3 +10253,32 @@ class StuckAlertTests(unittest.TestCase):
         mon._paint_screen(Screen(), monitor, "office", 0, False, {},
                           lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertNotIn(mon.BEHIND_WARNING, "\n".join(drawn.values()))
+
+
+class MainAiGhConfigTests(unittest.TestCase):
+    def _run(self, home, preset=None):
+        env = {'HOME': home}
+        if preset is not None:
+            env['GH_CONFIG_DIR'] = preset
+        with patch.dict(os.environ, env):
+            if preset is None:
+                os.environ.pop('GH_CONFIG_DIR', None)
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+                mon.main(['--help'])
+            return os.environ.get('GH_CONFIG_DIR')
+
+    def test_uses_ai_config_when_present(self):
+        with tempfile.TemporaryDirectory() as home:
+            ai = Path(home) / '.config' / 'gh-ai'
+            ai.mkdir(parents=True)
+            self.assertEqual(self._run(home), str(ai))
+
+    def test_keeps_preset_value(self):
+        with tempfile.TemporaryDirectory() as home:
+            ai = Path(home) / '.config' / 'gh-ai'
+            ai.mkdir(parents=True)
+            self.assertEqual(self._run(home, '/synthetic/other'), '/synthetic/other')
+
+    def test_unset_without_ai_config(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.assertIsNone(self._run(home))
