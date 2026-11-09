@@ -84,12 +84,21 @@ _V2_REMOTE_OUTCOME_SHAPES = tuple(shape | frozenset(('remote_test_outcomes',))
                                   for shape in _V2_SHAPES)
 _V2_REMOTE_RECEIPT_OUTCOME_SHAPES = tuple(shape | frozenset((
     'remote_test_receipts', 'remote_test_outcomes')) for shape in _V2_SHAPES)
+_V2_REMOTE_DISPATCH_SHAPES = tuple(shape | frozenset(('remote_test_dispatches',))
+                                   for shape in _V2_SHAPES)
+_V2_REMOTE_TEST_DISPATCH_SHAPES = tuple(shape | frozenset((
+    'remote_test_receipts', 'remote_test_dispatches')) for shape in _V2_SHAPES)
+_V2_REMOTE_OUTCOME_DISPATCH_SHAPES = tuple(shape | frozenset((
+    'remote_test_outcomes', 'remote_test_dispatches')) for shape in _V2_SHAPES)
+_V2_REMOTE_RECEIPT_OUTCOME_DISPATCH_SHAPES = tuple(shape | frozenset((
+    'remote_test_receipts', 'remote_test_outcomes', 'remote_test_dispatches'))
+    for shape in _V2_SHAPES)
 FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'dispatch_audit', 'completion_events', 'completion_event_tombstones',
-    'remote_test_receipts', 'remote_test_outcomes', 'review_dispatch_claim',
-    'review_repair_claims', 'high_debug', 'abandonment', 'pm_session_adoptions',
-    'pm_provenance', 'merge_attempt', 'published_pr', 'repair_cap_override',
-    'publish_operations'))
+    'remote_test_receipts', 'remote_test_outcomes', 'remote_test_dispatches',
+    'review_dispatch_claim', 'review_repair_claims', 'high_debug',
+    'abandonment', 'pm_session_adoptions', 'pm_provenance', 'merge_attempt',
+    'published_pr', 'repair_cap_override', 'publish_operations'))
 # One bounded record per publish refusal after this publish's own gh pr create
 # (#1139). Values are only int, bool, null or short strings; no command output.
 MAX_PUBLISH_OPERATIONS = 8
@@ -112,7 +121,11 @@ _REVIEW_REPAIR_OPTIONAL_FIELDS = frozenset(('repair_task_id', 'family',
                                              'high_debug_report_sha256'))
 _V2_REPAIR_BASES = (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
                     *_V2_REMOTE_OUTCOME_SHAPES,
-                    *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)
+                    *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES,
+                    *_V2_REMOTE_DISPATCH_SHAPES,
+                    *_V2_REMOTE_TEST_DISPATCH_SHAPES,
+                    *_V2_REMOTE_OUTCOME_DISPATCH_SHAPES,
+                    *_V2_REMOTE_RECEIPT_OUTCOME_DISPATCH_SHAPES)
 _V2_REPAIR_OPTIONAL_BASES = (
     *_V2_REPAIR_BASES,
     *(shape | frozenset(('completion_events',)) for shape in _V2_REPAIR_BASES),
@@ -157,7 +170,8 @@ _COMPLETION_INTENT_FIELDS = frozenset((
     'receipt_sha256', 'confirmed_at',
 ))
 _COMPLETION_SOURCES = frozenset(('DIRECT_D6_DEVELOPER', 'HOST_WORKER', 'REVIEWER',
-                                 'EC2_REMOTE_TEST', 'GITHUB', 'HIGH_DEBUG'))
+                                 'EC2_REMOTE_TEST', 'GITHUB', 'HIGH_DEBUG',
+                                 'GITHUB_REMOTE_TEST'))
 _REMOTE_TEST_RECEIPT_FIELDS = frozenset((
     'result', 'exit_code', 'source_sha', 'tree', 'fetch_head', 'modules',
     'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
@@ -165,8 +179,25 @@ _REMOTE_TEST_RECEIPT_FIELDS = frozenset((
     'run_id', 'executor_task', 'pm_session', 'command_digest', 'receipt_digest'))
 _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT = (
     _REMOTE_TEST_RECEIPT_FIELDS | frozenset(('failure_excerpt',)))
+_REMOTE_TEST_RECEIPT_FIELDS_WITH_ACTIONS = (
+    _REMOTE_TEST_RECEIPT_FIELDS | frozenset(('actions',)))
+_REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT_AND_ACTIONS = (
+    _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT | frozenset(('actions',)))
+_REMOTE_TEST_RECEIPT_SHAPES = (
+    _REMOTE_TEST_RECEIPT_FIELDS, _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT,
+    _REMOTE_TEST_RECEIPT_FIELDS_WITH_ACTIONS,
+    _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT_AND_ACTIONS)
 _REMOTE_TEST_FAILURE_EXCERPT_LIMIT = 4096
 _REMOTE_TEST_FAILURE_EXCERPT_LINES = 40
+# GitHub Actions provenance of a hosted remote test run (#1257).
+_REMOTE_TEST_ACTIONS_FIELDS = frozenset((
+    'run_id', 'run_attempt', 'job_id', 'check_run_id', 'workflow_path',
+    'workflow_sha', 'labels', 'runner_group', 'nonce'))
+_REMOTE_TEST_ACTIONS_WORKFLOW_PATH = '.github/workflows/llmtool-remote-test.yml'
+_REMOTE_TEST_ACTIONS_LABELS = ('ubuntu-24.04',)
+_REMOTE_TEST_ACTIONS_RUNNER_GROUP = 'GitHub Actions'
+_REMOTE_TEST_ACTIONS_ID_MAX = 2 ** 53
+_REMOTE_TEST_ACTIONS_ATTEMPT_MAX = 100
 
 
 def _valid_remote_test_failure_excerpt(value):
@@ -176,9 +207,39 @@ def _valid_remote_test_failure_excerpt(value):
         return len(value.encode('utf-8')) <= _REMOTE_TEST_FAILURE_EXCERPT_LIMIT
     except UnicodeError:
         return False
+
+
+def _valid_remote_test_actions(value):
+    """Return whether ``value`` is one exact GitHub Actions provenance block."""
+    if type(value) is not dict or set(value) != _REMOTE_TEST_ACTIONS_FIELDS:
+        return False
+    for field in ('run_id', 'job_id', 'check_run_id'):
+        if (type(value[field]) is not int or
+                not 1 <= value[field] <= _REMOTE_TEST_ACTIONS_ID_MAX):
+            return False
+    labels = value['labels']
+    return (type(value['run_attempt']) is int and
+            1 <= value['run_attempt'] <= _REMOTE_TEST_ACTIONS_ATTEMPT_MAX and
+            type(value['workflow_path']) is str and
+            value['workflow_path'] == _REMOTE_TEST_ACTIONS_WORKFLOW_PATH and
+            type(value['workflow_sha']) is str and
+            re.fullmatch(r'[0-9a-f]{40}', value['workflow_sha']) is not None and
+            type(labels) is list and
+            all(type(item) is str for item in labels) and
+            tuple(labels) == _REMOTE_TEST_ACTIONS_LABELS and
+            type(value['runner_group']) is str and
+            value['runner_group'] == _REMOTE_TEST_ACTIONS_RUNNER_GROUP and
+            type(value['nonce']) is str and
+            re.fullmatch(r'[0-9a-f]{32}', value['nonce']) is not None)
 MAX_REMOTE_TEST_OUTCOMES = 32
 _REMOTE_TEST_OUTCOME_FIELDS = frozenset((
     'result', 'code', 'executor_task', 'sha', 'modules', 'at'))
+MAX_REMOTE_TEST_DISPATCHES = 32
+_REMOTE_TEST_DISPATCH_FIELDS = frozenset((
+    'nonce', 'sha', 'executor_task', 'modules', 'dispatched_at', 'run_id', 'state'))
+_REMOTE_TEST_DISPATCH_STATES = frozenset((
+    'DISPATCHED', 'RUN_FOUND', 'RECORDED', 'ABANDONED'))
+_REMOTE_TEST_DISPATCH_RUN_ID_MAX = 2 ** 53
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
 _OPTIONAL_USAGE_FIELDS = frozenset((
     'cached_prompt_tokens', 'reasoning_tokens', 'tool_calls', 'served_model'))
@@ -819,8 +880,10 @@ def _validate_remote_test_receipts(record):
     # that session is accepted only through the record's verified chain.
     earlier_sessions = _verified_earlier_pm_sessions(record)
     for receipt in receipts:
-        if (type(receipt) is not dict or set(receipt) not in (
-                _REMOTE_TEST_RECEIPT_FIELDS, _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT) or
+        if (type(receipt) is not dict or set(receipt) not in _REMOTE_TEST_RECEIPT_SHAPES or
+                ('actions' in receipt and
+                 (not _valid_remote_test_actions(receipt['actions']) or
+                  receipt.get('remote_log_path') is not None)) or
                 ('failure_excerpt' in receipt and
                  (receipt.get('result') == 'PASS' or
                   not _valid_remote_test_failure_excerpt(
@@ -919,6 +982,51 @@ def _validate_remote_test_outcomes(record):
             _fail('REMOTE_TEST_OUTCOME_INVALID')
 
 
+def _valid_remote_test_dispatch_entry(entry):
+    if type(entry) is not dict or set(entry) != _REMOTE_TEST_DISPATCH_FIELDS:
+        return False
+    nonce = entry.get('nonce')
+    if type(nonce) is not str or re.fullmatch(r'[0-9a-f]{32}', nonce) is None:
+        return False
+    sha = entry.get('sha')
+    if type(sha) is not str or re.fullmatch(r'[0-9a-f]{40}', sha) is None:
+        return False
+    executor_task = entry.get('executor_task')
+    if type(executor_task) is not str or D6_TASK_ID.fullmatch(executor_task) is None:
+        return False
+    modules = entry.get('modules')
+    if (type(modules) is not list or not 1 <= len(modules) <= 8 or
+            any(type(m) is not str or re.fullmatch(r'test_[a-z0-9_]{1,80}', m) is None for m in modules) or
+            modules != sorted(set(modules))):
+        return False
+    dispatched_at = entry.get('dispatched_at')
+    if (type(dispatched_at) is not str or
+            re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{6})?Z', dispatched_at) is None):
+        return False
+    state = entry.get('state')
+    if state not in _REMOTE_TEST_DISPATCH_STATES:
+        return False
+    run_id = entry.get('run_id')
+    if run_id is not None:
+        if (type(run_id) is not int or isinstance(run_id, bool) or
+                not 1 <= run_id <= _REMOTE_TEST_DISPATCH_RUN_ID_MAX):
+            return False
+    elif state in ('RUN_FOUND', 'RECORDED'):
+        return False
+    return True
+
+
+def _validate_remote_test_dispatches(record):
+    dispatches = record.get('remote_test_dispatches', [])
+    if type(dispatches) is not list or len(dispatches) > MAX_REMOTE_TEST_DISPATCHES:
+        _fail('REMOTE_TEST_DISPATCH_INVALID')
+    seen_nonces = set()
+    for item in dispatches:
+        if not _valid_remote_test_dispatch_entry(item) or item['nonce'] in seen_nonces:
+            _fail('REMOTE_TEST_DISPATCH_INVALID')
+        seen_nonces.add(item['nonce'])
+
+
 def _valid_publish_operation(item):
     """Return whether item is one publish operation record of the fixed fields."""
     if type(item) is not dict or set(item) != _PUBLISH_OPERATION_FIELDS:
@@ -1003,30 +1111,7 @@ def _validate(record, *, strict=True):
     if (type(record) is not dict or
             (record.get('schema_version') == 1 and keys != _FIELDS_V1) or
             (record.get('schema_version') == 2 and keys not in
-             (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
-              *_V2_REMOTE_OUTCOME_SHAPES, *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES,
-              *(shape | frozenset(('completion_events',))
-                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
-                              *_V2_REMOTE_OUTCOME_SHAPES,
-                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *(shape | frozenset(('completion_events', 'completion_event_tombstones'))
-                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
-                              *_V2_REMOTE_OUTCOME_SHAPES,
-                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *(shape | frozenset(('review_dispatch_claim',))
-                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
-                              *_V2_REMOTE_OUTCOME_SHAPES,
-                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *(shape | frozenset(('completion_events', 'review_dispatch_claim'))
-                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
-                              *_V2_REMOTE_OUTCOME_SHAPES,
-                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *(shape | frozenset(('completion_events', 'completion_event_tombstones',
-                                  'review_dispatch_claim'))
-                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
-                              *_V2_REMOTE_OUTCOME_SHAPES,
-                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *_V2_REPAIR_SHAPES, *_HIGH_DEBUG_VALID_SHAPES,
+             (*_V2_REPAIR_OPTIONAL_BASES, *_V2_REPAIR_SHAPES, *_HIGH_DEBUG_VALID_SHAPES,
              *_REPAIR_CAP_OVERRIDE_VALID_SHAPES)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
@@ -1268,6 +1353,8 @@ def _validate(record, *, strict=True):
         _validate_remote_test_receipts(record)
     if 'remote_test_outcomes' in record:
         _validate_remote_test_outcomes(record)
+    if 'remote_test_dispatches' in record:
+        _validate_remote_test_dispatches(record)
     for key in ('created_at', 'updated_at'):
         try:
             stamp = datetime.strptime(record[key], '%Y-%m-%dT%H:%M:%SZ')
@@ -3192,8 +3279,7 @@ class TaskStore:
 
     def append_remote_test_receipt(self, task_id, receipt):
         """Append one validated remote test receipt idempotently to its Task."""
-        if type(receipt) is not dict or set(receipt) not in (
-                _REMOTE_TEST_RECEIPT_FIELDS, _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT):
+        if type(receipt) is not dict or set(receipt) not in _REMOTE_TEST_RECEIPT_SHAPES:
             _fail('REMOTE_TEST_RECEIPT_INVALID')
         for _ in range(5):
             current = self.get(task_id)
@@ -3272,6 +3358,82 @@ class TaskStore:
                 self._update(task_id, expected={'record_sha256': current['record_sha256']},
                              changes={'remote_test_outcomes': outcomes + [outcome]})
                 return {'outcome': outcome, 'counter': counter, 'created': True}
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
+
+    def append_remote_test_dispatch(self, task_id, entry):
+        """Append one validated remote test dispatch; replays are idempotent."""
+        if not _valid_remote_test_dispatch_entry(entry):
+            _fail('REMOTE_TEST_DISPATCH_INVALID')
+        if entry['state'] != 'DISPATCHED' or entry['run_id'] is not None:
+            _fail('REMOTE_TEST_DISPATCH_INVALID')
+        for _ in range(5):
+            current = self.get(task_id)
+            dispatches = list(current.get('remote_test_dispatches', []))
+            existing = next((item for item in dispatches
+                             if item['nonce'] == entry['nonce']), None)
+            if existing is not None:
+                if existing == entry:
+                    return existing
+                _fail('REMOTE_TEST_DISPATCH_CONFLICT')
+            if len(dispatches) >= MAX_REMOTE_TEST_DISPATCHES:
+                _fail('REMOTE_TEST_DISPATCH_LIMIT')
+            new_entry = dict(entry)
+            try:
+                self._update(task_id, expected={'record_sha256': current['record_sha256']},
+                             changes={'remote_test_dispatches': dispatches + [new_entry]})
+                return new_entry
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
+
+    def update_remote_test_dispatch(self, task_id, nonce, *, state, run_id=None):
+        """Update one remote test dispatch state along allowed transitions."""
+        if state not in _REMOTE_TEST_DISPATCH_STATES:
+            _fail('REMOTE_TEST_DISPATCH_INVALID')
+        if run_id is not None:
+            if (type(run_id) is not int or isinstance(run_id, bool) or
+                    not 1 <= run_id <= _REMOTE_TEST_DISPATCH_RUN_ID_MAX):
+                _fail('REMOTE_TEST_DISPATCH_INVALID')
+        for _ in range(5):
+            current = self.get(task_id)
+            dispatches = list(current.get('remote_test_dispatches', []))
+            position = next((index for index, item in enumerate(dispatches)
+                             if item['nonce'] == nonce), None)
+            if position is None:
+                _fail('REMOTE_TEST_DISPATCH_NOT_FOUND')
+            stored = dispatches[position]
+            old_state = stored['state']
+            old_run_id = stored['run_id']
+            if old_run_id is not None and run_id is not None and run_id != old_run_id:
+                _fail('REMOTE_TEST_DISPATCH_INVALID')
+            if state == old_state:
+                if run_id is not None and run_id != old_run_id:
+                    _fail('REMOTE_TEST_DISPATCH_INVALID')
+                return stored
+            if old_state == 'DISPATCHED' and state == 'RUN_FOUND':
+                if run_id is None:
+                    _fail('REMOTE_TEST_DISPATCH_INVALID')
+                new_run_id = run_id
+            elif old_state == 'RUN_FOUND' and state == 'RECORDED':
+                new_run_id = old_run_id
+            elif old_state == 'DISPATCHED' and state == 'ABANDONED':
+                if run_id is not None:
+                    _fail('REMOTE_TEST_DISPATCH_INVALID')
+                new_run_id = None
+            elif old_state == 'RUN_FOUND' and state == 'ABANDONED':
+                new_run_id = old_run_id
+            else:
+                _fail('REMOTE_TEST_DISPATCH_INVALID')
+            new_entry = dict(stored, state=state, run_id=new_run_id)
+            new_dispatches = list(dispatches)
+            new_dispatches[position] = new_entry
+            try:
+                self._update(task_id,
+                             expected={'record_sha256': current['record_sha256']},
+                             changes={'remote_test_dispatches': new_dispatches})
+                return new_entry
             except TaskStoreConflict:
                 continue
         _fail('TASK_STORE_BUSY')
