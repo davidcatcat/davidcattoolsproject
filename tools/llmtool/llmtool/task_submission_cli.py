@@ -48,6 +48,7 @@ from .developer_routes.agy import (
     MAX_PROMPT_BYTES as AGY_MAX_PROMPT_BYTES,
     _CONVERSATION as AGY_CONVERSATION,
 )
+from . import gw_agent_callsite, gw_agent_wiring
 from .developer_routes.claude import MAX_PROMPT_BYTES as CLAUDE_MAX_PROMPT_BYTES
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_data_rule import TEST_DATA_RULE
@@ -4381,14 +4382,16 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             return decision
         owner_gate_denied = True
         return False
+    site = None
     try:
         execute = run_route if route_runner is None else route_runner
+        site = gw_agent_callsite.SessionCallSite(store.root, executor_task_id=registration.task_id, task_id=task['task_id'], repair_excerpt=None, data_class=data_class).__enter__()
         try:
             result = execute(route, {'root': registration.root, 'model': model, 'effort': effort,
                 'expected_branch': registration.branch, 'expected_head': snapshot.head,
                 'write_paths': write_paths, 'executable': sys.executable,
                 'prompt': prompt, 'task': task_input, 'timeout': 600,
-                'state_dirs': ()}, gate=route_gate, boundary=for_platform(),
+                'state_dirs': (), **site.route_fields()}, gate=route_gate, boundary=for_platform(),
                 snapshot=capture_snapshot)
         finally:
             cleanup_audit_copies()
@@ -4425,10 +4428,13 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None})
+        site.after_result(result.session_id, task_input)
         _bind_direct_native_session(registration, developer, completion, _GW_AGENT_SESSION)
     except _D6SessionRefused:
         return persist_failure('DEVELOPER_GW_AGENT_D6_SESSION_REFUSED',
                                state='DEVELOPER_OUTCOME_UNKNOWN')
+    except gw_agent_wiring.WiringRefused as exc:
+        return persist_failure(exc.code)
     except RouteError as exc:
         code = 'DEVELOPER_' + (exc.code if not owner_gate_denied else 'DISPATCH_DENIED')
         gateway_code = exc.facts.get('gateway_code') if type(exc.facts) is dict else None
@@ -4445,6 +4451,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     except BaseException:
         persist_interrupted()
         raise
+    finally:
+        if site is not None:
+            site.__exit__(None, None, None)
     try:
         store.compare_and_update(
             task['task_id'], expected={'developer': expected_developer},
