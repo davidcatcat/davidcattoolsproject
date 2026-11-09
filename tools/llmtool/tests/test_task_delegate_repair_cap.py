@@ -213,7 +213,7 @@ class DelegateRepairCapTests(unittest.TestCase):
         store = self._at_cap(diagnosis=None, unreadable=True)
 
         with self.assertRaisesRegex(
-                LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
+                LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.recorded, [])
 
