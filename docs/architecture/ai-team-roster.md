@@ -28,17 +28,17 @@ Machine-readable **informational** inventory: [execution-resources.json](../../t
 
 | Host | Reported hardware / OS | Registered runners (name) | Existing purpose |
 | --- | --- | --- | --- |
-| Local Mac | Intel macOS, limited 8 GiB memory | `davidproject-self-action`, `davidproject-self-action-2` | `llmtool Mac CI`, macOS 3.13 check/native gates. |
-| AWS EC2 | CentOS Stream 9, x86_64, 4 vCPU / 8 GiB | See [execution-resources.json](../../tools/llmtool/execution-resources.json) | `llmtool Linux CI`, Python 3.14 PR/main checks; Python 3.9 manually started before release. |
+| Local Mac | Intel macOS, limited 8 GiB memory | None; self-hosted CI runners retired ([#1253](https://github.com/davidcatcat/davidcattoolsproject/issues/1253)) | Mac CI now runs on GitHub-hosted `macos-15-intel`; the Mac still gives native Mac runtime evidence. |
+| AWS EC2 | CentOS Stream 9, x86_64, 4 vCPU / 8 GiB | None; self-hosted CI runners retired ([#1253](https://github.com/davidcatcat/davidcattoolsproject/issues/1253)) | Linux CI now runs on GitHub-hosted `ubuntu-24.04`; EC2 serves `llmtool task remote-test`. |
 
-See [execution-resources.json](../../tools/llmtool/execution-resources.json) for the current host and runner inventory. Runner names, installation accounts and platform capabilities reflect committed documentation, not a live online/busy probe. [Mac runner guide](../../tools/mac-runner/README.md) and [EC2 runner guide](../../tools/ec2-runner/README.md) contain isolation and admission requirements.
+See [execution-resources.json](../../tools/llmtool/execution-resources.json) for the current host and runner inventory; its runner entries describe the retired self-hosted setup. Runner names, installation accounts and platform capabilities reflect committed documentation, not a live online/busy probe. [Mac runner guide](../../tools/mac-runner/README.md) and [EC2 runner guide](../../tools/ec2-runner/README.md) contain isolation and admission requirements.
 
 ## Routing and operational boundaries
 
 - PM picks an authorized model/Worker for a bounded Task, consults live technical availability and uses the Python dispatch gate at every handoff. The gate returns a compact permit/deny reason and policy digest; do not paste the entire JSON to an LLM every time.
 - PM may use a direct CLI D6 route for OpenCode or AGY under their current worker-dispatch entries without waiting on Host D4/G3/M2. Both still require independent review, exact-head CI and actual per-provider execution receipts.
 - When free quotas expire, record confirmed progress and unfinished steps. Protect uncommitted changes and single Writer lease; do not replay an UNKNOWN mutation. PM continues unrelated tasks and uses only authorized qualified fallback routes.
-- Current EC2 runners are CI executors under guarded GitHub workflows, **not** blanket remote-SSH code execution authorization. General SSH execution, dirty-worktree transfer and live Token savings require separate design, source screening and evidence; [EC2 work inventory](../ci/ec2-deterministic-work-inventory-20261027.md).
+- EC2 no longer runs CI ([#1253](https://github.com/davidcatcat/davidcattoolsproject/issues/1253)); it serves `llmtool task remote-test`, a PM pre-review tool on private infrastructure, **not** blanket remote-SSH code execution authorization. General SSH execution, dirty-worktree transfer and live Token savings require separate design, source screening and evidence; [EC2 work inventory](../ci/ec2-deterministic-work-inventory-20261027.md).
 - One GitHub login may post Developer and Reviewer records; a login alone is **not** independent review evidence. Require distinct read-only Reviewer Session, D6 record, exact-SHA verdict and merge gate. A second personal GitHub account is **not required** by current process; GitHub App integration is optional future work, not approved implementation.
 
 ## Where authority lives
