@@ -17,6 +17,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+import yaml
+
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -821,26 +823,47 @@ class CanonicalStepStructureTests(unittest.TestCase):
         self.assertIn(limits[2], workflow_step(CANONICAL_STEP))
 
     def test_selection_job_exists_and_check_job_needs_it(self):
-        try:
-            import yaml
-            workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-            jobs = workflow.get("jobs", {})
-            self.assertIn("select", jobs)
-            check_job = jobs.get("check", {})
-            needs = check_job.get("needs")
-            if isinstance(needs, list):
-                self.assertIn("select", needs)
-            else:
-                self.assertEqual(needs, "select")
-            check_names = [j.get("name") for j in jobs.values() if isinstance(j, dict) and j.get("name") == "check (macOS 3.13)"]
-            self.assertEqual(len(check_names), 1)
-        except ImportError:
-            pass
+        workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        jobs = workflow.get("jobs", {})
+        self.assertIn("select", jobs)
+        select_job = jobs.get("select", {})
+        check_job = jobs.get("check", {})
+        self.assertIn("if", select_job)
+        self.assertEqual(select_job.get("if"), check_job.get("if"))
+        needs = check_job.get("needs")
+        if isinstance(needs, list):
+            self.assertIn("select", needs)
+        else:
+            self.assertEqual(needs, "select")
+        check_names = [
+            j.get("name")
+            for j in jobs.values()
+            if isinstance(j, dict) and j.get("name") == "check (macOS 3.13)"
+        ]
+        self.assertEqual(len(check_names), 1)
         workflow_text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("  select:", workflow_text)
         self.assertIn("  check:", workflow_text)
         self.assertIn("needs: select", workflow_text)
         self.assertEqual(workflow_text.count("name: check (macOS 3.13)"), 1)
+
+    def test_concurrency_block_placement_on_select_job_only(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        self.assertNotIn("concurrency", workflow)
+        jobs = workflow.get("jobs", {})
+        select_job = jobs.get("select", {})
+        self.assertIn("concurrency", select_job)
+        select_concurrency = select_job.get("concurrency", {})
+        expected_group = (
+            "${{ github.workflow }}-${{ "
+            "github.event_name == 'workflow_dispatch' && 'full-main' "
+            "|| format('{0}-{1}', github.event_name, github.ref) }}"
+        )
+        expected_cancel = "${{ github.event_name != 'workflow_dispatch' }}"
+        self.assertEqual(select_concurrency.get("group"), expected_group)
+        self.assertEqual(select_concurrency.get("cancel-in-progress"), expected_cancel)
+        check_job = jobs.get("check", {})
+        self.assertNotIn("concurrency", check_job)
 
 
 @unittest.skipUnless(os.name == "posix", "the step script runs under POSIX bash")

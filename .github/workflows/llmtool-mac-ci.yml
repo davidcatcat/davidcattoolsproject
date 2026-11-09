@@ -29,10 +29,6 @@ on:
       - 'tools/safe-git/**'
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
-
 permissions:
   contents: read
   actions: read
@@ -41,6 +37,9 @@ jobs:
   select:
     name: select
     if: vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci' || github.event.label.name == 'mac-ci-intel')
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
+      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
     runs-on: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'mac-ci-intel') && 'macos-15' || 'macos-15-intel' }}
     timeout-minutes: 120
     outputs:
