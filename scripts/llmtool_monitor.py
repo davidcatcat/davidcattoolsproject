@@ -6657,6 +6657,19 @@ def _remote_test_time(value) -> float:
     return _github_time(re.sub(r"\.\d{6}Z$", "Z", value))
 
 
+DISPATCH_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z$")
+
+
+def _dispatch_time(value) -> float:
+    if type(value) is not str or not DISPATCH_TIMESTAMP.fullmatch(value):
+        return 0.0
+    try:
+        fmt = "%Y-%m-%dT%H:%M:%S.%fZ" if "." in value else "%Y-%m-%dT%H:%M:%SZ"
+        return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return 0.0
+
+
 CODEX_WORK_BUDGET = 4 << 20
 DISPATCH_BUDGET = 4 << 20
 CODEX_WORK_BEFORE = 5.0
@@ -6917,6 +6930,11 @@ def _remote_test_entries(record) -> tuple:
             continue
         sha, ran = item.get("source_sha"), item.get("ran_total")
         words = f"task {task} {result}"
+        actions = item.get("actions")
+        if type(actions) is dict:
+            run_id = actions.get("run_id")
+            if type(run_id) is int and not isinstance(run_id, bool) and 1 <= run_id <= (1 << 53):
+                words += f" GitHub-hosted run {run_id}"
         words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
         words += f"，跑了 {ran} 個測試" if type(ran) is int and ran >= 0 else ""
         found.append((_remote_test_time(item.get("ended_at")), words))
@@ -6929,6 +6947,29 @@ def _remote_test_entries(record) -> tuple:
         words += f"（{code}）" if type(code) is str and CODE_TEXT.fullmatch(code) else ""
         words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
         found.append((_remote_test_time(item.get("at")), words))
+    dispatches = record.get("remote_test_dispatches")
+    for item in dispatches if type(dispatches) is list else []:
+        if type(item) is not dict:
+            continue
+        state = item.get("state")
+        if state not in ("DISPATCHED", "RUN_FOUND"):
+            continue
+        sha = item.get("sha")
+        if type(sha) is not str or not HEX_SHA.fullmatch(sha):
+            continue
+        dispatched_at = item.get("dispatched_at")
+        when = _dispatch_time(dispatched_at)
+        if when <= 0:
+            continue
+        run_id = item.get("run_id")
+        if run_id is None:
+            run_word = "待定"
+        elif type(run_id) is int and not isinstance(run_id, bool) and 1 <= run_id <= (1 << 53):
+            run_word = str(run_id)
+        else:
+            continue
+        words = f"task {task} hosted {state} run {run_word} @{sha[:7]}"
+        found.append((when, words))
     return tuple(entry for entry in found if entry[0])
 
 
@@ -7019,6 +7060,9 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
     if latest is None:
         return OfficeRow("EC2 遠端測試", IDLE, "尚無遠端測試紀錄", None, 80, kind="worker",
                          evidence="llmtool 紀錄")
+    if re.search(r"\bhosted (?:DISPATCHED|RUN_FOUND)\b", latest[1]):
+        return OfficeRow("EC2 遠端測試", WORKING, f"GitHub-hosted 執行中：{latest[1]}",
+                         max(0.0, now - latest[0]), 80, kind="worker", evidence="llmtool 紀錄")
     return OfficeRow("EC2 遠端測試", IDLE, f"最近一次：{latest[1]}", max(0.0, now - latest[0]),
                      80, kind="worker", evidence="llmtool 紀錄")
 
