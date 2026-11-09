@@ -50,7 +50,7 @@ FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
   has its **own D6 Reviewer record**, created at the result HEAD with `--github-login`
   and `--native-session-id`. Anyone relaying another agent's review (for example the
   PM posting Codex advisory output) labels it with that agent's `actor`.
-- Owner decision 2026-11-04 ([#926](https://github.com/davidcatcat/davidcattoolsproject/issues/926)): `ddavidccatssun` is the AI machine account and `davidcatcat` remains the Owner. Until the #926 pilot passes, all agents still post as one login; the shared login proves nothing about who wrote the comment. `task complete
+- Owner decision 2026-11-04 ([#926](https://github.com/davidcatcat/davidcattoolsproject/issues/926)): `ddavidccatssun` is the AI machine account and `davidcatcat` remains the Owner. #926 closed under [Owner decision B](https://github.com/davidcatcat/davidcattoolsproject/issues/926#issuecomment-6697226334): same-user accident guards only, not a security boundary. The AI-account pilot is tracked in #1234 and has not passed. All agents still post as one login; the shared login proves nothing about who wrote the comment. `task complete
   --reviewer-task --pr` checks that the Reviewer D6 record exists, is distinct from the
   Executor (agent, Session and native Session) and has its worktree at the reviewed
   HEAD. This is process discipline, not protection against same-user tampering.
