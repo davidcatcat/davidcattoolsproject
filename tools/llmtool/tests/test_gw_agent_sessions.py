@@ -1,6 +1,8 @@
 """Tests for classify_homes and sweep in gw_agent_sessions."""
 
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from llmtool.developer_routes.gw_agent import (
     GwAgentSessionLock,
@@ -20,6 +23,7 @@ from llmtool.gw_agent_sessions import (
     _remove_home,
     classify_homes,
     sweep,
+    sweep_quietly,
 )
 
 try:
@@ -610,6 +614,34 @@ class GwAgentSessionsTests(unittest.TestCase):
         empty_root = self.base / 'other' / 'store'
         empty_root.mkdir(parents=True, mode=0o700)
         self.assertEqual(sweep(TaskStore(empty_root)), [])
+
+    def test_sweep_quietly_success_returns_sweep_list(self):
+        synthetic_result = [{'executor_task_id': 'task-exec-synthetic-quiet-01', 'outcome': 'ENDED'}]
+        with patch('llmtool.gw_agent_sessions.sweep', return_value=synthetic_result) as mock_sweep:
+            res = sweep_quietly(self.store, now=12345.0)
+            mock_sweep.assert_called_once_with(self.store, now=12345.0)
+        self.assertEqual(res, synthetic_result)
+
+    def test_sweep_quietly_exception_returns_empty_and_no_output(self):
+        buf_out = io.StringIO()
+        buf_err = io.StringIO()
+        with patch('llmtool.gw_agent_sessions.sweep', side_effect=RuntimeError('synthetic error')):
+            with redirect_stdout(buf_out), redirect_stderr(buf_err):
+                res = sweep_quietly(self.store)
+        self.assertEqual(res, [])
+        self.assertEqual(buf_out.getvalue(), '')
+        self.assertEqual(buf_err.getvalue(), '')
+
+    def test_sweep_quietly_keyboard_interrupt_propagates(self):
+        with patch('llmtool.gw_agent_sessions.sweep', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                sweep_quietly(self.store)
+
+    def test_sweep_quietly_system_exit_propagates(self):
+        with patch('llmtool.gw_agent_sessions.sweep', side_effect=SystemExit(1)):
+            with self.assertRaises(SystemExit):
+                sweep_quietly(self.store)
+
 
 
 if __name__ == '__main__':
