@@ -54,6 +54,9 @@ class TrainMemberClosureTests(unittest.TestCase):
                                lambda _root: self.trains)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.tasks_dir = base / 'store' / 'tasks'
+        self.tasks_dir.mkdir(parents=True, exist_ok=True)
+        self.real_store = TaskStore(self.tasks_dir)
         self.repo = str(base / 'repo')
         os.mkdir(self.repo)
         self.git('init', '-q')
@@ -307,6 +310,162 @@ class TrainMemberClosureTests(unittest.TestCase):
         with patch.object(task_advance, '_integration_delta_verified', return_value=True):
             self.assertEqual(self.target(self.task(), integration, integration_pr=27),
                              (27, 'd' * 40))
+
+    # Train-closed member advance and drive without --integration-pr ---------
+
+    def github_merge_event(self, pr=TRAIN_PR, merge_sha=None):
+        return {
+            'source': 'github-task-advance',
+            'event_id': 'e' * 32,
+            'pr': pr,
+            'event_type': 'merge',
+            'outcome': 'MERGED',
+            'source_sha': self.squash if merge_sha is None else merge_sha,
+        }
+
+    def review_pass_event(self, head=None):
+        return {
+            'source': 'REVIEWER',
+            'source_sha': self.head_a if head is None else head,
+            'version': 1,
+            'outcome': 'REVIEW_PASS',
+        }
+
+    def store_task(self, task_id=TASK_A, head=None, pr=17, events=None):
+        head = self.head_a if head is None else head
+        request = 'Bounded task for closure testing.'
+        request_sha = hashlib.sha256(request.encode('utf-8')).hexdigest()
+        run_id = '2' * 32
+        task = task_submission_cli._record(
+            task_id, run_id, 'pm-session', 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED', request_sha=request_sha)
+        task.update(
+            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None},
+            response='PM returned a bounded task.',
+            error_code=None,
+            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                           'goal': 'Complete closure task.', 'acceptance': ['closed']},
+            developer={'state': 'DEVELOPER_RESPONDED'},
+            completion={'state': 'PM_EVIDENCE_READY', 'evidence': {
+                'result': {'result_head': head}, 'review_pr_ci': {'stage': 'READY'}}},
+            review_dispatch_claim=[
+                {'pr': pr, 'head_sha': head, 'version': 1, 'state': 'COMPLETED'}],
+            completion_events=[] if events is None else events,
+        )
+        self.real_store.create(task)
+        return task
+
+    def _run_mismatch_case(self, events):
+        self.store_task(events=events)
+        fake_github = lambda path: {'number': 17, 'merged': False, 'head': {'sha': self.head_a}}
+        with patch.object(task_advance, '_review_outcomes', return_value=[]):
+            return task_advance.advance(
+                task_id=TASK_A, store=self.real_store, pr_number=17, integration_pr=None,
+                github_get=fake_github, cwd=self.repo)
+
+    def test_train_closed_task_reports_closed_from_advance_and_drive(self):
+        # A train-closed Task reports CLOSED from advance and drive without --integration-pr.
+        self.make_train(state='MERGED')
+        events = [self.review_pass_event(), self.github_merge_event()]
+        self.store_task(events=events)
+        saved = []
+        fake_github = lambda path: {'number': 17, 'merged': False, 'head': {'sha': self.head_a}}
+
+        advance_result = task_advance.advance(
+            task_id=TASK_A, store=self.real_store, pr_number=17, integration_pr=None,
+            github_get=fake_github, cwd=self.repo,
+            record_github_event_call=lambda *args: saved.append(args))
+        self.assertEqual(advance_result['step'], 'CLOSED')
+        self.assertEqual(advance_result['next'], 'CLOSED')
+        self.assertEqual(saved, [])
+
+        try:
+            drive_result = task_drive.drive(task_id=TASK_A, store=self.real_store)
+        except TypeError:
+            drive_result = task_drive.drive(TASK_A, store=self.real_store)
+        drive_step = drive_result.get('step') if isinstance(drive_result, dict) else drive_result
+        self.assertEqual(drive_step, 'CLOSED')
+
+    def test_closed_state_train_record_reports_closed_without_integration_pr(self):
+        # A Task whose train record is CLOSED also reports CLOSED without --integration-pr.
+        self.make_train(state='CLOSED')
+        events = [self.review_pass_event(), self.github_merge_event()]
+        self.store_task(events=events)
+        saved = []
+        result = task_advance.advance(
+            task_id=TASK_A, store=self.real_store, pr_number=17, integration_pr=None,
+            github_get=lambda path: None, cwd=self.repo,
+            record_github_event_call=lambda *args: saved.append(args))
+        self.assertEqual(result['step'], 'CLOSED')
+        self.assertEqual(result['next'], 'CLOSED')
+        self.assertEqual(saved, [])
+
+    def test_mismatch_no_such_event_keeps_todays_step(self):
+        self.make_train(state='MERGED')
+        events = [self.review_pass_event()]
+        result = self._run_mismatch_case(events)
+        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+        self.assertNotEqual(result['step'], 'CLOSED')
+
+    def test_mismatch_no_train_record_keeps_todays_step(self):
+        self.make_train(state='MERGED')
+        events = [self.review_pass_event(), self.github_merge_event(pr=999)]
+        result = self._run_mismatch_case(events)
+        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+        self.assertNotEqual(result['step'], 'CLOSED')
+
+    def test_mismatch_train_in_another_state_keeps_todays_step(self):
+        events = [self.review_pass_event(), self.github_merge_event()]
+        self.store_task(events=events)
+        for state in ('BUILT', 'MERGE_CLAIMED'):
+            with self.subTest(state=state):
+                train_id = 't-' + state.lower().replace('_', '-')
+                record = self.make_train(train_id, state=state)
+                fake_github = lambda path: {'number': 17, 'merged': False, 'head': {'sha': self.head_a}}
+                with patch.object(task_advance, '_review_outcomes', return_value=[]):
+                    result = task_advance.advance(
+                        task_id=TASK_A, store=self.real_store, pr_number=17, integration_pr=None,
+                        github_get=fake_github, cwd=self.repo)
+                self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+                self.assertNotEqual(result['step'], 'CLOSED')
+                os.unlink(self.trains / (record['train_id'] + '.json'))
+
+    def test_mismatch_task_not_listed_keeps_todays_step(self):
+        members = [self.member(TASK_B, 18, self.head_b), self.member(TASK_C, 19, self.head_other)]
+        self.make_train(members=members)
+        events = [self.review_pass_event(), self.github_merge_event()]
+        result = self._run_mismatch_case(events)
+        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+        self.assertNotEqual(result['step'], 'CLOSED')
+
+    def test_mismatch_head_not_listed_keeps_todays_step(self):
+        members = [self.member(TASK_A, 17, self.head_other), self.member(TASK_B, 18, self.head_b)]
+        self.make_train(members=members)
+        events = [self.review_pass_event(), self.github_merge_event()]
+        result = self._run_mismatch_case(events)
+        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+        self.assertNotEqual(result['step'], 'CLOSED')
+
+    def test_mismatch_different_merge_sha_keeps_todays_step(self):
+        self.make_train(state='MERGED')
+        events = [self.review_pass_event(), self.github_merge_event(merge_sha='d' * 40)]
+        result = self._run_mismatch_case(events)
+        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+        self.assertNotEqual(result['step'], 'CLOSED')
+
+    def test_store_read_error_does_not_report_closed(self):
+        self.make_train(state='MERGED')
+        events = [self.review_pass_event(), self.github_merge_event()]
+        self.store_task(events=events)
+        fake_github = lambda path: {'number': 17, 'merged': False, 'head': {'sha': self.head_a}}
+        (self.trains / 'invalid.json').write_text('bad json', encoding='utf-8')
+        with patch.object(task_advance, '_review_outcomes', return_value=[]):
+            result = task_advance.advance(
+                task_id=TASK_A, store=self.real_store, pr_number=17, integration_pr=None,
+                github_get=fake_github, cwd=self.repo)
+        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+        self.assertNotEqual(result['step'], 'CLOSED')
 
 
 if __name__ == '__main__':

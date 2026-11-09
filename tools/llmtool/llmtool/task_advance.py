@@ -2090,7 +2090,7 @@ def _closed_train_member_head(record, task_id, store):
         source = event.get('source')
         is_github = source in ('GITHUB', 'github-task-advance') or (
             type(source) is str and 'github' in source.lower())
-        if not is_github and event_type != 'merge':
+        if not is_github:
             continue
         pr = event.get('pr')
         if type(pr) is not int or not 1 <= pr <= 9999999:
@@ -2102,7 +2102,7 @@ def _closed_train_member_head(record, task_id, store):
             continue
         try:
             train = merge_train_store.find_by_pr(
-                pr, root=getattr(store, 'root', None))
+                pr, root=getattr(store, 'root', getattr(store, '_root', None)))
         except Exception:
             # A store read error never yields CLOSED.
             continue
