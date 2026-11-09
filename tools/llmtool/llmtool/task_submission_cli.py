@@ -5267,7 +5267,7 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     executor_task = getattr(args, 'executor_task', None)
     current_task_id = getattr(args, 'task_id', None)
     try:
-        task_ids = store.task_ids()
+        task_ids = store.completion_d6_task_ids(executor_task)
     except Exception:
         raise LLMToolError(
             f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None

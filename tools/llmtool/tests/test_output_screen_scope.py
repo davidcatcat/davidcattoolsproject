@@ -129,6 +129,15 @@ class _Store:
     def task_ids(self):
         return sorted(self.records)
 
+    def completion_d6_task_ids(self, executor_task_id):
+        matching = []
+        for task_id, record in self.records.items():
+            completion = record.get('completion')
+            if (isinstance(completion, dict) and
+                    completion.get('executor_task_id') == executor_task_id):
+                matching.append(task_id)
+        return sorted(matching)
+
     def get(self, task_id):
         return copy.deepcopy(self.records[task_id])
 

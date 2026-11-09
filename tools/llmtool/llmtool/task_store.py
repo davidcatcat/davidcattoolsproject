@@ -991,7 +991,7 @@ def _valid_binding_mismatch_keys(item):
             len(set(keys)) == len(keys))
 
 
-def _validate(record):
+def _validate(record, *, strict=True):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
     published_pr = record.get('published_pr') if type(record) is dict else None
@@ -2256,16 +2256,30 @@ def _validate(record):
                 # paths, so files from a clean main merge do not fail it. A
                 # present developer_changed_paths is checked in every record.
                 docs_paths = _completion_docs_paths(evidence['result'])
+
+                def _docs_only_test_valid(test):
+                    if (test.get('docs_only') is not True or
+                            test.get('source_sha') != result_head):
+                        return False
+                    paths = test.get('changed_paths')
+                    if (paths == docs_paths and
+                            all(type(path) is str and path.endswith('.md') for path in docs_paths)):
+                        return True
+                    return (
+                        not strict and
+                        'developer_changed_paths' in evidence['result'] and
+                        paths == evidence['result'].get('changed_paths') and
+                        type(paths) is list and
+                        all(type(path) is str and path.endswith('.md') for path in paths)
+                    )
+
                 if (type(result_head) is not str or
                         re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
                         evidence['result'].get('task_id') != record['task_id'] or
                         evidence['result'].get('run_id') != record['run_id'] or
                         any(type(test) is not dict or
                             (test.get('status') == 'NOT_APPLICABLE_DOCS_ONLY' and
-                             (test.get('docs_only') is not True or
-                              test.get('source_sha') != result_head or
-                              test.get('changed_paths') != docs_paths or
-                              not all(path.endswith('.md') for path in docs_paths))) or
+                             not _docs_only_test_valid(test)) or
                             (test.get('status') != 'NOT_APPLICABLE_DOCS_ONLY' and
                             (test.get('source_sha') != result_head or
                             type(test.get('exit_code')) is not int or test.get('exit_code') != 0
@@ -2474,7 +2488,7 @@ class TaskStore:
                                    parse_constant=lambda _: _fail())
                 if value.get('task_id') != task_id:
                     _fail()
-                return _validate(value) if validate else value
+                return _validate(value, strict=False) if validate else value
             except LLMToolError:
                 raise
             except FileNotFoundError:
@@ -2504,7 +2518,7 @@ class TaskStore:
     def _encoded(record):
         value = dict(record)
         value['record_sha256'] = _digest(value)
-        _validate(value)
+        _validate(value, strict=True)
         raw = _json_bytes(value)
         if len(raw) > MAX_RECORD_BYTES:
             _fail()
