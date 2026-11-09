@@ -1250,8 +1250,15 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         _refuse(code, detail)
 
     create = create_d6 or _create_d6
-    agent_id = 'claude-high-debug-claude-opus-5-5' if route == 'claude' else 'codex-high-debug-gpt-6.1-sol'
-    try: diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root, executor_task=executor_task, agent_id=agent_id)
+    try:
+        # Codex keeps the original create call; only Claude passes an agent id.
+        if route == 'claude':
+            diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root,
+                                    executor_task=executor_task,
+                                    agent_id='claude-high-debug-claude-opus-5-5')
+        else:
+            diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root,
+                                    executor_task=executor_task)
     except Exception: _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
     reason = f'failed corrections: {failed_corrections}' if failed_corrections is not None else f'early reason: {early_reason}'
     prompt = (f'Task: {task_id}\nPR: {pr_number}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'

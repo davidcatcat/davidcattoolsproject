@@ -1654,6 +1654,40 @@ class HighDebugTests(unittest.TestCase):
                 route='claude')
             return result, store, mock_eval, mock_resolve
 
+    def test_codex_route_create_keeps_the_original_no_agent_id_signature(self):
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS) + 'RCA_CONFIRMED'
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        subprocess.run(['git', 'init', '-q', str(root)], check=True)
+        store = _Store()
+        registration = SimpleNamespace(result_sha='a' * 40, root=str(root),
+                                       common_dir=str(root / '.git'))
+        created = []
+        def create_d6(*, task_id, base_sha, repo_root, executor_task):
+            created.append(task_id)
+            return str(root)
+        def runner(*, prompt, cwd, output_path):
+            Path(output_path).write_text(report, encoding='utf-8')
+            return subprocess.CompletedProcess([], 0, stdout=b'{"model":"gpt-6.1-sol"}\n',
+                                               stderr=b'')
+        with patch.object(high_debug.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=True)), \
+             patch.object(high_debug.task_completion, 'collect_git_snapshot',
+                          return_value=SimpleNamespace(head='a' * 40)), \
+             patch.object(high_debug.task_completion, 'read_d6_registration',
+                          return_value=registration):
+            high_debug.run_high_debug(
+                store=store, task_id='a' * 32, executor_task='executor',
+                pr_number=17, family='family', failed_corrections=2,
+                runner=runner, create_d6=create_d6, repo_root=str(root),
+                read_registration=lambda *_args, **_kwargs: registration)
+        self.assertEqual(created, ['executor-hd1-aaaaaaa'])
+        self.assertEqual(len(store.entries), 1)
+        self.assertEqual(store.entries[0]['status'], 'RCA_CONFIRMED')
+        self.assertEqual(len(store.events), 1)
+
     def test_claude_happy_path_records_report_and_usage(self):
         report = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS)
         report += 'RCA_CONFIRMED'
