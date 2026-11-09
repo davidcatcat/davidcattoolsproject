@@ -272,6 +272,9 @@ class AgyRouteWiringTests(unittest.TestCase):
             def task_ids(self):
                 return []
 
+            def completion_d6_task_ids(self, _executor_task):
+                return []
+
             def get(self, task_id):
                 self.gets.append(task_id)
                 raise LLMToolError('SENTINEL_STORE_GET')
