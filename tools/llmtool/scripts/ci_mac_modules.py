@@ -181,6 +181,20 @@ def _importing_test_ids(target: str, repo_root: Path) -> set[str] | None:
     return selected
 
 
+def _is_other_tool_markdown(path: str) -> bool:
+    """Accept markdown files under tools/<name>/ where name is not llmtool."""
+    parts = str(path).split("/")
+    if len(parts) < 3:
+        return False
+    if parts[0] != "tools" or parts[1] == "llmtool":
+        return False
+    if not parts[-1].endswith(".md"):
+        return False
+    if any(p in {"", ".", ".."} for p in parts):
+        return False
+    return True
+
+
 def select_test_ids(
     changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT,
     rejection_reasons: list[str] | None = None,
@@ -255,6 +269,8 @@ def select_test_ids(
         if not path.startswith("tools/llmtool/"):
             if (path_class == "docs" and (path in {"AGENTS.md", "CLAUDE.md"}
                                            or path.startswith(("skills/", "docs/")))):
+                continue
+            if path_class != "workflow" and _is_other_tool_markdown(path):
                 continue
             reject(path, "unsupported_path")
             continue

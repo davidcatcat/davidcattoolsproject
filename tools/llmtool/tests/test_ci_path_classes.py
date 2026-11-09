@@ -4,6 +4,8 @@ from pathlib import Path
 import sys
 import unittest
 
+import yaml
+
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -172,6 +174,38 @@ class CIPathClassTests(unittest.TestCase):
             with self.subTest(paths=paths):
                 path_bytes = b"\0".join(p.encode() for p in paths) + b"\0"
                 self.assertEqual(ci_path_classes.linux_flags(path_bytes), expected)
+
+    def test_workflow_paths_include_markdown_and_reports(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        workflow_text = (
+            repo_root / ".github" / "workflows" / "llmtool-linux-ci.yml"
+        ).read_text(encoding="utf-8")
+        parsed = yaml.safe_load(workflow_text)
+        on_block = parsed.get("on") if "on" in parsed else parsed.get(True)
+        push_paths = on_block["push"]["paths"]
+        pr_paths = on_block["pull_request"]["paths"]
+
+        required_entries = (
+            "!tools/llmtool/*.md",
+            "*.md",
+            "scripts/**",
+            ".github/workflows/**",
+            "**/*.md",
+            "reports/**",
+        )
+        for paths in (push_paths, pr_paths):
+            self.assertEqual(paths[-2:], ["**/*.md", "reports/**"])
+            for entry in required_entries:
+                self.assertIn(entry, paths)
+
+    def test_reports_markdown_classification(self):
+        code, docs, gateway, ai_loop = ci_path_classes.linux_flags(b"reports/x.md\0")
+        self.assertTrue(docs)
+        self.assertFalse(code)
+        self.assertEqual(
+            ci_path_classes.linux_flags(b"reports/x.md\0"),
+            (False, True, False, False),
+        )
 
 
 if __name__ == "__main__":
