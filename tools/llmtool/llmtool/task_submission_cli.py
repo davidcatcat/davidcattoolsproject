@@ -2564,50 +2564,11 @@ def _remote_task_test_paths(task, *, read_paths=()):
     return tuple(sorted(set(paths)))
 
 
-def _remote_test_config_state(config_loader=None):
-    """Classify remote-test config without exposing its path or values."""
-    loader = remote_test._config if config_loader is None else config_loader
-    try:
-        loader()
-        return 'VALID'
-    except FileNotFoundError:
-        return 'MISSING'
-    except LLMToolError as exc:
-        if (config_loader is None and
-                str(exc) == 'ADMISSION_DENIED: remote test config is missing or invalid'):
-            try:
-                (Path.home() / '.config/llmtool/remote-test.json').lstat()
-            except FileNotFoundError:
-                return 'MISSING'
-            except OSError:
-                pass
-        return 'INVALID'
-    except Exception:
-        return 'INVALID'
-
-
-def _remote_test_config_invalid_error():
-    error = LLMToolError('REMOTE_TEST_CONFIG_INVALID')
-    error.completion_code = 'REMOTE_TEST_CONFIG_INVALID'
-    return error
-
-
-def _reject_invalid_remote_test_config(task, read_paths, config_loader=None):
-    """Fail closed before local tests when a remote-test config exists but is invalid."""
-    if (not _remote_task_test_paths(task, read_paths=read_paths) or
-            _remote_test_config_state(config_loader) != 'INVALID'):
-        return
-    raise _remote_test_config_invalid_error()
-
-
 def _remote_receipt_test_policy(task, *, read_paths=(), config_loader=None):
-    """Select remote testing only for configured Tasks with fully admitted modules."""
-    if not _remote_task_test_paths(task, read_paths=read_paths):
-        return 'LOCAL'
-    state = _remote_test_config_state(config_loader)
-    if state == 'INVALID':
-        raise _remote_test_config_invalid_error()
-    return 'LOCAL' if state == 'MISSING' else 'REMOTE_RECEIPT'
+    """Select remote testing for Tasks with fully admitted modules."""
+    return ('REMOTE_RECEIPT'
+            if _remote_task_test_paths(task, read_paths=read_paths)
+            else 'LOCAL')
 
 
 def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
@@ -2652,8 +2613,6 @@ def _direct_result_tests(task, evidence, result, developer, *, config_loader=Non
             path, evidence['source_sha'], diff_sha256=result['diff_sha256'])
                 for path in _remote_task_test_paths(
                     task, read_paths=developer['read_paths'])]
-    _reject_invalid_remote_test_config(task, developer['read_paths'],
-                                       config_loader=config_loader)
     return task_completion.run_bounded_worktree_tests(
         root=evidence['root'], source_sha=evidence['source_sha'],
         diff_sha256=result['diff_sha256'], changed_paths=result['changed_paths'],
@@ -6335,7 +6294,6 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             if receipt_gate is not None:
                 missing.append(receipt_gate)
         else:
-            _reject_invalid_remote_test_config(task, developer['read_paths'])
             tests = task_completion.run_bounded_tests(root=git_evidence['root'],
                 source_sha=developer['source_sha'],
                 result_sha=git_evidence['result_head'], read_paths=developer['read_paths'],
