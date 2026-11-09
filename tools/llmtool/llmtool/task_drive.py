@@ -2,6 +2,7 @@
 
 import time
 
+from . import github_quota
 from . import task_advance
 
 
@@ -15,10 +16,30 @@ _UNKNOWN = {
     'REPAIR_OUTCOME_UNKNOWN', 'MERGE_OUTCOME_UNKNOWN',
 }
 _TERMINAL = {'CLOSED', 'CI_FAILED', 'MERGED', 'MERGE_REFUSED', 'REFUSED'}
+_MAX_PAUSE_SECONDS = 60
+
+
+def _quota_stop(task_id, read_quota, last_result, completed):
+    low = github_quota.low(read_quota())
+    if low is None:
+        return None
+    return {
+        'task_id': task_id,
+        'step': 'WAITING_GITHUB_QUOTA',
+        'result': {
+            'resource': low['resource'],
+            'remaining': low['remaining'],
+            'reset': low['reset'],
+            'last_result': last_result,
+        },
+        'codes': ['GITHUB_QUOTA_LOW'],
+        'steps': completed,
+    }
 
 
 def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
-          advance_call=None, label_mac_ci_call=None, sleep=None, **adapters):
+          advance_call=None, label_mac_ci_call=None,
+          quota_read=github_quota.read, sleep=None, **adapters):
     """Drive foreground steps; stop without polling if the initial Developer is unfinished."""
     if type(max_steps) is not int or max_steps < 1:
         raise ValueError('max_steps must be a positive integer')
@@ -27,7 +48,10 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
     invoke = task_advance.advance if advance_call is None else advance_call
     label_mac_ci = (task_advance.label_mac_ci_for_skipped_check
                     if label_mac_ci_call is None else label_mac_ci_call)
+    read_quota = github_quota.read if quota_read is None else quota_read
     pause = time.sleep if sleep is None else sleep
+    max_pause = max(poll_seconds, _MAX_PAUSE_SECONDS)
+    next_pause = poll_seconds
     # Keep an explicitly supplied PR authoritative for the whole drive. When
     # publication discovers the PR, carry it into every subsequent advance.
     pr_number = adapters.get('pr_number')
@@ -61,7 +85,11 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
             if merged.get('step') == 'WAITING_CI':
                 if attempts >= max_steps:
                     break
-                pause(poll_seconds)
+                stopped = _quota_stop(task_id, read_quota, last_result, completed)
+                if stopped is not None:
+                    return stopped
+                pause(next_pause)
+                next_pause = min(next_pause * 2, max_pause)
                 continue
             # MERGE_REFUSED is a terminal decision for this drive invocation,
             # including when an exact-head Mac check is still pending.
@@ -88,6 +116,7 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
             if pr_number is None:
                 pr_number = result['pr']
             completed += 1
+            next_pause = poll_seconds
             continue
         if step is None and codes:
             return dict(result, step='REFUSED', steps=completed)
@@ -99,6 +128,9 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
         # exact-head skipped check and cannot enter the merge path.
         if (merge and step == 'WAITING_CI' and
                 'CI_WORKFLOW_JOBS_INVALID' in codes):
+            stopped = _quota_stop(task_id, read_quota, last_result, completed)
+            if stopped is not None:
+                return stopped
             if not completion_mac_label_attempted:
                 label_adapters = {key: adapters[key] for key in
                                   ('github_get', 'merge_gh_runner', 'cwd')
@@ -113,7 +145,8 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
                         completion_mac_label_attempted = True
             if attempts >= max_steps:
                 break
-            pause(poll_seconds)
+            pause(next_pause)
+            next_pause = min(next_pause * 2, max_pause)
             continue
         waiting = (
             step in _WAITING_STEPS or
@@ -124,9 +157,14 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
         if waiting:
             if attempts >= max_steps:
                 break
-            pause(poll_seconds)
+            stopped = _quota_stop(task_id, read_quota, last_result, completed)
+            if stopped is not None:
+                return stopped
+            pause(next_pause)
+            next_pause = min(next_pause * 2, max_pause)
             continue
         completed += 1
+        next_pause = poll_seconds
         if step in _TERMINAL or step in _UNKNOWN or step.endswith('_UNKNOWN'):
             return dict(result, steps=completed)
         if step == 'READY_FOR_INTEGRATION':
@@ -152,7 +190,11 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
                 mac_ci_pending = True
                 if attempts >= max_steps:
                     break
-                pause(poll_seconds)
+                stopped = _quota_stop(task_id, read_quota, last_result, completed)
+                if stopped is not None:
+                    return stopped
+                pause(next_pause)
+                next_pause = min(next_pause * 2, max_pause)
                 continue
             return dict(merged, steps=completed)
         if step == 'MERGE_OWNER_ACCEPTANCE_MANUAL' or 'MERGE_OWNER_ACCEPTANCE_MANUAL' in codes:

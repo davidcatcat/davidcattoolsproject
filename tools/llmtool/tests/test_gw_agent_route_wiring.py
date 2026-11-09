@@ -475,6 +475,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
             read_path=['src.py'], write_path=['src.py'])
         store = Store()
+        self.addCleanup(store._temp.cleanup)
         route = SimpleNamespace(validate_profile=lambda *_args: None)
         decision = worker_dispatch.PolicyDecision('company-gw-agent', True,
                                                   'OWNER_POLICY_ALLOWED', 'f' * 64)
@@ -486,6 +487,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         def unexpected_runner(_route, _request, **_kwargs):
             raise RuntimeError('unexpected route failure')
         unexpected_store = Store()
+        self.addCleanup(unexpected_store._temp.cleanup)
         with patch.object(task_completion, 'validate_task_binding'), \
              patch.object(task_completion, 'bind_executor_task',
                           return_value=(registration, snapshot)), \
@@ -665,6 +667,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
             read_path=['src.py'], write_path=['src.py'])
         store = Store()
+        self.addCleanup(store._temp.cleanup)
         gateway_package = Path(tempfile.mkdtemp(prefix='gw-agent-gateway-'))
         (gateway_package / 'api_agent_gateway').mkdir()
         (gateway_package / 'api_agent_gateway' / '__init__.py').write_text('', encoding='utf-8')
