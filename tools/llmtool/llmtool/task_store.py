@@ -940,12 +940,55 @@ def _validate_publish_operations(record):
         _fail('TASK_PUBLISH_OPERATION_INVALID')
 
 
+def _completion_docs_paths(result):
+    """Return the paths a completion docs-only test is checked against (#1169).
+
+    Same rule as _attributed_paths in task_submission_cli.py: the Developer-
+    attributed developer_changed_paths when that key is present, else
+    changed_paths. Files that only a clean main merge brought in stay in
+    changed_paths and are not Developer changes. _validate calls this for
+    every completion record it checks. A present developer_changed_paths
+    must be a non-empty list of unique, non-empty strings, and changed_paths
+    must then be a list; anything else fails. Its entries need not appear
+    in changed_paths: Developer attribution (#1177) can name paths outside
+    the net diff, such as a rename-conflict source or a file added and
+    later deleted.
+    """
+    if 'developer_changed_paths' not in result:
+        return result.get('changed_paths', [])
+    paths = result['developer_changed_paths']
+    if (type(paths) is not list or not paths or
+            any(type(path) is not str or not path for path in paths) or
+            len(set(paths)) != len(paths) or
+            type(result.get('changed_paths')) is not list):
+        _fail()
+    return paths
+
+
 def _known_review_failure_reason(value):
     """Return whether ``value`` is one fixed unusable-review reason name."""
     # Imported here, like worker_dispatch: the store must not load the
     # dispatcher at import time. The dispatcher owns the one fixed set.
     from .review_dispatch import REVIEW_FAILURE_REASONS
     return type(value) is str and value in REVIEW_FAILURE_REASONS
+
+
+_BINDING_MISMATCH_KEY_NAMES = frozenset(('task_id', 'run_id', 'head'))
+
+
+def _valid_binding_mismatch_keys(item):
+    """Return whether a review claim's binding_mismatch_keys field is allowed.
+
+    Only an UNKNOWN claim refused with VERDICT_BINDING_MISMATCH may carry it,
+    as a non-empty list of distinct JSON key names. It never holds a value.
+    """
+    keys = item.get('binding_mismatch_keys')
+    return (item.get('state') == 'UNKNOWN' and
+            item.get('failure_reason') == 'VERDICT_BINDING_MISMATCH' and
+            type(keys) is list and bool(keys) and
+            all(type(key) is str and key in _BINDING_MISMATCH_KEY_NAMES
+                for key in keys) and
+            len(set(keys)) == len(keys))
 
 
 def _validate(record):
@@ -1097,7 +1140,7 @@ def _validate(record):
         identities = set()
         for item in claims:
             if (type(item) is not dict or
-                    set(item) - frozenset(('failure_reason',)) not in (
+                    set(item) - frozenset(('failure_reason', 'binding_mismatch_keys')) not in (
                         _REVIEW_DISPATCH_CLAIM_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
@@ -1105,6 +1148,8 @@ def _validate(record):
                         frozenset(('review_result',))) or
                     ('failure_reason' in item and
                      not _known_review_failure_reason(item['failure_reason'])) or
+                    ('binding_mismatch_keys' in item and
+                     not _valid_binding_mismatch_keys(item)) or
                     ('account' in item and
                      (type(item['account']) is not str or
                       _NAME.fullmatch(item['account']) is None)) or
@@ -2207,6 +2252,10 @@ def _validate(record):
                     _fail()
                 result_head = evidence['result'].get('result_head')
                 review_ci = evidence['review_pr_ci']
+                # A docs-only test is checked against Developer-attributed
+                # paths, so files from a clean main merge do not fail it. A
+                # present developer_changed_paths is checked in every record.
+                docs_paths = _completion_docs_paths(evidence['result'])
                 if (type(result_head) is not str or
                         re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
                         evidence['result'].get('task_id') != record['task_id'] or
@@ -2215,9 +2264,8 @@ def _validate(record):
                             (test.get('status') == 'NOT_APPLICABLE_DOCS_ONLY' and
                              (test.get('docs_only') is not True or
                               test.get('source_sha') != result_head or
-                              test.get('changed_paths') != evidence['result'].get('changed_paths') or
-                              not all(path.endswith('.md') for path in
-                                      evidence['result'].get('changed_paths', [])))) or
+                              test.get('changed_paths') != docs_paths or
+                              not all(path.endswith('.md') for path in docs_paths))) or
                             (test.get('status') != 'NOT_APPLICABLE_DOCS_ONLY' and
                             (test.get('source_sha') != result_head or
                             type(test.get('exit_code')) is not int or test.get('exit_code') != 0
