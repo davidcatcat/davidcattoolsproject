@@ -2501,7 +2501,12 @@ class GitHubSource:
         try:
             runners = ci_runners(self._get(f"repos/{self.repo}/actions/runners?per_page=100"))
         except errors as exc:
-            view = replace(view, error=_gh_error(exc))
+            error = _gh_error(exc)
+            # The AI account may not list runners (HTTP 403); self-hosted runners are retired (#1253).
+            if "HTTP 403" in error:
+                view = replace(view, runners=[], seen_at=self.clock(), error="")
+            else:
+                view = replace(view, error=error)
         else:
             view = replace(view, runners=runners, seen_at=self.clock(), error="")
         self.ci_view = view   # the runners show now; their jobs follow below

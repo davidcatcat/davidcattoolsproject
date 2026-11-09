@@ -7160,23 +7160,25 @@ class GitHubRunnerTests(unittest.TestCase):
 
     @patch.object(mon.shutil, 'which', new=lambda name: '/usr/bin/gh')
     def test_api_failures_and_old_data_say_unconfirmed_never_offline(self):
-        for answer, words in (((1, b"gh: Must have admin rights (HTTP 403)"), "沒有權限（HTTP 403）"),
-                              (subprocess.TimeoutExpired("gh", 20), "逾時")):
-            source, _ = self.source([("actions/runners", answer)])
-            row, = mon.github_runner_rows(source.ci_view, NOW)
-            self.assertEqual((row.state, row.alert), (mon.UNCHECKED, f"GitHub runner 清單讀不到（{words}）"))
-            self.assertIn("狀態未確認", row.detail)
-            self.assertTrue(source.status.startswith("GitHub o/r："))   # activity is unaffected
+        source, _ = self.source([("actions/runners", (1, b"gh: Must have admin rights (HTTP 403)"))])
+        self.assertEqual(mon.github_runner_rows(source.ci_view, NOW), [])
+        self.assertTrue(source.status.startswith("GitHub o/r："))   # activity is unaffected
+
+        source, _ = self.source([("actions/runners", subprocess.TimeoutExpired("gh", 20))])
+        row, = mon.github_runner_rows(source.ci_view, NOW)
+        self.assertEqual((row.state, row.alert), (mon.UNCHECKED, "GitHub runner 清單讀不到（逾時）"))
+        self.assertIn("狀態未確認", row.detail)
+        self.assertTrue(source.status.startswith("GitHub o/r："))   # activity is unaffected
         # Seen once, then the list fails: the last word is kept, marked 未確認.
         clock = [NOW]
         source, gh = self.source(self.ci([self.linux("ec2-llmtool-01")]), clock=lambda: clock[0])
-        gh.routes.insert(0, ("actions/runners", (1, b"HTTP 403")))
+        gh.routes.insert(0, ("actions/runners", subprocess.TimeoutExpired("gh", 20)))
         clock[0] = NOW + 40
         source.refresh(force=True)
         row, = mon.github_runner_rows(source.ci_view, clock[0])
         self.assertEqual(row.state, mon.UNCHECKED)
         self.assertEqual(row.detail.split("；")[:2],
-                         ["未確認：GitHub 資料 不到 1 分鐘沒更新（沒有權限（HTTP 403））", "上次看到：閒置"])
+                         ["未確認：GitHub 資料 不到 1 分鐘沒更新（逾時）", "上次看到：閒置"])
         # Data older than a few refreshes is stale even without an error.
         old = replace(source.ci_view, error="")
         row, = mon.github_runner_rows(old, NOW + 600)
