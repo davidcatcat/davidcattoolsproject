@@ -729,6 +729,34 @@ class MacTestIdSelectionTests(unittest.TestCase):
         self.assertEqual(report["level"], "L0")
         self.assertEqual(report["test_ids"], [])
 
+    def test_other_tool_non_markdown_keeps_full_fallback(self):
+        for path in (
+            "tools/mac-runner/setup.sh",
+            "tools/ec2-runner/README.txt",
+            "tools/nlf/main.go",
+        ):
+            report = ci_mac_modules.selection_report([path], REPO_ROOT)
+            self.assertEqual(report["level"], "L3")
+            self.assertIn("unsupported_path", report["fallback_reasons"])
+
+    def test_other_tool_markdown_with_rejected_path_keeps_full_fallback(self):
+        report = ci_mac_modules.selection_report(
+            ["tools/nlf/README.md", "tools/mac-runner/setup.sh"], REPO_ROOT
+        )
+        self.assertEqual(report["level"], "L3")
+        self.assertIn("unsupported_path", report["fallback_reasons"])
+
+    def test_other_tool_markdown_helper_rejects_bad_paths(self):
+        for path in (
+            "tools/README.md",
+            "tools/llmtool/README.md",
+            "tools/nlf/../x.md",
+            "tools//x.md",
+            "tools/nlf/README.txt",
+        ):
+            self.assertFalse(ci_mac_modules._is_other_tool_markdown(path))
+        self.assertTrue(ci_mac_modules._is_other_tool_markdown("tools/nlf/docs/guide.md"))
+
 
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml"
 CANONICAL_STEP = "Offline canonical checks"

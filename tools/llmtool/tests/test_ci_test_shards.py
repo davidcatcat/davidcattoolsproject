@@ -61,6 +61,156 @@ class CiTestShardsTests(unittest.TestCase):
                     [["test_known.py"], ["test_unknown.py"]],
                 )
 
+    def test_output_without_timings_unchanged_versus_default_file(self):
+        for count in range(1, 5):
+            with self.subTest(shard_count=count):
+                self.assertEqual(
+                    ci_test_shards.partition(count),
+                    ci_test_shards.partition(count, timings=ci_test_shards.TIMINGS),
+                )
+        for shard in (1, 2, 3):
+            with self.subTest(shard=shard):
+                proc_default = subprocess.run(
+                    [
+                        sys.executable,
+                        str(TOOLS_ROOT / "scripts" / "ci_test_shards.py"),
+                        "3",
+                        str(shard),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                proc_explicit = subprocess.run(
+                    [
+                        sys.executable,
+                        str(TOOLS_ROOT / "scripts" / "ci_test_shards.py"),
+                        "3",
+                        str(shard),
+                        "--timings",
+                        str(ci_test_shards.TIMINGS),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertEqual(proc_default.stdout, proc_explicit.stdout)
+
+    def test_mac_file_loads_with_exact_entries(self):
+        mac_path = getattr(
+            ci_test_shards,
+            "MAC_TIMINGS",
+            TOOLS_ROOT / "ci" / "mac-test-module-seconds.json",
+        )
+        self.assertTrue(mac_path.exists())
+        data = json.loads(mac_path.read_text(encoding="utf-8"))
+        self.assertEqual(data.get("default_seconds"), 3)
+        expected_modules = {
+            "test_task_completion.py": 300,
+            "test_opencode_worker.py": 269,
+            "test_gw_agent_route_wiring.py": 243,
+            "test_task_submission_cli.py": 207,
+            "test_worktree_env.py": 154,
+            "test_chat_tui.py": 127,
+            "test_ci_mac_modules.py": 85,
+            "test_cli.py": 82,
+            "test_developer_route_contract.py": 77,
+            "test_task_codex_delegate.py": 66,
+            "test_merge_train.py": 61,
+            "test_merge_train_build.py": 55,
+            "test_test_output_excerpts.py": 50,
+            "test_developer_route_gw_agent.py": 41,
+            "test_d6_worktree_retire.py": 40,
+            "test_d6_worktree_lifecycle.py": 39,
+            "test_ci_path_classes.py": 38,
+            "test_claude_bg_dispatch.py": 37,
+            "test_pm_runtime.py": 36,
+            "test_merge_train_ops.py": 35,
+            "test_train_member_closure.py": 34,
+            "test_developer_route_claude.py": 33,
+            "test_review_authority.py": 32,
+            "test_github_events.py": 30,
+            "test_task_advance.py": 27,
+            "test_claude_skill_hook.py": 26,
+            "test_cli_provider_lifecycle.py": 25,
+            "test_d6_worktree_env.py": 23,
+            "test_diagnostics_reader.py": 22,
+            "test_active_pm_inbox.py": 20,
+            "test_diagnostics_failure_matrix.py": 20,
+        }
+        self.assertEqual(data.get("modules"), expected_modules)
+        self.assertEqual(len(data["modules"]), 31)
+
+    def test_mac_file_disjoint_full_coverage_for_three_shards(self):
+        mac_path = getattr(
+            ci_test_shards,
+            "MAC_TIMINGS",
+            TOOLS_ROOT / "ci" / "mac-test-module-seconds.json",
+        )
+        shards = ci_test_shards.partition(3, timings=mac_path)
+        self.assertEqual(len(shards), 3)
+        modules = {path.name for path in ci_test_shards.TESTS.glob("test_*.py")}
+        flattened = [module for shard in shards for module in shard]
+        self.assertEqual(set(flattened), modules)
+        self.assertEqual(len(flattened), len(set(flattened)))
+        for i in range(len(shards)):
+            for j in range(i + 1, len(shards)):
+                self.assertTrue(set(shards[i]).isdisjoint(set(shards[j])))
+
+    def test_mac_file_max_min_summed_seconds_within_sixty(self):
+        mac_path = getattr(
+            ci_test_shards,
+            "MAC_TIMINGS",
+            TOOLS_ROOT / "ci" / "mac-test-module-seconds.json",
+        )
+        data = json.loads(mac_path.read_text(encoding="utf-8"))
+        weights = data["modules"]
+        default = data["default_seconds"]
+        shards = ci_test_shards.partition(3, timings=mac_path)
+
+        summed_listed = [
+            sum(weights[module] for module in shard if module in weights)
+            for shard in shards
+        ]
+        self.assertLessEqual(max(summed_listed) - min(summed_listed), 60)
+
+        summed_totals = [
+            sum(weights.get(module, default) for module in shard)
+            for shard in shards
+        ]
+        self.assertLessEqual(max(summed_totals) - min(summed_totals), 60)
+
+    def test_mac_file_unlisted_module_uses_default_seconds(self):
+        mac_path = getattr(
+            ci_test_shards,
+            "MAC_TIMINGS",
+            TOOLS_ROOT / "ci" / "mac-test-module-seconds.json",
+        )
+        data = json.loads(mac_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["default_seconds"], 3)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            test_dir = root / "tests"
+            test_dir.mkdir()
+            (test_dir / "test_listed.py").touch()
+            (test_dir / "test_unlisted.py").touch()
+            timing_path = root / "custom_timings.json"
+            timing_path.write_text(
+                json.dumps(
+                    {
+                        "default_seconds": 3,
+                        "modules": {"test_listed.py": 20},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(ci_test_shards, "TESTS", test_dir):
+                shards = ci_test_shards.partition(2, timings=timing_path)
+                self.assertEqual(
+                    shards,
+                    [["test_listed.py"], ["test_unlisted.py"]],
+                )
+
     def test_workflow_has_aggregate_gate_and_third_runner_mapping(self):
         workflow = (TOOLS_ROOT.parent.parent / ".github/workflows/llmtool-linux-ci.yml").read_text(
             encoding="utf-8"
@@ -161,6 +311,8 @@ class CiTestShardsTests(unittest.TestCase):
             "*.md",
             "scripts/**",
             ".github/workflows/**",
+            "**/*.md",
+            "reports/**",
         ]
         header = workflow.split("jobs:", 1)[0]
         # Under push there are a branches list and a comment line before paths:,
@@ -186,7 +338,7 @@ class CiTestShardsTests(unittest.TestCase):
             if line.strip().startswith("-")
         ]
         self.assertEqual(push_paths, expected_paths)
-        self.assertEqual(push_paths[-2:], ["scripts/**", ".github/workflows/**"])
+        self.assertEqual(push_paths[-2:], ["**/*.md", "reports/**"])
         idx_llmtool = push_paths.index("tools/llmtool/**")
         self.assertEqual(push_paths[idx_llmtool + 1], "!tools/llmtool/*.md")
 
@@ -196,7 +348,7 @@ class CiTestShardsTests(unittest.TestCase):
             if line.strip().startswith("-")
         ]
         self.assertEqual(pr_paths, expected_paths)
-        self.assertEqual(pr_paths[-2:], ["scripts/**", ".github/workflows/**"])
+        self.assertEqual(pr_paths[-2:], ["**/*.md", "reports/**"])
         idx_llmtool_pr = pr_paths.index("tools/llmtool/**")
         self.assertEqual(pr_paths[idx_llmtool_pr + 1], "!tools/llmtool/*.md")
 
