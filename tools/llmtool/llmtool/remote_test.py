@@ -962,7 +962,7 @@ def _hosted_artifact(run_id, nonce, *, get=None, get_bytes=None):
             if info.is_dir():
                 return None
             mode = info.external_attr >> 16
-            if mode != 0 and not stat.S_ISREG(mode):
+            if (mode & 0o170000) != 0 and not stat.S_ISREG(mode):
                 return None
             if info.file_size < 0 or info.file_size > _HOSTED_MEMBER_LIMIT:
                 return None
