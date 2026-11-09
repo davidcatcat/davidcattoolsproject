@@ -48,6 +48,7 @@ from .developer_routes.agy import (
     MAX_PROMPT_BYTES as AGY_MAX_PROMPT_BYTES,
     _CONVERSATION as AGY_CONVERSATION,
 )
+from . import gw_agent_callsite, gw_agent_wiring
 from .developer_routes.claude import MAX_PROMPT_BYTES as CLAUDE_MAX_PROMPT_BYTES
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_data_rule import TEST_DATA_RULE
@@ -805,7 +806,8 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--acceptance', action='append', required=True, help='bounded acceptance condition; repeat as needed')
     delegate.add_argument('--egress-basis', required=True, help='task-specific non-sensitive data authorization basis')
     delegate.add_argument('--data-class', help='required data classification for gw-agent direct Tasks')
-    delegate.add_argument('--owner-ref', help='required Owner assignment comment URL for AGY or Claude direct Tasks')
+    delegate.add_argument('--owner-ref', help=('Owner assignment comment URL: required for Claude direct Tasks; '
+                                'optional for AGY, validated when given'))
     delegate.add_argument('--high-debug-ref',
                           help='trusted GitHub comment URL authorizing a repair-cap override')
     delegate.add_argument('--high-debug-task',
@@ -3619,12 +3621,24 @@ def _codex_developer_profile():
     return provider, effort
 
 
-def run_task_agy_delegate(args, *, store, route_runner=None):
-    """Run the provider-neutral AGY adapter against its registered D6 task."""
+def _optional_agy_owner_ref(args):
+    """Return the AGY --owner-ref, which may be None (#785 M18).
+
+    The live dispatch gate decides: PAUSED or OWNER_ASSIGNMENT_ONLY still
+    refuse without a matching ref. A supplied ref must still be a valid Owner
+    comment URL, checked before any store read or Task mutation.
+    """
     owner_ref = getattr(args, 'owner_ref', None)
-    if (type(owner_ref) is not str or
+    if owner_ref is not None and (
+            type(owner_ref) is not str or
             worker_dispatch.owner_comment_ref().fullmatch(owner_ref) is None):
         raise LLMToolError('--provider agy requires a valid --owner-ref before Task mutation')
+    return owner_ref
+
+
+def run_task_agy_delegate(args, *, store, route_runner=None):
+    """Run the provider-neutral AGY adapter against its registered D6 task."""
+    owner_ref = _optional_agy_owner_ref(args)
     if getattr(args, 'mode', None) != 'direct':
         raise LLMToolError('--provider agy requires --mode direct')
     if getattr(args, 'context_stdin', False):
@@ -4130,6 +4144,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
 
 def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     """Run the company Gw Agent Gateway route against its registered D6 task."""
+    from . import gw_agent_sessions
+    gw_agent_sessions.sweep_quietly(store)
     if getattr(args, 'mode', None) != 'direct':
         raise LLMToolError('--provider gw-agent requires --mode direct')
     if getattr(args, 'context_stdin', False):
@@ -4379,14 +4395,16 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             return decision
         owner_gate_denied = True
         return False
+    site = None
     try:
         execute = run_route if route_runner is None else route_runner
+        site = gw_agent_callsite.SessionCallSite(store.root, executor_task_id=registration.task_id, task_id=task['task_id'], repair_excerpt=None, data_class=data_class).__enter__()
         try:
             result = execute(route, {'root': registration.root, 'model': model, 'effort': effort,
                 'expected_branch': registration.branch, 'expected_head': snapshot.head,
                 'write_paths': write_paths, 'executable': sys.executable,
                 'prompt': prompt, 'task': task_input, 'timeout': 600,
-                'state_dirs': ()}, gate=route_gate, boundary=for_platform(),
+                'state_dirs': (), **site.route_fields()}, gate=route_gate, boundary=for_platform(),
                 snapshot=capture_snapshot)
         finally:
             cleanup_audit_copies()
@@ -4423,10 +4441,13 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None})
+        site.after_result(result.session_id, task_input)
         _bind_direct_native_session(registration, developer, completion, _GW_AGENT_SESSION)
     except _D6SessionRefused:
         return persist_failure('DEVELOPER_GW_AGENT_D6_SESSION_REFUSED',
                                state='DEVELOPER_OUTCOME_UNKNOWN')
+    except gw_agent_wiring.WiringRefused as exc:
+        return persist_failure(exc.code)
     except RouteError as exc:
         code = 'DEVELOPER_' + (exc.code if not owner_gate_denied else 'DISPATCH_DENIED')
         gateway_code = exc.facts.get('gateway_code') if type(exc.facts) is dict else None
@@ -4443,6 +4464,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     except BaseException:
         persist_interrupted()
         raise
+    finally:
+        if site is not None:
+            site.__exit__(None, None, None)
     try:
         store.compare_and_update(
             task['task_id'], expected={'developer': expected_developer},
@@ -5487,8 +5511,9 @@ def run_task_delegate(args, *, store=None):
     if args.provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider agy requires --mode direct')
-        if getattr(args, 'owner_ref', None) is None:
-            raise LLMToolError('--provider agy requires --owner-ref')
+        # #785 M18: no owner-ref check here. The repair cap and High Debug
+        # refusals come first; run_task_agy_delegate validates a supplied ref
+        # (None accepted) before any store read or Task mutation.
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         _check_delegate_repair_cap(args, store)
         return run_task_agy_delegate(args, store=store)
