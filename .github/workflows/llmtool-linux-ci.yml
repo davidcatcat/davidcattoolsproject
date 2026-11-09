@@ -36,6 +36,9 @@ on:
       - '*.md'
       - 'scripts/**'
       - '.github/workflows/**'
+      # '*.md' matches only top-level files, so Markdown in reports/ and other folders got no docs check.
+      - '**/*.md'
+      - 'reports/**'
   pull_request:
     # Top-level llmtool Markdown triggers docs validation only; deeper paths remain included.
     paths:
@@ -54,6 +57,9 @@ on:
       - '*.md'
       - 'scripts/**'
       - '.github/workflows/**'
+      # '*.md' matches only top-level files, so Markdown in reports/ and other folders got no docs check.
+      - '**/*.md'
+      - 'reports/**'
   workflow_dispatch:
     inputs:
       python39:
