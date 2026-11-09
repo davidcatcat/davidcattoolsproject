@@ -6378,5 +6378,196 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(caught.exception.completion_code,
                          'DEVELOPER_ARTIFACT_BINDING_INVALID')
 
+
+class CompletionAttributedPathsStoreTests(unittest.TestCase):
+    """#1169: task complete saves records whose attributed paths leave the net diff.
+
+    Developer attribution (#1177) can name paths outside changed_paths: a
+    rename-conflict source or a file added and later deleted. The store must
+    save these completion records. The fixture helpers are reused from
+    TaskCompletionTests without inheriting (and so re-running) its tests.
+    """
+
+    setUp = TaskCompletionTests.setUp
+    _git = TaskCompletionTests._git
+    _write_registration = TaskCompletionTests._write_registration
+    _write_env2_marker = TaskCompletionTests._write_env2_marker
+    _trusted_main_ref = TaskCompletionTests._trusted_main_ref
+    _make_path_result = TaskCompletionTests._make_path_result
+    _segment_head = TaskCompletionTests._segment_head
+    _RENAME_CONFLICT_SHAPES = TaskCompletionTests._RENAME_CONFLICT_SHAPES
+    _complete_company_gw_task = TaskCompletionTests._complete_company_gw_task
+    _active_pm_task = TaskCompletionTests._active_pm_task
+    _task = TaskCompletionTests._task
+
+    DOC_PATH = 'docs/guide.md'
+
+    def _markdown_rename_conflict_head(self, shape):
+        """Same rename conflict as _rename_conflict_head, with only Markdown changes.
+
+        The Developer branch changes only README.md before the segment, and
+        the segment's own commit adds a Markdown guide, so every attributed
+        path ends in .md.
+        """
+        main_name, developer_name, dropped, hidden = self._RENAME_CONFLICT_SHAPES[shape]
+        original = 'README.md'
+        self._git('checkout', '-f', 'feat/executor')
+        self._git('reset', '--hard', self.source_sha)
+        self._write_registration(self.task_id, 'executor-agent', 'Executor D6 session',
+                                 self.root, 'feat/executor', self.source_sha, self.source_sha,
+                                 native_session_id='native-executor')
+        main_branch = 'docs-main-' + shape
+        self._git('checkout', '-b', main_branch)
+        if main_name is None:
+            self._git('rm', original)
+        else:
+            self._git('mv', original, main_name)
+        self._git('commit', '-m', 'trusted main moves README')
+        trusted_base = self._git('rev-parse', 'HEAD')
+
+        self._git('checkout', 'feat/executor')
+        if developer_name is None:
+            self._git('rm', original)
+        else:
+            self._git('mv', original, developer_name)
+        self._git('commit', '-m', 'developer moves README')
+        segment_start = self._git('rev-parse', 'HEAD')
+
+        merge = subprocess.run(
+            ['/usr/bin/git', '-c', 'merge.renames=true', '-c', 'diff.renames=true',
+             'merge', '--no-ff', main_branch, '-m', 'merge trusted main'],
+            cwd=self.root, text=True, capture_output=True)
+        self.assertNotEqual(merge.returncode, 0, merge.stdout + merge.stderr)
+        stages = self._git('ls-files', '-u')
+        conflicts = {line.split('\t', 1)[1] for line in stages.splitlines()}
+        self.assertLessEqual(set(hidden), conflicts, stages)
+        if dropped is not None:
+            (self.root / dropped).unlink()
+        self._git('add', '-A')
+        self._git('commit', '-m', 'resolve ' + shape)
+        merge_sha = self._git('rev-parse', 'HEAD')
+        self.assertEqual(self._git('ls-files', '-u'), '')
+        self.assertEqual(self._git('rev-parse', merge_sha + '^1'), segment_start)
+        self.assertEqual(self._git('rev-parse', merge_sha + '^2'), trusted_base)
+        result_sha = self._make_path_result(self.DOC_PATH, 'Developer guide.\n')
+        attributed = conflicts | {self.DOC_PATH}
+        self.assertTrue(all(path.endswith('.md') for path in attributed), attributed)
+        return self._segment_head(result_sha, trusted_base, segment_start, attributed)
+
+    def _register_head(self, result_sha):
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = result_sha
+        self._write_env2_marker(record, self.root, submitted_head=result_sha,
+                                current_head=result_sha)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+
+    def _bound_task(self, head):
+        task = self._active_pm_task(self._task(), route='company-gw')
+        paths = list(head['attributed'])
+        task['developer'].update(
+            source_sha=head['segment_start'], read_paths=paths, write_paths=paths,
+            artifact=head['artifact'], artifact_sha256=head['artifact_sha256'])
+        task['completion']['evidence'].update(
+            source_sha=head['segment_start'], result_head=head['segment_start'],
+            executor_native_session_id='native-executor',
+            executor_native_session='VERIFIED')
+        return task
+
+    def _complete_with_real_tests(self, store, task, *, trusted_base):
+        """Run task complete with the real collector and the real docs-only gate."""
+        real_collector = task_completion.collect_executor_result
+        real_tests = task_completion.run_bounded_tests
+
+        def github_get(path):
+            self.assertEqual(path, 'git/ref/heads/main')
+            return {'ref': 'refs/heads/main',
+                    'object': {'type': 'commit', 'sha': trusted_base}}
+
+        with patch.object(task_completion, '_github_get', side_effect=github_get), \
+             patch.object(task_completion, 'collect_executor_result',
+                          wraps=real_collector) as collect, \
+             patch.object(task_completion, 'run_bounded_tests',
+                          wraps=real_tests) as tests, \
+             patch('llmtool.task_submission_cli._remote_test_config_state',
+                   return_value='MISSING'), \
+             patch('llmtool.task_submission_cli.resolve_profile_config',
+                   side_effect=AssertionError('unexpected provider')) as resolve, \
+             patch.object(task_completion, 'collect_github_evidence',
+                          side_effect=AssertionError('unexpected review/CI')) as github, \
+             redirect_stdout(StringIO()):
+            code = run_task_complete(Namespace(
+                task_id=task['task_id'], executor_task=self.task_id,
+                reviewer_task=None, pr=None), store=store)
+        collect.assert_called_once()
+        tests.assert_called_once()
+        self.assertEqual(tests.call_args.kwargs['trusted_base_sha'], trusted_base)
+        resolve.assert_not_called()
+        github.assert_not_called()
+        return code, store.get(task['task_id'])['completion']
+
+    def test_markdown_rename_conflict_docs_only_completion_is_saved(self):
+        outside_net_diff = {}
+        for shape in self._RENAME_CONFLICT_SHAPES:
+            with self.subTest(shape=shape):
+                head = self._markdown_rename_conflict_head(shape)
+                store = TaskStore(self.base / ('docs-rename-conflict-' + shape))
+                task = self._bound_task(head)
+                store.create(task)
+                code, completion = self._complete_with_real_tests(
+                    store, task, trusted_base=head['trusted_base'])
+                self.assertEqual(code, 0)
+                self.assertEqual(completion['state'], 'PM_EVIDENCE_READY')
+                self.assertEqual(completion['missing_gates'], [])
+                self.assertEqual(completion['pm_dispatch'], 'NOT_STARTED')
+                result = completion['evidence']['result']
+                self.assertEqual(result['source_sha'], head['segment_start'])
+                self.assertEqual(result['result_head'], head['result_sha'])
+                self.assertEqual(result['developer_changed_paths'], head['attributed'])
+                self.assertEqual(completion['evidence']['tests'], [{
+                    'status': 'NOT_APPLICABLE_DOCS_ONLY',
+                    'changed_paths': head['attributed'],
+                    'source_sha': head['result_sha'], 'docs_only': True}])
+                outside_net_diff[shape] = (set(result['developer_changed_paths']) -
+                                           set(result['changed_paths']))
+        # README.md is renamed away on both sides, so it is attributed but is
+        # not in the net diff: the record the old subset rule refused.
+        self.assertIn('README.md', outside_net_diff['rename-rename-keep-both'])
+
+    def test_added_then_deleted_path_is_attributed_and_completion_is_saved(self):
+        scratch = 'docs/scratch.md'
+        self._git('checkout', '-f', 'feat/executor')
+        self._git('reset', '--hard', self.source_sha)
+        source = self.root / self.source_path
+        source.write_text(source.read_text() + '\n# scoped developer change\n')
+        (self.root / 'docs').mkdir(exist_ok=True)
+        (self.root / scratch).write_text('Temporary Developer notes.\n')
+        self._git('add', self.source_path, scratch)
+        self._git('commit', '-m', 'developer change with scratch notes')
+        self._git('rm', scratch)
+        self._git('commit', '-m', 'developer removes scratch notes')
+        result_sha = self._git('rev-parse', 'HEAD')
+        self._register_head(result_sha)
+        head = self._segment_head(result_sha, self.source_sha, self.source_sha,
+                                  {self.source_path, scratch})
+
+        store = TaskStore(self.base / 'added-then-deleted')
+        task = self._bound_task(head)
+        store.create(task)
+        code, tests, collect, completion = self._complete_company_gw_task(
+            store, task, trusted_base=self.source_sha, tested_head=result_sha)
+        self.assertEqual(code, 0)
+        tests.assert_called_once()
+        self.assertEqual(completion['state'], 'PM_EVIDENCE_READY')
+        self.assertEqual(completion['missing_gates'], [])
+        result = completion['evidence']['result']
+        self.assertEqual(result['result_head'], result_sha)
+        self.assertEqual(result['changed_paths'], [self.source_path])
+        self.assertEqual(result['developer_changed_paths'],
+                         sorted([self.source_path, scratch]))
+        self.assertNotIn(scratch, result['changed_paths'])
+
+
 if __name__ == '__main__':
     unittest.main()
