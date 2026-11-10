@@ -65,6 +65,38 @@ def check(spec: dict[str, Any]) -> list[str]:
     return failures
 
 
+# WP-120L (#120): the home LLM ladder runs from T1 to T5.
+LADDER_MAX_TIER = 5
+
+
+def ladder_tier(entries, max_tier=LADDER_MAX_TIER):
+    """Return (tier, streak, stable) from home LLM ladder log entries, oldest first.
+
+    Only entries whose int tier equals the current tier count. Three first-try
+    SOLVED in a row promote one tier, never above max_tier; two failures at a
+    tier drop one tier, never below 1. stable is True when the tier is max_tier
+    and its streak is at least 3.
+    """
+    tier, streak, failures = 1, 0, 0
+    for entry in entries:
+        if not isinstance(entry, dict) or type(entry.get("tier")) is not int:
+            continue
+        if entry["tier"] != tier:
+            continue
+        outcome = str(entry.get("outcome", ""))
+        if outcome.startswith("SOLVED") and entry.get("attempts") == 1:
+            streak += 1
+            if streak >= 3 and tier < max_tier:
+                tier, streak, failures = tier + 1, 0, 0
+        elif outcome.startswith("FAILED"):
+            streak, failures = 0, failures + 1
+            if failures >= 2 and tier > 1:
+                tier, streak, failures = tier - 1, 0, 0
+        else:
+            streak = 0
+    return tier, streak, tier == max_tier and streak >= 3
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if len(args) != 1:
