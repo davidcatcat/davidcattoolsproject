@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from .base import DeveloperRoute, RouteError
 from .write_boundary import SandboxExecBoundary
 from .. import config as llm_config
+from .. import github_identity
 
 _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
 _TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z')
@@ -477,7 +478,8 @@ class GwAgentRoute(DeveloperRoute):
             env['GW_AGENT_API_KEY'] = credential
         self._credential = None
         self._credential_resolved = False
-        return env
+        home = env.get('HOME') or str(Path.home())
+        return github_identity.ai_github_env(env, home)
 
     def parse_output(self, stdout, stderr, log_text):
         result = self._result
