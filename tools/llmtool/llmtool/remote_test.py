@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .active_pm_inbox import record_remote_test_event, record_remote_test_outcome_event
 from .errors import LLMToolError
-from . import github_identity
+from . import ai_github_exec, github_identity
 from .task_completion import _github_get, _trusted_slug, read_d6_registration
 from .task_store import TaskStore, _emitted_sensitive, _json_bytes
 
@@ -565,20 +565,22 @@ def _hosted_post(path, body):
     """Make one POST to the single accepted hosted dispatch path using gh CLI."""
     if path != _HOSTED_DISPATCH_PATH:
         raise ValueError(f'Unsupported dispatch path: {path}')
+    try:
+        env = ai_github_exec.verified_ai_env()
+    except ai_github_exec.AiIdentityError as exc:
+        raise LLMToolError(f'GITHUB_AI_IDENTITY_REFUSED {exc.code}') from exc
     gh = shutil.which('gh', path=_GH_PATH)
     if gh is None:
         raise LLMToolError('gh executable not found')
     slug = _trusted_slug()
-    env = {
+    env.update({
         'PATH': _GH_PATH,
         'HOME': os.path.expanduser('~'),
         'LC_ALL': 'C',
         'GH_PROMPT_DISABLED': '1',
         'GH_NO_UPDATE_NOTIFIER': '1',
         'NO_COLOR': '1',
-    }
-    if os.environ.get('GH_CONFIG_DIR'):
-        env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
+    })
     argv = [
         gh, 'api', '--method', 'POST',
         '-H', 'Accept: application/vnd.github+json',
@@ -679,6 +681,10 @@ def _hosted_dispatch(sha, ref, modules, nonce, *, post=None):
         if res is False or res == 'UNCONFIRMED':
             return 'UNCONFIRMED'
         return 'DISPATCHED'
+    except LLMToolError as exc:
+        if str(exc).startswith('GITHUB_AI_IDENTITY_REFUSED'):
+            raise
+        return 'UNCONFIRMED'
     except Exception:
         return 'UNCONFIRMED'
 
