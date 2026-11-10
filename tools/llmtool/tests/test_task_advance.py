@@ -4640,16 +4640,19 @@ class TaskAdvanceReviewRefusalTests(unittest.TestCase):
 
     def test_real_task_store_accepts_claim_unchanged(self):
         from llmtool.task_store import TaskStore, new_id
+        request = 'Bounded non-sensitive task for refusal store check.'
         task_id, run_id = new_id(), new_id()
         task = task_submission_cli._record(
-            task_id, run_id, 'pm-' + new_id(), 'pm-profile',
-            'Non-sensitive task for refusal store check.',
+            task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
             state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
             backend='NO_NATIVE_SESSION_ID_EXPOSED',
-            request_sha=hashlib.sha256(b'request').hexdigest())
+            request_sha=hashlib.sha256(request.encode()).hexdigest())
         task.update(
             pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None},
             response='PM task response', error_code=None,
+            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                           'goal': 'Verify refusal claim schema.',
+                           'acceptance': ['the claim is unchanged']},
             developer={'state': 'DEVELOPER_RESPONDED', 'write_paths': ['allowed.txt']},
             completion={'executor_task_id': 'executor-1', 'state': 'WAITING_REVIEW',
                         'evidence': {'result': {'result_head': HEAD}}},
@@ -4662,14 +4665,12 @@ class TaskAdvanceReviewRefusalTests(unittest.TestCase):
             store = TaskStore(Path(temp).resolve() / 'tasks')
             store.create(task)
 
-            claim = {
-                'executor_task': 'executor-1', 'pr': 17, 'head_sha': HEAD,
-                'version': 1, 'state': 'UNKNOWN', 'failure_reason': 'REVIEW_HEADER_MISMATCH',
-                'reviewer_task': 'reviewer-1', 'native_session_id': None, 'account_mode': 'ROLES',
-                'claimed_at': '2026-11-10T00:00:00Z', 'updated_at': '2026-11-10T00:00:01Z',
-            }
-            refreshed = store.get(task_id)
-            store.compare_and_update(task_id, expected={'record_sha256': refreshed['record_sha256']},
+            plain = dict(unusable_claim(reason=None), state='CLAIMED')
+            store.compare_and_update(task_id, expected={
+                'record_sha256': store.get(task_id)['record_sha256']},
+                review_dispatch_claim=[plain])
+            claim = unusable_claim(reason='REVIEW_HEADER_MISMATCH')
+            store.compare_and_update(task_id, expected={'review_dispatch_claim': [plain]},
                                      review_dispatch_claim=[claim])
 
             persisted = store.get(task_id)
@@ -4782,8 +4783,12 @@ class TaskAdvanceReviewRefusalTests(unittest.TestCase):
             drive_kwargs['pr'] = 17
         if 'dispatch_review_call' in sig.parameters:
             drive_kwargs['dispatch_review_call'] = counted_dispatch
+        if 'sleep' in sig.parameters:
+            drive_kwargs['sleep'] = lambda _seconds: None
 
-        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+        snapshot = dict(d6(), branch='feature/task')
+        with patch.object(task_advance.task_completion, '_github_get', side_effect=green_linux_ci), \
+             patch.object(task_advance, '_d6_snapshot', return_value=snapshot), \
              patch.object(task_advance, '_pr_snapshot', return_value=PR), \
              patch.object(task_advance, '_review_outcomes', return_value=[]), \
              patch.object(task_advance, '_review_ci_gate', return_value=(None, None)), \
