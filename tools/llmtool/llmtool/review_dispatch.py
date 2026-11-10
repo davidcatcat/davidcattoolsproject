@@ -102,11 +102,11 @@ def _resolve_github_login():
     gh = shutil.which('gh', path=task_completion._GH_PATH)
     if gh is None:
         _refuse('REVIEWER_GITHUB_LOGIN_UNAVAILABLE')
-    env = {'PATH': task_completion._GH_PATH, 'HOME': os.path.expanduser('~'),
+    home = os.environ.get('HOME') or os.path.expanduser('~')
+    env = {'PATH': task_completion._GH_PATH, 'HOME': home,
            'LC_ALL': 'C', 'GH_PROMPT_DISABLED': '1',
-           'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1'}
-    if os.environ.get('GH_CONFIG_DIR'):
-        env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
+           'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1',
+           'GH_CONFIG_DIR': github_identity.ai_gh_config_dir(home)}
     try:
         result = subprocess.run(
             [gh, 'api', 'user', '--jq', '.login'], env=env,
@@ -120,6 +120,8 @@ def _resolve_github_login():
         _refuse('REVIEWER_GITHUB_LOGIN_UNAVAILABLE')
     if (result.returncode or re.fullmatch(r'[A-Za-z0-9-]{1,39}', login) is None):
         _refuse('REVIEWER_GITHUB_LOGIN_UNAVAILABLE')
+    if login != github_identity.ai_login():
+        _refuse('REVIEWER_GITHUB_LOGIN_MISMATCH')
     return login
 
 

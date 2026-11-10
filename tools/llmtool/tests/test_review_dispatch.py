@@ -334,10 +334,11 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(fifth['head_sha'], HEAD)
 
     def test_github_login_resolution_uses_authenticated_account_and_validates_output(self):
-        result = SimpleNamespace(returncode=0, stdout=b'authenticated-account\n')
+        ai_login = review_dispatch.github_identity.ai_login()
+        result = SimpleNamespace(returncode=0, stdout=f'{ai_login}\n'.encode())
         with patch.object(review_dispatch.shutil, 'which', return_value='/bin/gh') as which, \
                 patch.object(review_dispatch.subprocess, 'run', return_value=result) as run:
-            self.assertEqual(review_dispatch._resolve_github_login(), 'authenticated-account')
+            self.assertEqual(review_dispatch._resolve_github_login(), ai_login)
         which.assert_called_once_with('gh', path=review_dispatch.task_completion._GH_PATH)
         self.assertEqual(run.call_args.args[0], [
             '/bin/gh', 'api', 'user', '--jq', '.login'])
