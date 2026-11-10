@@ -337,8 +337,7 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
             _screen_text(final, _CODEX_REVIEW_MAX_OUTPUT)
         except LLMToolError:
             _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_WITHHELD)
-        lines = final.splitlines(keepends=True)[:40]
-        cut = ''.join(lines).encode('utf-8')[:2048].decode('utf-8', 'ignore')
+        cut = '\n'.join(final.splitlines()[:40]).encode('utf-8')[:2048].decode('utf-8', 'ignore')
         try:
             excerpt = _screen_text(cut, 2048)
         except LLMToolError:
