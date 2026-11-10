@@ -4504,5 +4504,294 @@ class IntegrationDeltaRealGitTests(unittest.TestCase):
         self.assertEqual(saved, [])
 
 
+class TaskAdvanceReviewRefusalTests(unittest.TestCase):
+    """#763 sub-PR 1180-c: review_refusal dict on refused DISPATCH_REVIEW."""
+
+    def test_key_on_refused_review(self):
+        record = base_record()
+        store = ClaimStore(record)
+        refusal = {
+            'failure_reason': 'REVIEW_HEADER_MISMATCH',
+            'excerpt': 'synthetic header mismatch excerpt',
+            'receipt_path': '/repo/test_receipt.json',
+        }
+
+        def dispatch_stub(**_kwargs):
+            err = LLMToolError('refused')
+            err.review_dispatch_code = 'REVIEW_NOT_POSTED'
+            err.review_failure_reason = 'REVIEW_HEADER_MISMATCH'
+            err.review_refusal = dict(refusal)
+            raise err
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]):
+            result = task_advance.advance(
+                task_id=record['task_id'], store=store, pr_number=17,
+                github_get=green_linux_ci, dispatch_review_call=dispatch_stub)
+
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(result['next'], 'DISPATCH_REVIEW')
+        self.assertIsNone(result['result'])
+        self.assertEqual(result['codes'], ['REVIEW_NOT_POSTED', 'REVIEW_HEADER_MISMATCH'])
+        self.assertEqual(result['review_refusal'], refusal)
+
+    def test_key_with_label_and_none_receipt(self):
+        record = base_record()
+        store = ClaimStore(record)
+        refusal = {
+            'failure_reason': 'REVIEW_PROMPT_REFUSED',
+            'label': 'SYNTHETIC_SCREEN_LABEL',
+            'receipt_path': None,
+        }
+
+        def dispatch_stub(**_kwargs):
+            err = LLMToolError('refused')
+            err.review_dispatch_code = 'REVIEW_NOT_POSTED'
+            err.review_failure_reason = 'REVIEW_PROMPT_REFUSED'
+            err.review_refusal = dict(refusal)
+            raise err
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]):
+            result = task_advance.advance(
+                task_id=record['task_id'], store=store, pr_number=17,
+                github_get=green_linux_ci, dispatch_review_call=dispatch_stub)
+
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(result['review_refusal'], refusal)
+
+    def test_absence_on_other_results(self):
+        record = base_record()
+        store = ClaimStore(record)
+
+        # Successful review dispatch has no review_refusal key
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]):
+            ok_result = task_advance.advance(
+                task_id=record['task_id'], store=store, pr_number=17,
+                github_get=green_linux_ci,
+                dispatch_review_call=lambda **_k: {'state': 'DISPATCHED'})
+        self.assertEqual(ok_result['step'], 'DISPATCH_REVIEW')
+        self.assertNotIn('review_refusal', ok_result)
+
+        # Error without review_refusal attribute
+        def no_refusal_err(**_k):
+            err = LLMToolError('refused')
+            err.review_dispatch_code = 'REVIEW_NOT_POSTED'
+            err.review_failure_reason = 'REVIEW_HEADER_MISMATCH'
+            raise err
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]):
+            no_attr_result = task_advance.advance(
+                task_id=record['task_id'], store=store, pr_number=17,
+                github_get=green_linux_ci, dispatch_review_call=no_refusal_err)
+        self.assertEqual(no_attr_result['step'], 'DISPATCH_REVIEW')
+        self.assertNotIn('review_refusal', no_attr_result)
+
+        # Malformed review_refusal dicts
+        malformed_cases = (
+            None,
+            'not a dict',
+            [],
+            {'failure_reason': 123, 'excerpt': 'sample'},
+            {'failure_reason': '', 'excerpt': 'sample'},
+            {'failure_reason': 'REVIEW_HEADER_MISMATCH'},
+            {'failure_reason': 'REVIEW_HEADER_MISMATCH', 'excerpt': 'sample', 'label': 'label'},
+            {'failure_reason': 'REVIEW_HEADER_MISMATCH', 'excerpt': 123},
+            {'failure_reason': 'REVIEW_HEADER_MISMATCH', 'label': 123},
+            {'failure_reason': 'REVIEW_HEADER_MISMATCH', 'excerpt': 'sample', 'receipt_path': 123},
+            {'failure_reason': 'REVIEW_HEADER_MISMATCH', 'excerpt': 'sample', 'extra_field': 'bad'},
+        )
+        for malformed in malformed_cases:
+            with self.subTest(malformed=malformed):
+                def malformed_err(**_k):
+                    err = LLMToolError('refused')
+                    err.review_dispatch_code = 'REVIEW_NOT_POSTED'
+                    err.review_failure_reason = 'REVIEW_HEADER_MISMATCH'
+                    err.review_refusal = malformed
+                    raise err
+
+                with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+                     patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+                     patch.object(task_advance, '_review_outcomes', return_value=[]):
+                    bad_result = task_advance.advance(
+                        task_id=record['task_id'], store=store, pr_number=17,
+                        github_get=green_linux_ci, dispatch_review_call=malformed_err)
+                self.assertEqual(bad_result['step'], 'DISPATCH_REVIEW')
+                self.assertNotIn('review_refusal', bad_result)
+
+        # Other advance results have no review_refusal key
+        rec_needs_attention = base_record(remote_test_outcomes=[{
+            'result': 'TIMEOUT', 'executor_task': 'executor-1',
+            'sha': HEAD, 'modules': ['test_task_advance'],
+        }])
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR):
+            attn_result = task_advance.advance(
+                task_id=rec_needs_attention['task_id'],
+                store=ClaimStore(rec_needs_attention), pr_number=17)
+        self.assertEqual(attn_result['step'], 'NEEDS_ATTENTION')
+        self.assertNotIn('review_refusal', attn_result)
+
+    def test_real_task_store_accepts_claim_unchanged(self):
+        from llmtool.task_store import TaskStore, new_id
+        request = 'Bounded non-sensitive review retry task.'
+        task_id, run_id = new_id(), new_id()
+        task = task_submission_cli._record(
+            task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED',
+            request_sha=hashlib.sha256(request.encode()).hexdigest())
+        task.update(pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                                      'base_url': None},
+                    response='PM returned a bounded task.', error_code=None,
+                    pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                                   'goal': 'Retry an unusable review.',
+                                   'acceptance': ['the failure reason is recorded']})
+
+        with tempfile.TemporaryDirectory() as temp:
+            store = TaskStore(Path(temp).resolve() / 'tasks')
+            store.create(task)
+
+            plain = dict(unusable_claim(reason=None), state='CLAIMED')
+            store.compare_and_update(task_id, expected={
+                'record_sha256': store.get(task_id)['record_sha256']},
+                review_dispatch_claim=[plain])
+            claim = unusable_claim(reason='REVIEW_HEADER_MISMATCH')
+            store.compare_and_update(task_id, expected={'review_dispatch_claim': [plain]},
+                                     review_dispatch_claim=[claim])
+
+            persisted = store.get(task_id)
+            persisted_claim = persisted['review_dispatch_claim'][0]
+            self.assertEqual(persisted_claim['state'], 'UNKNOWN')
+            self.assertEqual(persisted_claim['failure_reason'], 'REVIEW_HEADER_MISMATCH')
+            self.assertNotIn('review_refusal', persisted_claim)
+            self.assertNotIn('excerpt', persisted_claim)
+            self.assertNotIn('review_refusal', persisted)
+
+    def test_no_gh_call_carries_excerpt(self):
+        record = base_record()
+        store = ClaimStore(record)
+        excerpt = 'synthetic refusal excerpt that must never leak to github'
+        calls = []
+
+        def gh_runner(root, args):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(args, 0, b'[]', b'')
+
+        def dispatch_stub(**_kwargs):
+            err = LLMToolError('refused')
+            err.review_dispatch_code = 'REVIEW_NOT_POSTED'
+            err.review_failure_reason = 'REVIEW_HEADER_MISMATCH'
+            err.review_refusal = {
+                'failure_reason': 'REVIEW_HEADER_MISMATCH',
+                'excerpt': excerpt,
+                'receipt_path': None,
+            }
+            raise err
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]):
+            result = task_advance.advance(
+                task_id=record['task_id'], store=store, pr_number=17,
+                github_get=green_linux_ci, dispatch_review_call=dispatch_stub,
+                publish_gh_runner=gh_runner, merge_gh_runner=gh_runner)
+
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(result['review_refusal']['excerpt'], excerpt)
+        for call_args in calls:
+            for item in call_args:
+                self.assertNotIn(excerpt, str(item))
+
+    def test_pass_shaped_refused_output_is_not_verdict_at_decide_or_merge_gate(self):
+        claim = {
+            'executor_task': 'executor-1', 'pr': 17, 'head_sha': HEAD,
+            'version': 1, 'state': 'UNKNOWN', 'failure_reason': 'REVIEW_HEADER_MISMATCH',
+            'review_result': {'verdict': 'PASS'},
+        }
+        record = base_record(review_dispatch_claim=[claim])
+
+        # decide() gives REVIEW_REDISPATCH for 1 claim, not READY_FOR_INTEGRATION or RUN_TASK_COMPLETE
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'REVIEW_REDISPATCH')
+
+        # On second claim on same head, decide() gives REVIEW_UNUSABLE_STOPPED
+        claim2 = dict(claim, version=2)
+        record2 = base_record(review_dispatch_claim=[claim, claim2])
+        self.assertEqual(task_advance.decide(record2, d6(), PR, {}), 'REVIEW_UNUSABLE_STOPPED')
+
+        # Merge gate: _merge_pass_claim ignores UNKNOWN claims and returns None
+        self.assertIsNone(task_advance._merge_pass_claim(record, 17, HEAD, []))
+
+        # _merge_once returns MERGE_REVIEW_NOT_PASS
+        merge_result = task_advance._merge_once(
+            store=ClaimStore(record), record=record, number=17, head=HEAD, pr=PR,
+            events=[], github_get=green_linux_ci,
+            gh_runner=lambda *_a: subprocess.CompletedProcess([], 0), root='/repo')
+        self.assertEqual(merge_result['step'], 'MERGE_REFUSED')
+        self.assertEqual(merge_result['codes'], ['MERGE_REVIEW_NOT_PASS'])
+
+    def test_task_drive_around_real_advance_stops_after_one_advance(self):
+        import inspect
+        from argparse import Namespace
+        record = base_record()
+        store = ClaimStore(record)
+        dispatched = []
+
+        def counted_dispatch(*args, **kwargs):
+            dispatched.append((args, kwargs))
+            err = LLMToolError('refused')
+            err.review_dispatch_code = 'REVIEW_NOT_POSTED'
+            err.review_failure_reason = 'REVIEW_HEADER_MISMATCH'
+            err.review_refusal = {
+                'failure_reason': 'REVIEW_HEADER_MISMATCH',
+                'excerpt': 'synthetic header mismatch excerpt',
+                'receipt_path': None,
+            }
+            raise err
+
+        sig = inspect.signature(task_drive.drive)
+        drive_args = []
+        drive_kwargs = {}
+        first = next(iter(sig.parameters.values()), None)
+        if first and first.name == 'args':
+            drive_args.append(Namespace(task_id=record['task_id'], store=store, pr=17))
+        elif first and first.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+            drive_args.append(record['task_id'])
+        else:
+            drive_kwargs['task_id'] = record['task_id']
+
+        if 'store' in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            drive_kwargs['store'] = store
+        if 'github_get' in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            drive_kwargs['github_get'] = green_linux_ci
+        if 'pr_number' in sig.parameters:
+            drive_kwargs['pr_number'] = 17
+        elif 'pr' in sig.parameters:
+            drive_kwargs['pr'] = 17
+        if 'dispatch_review_call' in sig.parameters:
+            drive_kwargs['dispatch_review_call'] = counted_dispatch
+        if 'sleep' in sig.parameters:
+            drive_kwargs['sleep'] = lambda _seconds: None
+
+        snapshot = dict(d6(), branch='feature/task')
+        with patch.object(task_advance.task_completion, '_github_get', side_effect=green_linux_ci), \
+             patch.object(task_advance, '_d6_snapshot', return_value=snapshot), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(task_advance, '_review_ci_gate', return_value=(None, None)), \
+             patch.object(task_advance, '_find_published_pr', return_value=17), \
+             patch.object(task_advance, 'review_dispatch', review_dispatch), \
+             patch.object(review_dispatch, 'dispatch_review', side_effect=counted_dispatch):
+            task_drive.drive(*drive_args, **drive_kwargs)
+
+        self.assertEqual(len(dispatched), 1)
+
+
 if __name__ == '__main__':
     unittest.main()
