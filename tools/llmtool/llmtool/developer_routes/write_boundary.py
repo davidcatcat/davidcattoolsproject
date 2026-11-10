@@ -106,6 +106,9 @@ class SandboxExecBoundary(WriteBoundary):
         allowed = []
         for item in write_paths:
             rel = _safe_relative(item)
+            # Refuse write paths with any .git component regardless of case.
+            if any(part.casefold() == '.git' for part in rel.split('/')):
+                raise ValueError('writable path intersects a denied path')
             target = root.joinpath(*rel.split('/'))
             # Existing symlinks can escape before sandbox evaluation; reject all.
             current = root

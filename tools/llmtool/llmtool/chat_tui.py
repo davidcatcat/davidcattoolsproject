@@ -1837,11 +1837,18 @@ class ChatTUI:
             items = []
         else:
             items = slash_matches(text, self.dev)
-        self._set_menu(items)
+        # Select the exact command match when the draft equals its label.
+        selected = next((index for index, item in enumerate(items)
+                         if item[0] == text), 0)
+        self._set_menu(items, selected=selected)
 
-    def _set_menu(self, items):
-        if items != self.menu_items:
-            self.menu_index = 0
+    def _set_menu(self, items, selected=None):
+        if selected is None:
+            text = self.input.text
+            selected = next((index for index, item in enumerate(items)
+                             if item[0] == text), 0)
+        if items != self.menu_items or self.menu_index != selected:
+            self.menu_index = selected
             self.menu_offset = 0
         self.menu_items = items
         self._sync_picker()
