@@ -25,6 +25,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -466,6 +467,140 @@ class BoardLedger:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def claim_live(claim, store, now=None):
+    """Return whether a claim is currently live.
+
+    A reservation (no task_id) is live while now - claimed_at < RESERVATION_TTL.
+    A bound claim (with task_id) is live only if store.get(task_id) returns a
+    record whose derived state is not terminal.
+    """
+    if not isinstance(claim, dict):
+        return False
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif isinstance(now, datetime) and now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    task_id = claim.get('task_id')
+    if task_id is None:
+        claimed_at = claim.get('claimed_at')
+        if isinstance(claimed_at, datetime):
+            dt_claimed = claimed_at
+        elif isinstance(claimed_at, str):
+            dt_claimed = _seconds(claimed_at)
+        else:
+            return False
+        if dt_claimed is None:
+            return False
+        if dt_claimed.tzinfo is None:
+            dt_claimed = dt_claimed.replace(tzinfo=timezone.utc)
+        return (now - dt_claimed) < RESERVATION_TTL
+
+    if not isinstance(task_id, str) or _TASK_ID.fullmatch(task_id) is None:
+        return False
+    if store is None:
+        return False
+    try:
+        record = store.get(task_id)
+    except Exception:
+        return False
+    if not isinstance(record, dict):
+        return False
+    try:
+        state = task_status.derive_state(record)
+    except Exception:
+        state = record.get('state')
+    if state in _TERMINAL_TASK_STATES or record.get('state') in _TERMINAL_TASK_STATES:
+        return False
+    return state is not None
+
+
+def claim_row(ledger, rows, row, holder, task_id=None, store=None, now=None):
+    """Claim or bind a pm-board.json row under the ledger lock.
+
+    Without task_id, reserves the row for holder if no live claim exists.
+    With task_id, binds that Task to the holder's live reservation on the row.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif isinstance(now, datetime) and now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    if store is None:
+        store = TaskStore()
+
+    if isinstance(rows, dict):
+        row_ids = set(rows.keys())
+    elif isinstance(rows, (list, tuple)):
+        row_ids = {r.get('id') for r in rows if isinstance(r, dict) and 'id' in r}
+    else:
+        row_ids = set()
+
+    with ledger.locked():
+        claims = ledger.read()
+
+        if row not in row_ids:
+            raise ClaimRefused('CLAIM_ROW_UNKNOWN')
+
+        if task_id is None:
+            for c in claims:
+                if c.get('row') == row and claim_live(c, store, now):
+                    raise ClaimRefused('CLAIM_HELD')
+
+            new_claim = {
+                'holder': holder,
+                'row': row,
+                'claimed_at': _seconds(now),
+                'task_id': None,
+                'bound_at': None,
+            }
+            claims.append(new_claim)
+            ledger.write(claims)
+            return new_claim
+
+        if not isinstance(task_id, str) or _TASK_ID.fullmatch(task_id) is None:
+            raise ClaimRefused('CLAIM_TASK_UNKNOWN')
+
+        try:
+            record = store.get(task_id)
+        except Exception:
+            raise ClaimRefused('CLAIM_TASK_UNKNOWN') from None
+
+        if not isinstance(record, dict):
+            raise ClaimRefused('CLAIM_TASK_UNKNOWN')
+
+        try:
+            state = task_status.derive_state(record)
+        except Exception:
+            state = record.get('state')
+
+        if (state in _TERMINAL_TASK_STATES or
+                record.get('state') in _TERMINAL_TASK_STATES or
+                state is None):
+            raise ClaimRefused('CLAIM_TASK_UNKNOWN')
+
+        for c in claims:
+            if c.get('task_id') == task_id and claim_live(c, store, now):
+                raise ClaimRefused('CLAIM_TASK_BOUND')
+
+        matching_reservation = None
+        for c in claims:
+            if (c.get('row') == row and
+                    c.get('holder') == holder and
+                    c.get('task_id') is None and
+                    claim_live(c, store, now)):
+                matching_reservation = c
+                break
+
+        if matching_reservation is None:
+            raise ClaimRefused('CLAIM_NOT_RESERVED')
+
+        matching_reservation['task_id'] = task_id
+        matching_reservation['bound_at'] = _seconds(now)
+        ledger.write(claims)
+        return matching_reservation
 
 
 class _Context:
@@ -1311,11 +1446,41 @@ def add_board_check_parser(sub):
     parser.add_argument('--board', help='pm-board.json path '
                         '(default: ~/.local/state/llmtool/pm-board.json)')
     parser.add_argument('--json', action='store_true', help='output JSON')
+    parser.add_argument('--claim', help='claim or bind a pm-board.json row')
+    parser.add_argument('--holder', help='holder name for row claim')
+    parser.add_argument('--task', help='task ID to bind to a claimed row')
     return parser
 
 
 def run_board_check(args, *, store=None, github_get=None, list_processes_call=None,
-                    read_d6=None, evaluate=None, now=None):
+                    read_d6=None, evaluate=None, now=None, ledger=None):
+    claim_row_id = getattr(args, 'claim', None)
+    if claim_row_id is not None:
+        holder = getattr(args, 'holder', None)
+        if not holder:
+            print('board-check: --claim requires --holder', file=sys.stderr)
+            return 2
+        path = getattr(args, 'board', None) or default_board_path()
+        try:
+            rows = read_board(path)
+        except BoardUnreadable:
+            print('board-check: UNREADABLE board file')
+            return 1
+        active_ledger = ledger if ledger is not None else BoardLedger()
+        active_store = store if store is not None else TaskStore()
+        task_id = getattr(args, 'task', None)
+        try:
+            claim_row(active_ledger, rows, claim_row_id, holder,
+                      task_id=task_id, store=active_store, now=now)
+        except ClaimRefused as exc:
+            print(exc.code)
+            return CLAIM_REFUSED_EXIT
+        if task_id:
+            print(f'claimed {claim_row_id} for {holder} bound to {task_id}')
+        else:
+            print(f'claimed {claim_row_id} for {holder}')
+        return 0
+
     path = getattr(args, 'board', None) or default_board_path()
     as_json = bool(getattr(args, 'json', False))
     try:
