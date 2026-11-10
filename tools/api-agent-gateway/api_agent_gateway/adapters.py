@@ -5,6 +5,7 @@ redirects, TLS verification on, and plain HTTP only to loopback hosts.
 """
 from __future__ import annotations
 
+import errno
 import http.client
 import json
 import ssl
@@ -111,7 +112,15 @@ class OpenAIChatTools:
                     break
             data = b''.join(chunks)
         except (OSError, http.client.HTTPException) as exc:
-            raise ModelError('TIMEOUT' if 'timed out' in str(exc) else 'TRANSPORT_ERROR') from exc
+            # Network timeout first: an errno of ETIMEDOUT is a timeout at the socket layer.
+            if getattr(exc, 'errno', None) == errno.ETIMEDOUT:
+                code = 'NETWORK_TIMEOUT'
+            # Then plain timeouts, then any other transport failure.
+            elif isinstance(exc, TimeoutError) or 'timed out' in str(exc):
+                code = 'TIMEOUT'
+            else:
+                code = 'TRANSPORT_ERROR'
+            raise ModelError(code) from exc
         finally:
             conn.close()
         if 300 <= status < 400:
