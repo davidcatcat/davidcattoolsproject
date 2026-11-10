@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 from .errors import LLMToolError
-from . import role_config, task_completion, worker_dispatch
+from . import github_identity, role_config, task_completion, worker_dispatch
 
 
 _CODEX_REVIEW_MODEL = 'gpt-6-luna'
@@ -501,14 +501,17 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
     if executable is None:
         _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
     try:
+        env = {'PATH': os.pathsep.join((str(Path(executable).parent), '/usr/bin', '/bin')),
+               'HOME': os.path.expanduser('~'), 'LC_ALL': 'C', 'NO_COLOR': '1',
+               **({'CODEX_HOME': config_dir} if config_dir is not None else {})}
+        home = env.get('HOME') or os.path.expanduser('~')
+        env = github_identity.ai_github_env(env, home)
         result = subprocess.run(
             _codex_argv(executable, reviewer_root, model=model, effort=effort),
             cwd=str(reviewer_root),
             input=prompt.encode('utf-8'), stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env={'PATH': os.pathsep.join((str(Path(executable).parent), '/usr/bin', '/bin')),
-                 'HOME': os.path.expanduser('~'), 'LC_ALL': 'C', 'NO_COLOR': '1',
-                 **({'CODEX_HOME': config_dir} if config_dir is not None else {})},
+            env=env,
             check=False,
             timeout=_CODEX_REVIEW_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -755,6 +758,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             env['CLAUDE_CONFIG_DIR'] = config_dir
         else:
             env.pop('CLAUDE_CONFIG_DIR', None)
+        home = env.get('HOME') or os.path.expanduser('~')
+        env = github_identity.ai_github_env(env, home)
         if reviewer_key == 'codex-reviewer':
             reviewer = task_completion.read_d6_registration(
                 reviewer_task, executor.common_dir,
