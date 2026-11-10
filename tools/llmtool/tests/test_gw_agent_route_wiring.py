@@ -43,6 +43,26 @@ def tearDownModule():
 
 
 class GwAgentRouteWiringTests(unittest.TestCase):
+    def setUp(self):
+        self._real_gw_agent_endpoint = task_submission_cli._gw_agent_endpoint
+        endpoint = patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
+            'type': 'openai-compatible', 'model': 'authorized-model',
+            'base_url': 'https://authorized.example'}, {'max_tokens': 49152}))
+        endpoint.start()
+        self.addCleanup(endpoint.stop)
+
+    def test_gw_agent_endpoint_reads_the_gateway_profile_not_company_gw(self):
+        profile = {'name': 'work', 'base_url': 'https://gateway.example', 'model': 'm1',
+                   'api_key_env': None, 'context_cap_tokens': 9000, 'max_output_tokens': 700}
+        with patch.object(task_submission_cli.gateway_profiles, 'load_gateway_profile',
+                          return_value=profile), \
+             patch.object(task_submission_cli, 'resolve_profile_config',
+                          side_effect=AssertionError('company-gw read')):
+            provider, generation = self._real_gw_agent_endpoint()
+        self.assertEqual(provider, {'type': 'openai-compatible', 'model': 'm1',
+                                     'base_url': 'https://gateway.example'})
+        self.assertEqual(generation, {'max_tokens': 700})
+
     def test_delegate_sweeps_gw_agent_sessions_before_checks(self):
         args = Namespace(mode='proposal')
         store = object()
@@ -81,13 +101,11 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                           return_value=(['src.py'], ['src.py'])), \
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': route_config}}), \
-             patch.object(task_submission_cli, 'resolve_profile_config', return_value={
-                 'generation': {'max_tokens': 4096}}), \
-             patch.object(task_submission_cli, 'selected_provider', return_value={
+             patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
                  'type': 'openai-compatible', 'model': 'authorized-model',
-                 'base_url': 'https://company.example/v1'}):
+                 'base_url': 'https://gateway.example/v1'}, {'max_tokens': 4096})):
             with self.assertRaisesRegex(
-                    LLMToolError, 'authorized company-gw profile is unavailable or invalid'):
+                    LLMToolError, 'gateway profile is unavailable or invalid'):
                 task_submission_cli.run_task_gw_agent_delegate(args, store=Store())
 
     def test_pm_assignment_accepts_gw_agent_and_missing_data_class_is_pre_mutation(self):
@@ -888,6 +906,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                               'authorization_ref': 'pm-task-ref',
                               'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
              patch.dict(os.environ, {'HOME': str(config_home)}), \
+             patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
+                 'type': 'openai-compatible', 'model': 'authorized-model',
+                 'base_url': 'http://10.20.30.40:8080'}, {'max_tokens': 49152})), \
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
              patch.object(task_submission_cli, 'GwAgentRoute', side_effect=make_route) as constructor, \
@@ -1101,6 +1122,10 @@ class GwAgentRealStoreTests(unittest.TestCase):
                 f'    base_url: http://127.0.0.1:{self.server.port}\n'
                 f'    model: {provider_model}\n',
                 encoding='utf-8')
+            gateway_file = config.parent / 'gateway-profiles.json'
+            profiles = json.loads(gateway_file.read_text(encoding='utf-8'))
+            profiles['profiles']['home']['model'] = provider_model
+            gateway_file.write_text(json.dumps(profiles), encoding='utf-8')
         self.server.script.extend((
             self.reply(self.tool_call('apply_edit', path=target, new=content,
                                       create=True), model=served_model, usage=usage),
