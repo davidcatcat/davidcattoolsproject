@@ -199,7 +199,7 @@ class BoardLedgerTests(unittest.TestCase):
 
     def test_default_ledger_path(self):
         """default_ledger_path returns expected standard location."""
-        expected = Path.home() / '.local' / 'state' / 'llmtool' / 'pm-claims.json'
+        expected = Path.home() / '.local' / 'state' / 'llmtool' / 'board-ledger.json'
         self.assertEqual(board_check.default_ledger_path(), expected)
 
     def test_valid_claim_helper(self):
@@ -443,6 +443,97 @@ class BoardLedgerTests(unittest.TestCase):
                     }
                 ])
             self.assertEqual(cm.exception.code, 'LEDGER_UNAVAILABLE')
+
+    def test_write_short_write_raises_claim_refused_and_preserves_old_ledger(self):
+        """A short write raises ClaimRefused LEDGER_WRITE_FAILED and preserves old data."""
+        old_claims = [
+            {
+                'holder': 'pm-a',
+                'row': 'PR #1',
+                'claimed_at': '2026-11-10T00:00:00Z',
+                'task_id': None,
+                'bound_at': None,
+            }
+        ]
+        self.ledger.write(old_claims)
+
+        new_claims = [
+            {
+                'holder': 'pm-b',
+                'row': 'PR #2',
+                'claimed_at': '2026-11-10T01:00:00Z',
+                'task_id': None,
+                'bound_at': None,
+            }
+        ]
+
+        call_count = 0
+
+        def mock_write(fd, data):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return min(5, len(data))
+            return 0
+
+        with mock.patch('os.write', side_effect=mock_write):
+            with self.assertRaises(board_check.ClaimRefused) as cm:
+                self.ledger.write(new_claims)
+            self.assertEqual(cm.exception.code, 'LEDGER_WRITE_FAILED')
+
+        self.assertEqual(self.ledger.read(), old_claims)
+        temp_files = list(self.dir.glob(f'{self.ledger_path.name}.tmp.*'))
+        self.assertEqual(temp_files, [])
+
+    def test_write_replace_oserror_raises_claim_refused_and_leaves_no_temp_file(self):
+        """os.replace raising OSError gives LEDGER_WRITE_FAILED and leaves no temp file."""
+        claims = [
+            {
+                'holder': 'pm-a',
+                'row': 'PR #1',
+                'claimed_at': '2026-11-10T00:00:00Z',
+                'task_id': None,
+                'bound_at': None,
+            }
+        ]
+        with mock.patch('os.replace', side_effect=OSError('replace failed')):
+            with self.assertRaises(board_check.ClaimRefused) as cm:
+                self.ledger.write(claims)
+            self.assertEqual(cm.exception.code, 'LEDGER_WRITE_FAILED')
+
+        temp_files = list(self.dir.glob(f'{self.ledger_path.name}.tmp.*'))
+        self.assertEqual(temp_files, [])
+
+    def test_write_fsync_called_on_file_and_directory(self):
+        """os.fsync is called on both the file and the parent folder."""
+        claims = [
+            {
+                'holder': 'pm-a',
+                'row': 'PR #1',
+                'claimed_at': '2026-11-10T00:00:00Z',
+                'task_id': None,
+                'bound_at': None,
+            }
+        ]
+        with mock.patch('os.fsync', wraps=os.fsync) as mock_fsync:
+            self.ledger.write(claims)
+            self.assertEqual(mock_fsync.call_count, 2)
+
+    def test_write_fsync_oserror_raises_claim_refused(self):
+        """os.fsync raising OSError gives LEDGER_WRITE_FAILED."""
+        claims = [
+            {
+                'holder': 'pm-a',
+                'row': 'PR #1',
+                'claimed_at': '2026-11-10T00:00:00Z',
+                'task_id': None,
+                'bound_at': None,
+            }
+        ]
+        with mock.patch('os.fsync', side_effect=OSError('fsync failed')):
+            with self.assertRaises(board_check.ClaimRefused) as cm:
+                self.ledger.write(claims)
+            self.assertEqual(cm.exception.code, 'LEDGER_WRITE_FAILED')
 
 
 if __name__ == '__main__':

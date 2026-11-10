@@ -231,7 +231,7 @@ class ClaimRefused(Exception):
 
 
 def default_ledger_path():
-    return Path.home() / '.local' / 'state' / 'llmtool' / 'pm-claims.json'
+    return Path.home() / '.local' / 'state' / 'llmtool' / 'board-ledger.json'
 
 
 def _seconds(dt):
@@ -429,20 +429,43 @@ class BoardLedger:
 
         tmp_path = self.path.with_name(f'{self.path.name}.tmp.{uuid.uuid4().hex}')
         try:
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, 'O_NOFOLLOW', 0)
+            )
             fd = os.open(tmp_path, flags, 0o600)
             try:
-                os.write(fd, data)
+                os.fchmod(fd, 0o600)
+                offset = 0
+                total = len(data)
+                while offset < total:
+                    written = os.write(fd, data[offset:])
+                    if written <= 0:
+                        raise ClaimRefused('LEDGER_WRITE_FAILED')
+                    offset += written
+                os.fsync(fd)
             finally:
                 os.close(fd)
+
             os.replace(tmp_path, self.path)
-            os.chmod(self.path, 0o600)
+
+            dir_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0)
+            dir_fd = os.open(parent, dir_flags)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except ClaimRefused:
+            raise
+        except OSError as exc:
+            raise ClaimRefused('LEDGER_WRITE_FAILED') from exc
         finally:
-            if tmp_path.exists():
-                try:
-                    tmp_path.unlink()
-                except OSError:
-                    pass
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 class _Context:
