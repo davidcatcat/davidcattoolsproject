@@ -147,6 +147,12 @@ class WorkerDispatchTests(unittest.TestCase):
         policy = worker_dispatch._parse_policy(raw)
         self.assertIsInstance(policy, dict)
         self.assertNotIn('owner_assignments', policy['workers']['agy'])
+        self.assertNotIn('owner_assignments', policy['workers']['company-gw-agent'])
+        gw_agent_entry = policy['workers']['company-gw-agent']
+        self.assertEqual(gw_agent_entry['dispatch'], 'ALLOWED')
+        self.assertEqual(gw_agent_entry['decided_by'], 'Owner')
+        self.assertEqual(gw_agent_entry['decided_at'], '2026-11-10')
+        self.assertEqual(gw_agent_entry['evidence'], worker_dispatch._GW_AGENT_OWNER_REF)
         with patch.object(worker_dispatch, '_POLICY_PATH',
                           Path(worker_dispatch._DEFAULT_POLICY_PATH)):
             decision = worker_dispatch.evaluate('agy')
@@ -159,19 +165,40 @@ class WorkerDispatchTests(unittest.TestCase):
     def test_company_gw_agent_accepts_only_pending_pm_pause_or_exact_owner_allow(self):
         self.assertIn('company-gw-agent', worker_dispatch.WORKERS)
         self.assertEqual(worker_dispatch.worker_key_for('gw-agent'), 'company-gw-agent')
+        # A PM-paused row validates and evaluates to OWNER_PAUSED.
         decision = worker_dispatch.evaluate('company-gw-agent')
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
 
         worker = self.policy['workers']['company-gw-agent']
         owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
-                     'issues/120#issuecomment-6594101520')
+                     'issues/120#issuecomment-6760670167')
+        old_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
+                   'issues/120#issuecomment-6594101520')
+        self.assertEqual(worker_dispatch._GW_AGENT_OWNER_REF, owner_ref)
+
+        # The new row validates and evaluates to ALLOWED with no Owner assignment.
         worker.update(dispatch='ALLOWED', decided_by='Owner',
                       evidence=owner_ref)
+        self.policy['workers']['company-gw-agent'].pop('owner_assignments', None)
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
-        self.assertTrue(worker_dispatch.evaluate('company-gw-agent').allowed)
+        new_row_decision = worker_dispatch.evaluate('company-gw-agent')
+        self.assertTrue(new_row_decision.allowed)
+        self.assertEqual(new_row_decision.reason_code, 'OWNER_POLICY_ALLOWED')
 
-        worker['decided_by'] = 'PM'
+        # A row with the old ref is refused.
+        worker.update(dispatch='ALLOWED', decided_by='Owner', evidence=old_ref)
+        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+        old_ref_decision = worker_dispatch.evaluate('company-gw-agent')
+        self.assertFalse(old_ref_decision.allowed)
+        self.assertEqual(old_ref_decision.reason_code, 'WORKER_POLICY_INVALID')
+        with self.assertRaises(ValueError) as caught:
+            worker_dispatch._parse_policy(json.dumps(self.policy).encode('utf-8'))
+        self.assertIn('gw-agent requires the exact paused or Owner-authorized entry',
+                      str(caught.exception))
+
+        # Other invalid variants fail closed.
+        worker.update(decided_by='PM', evidence=owner_ref)
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
         self.assertEqual(worker_dispatch.evaluate('company-gw-agent').reason_code,
                          'WORKER_POLICY_INVALID')
@@ -185,6 +212,16 @@ class WorkerDispatchTests(unittest.TestCase):
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
         self.assertEqual(worker_dispatch.evaluate('company-gw-agent').reason_code,
                          'WORKER_POLICY_INVALID')
+
+        # A PM-paused row still validates.
+        worker.update(dispatch='PAUSED', decided_by='PM',
+                      evidence='https://github.com/davidcatcat/davidcattoolsproject/issues/120')
+        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+        paused_decision = worker_dispatch.evaluate('company-gw-agent')
+        self.assertFalse(paused_decision.allowed)
+        self.assertEqual(paused_decision.reason_code, 'OWNER_PAUSED')
+        parsed = worker_dispatch._parse_policy(json.dumps(self.policy).encode('utf-8'))
+        self.assertEqual(parsed['workers']['company-gw-agent']['dispatch'], 'PAUSED')
 
     def test_owner_policy_states_are_read_from_the_exact_schema(self):
         self._set_state('agy', 'ALLOWED')

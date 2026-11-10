@@ -108,7 +108,7 @@ ALLOWLIST = {
      "'https://github.com/davidcatcat/davidcattoolsproject/'"):
         GW_AGENT_POLICY_REFS,
     (_WORKER_DISPATCH,
-     "'issues/120#issuecomment-6594101520')"):
+     "'issues/120#issuecomment-6760670167')"):
         GW_AGENT_POLICY_REFS,
     (_WORKER_DISPATCH,
      "'https://github.com/davidcatcat/davidcattoolsproject/issues/120')) or"):
