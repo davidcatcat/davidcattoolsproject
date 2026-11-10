@@ -50,14 +50,15 @@ FLAGGED_STATES = frozenset((ACTIONABLE, ANOMALY))
 
 LEDGER_SCHEMA_VERSION = 1
 MAX_LEDGER_BYTES = 256 * 1024
-MAX_LEDGER_CLAIMS = 64
+MAX_LEDGER_CLAIMS = 1024
+
 RESERVATION_TTL = timedelta(minutes=15)
 # Tolerate slight clock skew across cooperating PM hosts/processes.
-_CLAIM_CLOCK_SKEW = timedelta(seconds=30)
-LEDGER_LOCK_TIMEOUT_SECONDS = 5.0
+_CLAIM_CLOCK_SKEW = timedelta(seconds=60)
+LEDGER_LOCK_TIMEOUT_SECONDS = 10
 CLAIM_REFUSED_EXIT = 3
-_CLAIM_FIELDS = frozenset({'holder', 'row', 'claimed_at', 'task_id', 'bound_at'})
-_HOLDER = re.compile(r'[A-Za-z0-9._-]{1,64}\Z')
+_CLAIM_FIELDS = frozenset(('holder', 'row', 'claimed_at', 'task_id', 'bound_at'))
+_HOLDER = re.compile(r'[A-Za-z0-9_.-]{1,64}\Z')
 _UTC_SECONDS = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z')
 
 # Developer routes that take a registered D6 writer. Company gw only proposes

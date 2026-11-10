@@ -233,6 +233,47 @@ class BoardLedgerTests(unittest.TestCase):
         bad_task = dict(valid, task_id='not-hex', bound_at='2026-11-10T00:05:00Z')
         self.assertFalse(board_check._valid_claim(bad_task))
 
+    def test_constants_verbatim(self):
+        """Constants match the specification from commit 91d03289."""
+        self.assertEqual(board_check.LEDGER_SCHEMA_VERSION, 1)
+        self.assertEqual(board_check.MAX_LEDGER_BYTES, 256 * 1024)
+        self.assertEqual(board_check.MAX_LEDGER_CLAIMS, 1024)
+        self.assertEqual(board_check.LEDGER_LOCK_TIMEOUT_SECONDS, 10)
+        self.assertEqual(board_check.CLAIM_REFUSED_EXIT, 3)
+
+    def test_seconds_helper(self):
+        """_seconds helper formats datetimes and parses ISO UTC strings."""
+        dt = datetime(2026, 11, 10, 12, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(board_check._seconds(dt), '2026-11-10T12:00:00Z')
+        self.assertEqual(board_check._seconds('2026-11-10T12:00:00Z'), dt)
+        self.assertIsNone(board_check._seconds('not-a-date'))
+        self.assertIsNone(board_check._seconds(12345))
+
+    def test_write_invalid_claim_raises_claim_refused_invalid(self):
+        """Writing an invalid claim raises ClaimRefused LEDGER_CLAIM_INVALID."""
+        invalid_claims = [{'holder': 'bad holder!'}]
+        with self.assertRaises(board_check.ClaimRefused) as cm:
+            self.ledger.write(invalid_claims)
+        self.assertEqual(cm.exception.code, 'LEDGER_CLAIM_INVALID')
+
+    def test_read_claims_over_limit_raises_ledger_unreadable(self):
+        """A ledger file with more than MAX_LEDGER_CLAIMS raises LedgerUnreadable."""
+        claims = [
+            {
+                'holder': f'pm-{i}',
+                'row': f'PR #{i}',
+                'claimed_at': '2026-11-10T00:00:00Z',
+                'task_id': None,
+                'bound_at': None,
+            }
+            for i in range(board_check.MAX_LEDGER_CLAIMS + 1)
+        ]
+        self.ledger_path.write_text(
+            json.dumps({'schema_version': 1, 'claims': claims}), encoding='utf-8')
+        os.chmod(self.ledger_path, 0o600)
+        with self.assertRaises(board_check.LedgerUnreadable):
+            self.ledger.read()
+
 
 if __name__ == '__main__':
     unittest.main()
