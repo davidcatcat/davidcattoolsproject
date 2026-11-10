@@ -6532,7 +6532,7 @@ DEVELOPER_RESULTS = {   # llmtool developer state / error code -> plain words
 
 _llmtool_records: dict = {}   # record path -> (file key, the few fields the views use)
 LLMTOOL_RECORD_FIELDS = ("task_id", "state", "updated_at")
-LLMTOOL_RECORD_PARTS = {"developer": ("provider_profile", "state", "error_code"),
+LLMTOOL_RECORD_PARTS = {"developer": ("provider_profile", "state", "error_code", "model", "executor_task_id"),
                         "completion": ("executor_task_id", "state"), "pm_assignment": ("route",)}
 
 
