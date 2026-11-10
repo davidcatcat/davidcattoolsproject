@@ -6367,6 +6367,155 @@ def github_runner_rows(view: CiView | None, now: float, local=(), ci: list | Non
     return rows
 
 
+def _ci_conclusion_word(conclusion: str | None) -> str:
+    """Map conclusion string to Chinese words matching CI_CONCLUSIONS."""
+    if not conclusion:
+        return "結果不明"
+    if conclusion in CI_CONCLUSIONS:
+        return CI_CONCLUSIONS[conclusion]
+    if conclusion in CI_CONCLUSIONS.values():
+        return conclusion
+    if conclusion == "結果不明":
+        return "結果不明"
+    c_lower = str(conclusion).lower()
+    return CI_CONCLUSIONS.get(c_lower, "結果不明")
+
+
+def hosted_ci_rows(ci_runs: list | None, view: CiView | None, now: float) -> list[OfficeRow]:
+    """One OfficeRow per queued or in-progress llmtool hosted CI run, or one
+    UNCHECKED row when data is missing or stale. Pure; no I/O."""
+    if ci_runs is None:
+        reason = f"GitHub 資料讀取失敗（{view.error}）" if view and view.error else "GitHub CI 資料尚未讀取"
+        return [OfficeRow("hosted ci", UNCHECKED, f"未確認：{reason}", None, 95,
+                          kind="worker", evidence="GitHub",
+                          alert=f"GitHub CI 資料讀取失敗（{view.error}）" if view and view.error else "")]
+    if view is None:
+        return [OfficeRow("hosted ci", UNCHECKED, "未確認：沒有 GitHub 資料", None, 95,
+                          kind="worker", evidence="GitHub")]
+    old = now - view.seen_at
+    if old > GITHUB_STALE or view.error:
+        if view.error:
+            reason = f"GitHub 資料讀取失敗（{view.error}）"
+        else:
+            reason = f"GitHub 資料 {_ago(old)[:-1] if old >= 60 else '不到 1 分鐘'}沒更新"
+        return [OfficeRow("hosted ci", UNCHECKED, f"未確認：{reason}", old, 95,
+                          kind="worker", evidence="GitHub",
+                          alert=f"GitHub CI 資料未更新（{reason}）" if view.error else "")]
+
+    last_entry = None
+    if view.finished:
+        items = view.finished.values() if isinstance(view.finished, dict) else view.finished
+        valid_items = []
+        for item in items:
+            if type(item) in (tuple, list) and len(item) >= 2:
+                end = item[2] if len(item) > 2 and type(item[2]) in (int, float) else 0.0
+                valid_items.append((end, item[0], item[1]))
+        if valid_items:
+            end_t, last_text, last_result = max(valid_items, key=lambda x: x[0])
+            result_word = _ci_conclusion_word(last_result)
+            last_entry = (last_text, result_word, end_t if end_t > 0 else None)
+
+    runs: dict[typing.Any, dict] = {}
+    for entry in ci_runs:
+        if type(entry) in (tuple, list):
+            status = str(entry[0] or "")
+            text = str(entry[1] or "")
+            started = entry[2] if len(entry) > 2 and type(entry[2]) in (int, float) else None
+            runner = entry[3] if len(entry) > 3 and type(entry[3]) is str else None
+            run_id = entry[4] if len(entry) > 4 else None
+        elif isinstance(entry, dict):
+            status = str(entry.get("status") or "")
+            text = str(entry.get("text") or entry.get("name") or "")
+            started = entry.get("started")
+            runner = entry.get("runner")
+            run_id = entry.get("run_id") or entry.get("id")
+        else:
+            continue
+
+        if "：" in text:
+            base_text, _, job_name = text.partition("：")
+        else:
+            base_text, job_name = text, ""
+        base_text = base_text.strip()
+        job_name = job_name.strip()
+
+        key = run_id if run_id is not None else base_text
+        if key not in runs:
+            if "（" in base_text:
+                wf_name = base_text.split("（", 1)[0].strip()
+            else:
+                wf_name = base_text
+            runs[key] = {
+                "base_text": base_text,
+                "wf_name": wf_name,
+                "started": started,
+                "in_progress_jobs": [],
+                "queued_count": 0,
+            }
+        run_data = runs[key]
+        if started is not None:
+            if run_data["started"] is None or started < run_data["started"]:
+                run_data["started"] = started
+
+        if status == "in_progress" and job_name:
+            if job_name not in run_data["in_progress_jobs"]:
+                run_data["in_progress_jobs"].append(job_name)
+        elif status in CI_ACTIVE or status in ("queued", "in_progress"):
+            run_data["queued_count"] += 1
+
+    if not runs:
+        if last_entry:
+            last_text, result_word, end_time = last_entry
+            age = max(0.0, now - end_time) if end_time else None
+            time_str = f"（{_ago(age)}）" if age is not None else ""
+            detail = f"閒置，沒有執行中的 CI；上一個工作：{last_text} {result_word}{time_str}"
+            return [OfficeRow("hosted ci", IDLE, detail, age, 95, kind="worker", evidence="GitHub")]
+        return [OfficeRow("hosted ci", IDLE, "閒置，沒有執行中的 CI", None, 95, kind="worker", evidence="GitHub")]
+
+    rows = []
+    for idx, (key, run_data) in enumerate(runs.items(), 1):
+        base_text = run_data["base_text"]
+        wf_name = run_data["wf_name"]
+        in_jobs = run_data["in_progress_jobs"]
+        in_count = len(in_jobs)
+        queued_count = run_data["queued_count"]
+
+        if view and view.queued:
+            extra_q = sum(1 for _, q_text in view.queued if q_text.startswith(base_text))
+            queued_count = max(queued_count, extra_q)
+
+        has_running = len(in_jobs) > 0
+        started = run_data["started"]
+        age = max(0.0, now - started) if (started and math.isfinite(started) and started > 0) else None
+
+        if not has_running:
+            state = "排隊"
+            notes = [f"排隊 {queued_count} 個" if queued_count > 0 else "排隊中"]
+            if age is not None:
+                notes.append(f"已排隊 {max(1, int(age // 60))} 分鐘")
+            if last_entry:
+                last_time = f"（{_ago(max(0.0, now - last_entry[2]))}）" if last_entry[2] else ""
+                notes.append(f"上一個工作：{last_entry[0]} {last_entry[1]}{last_time}")
+        else:
+            state = WORKING
+            if in_jobs:
+                job_names = "、".join(in_jobs[:3]) + ("…" if len(in_jobs) > 3 else "")
+                notes = [f"執行中 {in_count} 個：{job_names}"]
+            else:
+                notes = [f"執行中 {in_count} 個"]
+            if queued_count > 0:
+                notes.append(f"排隊 {queued_count} 個")
+            if age is not None:
+                notes.append(f"已執行 {max(1, int(age // 60))} 分鐘")
+
+        row_name = f"hosted ci {wf_name}" if wf_name else "hosted ci"
+        detail = f"{base_text}：{'；'.join(notes)}"
+        rows.append(OfficeRow(row_name, state, detail, age, 95 + idx,
+                              key=str(key), kind="worker", evidence="GitHub"))
+
+    return rows
+
+
 LLMTOOL_TASKS = os.path.expanduser("~/.local/state/llmtool/tasks")
 LLMTOOL_EVIDENCE_WINDOW = 7 * 86400
 PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}")
