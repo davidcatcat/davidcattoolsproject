@@ -274,6 +274,176 @@ class BoardLedgerTests(unittest.TestCase):
         with self.assertRaises(board_check.LedgerUnreadable):
             self.ledger.read()
 
+    def test_holder_pattern_accepts_subpm_and_host_formats(self):
+        """Holders like subpm:claude-redo:r1218a and pm@host are valid."""
+        for holder in ('subpm:claude-redo:r1218a', 'pm@host', 'pm-a', 'worker.1'):
+            claim = {
+                'holder': holder,
+                'row': 'PR #1',
+                'claimed_at': '2026-11-10T00:00:00Z',
+                'task_id': None,
+                'bound_at': None,
+            }
+            self.assertTrue(board_check._valid_claim(claim))
+
+        for bad in (':invalid', '@host', 'has space', ''):
+            claim = {
+                'holder': bad,
+                'row': 'PR #1',
+                'claimed_at': '2026-11-10T00:00:00Z',
+                'task_id': None,
+                'bound_at': None,
+            }
+            self.assertFalse(board_check._valid_claim(claim))
+
+    def test_read_different_uid_raises_ledger_unreadable(self):
+        """A ledger file with st_uid not matching current user raises LedgerUnreadable."""
+        self.ledger.write([
+            {
+                'holder': 'pm-a',
+                'row': 'PR #1',
+                'claimed_at': '2026-11-10T00:00:00Z',
+                'task_id': None,
+                'bound_at': None,
+            }
+        ])
+        real_fstat = os.fstat
+
+        def mock_fstat(fd):
+            st = real_fstat(fd)
+            return os.stat_result((
+                st.st_mode,
+                st.st_ino,
+                st.st_dev,
+                st.st_nlink,
+                os.getuid() + 1,
+                st.st_gid,
+                st.st_size,
+                int(st.st_atime),
+                int(st.st_mtime),
+                int(st.st_ctime),
+            ))
+
+        with mock.patch('os.fstat', side_effect=mock_fstat):
+            with self.assertRaises(board_check.LedgerUnreadable):
+                self.ledger.read()
+
+    def test_read_multiple_hard_links_raises_ledger_unreadable(self):
+        """A ledger file with st_nlink != 1 raises LedgerUnreadable."""
+        self.ledger.write([
+            {
+                'holder': 'pm-a',
+                'row': 'PR #1',
+                'claimed_at': '2026-11-10T00:00:00Z',
+                'task_id': None,
+                'bound_at': None,
+            }
+        ])
+        hard_link = self.dir / 'hardlink.json'
+        os.link(self.ledger_path, hard_link)
+        with self.assertRaises(board_check.LedgerUnreadable):
+            self.ledger.read()
+
+    def test_locked_lock_file_symlink_raises_claim_refused_unavailable(self):
+        """A symlink lock file raises ClaimRefused LEDGER_UNAVAILABLE."""
+        target = self.dir / 'real_lock.txt'
+        target.write_text('', encoding='utf-8')
+        self.ledger.lock_path.symlink_to(target)
+
+        with self.assertRaises(board_check.ClaimRefused) as cm:
+            with self.ledger.locked():
+                pass
+        self.assertEqual(cm.exception.code, 'LEDGER_UNAVAILABLE')
+
+    def test_locked_lock_file_different_uid_raises_claim_refused_unavailable(self):
+        """A lock file with st_uid not matching current user raises ClaimRefused."""
+        real_fstat = os.fstat
+
+        def mock_fstat(fd):
+            st = real_fstat(fd)
+            return os.stat_result((
+                st.st_mode,
+                st.st_ino,
+                st.st_dev,
+                st.st_nlink,
+                os.getuid() + 1,
+                st.st_gid,
+                st.st_size,
+                int(st.st_atime),
+                int(st.st_mtime),
+                int(st.st_ctime),
+            ))
+
+        with mock.patch('os.fstat', side_effect=mock_fstat):
+            with self.assertRaises(board_check.ClaimRefused) as cm:
+                with self.ledger.locked():
+                    pass
+            self.assertEqual(cm.exception.code, 'LEDGER_UNAVAILABLE')
+
+    def test_parent_folder_symlink_raises_claim_refused_unavailable(self):
+        """A parent folder that is a symlink raises ClaimRefused LEDGER_UNAVAILABLE."""
+        real_dir = self.dir / 'real_dir'
+        real_dir.mkdir(mode=0o700)
+        symlink_dir = self.dir / 'symlink_dir'
+        symlink_dir.symlink_to(real_dir, target_is_directory=True)
+
+        symlink_ledger = board_check.BoardLedger(symlink_dir / 'claims.json')
+        with self.assertRaises(board_check.ClaimRefused) as cm:
+            with symlink_ledger.locked():
+                pass
+        self.assertEqual(cm.exception.code, 'LEDGER_UNAVAILABLE')
+
+        with self.assertRaises(board_check.ClaimRefused) as cm:
+            symlink_ledger.write([
+                {
+                    'holder': 'pm-a',
+                    'row': 'PR #1',
+                    'claimed_at': '2026-11-10T00:00:00Z',
+                    'task_id': None,
+                    'bound_at': None,
+                }
+            ])
+        self.assertEqual(cm.exception.code, 'LEDGER_UNAVAILABLE')
+
+    def test_parent_folder_different_uid_raises_claim_refused_unavailable(self):
+        """A parent folder not owned by current user raises ClaimRefused LEDGER_UNAVAILABLE."""
+        real_lstat = os.lstat
+
+        def mock_lstat(path):
+            st = real_lstat(path)
+            if str(path) == str(self.dir):
+                return os.stat_result((
+                    st.st_mode,
+                    st.st_ino,
+                    st.st_dev,
+                    st.st_nlink,
+                    os.getuid() + 1,
+                    st.st_gid,
+                    st.st_size,
+                    int(st.st_atime),
+                    int(st.st_mtime),
+                    int(st.st_ctime),
+                ))
+            return st
+
+        with mock.patch('os.lstat', side_effect=mock_lstat):
+            with self.assertRaises(board_check.ClaimRefused) as cm:
+                with self.ledger.locked():
+                    pass
+            self.assertEqual(cm.exception.code, 'LEDGER_UNAVAILABLE')
+
+            with self.assertRaises(board_check.ClaimRefused) as cm:
+                self.ledger.write([
+                    {
+                        'holder': 'pm-a',
+                        'row': 'PR #1',
+                        'claimed_at': '2026-11-10T00:00:00Z',
+                        'task_id': None,
+                        'bound_at': None,
+                    }
+                ])
+            self.assertEqual(cm.exception.code, 'LEDGER_UNAVAILABLE')
+
 
 if __name__ == '__main__':
     unittest.main()

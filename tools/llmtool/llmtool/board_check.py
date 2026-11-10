@@ -58,7 +58,7 @@ _CLAIM_CLOCK_SKEW = timedelta(seconds=60)
 LEDGER_LOCK_TIMEOUT_SECONDS = 10
 CLAIM_REFUSED_EXIT = 3
 _CLAIM_FIELDS = frozenset(('holder', 'row', 'claimed_at', 'task_id', 'bound_at'))
-_HOLDER = re.compile(r'[A-Za-z0-9_.-]{1,64}\Z')
+_HOLDER = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}\Z')
 _UTC_SECONDS = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z')
 
 # Developer routes that take a registered D6 writer. Company gw only proposes
@@ -305,6 +305,8 @@ class BoardLedger:
                     raise LedgerUnreadable('ledger is a symlink')
                 if not stat.S_ISREG(info.st_mode):
                     raise LedgerUnreadable('ledger is not a regular file')
+                if info.st_uid != os.getuid() or info.st_nlink != 1:
+                    raise LedgerUnreadable('ledger ownership or link count invalid')
                 if stat.S_IMODE(info.st_mode) != 0o600:
                     raise LedgerUnreadable('ledger permissions must be 0600')
                 if info.st_size > MAX_LEDGER_BYTES:
@@ -349,8 +351,8 @@ class BoardLedger:
         parent = self.path.parent
         try:
             parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            st = os.stat(parent)
-            if st.st_mode & 0o022:
+            st = os.lstat(parent)
+            if stat.S_ISLNK(st.st_mode) or st.st_uid != os.getuid() or (st.st_mode & 0o022):
                 raise ClaimRefused('LEDGER_UNAVAILABLE')
         except ClaimRefused:
             raise
@@ -359,11 +361,20 @@ class BoardLedger:
 
         timeout = LEDGER_LOCK_TIMEOUT_SECONDS
         deadline = time.time() + timeout
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
-            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            fd = os.open(self.lock_path, flags, 0o600)
         except OSError:
             raise ClaimRefused('LEDGER_UNAVAILABLE')
         try:
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                    raise ClaimRefused('LEDGER_UNAVAILABLE')
+            except ClaimRefused:
+                raise
+            except OSError:
+                raise ClaimRefused('LEDGER_UNAVAILABLE')
             try:
                 os.chmod(self.lock_path, 0o600)
             except OSError:
@@ -400,8 +411,8 @@ class BoardLedger:
         parent = self.path.parent
         try:
             parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            st = os.stat(parent)
-            if st.st_mode & 0o022:
+            st = os.lstat(parent)
+            if stat.S_ISLNK(st.st_mode) or st.st_uid != os.getuid() or (st.st_mode & 0o022):
                 raise ClaimRefused('LEDGER_UNAVAILABLE')
         except ClaimRefused:
             raise
