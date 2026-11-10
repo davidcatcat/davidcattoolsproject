@@ -1623,7 +1623,7 @@ class ChatTUI:
             lines = ["狀態（PM 模式）",
                      "PM session：" + self.pm_target[0] + "（" + chat_tui_pm.safe_text(runtime)
                      + "，cwd " + chat_tui_pm.safe_text(pm_runtime.display_path(
-                         str(self.pm_target[1]), self.pm_target[1]) or "UNKNOWN") + "）"]
+                         str(self.pm_target[1])) or "UNKNOWN") + "）"]
             if runtime == "claude-code":
                 lines.extend((
                     "Claude 帳號目錄：" + chat_tui_pm.safe_text(
@@ -2996,7 +2996,7 @@ class ChatTUI:
         if runtime == 'claude-code':
             runtime = 'claude'
         account = binding.get('account') or 'default'
-        lead = ["▸▸ " + PM_LABEL + " 模式", chat_tui_pm.permission_mode()]
+        lead = ["▸▸ " + PM_LABEL + " 模式", (chat_tui_pm.permission_mode() if runtime == 'claude' else 'workspace-write')]
         count = self.background_count()
         if count is not None:
             lead.append("背景 %s" % count)
