@@ -70,19 +70,31 @@ def check(spec: dict[str, Any]) -> list[str]:
 LADDER_MAX_TIER = 5
 
 
-def ladder_tier(entries, max_tier=LADDER_MAX_TIER):
+def _row_tier(value, route):
+    """Return the int tier of a ladder row for this route, or None."""
+    if route is None:
+        return value if type(value) is int else None
+    prefix = route + '-'
+    if isinstance(value, str) and value.startswith(prefix) and value[len(prefix):].isdigit():
+        return int(value[len(prefix):])
+    return None
+
+
+def ladder_tier(entries, max_tier=LADDER_MAX_TIER, route=None):
     """Return (tier, streak, stable) from home LLM ladder log entries, oldest first.
 
     Only entries whose int tier equals the current tier count. Three first-try
     SOLVED in a row promote one tier, never above max_tier; two failures at a
     tier drop one tier, never below 1. stable is True when the tier is max_tier
-    and its streak is at least 3.
+    and its streak is at least 3. route None counts int tiers; a route such as
+    'gw-agent' counts only rows whose tier is '<route>-N'.
     """
     tier, streak, failures = 1, 0, 0
     for entry in entries:
-        if not isinstance(entry, dict) or type(entry.get("tier")) is not int:
+        if not isinstance(entry, dict):
             continue
-        if entry["tier"] != tier:
+        row_tier = _row_tier(entry.get("tier"), route)
+        if row_tier is None or row_tier != tier:
             continue
         outcome = str(entry.get("outcome", ""))
         if outcome.startswith("UNAVAILABLE"):
@@ -168,7 +180,8 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(value, dict):
             entries.append(value)
 
-    current = ladder_tier(entries)[0]
+    route = 'gw-agent' if spec.get('provider') == 'gw-agent' else None
+    current = ladder_tier(entries, route=route)[0]
     context_file = spec.get("context_file")
     if isinstance(context_file, str) and os.path.isfile(context_file):
         context_bytes = os.path.getsize(context_file)
