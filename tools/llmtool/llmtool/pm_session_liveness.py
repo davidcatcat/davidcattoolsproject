@@ -60,7 +60,7 @@ _MAX_PID = 2 ** 31 - 1
 
 
 def check_session(native_id, runtime, cwd, *, state_root=None, environ=None, home=None,
-                  clock=None, process_lister=None, lock_held=False):
+                  clock=None, process_lister=None, lock_held=False, self_pids=None):
     """Return {'state': ACTIVE|STOPPED|UNKNOWN, 'evidence': [fixed codes]}.
 
     The lock probe opens a new descriptor, so it reads as busy under the caller's
@@ -69,7 +69,7 @@ def check_session(native_id, runtime, cwd, *, state_root=None, environ=None, hom
     """
     try:
         evidence, required = _collect(native_id, runtime, cwd, state_root, environ, home,
-                                      clock, process_lister, lock_held)
+                                      clock, process_lister, lock_held, self_pids=self_pids)
     except Exception:
         evidence, required = [CHECK_FAILED], None
     evidence = list(dict.fromkeys(evidence))
@@ -100,7 +100,7 @@ def _exists(path):
 
 
 def _collect(native_id, runtime, cwd, state_root, environ, home, clock, process_lister,
-             lock_held):
+             lock_held, self_pids=None):
     """(evidence, the exact evidence that STOPPED requires, or None if it cannot apply)."""
     if (type(native_id) is not str or
             active_pm_inbox.PM_NATIVE_SESSION_ID.fullmatch(native_id) is None):
@@ -130,7 +130,8 @@ def _collect(native_id, runtime, cwd, state_root, environ, home, clock, process_
                 ids.add(thread_id)
         except Exception:
             evidence.append(CODEX_STATE_INVALID)
-    evidence.extend(_guard(PROCESS_LIST_FAILED, _process_evidence, ids, process_lister))
+    evidence.extend(_guard(PROCESS_LIST_FAILED, _process_evidence, ids, process_lister,
+                           self_pids))
     if lock_held:
         evidence.append(LOCK_FREE)
     elif binding is not None:
@@ -176,7 +177,9 @@ def _list_processes():
                                    stderr=subprocess.DEVNULL, timeout=_PS_TIMEOUT_SECONDS)
 
 
-def _process_evidence(ids, process_lister):
+def _process_evidence(ids, process_lister, self_pids=None):
+    if self_pids is None:
+        self_pids = {os.getpid(), os.getppid()}
     listing = (process_lister or _list_processes)()
     if isinstance(listing, (bytes, bytearray)):
         listing = bytes(listing).decode('utf-8', 'replace')
@@ -190,6 +193,9 @@ def _process_evidence(ids, process_lister):
                 return [PROCESS_MATCH]
             continue
         parsed = True
+        pid = int(fields[0])
+        if pid in self_pids or fields[0] in self_pids:
+            continue
         # ps prints argv joined by spaces with its quoting lost, so a stray quote can
         # make shlex merge items; the plain split keeps every space-separated item.
         items = fields[1].split()
