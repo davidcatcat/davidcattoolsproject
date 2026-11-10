@@ -1508,6 +1508,46 @@ def _remote_test_status(record, d6):
     return None, None, None
 
 
+def _remote_test_timeout_count(record, d6):
+    """Count exact-head EC2 TIMEOUT results for this Task's executor."""
+    head = d6.get('result_head') if type(d6) is dict else None
+    completion = record.get('completion') if type(record) is dict else None
+    executor_task = completion.get('executor_task_id') if type(completion) is dict else None
+    if type(head) is not str or type(executor_task) is not str:
+        return 0
+    count = 0
+    receipts = record.get('remote_test_receipts', [])
+    if type(receipts) is list:
+        for receipt in receipts:
+            if (type(receipt) is not dict or
+                    receipt.get('task_id') != record.get('task_id') or
+                    receipt.get('run_id') != record.get('run_id') or
+                    receipt.get('executor_task') != executor_task or
+                    receipt.get('source_sha') != head or
+                    receipt.get('result') != 'TIMEOUT' or
+                    type(receipt.get('modules')) is not list or not receipt['modules']):
+                continue
+            digest_input = dict(receipt)
+            claimed = digest_input.pop('receipt_digest', None)
+            try:
+                digest = hashlib.sha256(_json_bytes(digest_input)).hexdigest()
+            except Exception:
+                continue
+            if type(claimed) is not str or claimed != digest:
+                continue
+            count += 1
+    outcomes = record.get('remote_test_outcomes', [])
+    if type(outcomes) is list:
+        for outcome in outcomes:
+            if (type(outcome) is not dict or
+                    outcome.get('executor_task') != executor_task or
+                    outcome.get('sha') != head or
+                    outcome.get('result') != 'TIMEOUT'):
+                continue
+            count += 1
+    return count
+
+
 def _run_remote_test(store, task_id, executor_task, head, ref, pr):
     """Run one remote test through the CLI adapter and return its emitted result."""
     args = Namespace(task_id=task_id, executor_task=executor_task, sha=head, ref=ref,
