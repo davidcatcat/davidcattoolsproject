@@ -45,16 +45,23 @@ _PR_URL = re.compile(
 _HEX40 = re.compile(r'[0-9a-f]{40}')
 
 
+_REMOTE_GIT_COMMANDS = frozenset(('push', 'fetch', 'pull', 'ls-remote', 'clone'))
+
+
 def _publish_run_git(root, args):
     cmd = ['git', *args]
-    try:
-        env = verified_ai_env()
-    except AiIdentityError as exc:
-        print(f'llmtool: GITHUB_AI_IDENTITY_REFUSED {exc.code}', file=sys.stderr)
-        return subprocess.CompletedProcess(cmd, 2, stdout=b'', stderr=b'')
+    if args and args[0] in _REMOTE_GIT_COMMANDS:
+        try:
+            env = verified_ai_env()
+        except AiIdentityError as exc:
+            print(f'llmtool: GITHUB_AI_IDENTITY_REFUSED {exc.code}', file=sys.stderr)
+            return subprocess.CompletedProcess(cmd, 2, stdout=b'', stderr=b'')
+        return subprocess.run(cmd, cwd=root, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              check=False, timeout=30, env=env)
     return subprocess.run(cmd, cwd=root, stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                          check=False, timeout=30, env=env)
+                          check=False, timeout=30)
 
 
 def _publish_run_gh(root, args):
