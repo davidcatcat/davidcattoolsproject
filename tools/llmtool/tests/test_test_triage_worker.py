@@ -228,6 +228,7 @@ class WorkerTests(_WorkerFixture, unittest.TestCase):
         for profile, category in (('missing', 'explicit profile unavailable'),
                                   ('cli', 'profile must be openai-compatible'),
                                   ('slow', 'profile timeout must be 1 through 120 seconds'),
+                                  ('company-gw', 'retired route profile'),
                                   ('', 'explicit profile required')):
             with self.subTest(profile=profile):
                 self.opener.open.reset_mock()
