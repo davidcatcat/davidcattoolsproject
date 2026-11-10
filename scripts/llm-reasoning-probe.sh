@@ -1,7 +1,9 @@
 #!/bin/sh
 set -eu
 
-BASE_URL=${BASE_URL:-http://10.29.7.58:4000}
+# Retired (Owner 2026-11-11, #120): company/home LLM work runs only through the API Agent Gateway (gw-agent).
+echo "llm-reasoning-probe.sh is retired: use the API Agent Gateway (gw-agent). See issue #120." >&2
+exit 2
 MODEL=${MODEL:-gw}
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
