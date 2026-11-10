@@ -954,6 +954,24 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     if any(type(claim) is dict and claim.get('head_sha') == head and
            claim.get('pr') != number for claim in _claims(record)):
         return _merge_refusal('MERGE_CONFLICTING_PR')
+    if pr.get('mergeable') is None:
+        # GitHub is still computing mergeability; use the latest PR for the
+        # gates below.
+        for _ in range(3):
+            _sleep(5)
+            try:
+                pr = github_get(f'pulls/{number}')
+            except Exception:
+                return _merge_refusal('MERGE_PR_UNAVAILABLE')
+            if type(pr) is not dict:
+                return _merge_refusal('MERGE_PR_UNAVAILABLE')
+            fresh_head = pr.get('head')
+            if (type(fresh_head) is not dict or fresh_head.get('sha') != head or
+                    pr.get('state') not in (None, 'open') or
+                    pr.get('merged') is True):
+                break
+            if pr.get('mergeable') is not None:
+                break
     review_version = _merge_pass_claim(record, number, head, events)
     if type(review_version) is not int:
         return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
