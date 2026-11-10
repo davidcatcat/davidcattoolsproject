@@ -30,7 +30,7 @@ FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
 - A Claude PASS in this exact form, unedited, satisfies the gate. Under [Owner D6
   (#846)](https://github.com/davidcatcat/davidcattoolsproject/issues/846), an
   independent `codex-reviewer` PASS is eligible for Tasks authored through Claude,
-  AGY, OpenCode, company `gw` or `gw-agent`, but never for a Codex-authored Task.
+  AGY, OpenCode, home LLM `gw-agent` or historical company `gw` Tasks, but never for a Codex-authored Task.
   All Codex PASS comments must meet the registered Reviewer,
   independent D6 record and task-bound completion checks. Under Owner decision
   035:A (#525, c6468216854), for a Claude-authored Task specifically,
