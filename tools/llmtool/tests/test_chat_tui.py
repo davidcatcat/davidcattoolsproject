@@ -5692,7 +5692,9 @@ class PMConversationTests(BoundedPMTest):
                             lambda ui: self.until(ui, lambda ui: '狀態（PM 模式）' in
                                                   ui.conversation.text)])
         status = ui.conversation.text.split('> /status', 1)[1]
-        self.assertIn('PM session：' + self.session_id + '（claude-code，cwd .）', status)
+        expected_cwd = self.pm_runtime.display_path(str(self.temp_root))
+        self.assertIn('PM session：' + self.session_id + '（claude-code，cwd ' + expected_cwd + '）', status)
+        self.assertNotIn('cwd .）', status)
         # Owner #683: TUI shows paths like Claude Code (repo-relative, ~/, else full path).
         # Full path, or ~/... when the temp dir sits under home (CI runners).
         self.assertRegex(status, r'Claude 帳號目錄：(/|~/)\S*\.claude\n')
@@ -5738,6 +5740,7 @@ class PMConversationTests(BoundedPMTest):
                       '/pm disconnect ends the connection. Chat replies are never the PM.',
                       connect)
         self.assertEqual(fields['identity'], 'claude/default')
+        self.assertIn('auto', fields['mode'])
 
     def test_codex_binding_names_codex_on_the_connect_line_and_status(self):
         self.bind_codex('codex-test')
@@ -5746,7 +5749,9 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('; codex account codex-test. pm_runtime checked', connect)
         self.assertNotIn('(claude-code, cwd', connect)
         self.assertNotIn('claude-code account', connect)
-        self.assertIn('PM session：' + self.session_id + '（codex，cwd .）', status)
+        expected_cwd = self.pm_runtime.display_path(str(self.temp_root))
+        self.assertIn('PM session：' + self.session_id + '（codex，cwd ' + expected_cwd + '）', status)
+        self.assertNotIn('cwd .）', status)
         self.assertIn('  帳號：codex-test\n', status)
         self.assertNotIn('Claude', status)
         self.assertNotIn('claude-code', status)
@@ -5757,6 +5762,7 @@ class PMConversationTests(BoundedPMTest):
         positions = [status.index(line) for line in ordered]
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(fields['identity'], 'codex/codex-test')
+        self.assertIn('workspace-write', fields['mode'])
 
     def assert_codex_account_unknown(self, account):
         self.bind_codex(account)
@@ -5776,12 +5782,16 @@ class PMConversationTests(BoundedPMTest):
             try:
                 status = ui.status_report()
                 identity = ui.pm_status_fields(lambda value, _width: value)['identity']
+                mode = ui.pm_status_fields(lambda value, _width: value)['mode']
             finally:
                 ui.pm_runtime = real
-            self.assertIn('PM session：' + self.session_id + '（codex，cwd .）', status)
+            expected_cwd = self.pm_runtime.display_path(str(self.temp_root))
+            self.assertIn('PM session：' + self.session_id + '（codex，cwd ' + expected_cwd + '）', status)
+            self.assertNotIn('cwd .）', status)
             self.assertIn('  帳號：UNKNOWN\n', status)
             self.assertNotIn('權限模式', status)
             self.assertEqual(identity, 'codex/default')
+            self.assertIn('workspace-write', mode)
 
         self.drive([self.connect(), self.connected, check])
 
@@ -5795,6 +5805,50 @@ class PMConversationTests(BoundedPMTest):
         status = ui.conversation.text.split('> /status', 1)[1]
         self.assertIn('用量（本 session）：UNKNOWN（PM 歷史無法讀取）', status)
         self.assertIn('Context 與額度：UNAVAILABLE（llmtool 沒有這項資料）', status)
+
+    def test_status_pm_session_cwd_under_home_and_outside_home(self):
+        # /status shows ~/... when cwd is under home and full path when outside home (#683).
+        def check(ui):
+            home = Path(os.path.expanduser('~'))
+            under_home = str(home / 'project-under-home')
+            ui.pm_target = (self.session_id, under_home)
+            status_home = ui.status_report()
+            self.assertIn('cwd ~/project-under-home）', status_home)
+            self.assertNotIn('cwd .', status_home)
+
+            outside = '/opt/project-outside-home' if not str(home).startswith('/opt') else '/var/project-outside-home'
+            ui.pm_target = (self.session_id, outside)
+            status_outside = ui.status_report()
+            self.assertIn('cwd ' + outside + '）', status_outside)
+            self.assertNotIn('cwd .', status_outside)
+
+            repo_root = str(self.temp_root)
+            ui.pm_target = (self.session_id, repo_root)
+            status_repo = ui.status_report()
+            expected_repo = self.pm_runtime.display_path(repo_root)
+            self.assertIn('cwd ' + expected_repo + '）', status_repo)
+            self.assertNotIn('cwd .）', status_repo)
+            self.assertNotEqual(expected_repo, '.')
+
+        self.drive([self.connect(), self.connected, check])
+
+    def test_status_row_permission_labels_for_claude_and_codex(self):
+        # The status row lead displays auto for Claude PM and workspace-write for Codex PM.
+        def check(ui):
+            claude_mode = ui.pm_status_fields(lambda value, _width: value)['mode']
+            self.assertIn('auto', claude_mode)
+            self.assertNotIn('workspace-write', claude_mode)
+
+            real_runtime = ui.pm_runtime
+            ui.pm_runtime = Mock(runtime='codex')
+            try:
+                codex_mode = ui.pm_status_fields(lambda value, _width: value)['mode']
+                self.assertIn('workspace-write', codex_mode)
+                self.assertNotIn('auto', codex_mode)
+            finally:
+                ui.pm_runtime = real_runtime
+
+        self.drive([self.connect(), self.connected, check])
 
     def test_logs_disconnected_and_picker_enter_on_exact_command_runs(self):
         expected = 'PM 紀錄：尚未連線 PM。先 /pm connect。'
