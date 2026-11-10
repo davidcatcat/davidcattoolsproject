@@ -36,6 +36,9 @@ REVIEW_FAILURE_REASONS = _D6_CREATE_FAILURE_REASONS | frozenset((
     'REVIEW_PROMPT_REFUSED'))
 REVIEW_OUTPUT_WITHHELD = 'REVIEW_OUTPUT_WITHHELD'
 REVIEW_OUTPUT_ABSENT = 'REVIEW_OUTPUT_ABSENT'
+_REVIEW_REFUSALS_DIR = 'review-refusals'
+_RECEIPT_NAME_RE = re.compile(r'^[0-9a-zA-Z._-]+-[0-9a-zA-Z._-]+-[0-9]+\.json\Z')
+_RECEIPT_PRUNE_LIMIT = 64
 
 
 def _unique_json_object(pairs):
@@ -437,6 +440,53 @@ def _bind_d6(task_id, session_id, repo_root):
         raise RuntimeError('REVIEWER_SESSION_BIND_FAILED')
 
 
+def _prune_receipts(directory, limit=_RECEIPT_PRUNE_LIMIT):
+    entries = []
+    for entry in os.scandir(directory):
+        try:
+            if entry.is_file() and not entry.is_symlink() and _RECEIPT_NAME_RE.fullmatch(entry.name):
+                stat_info = entry.stat()
+                entries.append((stat_info.st_mtime_ns, entry.name, Path(entry.path)))
+        except OSError:
+            continue
+    if len(entries) <= limit:
+        return
+    entries.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    for _, _, path in entries[limit:]:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _write_refusal_receipt(*, store, task_id, pr_number, head, version,
+                           reviewer_task, reason, excerpt_key, excerpt_val):
+    root = getattr(store, 'root', None)
+    if not isinstance(root, Path):
+        return None
+    receipt_dir = root.parent / _REVIEW_REFUSALS_DIR
+    if receipt_dir.is_symlink():
+        return None
+    from . import high_debug
+    high_debug._private_directory(receipt_dir)
+    receipt_path = receipt_dir / f'{task_id}-{head}-{version}.json'
+    record = {
+        'task_id': task_id,
+        'pr': pr_number,
+        'head': head,
+        'version': version,
+        'reviewer_task': reviewer_task,
+        'failure_reason': reason,
+        'recorded_at': _now(),
+        'not_a_verdict': True,
+        excerpt_key: excerpt_val,
+    }
+    data = (json.dumps(record, sort_keys=True) + '\n').encode('utf-8')
+    high_debug._create_private(receipt_path, data)
+    _prune_receipts(receipt_dir, _RECEIPT_PRUNE_LIMIT)
+    return receipt_path
+
+
 def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     create_d6=None, dispatch_session=None, bind_session=None,
                     prompt_renderer=None, codex_runner=None, reviewer=None):
@@ -634,13 +684,44 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             keys = [key for key in ('task_id', 'run_id', 'head') if key in mismatch]
             if keys:
                 unknown['binding_mismatch_keys'] = keys
+        claim_updated = False
         try:
             claimed = claims + [claim]
             updated_claims = [unknown if item is claim else item for item in claimed]
             store.compare_and_update(task_id, expected={'review_dispatch_claim': claimed},
                                      review_dispatch_claim=updated_claims)
+            claim_updated = True
         except Exception:
             pass
+        if claim_updated and reason in REVIEW_FAILURE_REASONS:
+            raw_excerpt = getattr(exc, 'review_excerpt', None)
+            if raw_excerpt in (REVIEW_OUTPUT_WITHHELD, REVIEW_OUTPUT_ABSENT):
+                excerpt_key = 'label'
+                excerpt_val = raw_excerpt
+            elif raw_excerpt is None or not str(raw_excerpt).strip():
+                excerpt_key = 'label'
+                excerpt_val = REVIEW_OUTPUT_ABSENT
+            else:
+                excerpt_key = 'excerpt'
+                excerpt_val = raw_excerpt
+            refusal = {
+                'failure_reason': reason,
+                excerpt_key: excerpt_val,
+                'receipt_path': None,
+            }
+            try:
+                receipt_path = _write_refusal_receipt(
+                    store=store, task_id=task_id, pr_number=pr_number, head=head,
+                    version=version, reviewer_task=reviewer_task, reason=reason,
+                    excerpt_key=excerpt_key, excerpt_val=excerpt_val)
+                refusal['receipt_path'] = receipt_path
+            except Exception:
+                pass
+            exc.review_refusal = refusal
         if getattr(exc, 'review_dispatch_code', None):
             raise
-        _refuse('REVIEW_DISPATCH_OUTCOME_UNKNOWN')
+        outcome_error = LLMToolError('Reviewer dispatch refused; details omitted')
+        outcome_error.review_dispatch_code = 'REVIEW_DISPATCH_OUTCOME_UNKNOWN'
+        if hasattr(exc, 'review_refusal'):
+            outcome_error.review_refusal = exc.review_refusal
+        raise outcome_error from None
