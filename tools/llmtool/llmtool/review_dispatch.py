@@ -4,10 +4,12 @@ from contextlib import redirect_stdout
 from datetime import datetime, timezone
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -367,6 +369,131 @@ def _review_return(claim, result):
     return output
 
 
+_CODEX_QUOTA_FILE = Path('.local') / 'state' / 'llmtool' / 'codex-quota.json'
+_CODEX_QUOTA_MAX_SIZE = 4096
+
+
+def _codex_quota_path():
+    home = os.environ.get('HOME') or os.path.expanduser('~')
+    return Path(home) / _CODEX_QUOTA_FILE
+
+
+def _extract_codex_quota(raw_stdout):
+    """Scan codex exec JSON event output for the newest rate_limits object."""
+    if type(raw_stdout) is not bytes:
+        return None
+    newest = None
+    seen = False
+    for line in raw_stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line.decode('utf-8'), object_pairs_hook=_unique_json_object)
+        except Exception:
+            continue
+        if not isinstance(event, dict):
+            continue
+        candidate = None
+        if 'rate_limits' in event:
+            candidate = event['rate_limits']
+        elif event.get('type') == 'rate_limits':
+            candidate = event
+        elif isinstance(event.get('item'), dict):
+            item = event['item']
+            if 'rate_limits' in item:
+                candidate = item['rate_limits']
+            elif item.get('type') == 'rate_limits':
+                candidate = item
+        if candidate is not None:
+            newest = candidate
+            seen = True
+    if not seen or not isinstance(newest, dict):
+        return None
+
+    cleaned = {}
+    for section in ('primary', 'secondary'):
+        sub = newest.get(section)
+        if isinstance(sub, dict):
+            clean_sub = {}
+            for key in ('used_percent', 'window_minutes', 'resets_at'):
+                val = sub.get(key)
+                if (type(val) in (int, float) and
+                        not isinstance(val, bool) and
+                        math.isfinite(val)):
+                    clean_sub[key] = val
+            if clean_sub:
+                cleaned[section] = clean_sub
+
+    if not cleaned:
+        return None
+
+    record = {
+        'schema_version': 1,
+        'read_time': int(datetime.now(timezone.utc).timestamp()),
+    }
+    record.update(cleaned)
+    return record
+
+
+def _write_codex_quota(quota_data):
+    """Write cleaned codex quota figures atomically to ~/.local/state/llmtool/codex-quota.json."""
+    if not isinstance(quota_data, dict):
+        return
+    quota_path = _codex_quota_path()
+    parent = quota_path.parent
+    try:
+        if os.path.islink(quota_path):
+            return
+        if not parent.exists():
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.path.islink(parent):
+            return
+        parent_stat = parent.stat()
+        if not stat.S_ISDIR(parent_stat.st_mode):
+            return
+        if hasattr(os, 'getuid') and parent_stat.st_uid != os.getuid():
+            return
+        if parent.parent.exists() and os.path.islink(parent.parent):
+            return
+        if parent.parent.parent.exists() and os.path.islink(parent.parent.parent):
+            return
+
+        payload = (json.dumps(quota_data, sort_keys=True) + '\n').encode('utf-8')
+        if len(payload) > _CODEX_QUOTA_MAX_SIZE:
+            return
+
+        temp_name = f'.codex-quota.json.tmp.{os.urandom(8).hex()}'
+        temp_path = parent / temp_name
+        fd = os.open(str(temp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+        try:
+            os.chmod(temp_path, 0o600)
+            if os.path.islink(quota_path):
+                return
+            os.replace(str(temp_path), str(quota_path))
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
+    except Exception:
+        return
+
+
+def _record_codex_quota(raw_stdout):
+    try:
+        quota = _extract_codex_quota(raw_stdout)
+        if quota is not None:
+            _write_codex_quota(quota)
+    except Exception:
+        pass
+
+
 def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
                     model=_CODEX_REVIEW_MODEL, effort=_CODEX_REVIEW_EFFORT,
                     config_dir=None):
@@ -403,6 +530,7 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
     binding = task.get('task_binding')
     if type(binding) is not dict:
         _refuse('REVIEW_PROMPT_BINDING_MISSING')
+    _record_codex_quota(result.stdout)
     return _parse_codex_review(
         result.stdout, task_id=task.get('task_id'), run_id=task.get('run_id'),
         contract_digest=binding.get('contract_digest'),

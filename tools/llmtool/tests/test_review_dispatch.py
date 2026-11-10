@@ -1077,6 +1077,20 @@ def _codex_event_stream(review_text, *, drop=(), plain=None, **changes):
     return '\n'.join(json.dumps(event) for event in events).encode('utf-8')
 
 
+def _codex_stream_with_events(*extra_events, review_text=None):
+    if review_text is None:
+        review_text = _codex_review_text(run_id='c' * 32, contract='d' * 64)
+    verdict = {'task_id': TASK, 'run_id': 'c' * 32, 'head': HEAD,
+               'verdict': 'PASS', 'review': review_text}
+    events = [
+        {'type': 'thread.started', 'thread_id': '0123456789abcdef'},
+        *extra_events,
+        {'type': 'item.completed', 'item': {
+            'type': 'agent_message', 'text': json.dumps(verdict)}},
+    ]
+    return '\n'.join(json.dumps(event) for event in events).encode('utf-8')
+
+
 def _claim(*, head=HEAD, version=1, reviewer='reviewer-a'):
     stamp = '2026-10-27T00:00:00Z'
     return {'executor_task': 'executor-d6', 'pr': 42, 'head_sha': head,
@@ -1611,6 +1625,229 @@ class ReviewRefusalReceiptTests(unittest.TestCase):
         self.assertIsNone(getattr(exc, 'review_failure_reason', None))
         self.assertFalse(hasattr(exc, 'review_refusal'))
         self.assertFalse(self.receipt_dir.exists())
+
+
+class CodexQuotaRecordingTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = Path(self.temp.name)
+        self.quota_file = self.home / '.local' / 'state' / 'llmtool' / 'codex-quota.json'
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _dispatch(self, stdout_bytes):
+        result = SimpleNamespace(returncode=0, stdout=stdout_bytes, stderr=b'')
+        with patch.dict(review_dispatch.os.environ, {'HOME': str(self.home)}), \
+                patch.object(review_dispatch.shutil, 'which', return_value='/bin/codex'), \
+                patch.object(review_dispatch.subprocess, 'run', return_value=result):
+            return review_dispatch._dispatch_codex(
+                reviewer_root='/repo/reviewer-d6', prompt='review prompt',
+                task={'task_id': TASK, 'run_id': 'c' * 32,
+                      'task_binding': {'contract_digest': 'd' * 64}}, head=HEAD)
+
+    def test_figures_recorded_to_quota_file(self):
+        rate_limits_event = {
+            'type': 'rate_limits',
+            'rate_limits': {
+                'primary': {
+                    'used_percent': 12.5,
+                    'window_minutes': 60,
+                    'resets_at': 1700000000,
+                },
+                'secondary': {
+                    'used_percent': 3.0,
+                    'window_minutes': 10080,
+                    'resets_at': 1700604800,
+                },
+            },
+        }
+        stdout = _codex_stream_with_events(rate_limits_event)
+        res = self._dispatch(stdout)
+        self.assertEqual(res['verdict'], 'PASS')
+        self.assertTrue(self.quota_file.exists())
+        self.assertEqual(stat.S_IMODE(self.quota_file.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.quota_file.parent.stat().st_mode), 0o700)
+
+        data = json.loads(self.quota_file.read_text(encoding='utf-8'))
+        self.assertEqual(data['schema_version'], 1)
+        self.assertIsInstance(data['read_time'], int)
+        self.assertEqual(data['primary'], {
+            'used_percent': 12.5,
+            'window_minutes': 60,
+            'resets_at': 1700000000,
+        })
+        self.assertEqual(data['secondary'], {
+            'used_percent': 3.0,
+            'window_minutes': 10080,
+            'resets_at': 1700604800,
+        })
+
+    def test_newest_rate_limits_kept(self):
+        first_event = {
+            'type': 'rate_limits',
+            'rate_limits': {
+                'primary': {
+                    'used_percent': 10.0,
+                    'window_minutes': 60,
+                    'resets_at': 1700000000,
+                },
+            },
+        }
+        second_event = {
+            'type': 'rate_limits',
+            'rate_limits': {
+                'primary': {
+                    'used_percent': 25.5,
+                    'window_minutes': 60,
+                    'resets_at': 1700002000,
+                },
+                'secondary': {
+                    'used_percent': 5.0,
+                    'window_minutes': 10080,
+                    'resets_at': 1700605000,
+                },
+            },
+        }
+        stdout = _codex_stream_with_events(first_event, second_event)
+        res = self._dispatch(stdout)
+        self.assertEqual(res['verdict'], 'PASS')
+        data = json.loads(self.quota_file.read_text(encoding='utf-8'))
+        self.assertEqual(data['primary']['used_percent'], 25.5)
+        self.assertEqual(data['primary']['resets_at'], 1700002000)
+        self.assertEqual(data['secondary']['used_percent'], 5.0)
+
+    def test_no_event_no_write(self):
+        stdout = _codex_stream_with_events()
+        res = self._dispatch(stdout)
+        self.assertEqual(res['verdict'], 'PASS')
+        self.assertFalse(self.quota_file.exists())
+
+    def test_extra_fields_dropped(self):
+        event_with_extra = {
+            'type': 'rate_limits',
+            'rate_limits': {
+                'primary': {
+                    'used_percent': 45.0,
+                    'window_minutes': 60,
+                    'resets_at': 1700001000,
+                    'extra_label': 'drop',
+                    'count': 99,
+                },
+                'secondary': {
+                    'used_percent': 10.0,
+                    'window_minutes': 10080,
+                    'resets_at': 1700605000,
+                    'note': 'ignore',
+                },
+                'top_level_flag': 'ignore_me',
+            },
+        }
+        stdout = _codex_stream_with_events(event_with_extra)
+        res = self._dispatch(stdout)
+        self.assertEqual(res['verdict'], 'PASS')
+        data = json.loads(self.quota_file.read_text(encoding='utf-8'))
+        self.assertEqual(set(data.keys()), {'schema_version', 'read_time', 'primary', 'secondary'})
+        self.assertEqual(set(data['primary'].keys()), {'used_percent', 'window_minutes', 'resets_at'})
+        self.assertEqual(set(data['secondary'].keys()), {'used_percent', 'window_minutes', 'resets_at'})
+        self.assertEqual(data['primary']['used_percent'], 45.0)
+        self.assertEqual(data['primary']['window_minutes'], 60)
+        self.assertEqual(data['primary']['resets_at'], 1700001000)
+
+    def test_non_numeric_fields_ignored_and_malformed_quota_no_write(self):
+        event_non_numeric = {
+            'type': 'rate_limits',
+            'rate_limits': {
+                'primary': {
+                    'used_percent': 'not_a_number',
+                    'window_minutes': 60,
+                    'resets_at': 1700001000,
+                },
+            },
+        }
+        stdout = _codex_stream_with_events(event_non_numeric)
+        res = self._dispatch(stdout)
+        self.assertEqual(res['verdict'], 'PASS')
+        data = json.loads(self.quota_file.read_text(encoding='utf-8'))
+        self.assertEqual(data['primary'], {'window_minutes': 60, 'resets_at': 1700001000})
+
+        # When rate_limits is completely malformed:
+        malformed_event = {'type': 'rate_limits', 'rate_limits': 'not_a_dict'}
+        stdout_malformed = _codex_stream_with_events(malformed_event)
+        self.quota_file.unlink()
+        res_malformed = self._dispatch(stdout_malformed)
+        self.assertEqual(res_malformed['verdict'], 'PASS')
+        self.assertFalse(self.quota_file.exists())
+
+    def test_write_failure_leaves_result_unchanged(self):
+        rate_limits_event = {
+            'type': 'rate_limits',
+            'rate_limits': {
+                'primary': {'used_percent': 10.0, 'window_minutes': 60, 'resets_at': 1700000000},
+            },
+        }
+        stdout = _codex_stream_with_events(rate_limits_event)
+        with patch.object(review_dispatch, '_write_codex_quota', side_effect=OSError('disk full')):
+            res = self._dispatch(stdout)
+        self.assertEqual(res['verdict'], 'PASS')
+        self.assertFalse(self.quota_file.exists())
+
+    def test_symlink_path_or_parent_gives_no_write(self):
+        rate_limits_event = {
+            'type': 'rate_limits',
+            'rate_limits': {
+                'primary': {'used_percent': 10.0, 'window_minutes': 60, 'resets_at': 1700000000},
+            },
+        }
+        stdout = _codex_stream_with_events(rate_limits_event)
+
+        # 1. Parent directory is a symlink
+        fake_target = self.home / 'other_target'
+        fake_target.mkdir(parents=True, exist_ok=True)
+        self.quota_file.parent.parent.mkdir(parents=True, exist_ok=True)
+        self.quota_file.parent.symlink_to(fake_target)
+
+        res = self._dispatch(stdout)
+        self.assertEqual(res['verdict'], 'PASS')
+        self.assertEqual(list(fake_target.iterdir()), [])
+
+        # Clean up symlink
+        self.quota_file.parent.unlink()
+        self.quota_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # 2. Target file is a symlink
+        dummy_target = self.home / 'dummy_target.json'
+        dummy_target.write_text('{}', encoding='utf-8')
+        self.quota_file.symlink_to(dummy_target)
+
+        res2 = self._dispatch(stdout)
+        self.assertEqual(res2['verdict'], 'PASS')
+        self.assertEqual(dummy_target.read_text(encoding='utf-8'), '{}')
+
+    def test_parent_owned_by_different_user_gives_no_write(self):
+        rate_limits_event = {
+            'type': 'rate_limits',
+            'rate_limits': {
+                'primary': {'used_percent': 10.0, 'window_minutes': 60, 'resets_at': 1700000000},
+            },
+        }
+        stdout = _codex_stream_with_events(rate_limits_event)
+        self.quota_file.parent.mkdir(parents=True, exist_ok=True)
+        real_stat = Path.stat
+
+        def fake_stat(path_obj):
+            st = real_stat(path_obj)
+            if path_obj == self.quota_file.parent:
+                return SimpleNamespace(
+                    st_mode=st.st_mode,
+                    st_uid=os.getuid() + 999 if hasattr(os, 'getuid') else 9999,
+                )
+            return st
+
+        with patch.object(Path, 'stat', side_effect=fake_stat):
+            res = self._dispatch(stdout)
+        self.assertEqual(res['verdict'], 'PASS')
+        self.assertFalse(self.quota_file.exists())
 
 
 if __name__ == '__main__':
