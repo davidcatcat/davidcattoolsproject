@@ -6245,8 +6245,9 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(row.alert, "")
         stopped, = mon.runner_rows([], now, root)
         self.assertEqual((stopped.state, stopped.age, stopped.alert),
-                         (mon.STOPPED, None, "CI runner 沒在跑"))
-        self.assertTrue(stopped.detail.startswith("沒在跑（GitHub 上的 CI 會排隊等它）"))
+                         (mon.IDLE, None, ""))
+        self.assertTrue(stopped.detail.startswith("已退役（#1253：CI 改用 GitHub 主機）"))
+        self.assertFalse(any(line.startswith("⚠") for line, _ in mon.office_view([stopped])))
         # No runner configured, or no place given: no row (the office tests stay hermetic).
         self.assertEqual(mon.runner_rows([], now, self.tmp.name), [])
         self.assertEqual(mon.runner_rows([], now, None), [])
