@@ -333,7 +333,15 @@ class TestLlmtoolMonitorState(unittest.TestCase):
         )
 
         entries = []
-        mon.office_view([r_working, r_alert, r_idle, r_error], entries=entries, expand=True)
+        orig_line_style = mon._line_style
+
+        def fake_line_style(row, rows):
+            if row.name == "row-err":
+                return "?"
+            return orig_line_style(row, rows)
+
+        with unittest.mock.patch.object(mon, "_line_style", side_effect=fake_line_style):
+            mon.office_view([r_working, r_alert, r_idle, r_error], entries=entries, expand=True)
         bands = [e["band"] for e in entries]
         self.assertEqual(bands, ["working", "alert", "idle", "error"])
 
