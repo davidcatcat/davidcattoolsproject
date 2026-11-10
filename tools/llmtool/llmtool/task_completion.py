@@ -2283,6 +2283,29 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
             _stop('CI_WORKFLOW_RUNS_INVALID')
         candidates.append(run)
     if not candidates:
+        # Check workflow_dispatch runs when no pull_request run exists.
+        dispatch_runs = _github_get(
+            f'actions/workflows/{workflow_id}/runs?head_sha={result_sha}&event=workflow_dispatch&per_page=100')
+        if (type(dispatch_runs) is not dict or
+                type(dispatch_runs.get('workflow_runs')) is not list or
+                type(dispatch_runs.get('total_count')) is not int or
+                dispatch_runs['total_count'] != len(dispatch_runs['workflow_runs']) or
+                len(dispatch_runs['workflow_runs']) > 100):
+            _stop('CI_WORKFLOW_RUNS_INVALID')
+        for run in dispatch_runs['workflow_runs']:
+            if type(run) is not dict:
+                _stop('CI_WORKFLOW_RUNS_INVALID')
+            if (run.get('workflow_id') != workflow_id or run.get('path') != workflow_path or
+                    run.get('event') != 'workflow_dispatch' or run.get('head_sha') != result_sha or
+                    type(pr_head_ref) is not str or not pr_head_ref or
+                    run.get('head_branch') != pr_head_ref):
+                _stop('CI_WORKFLOW_RUN_MISMATCH')
+            if (type(run.get('id')) is not int or run['id'] <= 0 or
+                    type(run.get('run_number')) is not int or run['run_number'] <= 0 or
+                    type(run.get('run_attempt')) is not int or run['run_attempt'] <= 0):
+                _stop('CI_WORKFLOW_RUNS_INVALID')
+            candidates.append(run)
+    if not candidates:
         return {'workflow_id': workflow_id, 'run_id': None, 'run_attempt': None,
                 'run_number': None, 'successful_checks': [], 'check_ids': {},
                 'check_outcomes': {check_name: 'MISSING'}}
