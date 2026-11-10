@@ -71,6 +71,10 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
                     boundary._policy(root, ['../escape'], [])
                 with self.assertRaises(ValueError):
                     boundary._policy(root, ['.git/config'], [])
+                with self.assertRaises(ValueError):
+                    boundary._policy(root, ['.GIT/x'], [])
+                with self.assertRaises(ValueError):
+                    boundary._policy(root, ['.Git/sub/x'], [])
 
     def test_rejects_state_directory_equal_to_temp_root(self):
         with tempfile.TemporaryDirectory() as temp:
