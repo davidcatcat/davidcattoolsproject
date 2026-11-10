@@ -20,7 +20,7 @@ from llmtool.errors import LLMToolError
 from llmtool.providers.base import Reply
 from llmtool.task_store import TaskStore
 from llmtool.task_submission_cli import run_task_complete
-from llmtool import task_completion
+from llmtool import github_identity, task_completion
 
 import test_task_completion as fixtures
 import review_trust_fixture
@@ -70,7 +70,9 @@ class FakeGhTests(unittest.TestCase):
                 self.which_calls = which.call_args_list
 
     def test_reads_fixed_repository_path_without_ambient_credentials(self):
-        value = self._get('pulls/10', self._fake_gh('{"number": 10}'))
+        home = str(self.base / 'home')
+        with patch.dict(os.environ, {'HOME': home}):
+            value = self._get('pulls/10', self._fake_gh('{"number": 10}'))
         self.assertEqual(value, {'number': 10})
         logged = self.log.read_text()
         argv = logged.split('\n')
@@ -82,7 +84,7 @@ class FakeGhTests(unittest.TestCase):
                        'evil.invalid'):
             self.assertNotIn(leaked, logged)
         self.assertIn('GH_PROMPT_DISABLED=1', logged)
-        self.assertIn('GH_CONFIG_DIR=' + str(self.base / 'gh-config'), logged)
+        self.assertIn('GH_CONFIG_DIR=' + github_identity.ai_gh_config_dir(home), logged)
         self.assertEqual(self.which_calls[0].kwargs['path'], task_completion._GH_PATH)
 
     def test_failures_are_fail_closed_codes(self):
