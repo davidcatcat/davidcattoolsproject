@@ -911,7 +911,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen['route_model'], 'authorized-model')
         self.assertEqual(seen['profile']['model'], 'authorized-model')
         self.assertEqual(seen['profile']['base_url'], 'http://10.20.30.40:8080/v1')
-        self.assertEqual(seen['profile']['max_output_tokens'], 8192)
+        self.assertEqual(seen['profile']['max_output_tokens'], 16384)
         self.assertEqual(seen['profile']['http_allow_hosts'], ['10.20.30.40'])
         self.assertEqual(developer['artifact'], 'diff')
         self.assertEqual(developer['usage']['served_model'], 'authorized-model')
