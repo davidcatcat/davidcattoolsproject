@@ -90,7 +90,7 @@ _GW_AGENT_PAUSED_REF = (
     'https://github.com/davidcatcat/davidcattoolsproject/issues/120')
 _GW_AGENT_OWNER_REF = (
     'https://github.com/davidcatcat/davidcattoolsproject/'
-    'issues/120#issuecomment-6594101520')
+    'issues/120#issuecomment-6760670167')
 
 
 class WorkerDispatchDenied(LLMToolError):

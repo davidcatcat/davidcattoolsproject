@@ -2215,7 +2215,8 @@ POLICY_EVIDENCE = "https://github.com/davidcatcat/davidcattoolsproject/issues/28
 GW_AGENT_EVIDENCE = "https://github.com/davidcatcat/davidcattoolsproject/issues/120"
 GW_AGENT_ENTRY = {"dispatch": "PAUSED", "decided_by": "PM", "decided_at": "2026-11-03",
                   "reason": "test", "evidence": GW_AGENT_EVIDENCE}
-GW_AGENT_OWNER_EVIDENCE = GW_AGENT_EVIDENCE + "#issuecomment-6594101520"   # #120 D1 = A
+GW_AGENT_OWNER_EVIDENCE = GW_AGENT_EVIDENCE + "#issuecomment-6760670167"   # #120 Owner standing authorization 2026-11-10
+GW_AGENT_OLD_OWNER_EVIDENCE = GW_AGENT_EVIDENCE + "#issuecomment-6594101520"   # #120 D1 = A (superseded)
 GW_AGENT_OWNER_ALLOWED = {"dispatch": "ALLOWED", "decided_by": "Owner",
                           "evidence": GW_AGENT_OWNER_EVIDENCE}
 
@@ -2329,7 +2330,9 @@ class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
             "gw-agent allowed by Owner bare #120": {"company-gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_EVIDENCE)},
             "gw-agent allowed by Owner other comment": {"company-gw-agent": dict(
-                GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_EVIDENCE + "#issuecomment-6594101521")},
+                GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_EVIDENCE + "#issuecomment-6760670168")},
+            "gw-agent allowed by Owner old comment": {"company-gw-agent": dict(
+                GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_OLD_OWNER_EVIDENCE)},
             "gw-agent allowed by Owner comment +1 digit": {"company-gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_OWNER_EVIDENCE + "0")},
             "gw-agent allowed by Owner comment -1 digit": {"company-gw-agent": dict(
@@ -2338,7 +2341,7 @@ class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
                 GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_OWNER_EVIDENCE + "/")},
             "gw-agent allowed by Owner comment on #1200": {"company-gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED,
-                evidence=GW_AGENT_EVIDENCE + "0#issuecomment-6594101520")},
+                evidence=GW_AGENT_EVIDENCE + "0#issuecomment-6760670167")},
             "gw-agent allowed by Owner lower-case switch": {"company-gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, dispatch="allowed")},
             "other key Owner D1 comment": {"company-gw": {"evidence": GW_AGENT_OWNER_EVIDENCE}},
@@ -2398,6 +2401,7 @@ class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
                       "gw-agent paused by Owner bare #120", "gw-agent assignment only by Owner D1",
                       "gw-agent paused by PM D1", "gw-agent allowed by Owner bare #120",
                       "gw-agent allowed by Owner other comment",
+                      "gw-agent allowed by Owner old comment",
                       "gw-agent allowed by Owner comment +1 digit",
                       "gw-agent allowed by Owner comment -1 digit",
                       "gw-agent allowed by Owner comment trailing slash",

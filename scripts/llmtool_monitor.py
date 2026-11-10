@@ -7604,12 +7604,12 @@ DISPATCH_WORKERS = frozenset({"codex-developer", "claude-developer", "opencode-d
                               "codex-reviewer"})
 # The gw Agent route (#120) accepts exactly one of two entries, as the gate
 # does: PAUSED by the PM with the bare issue as evidence (WP3b), or ALLOWED by
-# the Owner with exactly the D1 = A decision comment (synthetic content only).
+# the Owner with exactly the 2026-11-10 standing authorization comment (#120).
 # Anything else for this key fails closed. Every other key still needs Owner.
 DISPATCH_EXACT_ENTRIES = {"company-gw-agent": frozenset({
     ("PAUSED", "PM", "https://github.com/davidcatcat/davidcattoolsproject/issues/120"),
     ("ALLOWED", "Owner",
-     "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6594101520"),
+     "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167"),
 })}
 DISPATCH_FIELDS = (frozenset({"dispatch", "decided_by", "decided_at", "reason", "evidence"}),
                    frozenset({"dispatch", "decided_by", "decided_at", "reason", "evidence",
