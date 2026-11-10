@@ -8242,12 +8242,14 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     if ci_view is not None:
         rows += hosted_ci_rows(ci, ci_view, now)
     rows.append(remote_test_row(processes, now, llmtool_tasks))
-    gw_runs = gw_rows(processes, now, canonical)
+    gw_runs = gw_rows(processes, now, canonical) + gw_task_rows(now, llmtool_tasks)
     rows += gw_runs
     gw_live: dict = {}
     for row in gw_runs:
         if row.state == WORKING:
-            gw_live.setdefault(GW_ROSTER[row.name], []).append(row)
+            gw_key = GW_ROSTER.get(row.name) or ("公司 gw" if row.name.startswith("home LLM") else None)
+            if gw_key:
+                gw_live.setdefault(gw_key, []).append(row)
     raw, source = load_dispatch(canonical, dispatch)
     switches, problem = worker_dispatch(raw)
     for name, key, order in WORKER_ROSTER:
@@ -8256,7 +8258,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         switch = switches.get(key)
         trouble = problem
         paused = not trouble and switch[0] == "PAUSED"
-        if live and not trouble and not paused:
+        if live and not trouble and not paused and name != "公司 gw":
             continue   # the live CLI rows say everything
         notes, state, age, alert = [], None, None, ""
         if name == "opencode developer" and not live:
