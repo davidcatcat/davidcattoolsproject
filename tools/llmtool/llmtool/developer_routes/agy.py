@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import re
 
 from .base import DeveloperRoute, RouteError
+from .. import github_identity
 
 _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
 _EFFORT = re.compile(r'(?:minimal|low|medium|high)\Z')
@@ -53,7 +55,8 @@ class AgyRoute(DeveloperRoute):
                                any(ord(char) < 32 for char in env[key])):
                 raise RouteError('AGY_ENV_INVALID')
         env['TMPDIR'] = tmpdir
-        return env
+        home = env.get('HOME') or str(Path.home())
+        return github_identity.ai_github_env(env, home)
 
     def validate_request(self, request):
         value = super().validate_request(request)
