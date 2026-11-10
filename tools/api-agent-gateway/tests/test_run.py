@@ -241,6 +241,8 @@ class StandaloneTests(unittest.TestCase):
                 os.path.join(llmtool, 'llmtool', 'gw_agent_sessions.py'),
                 os.path.join(llmtool, 'tests', 'test_developer_route_gw_agent.py'),
                 os.path.join(llmtool, 'tests', 'test_gw_agent_route_wiring.py'),
+                # This only names the gateway package in a test of the env builder.
+                os.path.join(llmtool, 'tests', 'test_developer_env_ai_identity.py'),
                 # This only names a path string.
                 os.path.join(llmtool, 'tests', 'test_sensitive_paths.py'),
             }
