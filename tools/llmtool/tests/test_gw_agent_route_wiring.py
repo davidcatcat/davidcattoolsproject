@@ -1001,6 +1001,15 @@ class GwAgentRealStoreTests(unittest.TestCase):
             'providers:\n  company-gw:\n    type: openai-compatible\n'
             f'    base_url: http://127.0.0.1:{self.server.port}\n    model: gw\n',
             encoding='utf-8')
+        gateway_file = config.parent / 'gateway-profiles.json'
+        gateway_file.write_text(json.dumps({'schema_version': 1, 'default': 'home', 'profiles': {
+            'home': {'base_url': f'http://127.0.0.1:{self.server.port}', 'model': 'gw',
+                    'api_key_env': 'GW_AGENT_TEST_KEY_ENV', 'context_cap_tokens': 32768,
+                    'max_output_tokens': 49152}}}), encoding='utf-8')
+        gateway_file.chmod(0o600)
+        key_env = patch.dict(os.environ, {'GW_AGENT_TEST_KEY_ENV': 'synthetic-value'})
+        key_env.start()
+        self.addCleanup(key_env.stop)
         self.root = self.base / 'd6'
         (self.root / 'tools' / 'llmtool').mkdir(parents=True)
         self._git('init', '-b', 'task-branch')

@@ -39,6 +39,9 @@ class GwAgentRouteTests(unittest.TestCase):
         home = mock.patch.dict(os.environ, {'HOME': self.temp.name})
         home.start()
         self.addCleanup(home.stop)
+        gateway = mock.patch.object(gw_agent, '_gateway_credential_config', return_value={})
+        gateway.start()
+        self.addCleanup(gateway.stop)
         self.root = Path(self.temp.name) / 'repo'
         self.root.mkdir()
         subprocess.run(['/usr/bin/git', 'init', str(self.root)], check=True,
@@ -194,7 +197,7 @@ class GwAgentRouteTests(unittest.TestCase):
             self.route._credential = None
             with tempfile.TemporaryDirectory() as tmpdir, self.subTest(case=label):
                 resolver = (mock.patch.object(
-                    gw_agent.llm_config, 'resolve_profile_config', side_effect=resolve_error)
+                    gw_agent, '_gateway_credential_config', side_effect=resolve_error)
                     if label == 'config-error' else mock.patch.object(
                         gw_agent.llm_config, 'resolve_profile_config', return_value={}))
                 key_loader = (mock.patch.object(gw_agent.llm_config, 'api_key',
@@ -1254,6 +1257,24 @@ class GwAgentRouteTests(unittest.TestCase):
             with self.assertRaises(RouteError) as cm:
                 self.route.collect(tmpdir, req)
             self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_PERSIST_FAILED')
+
+
+class GatewayCredentialConfigTests(unittest.TestCase):
+    def test_null_key_env_gives_no_credential_and_skips_company_config(self):
+        with mock.patch.object(gw_agent.gateway_profiles, 'load_gateway_profile',
+                               return_value={'api_key_env': None}), \
+                 mock.patch.object(gw_agent.llm_config, 'resolve_profile_config',
+                                   side_effect=AssertionError('company-gw read')):
+            config_value = gw_agent._gateway_credential_config()
+            self.assertIsNone(gw_agent.llm_config.api_key(config_value))
+
+    def test_named_key_env_is_read_from_the_environment(self):
+        name = 'GW_AGENT_TEST_KEY_ENV'
+        with mock.patch.object(gw_agent.gateway_profiles, 'load_gateway_profile',
+                               return_value={'api_key_env': name}), \
+                 mock.patch.dict(os.environ, {name: 'synthetic-value'}):
+            config_value = gw_agent._gateway_credential_config()
+            self.assertEqual(gw_agent.llm_config.api_key(config_value), 'synthetic-value')
 
 
 if __name__ == '__main__':
