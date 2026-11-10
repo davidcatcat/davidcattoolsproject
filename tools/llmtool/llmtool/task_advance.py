@@ -942,7 +942,8 @@ def _owner_acceptance_code(url, number, head, github_get, *, carry_out=None):
 
 
 def _merge_once(*, store, record, number, head, pr, events, github_get,
-                gh_runner, root, owner_acceptance=None):
+                gh_runner, root, owner_acceptance=None, sleep_fn=None, sleep=None):
+    _sleep = time.sleep if sleep_fn is None and sleep is None else (sleep_fn if sleep_fn is not None else sleep)
     if type(number) is not int or number < 1:
         return _merge_refusal('MERGE_PR_UNAVAILABLE')
     if type(pr) is not dict or pr.get('number', number) != number:
@@ -989,6 +990,23 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         current_pr = github_get(f'pulls/{number}')
     except Exception:
         return _merge_refusal('MERGE_PR_UNAVAILABLE')
+    # Re-fetch when GitHub is still computing mergeability.
+    for _ in range(3):
+        if type(current_pr) is not dict:
+            break
+        current_head = current_pr.get('head')
+        if (type(current_head) is not dict or current_head.get('sha') != head or
+                current_pr.get('number', number) != number):
+            break
+        if current_pr.get('state') not in (None, 'open') or current_pr.get('merged') is True:
+            break
+        if current_pr.get('mergeable') is not None:
+            break
+        _sleep(5)
+        try:
+            current_pr = github_get(f'pulls/{number}')
+        except Exception:
+            return _merge_refusal('MERGE_PR_UNAVAILABLE')
     current_head = current_pr.get('head') if type(current_pr) is dict else None
     if (type(current_head) is not dict or current_head.get('sha') != head or
             current_pr.get('number', number) != number):
@@ -2166,7 +2184,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             run_task_complete_call=None, record_github_event_call=None,
             github_get=None, cwd=None, publish_git_runner=None,
             publish_gh_runner=None, record_result_call=None, merge_gh_runner=None,
-            owner_acceptance=None):
+            owner_acceptance=None, sleep_fn=None, sleep=None):
     """Perform one selected action and return a bounded JSON-ready summary."""
     if owner_acceptance is not None and not merge:
         # An Owner acceptance is only for a merge; refuse before anything runs.
@@ -2259,7 +2277,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         merge_result = _merge_once(store=store, record=record, number=number,
             head=d6['result_head'], pr=pr, events=related['events'], github_get=get,
             gh_runner=_publish_run_gh if merge_gh_runner is None else merge_gh_runner,
-            root=d6.get('root') or cwd or os.getcwd(), owner_acceptance=owner_acceptance)
+            root=d6.get('root') or cwd or os.getcwd(), owner_acceptance=owner_acceptance,
+            sleep_fn=sleep_fn, sleep=sleep)
         merge_result.update(task_id=task_id, next=merge_result['step'])
         return _ack_consumed_events(merge_result, record, store, d6['result_head'])
     if type(d6) is dict and d6.get('state') == 'D6_BINDING_UNAVAILABLE':
