@@ -61,7 +61,7 @@ Current Owner escalation is defined in [AGENTS.md](../../AGENTS.md); see the [no
 
 ## Test data rule (Owner #763 A, 2026-11-08)
 
-[Owner decision, relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6717848625). The rule binds every Developer route: Claude Developer, AGY, OpenCode, Codex (including repair runs), company `gw` and `gw-agent`. It also binds every Developer spec the PM writes. llmtool adds the same rule text to each route's prompt.
+[Owner decision, relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6717848625). The rule binds every Developer route: Claude Developer, AGY, OpenCode, Codex (including repair runs) and home LLM `gw-agent`. It also binds every Developer spec the PM writes. llmtool adds the same rule text to each route's prompt.
 
 1. Ordinary tests never contain password-, API-key-, token- or other credential-shaped strings.
 2. A test of a refusal flow uses mock, monkeypatch or dependency injection of the screen function, and still checks the real behaviour.
