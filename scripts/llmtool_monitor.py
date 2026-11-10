@@ -6329,9 +6329,9 @@ def _runner_row(root, listener, processes, now, isolation, ci, number, total):
     notes, alert, ran = [], "", None
     label = "CI runner" + (f" {runner}" if total > 1 and runner else "")
     if listener is None:
-        state, age = STOPPED, None
-        notes.append("沒在跑（GitHub 上的 CI 會排隊等它）")
-        alert = f"{label} 沒在跑"
+        state, age = IDLE, None
+        notes.append("已退役（#1253：CI 改用 GitHub 主機）")
+        alert = ""
     else:
         age = _elapsed_seconds(listener.elapsed)
         kept = isolation(listener.pid)
