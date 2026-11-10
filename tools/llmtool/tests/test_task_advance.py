@@ -469,14 +469,30 @@ class TaskAdvanceTests(unittest.TestCase):
                          ('ADMISSION_DENIED', None, None))
 
     def test_timeout_and_sha_mismatch_receipts_require_attention(self):
+        single_timeout = base_record(remote_test_outcomes=[{
+            'result': 'TIMEOUT', 'executor_task': 'executor-1',
+            'sha': HEAD, 'modules': ['test_task_advance'],
+        }])
+        self.assertEqual(task_advance.decide(single_timeout, d6(), PR, {}),
+                         'RUN_REMOTE_TEST')
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_run_remote_test', return_value={}):
+            single_result = task_advance.advance(
+                task_id=single_timeout['task_id'],
+                store=type('S', (), {'get': lambda self, _id: single_timeout})(),
+                pr_number=17)
+        self.assertEqual(single_result['step'], 'RUN_REMOTE_TEST')
         for outcome, code in (('TIMEOUT', 'REMOTE_TEST_TIMEOUT'),
                               ('SHA_MISMATCH', 'REMOTE_TEST_SHA_MISMATCH')):
             record = base_record(remote_test_outcomes=[])
             if outcome == 'TIMEOUT':
-                record['remote_test_outcomes'] = [{
-                    'result': 'TIMEOUT', 'executor_task': 'executor-1',
-                    'sha': HEAD, 'modules': ['test_task_advance'],
-                }]
+                record['remote_test_outcomes'] = [
+                    {'result': 'TIMEOUT', 'executor_task': 'executor-1',
+                     'sha': HEAD, 'modules': ['test_task_advance']},
+                    {'result': 'TIMEOUT', 'executor_task': 'executor-1',
+                     'sha': HEAD, 'modules': ['test_task_advance']},
+                ]
             else:
                 record['remote_test_receipts'] = [remote_receipt(
                     base_record(), result=outcome)]
@@ -4626,10 +4642,12 @@ class TaskAdvanceReviewRefusalTests(unittest.TestCase):
                 self.assertNotIn('review_refusal', bad_result)
 
         # Other advance results have no review_refusal key
-        rec_needs_attention = base_record(remote_test_outcomes=[{
-            'result': 'TIMEOUT', 'executor_task': 'executor-1',
-            'sha': HEAD, 'modules': ['test_task_advance'],
-        }])
+        rec_needs_attention = base_record(remote_test_outcomes=[
+            {'result': 'TIMEOUT', 'executor_task': 'executor-1',
+             'sha': HEAD, 'modules': ['test_task_advance']},
+            {'result': 'TIMEOUT', 'executor_task': 'executor-1',
+             'sha': HEAD, 'modules': ['test_task_advance']},
+        ])
         with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
              patch.object(task_advance, '_pr_snapshot', return_value=PR):
             attn_result = task_advance.advance(

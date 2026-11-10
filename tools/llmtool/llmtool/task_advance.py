@@ -1603,7 +1603,7 @@ def _pre_pr_remote_gate(record, store, executor_task, head, branch):
     try:
         fresh = store.get(task_id)
         status = _remote_test_status(fresh, binding)[0]
-        if status is None:
+        if status is None or (status == 'TIMEOUT' and _remote_test_timeout_count(fresh, binding) == 1):
             remote_result = _run_remote_test(store, task_id, executor_task, head,
                                              f'refs/heads/{branch}', None)
             fresh = store.get(task_id)
@@ -1702,7 +1702,11 @@ def derive_repair_state(repair_record):
 def _pre_review_action(record, d6, pr, related, result_head):
     """Return the gate action before a Reviewer may start on this head."""
     remote_status, _, _ = _remote_test_status(record, d6)
-    if remote_status in ('TIMEOUT', 'SHA_MISMATCH'):
+    if remote_status == 'TIMEOUT':
+        if _remote_test_timeout_count(record, d6) == 1:
+            return 'RUN_REMOTE_TEST'
+        return 'NEEDS_ATTENTION'
+    if remote_status == 'SHA_MISMATCH':
         return 'NEEDS_ATTENTION'
     if remote_status == 'FAIL':
         return _remote_fail_action(related, result_head)
@@ -1741,7 +1745,11 @@ def decide(record, d6, pr, related):
         # EC2 runs on the branch before any PR, so a stopped head stays here
         # with no PR. Every other state re-enters the idempotent publish step.
         remote_status, _, _ = _remote_test_status(record, d6)
-        if remote_status in ('TIMEOUT', 'SHA_MISMATCH'):
+        if remote_status == 'TIMEOUT':
+            if _remote_test_timeout_count(record, d6) == 1:
+                return 'PUBLISH'
+            return 'NEEDS_ATTENTION'
+        if remote_status == 'SHA_MISMATCH':
             return 'NEEDS_ATTENTION'
         if remote_status == 'FAIL':
             return _remote_fail_action(related, result_head)
