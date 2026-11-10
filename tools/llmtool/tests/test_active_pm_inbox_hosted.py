@@ -5,9 +5,14 @@ Synthetic test data only; no credential-shaped strings are used.
 
 import hashlib
 import json
+import os
+from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from llmtool import active_pm_inbox
+from llmtool import worker_dispatch
+from llmtool.task_store import TaskStore
 import test_active_pm_inbox as pm_inbox_fixture
 import test_task_completion as completion_fixture
 from review_trust_fixture import start_module as _start_trust_fixture
@@ -77,7 +82,28 @@ class ActivePMInboxHostedReceiptTests(unittest.TestCase):
     _task = completion_fixture.TaskCompletionTests._task
     _mock_complete_evidence = completion_fixture.TaskCompletionTests._mock_complete_evidence
 
-    setUp = pm_inbox_fixture.ActivePMInboxTests.setUp
+    def setUp(self):
+        self.setUp_fixture()
+        self.claude_home = self.base / 'claude-config'
+        self.codex_home = self.base / 'codex-config'
+        self.pm_cwd = self.base / 'pm-root'
+        self.pm_cwd.mkdir()
+        env = patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.claude_home),
+                                      'CODEX_HOME': str(self.codex_home),
+                                      'HOME': str(self.base / 'home')})
+        env.start()
+        self.addCleanup(env.stop)
+        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+        policy['workers']['company-gw']['dispatch'] = 'ALLOWED'
+        policy['workers']['company-gw']['reason'] = 'test fixture allows isolated route checks'
+        self.policy_path = (self.base / 'worker-dispatch.json').resolve()
+        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
+        policy_patch.start()
+        self.addCleanup(policy_patch.stop)
+        self.session = self._claude_session()
+        self.store = TaskStore(self.base / 'tasks')
+
     _claude_session = pm_inbox_fixture.ActivePMInboxTests._claude_session
     _record_pm = pm_inbox_fixture.ActivePMInboxTests._record_pm
     _ready_task = pm_inbox_fixture.ActivePMInboxTests._ready_task
