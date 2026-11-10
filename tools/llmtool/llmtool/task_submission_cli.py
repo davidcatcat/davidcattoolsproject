@@ -34,6 +34,7 @@ from . import task_completion
 from . import opencode_direct_developer
 from . import codex_direct_developer
 from . import worker_dispatch
+from . import gateway_profiles
 from .run_budget import MAX_REPAIR_ATTEMPTS
 from .developer_output_normalize import _HUNK
 from . import role_config
@@ -4146,6 +4147,14 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
     return 1
 
 
+def _gw_agent_endpoint():
+    """Gateway profile as (provider, generation) for gw-agent; never company-gw (#120)."""
+    gateway = gateway_profiles.load_gateway_profile()
+    provider = {'type': 'openai-compatible', 'model': gateway['model'],
+                'base_url': gateway['base_url']}
+    return provider, {'max_tokens': gateway['max_output_tokens']}
+
+
 def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     """Run the company Gw Agent Gateway route against its registered D6 task."""
     from . import gw_agent_sessions
@@ -4198,9 +4207,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             gateway_data_class not in route_config.get('allowed_data_classes', [])):
         raise LLMToolError('gw-agent data class is not allowed by its profile')
     try:
-        company_config = resolve_profile_config('company-gw', require_configured=True)
-        company_provider = selected_provider(company_config)
-        generation = company_config.get('generation')
+        company_provider, generation = _gw_agent_endpoint()
         model = company_provider.get('model')
         base_url = company_provider.get('base_url')
         profile = route_config.get('profile')
@@ -4241,7 +4248,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 raise ValueError
             route_config['profile']['http_allow_hosts'] = [host]
     except Exception:
-        raise LLMToolError('authorized company-gw profile is unavailable or invalid') from None
+        raise LLMToolError('gateway profile is unavailable or invalid') from None
     effort = route_config['default_effort']
     prompt_packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
