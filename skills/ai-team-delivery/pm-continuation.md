@@ -19,7 +19,7 @@ After recording the next decision, close out completed sessions and retire eligi
 
 ### Validate a Developer result before review (Owner 2026-11-02)
 
-A Developer result is not ready for review until the PM has validated it on EC2. Codex direct, AGY, OpenCode and company `gw` Developers do not run the Task's tests themselves. "Remote testing is handled by PM" in their reply means this step; it does not mean the PM runs the tests locally.
+A Developer result is not ready for review until the PM has validated it on EC2. Codex direct, AGY, OpenCode and home LLM `gw-agent` Developers do not run the Task's tests themselves. "Remote testing is handled by PM" in their reply means this step; it does not mean the PM runs the tests locally.
 
 1. **Commit the result in its D6** without running tests inside it first. Local runs leave `__pycache__`, and ENV-2 then refuses the D6 (`D6_UNREGISTERED_LOCAL_STATE`, shown as `ENV_BOOTSTRAP_REJECTED`, #725). #775 fixed the env-probe `__pycache__` issue, but running tests in a D6 still creates `__pycache__`, so the no-tests-in-D6 rule remains. If anything stray appears, move it out; never delete Developer work.
 2. **Record the result head:** `d6_worktree_lifecycle.py --record-result-task-id <d6>`. Without this, remote-test refuses with `RECEIPT_HEAD_UNRECORDED` (or `RECEIPT_HEAD_MISMATCH` when the recorded head differs from `--sha`).
@@ -193,7 +193,7 @@ For other GitHub activity posts, begin the post with whole-line `<!-- activity: 
 - a background Claude session: `claude agents --json` shows it running (`busy` or `idle`) or finished (`state` `done`), and its transcript holds a first action stamped at or after the dispatch time (history carried over by `--resume` does not count); [claude_bg_dispatch.py](../../tools/llmtool/scripts/claude_bg_dispatch.py) checks this and prints the receipt;
 - Codex direct: the `task <32-hex>` ID and a running `llmtool task delegate` process, followed by the Codex session ID and first event (or a result line);
 - OpenCode or AGY direct: Task developer state `DEVELOPER_DISPATCHING` with provider `opencode-cli` or `agy-cli`, plus a running delegate process, or a result;
-- company `gw`: the recorded result.
+- home LLM `gw-agent`: the recorded result.
 
 Confirm the receipt within 2 minutes of dispatch. Until then record only `DISPATCHED` / `UNKNOWN`, and never report the Worker as delivered, started or working. While waiting for a result, watch Worker state (`claude_bg_dispatch.py watch --name <worker-role>` for Claude, using the same role as dispatch); a blocked, waiting or gone Worker is handled under [BLOCKED](#blocked-diagnose-then-retry-reassign-or-isolate).
 
