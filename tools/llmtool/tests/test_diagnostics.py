@@ -224,6 +224,7 @@ class ErrorCompatibilityTests(unittest.TestCase):
     def test_codes_are_closed_and_exactly_spec_set(self):
         self.assertEqual({code.value for code in d.ErrorCode}, {
             'USER_INPUT_ERROR', 'CONFIG_INVALID', 'CONFIG_PROVIDER_NOT_READY',
+            'COMPANY_GW_DIRECT_RETIRED',
             'AUTH_CREDENTIAL_MISSING', 'AUTH_PROVIDER_REJECTED',
             'ENV_PROVIDER_RUNTIME_MISSING', 'NETWORK_PROVIDER_UNREACHABLE',
             'PROVIDER_TIMEOUT', 'PROVIDER_RATE_LIMITED', 'PROVIDER_HTTP_ERROR',

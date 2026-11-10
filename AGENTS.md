@@ -38,7 +38,7 @@
   - On quota exhaustion, record bounded Task progress, SHA, changed files, unfinished checks and state (including UNKNOWN); release Writer ownership before reassignment. Never replay uncertain mutations or buy a fallback.
 
 - **Company LLM Developer:**
-  - Company `gw` is a third, low-cost Developer route for small, low-risk, clearly testable tasks, selected by the PM and called only through llmtool.
+  - Company `gw` (home LLM) runs only through the API Agent Gateway (`gw-agent`) since the Owner decision of 2026-11-11 (#120); the `company-gw` direct and proposal routes are retired, llmtool refuses them and a Gateway failure reports UNAVAILABLE without fallback.
   - Company `gw` may act as an agent-mode Developer through `gw-agent` on real repository code; Developer choice, mode and scope are PM decisions under the standing Owner authorization (#120, 2026-11-10), which supersedes the 2026-11-03 synthetic-only limit. Every result receives formal cross-family review. Pause after two consecutive failed runs, a write outside allowed paths, a credential or audit finding, or HTTP 429.
   - `gw` may propose code, tests and self-review, but has no shell, filesystem, Git, credential or approval authority. An authorized execution environment applies accepted patches and runs tests.
   - Before each call, record the exact non-sensitive input/egress basis and bounded budget. Do not send secrets, private/customer data or restricted logs.

@@ -11,7 +11,7 @@ security sign-off, QA verdict, or merge authority.
 
 Research findings and benchmark history are preserved in [the 2026-11-03 history](../../docs/history/company-llm-delegation-research-20261103.md).
 
-Company `gw` may act as an agent-mode Developer through `gw-agent` on real repository
+Home LLM `gw` may act as an agent-mode Developer through `gw-agent` on real repository
 code; Developer choice, mode and scope are PM decisions under the standing Owner
 authorization (#120, 2026-11-10), which supersedes the 2026-11-03 synthetic-only limit.
 Every result receives formal cross-family review. Pause after two consecutive failed
@@ -68,7 +68,7 @@ See the [C1B test-triage Worker history](../../docs/history/company-llm-delegati
 
 ## Availability classification
 
-This classification applies to the triage use above and to the company `gw` Developer
+This classification applies to the triage use above and to the home LLM `gw-agent` Developer
 route in [AGENTS.md](../../AGENTS.md). Check the four layers separately. Record each
 layer as `PASS`, `FAIL` or `UNKNOWN`, with its time and evidence, in the
 [Worker dispatch authority and live technical state](../../tools/llmtool/ROADMAP.md):

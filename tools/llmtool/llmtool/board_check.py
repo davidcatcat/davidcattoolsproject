@@ -1259,6 +1259,12 @@ def _row_problem(row):
     for field in ('owner_ref', 'after', 'blocker'):
         if row.get(field) is not None and (type(row[field]) is not str or len(row[field]) > 512):
             return f'{field} is not a short string'
+    if 'next' in row:
+        val = row['next']
+        if (type(val) is not list or
+                not 1 <= len(val) <= 16 or
+                any(type(item) is not str or not 1 <= len(item) <= 64 for item in val)):
+            return 'invalid next list'
     return None
 
 
@@ -1394,14 +1400,35 @@ def check_board(rows, *, store, github_get, list_processes, read_d6=None,
         except Exception:
             state, evidence = UNKNOWN, ['BOARD_CHECK_INTERNAL_ERROR']
         findings.append({'row': _row_label(row, index), 'state': state, 'evidence': evidence})
+        if state == DONE and type(row) is dict and type(row.get('next')) is list:
+            row_id = row['id'] if type(row.get('id')) is str and row['id'] else _row_label(row, index)
+            for next_id in row['next']:
+                if next_id not in rows_by_id:
+                    findings.append({
+                        'row': f'next:{next_id}',
+                        'state': ACTIONABLE,
+                        'evidence': [f'pending next item of {row_id}'],
+                    })
     findings.extend(_unlisted(ctx))
+    anomalies = None
+    if ledger_claims is not None:
+        anomalies = []
+        for item, row in zip(findings, rows):
+            if item['state'] != ACTIONABLE or type(row) is not dict:
+                continue
+            if not any(isinstance(c, dict) and c.get('row') == row.get('id') and
+                       claim_live(c, ctx.store, ctx.now) for c in ledger_claims):
+                anomalies.append({'row': item['row'], 'code': 'IDLE_RUNNABLE'})
     if any(item['state'] in FLAGGED_STATES for item in findings):
         result, code = 'FLAGGED', 2
     elif any(item['state'] == UNKNOWN for item in findings):
         result, code = 'UNKNOWN', 1
     else:
         result, code = 'CLEAN', 0
-    return {'result': result, 'exit_code': code, 'rows': findings}
+    out = {'result': result, 'exit_code': code, 'rows': findings}
+    if anomalies is not None:
+        out['anomalies'] = anomalies
+    return out
 
 
 def github_reader(runner=None):

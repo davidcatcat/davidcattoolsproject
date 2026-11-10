@@ -54,6 +54,37 @@ def open_locked_home(store_root, executor_task_id) -> Tuple[Any, GwAgentSessionL
         raise WiringRefused('SESSION_HOME_UNSAFE') from exc
 
 
+def _plan_resumed_run(
+    binding: Dict[str, Any],
+    *,
+    repair_excerpt: str,
+    data_class: Optional[str],
+) -> Dict[str, Any]:
+    """Build a run plan that resumes an existing session binding."""
+    root_task_id = binding.get('root_task_id')
+    session_id = binding.get('session_id')
+    bound_data_class = binding.get('data_class')
+
+    if data_class is None:
+        effective_data_class = bound_data_class
+    elif data_class == bound_data_class:
+        effective_data_class = bound_data_class
+    else:
+        raise WiringRefused('SESSION_UNAVAILABLE')
+
+    if repair_excerpt.strip():
+        findings = [repair_excerpt]
+    else:
+        findings = []
+
+    return {
+        'gateway_task_id': root_task_id,
+        'resume_session': session_id,
+        'findings': findings,
+        'data_class': effective_data_class,
+    }
+
+
 def plan_run(
     home,
     *,
@@ -65,7 +96,19 @@ def plan_run(
     """Plan gateway-agent run parameters for a first run or repair run."""
     if repair_excerpt is None:
         if session_binding_exists(home):
-            raise WiringRefused('SESSION_EXISTS')
+            try:
+                binding = read_session_binding(home, executor_task_id=executor_task_id)
+                if not isinstance(binding, dict):
+                    raise ValueError('invalid binding structure')
+                root_task_id = binding.get('root_task_id')
+            except (RouteError, Exception) as exc:
+                raise WiringRefused('SESSION_UNAVAILABLE') from exc
+
+            if root_task_id == task_id:
+                raise WiringRefused('SESSION_EXISTS')
+
+            return _plan_resumed_run(binding, repair_excerpt='', data_class=data_class)
+
         if not isinstance(data_class, str) or not data_class:
             raise WiringRefused('SESSION_UNAVAILABLE')
         return {
@@ -77,31 +120,12 @@ def plan_run(
     elif isinstance(repair_excerpt, str):
         try:
             binding = read_session_binding(home, executor_task_id=executor_task_id)
+            if not isinstance(binding, dict):
+                raise ValueError('invalid binding structure')
         except (RouteError, Exception) as exc:
             raise WiringRefused('SESSION_UNAVAILABLE') from exc
 
-        root_task_id = binding.get('root_task_id')
-        session_id = binding.get('session_id')
-        bound_data_class = binding.get('data_class')
-
-        if data_class is None:
-            effective_data_class = bound_data_class
-        elif data_class == bound_data_class:
-            effective_data_class = bound_data_class
-        else:
-            raise WiringRefused('SESSION_UNAVAILABLE')
-
-        if repair_excerpt.strip():
-            findings = [repair_excerpt]
-        else:
-            findings = []
-
-        return {
-            'gateway_task_id': root_task_id,
-            'resume_session': session_id,
-            'findings': findings,
-            'data_class': effective_data_class,
-        }
+        return _plan_resumed_run(binding, repair_excerpt=repair_excerpt, data_class=data_class)
     else:
         raise WiringRefused('SESSION_UNAVAILABLE')
 
