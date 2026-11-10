@@ -8875,7 +8875,8 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
                 now: float | None = None, scope: str = "", *,
                 waiting: int | None = None,
                 top: list[tuple[str, str]] | None = None,
-                parts: dict[int, list[tuple[str, bool]]] | None = None) -> list[tuple[str, str]]:
+                parts: dict[int, list[tuple[str, bool]]] | None = None,
+                entries: list[dict[str, typing.Any]] | None = None) -> list[tuple[str, str]]:
     """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
     parts, if given, gets {line index: [(text, highlighted)]} for each runner
     row line holding a CI reference (the TUI draws those bright white).
@@ -8947,8 +8948,10 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     longest = max([_width(_row_detail(row)) for _, row in tree if _row_detail(row)] or [0])
     detail_cols = (DETAIL_COLS if width is None else
                    max(12, min(longest, DETAIL_MAX, width - name_cols - 8 - 11)))
+    current_section = "live"
     for prefix, row in tree:
         if prefix == "—":
+            current_section = "status" if row.name == STATUS_SECTION else "live"
             if row.name == STATUS_SECTION:
                 out.append(("", ""))   # a blank line sets the Worker list apart
             out.append((f"── {row.name} ──", "section"))
@@ -8962,6 +8965,40 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
         if when:
             line = f"{_pad(line, name_cols + 8 + detail_cols)}  {when}"
         style = _line_style(row, rows)
+        if entries is not None:
+            depth = 0 if prefix == "" else prefix.count("  ") + 1
+            if style == "+":
+                band = "working"
+            elif style == "!":
+                band = "alert"
+            elif style == "dim":
+                band = "idle"
+            else:
+                band = "error"
+            if row.role in ("pm", "developer", "reviewer"):
+                room = row.role
+            elif _is_runner_row(row) or row.name == "EC2 遠端測試":
+                room = "machine"
+            elif row.kind == "worker" and bool(row.authority):
+                room = "developer"
+            elif depth > 0:
+                room = "other"
+                for prev in reversed(entries):
+                    if prev["depth"] < depth:
+                        room = prev["room"]
+                        break
+            else:
+                room = "other"
+            entries.append({
+                "section": current_section,
+                "depth": depth,
+                "name": _shown(row),
+                "state": row.state,
+                "detail": detail,
+                "age": when,
+                "band": band,
+                "room": room,
+            })
         first = len(out)
         out.append((line.rstrip(), style))
         out += [(" " * (name_cols + 8) + piece, style) for piece in pieces[1:]]
@@ -9489,6 +9526,7 @@ def office_state(
     stuck: typing.Any,
     generated_at: typing.Any,
     data_age: typing.Any,
+    office: typing.Any = None,
 ) -> dict[str, typing.Any]:
     """Build the JSON view dictionary from values the screen already displays."""
     top_entries = top if isinstance(top, (list, tuple)) else []
@@ -9563,6 +9601,39 @@ def office_state(
     stuck_entries = stuck if isinstance(stuck, (list, tuple)) else []
     stuck_out = [_state_redact(x) for x in stuck_entries]
 
+    office_out: list[dict[str, typing.Any]] = []
+    if isinstance(office, (list, tuple)):
+        for item in office:
+            if not isinstance(item, dict):
+                continue
+            sec = item.get("section")
+            section = sec if sec in ("live", "status") else "live"
+
+            d = item.get("depth")
+            depth = d if type(d) is int and not isinstance(d, bool) and d >= 0 else 0
+
+            name = _state_redact(item.get("name", ""))
+            state = _state_redact(item.get("state", ""))
+            detail = _state_redact(item.get("detail", ""))
+            age = _state_redact(item.get("age", ""))
+
+            b = item.get("band")
+            band = b if b in ("working", "alert", "idle", "error") else "error"
+
+            r = item.get("room")
+            room = r if r in ("pm", "developer", "reviewer", "machine", "other") else "other"
+
+            office_out.append({
+                "section": section,
+                "depth": depth,
+                "name": name,
+                "state": state,
+                "detail": detail,
+                "age": age,
+                "band": band,
+                "room": room,
+            })
+
     age_val = None
     if data_age is not None:
         try:
@@ -9578,7 +9649,7 @@ def office_state(
         "owner": owner_out,
         "prs": prs_out,
         "stuck": stuck_out,
-        "office": [],
+        "office": office_out,
     }
 
 
