@@ -6434,7 +6434,6 @@ def hosted_ci_rows(ci_runs: list | None, view: CiView | None, now: float) -> lis
                 "wf_name": wf_name,
                 "started": started,
                 "in_progress_jobs": [],
-                "in_progress_count": 0,
                 "queued_count": 0,
             }
         run_data = runs[key]
@@ -6442,13 +6441,10 @@ def hosted_ci_rows(ci_runs: list | None, view: CiView | None, now: float) -> lis
             if run_data["started"] is None or started < run_data["started"]:
                 run_data["started"] = started
 
-        if status == "in_progress":
-            if job_name:
-                if job_name not in run_data["in_progress_jobs"]:
-                    run_data["in_progress_jobs"].append(job_name)
-            else:
-                run_data["in_progress_count"] += 1
-        elif status in CI_ACTIVE or status == "queued":
+        if status == "in_progress" and job_name:
+            if job_name not in run_data["in_progress_jobs"]:
+                run_data["in_progress_jobs"].append(job_name)
+        elif status in CI_ACTIVE or status in ("queued", "in_progress"):
             run_data["queued_count"] += 1
 
     if not runs:
@@ -6465,14 +6461,14 @@ def hosted_ci_rows(ci_runs: list | None, view: CiView | None, now: float) -> lis
         base_text = run_data["base_text"]
         wf_name = run_data["wf_name"]
         in_jobs = run_data["in_progress_jobs"]
-        in_count = len(in_jobs) if in_jobs else run_data["in_progress_count"]
+        in_count = len(in_jobs)
         queued_count = run_data["queued_count"]
 
         if view and view.queued:
             extra_q = sum(1 for _, q_text in view.queued if q_text.startswith(base_text))
             queued_count = max(queued_count, extra_q)
 
-        has_running = (len(in_jobs) > 0 or run_data["in_progress_count"] > 0)
+        has_running = len(in_jobs) > 0
         started = run_data["started"]
         age = max(0.0, now - started) if (started and math.isfinite(started) and started > 0) else None
 
