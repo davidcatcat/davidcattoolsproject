@@ -6606,6 +6606,48 @@ def llmtool_route_outcomes(now: float, root: str | None = None) -> dict:
     return found
 
 
+GW_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$")
+
+
+def gw_task_rows(now: float, root: str | None = None) -> list[OfficeRow]:
+    """Live subagent rows for company-gw Tasks in DEVELOPER_DISPATCHING changed
+    within OFFICE_DONE_WINDOW. Only bounded developer route fields (profile,
+    state, model, executor_task_id) and task_id are read; request, response,
+    diff, summary, acceptance and audit text are never touched."""
+    root = LLMTOOL_TASKS if root is None else root
+    rows = []
+    for path in _llmtool_paths(root):
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        age = max(0.0, now - st.st_mtime)
+        if age > OFFICE_DONE_WINDOW:
+            continue
+        record = _llmtool_record(path, st)
+        if type(record) is not dict:
+            continue
+        developer = record.get("developer")
+        if type(developer) is not dict:
+            continue
+        if developer.get("provider_profile") != "company-gw" or developer.get("state") != "DEVELOPER_DISPATCHING":
+            continue
+        task_id = record.get("task_id")
+        task_id = task_id if type(task_id) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task_id) else ""
+        if not task_id:
+            continue
+        executor_task_id = developer.get("executor_task_id")
+        executor_task_id = (executor_task_id if type(executor_task_id) is str and TASK_ID.fullmatch(executor_task_id)
+                            else None)
+        model = developer.get("model")
+        plain_model = model if type(model) is str and GW_MODEL.fullmatch(model) else "不明"
+        detail = f'{executor_task_id or "?"} · {plain_model} · 工作中'
+        rows.append(OfficeRow(f'home LLM {task_id[:8]}', WORKING, detail, age, 40,
+                              kind='subagent', evidence='llmtool 任務紀錄'))
+    rows.sort(key=lambda r: (r.age if r.age is not None else 1e12, r.name))
+    return rows
+
+
 RECORD_STATES = {   # llmtool task / completion state -> plain words
     "PM_RESPONDED": "PM 已規劃，還沒派給 developer",
     "PM_UNAVAILABLE": "PM 無法使用",
