@@ -4,9 +4,9 @@ from pathlib import Path
 import tempfile
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from io import StringIO
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from llmtool import cli, review_repair, run_budget, task_store, task_submission_cli
 from llmtool.errors import LLMToolError
@@ -303,8 +303,15 @@ class ReviewRepairTests(unittest.TestCase):
                 'acceptance': list(developer['acceptance']) + [bounded]}}
         recorder = kwargs.pop('repair_task_recorder', default_recorder)
         runtime_path = kwargs.pop('runtime_path', '/usr/bin/codex')
-        with patch.object(review_repair.worker_dispatch, 'evaluate',
-                          return_value=decision), \
+        evaluate = kwargs.pop('evaluate', None)
+        evaluate_patch = (
+            patch.object(review_repair.worker_dispatch, 'evaluate', side_effect=evaluate)
+            if evaluate is not None else
+            nullcontext()
+            if isinstance(review_repair.worker_dispatch.evaluate, Mock) else
+            patch.object(review_repair.worker_dispatch, 'evaluate', return_value=decision)
+        )
+        with evaluate_patch, \
              patch.object(review_repair.shutil, 'which', return_value=runtime_path):
             return review_repair.repair_review(
                 store=self.store, task_id=TASK, executor_task=EXECUTOR,
