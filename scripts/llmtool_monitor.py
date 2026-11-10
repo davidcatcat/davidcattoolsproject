@@ -5521,23 +5521,133 @@ def _session_files(top: str) -> list[str]:
 
 
 QUOTA_WARN_PERCENT = 80
+CODEX_QUOTA_PATH = os.path.join(".local", "state", "llmtool", "codex-quota.json")
+CODEX_QUOTA_FILE = os.path.join(os.path.expanduser("~"), CODEX_QUOTA_PATH)
 
 
 def _quota_timestamp(value):
     if type(value) in (int, float):
-        return float(value)
+        return float(value) if math.isfinite(value) and value > 0 else None
     if type(value) is str:
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return parsed.timestamp() if parsed.tzinfo else None
+            ts = parsed.timestamp() if parsed.tzinfo else None
+            return ts if ts is not None and math.isfinite(ts) and ts > 0 else None
         except (ValueError, OverflowError):
             return None
     return None
 
 
-def quota_warnings(now, codex_root=None, claude_root=None) -> list[str]:
-    """Quota notices from bounded local Codex and Claude session tails only."""
+def read_codex_quota(now, path=None) -> dict:
+    """Read ~/.local/state/llmtool/codex-quota.json.
+
+    Returns {'state': 'FRESH', ...} with the figures, or {'state': 'UNKNOWN', 'reason': reason}
+    when the file is missing, unreadable, malformed, not mode 0600, or any window's read time
+    is older than its window_minutes.
+    """
+    if path is None:
+        path = os.path.join(os.path.expanduser("~"), CODEX_QUOTA_PATH)
+    try:
+        now = float(now)
+    except (TypeError, ValueError):
+        return {"state": "UNKNOWN", "reason": "unreadable"}
+
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return {"state": "UNKNOWN", "reason": "missing"}
+    except OSError:
+        return {"state": "UNKNOWN", "reason": "unreadable"}
+
+    if stat.S_IMODE(st.st_mode) != 0o600 or not stat.S_ISREG(st.st_mode):
+        return {"state": "UNKNOWN", "reason": "wrong mode"}
+
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return {"state": "UNKNOWN", "reason": "unreadable"}
+
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return {"state": "UNKNOWN", "reason": "malformed"}
+
+    if not isinstance(data, dict):
+        return {"state": "UNKNOWN", "reason": "malformed"}
+
+    if type(data.get("schema_version")) is not int or data.get("schema_version") != 1:
+        return {"state": "UNKNOWN", "reason": "malformed"}
+
+    primary = data.get("primary")
+    secondary = data.get("secondary")
+    if not isinstance(primary, dict) or not isinstance(secondary, dict):
+        return {"state": "UNKNOWN", "reason": "malformed"}
+
+    for window_data in (primary, secondary):
+        used = window_data.get("used_percent")
+        window_minutes = window_data.get("window_minutes")
+        reset = _quota_timestamp(window_data.get("resets_at"))
+        if (type(used) not in (int, float) or isinstance(used, bool) or used < 0
+                or type(window_minutes) not in (int, float) or isinstance(window_minutes, bool)
+                or window_minutes <= 0
+                or reset is None):
+            return {"state": "UNKNOWN", "reason": "malformed"}
+
+        read_val = (window_data.get("read_at") if "read_at" in window_data
+                    else window_data.get("read_time") if "read_time" in window_data
+                    else data.get("read_at") if "read_at" in data
+                    else data.get("read_time"))
+        read_time = _quota_timestamp(read_val)
+        if read_time is None:
+            return {"state": "UNKNOWN", "reason": "malformed"}
+
+        if now - read_time > window_minutes * 60:
+            return {"state": "UNKNOWN", "reason": "stale"}
+
+    res = dict(data)
+    res["state"] = "FRESH"
+    return res
+
+
+def quota_warnings(now, codex_root=None, claude_root=None, codex_quota_path=None) -> list[str]:
+    """Quota notices from codex-quota.json and bounded local Codex and Claude session tails."""
     out = []
+    seen_windows = set()
+    try:
+        quota_data = read_codex_quota(now, path=codex_quota_path)
+    except Exception:
+        quota_data = {"state": "UNKNOWN", "reason": "unreadable"}
+
+    if quota_data.get("state") == "FRESH":
+        for data in (quota_data.get("primary"), quota_data.get("secondary")):
+            if type(data) is not dict:
+                continue
+            used = data.get("used_percent")
+            window = data.get("window_minutes")
+            reset = _quota_timestamp(data.get("resets_at"))
+            read_time = (
+                _quota_timestamp(data.get("read_at"))
+                or _quota_timestamp(data.get("read_time"))
+                or _quota_timestamp(quota_data.get("read_at"))
+                or _quota_timestamp(quota_data.get("read_time"))
+                or now
+            )
+            if (type(used) not in (int, float) or type(used) is bool
+                    or type(window) not in (int, float) or type(window) is bool
+                    or reset is None or reset <= now or used < QUOTA_WARN_PERCENT):
+                continue
+            window_text = ("5 小時額度" if window == 300 else
+                           "7 天額度" if window == 10080 else f"{window:g} 分鐘額度")
+            age = max(0, int((now - read_time) // 60))
+            reset_local = datetime.fromtimestamp(reset)
+            reset_format = "%H:%M" if reset_local.date() == datetime.fromtimestamp(now).date() else "%m-%d %H:%M"
+            line = (f"Codex {window_text}已用 {used:g}%，{reset_local:{reset_format}} 重置"
+                    f"（紀錄 {age} 分鐘前）")
+            if line not in out:
+                out.append(line)
+                seen_windows.add(window_text)
+
     root = CODEX_SESSIONS if codex_root is None else codex_root
     paths = []
     for day in range(CODEX_DAYS):
@@ -5583,6 +5693,8 @@ def quota_warnings(now, codex_root=None, claude_root=None) -> list[str]:
                     continue
                 window_text = ("5 小時額度" if window == 300 else
                                "7 天額度" if window == 10080 else f"{window:g} 分鐘額度")
+                if window_text in seen_windows:
+                    continue
                 age = max(0, int((now - rate_modified) // 60))
                 reset_local = datetime.fromtimestamp(reset)
                 reset_format = "%H:%M" if reset_local.date() == datetime.fromtimestamp(now).date() else "%m-%d %H:%M"
@@ -5590,6 +5702,7 @@ def quota_warnings(now, codex_root=None, claude_root=None) -> list[str]:
                         f"（紀錄 {age} 分鐘前）")
                 if line not in out:
                     out.append(line)
+                    seen_windows.add(window_text)
 
     for top in claude_roots(claude_root):
         candidates = []
@@ -9127,7 +9240,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="read GitHub only through `gh api` processes (never holds gh's token; more CPU)")
     parser.add_argument("--clear-rule-alert", type=int, metavar="PR",
                         help="clear one local sensitive-path alert by PR number")
+    parser.add_argument("--codex-quota", action="store_true",
+                        help="print the Codex quota status as one JSON line, then exit")
     args = parser.parse_args(argv)
+    if args.codex_quota:
+        print(json.dumps(read_codex_quota(time.time()), ensure_ascii=False))
+        return 0
     if args.clear_rule_alert is not None:
         try:
             state = _load_rule_alerts(RULE_ALERT_FILE)
