@@ -1287,7 +1287,7 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
 class ReviewRefusalReceiptTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.store_dir = Path(self.temp.name) / 'tasks'
+        self.store_dir = Path(self.temp.name).resolve() / 'tasks'
         self.store, self.task_id = _real_store(self.store_dir)
         self.receipt_dir = self.store_dir.parent / 'review-refusals'
         self.executor = SimpleNamespace(root='/repo/executor', common_dir='/repo/.git')
@@ -1470,7 +1470,7 @@ class ReviewRefusalReceiptTests(unittest.TestCase):
         self.assertEqual(len(matching), 64)
 
     def test_symlinked_directory_refused(self):
-        target_dir = Path(self.temp.name) / 'fake-receipts-target'
+        target_dir = Path(self.temp.name).resolve() / 'fake-receipts-target'
         target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.receipt_dir.symlink_to(target_dir, target_is_directory=True)
 
