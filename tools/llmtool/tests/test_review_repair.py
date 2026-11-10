@@ -4,9 +4,9 @@ from pathlib import Path
 import tempfile
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from io import StringIO
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from llmtool import cli, review_repair, run_budget, task_store, task_submission_cli
 from llmtool.errors import LLMToolError
@@ -182,6 +182,61 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(captured[0].owner_ref, developer['owner_assignment_ref'])
         self.assertEqual(captured[0].cwd, '/registered/d6')
 
+    def test_gw_agent_repair_delegate_args(self):
+        self.assertEqual(review_repair._worker_key('gw-agent'), 'company-gw-agent')
+        for data_class in ('SYNTHETIC', 'PUBLIC_REPO'):
+            with self.subTest(data_class=data_class):
+                captured = []
+                task = {'task_id': TASK, 'pm_assignment': {'acceptance': ['Fix it.']}}
+                developer = {'provider_profile': 'gw-agent',
+                             'data_class': data_class,
+                             'read_paths': ['tools/llmtool/llmtool'],
+                             'write_paths': ['tools/llmtool/llmtool/review_repair.py'],
+                             'acceptance': ['Fix it.'],
+                             'egress_basis': 'Task authorized source files only.'}
+                with patch.object(review_repair, '_registered_d6', return_value=(
+                        type('Registration', (), {'root': '/registered/d6'})(), object())):
+                    result = review_repair._delegate_repair(
+                        task=task, developer=developer, packet={'verdict_comment_id': 9,
+                            'task': TASK,
+                            'failed_head': HEAD, 'version': 1, 'findings_count': 1,
+                            'reviewer_text_excerpt_untrusted_data': 'Fix the reported issue.'},
+                        executor_task=EXECUTOR,
+                        delegate=lambda args, store: captured.append(args) or 0,
+                        store=type('S', (), {'get': lambda _self, _task_id: _record()})())
+                self.assertEqual(result, 0)
+                args = captured[0]
+                self.assertEqual(args.provider, 'gw-agent')
+                self.assertEqual(args.mode, 'direct')
+                self.assertEqual(args.read_path, ['tools/llmtool/llmtool'])
+                self.assertEqual(args.write_path, ['tools/llmtool/llmtool/review_repair.py'])
+                self.assertEqual(args.acceptance, ['Fix it.'])
+                self.assertEqual(args.egress_basis, 'Task authorized source files only.')
+                self.assertEqual(args.data_class, data_class)
+                self.assertEqual(args.cwd, '/registered/d6')
+
+    def test_gw_agent_repair_refuses_missing_or_unknown_data_class(self):
+        for bad_class in (None, '', 'UNKNOWN', 'INVALID'):
+            with self.subTest(data_class=bad_class):
+                task = {'task_id': TASK, 'pm_assignment': {'acceptance': ['Fix it.']}}
+                developer = {'provider_profile': 'gw-agent',
+                             'read_paths': ['tools/llmtool/llmtool'],
+                             'write_paths': ['tools/llmtool/llmtool/review_repair.py'],
+                             'acceptance': ['Fix it.']}
+                if bad_class is not None:
+                    developer['data_class'] = bad_class
+                with self.assertRaises(LLMToolError) as caught:
+                    review_repair._delegate_repair(
+                        task=task, developer=developer, packet={'verdict_comment_id': 9,
+                            'task': TASK,
+                            'failed_head': HEAD, 'version': 1, 'findings_count': 1,
+                            'reviewer_text_excerpt_untrusted_data': 'Fix finding.'},
+                        executor_task=EXECUTOR,
+                        delegate=lambda args, store: 0,
+                        store=type('S', (), {'get': lambda _self, _task_id: _record()})())
+                self.assertEqual(caught.exception.review_repair_code,
+                                 'REPAIR_DATA_CLASS_INVALID')
+
     def test_repair_delegate_refuses_unregistered_or_moved_d6_before_provider(self):
         original = _record()
         repair_task = {'task_id': 'f' * 32,
@@ -248,8 +303,15 @@ class ReviewRepairTests(unittest.TestCase):
                 'acceptance': list(developer['acceptance']) + [bounded]}}
         recorder = kwargs.pop('repair_task_recorder', default_recorder)
         runtime_path = kwargs.pop('runtime_path', '/usr/bin/codex')
-        with patch.object(review_repair.worker_dispatch, 'evaluate',
-                          return_value=decision), \
+        evaluate = kwargs.pop('evaluate', None)
+        evaluate_patch = (
+            patch.object(review_repair.worker_dispatch, 'evaluate', side_effect=evaluate)
+            if evaluate is not None else
+            nullcontext()
+            if isinstance(review_repair.worker_dispatch.evaluate, Mock) else
+            patch.object(review_repair.worker_dispatch, 'evaluate', return_value=decision)
+        )
+        with evaluate_patch, \
              patch.object(review_repair.shutil, 'which', return_value=runtime_path):
             return review_repair.repair_review(
                 store=self.store, task_id=TASK, executor_task=EXECUTOR,
@@ -729,6 +791,25 @@ class ReviewRepairTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, 'refused') as raised:
                 self.dispatch(decision=decision)
         self.assertEqual(getattr(raised.exception, 'review_repair_code'), 'PAUSED')
+
+    def test_gw_agent_paused_policy_refused_before_claim(self):
+        record = self.store.get(TASK)
+        record['developer']['provider_profile'] = 'gw-agent'
+        record['developer']['data_class'] = 'SYNTHETIC'
+        record['pm_assignment']['route'] = 'gw-agent'
+        self.store = TempTaskStore(self.temp.name, record)
+        decision = type('Decision', (), {'allowed': False, 'reason_code': 'PAUSED'})()
+        evaluated = []
+        def capture_eval(*args, **kwargs):
+            evaluated.append(args)
+            return decision
+        with patch.object(review_repair.worker_dispatch, 'evaluate', side_effect=capture_eval):
+            with self.assertRaises(LLMToolError) as caught:
+                self.dispatch(decision=decision)
+        self.assertEqual(caught.exception.review_repair_code, 'PAUSED')
+        self.assertEqual(evaluated, [('company-gw-agent', None, TASK)])
+        self.assertNotIn('review_repair_claims', self.store.get(TASK))
+        self.assertEqual(self.calls, [])
 
     def test_company_route_refused_before_task_record_or_claim(self):
         record = self.store.get(TASK)

@@ -31,6 +31,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
+from . import github_identity
 from . import source_freshness
 from . import trust
 from .errors import LLMToolError
@@ -2014,10 +2015,10 @@ def _github_get(path):
     if gh is None:
         _stop('GITHUB_EVIDENCE_UNAVAILABLE')
     slug = _trusted_slug()
-    env = {'PATH': _GH_PATH, 'HOME': os.path.expanduser('~'), 'LC_ALL': 'C',
-           'GH_PROMPT_DISABLED': '1', 'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1'}
-    if os.environ.get('GH_CONFIG_DIR'):
-        env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
+    home = os.environ.get('HOME') or os.path.expanduser('~')
+    env = {'PATH': _GH_PATH, 'HOME': home, 'LC_ALL': 'C',
+           'GH_PROMPT_DISABLED': '1', 'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1',
+           'GH_CONFIG_DIR': github_identity.ai_gh_config_dir(home)}
     argv = [gh, 'api', '--method', 'GET',
             '-H', 'Accept: application/vnd.github+json',
             '-H', 'X-GitHub-Api-Version: 2022-11-28',

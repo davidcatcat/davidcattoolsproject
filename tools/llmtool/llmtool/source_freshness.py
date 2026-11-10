@@ -17,6 +17,7 @@ import warnings
 
 import llmtool
 
+from . import github_identity
 from .errors import LLMToolError
 
 
@@ -97,11 +98,17 @@ def read_pin():
 
 def _fetch_origin_main(repo_root):
     """Fetch origin/main, stopping the full process group if it times out."""
+    home = os.environ.get('HOME') or os.path.expanduser('~')
+    try:
+        env = github_identity.ai_github_env(os.environ, home)
+    except (ValueError, TypeError):
+        return
+    env['GIT_TERMINAL_PROMPT'] = '0'
     argv = ['git', 'fetch', '--quiet', '--no-tags', 'origin', 'main']
     try:
         process = subprocess.Popen(
             argv, cwd=str(repo_root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'},
+            text=True, env=env,
             start_new_session=True)
     except OSError:
         return
