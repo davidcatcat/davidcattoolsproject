@@ -11,10 +11,11 @@ security sign-off, QA verdict, or merge authority.
 
 Research findings and benchmark history are preserved in [the 2026-11-03 history](../../docs/history/company-llm-delegation-research-20261103.md).
 
-Company `gw` may act as an agent-mode Developer through `gw-agent` only for synthetic
-test content, and every result receives formal Claude review. Pause after two
-consecutive failed runs, a write outside allowed paths, a credential or audit finding,
-or HTTP 429; real repository work needs a new Owner decision.
+Company `gw` may act as an agent-mode Developer through `gw-agent` on real repository
+code; Developer choice, mode and scope are PM decisions under the standing Owner
+authorization (#120, 2026-11-10), which supersedes the 2026-11-03 synthetic-only limit.
+Every result receives formal cross-family review. Pause after two consecutive failed
+runs, a write outside allowed paths, a credential or audit finding, or HTTP 429.
 
 ## Decision order
 
