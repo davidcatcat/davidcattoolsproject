@@ -3870,7 +3870,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         return 1
     try:
         saved = store.update(task['task_id'], developer=developer, completion=completion)
-    except Exception:
+    except Exception as exc:
+        print(f'AGY_RESULT_PERSISTENCE_REJECTED reason={getattr(exc, "task_store_error_code", None) or type(exc).__name__}', file=sys.stderr)
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', artifact=None,
             artifact_sha256=None, error_code='AGY_RESULT_PERSISTENCE_REJECTED',
             execution={**developer['execution'], 'status': 'UNKNOWN',
