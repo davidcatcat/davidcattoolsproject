@@ -26,11 +26,11 @@
         "model": "gw-agent-default",
         "context_cap_tokens": 32768,
         "max_output_tokens": 8192,
-        "allowed_data_classes": ["synthetic"],
-        "data_class_map": {"SYNTHETIC": "synthetic"}
+        "allowed_data_classes": ["synthetic", "public_repo"],
+        "data_class_map": {"SYNTHETIC": "synthetic", "PUBLIC_REPO": "public_repo"}
       },
-      "authorization_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6594101520",
-      "allowed_data_classes": ["synthetic"]
+      "authorization_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167",
+      "allowed_data_classes": ["synthetic", "public_repo"]
     }
   }
 }
