@@ -2282,7 +2282,7 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
                 type(run.get('run_attempt')) is not int or run['run_attempt'] <= 0):
             _stop('CI_WORKFLOW_RUNS_INVALID')
         candidates.append(run)
-    if not candidates:
+    if not candidates and type(pr_head_ref) is str and pr_head_ref:
         # Fall back to workflow_dispatch runs when no pull_request run exists.
         try:
             dispatch_runs = _github_get(
