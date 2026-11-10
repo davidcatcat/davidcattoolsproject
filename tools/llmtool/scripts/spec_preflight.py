@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -120,12 +121,17 @@ def spec_tier(spec, context_bytes=0):
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
-    if len(args) != 1:
+    ladder_log: str | None = None
+    if len(args) == 1:
+        spec_path = args[0]
+    elif len(args) == 3 and args[1] == "--ladder":
+        spec_path, ladder_log = args[0], args[2]
+    else:
         print("SPEC_PREFLIGHT_INVALID")
         return 2
 
     try:
-        spec = _strict_json_object(Path(args[0]).read_text(encoding="utf-8"))
+        spec = _strict_json_object(Path(spec_path).read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
         print("SPEC_PREFLIGHT_INVALID")
         return 2
@@ -140,7 +146,39 @@ def main(argv: list[str] | None = None) -> int:
     if failures:
         print("SPEC_PREFLIGHT_FAIL:" + ",".join(failures))
         return 1
-    print("SPEC_PREFLIGHT_OK")
+    if ladder_log is None:
+        print("SPEC_PREFLIGHT_OK")
+        return 0
+
+    # Ladder mode, only reached after check(spec) passed.
+    try:
+        log_text = Path(ladder_log).read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        print("SPEC_PREFLIGHT_INVALID")
+        return 2
+
+    entries: list[dict[str, Any]] = []
+    for line in log_text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            entries.append(value)
+
+    current = ladder_tier(entries)[0]
+    context_file = spec.get("context_file")
+    if isinstance(context_file, str) and os.path.isfile(context_file):
+        context_bytes = os.path.getsize(context_file)
+    else:
+        context_bytes = 0
+    required = spec_tier(spec, context_bytes)
+    if required > current:
+        print(f"SPEC_LADDER_TIER_EXCEEDED:required={required},current={current}")
+        return 2
+    print(f"SPEC_PREFLIGHT_OK:tier={required},current={current}")
     return 0
 
 
