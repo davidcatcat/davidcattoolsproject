@@ -71,8 +71,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             data_class='SYNTHETIC', egress_basis='Synthetic test context.',
             acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
             read_path=['src.py'], write_path=['src.py'])
-        route_config = {'allowed_data_classes': ['synthetic'], 'profile': {
-            'data_class_map': {'SYNTHETIC': 'synthetic'}, 'context_cap_tokens': 32768,
+        route_config = {'allowed_data_classes': ['synthetic', 'public_repo'], 'profile': {
+            'data_class_map': {'SYNTHETIC': 'synthetic', 'PUBLIC_REPO': 'public_repo'}, 'context_cap_tokens': 32768,
             'max_output_tokens': 8192}}
         with patch.object(task_completion, 'validate_task_binding'), \
              patch.object(task_submission_cli, '_delegate_d6_binding',
@@ -146,12 +146,14 @@ class GwAgentRouteWiringTests(unittest.TestCase):
     def test_route_config_and_data_class_are_validated(self):
         config = load_route_config()['routes']['gw-agent']
         self.assertEqual(config['package_path'], '~/.local/lib/api-agent-gateway')
-        self.assertEqual(config['allowed_data_classes'], ['synthetic'])
+        self.assertEqual(config['allowed_data_classes'], ['synthetic', 'public_repo'])
         self.assertEqual(config['profile']['adapter'], 'openai-chat-tools')
         self.assertNotIn('base_url', config['profile'])
-        self.assertEqual(config['profile']['allowed_data_classes'], ['synthetic'])
+        self.assertEqual(config['profile']['allowed_data_classes'], ['synthetic', 'public_repo'])
+        self.assertEqual(config['profile']['data_class_map'],
+                         {'SYNTHETIC': 'synthetic', 'PUBLIC_REPO': 'public_repo'})
         self.assertEqual(config['authorization_ref'],
-            'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6594101520')
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167')
         with tempfile.TemporaryDirectory() as temp:
             package = Path(temp) / 'api_agent_gateway'
             package.mkdir()
@@ -170,6 +172,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 'max_wall_seconds': 60, 'max_tool_result_bytes': 4096,
                 'max_sent_bytes': 100000},
             'egress_basis': 'Synthetic test content.', 'data_class': 'synthetic'}}
+        route.validate_request(request)
+        request['task']['data_class'] = 'public_repo'
         route.validate_request(request)
         request['task']['data_class'] = 'RESTRICTED'
         with self.assertRaises(LLMToolError):
@@ -223,6 +227,131 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             with self.assertRaises(LLMToolError):
                 task_submission_cli.run_task_gw_agent_delegate(args, store=store)
         self.assertEqual(store.mutations, 0)
+
+    def test_private_data_class_is_refused_with_profile_error(self):
+        task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'private task',
+            'task_binding': {'contract_digest': 'c' * 64},
+            'pm_assignment': {'route': 'gw-agent', 'risk': 'LOW', 'goal': 'goal',
+                              'acceptance': ['record result']},
+            'developer': None}
+
+        class Store:
+            def __init__(self):
+                self.mutations = 0
+
+            def get(self, _task_id):
+                return dict(task)
+
+            def update(self, _task_id, **_updates):
+                self.mutations += 1
+                raise AssertionError('disallowed data class must not mutate Task')
+
+        registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
+            common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
+            session_ref='session-ref', native_session_id=None)
+        snapshot = SimpleNamespace(head='d' * 40)
+        args = Namespace(task_id='a' * 32, mode='direct', context_stdin=False,
+            data_class='PRIVATE', egress_basis='Approved non-sensitive context.',
+            acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
+            read_path=['src.py'], write_path=['src.py'])
+        store = Store()
+        with patch.object(task_completion, 'validate_task_binding'), \
+             patch.object(task_submission_cli, '_delegate_d6_binding',
+                          return_value=(registration, snapshot)), \
+             patch.object(task_submission_cli, '_assignment_paths',
+                          return_value=(['src.py'], ['src.py'])):
+            with self.assertRaisesRegex(
+                    LLMToolError, 'gw-agent data class is not allowed by its profile'):
+                task_submission_cli.run_task_gw_agent_delegate(args, store=store)
+        self.assertEqual(store.mutations, 0)
+
+    def test_delegate_without_egress_basis_is_refused(self):
+        class UnreadStore:
+            def get(self, _task_id):
+                raise AssertionError('missing egress basis must be refused before Task read')
+
+        for missing in (None, '', '   '):
+            args = Namespace(task_id='a' * 32, mode='direct', context_stdin=False,
+                             egress_basis=missing, data_class='PUBLIC_REPO')
+            with self.assertRaises(LLMToolError):
+                task_submission_cli.run_task_gw_agent_delegate(args, store=UnreadStore())
+
+    def test_public_repo_data_class_passes_class_check_and_invokes_runner(self):
+        task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'public repo task',
+            'task_binding': {'contract_digest': 'c' * 64},
+            'pm_assignment': {'route': 'gw-agent', 'risk': 'LOW', 'goal': 'goal',
+                              'acceptance': ['record result']},
+            'developer': None, 'completion': None}
+
+        class Store:
+            def __init__(self):
+                self._temp = tempfile.TemporaryDirectory(prefix='gw-agent-store-')
+                self.root = Path(self._temp.name) / 'tasks'
+                self.value = dict(task)
+
+            def get(self, _task_id):
+                return dict(self.value)
+
+            def compare_and_update(self, _task_id, *, expected, **updates):
+                self.value.update(updates)
+                return dict(self.value)
+
+            def d6_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                           expected, **updates):
+                return self.compare_and_update(task_id, expected=expected, **updates)
+
+            def update(self, _task_id, **updates):
+                self.value.update(updates)
+                return dict(self.value)
+
+        registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
+            common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
+            session_ref='session-ref', native_session_id=None)
+        snapshot = SimpleNamespace(head='d' * 40)
+        args = Namespace(task_id='a' * 32, mode='direct', context_stdin=False,
+            data_class='PUBLIC_REPO', egress_basis='Public repository test context.',
+            acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
+            read_path=['src.py'], write_path=['src.py'])
+        store = Store()
+        self.addCleanup(store._temp.cleanup)
+        route = SimpleNamespace(validate_profile=lambda *_args: None)
+        decision = worker_dispatch.PolicyDecision('company-gw-agent', True,
+                                                  'OWNER_POLICY_ALLOWED', 'f' * 64)
+        seen_requests = []
+        def fake_runner(_route, request, *, gate, **_kwargs):
+            self.assertIs(gate(), decision)
+            seen_requests.append(copy.deepcopy(request))
+            raise RouteError('GW_AGENT_TIMEOUT')
+
+        with patch.object(task_completion, 'validate_task_binding'), \
+             patch.object(task_completion, 'bind_executor_task',
+                          return_value=(registration, snapshot)), \
+             patch.object(task_submission_cli, '_delegate_d6_binding',
+                          return_value=(registration, snapshot)), \
+             patch.object(task_submission_cli, '_assignment_paths',
+                          return_value=(['src.py'], ['src.py'])), \
+             patch.object(task_submission_cli, '_remote_receipt_test_policy', return_value='REMOTE_RECEIPT'), \
+             patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
+             patch.object(task_submission_cli, 'resolve_profile_config',
+                          return_value={'generation': {'max_tokens': 49152}}), \
+             patch.object(task_submission_cli, 'selected_provider', return_value={
+                 'type': 'openai-compatible', 'model': 'authorized-model',
+                 'base_url': 'https://authorized.example'}), \
+             patch.object(worker_dispatch, 'authorize_dispatch'), \
+             patch.object(worker_dispatch, 'evaluate', return_value=decision), \
+             patch.object(task_submission_cli, 'GwAgentRoute', return_value=route), \
+             patch.object(task_submission_cli, 'for_platform', return_value=object()), \
+             patch.object(task_submission_cli, '_task_view', return_value={}):
+            status = task_submission_cli.run_task_gw_agent_delegate(
+                args, store=store, route_runner=fake_runner)
+
+        self.assertEqual(status, 1)
+        self.assertEqual(len(seen_requests), 1)
+        self.assertEqual(seen_requests[0]['task']['data_class'], 'public_repo')
+        self.assertEqual(store.value['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(store.value['developer']['error_code'], 'DEVELOPER_GW_AGENT_TIMEOUT')
 
     def test_gw_agent_uses_claude_formal_reviewer(self):
         task = {'task_id': 'a' * 32, 'run_id': 'b' * 32,
@@ -303,13 +432,13 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': {
-                              'allowed_data_classes': ['synthetic'],
+                              'allowed_data_classes': ['synthetic', 'public_repo'],
                               'profile': {'adapter': 'openai-chat-tools',
                                   'base_url': 'https://api.openai.com/v1',
                                   'model': 'gw-agent-default',
                                   'context_cap_tokens': 32768,
                                   'max_output_tokens': 8192,
-                                  'allowed_data_classes': ['synthetic']},
+                                  'allowed_data_classes': ['synthetic', 'public_repo']},
                               'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
              patch.object(task_submission_cli, 'resolve_profile_config',
                           return_value={'generation': {'max_tokens': 49152}}), \
@@ -506,13 +635,13 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': {
-                              'allowed_data_classes': ['synthetic'],
+                              'allowed_data_classes': ['synthetic', 'public_repo'],
                               'profile': {'adapter': 'openai-chat-tools',
                                   'base_url': 'https://api.openai.com/v1',
                                   'model': 'gw-agent-default',
                                   'context_cap_tokens': 32768,
                                   'max_output_tokens': 8192,
-                                  'allowed_data_classes': ['synthetic']},
+                                  'allowed_data_classes': ['synthetic', 'public_repo']},
                               'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
              patch.object(task_submission_cli, 'resolve_profile_config',
                           return_value={'generation': {'max_tokens': 49152}}), \
@@ -753,7 +882,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': {
-                              'allowed_data_classes': ['synthetic'],
+                              'allowed_data_classes': ['synthetic', 'public_repo'],
                               'profile': gateway_profile,
                               'profile_name': 'llmtool-direct',
                               'authorization_ref': 'pm-task-ref',
@@ -945,7 +1074,8 @@ class GwAgentRealStoreTests(unittest.TestCase):
     def _delegate(self, target, *, usage=(1026, 49), served_model='qwen3.8-27b',
                   provider_model='gw', reject_responded=False, route_runner=None,
                   wrap_store=None, gate=None, authorize=None, route_factory=None,
-                  content='hello synthetic\n', bind=None, repair_packet=None):
+                  content='hello synthetic\n', bind=None, repair_packet=None,
+                  data_class='SYNTHETIC', egress_basis='Synthetic test content only.'):
         # #1072: without ``bind`` the D6 session step keeps today's unbound
         # result; with it the real step runs against that fake lifecycle helper.
         task_id = self.task_id = self._active_pm_task(target)
@@ -964,7 +1094,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
             self.reply(self.tool_call('finish', summary='done'), model=served_model,
                        usage=usage)))
         args = Namespace(task_id=task_id, mode='direct', context_stdin=False,
-            data_class='SYNTHETIC', egress_basis='Synthetic test content only.',
+            data_class=data_class, egress_basis=egress_basis,
             acceptance=[f'Only {target} is created.'], selection_source='PM',
             executor_task='executor-d6', read_path=[target], write_path=[target],
             cwd=str(self.root))
@@ -1126,6 +1256,14 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual((code, callback['state'], callback['missing_gates']),
                          (0, 'PM_EVIDENCE_READY', []))
         self.assertEqual(callback['evidence']['verification_state'], 'READY')
+
+    def test_public_repo_data_class_succeeds_on_real_store(self):
+        target = 'gw-agent-public-repo.md'
+        code, task = self._delegate(
+            target, data_class='PUBLIC_REPO',
+            egress_basis='Public repository test context.')
+        self.assertEqual(code, 0)
+        self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
 
     def test_docs_success_with_unknown_usage_persists_served_model(self):
         target = 'gw-agent-unknown-usage.md'
