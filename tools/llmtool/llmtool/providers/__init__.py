@@ -3,13 +3,14 @@
 import re
 from types import MappingProxyType
 from typing import Iterable
+from urllib.parse import urlsplit
 
 from .openai_compatible import OpenAICompatibleClient
 from .openai import OpenAIProvider
 from .claude_cli import ClaudeCLIProvider
 from .codex_cli import CodexCLIProvider
 from .base import Provider, ProviderCapabilities
-from ..errors import LLMToolError
+from ..errors import LLMToolError, coded_error
 
 
 class ProviderRegistry:
@@ -52,7 +53,55 @@ def get_provider_capabilities(type_name: str) -> ProviderCapabilities:
     return PROVIDER_REGISTRY.capabilities(type_name)
 
 
+def _origin(url: str | None) -> tuple[str, str, int | None] | None:
+    """Extract (scheme, lowercase host, port with default 80/443) from a URL."""
+    if not url or not isinstance(url, str):
+        return None
+    try:
+        parsed = urlsplit(url.strip())
+    except Exception:
+        return None
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    if not scheme or not host:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if port is None:
+        if scheme == "http":
+            port = 80
+        elif scheme == "https":
+            port = 443
+    return (scheme, host, port)
+
+
 def create_client(config, key=None) -> Provider:
+    active_name = config.get("active_provider")
+    providers = config.get("providers", {})
+    provider = providers.get(active_name) if isinstance(providers, dict) else None
+
+    # Refuse direct company-gw access or any profile matching its origin.
+    is_direct_gw = active_name == "company-gw"
+    if not is_direct_gw and isinstance(providers, dict) and "company-gw" in providers:
+        gw_profile = providers["company-gw"]
+        if isinstance(gw_profile, dict):
+            gw_origin = _origin(gw_profile.get("base_url"))
+            active_origin = _origin(provider.get("base_url")) if isinstance(provider, dict) else None
+            if gw_origin is not None and active_origin == gw_origin:
+                is_direct_gw = True
+
+    if is_direct_gw:
+        provider_type = provider.get("type") if isinstance(provider, dict) else None
+        source = f"provider.{provider_type}" if provider_type else "provider"
+        raise coded_error(
+            "direct company-gw provider access is retired per Owner decision 2026-11-11; use gw-agent",
+            "COMPANY_GW_DIRECT_RETIRED",
+            source,
+            user_action_required=True,
+        )
+
     provider = config["providers"][config["active_provider"]]
     implementation = client_type(provider["type"])
     implementation.validate_ready(provider)

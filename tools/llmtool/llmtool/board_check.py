@@ -47,6 +47,7 @@ ACTIONABLE = 'ACTIONABLE'
 ANOMALY = 'ANOMALY'
 UNKNOWN = 'UNKNOWN'
 DONE = 'DONE'
+CLAIMED = 'CLAIMED'
 FLAGGED_STATES = frozenset((ACTIONABLE, ANOMALY))
 
 LEDGER_SCHEMA_VERSION = 1
@@ -606,13 +607,16 @@ def claim_row(ledger, rows, row, holder, task_id=None, store=None, now=None):
 class _Context:
     """Cached, read-only evidence for one board check."""
 
-    def __init__(self, *, store, github_get, list_processes, read_d6, evaluate, now):
+    def __init__(self, *, store, github_get, list_processes, read_d6, evaluate, now,
+                 ledger_claims=None, ledger_unreadable=False):
         self.store = store
         self._github_get = github_get
         self._list_processes = list_processes
         self._read_d6 = read_d6
         self._evaluate = evaluate
         self.now = now
+        self.ledger_claims = ledger_claims
+        self.ledger_unreadable = ledger_unreadable
         self._ids = None
         self._records = {}
         self._processes = None
@@ -1255,6 +1259,12 @@ def _row_problem(row):
     for field in ('owner_ref', 'after', 'blocker'):
         if row.get(field) is not None and (type(row[field]) is not str or len(row[field]) > 512):
             return f'{field} is not a short string'
+    if 'next' in row:
+        val = row['next']
+        if (type(val) is not list or
+                not 1 <= len(val) <= 16 or
+                any(type(item) is not str or not 1 <= len(item) <= 64 for item in val)):
+            return 'invalid next list'
     return None
 
 
@@ -1273,8 +1283,37 @@ def _classify_row(ctx, row, rows_by_id, duplicate_ids):
     gates, problem = _row_gates(row, rows_by_id)
     if problem is not None:
         return ANOMALY, [problem]
-    if row.get('task_id') is not None:
+
+    if getattr(ctx, 'ledger_unreadable', False) and row.get('task_id') is None:
+        return UNKNOWN, ['LEDGER_UNREADABLE']
+
+    ledger_claims = getattr(ctx, 'ledger_claims', None)
+    if ledger_claims is not None:
+        row_id = row.get('id')
+        row_claims = [c for c in ledger_claims
+                      if isinstance(c, dict) and c.get('row') == row_id] if isinstance(row_id, str) else []
+        live_claims = [c for c in row_claims if claim_live(c, ctx.store, ctx.now)]
+
+        if row.get('task_id') is not None:
+            if any(c.get('task_id') is not None and c.get('task_id') != row['task_id'] for c in live_claims):
+                return ANOMALY, ['board task differs from ledger claim']
+            return _classify_task(ctx, row, row['task_id'], gates, rows_by_id)
+
+        bound_claims = [c for c in live_claims if c.get('task_id') is not None]
+        if bound_claims:
+            bound_task_id = bound_claims[-1]['task_id']
+            ctx.covered_tasks.add(bound_task_id)
+            return _classify_task(ctx, row, bound_task_id, gates, rows_by_id)
+
+        if live_claims:
+            return CLAIMED, ['live reservation']
+
+        if row_claims:
+            return ANOMALY, ['stale ledger claim']
+
+    elif row.get('task_id') is not None:
         return _classify_task(ctx, row, row['task_id'], gates, rows_by_id)
+
     if row.get('pr') is not None:
         return _classify_pr(ctx, row, row['pr'], gates, rows_by_id)
     return _finish(ctx, row, None, gates, rows_by_id,
@@ -1334,12 +1373,18 @@ def _row_label(row, index):
 
 
 def check_board(rows, *, store, github_get, list_processes, read_d6=None,
-                evaluate=None, now=None):
+                evaluate=None, now=None, ledger_claims=None,
+                ledger_unreadable=False):
     """Classify every row and return {'result', 'exit_code', 'rows'}."""
+    if ledger_claims == 'LEDGER_UNREADABLE':
+        ledger_claims = None
+        ledger_unreadable = True
     ctx = _Context(store=store, github_get=github_get, list_processes=list_processes,
                    read_d6=read_d6 or task_advance._d6_snapshot,
                    evaluate=evaluate or worker_dispatch.evaluate,
-                   now=now or datetime.now(timezone.utc))
+                   now=now or datetime.now(timezone.utc),
+                   ledger_claims=ledger_claims,
+                   ledger_unreadable=ledger_unreadable)
     rows_by_id, duplicate_ids = {}, set()
     for row in rows:
         if type(row) is dict and type(row.get('id')) is str:
@@ -1355,14 +1400,35 @@ def check_board(rows, *, store, github_get, list_processes, read_d6=None,
         except Exception:
             state, evidence = UNKNOWN, ['BOARD_CHECK_INTERNAL_ERROR']
         findings.append({'row': _row_label(row, index), 'state': state, 'evidence': evidence})
+        if state == DONE and type(row) is dict and type(row.get('next')) is list:
+            row_id = row['id'] if type(row.get('id')) is str and row['id'] else _row_label(row, index)
+            for next_id in row['next']:
+                if next_id not in rows_by_id:
+                    findings.append({
+                        'row': f'next:{next_id}',
+                        'state': ACTIONABLE,
+                        'evidence': [f'pending next item of {row_id}'],
+                    })
     findings.extend(_unlisted(ctx))
+    anomalies = None
+    if ledger_claims is not None:
+        anomalies = []
+        for item, row in zip(findings, rows):
+            if item['state'] != ACTIONABLE or type(row) is not dict:
+                continue
+            if not any(isinstance(c, dict) and c.get('row') == row.get('id') and
+                       claim_live(c, ctx.store, ctx.now) for c in ledger_claims):
+                anomalies.append({'row': item['row'], 'code': 'IDLE_RUNNABLE'})
     if any(item['state'] in FLAGGED_STATES for item in findings):
         result, code = 'FLAGGED', 2
     elif any(item['state'] == UNKNOWN for item in findings):
         result, code = 'UNKNOWN', 1
     else:
         result, code = 'CLEAN', 0
-    return {'result': result, 'exit_code': code, 'rows': findings}
+    out = {'result': result, 'exit_code': code, 'rows': findings}
+    if anomalies is not None:
+        out['anomalies'] = anomalies
+    return out
 
 
 def github_reader(runner=None):
@@ -1492,10 +1558,21 @@ def run_board_check(args, *, store=None, github_get=None, list_processes_call=No
         else:
             print('board-check: UNREADABLE board file')
         return 1
+
+    active_ledger = ledger if ledger is not None else BoardLedger()
+    ledger_unreadable = False
+    try:
+        claims = active_ledger.read()
+    except LedgerUnreadable:
+        claims = None
+        ledger_unreadable = True
+
     result = check_board(rows, store=store or TaskStore(),
                          github_get=github_get or github_reader(),
                          list_processes=list_processes_call or list_processes,
-                         read_d6=read_d6, evaluate=evaluate, now=now)
+                         read_d6=read_d6, evaluate=evaluate, now=now,
+                         ledger_claims=claims,
+                         ledger_unreadable=ledger_unreadable)
     if as_json:
         print(json.dumps(result, ensure_ascii=True, sort_keys=True))
     else:

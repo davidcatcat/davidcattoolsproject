@@ -4,7 +4,9 @@
 
 set -eu
 
-BASE_URL=${BASE_URL:-http://10.29.7.58:4000}
+# Retired (Owner 2026-11-11, #120): company/home LLM work runs only through the API Agent Gateway (gw-agent).
+echo "llm-benchmark.sh is retired: use the API Agent Gateway (gw-agent). See issue #120." >&2
+exit 2
 MODEL=${MODEL:-gw}
 CONTEXT_SIZES=${CONTEXT_SIZES:-"8000 16000 32000 64000"}
 
