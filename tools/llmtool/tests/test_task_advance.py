@@ -4640,26 +4640,19 @@ class TaskAdvanceReviewRefusalTests(unittest.TestCase):
 
     def test_real_task_store_accepts_claim_unchanged(self):
         from llmtool.task_store import TaskStore, new_id
-        request = 'Bounded non-sensitive task for refusal store check.'
+        request = 'Bounded non-sensitive review retry task.'
         task_id, run_id = new_id(), new_id()
         task = task_submission_cli._record(
             task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
             state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
             backend='NO_NATIVE_SESSION_ID_EXPOSED',
             request_sha=hashlib.sha256(request.encode()).hexdigest())
-        task.update(
-            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None},
-            response='PM task response', error_code=None,
-            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
-                           'goal': 'Verify refusal claim schema.',
-                           'acceptance': ['the claim is unchanged']},
-            developer={'state': 'DEVELOPER_RESPONDED', 'write_paths': ['allowed.txt']},
-            completion={'executor_task_id': 'executor-1', 'state': 'WAITING_REVIEW',
-                        'evidence': {'result': {'result_head': HEAD}}},
-            review_dispatch_claim=[],
-            completion_events=[],
-            remote_test_outcomes=[{'result': 'ADMISSION_DENIED', 'code': 'MODULE_NOT_ADMITTED',
-                                  'executor_task': 'executor-1', 'sha': HEAD, 'modules': []}])
+        task.update(pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                                      'base_url': None},
+                    response='PM returned a bounded task.', error_code=None,
+                    pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                                   'goal': 'Retry an unusable review.',
+                                   'acceptance': ['the failure reason is recorded']})
 
         with tempfile.TemporaryDirectory() as temp:
             store = TaskStore(Path(temp).resolve() / 'tasks')
