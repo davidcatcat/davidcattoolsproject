@@ -527,6 +527,10 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     resolved_git = root_git.resolve(strict=False)
     folders_to_create = []
     for item in value['write_paths']:
+        # Refuse write paths with any .git component regardless of case.
+        if any(part.casefold() == '.git' for part in Path(item).parts):
+            raise RouteError('BLOCKED_WRITE_ISOLATION',
+                             blocked_reason='BOUNDARY_PREPARATION_FAILED')
         rel_parent = Path(item).parent
         target_parent = root / rel_parent
         try:

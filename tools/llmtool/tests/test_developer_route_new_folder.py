@@ -157,6 +157,23 @@ class DeveloperRouteNewFolderTests(unittest.TestCase):
             self.assertEqual(caught.exception.blocked_reason, 'BOUNDARY_PREPARATION_FAILED')
             self.assertFalse(git_target.exists())
 
+    def test_case_folded_git_path_fails_and_creates_nothing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            root.mkdir()
+            base_request = self._init_repo(root)
+            git_target = root / '.GIT' / 'newdir'
+            request = dict(base_request, write_paths=['.GIT/newdir/x.py'])
+            boundary = RecordingBoundary(git_target)
+
+            with self.assertRaises(RouteError) as caught:
+                run_route(self.route, request, gate=lambda: True,
+                          runner=lambda *args: (0, b'ok', b''),
+                          boundary=boundary, snapshot=capture_snapshot)
+            self.assertEqual(caught.exception.code, 'BLOCKED_WRITE_ISOLATION')
+            self.assertEqual(caught.exception.blocked_reason, 'BOUNDARY_PREPARATION_FAILED')
+            self.assertFalse(git_target.exists())
+
     def test_existing_parent_folder_changes_nothing(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'repo'
