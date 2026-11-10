@@ -522,6 +522,48 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     if boundary is None or not all(callable(getattr(boundary, method, None))
                                    for method in ('prepare', 'verify')):
         raise RouteError('BLOCKED_WRITE_ISOLATION', blocked_reason='UNSUPPORTED_BOUNDARY')
+    root = Path(value['root'])
+    root_git = root / '.git'
+    resolved_git = root_git.resolve(strict=False)
+    folders_to_create = []
+    for item in value['write_paths']:
+        # Refuse write paths with any .git component regardless of case.
+        if any(part.casefold() == '.git' for part in Path(item).parts):
+            raise RouteError('BLOCKED_WRITE_ISOLATION',
+                             blocked_reason='BOUNDARY_PREPARATION_FAILED')
+        rel_parent = Path(item).parent
+        target_parent = root / rel_parent
+        try:
+            resolved_parent = target_parent.resolve(strict=False)
+        except Exception:
+            raise RouteError('BLOCKED_WRITE_ISOLATION',
+                             blocked_reason='BOUNDARY_PREPARATION_FAILED') from None
+        if resolved_parent != root and root not in resolved_parent.parents:
+            raise RouteError('BLOCKED_WRITE_ISOLATION',
+                             blocked_reason='BOUNDARY_PREPARATION_FAILED')
+        if (target_parent == root_git or root_git in target_parent.parents or
+                resolved_parent == resolved_git or resolved_git in resolved_parent.parents or
+                '.git' in rel_parent.parts):
+            raise RouteError('BLOCKED_WRITE_ISOLATION',
+                             blocked_reason='BOUNDARY_PREPARATION_FAILED')
+        current = root
+        for part in Path(item).parts:
+            current = current / part
+            if current.is_symlink():
+                raise RouteError('BLOCKED_WRITE_ISOLATION',
+                                 blocked_reason='BOUNDARY_PREPARATION_FAILED')
+        if not target_parent.exists():
+            if target_parent not in folders_to_create:
+                folders_to_create.append(target_parent)
+        elif not target_parent.is_dir():
+            raise RouteError('BLOCKED_WRITE_ISOLATION',
+                             blocked_reason='BOUNDARY_PREPARATION_FAILED')
+    for folder in folders_to_create:
+        try:
+            os.makedirs(folder, mode=0o755, exist_ok=True)
+        except OSError:
+            raise RouteError('BLOCKED_WRITE_ISOLATION',
+                             blocked_reason='BOUNDARY_PREPARATION_FAILED') from None
     private_tmp = tempfile.mkdtemp(prefix='llmtool-route-')
     os.chmod(private_tmp, 0o700)
     requested_states = value.get('state_dirs', ())

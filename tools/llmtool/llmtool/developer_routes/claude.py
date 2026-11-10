@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import re
 import uuid
 
 from .base import DeveloperRoute, RouteError
+from .. import github_identity
 
 _MODEL = re.compile(r'claude-[a-z0-9][a-z0-9.-]{0,120}\Z')
 _EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
@@ -72,7 +74,8 @@ class ClaudeRoute(DeveloperRoute):
                                    for char in env[key])):
                 raise RouteError('CLAUDE_ENV_INVALID')
         env['TMPDIR'] = tmpdir
-        return env
+        home = env.get('HOME') or str(Path.home())
+        return github_identity.ai_github_env(env, home)
 
     def validate_request(self, request):
         value = super().validate_request(request)

@@ -6,17 +6,25 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 
-from llmtool.ai_github_exec import main
+from llmtool.ai_github_exec import (
+    AiIdentityError,
+    clear_verified_ai_env_cache,
+    main,
+    verified_ai_env,
+)
+from llmtool.github_identity import ai_login
 
 
 class AiGithubExecTests(unittest.TestCase):
     def setUp(self):
+        clear_verified_ai_env_cache()
         self.temp_dir = tempfile.TemporaryDirectory()
         self.home = self.temp_dir.name
         (Path(self.home) / ".config" / "gh-ai").mkdir(parents=True)
         self.base_env = {"HOME": self.home, "PATH": "/usr/bin", "GH_TOKEN": "secret"}
 
     def tearDown(self):
+        clear_verified_ai_env_cache()
         self.temp_dir.cleanup()
 
     def invoke(self, argv, runner=None, execer=None):
@@ -141,6 +149,117 @@ class AiGithubExecTests(unittest.TestCase):
                 self.assertEqual(stderr, "AI_GH_LOGIN_MISMATCH\n")
                 self.assertNotIn("secret", stderr)
                 self.assertNotIn("owner-login", stderr)
+
+    def test_ai_identity_error_code(self):
+        err = AiIdentityError("CUSTOM_CODE")
+        self.assertEqual(err.code, "CUSTOM_CODE")
+
+    def test_verified_ai_env_missing_config_folder_refuses(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(AiIdentityError) as caught:
+                verified_ai_env(base_env={"HOME": temp_dir}, home=temp_dir)
+            self.assertEqual(caught.exception.code, "AI_GH_CONFIG_MISSING")
+
+    def test_verified_ai_env_relative_home_refuses(self):
+        with self.assertRaises(AiIdentityError) as caught:
+            verified_ai_env(base_env={"HOME": "/tmp"}, home="relative/home")
+        self.assertEqual(caught.exception.code, "AI_GH_CONFIG_MISSING")
+
+    def test_verified_ai_env_gh_error_refuses(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            (Path(temp_dir) / ".config" / "gh-ai").mkdir(parents=True)
+            failing_runner = lambda argv, **kwargs: subprocess.CompletedProcess(
+                argv, 1, stdout=b"", stderr=b"error"
+            )
+            with self.assertRaises(AiIdentityError) as caught:
+                verified_ai_env(
+                    base_env={"HOME": temp_dir},
+                    home=temp_dir,
+                    runner=failing_runner,
+                )
+            self.assertEqual(caught.exception.code, "AI_GH_LOGIN_MISMATCH")
+
+            def os_error_runner(argv, **kwargs):
+                raise OSError("gh process error")
+
+            with self.assertRaises(AiIdentityError) as caught:
+                verified_ai_env(
+                    base_env={"HOME": temp_dir},
+                    home=temp_dir,
+                    runner=os_error_runner,
+                )
+            self.assertEqual(caught.exception.code, "AI_GH_LOGIN_MISMATCH")
+
+    def test_verified_ai_env_wrong_login_refuses(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            (Path(temp_dir) / ".config" / "gh-ai").mkdir(parents=True)
+            wrong_login_runner = lambda argv, **kwargs: subprocess.CompletedProcess(
+                argv, 0, stdout=b"davidcatcat\n", stderr=b""
+            )
+            with self.assertRaises(AiIdentityError) as caught:
+                verified_ai_env(
+                    base_env={"HOME": temp_dir},
+                    home=temp_dir,
+                    runner=wrong_login_runner,
+                )
+            self.assertEqual(caught.exception.code, "AI_GH_LOGIN_MISMATCH")
+
+    def test_verified_ai_env_success_strips_credentials_and_returns_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            (Path(temp_dir) / ".config" / "gh-ai").mkdir(parents=True)
+            success_runner = lambda argv, **kwargs: subprocess.CompletedProcess(
+                argv, 0, stdout=f"{ai_login()}\n".encode("utf-8"), stderr=b""
+            )
+            base_env = {
+                "HOME": temp_dir,
+                "PATH": "/bin",
+                "GH_TOKEN": "custom-gh-val",
+                "GITHUB_TOKEN": "custom-github-val",
+                "SSH_AUTH_SOCK": "/tmp/custom-sock",
+                "CUSTOM_SETTING": "custom-val",
+            }
+            env = verified_ai_env(
+                base_env=base_env,
+                home=temp_dir,
+                runner=success_runner,
+            )
+            self.assertEqual(env["CUSTOM_SETTING"], "custom-val")
+            self.assertEqual(
+                env["GH_CONFIG_DIR"],
+                str(Path(temp_dir) / ".config" / "gh-ai"),
+            )
+            self.assertNotIn("GH_TOKEN", env)
+            self.assertNotIn("GITHUB_TOKEN", env)
+            self.assertNotIn("SSH_AUTH_SOCK", env)
+
+    def test_verified_ai_env_caches_success_and_skips_subsequent_gh(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            (Path(temp_dir) / ".config" / "gh-ai").mkdir(parents=True)
+            calls = []
+
+            def tracking_runner(argv, **kwargs):
+                calls.append(argv)
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout=f"{ai_login()}\n".encode("utf-8"), stderr=b""
+                )
+
+            env1 = verified_ai_env(
+                base_env={"HOME": temp_dir},
+                home=temp_dir,
+                runner=tracking_runner,
+            )
+            self.assertEqual(len(calls), 1)
+
+            def failing_runner(argv, **kwargs):
+                raise AssertionError("gh should not be called when cached")
+
+            env2 = verified_ai_env(
+                base_env={"HOME": temp_dir},
+                home=temp_dir,
+                runner=failing_runner,
+            )
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(env1, env2)
 
 
 if __name__ == "__main__":

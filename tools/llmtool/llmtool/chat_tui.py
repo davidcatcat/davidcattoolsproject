@@ -1623,7 +1623,7 @@ class ChatTUI:
             lines = ["狀態（PM 模式）",
                      "PM session：" + self.pm_target[0] + "（" + chat_tui_pm.safe_text(runtime)
                      + "，cwd " + chat_tui_pm.safe_text(pm_runtime.display_path(
-                         str(self.pm_target[1]), self.pm_target[1]) or "UNKNOWN") + "）"]
+                         str(self.pm_target[1])) or "UNKNOWN") + "）"]
             if runtime == "claude-code":
                 lines.extend((
                     "Claude 帳號目錄：" + chat_tui_pm.safe_text(
@@ -1837,11 +1837,18 @@ class ChatTUI:
             items = []
         else:
             items = slash_matches(text, self.dev)
-        self._set_menu(items)
+        # Select the exact command match when the draft equals its label.
+        selected = next((index for index, item in enumerate(items)
+                         if item[0] == text), 0)
+        self._set_menu(items, selected=selected)
 
-    def _set_menu(self, items):
-        if items != self.menu_items:
-            self.menu_index = 0
+    def _set_menu(self, items, selected=None):
+        if selected is None:
+            text = self.input.text
+            selected = next((index for index, item in enumerate(items)
+                             if item[0] == text), 0)
+        if items != self.menu_items or self.menu_index != selected:
+            self.menu_index = selected
             self.menu_offset = 0
         self.menu_items = items
         self._sync_picker()
@@ -2989,7 +2996,7 @@ class ChatTUI:
         if runtime == 'claude-code':
             runtime = 'claude'
         account = binding.get('account') or 'default'
-        lead = ["▸▸ " + PM_LABEL + " 模式", chat_tui_pm.permission_mode()]
+        lead = ["▸▸ " + PM_LABEL + " 模式", (chat_tui_pm.permission_mode() if runtime == 'claude' else 'workspace-write')]
         count = self.background_count()
         if count is not None:
             lead.append("背景 %s" % count)

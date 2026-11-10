@@ -6645,7 +6645,7 @@ DEVELOPER_RESULTS = {   # llmtool developer state / error code -> plain words
 
 _llmtool_records: dict = {}   # record path -> (file key, the few fields the views use)
 LLMTOOL_RECORD_FIELDS = ("task_id", "state", "updated_at")
-LLMTOOL_RECORD_PARTS = {"developer": ("provider_profile", "state", "error_code", "model", "executor_task_id"),
+LLMTOOL_RECORD_PARTS = {"developer": ("provider_profile", "state", "error_code", "model", "executor_task_id", "usage"),
                         "completion": ("executor_task_id", "state"), "pm_assignment": ("route",)}
 
 
@@ -6723,10 +6723,11 @@ GW_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$")
 
 
 def gw_task_rows(now: float, root: str | None = None) -> list[OfficeRow]:
-    """Live subagent rows for company-gw Tasks in DEVELOPER_DISPATCHING changed
-    within OFFICE_DONE_WINDOW. Only bounded developer route fields (profile,
-    state, model, executor_task_id) and task_id are read; request, response,
-    diff, summary, acceptance and audit text are never touched."""
+    """Live and finished subagent rows for company-gw and company-gw-agent Tasks
+    changed within OFFICE_DONE_WINDOW. Only bounded developer route fields
+    (profile, state, model, executor_task_id, usage, error_code) and task_id
+    are read; request, response, diff, summary, acceptance and audit text are
+    never touched."""
     root = LLMTOOL_TASKS if root is None else root
     rows = []
     for path in _llmtool_paths(root):
@@ -6743,20 +6744,43 @@ def gw_task_rows(now: float, root: str | None = None) -> list[OfficeRow]:
         developer = record.get("developer")
         if type(developer) is not dict:
             continue
-        if developer.get("provider_profile") != "company-gw" or developer.get("state") != "DEVELOPER_DISPATCHING":
+        profile = developer.get("provider_profile")
+        if profile not in ("company-gw", "company-gw-agent"):
             continue
         task_id = record.get("task_id")
         task_id = task_id if type(task_id) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task_id) else ""
         if not task_id:
             continue
-        executor_task_id = developer.get("executor_task_id")
-        executor_task_id = (executor_task_id if type(executor_task_id) is str and TASK_ID.fullmatch(executor_task_id)
-                            else None)
+        state = developer.get("state")
         model = developer.get("model")
         plain_model = model if type(model) is str and GW_MODEL.fullmatch(model) else "不明"
-        detail = f'{executor_task_id or "?"} · {plain_model} · 工作中'
-        rows.append(OfficeRow(f'home LLM {task_id[:8]}', WORKING, detail, age, 40,
-                              kind='subagent', evidence='llmtool 任務紀錄'))
+        if state == "DEVELOPER_DISPATCHING":
+            if profile != "company-gw":
+                continue
+            executor_task_id = developer.get("executor_task_id")
+            executor_task_id = (executor_task_id if type(executor_task_id) is str and TASK_ID.fullmatch(executor_task_id)
+                                else None)
+            detail = f'{executor_task_id or "?"} · {plain_model} · 工作中'
+            rows.append(OfficeRow(f'home LLM {task_id[:8]}', WORKING, detail, age, 40,
+                                  kind='subagent', evidence='llmtool 任務紀錄'))
+        else:
+            usage = developer.get("usage")
+            if type(usage) is dict:
+                p = usage.get("prompt_tokens")
+                p_text = str(p) if type(p) is int and p >= 0 else "不明"
+                c = usage.get("completion_tokens")
+                c_text = str(c) if type(c) is int and c >= 0 else "不明"
+                t = usage.get("total_tokens")
+                t_text = str(t) if type(t) is int and t >= 0 else "不明"
+                tokens_text = f"輸入 {p_text} · 輸出 {c_text} · 合計 {t_text} tokens"
+            else:
+                tokens_text = "用量未記錄"
+            detail = f"{plain_model} · 已結束 · {tokens_text}"
+            error_code = developer.get("error_code")
+            if type(error_code) is str and error_code and CODE_TEXT.fullmatch(error_code):
+                detail += f" · {error_code}"
+            rows.append(OfficeRow(f'home LLM {task_id[:8]}', DONE, detail, age, 40,
+                                  kind='subagent', evidence='llmtool 任務紀錄'))
     rows.sort(key=lambda r: (r.age if r.age is not None else 1e12, r.name))
     return rows
 
@@ -7580,12 +7604,12 @@ DISPATCH_WORKERS = frozenset({"codex-developer", "claude-developer", "opencode-d
                               "codex-reviewer"})
 # The gw Agent route (#120) accepts exactly one of two entries, as the gate
 # does: PAUSED by the PM with the bare issue as evidence (WP3b), or ALLOWED by
-# the Owner with exactly the D1 = A decision comment (synthetic content only).
+# the Owner with exactly the 2026-11-10 standing authorization comment (#120).
 # Anything else for this key fails closed. Every other key still needs Owner.
 DISPATCH_EXACT_ENTRIES = {"company-gw-agent": frozenset({
     ("PAUSED", "PM", "https://github.com/davidcatcat/davidcattoolsproject/issues/120"),
     ("ALLOWED", "Owner",
-     "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6594101520"),
+     "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167"),
 })}
 DISPATCH_FIELDS = (frozenset({"dispatch", "decided_by", "decided_at", "reason", "evidence"}),
                    frozenset({"dispatch", "decided_by", "decided_at", "reason", "evidence",
@@ -9259,11 +9283,327 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
     return offset
 
 
+# ---------------------------------------------------------------------------
+# State server for local browser inspection (loopback only)
+# ---------------------------------------------------------------------------
+
+import hmac
+import http.server
+import secrets
+
+STATE_SERVER_HTML = (
+    b"<!DOCTYPE html>\n"
+    b"<html><head><meta charset=\"utf-8\"><title>llmtool monitor</title></head>"
+    b"<body>llmtool monitor</body></html>\n"
+)
+
+
+class StateRequestHandler(http.server.BaseHTTPRequestHandler):
+    """Loopback-only HTTP request handler for StateServer."""
+
+    server: StateServer
+
+    def log_message(self, format: str, *args: typing.Any) -> None:
+        """Override to write nothing so tokens never reach logs or stderr."""
+        pass
+
+    def send_error(
+        self,
+        code: int,
+        message: str | None = None,
+        explain: str | None = None,
+    ) -> None:
+        """Override to ensure error responses carry security headers."""
+        self._send_reply(code, f"Error {code}\n".encode("utf-8"), send_body=True)
+
+    def _send_reply(
+        self,
+        status_code: int,
+        body: bytes,
+        content_type: str = "text/plain; charset=utf-8",
+        send_body: bool = True,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
+        self.send_response(status_code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; frame-ancestors 'none'; form-action 'none'; "
+            "script-src 'self'; style-src 'self'; connect-src 'self'",
+        )
+        if extra_headers:
+            for header_name, header_val in extra_headers.items():
+                self.send_header(header_name, header_val)
+        self.end_headers()
+        if send_body:
+            self.wfile.write(body)
+
+    def _check_host(self, send_body: bool = True) -> bool:
+        host_header = self.headers.get("Host")
+        if not host_header:
+            self._send_reply(403, b"Forbidden\n", send_body=send_body)
+            return False
+        port = self.server.server_port
+        allowed = (f"127.0.0.1:{port}", f"localhost:{port}")
+        if host_header.strip().lower() not in allowed:
+            self._send_reply(403, b"Forbidden\n", send_body=send_body)
+            return False
+        return True
+
+    def _handle_get_or_head(self, send_body: bool) -> None:
+        if not self._check_host(send_body=send_body):
+            return
+
+        parts = self.requestline.split(" ")
+        raw = parts[1] if len(parts) == 3 else ""
+        raw_path = raw.split("?", 1)[0]
+        token = self.server.token
+
+        is_page = False
+        is_state = False
+
+        if raw_path.startswith("/") and raw_path.endswith("/"):
+            candidate = raw_path[1:-1]
+            if candidate and "/" not in candidate:
+                if hmac.compare_digest(
+                    candidate.encode("utf-8"), token.encode("utf-8")
+                ):
+                    is_page = True
+        elif raw_path.startswith("/") and raw_path.endswith("/state.json"):
+            candidate = raw_path[1:-11]
+            if candidate and "/" not in candidate:
+                if hmac.compare_digest(
+                    candidate.encode("utf-8"), token.encode("utf-8")
+                ):
+                    is_state = True
+
+        if is_page:
+            self._send_reply(
+                200,
+                STATE_SERVER_HTML,
+                content_type="text/html; charset=utf-8",
+                send_body=send_body,
+            )
+        elif is_state:
+            data = self.server.get_bytes()
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            self._send_reply(
+                200, data, content_type="application/json", send_body=send_body
+            )
+        else:
+            self._send_reply(404, b"Not Found\n", send_body=send_body)
+
+    def do_GET(self) -> None:
+        self._handle_get_or_head(send_body=True)
+
+    def do_HEAD(self) -> None:
+        self._handle_get_or_head(send_body=False)
+
+    def do_POST(self) -> None:
+        if not self._check_host(send_body=True):
+            return
+        self._send_reply(
+            405,
+            b"Method Not Allowed\n",
+            send_body=True,
+            extra_headers={"Allow": "GET, HEAD"},
+        )
+
+    def do_PUT(self) -> None:
+        if not self._check_host(send_body=True):
+            return
+        self._send_reply(
+            405,
+            b"Method Not Allowed\n",
+            send_body=True,
+            extra_headers={"Allow": "GET, HEAD"},
+        )
+
+    def do_PATCH(self) -> None:
+        if not self._check_host(send_body=True):
+            return
+        self._send_reply(
+            405,
+            b"Method Not Allowed\n",
+            send_body=True,
+            extra_headers={"Allow": "GET, HEAD"},
+        )
+
+    def do_DELETE(self) -> None:
+        if not self._check_host(send_body=True):
+            return
+        self._send_reply(
+            405,
+            b"Method Not Allowed\n",
+            send_body=True,
+            extra_headers={"Allow": "GET, HEAD"},
+        )
+
+    def do_OPTIONS(self) -> None:
+        if not self._check_host(send_body=True):
+            return
+        self._send_reply(
+            405,
+            b"Method Not Allowed\n",
+            send_body=True,
+            extra_headers={"Allow": "GET, HEAD"},
+        )
+
+
+class StateServer(http.server.ThreadingHTTPServer):
+    """Loopback-only HTTP server serving monitor state bytes."""
+
+    daemon_threads = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        RequestHandlerClass: type[http.server.BaseHTTPRequestHandler] = StateRequestHandler,
+        get_bytes: typing.Callable[[], bytes] | None = None,
+        token: str | None = None,
+    ):
+        if server_address[0] != "127.0.0.1":
+            raise ValueError("SERVE_HOST_REFUSED")
+        self.get_bytes = get_bytes or (lambda: b"{}")
+        self.token = token or secrets.token_urlsafe(16)
+        super().__init__(server_address, RequestHandlerClass)
+        self.server_port = int(self.server_address[1])
+
+
+def _state_redact(text: typing.Any) -> str:
+    """Redact secret-like patterns from exported string values."""
+    if not isinstance(text, str):
+        return ""
+    return SECRETISH.sub("[已遮蔽]", text)
+
+
+def office_state(
+    top: typing.Any,
+    owner: typing.Any,
+    prs: typing.Any,
+    stuck: typing.Any,
+    generated_at: typing.Any,
+    data_age: typing.Any,
+) -> dict[str, typing.Any]:
+    """Build the JSON view dictionary from values the screen already displays."""
+    top_entries = top if isinstance(top, (list, tuple)) else []
+    top_out: list[dict[str, str]] = []
+    for item in top_entries:
+        if isinstance(item, (tuple, list)):
+            t = item[0] if len(item) > 0 else ""
+            s = item[1] if len(item) > 1 else ""
+        elif isinstance(item, dict):
+            t = item.get("text", "")
+            s = item.get("style", "")
+        else:
+            t = str(item)
+            s = ""
+        if not isinstance(t, str):
+            t = ""
+        if (
+            "brew " in t
+            or "pip " in t
+            or "install" in t
+            or t.startswith("$ ")
+            or t.lstrip().startswith("$ ")
+        ):
+            continue
+        top_out.append({
+            "text": _state_redact(t),
+            "style": _state_redact(s),
+        })
+
+    owner_entries = owner if isinstance(owner, (list, tuple)) else []
+    owner_out = [_state_redact(x) for x in owner_entries]
+
+    pr_entries = prs if isinstance(prs, (list, tuple)) else []
+    prs_out: list[dict[str, typing.Any]] = []
+    for row in pr_entries:
+        if isinstance(row, dict):
+            num = row.get("number", 0)
+            review = row.get("review", "")
+            ec2 = row.get("ec2", "")
+            linux = row.get("linux", "")
+            mac = row.get("mac", "")
+            next_val = row.get("next", "")
+            owner_val = row.get("owner", "")
+            current_val = row.get("current", "")
+        else:
+            num = getattr(row, "number", 0)
+            review = getattr(row, "review", "")
+            ec2 = getattr(row, "ec2", "")
+            linux = getattr(row, "linux", "")
+            mac = getattr(row, "mac", "")
+            next_val = getattr(row, "next", "")
+            owner_val = getattr(row, "owner", "")
+            current_val = getattr(row, "current", "")
+
+        if not isinstance(num, int):
+            try:
+                num = int(num)
+            except (ValueError, TypeError):
+                num = 0
+
+        prs_out.append({
+            "number": num,
+            "review": _state_redact(review),
+            "ec2": _state_redact(ec2),
+            "linux": _state_redact(linux),
+            "mac": _state_redact(mac),
+            "next": _state_redact(next_val),
+            "owner": _state_redact(owner_val),
+            "current": _state_redact(current_val),
+        })
+
+    stuck_entries = stuck if isinstance(stuck, (list, tuple)) else []
+    stuck_out = [_state_redact(x) for x in stuck_entries]
+
+    age_val = None
+    if data_age is not None:
+        try:
+            age_val = float(data_age)
+        except (ValueError, TypeError):
+            age_val = None
+
+    return {
+        "schema_version": 1,
+        "generated_at": _state_redact(generated_at),
+        "data_age": age_val,
+        "top": top_out,
+        "owner": owner_out,
+        "prs": prs_out,
+        "stuck": stuck_out,
+        "office": [],
+    }
+
+
+def make_state_server(
+    get_bytes: typing.Callable[[], bytes],
+    host: str = "127.0.0.1",
+    port: int = 0,
+) -> tuple[StateServer, str]:
+    """Create and bind a loopback state server returning (server, url)."""
+    if host != "127.0.0.1":
+        raise ValueError("SERVE_HOST_REFUSED")
+    token = secrets.token_urlsafe(16)
+    server = StateServer(
+        (host, port), StateRequestHandler, get_bytes=get_bytes, token=token
+    )
+    url = f"http://127.0.0.1:{server.server_port}/{token}/"
+    return server, url
+
+
 def main(argv: list[str] | None = None) -> int:
-    # #1234: GitHub reads use the AI login (gh-ai config) when it exists.
-    ai_gh = os.path.expanduser("~/.config/gh-ai")
-    if os.path.isdir(ai_gh):
-        os.environ.setdefault("GH_CONFIG_DIR", ai_gh)
+    # #1234: GitHub reads always use the AI login (gh-ai config), never the
+    # Owner's default login; if gh-ai is missing, reads fail instead.
+    os.environ["GH_CONFIG_DIR"] = os.path.expanduser("~/.config/gh-ai")
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        os.environ.pop(name, None)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interval", type=float, default=1.0,
                         help="seconds between snapshots (default 1; minimum 0.5)")

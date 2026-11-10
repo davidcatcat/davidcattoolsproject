@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 import functools
 
 from .errors import LLMToolError
-from . import role_config, task_completion, task_store, worker_dispatch
+from . import ai_github_exec, role_config, task_completion, task_store, worker_dispatch
 from .test_output_excerpts import (
     _CLOUD_KEY, _SENSITIVE, _emitted_sensitive, _sensitive_jwt, _sensitive_url,
 )
@@ -123,11 +123,13 @@ def _post_github_record(pr_number, body, repo_root):
     slug = task_completion._trusted_slug()
     if slug is None:
         return False
-    env = {'PATH': task_completion._GH_PATH, 'HOME': os.path.expanduser('~'),
-           'LC_ALL': 'C', 'GH_PROMPT_DISABLED': '1',
-           'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1'}
-    if os.environ.get('GH_CONFIG_DIR'):
-        env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
+    try:
+        env = ai_github_exec.verified_ai_env()
+    except ai_github_exec.AiIdentityError:
+        return False
+    env.update({'PATH': task_completion._GH_PATH, 'HOME': os.path.expanduser('~'),
+                'LC_ALL': 'C', 'GH_PROMPT_DISABLED': '1',
+                'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1'})
     def comment(command):
         return subprocess.run(
             [gh, command, 'comment', str(pr_number), '--repo', slug, '--body-file', '-'],

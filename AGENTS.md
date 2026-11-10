@@ -39,7 +39,7 @@
 
 - **Company LLM Developer:**
   - Company `gw` is a third, low-cost Developer route for small, low-risk, clearly testable tasks, selected by the PM and called only through llmtool.
-  - Company `gw` may act as an agent-mode Developer through `gw-agent` only for synthetic test content, and every result receives formal Claude review. Pause after two consecutive failed runs, a write outside allowed paths, a credential or audit finding, or HTTP 429; real repository work needs a new Owner decision.
+  - Company `gw` may act as an agent-mode Developer through `gw-agent` on real repository code; Developer choice, mode and scope are PM decisions under the standing Owner authorization (#120, 2026-11-10), which supersedes the 2026-11-03 synthetic-only limit. Every result receives formal cross-family review. Pause after two consecutive failed runs, a write outside allowed paths, a credential or audit finding, or HTTP 429.
   - `gw` may propose code, tests and self-review, but has no shell, filesystem, Git, credential or approval authority. An authorized execution environment applies accepted patches and runs tests.
   - Before each call, record the exact non-sensitive input/egress basis and bounded budget. Do not send secrets, private/customer data or restricted logs.
   - Allow at most one evidence-guided repair within the existing task budget; no hidden paid fallback. Record actual usage, retries, repairs and outcome, or UNKNOWN.
