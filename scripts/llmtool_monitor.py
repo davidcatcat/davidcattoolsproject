@@ -8197,6 +8197,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     if mac_waiting:
         mac.append(ci_queue_row(mac_waiting, runner_count))
     rows += agy + mac + github_runner_rows(ci_view, now, local_names, ci)
+    if ci_view is not None:
+        rows += hosted_ci_rows(ci, ci_view, now)
     rows.append(remote_test_row(processes, now, llmtool_tasks))
     gw_runs = gw_rows(processes, now, canonical)
     rows += gw_runs
