@@ -211,7 +211,9 @@ class CodexRuntime:
             if key in env and (not os.path.isabs(env[key]) or
                                any(ord(char) < 32 or ord(char) == 127 for char in env[key])):
                 raise _error('PM_CONFIG_INVALID')
-        return env
+        from . import github_identity
+        home = env.get('HOME') or os.path.expanduser('~')
+        return github_identity.ai_github_env(env, home)
 
     def send(self, text, idempotency_key=None):
         from . import pm_runtime

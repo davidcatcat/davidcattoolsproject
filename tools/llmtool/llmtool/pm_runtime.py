@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import active_pm_inbox, role_config
+from . import active_pm_inbox, github_identity, role_config
 from .errors import LLMToolError
 from .test_output_excerpts import _CLOUD_KEY, _emitted_sensitive
 
@@ -1104,6 +1104,8 @@ class PMRuntime:
         env = dict(base_env)
         if config_dir is not None:
             env['CLAUDE_CONFIG_DIR'] = config_dir
+        home = env.get('HOME') or os.path.expanduser('~')
+        env = github_identity.ai_github_env(env, home)
         try:
             key = active_pm_inbox.pm_session_key(self.pm_session_id)
             binding = current_binding(self.pm_session_id, state_root=root, environ=self.environ,
