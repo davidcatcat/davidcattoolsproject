@@ -273,6 +273,41 @@ class ProcessCheckTests(LivenessCase):
             with self.subTest(listing=listing):
                 self.assertResult(self.check(ps=listing), 'UNKNOWN', 'PROCESS_LIST_FAILED')
 
+    def test_listing_with_caller_pid_containing_session_id_is_clean(self):
+        line = f'{os.getpid()} claude --resume {SESSION}\n'
+        self.assertEqual(
+            liveness._process_evidence({SESSION}, lambda: line),
+            ['PROCESS_CLEAN'])
+
+    def test_listing_with_parent_pid_containing_session_id_is_clean(self):
+        line = f'{os.getppid()} claude --resume {SESSION}\n'
+        self.assertEqual(
+            liveness._process_evidence({SESSION}, lambda: line),
+            ['PROCESS_CLEAN'])
+
+    def test_listing_with_another_pid_containing_session_id_matches(self):
+        other_pid = max(os.getpid(), os.getppid()) + 1000
+        line = f'{other_pid} claude --resume {SESSION}\n'
+        self.assertEqual(
+            liveness._process_evidence({SESSION}, lambda: line),
+            ['PROCESS_MATCH'])
+
+    def test_check_session_with_caller_pid_listing_reports_stopped(self):
+        for pid in (os.getpid(), os.getppid()):
+            with self.subTest(pid=pid):
+                line = f'{pid} claude --resume {SESSION}\n'
+                result = self.check(ps=line)
+                self.assertResult(result, 'STOPPED', 'PROCESS_CLEAN')
+
+    def test_custom_self_pids_skips_specified_pid(self):
+        line = f'12345 claude --resume {SESSION}\n'
+        self.assertEqual(
+            liveness._process_evidence({SESSION}, lambda: line, self_pids={12345}),
+            ['PROCESS_CLEAN'])
+        self.assertEqual(
+            liveness._process_evidence({SESSION}, lambda: line, self_pids={99999}),
+            ['PROCESS_MATCH'])
+
 
 class BindingCheckTests(LivenessCase):
     def test_a_held_lock_is_active(self):
