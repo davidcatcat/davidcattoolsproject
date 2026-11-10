@@ -10291,7 +10291,10 @@ class MainAiGhConfigTests(unittest.TestCase):
 
     def test_drops_token_overrides(self):
         with tempfile.TemporaryDirectory() as home:
-            with patch.dict(os.environ, {'GH_TOKEN': 'synthetic-not-a-token', 'GITHUB_TOKEN': 'synthetic-not-a-token'}):
-                self._run(home)
+            env = {'HOME': home, 'GH_TOKEN': 'synthetic-not-a-token',
+                   'GITHUB_TOKEN': 'synthetic-not-a-token'}
+            with patch.dict(os.environ, env):
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+                    mon.main(['--help'])
                 self.assertNotIn('GH_TOKEN', os.environ)
                 self.assertNotIn('GITHUB_TOKEN', os.environ)
