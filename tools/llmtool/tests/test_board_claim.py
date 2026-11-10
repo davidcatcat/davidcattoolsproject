@@ -45,7 +45,19 @@ class BoardClaimTests(unittest.TestCase):
         os.chmod(self.board_path, 0o600)
 
         self.ledger = board_check.BoardLedger()
-        self.store = TaskStore()
+        self.tasks = {}
+        tasks = self.tasks
+
+        class _Store:
+            def get(self, task_id):
+                if task_id not in tasks:
+                    raise KeyError(task_id)
+                return dict(tasks[task_id])
+
+            def abandon(self, task_id, **_kwargs):
+                tasks[task_id]['state'] = 'ABANDONED'
+
+        self.store = _Store()
         self.now = datetime(2026, 11, 10, 12, 0, 0, tzinfo=timezone.utc)
 
     def tearDown(self):
@@ -56,45 +68,8 @@ class BoardClaimTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def _create_task(self, task_id, run_id, state='PM_PENDING'):
-        contract_data = {
-            'task_id': task_id,
-            'run_id': run_id,
-            'goal': 'implement claim_row',
-            'acceptance': ['claim works'],
-            'read_paths': ['tools/llmtool/llmtool/board_check.py'],
-            'write_paths': ['tools/llmtool/llmtool/board_check.py'],
-            'source_sha': '0' * 40,
-        }
-        contract_json = json.dumps(contract_data, ensure_ascii=True, separators=(',', ':'))
-        contract = parse_task_contract(contract_json)
-        binding = contract.binding(run_id)
-        binding_dict = binding._asdict() if hasattr(binding, '_asdict') else dict(binding.__dict__)
-
-        now_str = '2026-11-10T12:00:00Z'
-        req = 'test request'
-        req_sha = hashlib.sha256(req.encode('utf-8')).hexdigest()
-        record = {
-            'schema_version': 1,
-            'task_id': task_id,
-            'run_id': run_id,
-            'pm_session_id': 'pm-test-session',
-            'pm_provider_profile': 'default',
-            'pm_provider_type': 'openai-compatible',
-            'pm_model': 'gpt-4',
-            'backend_session_semantics': 'EPHEMERAL_SINGLE_CALL',
-            'native_session_id': None,
-            'state': state,
-            'created_at': now_str,
-            'updated_at': now_str,
-            'task_contract': contract_data,
-            'task_binding': binding_dict,
-            'request': req,
-            'request_sha256': req_sha,
-            'response': None,
-            'usage': None,
-            'error_code': None,
-        }
-        return self.store.create(record)
+        self.tasks[task_id] = {'task_id': task_id, 'run_id': run_id, 'state': state}
+        return dict(self.tasks[task_id])
 
     def test_reserve_then_bind(self):
         """A row is reserved first and then bound to a stored task."""
