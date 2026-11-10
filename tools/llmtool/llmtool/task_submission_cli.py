@@ -4263,8 +4263,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'task_id': task['task_id'], 'source_sha': snapshot.head,
         'goal': assignment['goal'], 'acceptance': acceptance + [TEST_DATA_RULE],
         'read_paths': read_paths, 'write_paths': write_paths,
-        'budgets': {'max_turns': 16, 'max_input_tokens': 32768,
-                    'max_output_tokens': 8192, 'max_wall_seconds': 600,
+        # Per-Task totals over all turns scale with the route caps (#120).
+        'budgets': {'max_turns': 16, 'max_input_tokens': 8 * context_cap_tokens,
+                    'max_output_tokens': 4 * route_output_cap, 'max_wall_seconds': 600,
                     'max_tool_result_bytes': 262144,
                     'max_sent_bytes': 16 * 1024 * 1024},
         'egress_basis': egress_basis, 'data_class': gateway_data_class,
