@@ -9259,6 +9259,204 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
     return offset
 
 
+# ---------------------------------------------------------------------------
+# State server for local browser inspection (loopback only)
+# ---------------------------------------------------------------------------
+
+import hmac
+import http.server
+import secrets
+
+STATE_SERVER_HTML = (
+    b"<!DOCTYPE html>\n"
+    b"<html><head><meta charset=\"utf-8\"><title>llmtool monitor</title></head>"
+    b"<body>llmtool monitor</body></html>\n"
+)
+
+
+class StateRequestHandler(http.server.BaseHTTPRequestHandler):
+    """Loopback-only HTTP request handler for StateServer."""
+
+    server: StateServer
+
+    def log_message(self, format: str, *args: typing.Any) -> None:
+        """Override to write nothing so tokens never reach logs or stderr."""
+        pass
+
+    def send_error(
+        self,
+        code: int,
+        message: str | None = None,
+        explain: str | None = None,
+    ) -> None:
+        """Override to ensure error responses carry security headers."""
+        self._send_reply(code, f"Error {code}\n".encode("utf-8"), send_body=True)
+
+    def _send_reply(
+        self,
+        status_code: int,
+        body: bytes,
+        content_type: str = "text/plain; charset=utf-8",
+        send_body: bool = True,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
+        self.send_response(status_code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; frame-ancestors 'none'; form-action 'none'; "
+            "script-src 'self'; style-src 'self'; connect-src 'self'",
+        )
+        if extra_headers:
+            for header_name, header_val in extra_headers.items():
+                self.send_header(header_name, header_val)
+        self.end_headers()
+        if send_body:
+            self.wfile.write(body)
+
+    def _check_host(self, send_body: bool = True) -> bool:
+        host_header = self.headers.get("Host")
+        if not host_header:
+            self._send_reply(403, b"Forbidden\n", send_body=send_body)
+            return False
+        port = self.server.server_port
+        allowed = (f"127.0.0.1:{port}", f"localhost:{port}")
+        if host_header.strip().lower() not in allowed:
+            self._send_reply(403, b"Forbidden\n", send_body=send_body)
+            return False
+        return True
+
+    def _handle_get_or_head(self, send_body: bool) -> None:
+        if not self._check_host(send_body=send_body):
+            return
+
+        if "//" in self.path:
+            self._send_reply(404, b"Not Found\n", send_body=send_body)
+            return
+
+        parts = self.path.split("/")
+        if len(parts) == 3 and parts[0] == "":
+            candidate = parts[1]
+        else:
+            candidate = ""
+
+        token_matches = hmac.compare_digest(
+            candidate.encode("utf-8"), self.server.token.encode("utf-8")
+        )
+        if token_matches and parts[2] == "":
+            self._send_reply(
+                200,
+                STATE_SERVER_HTML,
+                content_type="text/html; charset=utf-8",
+                send_body=send_body,
+            )
+        elif token_matches and parts[2] == "state.json":
+            data = self.server.get_bytes()
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            self._send_reply(
+                200, data, content_type="application/json", send_body=send_body
+            )
+        else:
+            self._send_reply(404, b"Not Found\n", send_body=send_body)
+
+    def do_GET(self) -> None:
+        self._handle_get_or_head(send_body=True)
+
+    def do_HEAD(self) -> None:
+        self._handle_get_or_head(send_body=False)
+
+    def do_POST(self) -> None:
+        if not self._check_host(send_body=True):
+            return
+        self._send_reply(
+            405,
+            b"Method Not Allowed\n",
+            send_body=True,
+            extra_headers={"Allow": "GET, HEAD"},
+        )
+
+    def do_PUT(self) -> None:
+        if not self._check_host(send_body=True):
+            return
+        self._send_reply(
+            405,
+            b"Method Not Allowed\n",
+            send_body=True,
+            extra_headers={"Allow": "GET, HEAD"},
+        )
+
+    def do_PATCH(self) -> None:
+        if not self._check_host(send_body=True):
+            return
+        self._send_reply(
+            405,
+            b"Method Not Allowed\n",
+            send_body=True,
+            extra_headers={"Allow": "GET, HEAD"},
+        )
+
+    def do_DELETE(self) -> None:
+        if not self._check_host(send_body=True):
+            return
+        self._send_reply(
+            405,
+            b"Method Not Allowed\n",
+            send_body=True,
+            extra_headers={"Allow": "GET, HEAD"},
+        )
+
+    def do_OPTIONS(self) -> None:
+        if not self._check_host(send_body=True):
+            return
+        self._send_reply(
+            405,
+            b"Method Not Allowed\n",
+            send_body=True,
+            extra_headers={"Allow": "GET, HEAD"},
+        )
+
+
+class StateServer(http.server.ThreadingHTTPServer):
+    """Loopback-only HTTP server serving monitor state bytes."""
+
+    daemon_threads = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        RequestHandlerClass: type[http.server.BaseHTTPRequestHandler] = StateRequestHandler,
+        get_bytes: typing.Callable[[], bytes] | None = None,
+        token: str | None = None,
+    ):
+        if server_address[0] != "127.0.0.1":
+            raise ValueError("SERVE_HOST_REFUSED")
+        self.get_bytes = get_bytes or (lambda: b"{}")
+        self.token = token or secrets.token_urlsafe(16)
+        super().__init__(server_address, RequestHandlerClass)
+        self.server_port = int(self.server_address[1])
+
+
+def make_state_server(
+    get_bytes: typing.Callable[[], bytes],
+    host: str = "127.0.0.1",
+    port: int = 0,
+) -> tuple[StateServer, str]:
+    """Create and bind a loopback state server returning (server, url)."""
+    if host != "127.0.0.1":
+        raise ValueError("SERVE_HOST_REFUSED")
+    token = secrets.token_urlsafe(16)
+    server = StateServer(
+        (host, port), StateRequestHandler, get_bytes=get_bytes, token=token
+    )
+    url = f"http://127.0.0.1:{server.server_port}/{token}/"
+    return server, url
+
+
 def main(argv: list[str] | None = None) -> int:
     # #1234: GitHub reads use the AI login (gh-ai config) when it exists.
     ai_gh = os.path.expanduser("~/.config/gh-ai")
