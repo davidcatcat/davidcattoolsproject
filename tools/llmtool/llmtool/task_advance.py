@@ -1608,6 +1608,13 @@ def _pre_pr_remote_gate(record, store, executor_task, head, branch):
                                              f'refs/heads/{branch}', None)
             fresh = store.get(task_id)
             status = _remote_test_status(fresh, binding)[0]
+        elif (status == 'TIMEOUT' and
+              _remote_test_timeout_count(fresh, binding) == 1):
+            # The first TIMEOUT on a head gets one more try before the gate holds.
+            remote_result = _run_remote_test(store, task_id, executor_task, head,
+                                             f'refs/heads/{branch}', None)
+            fresh = store.get(task_id)
+            status = _remote_test_status(fresh, binding)[0]
     except Exception as exc:
         return None, _remote_test_hold(
             'REMOTE_TEST_REFUSED',
@@ -1703,6 +1710,9 @@ def _pre_review_action(record, d6, pr, related, result_head):
     """Return the gate action before a Reviewer may start on this head."""
     remote_status, _, _ = _remote_test_status(record, d6)
     if remote_status in ('TIMEOUT', 'SHA_MISMATCH'):
+        if (remote_status == 'TIMEOUT' and
+                _remote_test_timeout_count(record, d6) == 1):
+            return 'RUN_REMOTE_TEST'
         return 'NEEDS_ATTENTION'
     if remote_status == 'FAIL':
         return _remote_fail_action(related, result_head)
@@ -1742,6 +1752,9 @@ def decide(record, d6, pr, related):
         # with no PR. Every other state re-enters the idempotent publish step.
         remote_status, _, _ = _remote_test_status(record, d6)
         if remote_status in ('TIMEOUT', 'SHA_MISMATCH'):
+            if (remote_status == 'TIMEOUT' and
+                    _remote_test_timeout_count(record, d6) == 1):
+                return 'PUBLISH'
             return 'NEEDS_ATTENTION'
         if remote_status == 'FAIL':
             return _remote_fail_action(related, result_head)
