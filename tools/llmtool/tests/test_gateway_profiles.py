@@ -171,6 +171,11 @@ class GatewayProfileTests(unittest.TestCase):
             "AUTH_CREDENTIAL_MISSING", environ={self.env_name: ""})
         self.assertNotIn(self.env_value, str(error))
 
+    def test_null_api_key_env_means_no_credential(self):
+        self.write(self.document(profiles={"work": self.profile(api_key_env=None)}))
+        result = self.load(environ={})
+        self.assertIsNone(result["api_key_env"])
+
 
 if __name__ == "__main__":
     unittest.main()
