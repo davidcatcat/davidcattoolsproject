@@ -13,38 +13,46 @@ import sys
 
 from llmtool.github_identity import ai_github_env, ai_login
 
-
-def _refuse(code):
-    print(code, file=sys.stderr)
-    return 2
+_verified_env = None
 
 
-def main(argv, base_env=None, home=None, runner=None, execer=None):
-    """Validate the AI GitHub account, then replace this process with a command."""
-    if runner is None:
-        runner = subprocess.run
-    if execer is None:
-        execer = os.execvpe
+class AiIdentityError(Exception):
+    """An AI GitHub identity precondition was not met."""
 
-    args = list(argv)
-    if not args or args[0] != "--" or len(args) < 2 or not args[1]:
-        return _refuse("AI_GH_USAGE")
-    command, command_args = args[1], args[2:]
-    if (os.path.basename(command).lower() == "gh" and command_args
-            and command_args[0] == "auth"
-            and command_args != ["auth", "status"]):
-        return _refuse("AI_GH_AUTH_REFUSED")
+    code = "AI_IDENTITY_ERROR"
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = str(code)
+
+
+def clear_verified_ai_env_cache():
+    """Clear the cached verified AI environment."""
+    global _verified_env
+    _verified_env = None
+
+
+def verified_ai_env(base_env=None, home=None, runner=None):
+    """Return an isolated and verified environment for AI operations."""
+    global _verified_env
+    if _verified_env is not None:
+        return dict(_verified_env)
 
     if base_env is None:
         base_env = os.environ
     if home is None:
         home = base_env.get("HOME") or str(Path.home())
+
     try:
         env = ai_github_env(base_env, home)
-    except ValueError:
-        return _refuse("AI_GH_CONFIG_MISSING")
+    except (TypeError, ValueError):
+        raise AiIdentityError("AI_GH_CONFIG_MISSING") from None
+
     if not os.path.isdir(env["GH_CONFIG_DIR"]):
-        return _refuse("AI_GH_CONFIG_MISSING")
+        raise AiIdentityError("AI_GH_CONFIG_MISSING")
+
+    if runner is None:
+        runner = subprocess.run
 
     try:
         result = runner(
@@ -57,16 +65,55 @@ def main(argv, base_env=None, home=None, runner=None, execer=None):
             shell=False,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return _refuse("AI_GH_LOGIN_MISMATCH")
-    if result.returncode != 0:
-        return _refuse("AI_GH_LOGIN_MISMATCH")
+    except (OSError, subprocess.SubprocessError):
+        raise AiIdentityError("AI_GH_LOGIN_MISMATCH") from None
+    except Exception:
+        raise AiIdentityError("AI_GH_LOGIN_MISMATCH") from None
+
+    if getattr(result, "returncode", 1) != 0:
+        raise AiIdentityError("AI_GH_LOGIN_MISMATCH")
+
     try:
-        login = result.stdout.decode("utf-8").rstrip("\r\n")
+        stdout = getattr(result, "stdout", b"")
+        if isinstance(stdout, bytes):
+            login = stdout.decode("utf-8").rstrip("\r\n")
+        elif isinstance(stdout, str):
+            login = stdout.rstrip("\r\n")
+        else:
+            raise AiIdentityError("AI_GH_LOGIN_MISMATCH")
     except (AttributeError, UnicodeDecodeError):
-        return _refuse("AI_GH_LOGIN_MISMATCH")
+        raise AiIdentityError("AI_GH_LOGIN_MISMATCH") from None
+
     if login != ai_login():
-        return _refuse("AI_GH_LOGIN_MISMATCH")
+        raise AiIdentityError("AI_GH_LOGIN_MISMATCH")
+
+    _verified_env = dict(env)
+    return dict(_verified_env)
+
+
+def _refuse(code):
+    print(code, file=sys.stderr)
+    return 2
+
+
+def main(argv, base_env=None, home=None, runner=None, execer=None):
+    """Validate the AI GitHub account, then replace this process with a command."""
+    if execer is None:
+        execer = os.execvpe
+
+    args = list(argv)
+    if not args or args[0] != "--" or len(args) < 2 or not args[1]:
+        return _refuse("AI_GH_USAGE")
+    command, command_args = args[1], args[2:]
+    if (os.path.basename(command).lower() == "gh" and command_args
+            and command_args[0] == "auth"
+            and command_args != ["auth", "status"]):
+        return _refuse("AI_GH_AUTH_REFUSED")
+
+    try:
+        env = verified_ai_env(base_env=base_env, home=home, runner=runner)
+    except AiIdentityError as exc:
+        return _refuse(exc.code)
 
     try:
         execer(command, [command] + command_args, env)
