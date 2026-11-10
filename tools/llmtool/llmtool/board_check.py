@@ -1395,13 +1395,25 @@ def check_board(rows, *, store, github_get, list_processes, read_d6=None,
             state, evidence = UNKNOWN, ['BOARD_CHECK_INTERNAL_ERROR']
         findings.append({'row': _row_label(row, index), 'state': state, 'evidence': evidence})
     findings.extend(_unlisted(ctx))
+    anomalies = None
+    if ledger_claims is not None:
+        anomalies = []
+        for item, row in zip(findings, rows):
+            if item['state'] != ACTIONABLE or type(row) is not dict:
+                continue
+            if not any(isinstance(c, dict) and c.get('row') == row.get('id') and
+                       claim_live(c, ctx.store, ctx.now) for c in ledger_claims):
+                anomalies.append({'row': item['row'], 'code': 'IDLE_RUNNABLE'})
     if any(item['state'] in FLAGGED_STATES for item in findings):
         result, code = 'FLAGGED', 2
     elif any(item['state'] == UNKNOWN for item in findings):
         result, code = 'UNKNOWN', 1
     else:
         result, code = 'CLEAN', 0
-    return {'result': result, 'exit_code': code, 'rows': findings}
+    out = {'result': result, 'exit_code': code, 'rows': findings}
+    if anomalies is not None:
+        out['anomalies'] = anomalies
+    return out
 
 
 def github_reader(runner=None):
