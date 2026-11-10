@@ -120,8 +120,8 @@ def _validate_profile(value):
             or any(ord(c) < 32 or ord(c) == 127 for c in model)):
         raise _error("gateway profile model must be non-empty text", "CONFIG_INVALID")
     env_name = value["api_key_env"]
-    if type(env_name) is not str or ENV_NAME.fullmatch(env_name) is None:
-        raise _error("gateway profile api_key_env must be an environment variable name",
+    if env_name is not None and (type(env_name) is not str or ENV_NAME.fullmatch(env_name) is None):
+        raise _error("gateway profile api_key_env must be an environment variable name or null",
                      "CONFIG_INVALID")
     for field in ("context_cap_tokens", "max_output_tokens"):
         cap = value[field]
@@ -141,7 +141,7 @@ def load_gateway_profile(name=None, path=None, environ=None):
         selected = name
     profile = profiles[selected]
     env = os.environ if environ is None else environ
-    if not env.get(profile["api_key_env"]):
+    if profile["api_key_env"] is not None and not env.get(profile["api_key_env"]):
         raise _error("gateway profile API key environment variable is missing or empty",
                      "AUTH_CREDENTIAL_MISSING", user_action_required=True)
     return {
