@@ -146,7 +146,7 @@ def load_and_validate_map(map_path: Path, repo_root: Path) -> list[tuple[str, st
 
 def _is_path_selected(tracked_rel: Path, targets: list[Path] | None) -> bool:
     """Return True if tracked path matches any target filter."""
-    if not targets:
+    if targets is None:
         return True
     for target in targets:
         if tracked_rel == target:
@@ -181,19 +181,24 @@ def redact_repo(
     entries = load_and_validate_map(map_path, repo_root)
 
     target_paths: list[Path] | None = None
-    if paths:
+    if paths is not None:
         target_paths = []
         for p in paths:
             user_target = Path(p)
-            if not user_target.is_absolute():
-                user_target = (Path.cwd() / user_target).resolve()
+            if user_target.is_absolute():
+                candidate = user_target.resolve()
             else:
-                user_target = user_target.resolve()
+                cwd_candidate = (Path.cwd() / user_target).resolve()
+                try:
+                    rel = cwd_candidate.relative_to(repo_root.resolve())
+                    target_paths.append(rel)
+                    continue
+                except ValueError:
+                    candidate = (repo_root / user_target).resolve()
             try:
-                rel = user_target.relative_to(repo_root.resolve())
+                rel = candidate.relative_to(repo_root.resolve())
                 target_paths.append(rel)
             except ValueError:
-                # Path outside repository
                 pass
 
     tracked_files = get_git_tracked_files(repo_root)
