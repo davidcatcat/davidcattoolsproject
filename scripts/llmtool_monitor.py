@@ -6532,7 +6532,7 @@ DEVELOPER_RESULTS = {   # llmtool developer state / error code -> plain words
 
 _llmtool_records: dict = {}   # record path -> (file key, the few fields the views use)
 LLMTOOL_RECORD_FIELDS = ("task_id", "state", "updated_at")
-LLMTOOL_RECORD_PARTS = {"developer": ("provider_profile", "state", "error_code", "model", "executor_task_id"),
+LLMTOOL_RECORD_PARTS = {"developer": ("provider_profile", "state", "error_code", "model", "executor_task_id", "usage"),
                         "completion": ("executor_task_id", "state"), "pm_assignment": ("route",)}
 
 
@@ -6610,10 +6610,11 @@ GW_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$")
 
 
 def gw_task_rows(now: float, root: str | None = None) -> list[OfficeRow]:
-    """Live subagent rows for company-gw Tasks in DEVELOPER_DISPATCHING changed
-    within OFFICE_DONE_WINDOW. Only bounded developer route fields (profile,
-    state, model, executor_task_id) and task_id are read; request, response,
-    diff, summary, acceptance and audit text are never touched."""
+    """Live and finished subagent rows for company-gw and company-gw-agent Tasks
+    changed within OFFICE_DONE_WINDOW. Only bounded developer route fields
+    (profile, state, model, executor_task_id, usage, error_code) and task_id
+    are read; request, response, diff, summary, acceptance and audit text are
+    never touched."""
     root = LLMTOOL_TASKS if root is None else root
     rows = []
     for path in _llmtool_paths(root):
@@ -6630,20 +6631,43 @@ def gw_task_rows(now: float, root: str | None = None) -> list[OfficeRow]:
         developer = record.get("developer")
         if type(developer) is not dict:
             continue
-        if developer.get("provider_profile") != "company-gw" or developer.get("state") != "DEVELOPER_DISPATCHING":
+        profile = developer.get("provider_profile")
+        if profile not in ("company-gw", "company-gw-agent"):
             continue
         task_id = record.get("task_id")
         task_id = task_id if type(task_id) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task_id) else ""
         if not task_id:
             continue
-        executor_task_id = developer.get("executor_task_id")
-        executor_task_id = (executor_task_id if type(executor_task_id) is str and TASK_ID.fullmatch(executor_task_id)
-                            else None)
+        state = developer.get("state")
         model = developer.get("model")
         plain_model = model if type(model) is str and GW_MODEL.fullmatch(model) else "不明"
-        detail = f'{executor_task_id or "?"} · {plain_model} · 工作中'
-        rows.append(OfficeRow(f'home LLM {task_id[:8]}', WORKING, detail, age, 40,
-                              kind='subagent', evidence='llmtool 任務紀錄'))
+        if state == "DEVELOPER_DISPATCHING":
+            if profile != "company-gw":
+                continue
+            executor_task_id = developer.get("executor_task_id")
+            executor_task_id = (executor_task_id if type(executor_task_id) is str and TASK_ID.fullmatch(executor_task_id)
+                                else None)
+            detail = f'{executor_task_id or "?"} · {plain_model} · 工作中'
+            rows.append(OfficeRow(f'home LLM {task_id[:8]}', WORKING, detail, age, 40,
+                                  kind='subagent', evidence='llmtool 任務紀錄'))
+        else:
+            usage = developer.get("usage")
+            if type(usage) is dict:
+                p = usage.get("prompt_tokens")
+                p_text = str(p) if type(p) is int and p >= 0 else "不明"
+                c = usage.get("completion_tokens")
+                c_text = str(c) if type(c) is int and c >= 0 else "不明"
+                t = usage.get("total_tokens")
+                t_text = str(t) if type(t) is int and t >= 0 else "不明"
+                tokens_text = f"輸入 {p_text} · 輸出 {c_text} · 合計 {t_text} tokens"
+            else:
+                tokens_text = "用量未記錄"
+            detail = f"{plain_model} · 已結束 · {tokens_text}"
+            error_code = developer.get("error_code")
+            if type(error_code) is str and error_code and CODE_TEXT.fullmatch(error_code):
+                detail += f" · {error_code}"
+            rows.append(OfficeRow(f'home LLM {task_id[:8]}', DONE, detail, age, 40,
+                                  kind='subagent', evidence='llmtool 任務紀錄'))
     rows.sort(key=lambda r: (r.age if r.age is not None else 1e12, r.name))
     return rows
 
