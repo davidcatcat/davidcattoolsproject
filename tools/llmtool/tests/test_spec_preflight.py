@@ -213,5 +213,41 @@ class SpecPreflightTests(unittest.TestCase):
         self.assertEqual((status, output.getvalue()), (2, "SPEC_PREFLIGHT_INVALID\n"))
 
 
+class LadderTierTests(unittest.TestCase):
+    """WP-120L (#120): the home LLM ladder tier from ladder log entries."""
+
+    def entry(self, tier, outcome, attempts=1):
+        return {"tier": tier, "outcome": outcome, "attempts": attempts}
+
+    def test_empty_log_is_t1(self):
+        self.assertEqual(spec_preflight.ladder_tier([]), (1, 0, False))
+
+    def test_three_first_try_solved_promote(self):
+        log = [self.entry(1, "SOLVED")] * 3
+        self.assertEqual(spec_preflight.ladder_tier(log), (2, 0, False))
+
+    def test_t2_streak_moves_on_to_t3(self):
+        log = [self.entry(1, "SOLVED")] * 3 + [self.entry(2, "SOLVED")] * 3
+        self.assertEqual(spec_preflight.ladder_tier(log), (3, 0, False))
+
+    def test_repair_or_partial_resets_streak(self):
+        log = [self.entry(1, "SOLVED"), self.entry(1, "SOLVED", attempts=2),
+               self.entry(1, "PARTIAL")]
+        self.assertEqual(spec_preflight.ladder_tier(log), (1, 0, False))
+
+    def test_two_failures_drop_one_tier(self):
+        log = [self.entry(1, "SOLVED")] * 3 + [self.entry(2, "FAILED")] * 2
+        self.assertEqual(spec_preflight.ladder_tier(log), (1, 0, False))
+
+    def test_other_tiers_and_bad_rows_are_ignored(self):
+        log = [self.entry("gw-agent-1", "SOLVED"), self.entry(True, "SOLVED"), "x",
+               self.entry(3, "FAILED"), self.entry(1, "SOLVED")]
+        self.assertEqual(spec_preflight.ladder_tier(log), (1, 1, False))
+
+    def test_top_tier_is_stable_after_three(self):
+        log = [self.entry(1, "SOLVED")] * 3
+        self.assertEqual(spec_preflight.ladder_tier(log, max_tier=1), (1, 3, True))
+
+
 if __name__ == "__main__":
     unittest.main()
