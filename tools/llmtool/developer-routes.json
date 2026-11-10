@@ -25,7 +25,7 @@
         "auth_env": "GW_AGENT_API_KEY",
         "model": "gw-agent-default",
         "context_cap_tokens": 32768,
-        "max_output_tokens": 8192,
+        "max_output_tokens": 16384,
         "allowed_data_classes": ["synthetic", "public_repo"],
         "data_class_map": {"SYNTHETIC": "synthetic", "PUBLIC_REPO": "public_repo"}
       },
