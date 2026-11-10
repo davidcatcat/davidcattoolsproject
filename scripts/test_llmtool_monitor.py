@@ -6317,8 +6317,9 @@ class OfficeViewTests(unittest.TestCase):
         # empty queue gets no line.
         rows = mon.runner_rows([one], now, roots, where.get, {30: "專用帳號 ghrunner"}.get, ci=[])
         self.assertEqual([(r.name, r.state) for r in rows],
-                         [("mac ci runner #1", mon.IDLE), ("mac ci runner #2", mon.STOPPED)])
-        self.assertEqual(rows[1].alert, "CI runner davidproject-self-action-2 沒在跑")
+                         [("mac ci runner #1", mon.IDLE), ("mac ci runner #2", mon.IDLE)])
+        self.assertEqual(rows[1].alert, "")
+        self.assertTrue(rows[1].detail.startswith("已退役（#1253：CI 改用 GitHub 主機）"))
         # Only running jobs, none waiting: no line either.
         rows = mon.runner_rows([one, two, job], now, roots, where.get,
                                {30: "專用帳號 ghrunner", 40: "專用帳號 ghrunner2"}.get, ci=ci[:1])
