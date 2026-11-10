@@ -1054,8 +1054,16 @@ def _codex_review_text(*, run_id='c' * 32, contract='d' * 64, version=1):
             f'contract={contract} head={HEAD}')
 
 
-def _codex_event_stream(review_text, *, drop=(), **changes):
+def _codex_event_stream(review_text, *, drop=(), plain=None, **changes):
     """Codex JSONL with the current reply shape; changes add or replace JSON keys."""
+    if plain or (plain is None and not changes and not drop and (
+            not review_text.strip().startswith(('<!--', '{')))):
+        events = [
+            {'type': 'thread.started', 'thread_id': '0123456789abcdef'},
+            {'type': 'item.completed', 'item': {
+                'type': 'agent_message', 'text': review_text}},
+        ]
+        return '\n'.join(json.dumps(event) for event in events).encode('utf-8')
     verdict = {'task_id': TASK, 'run_id': 'c' * 32, 'head': HEAD,
                'verdict': 'PASS', 'review': review_text}
     verdict.update(changes)
