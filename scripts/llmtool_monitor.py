@@ -9334,27 +9334,35 @@ class StateRequestHandler(http.server.BaseHTTPRequestHandler):
         if not self._check_host(send_body=send_body):
             return
 
-        if "//" in self.path:
-            self._send_reply(404, b"Not Found\n", send_body=send_body)
-            return
+        raw_path = self.path.split("?", 1)[0]
+        token = self.server.token
 
-        parts = self.path.split("/")
-        if len(parts) == 3 and parts[0] == "":
-            candidate = parts[1]
-        else:
-            candidate = ""
+        is_page = False
+        is_state = False
 
-        token_matches = hmac.compare_digest(
-            candidate.encode("utf-8"), self.server.token.encode("utf-8")
-        )
-        if token_matches and parts[2] == "":
+        if raw_path.startswith("/") and raw_path.endswith("/"):
+            candidate = raw_path[1:-1]
+            if candidate and "/" not in candidate:
+                if hmac.compare_digest(
+                    candidate.encode("utf-8"), token.encode("utf-8")
+                ):
+                    is_page = True
+        elif raw_path.startswith("/") and raw_path.endswith("/state.json"):
+            candidate = raw_path[1:-11]
+            if candidate and "/" not in candidate:
+                if hmac.compare_digest(
+                    candidate.encode("utf-8"), token.encode("utf-8")
+                ):
+                    is_state = True
+
+        if is_page:
             self._send_reply(
                 200,
                 STATE_SERVER_HTML,
                 content_type="text/html; charset=utf-8",
                 send_body=send_body,
             )
-        elif token_matches and parts[2] == "state.json":
+        elif is_state:
             data = self.server.get_bytes()
             if isinstance(data, str):
                 data = data.encode("utf-8")
