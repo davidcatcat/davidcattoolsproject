@@ -6645,7 +6645,7 @@ DEVELOPER_RESULTS = {   # llmtool developer state / error code -> plain words
 
 _llmtool_records: dict = {}   # record path -> (file key, the few fields the views use)
 LLMTOOL_RECORD_FIELDS = ("task_id", "state", "updated_at")
-LLMTOOL_RECORD_PARTS = {"developer": ("provider_profile", "state", "error_code"),
+LLMTOOL_RECORD_PARTS = {"developer": ("provider_profile", "state", "error_code", "model", "executor_task_id"),
                         "completion": ("executor_task_id", "state"), "pm_assignment": ("route",)}
 
 
@@ -6717,6 +6717,48 @@ def llmtool_route_outcomes(now: float, root: str | None = None) -> dict:
         found[profile] = (age if newer else age_, total + 1,
                           ok + (state == "DEVELOPER_RESPONDED"), words if newer else latest)
     return found
+
+
+GW_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$")
+
+
+def gw_task_rows(now: float, root: str | None = None) -> list[OfficeRow]:
+    """Live subagent rows for company-gw Tasks in DEVELOPER_DISPATCHING changed
+    within OFFICE_DONE_WINDOW. Only bounded developer route fields (profile,
+    state, model, executor_task_id) and task_id are read; request, response,
+    diff, summary, acceptance and audit text are never touched."""
+    root = LLMTOOL_TASKS if root is None else root
+    rows = []
+    for path in _llmtool_paths(root):
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        age = max(0.0, now - st.st_mtime)
+        if age > OFFICE_DONE_WINDOW:
+            continue
+        record = _llmtool_record(path, st)
+        if type(record) is not dict:
+            continue
+        developer = record.get("developer")
+        if type(developer) is not dict:
+            continue
+        if developer.get("provider_profile") != "company-gw" or developer.get("state") != "DEVELOPER_DISPATCHING":
+            continue
+        task_id = record.get("task_id")
+        task_id = task_id if type(task_id) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task_id) else ""
+        if not task_id:
+            continue
+        executor_task_id = developer.get("executor_task_id")
+        executor_task_id = (executor_task_id if type(executor_task_id) is str and TASK_ID.fullmatch(executor_task_id)
+                            else None)
+        model = developer.get("model")
+        plain_model = model if type(model) is str and GW_MODEL.fullmatch(model) else "不明"
+        detail = f'{executor_task_id or "?"} · {plain_model} · 工作中'
+        rows.append(OfficeRow(f'home LLM {task_id[:8]}', WORKING, detail, age, 40,
+                              kind='subagent', evidence='llmtool 任務紀錄'))
+    rows.sort(key=lambda r: (r.age if r.age is not None else 1e12, r.name))
+    return rows
 
 
 RECORD_STATES = {   # llmtool task / completion state -> plain words
@@ -8313,12 +8355,14 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     if ci_view is not None:
         rows += hosted_ci_rows(ci, ci_view, now)
     rows.append(remote_test_row(processes, now, llmtool_tasks))
-    gw_runs = gw_rows(processes, now, canonical)
+    gw_runs = gw_rows(processes, now, canonical) + gw_task_rows(now, llmtool_tasks)
     rows += gw_runs
     gw_live: dict = {}
     for row in gw_runs:
         if row.state == WORKING:
-            gw_live.setdefault(GW_ROSTER[row.name], []).append(row)
+            gw_key = GW_ROSTER.get(row.name) or ("公司 gw" if row.name.startswith("home LLM") else None)
+            if gw_key:
+                gw_live.setdefault(gw_key, []).append(row)
     raw, source = load_dispatch(canonical, dispatch)
     switches, problem = worker_dispatch(raw)
     for name, key, order in WORKER_ROSTER:
@@ -8327,7 +8371,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         switch = switches.get(key)
         trouble = problem
         paused = not trouble and switch[0] == "PAUSED"
-        if live and not trouble and not paused:
+        if live and not trouble and not paused and name != "公司 gw":
             continue   # the live CLI rows say everything
         notes, state, age, alert = [], None, None, ""
         if name == "opencode developer" and not live:
