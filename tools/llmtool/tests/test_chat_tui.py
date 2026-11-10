@@ -794,6 +794,35 @@ class WidgetTests(Base):
                             lambda ui: self.assertEqual(ui.input.text, '/task submit --provider '),
                             lambda ui: self.assertNotIn('usage:', ui.conversation.text)])
 
+    def test_bare_pm_enter_does_not_become_pm_connect(self):
+        # Bare /pm selects its exact command match so Enter runs it without expanding.
+        def check_menu(ui):
+            self.assertEqual(ui.menu_items[ui.menu_index][0], '/pm')
+
+        ui, _ = self.drive(['/pm', check_menu, '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '')])
+        self.assertIn('PM: not connected', ui.conversation.text)
+        self.assertNotEqual(ui.input.text, '/pm connect')
+        self.assertNotIn('> /pm connect', ui.conversation.text)
+
+    def test_pm_down_enter_completes_moved_to_entry(self):
+        # Moving down selects the next command and Enter completes it into the draft.
+        ui, _ = self.drive(['/pm', '\x1b[B', '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '/pm disconnect'),
+                            lambda ui: self.assertEqual(ui.menu_items, []),
+                            lambda ui: self.assertNotIn('> /pm disconnect', ui.conversation.text)])
+
+    def test_prefix_draft_keeps_first_match_selected(self):
+        # A prefix draft keeps the first matching candidate selected.
+        def check_menu(ui):
+            self.assertEqual(ui.menu_index, 0)
+            self.assertEqual(ui.menu_items[0][0], '/status')
+
+        ui, _ = self.drive(['/s', check_menu, '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '/status'),
+                            lambda ui: self.assertEqual(ui.menu_items, []),
+                            lambda ui: self.assertNotIn('> /status', ui.conversation.text)])
+
     def test_tab_completes_unique_slash_command_and_argument_spacing(self):
         ui, _ = self.drive(['/pm c', '\t',
                             lambda ui: self.assertEqual(ui.input.text, '/pm connect'),
