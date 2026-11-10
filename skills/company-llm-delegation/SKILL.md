@@ -105,6 +105,24 @@ Use the smallest applicable llmtool runtime skill:
 Do not use `review-diff` as the cheap final reviewer for code correctness merely because
 it exists. Required independent review stays independent and strong.
 
+## Task sizing and ladder
+
+Home LLM work grows by a ladder (Owner 2026-11-10, #120). The PM logs every call in `~/.local/state/llmtool/home-llm-ladder.jsonl` (time, Task, tier, first-try result, repairs, outcome).
+
+| Tier | Size |
+| --- | --- |
+| T1 | One contiguous edit in one existing file, exact BEFORE/AFTER given |
+| T2 | Tests, or up to 40 lines, in one file; at most 3 KB of context |
+| T3 | Code and tests in two files; at most 6 KB of context |
+| T4 | A new file, or up to 3 files; at most 10 KB of context |
+| T5 | A small feature |
+
+- Promote one tier after 3 first-try SOLVED in a row at the current tier. Drop one tier after 2 failures at a tier.
+- Until T2 is stable (3 first-try SOLVED in a row at T2), no Task above T2.
+- One contiguous region per Task. Give exact BEFORE/AFTER text in proposal mode.
+- In agent mode (gw-agent), name the line ranges to read; never ask for a whole large file. Put new tests in a new file.
+- Every failure gets a root-cause pass by the Claude Reviewer route (`task high-debug --route claude --early`) before the next try.
+
 ## Invocation
 
 Use the already configured company profile explicitly. For example:

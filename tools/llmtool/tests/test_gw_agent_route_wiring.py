@@ -928,6 +928,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             'max_turns', 'max_input_tokens', 'max_output_tokens', 'max_wall_seconds',
             'max_tool_result_bytes', 'max_sent_bytes'})
         self.assertNotIn('stdout_bytes', seen['task']['budgets'])
+        # Per-Task budgets scale with the route caps (#120): 8 x 32768 and 4 x 16384.
+        self.assertEqual(seen['task']['budgets']['max_input_tokens'], 262144)
+        self.assertEqual(seen['task']['budgets']['max_output_tokens'], 65536)
+        self.assertEqual(seen['task']['budgets']['max_turns'], 16)
         self.assertEqual(developer['usage']['prompt_tokens'], 1)
         self.assertEqual(developer['usage']['completion_tokens'], 2)
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
