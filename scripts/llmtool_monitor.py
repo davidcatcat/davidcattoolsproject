@@ -9240,7 +9240,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="read GitHub only through `gh api` processes (never holds gh's token; more CPU)")
     parser.add_argument("--clear-rule-alert", type=int, metavar="PR",
                         help="clear one local sensitive-path alert by PR number")
+    parser.add_argument("--codex-quota", action="store_true",
+                        help="print the Codex quota status as one JSON line, then exit")
     args = parser.parse_args(argv)
+    if args.codex_quota:
+        print(json.dumps(read_codex_quota(time.time()), ensure_ascii=False))
+        return 0
     if args.clear_rule_alert is not None:
         try:
             state = _load_rule_alerts(RULE_ALERT_FILE)
