@@ -48,7 +48,7 @@ class TestCompanyGwDirectRetired(unittest.TestCase):
         with self.assertRaises(LLMToolError) as caught:
             create_client(config)
         exc = caught.exception
-        self.assertEqual(str(exc.diagnostic.code), "COMPANY_GW_DIRECT_RETIRED")
+        self.assertEqual(exc.diagnostic.code.value, "COMPANY_GW_DIRECT_RETIRED")
         self.assertTrue(exc.diagnostic.user_action_required)
         self.assertIn("Owner decision 2026-11-11", str(exc))
         self.assertIn("gw-agent", str(exc))
@@ -68,7 +68,7 @@ class TestCompanyGwDirectRetired(unittest.TestCase):
         with self.assertRaises(LLMToolError) as caught:
             create_client(config)
         exc = caught.exception
-        self.assertEqual(str(exc.diagnostic.code), "COMPANY_GW_DIRECT_RETIRED")
+        self.assertEqual(exc.diagnostic.code.value, "COMPANY_GW_DIRECT_RETIRED")
         self.assertTrue(exc.diagnostic.user_action_required)
         self.assertIn("Owner decision 2026-11-11", str(exc))
         self.assertIn("gw-agent", str(exc))
@@ -105,7 +105,7 @@ class TestCompanyGwDirectRetired(unittest.TestCase):
                 with self.assertRaises(LLMToolError) as caught:
                     create_client(config)
                 exc = caught.exception
-                self.assertEqual(str(exc.diagnostic.code), "COMPANY_GW_DIRECT_RETIRED")
+                self.assertEqual(exc.diagnostic.code.value, "COMPANY_GW_DIRECT_RETIRED")
                 self.assertTrue(exc.diagnostic.user_action_required)
                 self.assertIn("Owner decision 2026-11-11", str(exc))
                 self.assertIn("gw-agent", str(exc))
@@ -133,7 +133,7 @@ class TestCompanyGwDirectRetired(unittest.TestCase):
         with self.assertRaises(LLMToolError) as caught:
             create_client(config)
         exc = caught.exception
-        self.assertEqual(str(exc.diagnostic.code), "COMPANY_GW_DIRECT_RETIRED")
+        self.assertEqual(exc.diagnostic.code.value, "COMPANY_GW_DIRECT_RETIRED")
         self.assertTrue(exc.diagnostic.user_action_required)
         self.assertIn("Owner decision 2026-11-11", str(exc))
         self.assertIn("gw-agent", str(exc))
@@ -222,5 +222,5 @@ class TestCompanyGwDirectRetired(unittest.TestCase):
         )
         with self.assertRaises(LLMToolError) as caught:
             create_client(config)
-        self.assertEqual(str(caught.exception.diagnostic.code), "CONFIG_PROVIDER_NOT_READY")
+        self.assertEqual(caught.exception.diagnostic.code.value, "CONFIG_PROVIDER_NOT_READY")
         self.mock_open.assert_not_called()
