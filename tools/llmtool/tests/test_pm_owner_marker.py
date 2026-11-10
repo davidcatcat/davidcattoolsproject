@@ -10,6 +10,14 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "tools" / "llmtool" / "scripts" / "pm_owner_marker.py"
+LLMTOOL_DIR = ROOT / "tools" / "llmtool"
+
+try:
+    from llmtool import github_identity
+except ImportError:
+    if str(LLMTOOL_DIR) not in sys.path:
+        sys.path.insert(0, str(LLMTOOL_DIR))
+    from llmtool import github_identity
 
 
 class PMOwnerMarkerTests(unittest.TestCase):
@@ -17,6 +25,10 @@ class PMOwnerMarkerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.tmp = Path(self.temp.name)
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        (self.home / ".config" / "gh-ai").mkdir(parents=True)
+        (self.tmp / ".config" / "gh-ai").mkdir(parents=True, exist_ok=True)
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
@@ -27,10 +39,15 @@ class PMOwnerMarkerTests(unittest.TestCase):
         self.calls = self.tmp / "calls.jsonl"
         self.gh = self.bin / "gh"
         fake_gh_code = self.tmp / "fake_gh.py"
-        fake_gh_code.write_text("""import json, os, pathlib, sys
+        fake_gh_code.write_text(f"""import json, os, pathlib, sys
 args = sys.argv[1:]
+if args == ['api', 'user', '--jq', '.login']:
+    sys.path.insert(0, {str(LLMTOOL_DIR)!r})
+    from llmtool import github_identity
+    print(github_identity.ai_login())
+    sys.exit(0)
 with open(os.environ['FAKE_GH_CALLS'], 'a', encoding='utf-8') as f:
-    row = {'args': args}
+    row = {{'args': args}}
     if '--body-file' in args:
         path = args[args.index('--body-file') + 1]
         row['body'] = pathlib.Path(path).read_text(encoding='utf-8')
@@ -45,21 +62,21 @@ if args[:2] == ['api', '--paginate']:
     endpoint = args[-1]
     if endpoint.endswith('issues/comments?per_page=100'):
         rows = [
-          {'id': 1, 'issue_url': 'https://api.github.com/repos/a/b/issues/17',
+          {{'id': 1, 'issue_url': 'https://api.github.com/repos/a/b/issues/17',
            'created_at': '2026-11-01T00:00:00Z', 'author_association': 'MEMBER',
-           'body': '<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->\\nQuestion'},
-          {'id': 2, 'issue_url': 'https://api.github.com/repos/a/b/issues/18',
+           'body': '<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->\\nQuestion'}},
+          {{'id': 2, 'issue_url': 'https://api.github.com/repos/a/b/issues/18',
            'created_at': '2026-11-01T00:00:00Z', 'author_association': 'MEMBER',
-           'body': '<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->\\nQuestion'},
-          {'id': 3, 'issue_url': 'https://api.github.com/repos/a/b/issues/18',
+           'body': '<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->\\nQuestion'}},
+          {{'id': 3, 'issue_url': 'https://api.github.com/repos/a/b/issues/18',
            'created_at': '2026-11-02T00:00:00Z', 'author_association': 'MEMBER',
-           'body': '<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->\\nRelayed'},
-          {'id': 4, 'issue_url': 'https://api.github.com/repos/a/b/issues/19',
+           'body': '<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->\\nRelayed'}},
+          {{'id': 4, 'issue_url': 'https://api.github.com/repos/a/b/issues/19',
            'created_at': '2026-11-02T00:00:00Z', 'author_association': 'MEMBER',
-           'body': '<!-- activity: type=waiting_owner actor=PM target=Owner status=BLOCKED -->\\nBlocked'},
-          {'id': 5, 'issue_url': 'https://api.github.com/repos/a/b/issues/20',
+           'body': '<!-- activity: type=waiting_owner actor=PM target=Owner status=BLOCKED -->\\nBlocked'}},
+          {{'id': 5, 'issue_url': 'https://api.github.com/repos/a/b/issues/20',
            'created_at': '2026-11-02T00:00:00Z', 'author_association': 'MEMBER',
-           'body': '<!-- activity: type=repair_gate actor=PM target=Owner status=OPEN -->\\nNeeds review'},
+           'body': '<!-- activity: type=repair_gate actor=PM target=Owner status=OPEN -->\\nNeeds review'}},
         ]
     else:
         rows = []
@@ -73,6 +90,7 @@ elif len(args) >= 2 and args[:2] == ['issue', 'comment']:
 
     def run_cli(self, *args, fail=False, repo=False, cwd=None):
         env = os.environ.copy()
+        env["HOME"] = str(self.home)
         env["PATH"] = str(self.bin) + os.pathsep + env["PATH"]
         env["FAKE_GH_CALLS"] = str(self.calls)
         env["FAKE_GH_SCRIPT"] = str(self.tmp / "fake_gh.py")

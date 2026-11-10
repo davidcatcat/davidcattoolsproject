@@ -39,6 +39,14 @@ class HighDebugTests(unittest.TestCase):
     def setUp(self):
         self.unposted_root = tempfile.TemporaryDirectory()
         self.addCleanup(self.unposted_root.cleanup)
+        self._verified_ai_env_patch = patch.object(
+            high_debug.ai_github_exec, 'verified_ai_env',
+            side_effect=lambda *args, **kwargs: {
+                'GH_CONFIG_DIR': high_debug.os.environ.get('GH_CONFIG_DIR', '/safe/gh-config'),
+                'PATH': '/usr/bin',
+            })
+        self._verified_ai_env = self._verified_ai_env_patch.start()
+        self.addCleanup(self._verified_ai_env_patch.stop)
         self._poster_patch = patch.object(high_debug, '_post_github_record',
                                           return_value=True)
         self._poster = self._poster_patch.start()

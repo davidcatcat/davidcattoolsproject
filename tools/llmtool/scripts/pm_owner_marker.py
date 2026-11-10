@@ -39,10 +39,28 @@ class MarkerError(Exception):
     pass
 
 
-def _run(argv: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess:
+try:
+    from llmtool import ai_github_exec
+except ImportError:
+    try:
+        import ai_github_exec
+    except ImportError:
+        _pkg_dir = Path(__file__).resolve().parent.parent
+        if str(_pkg_dir) not in sys.path:
+            sys.path.insert(0, str(_pkg_dir))
+        from llmtool import ai_github_exec
+
+AiIdentityError = ai_github_exec.AiIdentityError
+
+
+def verified_ai_env(*args, **kwargs):
+    return ai_github_exec.verified_ai_env(*args, **kwargs)
+
+
+def _run(argv: list[str], *, timeout: int = 60, env: dict | None = None) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
-                              timeout=timeout, check=False, shell=False)
+                              timeout=timeout, check=False, shell=False, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise MarkerError("command failed") from exc
 
@@ -64,13 +82,24 @@ def repository_slug(explicit: str | None = None) -> str:
 
 
 def _post(number: str, body: str, repo: str) -> str:
+    try:
+        env = verified_ai_env()
+    except AiIdentityError as exc:
+        raise MarkerError(f"GITHUB_AI_IDENTITY_REFUSED {exc.code}") from exc
+    _gh_path = os.environ.get("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+    env.update({
+        "PATH": _gh_path,
+        "LC_ALL": "C",
+        "GH_PROMPT_DISABLED": "1",
+        "NO_COLOR": "1",
+    })
     fd, path = tempfile.mkstemp(prefix="pm-owner-marker-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
             stream.write(body)
             stream.write("\n")
         result = _run(["gh", "issue", "comment", number, "--repo", repo,
-                       "--body-file", path])
+                       "--body-file", path], env=env)
         if result.returncode:
             raise MarkerError("gh failed to post comment")
         url = result.stdout.decode("utf-8", "replace").strip().splitlines()
