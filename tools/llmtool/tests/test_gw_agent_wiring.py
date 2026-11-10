@@ -10,6 +10,7 @@ from llmtool.developer_routes.gw_agent import (
     session_binding_exists,
     write_session_binding,
 )
+from llmtool.gw_agent_callsite import SessionCallSite
 from llmtool.gw_agent_wiring import (
     WiringRefused,
     check_resumed_session,
@@ -85,11 +86,102 @@ class GwAgentWiringTests(unittest.TestCase):
             plan_run(
                 home,
                 executor_task_id=self.valid_executor_id,
-                task_id=self.valid_task_id,
+                task_id=self.valid_root_id,
                 repair_excerpt=None,
                 data_class=self.valid_data_class,
             )
         self.assertEqual(cm.exception.code, 'DEVELOPER_GW_AGENT_SESSION_EXISTS')
+
+    def test_first_run_resumes_other_task_session_with_empty_findings(self):
+        home, lock = open_locked_home(self.store_root, self.valid_executor_id)
+        self.addCleanup(lock.release)
+
+        root_task_r = 'task-root-synthetic-r'
+        other_task = 'task-synthetic-other'
+
+        write_session_binding(
+            home,
+            root_task_id=root_task_r,
+            executor_task_id=self.valid_executor_id,
+            session_id=self.valid_session_id,
+            data_class=self.valid_data_class,
+            scope_digest=self.valid_scope_digest,
+        )
+
+        plan = plan_run(
+            home,
+            executor_task_id=self.valid_executor_id,
+            task_id=other_task,
+            repair_excerpt=None,
+            data_class=self.valid_data_class,
+        )
+        expected = {
+            'gateway_task_id': root_task_r,
+            'resume_session': self.valid_session_id,
+            'findings': [],
+            'data_class': self.valid_data_class,
+        }
+        self.assertEqual(plan, expected)
+
+        with self.assertRaises(WiringRefused) as cm:
+            plan_run(
+                home,
+                executor_task_id=self.valid_executor_id,
+                task_id=root_task_r,
+                repair_excerpt=None,
+                data_class=self.valid_data_class,
+            )
+        self.assertEqual(cm.exception.code, 'DEVELOPER_GW_AGENT_SESSION_EXISTS')
+
+    def test_callsite_is_repair_flag(self):
+        first_site = SessionCallSite(
+            self.store_root,
+            executor_task_id='task-exec-synthetic-first',
+            task_id='task-synthetic-first',
+            repair_excerpt=None,
+            data_class=self.valid_data_class,
+        )
+        self.assertFalse(first_site.is_repair)
+        with first_site:
+            self.assertFalse(first_site.is_repair)
+            self.assertIsNone(first_site.resume_session)
+
+        home, lock = open_locked_home(self.store_root, self.valid_executor_id)
+        self.addCleanup(lock.release)
+        root_task_r = 'task-root-synthetic-r'
+        write_session_binding(
+            home,
+            root_task_id=root_task_r,
+            executor_task_id=self.valid_executor_id,
+            session_id=self.valid_session_id,
+            data_class=self.valid_data_class,
+            scope_digest=self.valid_scope_digest,
+        )
+        lock.release()
+
+        resumed_site = SessionCallSite(
+            self.store_root,
+            executor_task_id=self.valid_executor_id,
+            task_id='task-synthetic-other',
+            repair_excerpt=None,
+            data_class=self.valid_data_class,
+        )
+        self.assertFalse(resumed_site.is_repair)
+        with resumed_site:
+            self.assertTrue(resumed_site.is_repair)
+            self.assertEqual(resumed_site.resume_session, self.valid_session_id)
+
+        repair_site = SessionCallSite(
+            self.store_root,
+            executor_task_id=self.valid_executor_id,
+            task_id='task-synthetic-repair',
+            repair_excerpt='synthetic defect',
+            data_class=self.valid_data_class,
+        )
+        self.assertTrue(repair_site.is_repair)
+        with repair_site:
+            self.assertTrue(repair_site.is_repair)
+            self.assertEqual(repair_site.resume_session, self.valid_session_id)
 
     def test_first_run_plan_fields(self):
         home, lock = open_locked_home(self.store_root, self.valid_executor_id)

@@ -96,6 +96,8 @@ class SessionCallSite:
     @property
     def is_repair(self) -> bool:
         """True if this is a repair run, False on first run."""
+        if self._plan is not None:
+            return self._plan['resume_session'] is not None
         return self.repair_excerpt is not None
 
     def route_fields(self) -> Dict[str, Any]:
