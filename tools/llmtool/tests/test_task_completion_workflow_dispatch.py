@@ -223,9 +223,10 @@ class TestTaskCompletionWorkflowDispatch(unittest.TestCase):
             pr_runs=[],
             dispatch_runs=[_sample_dispatch_run(head_branch=_OTHER_BRANCH)],
         )
-        with self.assertRaises(LLMToolError) as ctx:
-            _call_collect(fake_gh)
-        self.assertEqual(ctx.exception.completion_code, 'CI_WORKFLOW_RUN_MISMATCH')
+        result = _call_collect(fake_gh)
+        self.assertIsNone(result['run_id'])
+        self.assertEqual(result['successful_checks'], [])
+        self.assertEqual(result['check_outcomes'], {_CHECK_NAME: 'MISSING'})
 
     def test_refused_for_other_sha(self):
         # A workflow_dispatch run on another sha is refused.
@@ -233,9 +234,10 @@ class TestTaskCompletionWorkflowDispatch(unittest.TestCase):
             pr_runs=[],
             dispatch_runs=[_sample_dispatch_run(head_sha=_OTHER_SHA)],
         )
-        with self.assertRaises(LLMToolError) as ctx:
-            _call_collect(fake_gh)
-        self.assertEqual(ctx.exception.completion_code, 'CI_WORKFLOW_RUN_MISMATCH')
+        result = _call_collect(fake_gh)
+        self.assertIsNone(result['run_id'])
+        self.assertEqual(result['successful_checks'], [])
+        self.assertEqual(result['check_outcomes'], {_CHECK_NAME: 'MISSING'})
 
     def test_refused_for_other_workflow(self):
         # A run from another workflow id or path is refused.
@@ -243,9 +245,10 @@ class TestTaskCompletionWorkflowDispatch(unittest.TestCase):
             pr_runs=[],
             dispatch_runs=[_sample_dispatch_run(workflow_id=999)],
         )
-        with self.assertRaises(LLMToolError) as ctx:
-            _call_collect(fake_gh)
-        self.assertEqual(ctx.exception.completion_code, 'CI_WORKFLOW_RUN_MISMATCH')
+        result = _call_collect(fake_gh)
+        self.assertIsNone(result['run_id'])
+        self.assertEqual(result['successful_checks'], [])
+        self.assertEqual(result['check_outcomes'], {_CHECK_NAME: 'MISSING'})
 
     def test_pull_request_run_still_preferred(self):
         # An existing pull_request run is preferred over workflow_dispatch.
@@ -336,6 +339,61 @@ class TestTaskCompletionWorkflowDispatch(unittest.TestCase):
         self.assertIsNone(result['run_id'])
         self.assertEqual(result['successful_checks'], [])
         self.assertEqual(result['check_outcomes'], {_CHECK_NAME: 'MISSING'})
+
+    def test_fallback_response_holding_pull_request_runs_ignored(self):
+        # A fallback response holding pull_request runs is ignored.
+        fake_gh, _ = _make_fake_github(
+            pr_runs=[],
+            dispatch_runs=[_sample_pr_run()],
+        )
+        result = _call_collect(fake_gh)
+        self.assertIsNone(result['run_id'])
+        self.assertEqual(result['successful_checks'], [])
+        self.assertEqual(result['check_outcomes'], {_CHECK_NAME: 'MISSING'})
+
+    def test_fallback_response_not_valid_runs_list_ignored(self):
+        # A fallback response that is not a valid runs list is treated as no dispatch run.
+        workflow_data = {
+            'id': _WORKFLOW_ID,
+            'path': _WORKFLOW_PATH,
+            'name': _WORKFLOW_NAME,
+            'state': 'active',
+        }
+        pr_runs_data = {
+            'total_count': 0,
+            'workflow_runs': [],
+        }
+
+        def fake_get(path):
+            if path == f'actions/workflows/{_WORKFLOW_PATH.rsplit("/", 1)[-1]}':
+                return workflow_data
+            if path == f'actions/workflows/{_WORKFLOW_ID}/runs?head_sha={_SHA}&event=pull_request&per_page=100':
+                return pr_runs_data
+            if path == f'actions/workflows/{_WORKFLOW_ID}/runs?head_sha={_SHA}&event=workflow_dispatch&per_page=100':
+                return {'unexpected': 'shape'}
+            raise AssertionError(f'Unexpected GitHub API path: {path}')
+
+        result = _call_collect(fake_get)
+        self.assertIsNone(result['run_id'])
+        self.assertEqual(result['successful_checks'], [])
+        self.assertEqual(result['check_outcomes'], {_CHECK_NAME: 'MISSING'})
+
+    def test_multiple_dispatch_runs_only_fully_matching_candidate(self):
+        # Only fully matching workflow_dispatch runs become candidates.
+        mismatched_branch = _sample_dispatch_run(run_id=2001, head_branch=_OTHER_BRANCH)
+        mismatched_sha = _sample_dispatch_run(run_id=2002, head_sha=_OTHER_SHA)
+        mismatched_workflow = _sample_dispatch_run(run_id=2003, workflow_id=999)
+        matching = _sample_dispatch_run(run_id=2004)
+        fake_gh, _ = _make_fake_github(
+            pr_runs=[],
+            dispatch_runs=[mismatched_branch, mismatched_sha, mismatched_workflow, matching],
+            jobs=[_sample_job(run_id=2004)],
+            checks=[_sample_check()],
+        )
+        result = _call_collect(fake_gh)
+        self.assertEqual(result['run_id'], 2004)
+        self.assertEqual(result['successful_checks'], [_CHECK_NAME])
+        self.assertEqual(result['check_outcomes'], {_CHECK_NAME: 'SUCCESS'})
 
 
 if __name__ == '__main__':
