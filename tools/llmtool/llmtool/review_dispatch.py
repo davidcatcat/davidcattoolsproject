@@ -34,6 +34,8 @@ REVIEW_FAILURE_REASONS = _D6_CREATE_FAILURE_REASONS | frozenset((
     'REVIEW_CLASSIFIER_REJECTED',
     # The review prompt was refused before any Reviewer session started.
     'REVIEW_PROMPT_REFUSED'))
+REVIEW_OUTPUT_WITHHELD = 'REVIEW_OUTPUT_WITHHELD'
+REVIEW_OUTPUT_ABSENT = 'REVIEW_OUTPUT_ABSENT'
 
 
 def _unique_json_object(pairs):
@@ -46,7 +48,7 @@ def _unique_json_object(pairs):
 
 
 def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reason=None,
-            mismatch_keys=None):
+            mismatch_keys=None, excerpt=None):
     error = LLMToolError(message)
     error.review_dispatch_code = code
     if reason is not None:
@@ -54,6 +56,8 @@ def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reaso
     if mismatch_keys is not None:
         # Fixed JSON key names only; never a returned or expected value.
         error.review_binding_mismatch_keys = tuple(mismatch_keys)
+    if excerpt is not None:
+        error.review_excerpt = excerpt
     raise error from None
 
 
@@ -326,17 +330,20 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
             # The reply holds the returned values, so no excerpt is added.
             raise
         final = _codex_final_message(raw)
-        if final is not None and final.strip():
-            excerpt = final.encode('utf-8')[:2048].decode('utf-8', 'ignore')
-            try:
-                from .task_submission_cli import _screen_text
-                excerpt = _screen_text(excerpt, 2048)
-            except LLMToolError:
-                excerpt = ''
-            if excerpt:
-                _refuse('REVIEW_NOT_POSTED', 'Reviewer dispatch refused: ' + excerpt,
-                        reason=reason)
-        _refuse('REVIEW_NOT_POSTED', reason=reason)
+        if final is None or not final.strip():
+            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_ABSENT)
+        from .task_submission_cli import _screen_text
+        try:
+            _screen_text(final, _CODEX_REVIEW_MAX_OUTPUT)
+        except LLMToolError:
+            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_WITHHELD)
+        cut = '\n'.join(final.splitlines()[:40]).encode('utf-8')[:2048].decode('utf-8', 'ignore')
+        try:
+            excerpt = _screen_text(cut, 2048)
+        except LLMToolError:
+            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_WITHHELD)
+        _refuse('REVIEW_NOT_POSTED', 'Reviewer dispatch refused: ' + excerpt,
+                reason=reason, excerpt=excerpt)
 
 
 def _review_return(claim, result):

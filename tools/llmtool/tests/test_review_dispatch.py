@@ -613,20 +613,40 @@ class ReviewDispatchTests(unittest.TestCase):
                                  'REVIEW_NOT_POSTED')
 
     def test_refused_codex_review_includes_only_a_screened_bounded_excerpt(self):
-        final = 'not a review object: ' + ('界' * 3000)
-        raw = ('\n'.join((
+        final_bytes = 'not a review object: ' + ('界' * 3000)
+        raw_bytes = ('\n'.join((
             json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}),
             json.dumps({'type': 'item.completed', 'item': {
-                'type': 'agent_message', 'text': final}}))).encode('utf-8'))
+                'type': 'agent_message', 'text': final_bytes}}))).encode('utf-8'))
         with self.assertRaises(LLMToolError) as raised:
             review_dispatch._parse_codex_review(
-                raw, task_id=TASK, run_id='c' * 32,
+                raw_bytes, task_id=TASK, run_id='c' * 32,
                 contract_digest='d' * 64, head=HEAD)
         self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
-        message = str(raised.exception)
-        excerpt = message.split('Reviewer dispatch refused: ', 1)[1]
+        self.assertEqual(raised.exception.review_failure_reason, 'VERDICT_NOT_JSON')
+        excerpt = raised.exception.review_excerpt
         self.assertLessEqual(len(excerpt.encode('utf-8')), 2048)
-        self.assertTrue(final.startswith(excerpt))
+        self.assertLessEqual(len(excerpt.splitlines()), 40)
+        self.assertTrue(final_bytes.startswith(excerpt))
+        self.assertEqual(str(raised.exception), 'Reviewer dispatch refused: ' + excerpt)
+
+        final_lines = '\n'.join(f'line {i:02d} content' for i in range(60))
+        raw_lines = ('\n'.join((
+            json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}),
+            json.dumps({'type': 'item.completed', 'item': {
+                'type': 'agent_message', 'text': final_lines}}))).encode('utf-8'))
+        with self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_codex_review(
+                raw_lines, task_id=TASK, run_id='c' * 32,
+                contract_digest='d' * 64, head=HEAD)
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertEqual(raised.exception.review_failure_reason, 'VERDICT_NOT_JSON')
+        excerpt_lines = raised.exception.review_excerpt
+        self.assertEqual(len(excerpt_lines.splitlines()), 40)
+        self.assertLessEqual(len(excerpt_lines.encode('utf-8')), 2048)
+        self.assertTrue(final_lines.startswith(excerpt_lines))
+        self.assertEqual(excerpt_lines, '\n'.join(f'line {i:02d} content' for i in range(40)))
+        self.assertEqual(str(raised.exception), 'Reviewer dispatch refused: ' + excerpt_lines)
 
         hidden = _runtime_parts(
             'not a review object: ', 'api', '_key', ' = ', 'abcdefghijkl', 'mnop')
@@ -638,6 +658,44 @@ class ReviewDispatchTests(unittest.TestCase):
             review_dispatch._parse_codex_review(
                 raw_hidden, task_id=TASK, run_id='c' * 32,
                 contract_digest='d' * 64, head=HEAD)
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertEqual(raised.exception.review_failure_reason, 'VERDICT_NOT_JSON')
+        self.assertEqual(raised.exception.review_excerpt,
+                         review_dispatch.REVIEW_OUTPUT_WITHHELD)
+        self.assertEqual(str(raised.exception),
+                         'Reviewer dispatch refused; details omitted')
+
+        clean_prefix = ('safe review line without sensitive data\n' * 60)
+        hidden_past = clean_prefix + _runtime_parts(
+            'api', '_key', ' = ', 'abcdefghijkl', 'mnop')
+        raw_hidden_past = ('\n'.join((
+            json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}),
+            json.dumps({'type': 'item.completed', 'item': {
+                'type': 'agent_message', 'text': hidden_past}}))).encode('utf-8'))
+        with self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_codex_review(
+                raw_hidden_past, task_id=TASK, run_id='c' * 32,
+                contract_digest='d' * 64, head=HEAD)
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertEqual(raised.exception.review_failure_reason, 'VERDICT_NOT_JSON')
+        self.assertEqual(raised.exception.review_excerpt,
+                         review_dispatch.REVIEW_OUTPUT_WITHHELD)
+        self.assertEqual(str(raised.exception),
+                         'Reviewer dispatch refused; details omitted')
+
+        control_text = 'not a review object: \x00 control char'
+        raw_control = ('\n'.join((
+            json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}),
+            json.dumps({'type': 'item.completed', 'item': {
+                'type': 'agent_message', 'text': control_text}}))).encode('utf-8'))
+        with self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_codex_review(
+                raw_control, task_id=TASK, run_id='c' * 32,
+                contract_digest='d' * 64, head=HEAD)
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertEqual(raised.exception.review_failure_reason, 'VERDICT_NOT_JSON')
+        self.assertEqual(raised.exception.review_excerpt,
+                         review_dispatch.REVIEW_OUTPUT_WITHHELD)
         self.assertEqual(str(raised.exception),
                          'Reviewer dispatch refused; details omitted')
 
@@ -647,6 +705,10 @@ class ReviewDispatchTests(unittest.TestCase):
             review_dispatch._parse_codex_review(
                 without_final, task_id=TASK, run_id='c' * 32,
                 contract_digest='d' * 64, head=HEAD)
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertEqual(raised.exception.review_failure_reason, 'NO_FINAL_MESSAGE')
+        self.assertEqual(raised.exception.review_excerpt,
+                         review_dispatch.REVIEW_OUTPUT_ABSENT)
         self.assertEqual(str(raised.exception),
                          'Reviewer dispatch refused; details omitted')
 
@@ -677,12 +739,17 @@ class ReviewDispatchTests(unittest.TestCase):
         return raised.exception, screen
 
     def assert_screened_excerpt_only(self, exc, screen, raw):
-        # The excerpt goes through the screen once, bounded, and only the
-        # screened text reaches the message.
-        screen.assert_called_once()
-        excerpt, limit = screen.call_args.args
-        self.assertEqual(limit, 2048)
-        self.assertTrue(review_dispatch._codex_final_message(raw).startswith(excerpt))
+        # The whole reply is screened first, then the cut excerpt is screened,
+        # and only the screened text reaches the message.
+        self.assertEqual(screen.call_count, 2)
+        final = review_dispatch._codex_final_message(raw)
+        (first_text, first_limit), _ = screen.call_args_list[0]
+        self.assertEqual(first_text, final)
+        self.assertEqual(first_limit, review_dispatch._CODEX_REVIEW_MAX_OUTPUT)
+        (second_text, second_limit), _ = screen.call_args_list[1]
+        self.assertEqual(second_limit, 2048)
+        self.assertTrue(final.startswith(second_text))
+        self.assertEqual(exc.review_excerpt, SCREENED_EXCERPT)
         self.assertEqual(str(exc), 'Reviewer dispatch refused: ' + SCREENED_EXCERPT)
 
     def test_wrong_or_missing_binding_line_refuses_with_a_right_json_reply(self):
