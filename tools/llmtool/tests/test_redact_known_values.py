@@ -3,20 +3,29 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import io
 import json
 import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
-from tools.llmtool.scripts.redact_known_values import (
-    MAX_FILE_SIZE,
-    main,
-    redact_repo,
-)
+_SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "redact_known_values.py"
+_spec = importlib.util.spec_from_file_location("redact_known_values", _SCRIPT_PATH)
+if _spec is None or _spec.loader is None:
+    raise ImportError(f"Cannot load spec from {_SCRIPT_PATH}")
+_mod = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = _mod
+_spec.loader.exec_module(_mod)
+
+MAX_FILE_SIZE = _mod.MAX_FILE_SIZE
+main = _mod.main
+redact_repo = _mod.redact_repo
 
 
 FAKE_VAL_BASE = "fake-host.example.invalid"
@@ -230,7 +239,7 @@ class TestRedactKnownValues(unittest.TestCase):
         self.assertNotIn(FAKE_VAL_BASE, err)
 
     def test_output_never_contains_value(self) -> None:
-        """Neither stdout nor stderr should ever print values from map."""
+        """Neither stdout nor stderr should ever print values or placeholders from map."""
         _commit_file(
             self.repo_dir,
             "sample.txt",
@@ -242,8 +251,12 @@ class TestRedactKnownValues(unittest.TestCase):
         )
         self.assertNotIn(FAKE_VAL_BASE, out)
         self.assertNotIn(FAKE_VAL_EXTRA, out)
+        self.assertNotIn(FAKE_PLC_BASE, out)
+        self.assertNotIn(FAKE_PLC_EXTRA, out)
         self.assertNotIn(FAKE_VAL_BASE, err)
         self.assertNotIn(FAKE_VAL_EXTRA, err)
+        self.assertNotIn(FAKE_PLC_BASE, err)
+        self.assertNotIn(FAKE_PLC_EXTRA, err)
 
         # Test check
         _, out, err = self._run_cli(
@@ -257,8 +270,12 @@ class TestRedactKnownValues(unittest.TestCase):
         )
         self.assertNotIn(FAKE_VAL_BASE, out)
         self.assertNotIn(FAKE_VAL_EXTRA, out)
+        self.assertNotIn(FAKE_PLC_BASE, out)
+        self.assertNotIn(FAKE_PLC_EXTRA, out)
         self.assertNotIn(FAKE_VAL_BASE, err)
         self.assertNotIn(FAKE_VAL_EXTRA, err)
+        self.assertNotIn(FAKE_PLC_BASE, err)
+        self.assertNotIn(FAKE_PLC_EXTRA, err)
 
         # Test error report
         invalid_map = self.map_dir / "invalid-entries.json"
@@ -275,6 +292,8 @@ class TestRedactKnownValues(unittest.TestCase):
         )
         self.assertNotIn(FAKE_VAL_BASE, out)
         self.assertNotIn(FAKE_VAL_BASE, err)
+        self.assertNotIn(FAKE_PLC_BASE, out)
+        self.assertNotIn(FAKE_PLC_BASE, err)
 
     def test_longest_first_replacement(self) -> None:
         """Longer matching values must be replaced before shorter prefixes."""
@@ -359,7 +378,7 @@ class TestRedactKnownValues(unittest.TestCase):
     def test_untracked_files_ignored(self) -> None:
         """Untracked files are not read or modified."""
         untracked = self.repo_dir / "untracked.txt"
-        untracked.write_text(f"Secret: {FAKE_VAL_BASE}\n", encoding="utf-8")
+        untracked.write_text(f"Untracked: {FAKE_VAL_BASE}\n", encoding="utf-8")
 
         code, out, _ = self._run_cli(
             [
@@ -373,6 +392,55 @@ class TestRedactKnownValues(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("untracked.txt", out)
         self.assertIn(FAKE_VAL_BASE, untracked.read_text(encoding="utf-8"))
+
+    def test_refuses_symlink_map(self) -> None:
+        """Map that is a symlink must be rejected with exit code 2."""
+        symlink_map = self.map_dir / "symlink-map.json"
+        symlink_map.symlink_to(self.default_map_path)
+        code, _, err = self._run_cli(
+            ["--map", str(symlink_map), "--repo", str(self.repo_dir)]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("MAP_NOT_REGULAR", err)
+
+    def test_refuses_not_owned_map(self) -> None:
+        """Map not owned by current user must be rejected with exit code 2."""
+        if not hasattr(os, "getuid"):
+            self.skipTest("os.getuid not supported on this platform")
+        current_uid = os.getuid()
+        with mock.patch("os.getuid", return_value=current_uid + 1):
+            code, _, err = self._run_cli(
+                ["--map", str(self.default_map_path), "--repo", str(self.repo_dir)]
+            )
+            self.assertEqual(code, 2)
+            self.assertIn("MAP_NOT_OWNED", err)
+
+    def test_refuses_combining_apply_and_check(self) -> None:
+        """Combining --apply and --check must be rejected with exit code 2."""
+        code, _, err = self._run_cli(
+            [
+                "--apply",
+                "--check",
+                "--map",
+                str(self.default_map_path),
+                "--repo",
+                str(self.repo_dir),
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("cannot combine", err)
+
+    def test_env_var_map_path(self) -> None:
+        """Environment variable LLMTOOL_REDACT_MAP is used when --map is omitted."""
+        _commit_file(
+            self.repo_dir,
+            "sample.txt",
+            f"Target {FAKE_VAL_BASE}\n",
+        )
+        with mock.patch.dict(os.environ, {"LLMTOOL_REDACT_MAP": str(self.default_map_path)}):
+            code, out, _ = self._run_cli(["--repo", str(self.repo_dir)])
+            self.assertEqual(code, 0)
+            self.assertIn("sample.txt: 1", out)
 
     def test_map_validation_constraints(self) -> None:
         """Map validation rejects non-existent, malformed, or short entries."""
