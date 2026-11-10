@@ -21,7 +21,15 @@ from urllib.parse import urlsplit
 from .base import DeveloperRoute, RouteError
 from .write_boundary import SandboxExecBoundary
 from .. import config as llm_config
+from .. import gateway_profiles
 from .. import github_identity
+
+def _gateway_credential_config():
+    """Config-shaped view of the Gateway profile key setting; never company-gw (#120)."""
+    gateway = gateway_profiles.load_gateway_profile()
+    provider = dict(llm_config.PROVIDER_DEFAULTS, api_key_env=gateway['api_key_env'])
+    return {'active_provider': 'gateway', 'providers': {'gateway': provider}}
+
 
 _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
 _TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z')
@@ -447,7 +455,7 @@ class GwAgentRoute(DeveloperRoute):
         if self._credential_resolved:
             return self._credential
         try:
-            config_value = llm_config.resolve_profile_config('company-gw')
+            config_value = _gateway_credential_config()
             try:
                 credential = llm_config.api_key(config_value)
             except Exception as exc:

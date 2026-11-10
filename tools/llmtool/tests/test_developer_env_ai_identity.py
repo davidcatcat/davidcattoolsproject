@@ -85,7 +85,7 @@ class DeveloperEnvAiIdentityTests(unittest.TestCase):
             'allowed_data_classes': ['synthetic'],
         }
         route = GwAgentRoute(config)
-        with mock.patch.object(gw_agent.llm_config, 'resolve_profile_config', return_value={}), \
+        with mock.patch.object(gw_agent, '_gateway_credential_config', return_value={}), \
                 mock.patch.object(gw_agent.llm_config, 'api_key', return_value='synthetic-not-a-token'), \
                 mock.patch.dict(os.environ, self.base_env, clear=True):
             env = route.build_env(str(self.tmpdir))
