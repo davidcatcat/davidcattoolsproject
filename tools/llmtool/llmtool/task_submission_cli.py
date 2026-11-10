@@ -3825,6 +3825,12 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             raise RouteError('AGY_WRITE_SCOPE_VIOLATION')
         artifact = raw.decode('utf-8', 'strict')
         usage = _normalize_agy_usage(result.usage)
+        if developer_diff_sensitive(artifact, _added_diff_content(artifact), _patch_paths):
+            saved = _persist_developer_output_rejection(
+                store, task['task_id'], developer, 'DEVELOPER_OUTPUT_SENSITIVE', usage,
+                artifact, provider_type='agy-cli', model=model)
+            _print(_task_view(saved))
+            return 1
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
             error_code=None, execution={
