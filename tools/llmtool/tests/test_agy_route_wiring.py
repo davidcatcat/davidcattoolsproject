@@ -412,6 +412,15 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(inbox_events, [{'task_id': 'a' * 32,
                                          'executor_task_id': 'executor-d6'}])
 
+    def test_agy_screened_diff_is_reported_as_sensitive_output(self):
+        marker = 'pass' + 'word'
+        diff = ('diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x = 1\n+' + marker + ' = "' + 'q7' * 12 + '"\n').encode('utf-8')
+        status, task, inbox_events, _prompts = self._run_agy_delegate(diff_bytes=diff)
+        self.assertEqual(status, 1)
+        self.assertEqual(task['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(task['developer']['error_code'], 'DEVELOPER_OUTPUT_SENSITIVE')
+        self.assertEqual(inbox_events, [])
+
     def test_agy_unbound_missing_empty_and_unknown_sessions_remain_unverified(self):
         for session_id in (None, '', 'UNKNOWN'):
             with self.subTest(session_id=session_id):
