@@ -38,11 +38,11 @@ def tearDownModule():
 
 class CompanyGwRetiredTests(unittest.TestCase):
     def setUp(self):
-        # Configure repository evidence references for dispatch issues 120 and 289.
+        # Configure repository evidence references for dispatch issue 289.
         self.repository_patch = patch.object(
             worker_dispatch, 'repository_config',
             return_value={'slug': 'davidcatcat/davidcattoolsproject',
-                          'dispatch_issue': '(?:120|289)', 'dispatch_evidence_pr': 283})
+                          'dispatch_issue': 289, 'dispatch_evidence_pr': 283})
         self.repository_patch.start()
         self.addCleanup(self.repository_patch.stop)
 
@@ -66,22 +66,29 @@ class CompanyGwRetiredTests(unittest.TestCase):
         )
         self.assertEqual(
             company_gw['evidence'],
-            'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6773281594',
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6773709231',
         )
 
         gw_agent = policy['workers']['company-gw-agent']
         self.assertEqual(gw_agent['dispatch'], 'ALLOWED')
         self.assertEqual(gw_agent['decided_by'], 'Owner')
 
+        # Ensure the policy parses directly without failure.
+        parsed = worker_dispatch._parse_policy(policy_path.read_bytes())
+        self.assertIsInstance(parsed, dict)
+
         # Use the evaluate call shape from existing worker_dispatch tests.
         with patch.object(worker_dispatch, '_POLICY_PATH', policy_path):
             decision = worker_dispatch.evaluate('company-gw')
             gw_agent_decision = worker_dispatch.evaluate('company-gw-agent')
+            claude_decision = worker_dispatch.evaluate('claude-developer')
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
         self.assertTrue(gw_agent_decision.allowed)
         self.assertEqual(gw_agent_decision.reason_code, 'OWNER_POLICY_ALLOWED')
+        self.assertTrue(claude_decision.allowed)
+        self.assertEqual(claude_decision.reason_code, 'OWNER_POLICY_ALLOWED')
 
 
 if __name__ == '__main__':

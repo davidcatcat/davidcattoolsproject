@@ -34,7 +34,7 @@
       "decided_by": "Owner",
       "decided_at": "2026-11-11",
       "reason": "Owner decision: company/home LLM runs only through the API Agent Gateway (gw-agent); the company-gw direct/proposal route is retired as Developer, PM triage and fallback",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6773281594"
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6773709231"
     },
     "company-gw-agent": {
       "dispatch": "ALLOWED",
