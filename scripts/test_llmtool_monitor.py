@@ -10279,12 +10279,19 @@ class MainAiGhConfigTests(unittest.TestCase):
             ai.mkdir(parents=True)
             self.assertEqual(self._run(home), str(ai))
 
-    def test_keeps_preset_value(self):
+    def test_overrides_preset_value(self):
         with tempfile.TemporaryDirectory() as home:
             ai = Path(home) / '.config' / 'gh-ai'
             ai.mkdir(parents=True)
-            self.assertEqual(self._run(home, '/synthetic/other'), '/synthetic/other')
+            self.assertEqual(self._run(home, '/synthetic/other'), str(ai))
 
-    def test_unset_without_ai_config(self):
+    def test_ai_config_even_when_missing(self):
         with tempfile.TemporaryDirectory() as home:
-            self.assertIsNone(self._run(home))
+            self.assertEqual(self._run(home), str(Path(home) / '.config' / 'gh-ai'))
+
+    def test_drops_token_overrides(self):
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(os.environ, {'GH_TOKEN': 'synthetic-not-a-token', 'GITHUB_TOKEN': 'synthetic-not-a-token'}):
+                self._run(home)
+                self.assertNotIn('GH_TOKEN', os.environ)
+                self.assertNotIn('GITHUB_TOKEN', os.environ)
