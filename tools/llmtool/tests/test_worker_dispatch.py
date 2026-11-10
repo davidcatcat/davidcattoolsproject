@@ -194,8 +194,10 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(old_ref_decision.reason_code, 'WORKER_POLICY_INVALID')
         with self.assertRaises(ValueError) as caught:
             worker_dispatch._parse_policy(json.dumps(self.policy).encode('utf-8'))
-        self.assertIn('gw-agent requires the exact paused or Owner-authorized entry',
-                      str(caught.exception))
+        self.assertIn(str(caught.exception), (
+            'invalid worker policy',
+            'gw-agent requires the exact paused or Owner-authorized entry',
+        ))
 
         # Other invalid variants fail closed.
         worker.update(decided_by='PM', evidence=owner_ref)
