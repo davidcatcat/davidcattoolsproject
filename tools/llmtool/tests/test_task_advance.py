@@ -469,26 +469,33 @@ class TaskAdvanceTests(unittest.TestCase):
                          ('ADMISSION_DENIED', None, None))
 
     def test_timeout_and_sha_mismatch_receipts_require_attention(self):
-        for outcome, code in (('TIMEOUT', 'REMOTE_TEST_TIMEOUT'),
-                              ('SHA_MISMATCH', 'REMOTE_TEST_SHA_MISMATCH')):
-            record = base_record(remote_test_outcomes=[])
-            if outcome == 'TIMEOUT':
-                record['remote_test_outcomes'] = [{
-                    'result': 'TIMEOUT', 'executor_task': 'executor-1',
-                    'sha': HEAD, 'modules': ['test_task_advance'],
-                }]
-            else:
-                record['remote_test_receipts'] = [remote_receipt(
-                    base_record(), result=outcome)]
-            self.assertEqual(task_advance.decide(record, d6(), PR, {}),
-                             'NEEDS_ATTENTION')
-            store = type('S', (), {'get': lambda self, _id: record})()
-            with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
-                 patch.object(task_advance, '_pr_snapshot', return_value=PR):
-                result = task_advance.advance(task_id=record['task_id'], store=store,
-                    pr_number=17)
-            self.assertEqual(result['step'], 'NEEDS_ATTENTION')
-            self.assertEqual(result['codes'], [code])
+        timeout = {'result': 'TIMEOUT', 'executor_task': 'executor-1',
+                   'sha': HEAD, 'modules': ['test_task_advance']}
+
+        def record_with(*outcomes):
+            return base_record(remote_test_outcomes=[dict(item) for item in outcomes])
+
+        cases = (
+            # The first timeout on a head reruns once.
+            ('one timeout reruns', record_with(timeout), 'RUN_REMOTE_TEST', []),
+            # A second timeout keeps the attention hold.
+            ('two timeouts stop', record_with(timeout, timeout), 'NEEDS_ATTENTION',
+             ['REMOTE_TEST_TIMEOUT']),
+            ('sha mismatch stops', base_record(remote_test_outcomes=[], remote_test_receipts=[
+                remote_receipt(base_record(), result='SHA_MISMATCH')]),
+             'NEEDS_ATTENTION', ['REMOTE_TEST_SHA_MISMATCH']),
+        )
+        for name, record, action, codes in cases:
+            with self.subTest(name=name):
+                self.assertEqual(task_advance.decide(record, d6(), PR, {}), action)
+                store = type('S', (), {'get': lambda self, _id: record})()
+                with patch.object(task_advance, '_run_remote_test', return_value={}), \
+                     patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+                     patch.object(task_advance, '_pr_snapshot', return_value=PR):
+                    result = task_advance.advance(task_id=record['task_id'], store=store,
+                        pr_number=17)
+                self.assertEqual(result['step'], action)
+                self.assertEqual(result['codes'], codes)
 
     def test_no_admitted_modules_admission_denied_allows_review(self):
         record = base_record(remote_test_outcomes=[{
@@ -4625,11 +4632,12 @@ class TaskAdvanceReviewRefusalTests(unittest.TestCase):
                 self.assertEqual(bad_result['step'], 'DISPATCH_REVIEW')
                 self.assertNotIn('review_refusal', bad_result)
 
-        # Other advance results have no review_refusal key
-        rec_needs_attention = base_record(remote_test_outcomes=[{
-            'result': 'TIMEOUT', 'executor_task': 'executor-1',
-            'sha': HEAD, 'modules': ['test_task_advance'],
-        }])
+        # Other advance results have no review_refusal key. Two timeouts keep
+        # the attention hold, so this stays an advance result.
+        timeout = {'result': 'TIMEOUT', 'executor_task': 'executor-1',
+                   'sha': HEAD, 'modules': ['test_task_advance']}
+        rec_needs_attention = base_record(
+            remote_test_outcomes=[dict(timeout), dict(timeout)])
         with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
              patch.object(task_advance, '_pr_snapshot', return_value=PR):
             attn_result = task_advance.advance(
