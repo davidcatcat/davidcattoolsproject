@@ -18,11 +18,15 @@ nothing is flagged. A failed read stays UNKNOWN on the row it affects; it does
 not weaken a finding proven by other evidence.
 """
 
+import contextlib
+import fcntl
 import json
 import os
 import re
 import stat
 import subprocess
+import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -43,6 +47,18 @@ ANOMALY = 'ANOMALY'
 UNKNOWN = 'UNKNOWN'
 DONE = 'DONE'
 FLAGGED_STATES = frozenset((ACTIONABLE, ANOMALY))
+
+LEDGER_SCHEMA_VERSION = 1
+MAX_LEDGER_BYTES = 256 * 1024
+MAX_LEDGER_CLAIMS = 64
+RESERVATION_TTL = timedelta(minutes=15)
+# Tolerate slight clock skew across cooperating PM hosts/processes.
+_CLAIM_CLOCK_SKEW = timedelta(seconds=30)
+LEDGER_LOCK_TIMEOUT_SECONDS = 5.0
+CLAIM_REFUSED_EXIT = 3
+_CLAIM_FIELDS = frozenset({'holder', 'row', 'claimed_at', 'task_id', 'bound_at'})
+_HOLDER = re.compile(r'[A-Za-z0-9._-]{1,64}\Z')
+_UTC_SECONDS = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z')
 
 # Developer routes that take a registered D6 writer. Company gw only proposes
 # patches without file or Git authority, so it never counts as free capacity
@@ -199,6 +215,222 @@ def parse_predicate(text):
         parsed = _utc(value)
         return (kind, parsed) if parsed is not None else None
     return None
+
+
+class LedgerUnreadable(Exception):
+    """The ledger file is missing, unreadable or not schema_version 1."""
+
+
+class ClaimRefused(Exception):
+    """A claim operation was refused; carries a machine-readable code."""
+
+    def __init__(self, code, *args):
+        super().__init__(code, *args)
+        self.code = code
+
+
+def default_ledger_path():
+    return Path.home() / '.local' / 'state' / 'llmtool' / 'pm-claims.json'
+
+
+def _seconds(dt):
+    if isinstance(dt, datetime):
+        return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    if type(dt) is not str or _UTC_SECONDS.fullmatch(dt) is None:
+        return None
+    try:
+        return datetime.fromisoformat(dt.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+
+
+def _valid_claim(claim):
+    if type(claim) is not dict:
+        return False
+    if set(claim) != _CLAIM_FIELDS:
+        return False
+    holder = claim.get('holder')
+    if type(holder) is not str or _HOLDER.fullmatch(holder) is None:
+        return False
+    row = claim.get('row')
+    if type(row) is not str or not (1 <= len(row) <= 512):
+        return False
+    claimed_at = claim.get('claimed_at')
+    if type(claimed_at) is not str or _UTC_SECONDS.fullmatch(claimed_at) is None or _seconds(claimed_at) is None:
+        return False
+    task_id = claim.get('task_id')
+    bound_at = claim.get('bound_at')
+    if task_id is None:
+        if bound_at is not None:
+            return False
+    else:
+        if type(task_id) is not str or _TASK_ID.fullmatch(task_id) is None:
+            return False
+        if type(bound_at) is not str or _UTC_SECONDS.fullmatch(bound_at) is None or _seconds(bound_at) is None:
+            return False
+    return True
+
+
+class BoardLedger:
+    """Cooperative process-level claim ledger for pm-board reconciliation."""
+
+    def __init__(self, path=None):
+        self.path = Path(path) if path is not None else default_ledger_path()
+        self.lock_path = self.path.with_name(self.path.name + '.lock')
+
+    def read(self):
+        try:
+            st = os.lstat(self.path)
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            raise LedgerUnreadable('ledger unreadable') from exc
+
+        if stat.S_ISLNK(st.st_mode):
+            raise LedgerUnreadable('ledger is a symlink')
+        if not stat.S_ISREG(st.st_mode):
+            raise LedgerUnreadable('ledger is not a regular file')
+        if stat.S_IMODE(st.st_mode) != 0o600:
+            raise LedgerUnreadable('ledger permissions must be 0600')
+        if st.st_size > MAX_LEDGER_BYTES:
+            raise LedgerUnreadable('ledger exceeds size limit')
+
+        try:
+            flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+            fd = os.open(self.path, flags)
+            try:
+                info = os.fstat(fd)
+                if stat.S_ISLNK(info.st_mode):
+                    raise LedgerUnreadable('ledger is a symlink')
+                if not stat.S_ISREG(info.st_mode):
+                    raise LedgerUnreadable('ledger is not a regular file')
+                if stat.S_IMODE(info.st_mode) != 0o600:
+                    raise LedgerUnreadable('ledger permissions must be 0600')
+                if info.st_size > MAX_LEDGER_BYTES:
+                    raise LedgerUnreadable('ledger exceeds size limit')
+                chunks, remaining = [], MAX_LEDGER_BYTES + 1
+                while remaining:
+                    chunk = os.read(fd, min(65536, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+            finally:
+                os.close(fd)
+            raw = b''.join(chunks)
+            if len(raw) > MAX_LEDGER_BYTES:
+                raise LedgerUnreadable('ledger exceeds size limit')
+            value = json.loads(raw.decode('utf-8'),
+                               object_pairs_hook=worker_dispatch._unique_pairs,
+                               parse_constant=_reject_constant)
+        except LedgerUnreadable:
+            raise
+        except FileNotFoundError:
+            return []
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            raise LedgerUnreadable('ledger unreadable') from exc
+
+        if (type(value) is not dict or type(value.get('schema_version')) is not int or
+                value['schema_version'] != LEDGER_SCHEMA_VERSION or
+                type(value.get('claims')) is not list):
+            raise LedgerUnreadable('ledger is not schema_version 1 with a claims list')
+
+        claims = value['claims']
+        if len(claims) > MAX_LEDGER_CLAIMS:
+            raise LedgerUnreadable('ledger claims exceed limit')
+        for claim in claims:
+            if not _valid_claim(claim):
+                raise LedgerUnreadable('invalid claim in ledger')
+        return claims
+
+    @contextlib.contextmanager
+    def locked(self):
+        parent = self.path.parent
+        try:
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            st = os.stat(parent)
+            if st.st_mode & 0o022:
+                raise ClaimRefused('LEDGER_UNAVAILABLE')
+        except ClaimRefused:
+            raise
+        except OSError:
+            raise ClaimRefused('LEDGER_UNAVAILABLE')
+
+        timeout = LEDGER_LOCK_TIMEOUT_SECONDS
+        deadline = time.time() + timeout
+        try:
+            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            raise ClaimRefused('LEDGER_UNAVAILABLE')
+        try:
+            try:
+                os.chmod(self.lock_path, 0o600)
+            except OSError:
+                pass
+            acquired = False
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except (BlockingIOError, OSError):
+                    if time.time() >= deadline:
+                        break
+                    time.sleep(0.02)
+            if not acquired:
+                raise ClaimRefused('LEDGER_BUSY')
+            try:
+                yield self
+            finally:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+        finally:
+            os.close(fd)
+
+    def write(self, claims):
+        if len(claims) > MAX_LEDGER_CLAIMS:
+            raise ClaimRefused('LEDGER_FULL')
+        for claim in claims:
+            if not _valid_claim(claim):
+                raise ClaimRefused('LEDGER_CLAIM_INVALID')
+
+        parent = self.path.parent
+        try:
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            st = os.stat(parent)
+            if st.st_mode & 0o022:
+                raise ClaimRefused('LEDGER_UNAVAILABLE')
+        except ClaimRefused:
+            raise
+        except OSError:
+            raise ClaimRefused('LEDGER_UNAVAILABLE')
+
+        payload = {
+            'schema_version': LEDGER_SCHEMA_VERSION,
+            'claims': list(claims),
+        }
+        data = json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True).encode('utf-8')
+        if len(data) > MAX_LEDGER_BYTES:
+            raise ClaimRefused('LEDGER_FULL')
+
+        tmp_path = self.path.with_name(f'{self.path.name}.tmp.{uuid.uuid4().hex}')
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            fd = os.open(tmp_path, flags, 0o600)
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            os.replace(tmp_path, self.path)
+            os.chmod(self.path, 0o600)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
 
 
 class _Context:
