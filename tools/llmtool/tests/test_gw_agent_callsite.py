@@ -133,19 +133,30 @@ class GwAgentCallSiteTests(unittest.TestCase):
         with first_site:
             first_site.after_result(self.valid_session_id, self.valid_task_input)
 
-        second_first_run = SessionCallSite(
+        same_task_second_run = SessionCallSite(
+            self.store_root,
+            executor_task_id=self.valid_executor_id,
+            task_id=self.valid_task_id,
+            repair_excerpt=None,
+            data_class=self.valid_data_class,
+        )
+        with self.assertRaises(WiringRefused) as cm:
+            with same_task_second_run:
+                pass
+        self.assertEqual(cm.exception.code, 'DEVELOPER_GW_AGENT_SESSION_EXISTS')
+
+        other_task_run = SessionCallSite(
             self.store_root,
             executor_task_id=self.valid_executor_id,
             task_id='task-synthetic-03',
             repair_excerpt=None,
             data_class=self.valid_data_class,
         )
-        with self.assertRaises(WiringRefused) as cm:
-            with second_first_run:
-                pass
-        self.assertEqual(cm.exception.code, 'DEVELOPER_GW_AGENT_SESSION_EXISTS')
+        with other_task_run:
+            self.assertEqual(other_task_run.resume_session, self.valid_session_id)
+            self.assertTrue(other_task_run.is_repair)
 
-        # Lock was released when enter refused; repair run can acquire it.
+        # Lock was released; repair run can acquire it.
         repair_site = SessionCallSite(
             self.store_root,
             executor_task_id=self.valid_executor_id,
