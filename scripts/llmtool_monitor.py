@@ -9599,10 +9599,11 @@ def make_state_server(
 
 
 def main(argv: list[str] | None = None) -> int:
-    # #1234: GitHub reads use the AI login (gh-ai config) when it exists.
-    ai_gh = os.path.expanduser("~/.config/gh-ai")
-    if os.path.isdir(ai_gh):
-        os.environ.setdefault("GH_CONFIG_DIR", ai_gh)
+    # #1234: GitHub reads always use the AI login (gh-ai config), never the
+    # Owner's default login; if gh-ai is missing, reads fail instead.
+    os.environ["GH_CONFIG_DIR"] = os.path.expanduser("~/.config/gh-ai")
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        os.environ.pop(name, None)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interval", type=float, default=1.0,
                         help="seconds between snapshots (default 1; minimum 0.5)")
