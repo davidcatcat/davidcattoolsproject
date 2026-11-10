@@ -462,7 +462,18 @@ class PMRuntimeTests(unittest.TestCase):
         runtime = self.runtime()
         runtime.open()
         _, _, env = self.calls[0]
-        self.assertEqual(env, {'HOME': self.temp.name})
+        expected_env = {
+            'HOME': self.temp.name,
+            'GH_CONFIG_DIR': os.path.join(self.temp.name, '.config', 'gh-ai'),
+            'GIT_CONFIG_COUNT': '3',
+            'GIT_CONFIG_KEY_0': 'credential.helper',
+            'GIT_CONFIG_VALUE_0': '',
+            'GIT_CONFIG_KEY_1': 'credential.helper',
+            'GIT_CONFIG_VALUE_1': '!gh auth git-credential',
+            'GIT_CONFIG_KEY_2': 'url.https://github.com/.insteadOf',
+            'GIT_CONFIG_VALUE_2': 'git@github.com:',
+        }
+        self.assertEqual(env, expected_env)
         self.assertEqual(runtime.claude_config_dir, os.path.join(self.temp.name, '.claude'))
 
     def test_invalid_claude_account_config_starts_nothing(self):

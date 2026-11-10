@@ -120,7 +120,11 @@ class CodexRuntimeTests(unittest.TestCase):
             'sandbox_workspace_write.network_access=true', '-'])
         self.assertFalse(any(call['sentinel_present'] for call in calls))
         allowed_env = {'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE',
-                       'SSL_CERT_FILE', 'SSL_CERT_DIR', 'CODEX_HOME'}
+                       'SSL_CERT_FILE', 'SSL_CERT_DIR', 'CODEX_HOME',
+                       'GH_CONFIG_DIR', 'GIT_CONFIG_COUNT',
+                       'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
+                       'GIT_CONFIG_KEY_1', 'GIT_CONFIG_VALUE_1',
+                       'GIT_CONFIG_KEY_2', 'GIT_CONFIG_VALUE_2'}
         env = runtime._codex_driver._environment()
         self.assertLessEqual(set(env), allowed_env)
         self.assertNotIn('FAKE_VALUE', env)
