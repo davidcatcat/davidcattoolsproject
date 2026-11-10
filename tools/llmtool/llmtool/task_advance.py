@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from argparse import Namespace
@@ -44,15 +45,27 @@ _HEX40 = re.compile(r'[0-9a-f]{40}')
 
 
 def _publish_run_git(root, args):
-    return subprocess.run(['git', *args], cwd=root, stdin=subprocess.DEVNULL,
+    cmd = ['git', *args]
+    try:
+        env = github_identity.verified_ai_env()
+    except github_identity.AiIdentityError as exc:
+        print(f'llmtool: GITHUB_AI_IDENTITY_REFUSED {exc.code}', file=sys.stderr)
+        return subprocess.CompletedProcess(cmd, 2, stdout=b'', stderr=b'')
+    return subprocess.run(cmd, cwd=root, stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                          check=False, timeout=30)
+                          check=False, timeout=30, env=env)
 
 
 def _publish_run_gh(root, args):
-    return subprocess.run(['gh', *args], cwd=root, stdin=subprocess.DEVNULL,
+    cmd = ['gh', *args]
+    try:
+        env = github_identity.verified_ai_env()
+    except github_identity.AiIdentityError as exc:
+        print(f'llmtool: GITHUB_AI_IDENTITY_REFUSED {exc.code}', file=sys.stderr)
+        return subprocess.CompletedProcess(cmd, 2, stdout=b'', stderr=b'')
+    return subprocess.run(cmd, cwd=root, stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                          check=False, timeout=30)
+                          check=False, timeout=30, env=env)
 
 
 def _publish_pause(seconds):
