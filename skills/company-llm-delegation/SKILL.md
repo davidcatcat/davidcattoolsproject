@@ -17,6 +17,8 @@ authorization (#120, 2026-11-10), which supersedes the 2026-11-03 synthetic-only
 Every result receives formal cross-family review. Pause after two consecutive failed
 runs, a write outside allowed paths, a credential or audit finding, or HTTP 429.
 
+**Gateway only (Owner 2026-11-11, #120):** company/home LLM model work runs only through the API Agent Gateway (`gw-agent`). The `company-gw` direct and proposal routes are retired: llmtool refuses them (`COMPANY_GW_DIRECT_RETIRED`; worker `company-gw` is PAUSED), and a Gateway failure reports UNAVAILABLE without any fallback.
+
 ## Decision order
 
 1. **Deterministic first.** If a program can answer the question directly, do not call

@@ -84,6 +84,9 @@ def ladder_tier(entries, max_tier=LADDER_MAX_TIER):
         if entry["tier"] != tier:
             continue
         outcome = str(entry.get("outcome", ""))
+        if outcome.startswith("UNAVAILABLE"):
+            # A VPN or provider outage neither counts nor breaks a streak.
+            continue
         if outcome.startswith("SOLVED") and entry.get("attempts") == 1:
             streak += 1
             if streak >= 3 and tier < max_tier:

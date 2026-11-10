@@ -248,6 +248,14 @@ class LadderTierTests(unittest.TestCase):
         log = [self.entry(1, "SOLVED")] * 3
         self.assertEqual(spec_preflight.ladder_tier(log, max_tier=1), (1, 3, True))
 
+    def test_unavailable_rows_neither_count_nor_break_a_streak(self):
+        log = [self.entry(1, "SOLVED"), self.entry(1, "UNAVAILABLE (VPN down)"),
+               self.entry(1, "SOLVED"), self.entry(1, "UNAVAILABLE"),
+               self.entry(1, "SOLVED")]
+        self.assertEqual(spec_preflight.ladder_tier(log), (2, 0, False))
+        only_outages = [self.entry(1, "UNAVAILABLE")] * 5
+        self.assertEqual(spec_preflight.ladder_tier(only_outages), (1, 0, False))
+
 
 if __name__ == "__main__":
     unittest.main()
