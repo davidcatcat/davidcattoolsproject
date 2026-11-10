@@ -93,7 +93,7 @@ def resolve_worker_profile(name, *, home=None):
     if type(name) is not str or not name:
         raise _error('explicit profile required')
     if name == 'company-gw':
-        raise _error('company-gw route is retired')
+        raise _error('retired route profile')
     try:
         config = resolve_profile_config(name, home=home)
     except LLMToolError:
