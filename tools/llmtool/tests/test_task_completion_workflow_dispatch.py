@@ -310,6 +310,33 @@ class TestTaskCompletionWorkflowDispatch(unittest.TestCase):
         self.assertEqual(result['successful_checks'], [])
         self.assertEqual(result['check_outcomes'], {_CHECK_NAME: 'MISSING'})
 
+    def test_failing_fallback_query_returns_missing(self):
+        # A failing workflow_dispatch fallback query behaves as missing evidence.
+        workflow_data = {
+            'id': _WORKFLOW_ID,
+            'path': _WORKFLOW_PATH,
+            'name': _WORKFLOW_NAME,
+            'state': 'active',
+        }
+        pr_runs_data = {
+            'total_count': 0,
+            'workflow_runs': [],
+        }
+
+        def fake_get(path):
+            if path == f'actions/workflows/{_WORKFLOW_PATH.rsplit("/", 1)[-1]}':
+                return workflow_data
+            if path == f'actions/workflows/{_WORKFLOW_ID}/runs?head_sha={_SHA}&event=pull_request&per_page=100':
+                return pr_runs_data
+            if path == f'actions/workflows/{_WORKFLOW_ID}/runs?head_sha={_SHA}&event=workflow_dispatch&per_page=100':
+                task_completion._stop('GITHUB_EVIDENCE_UNAVAILABLE')
+            raise AssertionError(f'Unexpected GitHub API path: {path}')
+
+        result = _call_collect(fake_get)
+        self.assertIsNone(result['run_id'])
+        self.assertEqual(result['successful_checks'], [])
+        self.assertEqual(result['check_outcomes'], {_CHECK_NAME: 'MISSING'})
+
 
 if __name__ == '__main__':
     unittest.main()
