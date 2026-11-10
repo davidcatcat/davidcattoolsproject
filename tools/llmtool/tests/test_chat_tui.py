@@ -5808,8 +5808,19 @@ class PMConversationTests(BoundedPMTest):
 
     def test_status_pm_session_cwd_under_home_and_outside_home(self):
         # /status shows ~/... when cwd is under home and full path when outside home (#683).
+        fixed_home = (self.temp_root / 'fixed-home').resolve()
+        fixed_home.mkdir(parents=True, exist_ok=True)
+
+        def fake_expanduser(path):
+            path_str = str(path)
+            if path_str == '~':
+                return str(fixed_home)
+            if path_str.startswith('~/') or path_str.startswith('~\\'):
+                return str(fixed_home / path_str[2:])
+            return path_str
+
         def check(ui):
-            home = Path(os.path.expanduser('~'))
+            home = fixed_home
             under_home = str(home / 'project-under-home')
             ui.pm_target = (self.session_id, under_home)
             status_home = ui.status_report()
@@ -5830,7 +5841,10 @@ class PMConversationTests(BoundedPMTest):
             self.assertNotIn('cwd .）', status_repo)
             self.assertNotEqual(expected_repo, '.')
 
-        self.drive([self.connect(), self.connected, check])
+        with patch('pathlib.Path.home', return_value=fixed_home), \
+                patch('os.path.expanduser', side_effect=fake_expanduser), \
+                patch.dict(os.environ, {'HOME': str(fixed_home)}):
+            self.drive([self.connect(), self.connected, check])
 
     def test_status_row_permission_labels_for_claude_and_codex(self):
         # The status row lead displays auto for Claude PM and workspace-write for Codex PM.
@@ -5839,14 +5853,16 @@ class PMConversationTests(BoundedPMTest):
             self.assertIn('auto', claude_mode)
             self.assertNotIn('workspace-write', claude_mode)
 
-            real_runtime = ui.pm_runtime
+            real_runtime, real_binding = ui.pm_runtime, ui.pm_binding
             ui.pm_runtime = Mock(runtime='codex')
             try:
+                ui.pm_binding = dict(ui.pm_binding or {}, runtime='codex')
                 codex_mode = ui.pm_status_fields(lambda value, _width: value)['mode']
                 self.assertIn('workspace-write', codex_mode)
                 self.assertNotIn('auto', codex_mode)
             finally:
                 ui.pm_runtime = real_runtime
+                ui.pm_binding = real_binding
 
         self.drive([self.connect(), self.connected, check])
 
