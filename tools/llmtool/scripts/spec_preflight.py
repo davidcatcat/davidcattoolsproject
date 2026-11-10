@@ -97,6 +97,29 @@ def ladder_tier(entries, max_tier=LADDER_MAX_TIER):
     return tier, streak, tier == max_tier and streak >= 3
 
 
+# Ladder limits per tier: (files written, context bytes, gw-agent turns).
+LADDER_SIZES = {1: (1, 1536, 6), 2: (1, 3072, 10), 3: (2, 6144, 12), 4: (3, 10240, 16)}
+
+
+def spec_tier(spec, context_bytes=0) -> int:
+    """Return the smallest tier this spec fits, else 5.
+
+    The spec fits a tier when it writes no more files than the tier's limit,
+    its context uses no more bytes than the tier's limit, and when it runs on
+    gw-agent its estimated turns (reads + 2*writes + 1) fit the tier's limit.
+    """
+    writes = spec["write"] if isinstance(spec["write"], list) else []
+    reads = spec["read"] if isinstance(spec["read"], list) else []
+    agent = spec.get("provider") == "gw-agent"
+    turns = len(reads) + 2 * len(writes) + 1
+    for tier in sorted(LADDER_SIZES):
+        files, limit_bytes, limit_turns = LADDER_SIZES[tier]
+        if len(writes) <= files and context_bytes <= limit_bytes:
+            if not agent or turns <= limit_turns:
+                return tier
+    return 5
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if len(args) != 1:
