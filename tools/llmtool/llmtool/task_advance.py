@@ -1367,6 +1367,38 @@ def _failure_reason(value):
     return None
 
 
+def _well_formed_review_refusal(refusal):
+    """Return refusal when it has failure_reason str, exactly one of excerpt or
+    label str, and optional receipt path str or None; any other value returns None."""
+    if type(refusal) is not dict:
+        return None
+    failure = refusal.get('failure_reason')
+    if type(failure) is not str or not failure:
+        return None
+    excerpt = refusal.get('excerpt')
+    label = refusal.get('label')
+    has_excerpt = type(excerpt) is str
+    has_label = type(label) is str
+    if has_excerpt == has_label:
+        return None
+    if 'excerpt' in refusal and excerpt is not None and not has_excerpt:
+        return None
+    if 'label' in refusal and label is not None and not has_label:
+        return None
+    if 'receipt_path' in refusal:
+        receipt_path = refusal['receipt_path']
+        if receipt_path is not None and type(receipt_path) is not str:
+            return None
+    if 'receipt' in refusal:
+        receipt = refusal['receipt']
+        if receipt is not None and type(receipt) is not str:
+            return None
+    allowed = {'failure_reason', 'excerpt', 'label', 'receipt_path', 'receipt'}
+    if any(key not in allowed for key in refusal):
+        return None
+    return refusal
+
+
 def _head_review_claim(record, number, head):
     """Return the highest-version claim for one PR and head, if any."""
     matching = [claim for claim in _claims(record) if type(claim) is dict and
@@ -2215,7 +2247,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             {'task_id': task_id, 'step': 'D6_BINDING_UNAVAILABLE', 'result': None,
              'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}, record, store, None)
     step = decide(record, d6, pr, related)
-    result, codes = None, []
+    result, codes, refusal_dict = None, [], None
     redispatch_reason = None
     if step == 'REVIEW_REDISPATCH':
         unusable = _head_review_claim(record, number, d6['result_head'])
@@ -2272,6 +2304,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             failure = _failure_reason(getattr(exc, 'review_failure_reason', None))
             if failure is not None:
                 codes.append(failure)
+            refusal_dict = _well_formed_review_refusal(getattr(exc, 'review_refusal', None))
         if type(result) is dict:
             review_text = result.get('review_text')
             if (result.get('state') == 'COMPLETED' and
@@ -2503,7 +2536,10 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         codes.append(step)
     next_action =('resume the reviewer to post its verdict' if step == 'REVIEW_NOT_POSTED'
                    else step)
+    advance_result = {'task_id': task_id, 'step': step, 'result': result,
+                      'next': next_action, 'codes': codes}
+    if refusal_dict is not None:
+        advance_result['review_refusal'] = refusal_dict
     return _ack_consumed_events(
-        {'task_id': task_id, 'step': step, 'result': result,
-         'next': next_action, 'codes': codes}, record, store,
+        advance_result, record, store,
         d6.get('result_head') if type(d6) is dict else None)
