@@ -282,9 +282,10 @@ class BoardCheckLedgerTests(unittest.TestCase):
         )
         self.assertEqual(res['rows'][0]['state'], board_check.UNKNOWN)
         self.assertEqual(res['rows'][0]['evidence'], ['LEDGER_UNREADABLE'])
-        # Row with task_id classified as today.
+        # Row with task_id classified as today. row-2 is ACTIONABLE (flagged),
+        # so check_board ranks FLAGGED (exit 2) above UNKNOWN (exit 1).
         self.assertNotEqual(res['rows'][1]['state'], board_check.UNKNOWN)
-        self.assertEqual(res['exit_code'], 1)
+        self.assertEqual(res['exit_code'], 2)
 
         # run_board_check with a ledger that raises LedgerUnreadable.
         class _UnreadableLedger:
@@ -313,7 +314,8 @@ class BoardCheckLedgerTests(unittest.TestCase):
                     now=self.now,
                     ledger=_UnreadableLedger(),
                 )
-            self.assertEqual(code, 1)
+            # Exit code is 2 because row-2 is flagged (ACTIONABLE).
+            self.assertEqual(code, 2)
             parsed = json.loads(out_buf.getvalue())
             self.assertEqual(parsed['rows'][0]['state'], board_check.UNKNOWN)
             self.assertEqual(parsed['rows'][0]['evidence'], ['LEDGER_UNREADABLE'])
