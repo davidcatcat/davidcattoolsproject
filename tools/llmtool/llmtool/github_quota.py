@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import time
 
+from . import github_identity
+
 FLOOR = 300
 _GH_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
 _TIMEOUT = 8
@@ -24,16 +26,17 @@ def _unique_pairs(pairs):
 
 
 def _clean_env():
+    # Always isolate gh into the AI config dir; ignore the caller's GH_CONFIG_DIR.
+    home = os.path.expanduser('~')
     env = {
         'PATH': _GH_PATH,
-        'HOME': os.path.expanduser('~'),
+        'HOME': home,
         'LC_ALL': 'C',
         'GH_PROMPT_DISABLED': '1',
         'GH_NO_UPDATE_NOTIFIER': '1',
         'NO_COLOR': '1',
+        'GH_CONFIG_DIR': github_identity.ai_gh_config_dir(home),
     }
-    if os.environ.get('GH_CONFIG_DIR'):
-        env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
     return env
 
 

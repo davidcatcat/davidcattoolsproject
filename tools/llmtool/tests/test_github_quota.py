@@ -56,12 +56,35 @@ class GitHubQuotaTests(unittest.TestCase):
             'GH_NO_UPDATE_NOTIFIER', 'NO_COLOR', 'GH_CONFIG_DIR',
         })
         self.assertEqual(env['PATH'], github_quota._GH_PATH)
-        self.assertEqual(env['GH_CONFIG_DIR'], '/tmp/gh-cfg')
+        self.assertEqual(
+            env['GH_CONFIG_DIR'],
+            github_quota.github_identity.ai_gh_config_dir(env['HOME']))
         self.assertNotIn('UNTRUSTED_ENV', env)
         self.assertEqual(quota, {
             'core': {'remaining': 4321, 'reset': 1700000111},
             'graphql': {'remaining': 0, 'reset': 0},
         })
+
+    def test_clean_env_uses_ai_config_dir_when_caller_has_none(self):
+        # The caller env without GH_CONFIG_DIR still gets the AI config dir.
+        with patch.dict(os.environ, clear=False):
+            os.environ.pop('GH_CONFIG_DIR', None)
+            env = github_quota._clean_env()
+        self.assertEqual(
+            env['GH_CONFIG_DIR'],
+            github_quota.github_identity.ai_gh_config_dir(env['HOME']))
+        self.assertTrue(env['GH_CONFIG_DIR'].endswith('/.config/gh-ai'))
+
+    def test_clean_env_overrides_caller_gh_config_dir_and_drops_gh_token(self):
+        # The caller's GH_CONFIG_DIR is ignored and no token is passed through.
+        with patch.dict(os.environ, {'GH_CONFIG_DIR': '/other',
+                                     'GH_TOKEN': 'synthetic-not-a-token'}):
+            env = github_quota._clean_env()
+        self.assertEqual(
+            env['GH_CONFIG_DIR'],
+            github_quota.github_identity.ai_gh_config_dir(env['HOME']))
+        self.assertNotEqual(env['GH_CONFIG_DIR'], '/other')
+        self.assertNotIn('GH_TOKEN', env)
 
     def test_read_returns_none_when_gh_is_missing_or_invocation_fails(self):
         called = []
