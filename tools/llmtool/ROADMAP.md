@@ -18,6 +18,7 @@ Current collaboration and execution authority is in [AGENTS.md](../../AGENTS.md)
 ## Next steps
 
 - Verify the first M1a/M1b real-task adoption.
+- Gateway-only switch (Owner 2026-11-11, [#120](https://github.com/davidcatcat/davidcattoolsproject/issues/120)): retire the company-gw direct path, move gw-agent to its private Gateway profile, then run one real end-to-end gw-agent task and the efficiency report.
 - Finish the separately granted production foreground Worker trial, then verify same-Integrator resume and delegated-Worker M2.
 - Continue A11b F2 real-repository mutation design and A11b.3 approval semantics; execution remains NOT AUTHORIZED.
 - A11b.3 approval issuer and A11b.5–6 budgets/failure gates: design posted ([#97](https://github.com/davidcatcat/davidcattoolsproject/issues/97#issuecomment-6552954731)); implementation needs independent Security review. Finding: most current "Owner approval" checks match URL shape only and do not verify the comment author.
