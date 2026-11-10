@@ -3,6 +3,7 @@ import json
 import io
 from contextlib import redirect_stderr
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -1053,8 +1054,16 @@ def _codex_review_text(*, run_id='c' * 32, contract='d' * 64, version=1):
             f'contract={contract} head={HEAD}')
 
 
-def _codex_event_stream(review_text, *, drop=(), **changes):
+def _codex_event_stream(review_text, *, drop=(), plain=None, **changes):
     """Codex JSONL with the current reply shape; changes add or replace JSON keys."""
+    if plain or (plain is None and not changes and not drop and (
+            not review_text.strip().startswith(('<!--', '{')))):
+        events = [
+            {'type': 'thread.started', 'thread_id': '0123456789abcdef'},
+            {'type': 'item.completed', 'item': {
+                'type': 'agent_message', 'text': review_text}},
+        ]
+        return '\n'.join(json.dumps(event) for event in events).encode('utf-8')
     verdict = {'task_id': TASK, 'run_id': 'c' * 32, 'head': HEAD,
                'verdict': 'PASS', 'review': review_text}
     verdict.update(changes)
@@ -1273,6 +1282,335 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
         self.assertEqual(claim['binding_mismatch_keys'], ['head'])
         self.assertNotIn('review_result', claim)
         self.assertNotIn(wrong_head, json.dumps(claim))
+
+
+class ReviewRefusalReceiptTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store_dir = Path(self.temp.name).resolve() / 'tasks'
+        self.store, self.task_id = _real_store(self.store_dir)
+        self.receipt_dir = self.store_dir.parent / 'review-refusals'
+        self.executor = SimpleNamespace(root='/repo/executor', common_dir='/repo/.git')
+        self.reviewer = SimpleNamespace(root='/repo/reviewer')
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _invoke_refusal(self, *, runner=None, version=1, head=HEAD, store=None):
+        if store is None:
+            store = self.store
+        preflight = (self.task_id, self.executor, head, 'd' * 40, 'codex-reviewer')
+        with patch.object(review_dispatch, '_preflight', side_effect=[preflight, preflight]), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                             return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                patch.object(review_dispatch, '_resolve_github_login',
+                             return_value='reviewer-user'), \
+                patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                             return_value=self.reviewer):
+            return review_dispatch.dispatch_review(
+                store=store, task_id=self.task_id, executor_task='executor-d6',
+                pr_number=42, version=version, create_d6=lambda **_: None,
+                bind_session=lambda **_: None, prompt_renderer=lambda *_: 'prompt',
+                codex_runner=runner)
+
+    def test_receipt_modes_and_fields_with_excerpt(self):
+        raw = _codex_event_stream('not json output')
+        task = self.store.get(self.task_id)
+        run_id = task['run_id']
+        digest = task['task_binding']['contract_digest']
+
+        def runner(**_kw):
+            return review_dispatch._parse_codex_review(
+                raw, task_id=self.task_id, run_id=run_id,
+                contract_digest=digest, head=HEAD)
+
+        with patch.object(task_submission_cli, '_screen_text',
+                          return_value=SCREENED_EXCERPT), \
+                self.assertRaises(LLMToolError) as raised:
+            self._invoke_refusal(runner=runner)
+
+        exc = raised.exception
+        self.assertEqual(exc.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertEqual(exc.review_failure_reason, 'VERDICT_NOT_JSON')
+        self.assertTrue(hasattr(exc, 'review_refusal'))
+        refusal = exc.review_refusal
+        self.assertEqual(refusal['failure_reason'], 'VERDICT_NOT_JSON')
+        self.assertEqual(refusal['excerpt'], SCREENED_EXCERPT)
+        self.assertNotIn('label', refusal)
+        receipt_path = refusal['receipt_path']
+        self.assertIsNotNone(receipt_path)
+        self.assertEqual(receipt_path, self.receipt_dir / f'{self.task_id}-{HEAD}-1.json')
+
+        # Check directory and file permissions
+        self.assertEqual(stat.S_IMODE(self.receipt_dir.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(receipt_path.stat().st_mode), 0o600)
+        self.assertFalse(self.receipt_dir.is_symlink())
+
+        # Check JSON fields
+        content = json.loads(receipt_path.read_text(encoding='utf-8'))
+        claim = self.store.get(self.task_id)['review_dispatch_claim'][0]
+        self.assertEqual(content['task_id'], self.task_id)
+        self.assertEqual(content['pr'], 42)
+        self.assertEqual(content['head'], HEAD)
+        self.assertEqual(content['version'], 1)
+        self.assertEqual(content['reviewer_task'], claim['reviewer_task'])
+        self.assertEqual(content['failure_reason'], 'VERDICT_NOT_JSON')
+        self.assertEqual(content['not_a_verdict'], True)
+        self.assertEqual(content['excerpt'], SCREENED_EXCERPT)
+        self.assertNotIn('label', content)
+        self.assertEqual(set(content.keys()), {
+            'task_id', 'pr', 'head', 'version', 'reviewer_task',
+            'failure_reason', 'recorded_at', 'not_a_verdict', 'excerpt'
+        })
+
+    def test_receipt_fields_with_withheld_label(self):
+        raw = _codex_event_stream('not json output')
+        task = self.store.get(self.task_id)
+        run_id = task['run_id']
+        digest = task['task_binding']['contract_digest']
+
+        def runner(**_kw):
+            return review_dispatch._parse_codex_review(
+                raw, task_id=self.task_id, run_id=run_id,
+                contract_digest=digest, head=HEAD)
+
+        with patch.object(task_submission_cli, '_screen_text',
+                          side_effect=LLMToolError('sensitive')), \
+                self.assertRaises(LLMToolError) as raised:
+            self._invoke_refusal(runner=runner)
+
+        exc = raised.exception
+        refusal = exc.review_refusal
+        self.assertEqual(refusal['failure_reason'], 'VERDICT_NOT_JSON')
+        self.assertEqual(refusal['label'], 'REVIEW_OUTPUT_WITHHELD')
+        self.assertNotIn('excerpt', refusal)
+        receipt_path = refusal['receipt_path']
+        self.assertIsNotNone(receipt_path)
+        content = json.loads(receipt_path.read_text(encoding='utf-8'))
+        self.assertEqual(content['label'], 'REVIEW_OUTPUT_WITHHELD')
+        self.assertNotIn('excerpt', content)
+        self.assertEqual(set(content.keys()), {
+            'task_id', 'pr', 'head', 'version', 'reviewer_task',
+            'failure_reason', 'recorded_at', 'not_a_verdict', 'label'
+        })
+
+    def test_receipt_fields_with_absent_label(self):
+        raw = json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}).encode('utf-8')
+        task = self.store.get(self.task_id)
+        run_id = task['run_id']
+        digest = task['task_binding']['contract_digest']
+
+        def runner(**_kw):
+            return review_dispatch._parse_codex_review(
+                raw, task_id=self.task_id, run_id=run_id,
+                contract_digest=digest, head=HEAD)
+
+        with self.assertRaises(LLMToolError) as raised:
+            self._invoke_refusal(runner=runner)
+
+        exc = raised.exception
+        refusal = exc.review_refusal
+        self.assertEqual(refusal['failure_reason'], 'NO_FINAL_MESSAGE')
+        self.assertEqual(refusal['label'], 'REVIEW_OUTPUT_ABSENT')
+        self.assertNotIn('excerpt', refusal)
+        receipt_path = refusal['receipt_path']
+        self.assertIsNotNone(receipt_path)
+        content = json.loads(receipt_path.read_text(encoding='utf-8'))
+        self.assertEqual(content['label'], 'REVIEW_OUTPUT_ABSENT')
+        self.assertNotIn('excerpt', content)
+        self.assertEqual(set(content.keys()), {
+            'task_id', 'pr', 'head', 'version', 'reviewer_task',
+            'failure_reason', 'recorded_at', 'not_a_verdict', 'label'
+        })
+
+    def test_prune_at_64_keeps_newest_and_leaves_other_files_untouched(self):
+        self.receipt_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        other_txt = self.receipt_dir / 'other.txt'
+        other_txt.write_text('preserve me', encoding='utf-8')
+        other_json = self.receipt_dir / 'unrelated.json'
+        other_json.write_text('{"unrelated": true}', encoding='utf-8')
+
+        import os
+        base_time = 1700000000
+        for i in range(1, 65):
+            path = self.receipt_dir / f'{self.task_id}-{HEAD}-{i}.json'
+            path.write_text('{"dummy": true}', encoding='utf-8')
+            os.utime(path, (base_time + i, base_time + i))
+
+        raw = _codex_event_stream('not json output')
+        task = self.store.get(self.task_id)
+        run_id = task['run_id']
+        digest = task['task_binding']['contract_digest']
+
+        def runner(**_kw):
+            return review_dispatch._parse_codex_review(
+                raw, task_id=self.task_id, run_id=run_id,
+                contract_digest=digest, head=HEAD, version=65)
+
+        with patch.object(task_submission_cli, '_screen_text',
+                          return_value=SCREENED_EXCERPT), \
+                self.assertRaises(LLMToolError):
+            self._invoke_refusal(runner=runner, version=65)
+
+        # Other files remain untouched
+        self.assertTrue(other_txt.exists())
+        self.assertEqual(other_txt.read_text(encoding='utf-8'), 'preserve me')
+        self.assertTrue(other_json.exists())
+        self.assertEqual(other_json.read_text(encoding='utf-8'), '{"unrelated": true}')
+
+        # The oldest matching receipt (#1) was pruned
+        self.assertFalse((self.receipt_dir / f'{self.task_id}-{HEAD}-1.json').exists())
+
+        # The newest matching receipt (#65) exists
+        self.assertTrue((self.receipt_dir / f'{self.task_id}-{HEAD}-65.json').exists())
+
+        # Exactly 64 matching receipts remain
+        matching = [p for p in self.receipt_dir.iterdir()
+                    if review_dispatch._RECEIPT_NAME_RE.fullmatch(p.name)]
+        self.assertEqual(len(matching), 64)
+
+    def test_symlinked_directory_refused(self):
+        target_dir = Path(self.temp.name).resolve() / 'fake-receipts-target'
+        target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.receipt_dir.symlink_to(target_dir, target_is_directory=True)
+
+        raw = _codex_event_stream('not json output')
+        task = self.store.get(self.task_id)
+        run_id = task['run_id']
+        digest = task['task_binding']['contract_digest']
+
+        def runner(**_kw):
+            return review_dispatch._parse_codex_review(
+                raw, task_id=self.task_id, run_id=run_id,
+                contract_digest=digest, head=HEAD)
+
+        with patch.object(task_submission_cli, '_screen_text',
+                          return_value=SCREENED_EXCERPT), \
+                self.assertRaises(LLMToolError) as raised:
+            self._invoke_refusal(runner=runner)
+
+        exc = raised.exception
+        self.assertEqual(exc.review_failure_reason, 'VERDICT_NOT_JSON')
+        self.assertIsNone(exc.review_refusal['receipt_path'])
+        self.assertEqual(list(target_dir.iterdir()), [])
+        claim = self.store.get(self.task_id)['review_dispatch_claim'][0]
+        self.assertEqual(claim['state'], 'UNKNOWN')
+        self.assertEqual(claim['failure_reason'], 'VERDICT_NOT_JSON')
+
+    def test_failed_receipt_write_sets_receipt_path_none_and_leaves_claim_intact(self):
+        raw = _codex_event_stream('not json output')
+        task = self.store.get(self.task_id)
+        run_id = task['run_id']
+        digest = task['task_binding']['contract_digest']
+
+        def runner(**_kw):
+            return review_dispatch._parse_codex_review(
+                raw, task_id=self.task_id, run_id=run_id,
+                contract_digest=digest, head=HEAD)
+
+        from llmtool import high_debug
+        with patch.object(high_debug, '_create_private',
+                          side_effect=OSError('disk full')), \
+                patch.object(task_submission_cli, '_screen_text',
+                             return_value=SCREENED_EXCERPT), \
+                self.assertRaises(LLMToolError) as raised:
+            self._invoke_refusal(runner=runner)
+
+        exc = raised.exception
+        self.assertEqual(exc.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertEqual(exc.review_failure_reason, 'VERDICT_NOT_JSON')
+        self.assertIsNone(exc.review_refusal['receipt_path'])
+        self.assertEqual(exc.review_refusal['failure_reason'], 'VERDICT_NOT_JSON')
+        claim = self.store.get(self.task_id)['review_dispatch_claim'][0]
+        self.assertEqual(claim['state'], 'UNKNOWN')
+        self.assertEqual(claim['failure_reason'], 'VERDICT_NOT_JSON')
+
+    def test_failed_claim_update_writes_none_and_raises_unchanged(self):
+        raw = _codex_event_stream('not json output')
+        task = self.store.get(self.task_id)
+        run_id = task['run_id']
+        digest = task['task_binding']['contract_digest']
+
+        def runner(**_kw):
+            return review_dispatch._parse_codex_review(
+                raw, task_id=self.task_id, run_id=run_id,
+                contract_digest=digest, head=HEAD)
+
+        real_update = self.store.compare_and_update
+
+        def fail_unknown_update(task_id, *, expected, **changes):
+            claims = changes.get('review_dispatch_claim', [])
+            if any(c.get('state') == 'UNKNOWN' for c in claims):
+                raise RuntimeError('claim update failed')
+            return real_update(task_id, expected=expected, **changes)
+
+        with patch.object(self.store, 'compare_and_update',
+                          side_effect=fail_unknown_update), \
+                patch.object(task_submission_cli, '_screen_text',
+                             return_value=SCREENED_EXCERPT), \
+                self.assertRaises(LLMToolError) as raised:
+            self._invoke_refusal(runner=runner)
+
+        exc = raised.exception
+        self.assertEqual(exc.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertFalse(hasattr(exc, 'review_refusal'))
+        self.assertFalse(self.receipt_dir.exists())
+
+    def test_store_with_no_path_root_writes_none(self):
+        class NonPathStore:
+            def __init__(self, inner):
+                self._inner = inner
+                self.root = str(inner.root)
+
+            def get(self, task_id):
+                return self._inner.get(task_id)
+
+            def compare_and_update(self, task_id, *, expected, **changes):
+                return self._inner.compare_and_update(task_id, expected=expected, **changes)
+
+        fake_store = NonPathStore(self.store)
+        raw = _codex_event_stream('not json output')
+        task = self.store.get(self.task_id)
+        run_id = task['run_id']
+        digest = task['task_binding']['contract_digest']
+
+        def runner(**_kw):
+            return review_dispatch._parse_codex_review(
+                raw, task_id=self.task_id, run_id=run_id,
+                contract_digest=digest, head=HEAD)
+
+        with patch.object(task_submission_cli, '_screen_text',
+                          return_value=SCREENED_EXCERPT), \
+                self.assertRaises(LLMToolError) as raised:
+            self._invoke_refusal(runner=runner, store=fake_store)
+
+        exc = raised.exception
+        self.assertEqual(exc.review_failure_reason, 'VERDICT_NOT_JSON')
+        self.assertIsNone(exc.review_refusal['receipt_path'])
+        self.assertFalse(self.receipt_dir.exists())
+
+    def test_refusal_without_fixed_failure_reason_writes_no_receipt(self):
+        moved_head = 'f' * 40
+        preflight_first = (self.task_id, self.executor, HEAD, 'd' * 40, 'codex-reviewer')
+        preflight_moved = (self.task_id, self.executor, moved_head, 'd' * 40, 'codex-reviewer')
+        with patch.object(review_dispatch, '_preflight', side_effect=[preflight_first, preflight_moved]), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                             return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                patch.object(review_dispatch, '_resolve_github_login',
+                             return_value='reviewer-user'), \
+                patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                             return_value=self.reviewer), \
+                self.assertRaises(LLMToolError) as raised:
+            review_dispatch.dispatch_review(
+                store=self.store, task_id=self.task_id, executor_task='executor-d6',
+                pr_number=42, version=1, create_d6=lambda **_: None,
+                bind_session=lambda **_: None, prompt_renderer=lambda *_: 'prompt')
+
+        exc = raised.exception
+        self.assertEqual(exc.review_dispatch_code, 'REVIEW_PROMPT_PR_HEAD_MISMATCH')
+        self.assertIsNone(getattr(exc, 'review_failure_reason', None))
+        self.assertFalse(hasattr(exc, 'review_refusal'))
+        self.assertFalse(self.receipt_dir.exists())
 
 
 if __name__ == '__main__':
