@@ -900,6 +900,7 @@ class TaskStoreTests(unittest.TestCase):
         policy = json.loads(policy_path.read_text(encoding='utf-8'))
         policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
         policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
+        policy['workers']['company-gw']['dispatch'] = 'ALLOWED'
         temporary_policy = Path(self.temp.name) / 'worker-dispatch.json'
         temporary_policy.write_text(json.dumps(policy), encoding='utf-8')
         patcher = patch.object(worker_dispatch, '_POLICY_PATH', temporary_policy)
@@ -1038,6 +1039,7 @@ class TaskStoreTests(unittest.TestCase):
                     task_store_module._validate(malformed)
 
     def test_non_claude_d6_binding_refuses_second_live_task_for_each_route(self):
+        self._allow_codex_dispatch()
         store = TaskStore(Path(self.temp.name).resolve())
         routes = ('codex', 'company-gw', 'opencode', 'agy', 'gw-agent')
 
