@@ -9334,7 +9334,9 @@ class StateRequestHandler(http.server.BaseHTTPRequestHandler):
         if not self._check_host(send_body=send_body):
             return
 
-        raw_path = self.path.split("?", 1)[0]
+        parts = self.requestline.split(" ")
+        raw = parts[1] if len(parts) == 3 else ""
+        raw_path = raw.split("?", 1)[0]
         token = self.server.token
 
         is_page = False
