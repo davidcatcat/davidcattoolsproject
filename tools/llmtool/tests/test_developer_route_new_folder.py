@@ -69,6 +69,13 @@ class DeveloperRouteNewFolderTests(unittest.TestCase):
                 'expected_branch': branch, 'expected_head': head,
                 'executable': '/fake/cli'}
 
+    def _commit_all(self, root, message='update'):
+        subprocess.run(['/usr/bin/git', '-C', str(root), 'add', '-A'], check=True)
+        subprocess.run(['/usr/bin/git', '-C', str(root), 'commit', '-m', message], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return subprocess.check_output(['/usr/bin/git', '-C', str(root), 'rev-parse', 'HEAD'],
+                                       text=True).strip()
+
     def test_missing_parent_folder_created_before_boundary_prepare(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'repo'
@@ -97,7 +104,9 @@ class DeveloperRouteNewFolderTests(unittest.TestCase):
             real_dir.mkdir()
             sym_dir = root / 'sym_dir'
             sym_dir.symlink_to(real_dir)
-            request = dict(base_request, write_paths=['sym_dir/new_sub/new.py'])
+            head = self._commit_all(root, 'add symlink')
+            request = dict(base_request, write_paths=['sym_dir/new_sub/new.py'],
+                           expected_head=head)
             boundary = RecordingBoundary(sym_dir / 'new_sub')
 
             with self.assertRaises(RouteError) as caught:
@@ -118,7 +127,9 @@ class DeveloperRouteNewFolderTests(unittest.TestCase):
             outside_dir.mkdir()
             outside_link = root / 'outside_link'
             outside_link.symlink_to(outside_dir)
-            request = dict(base_request, write_paths=['outside_link/new_sub/new.py'])
+            head = self._commit_all(root, 'add outside link')
+            request = dict(base_request, write_paths=['outside_link/new_sub/new.py'],
+                           expected_head=head)
             boundary = RecordingBoundary(outside_link / 'new_sub')
 
             with self.assertRaises(RouteError) as caught:
