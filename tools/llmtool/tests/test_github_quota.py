@@ -56,7 +56,9 @@ class GitHubQuotaTests(unittest.TestCase):
             'GH_NO_UPDATE_NOTIFIER', 'NO_COLOR', 'GH_CONFIG_DIR',
         })
         self.assertEqual(env['PATH'], github_quota._GH_PATH)
-        self.assertEqual(env['GH_CONFIG_DIR'], '/tmp/gh-cfg')
+        self.assertEqual(
+            env['GH_CONFIG_DIR'],
+            github_quota.github_identity.ai_gh_config_dir(env['HOME']))
         self.assertNotIn('UNTRUSTED_ENV', env)
         self.assertEqual(quota, {
             'core': {'remaining': 4321, 'reset': 1700000111},
