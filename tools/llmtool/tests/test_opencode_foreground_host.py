@@ -79,6 +79,19 @@ class CompositionTests(unittest.TestCase):
         root = parent / 'tasks'
         import shutil
         self.addCleanup(lambda: shutil.rmtree(parent, ignore_errors=True))
+        if with_developer:
+            import json
+            from unittest.mock import patch
+            from llmtool import worker_dispatch
+
+            policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+            policy['workers']['company-gw']['dispatch'] = 'ALLOWED'
+            policy['workers']['company-gw']['reason'] = 'test fixture allows isolated route checks'
+            policy_path = parent / 'worker-dispatch.json'
+            policy_path.write_text(json.dumps(policy), encoding='utf-8')
+            policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', policy_path)
+            policy_patch.start()
+            self.addCleanup(policy_patch.stop)
         store = TaskStore(root)
         store.create(record)
         return linked_job, store, record
