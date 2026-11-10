@@ -9475,6 +9475,113 @@ class StateServer(http.server.ThreadingHTTPServer):
         self.server_port = int(self.server_address[1])
 
 
+def _state_redact(text: typing.Any) -> str:
+    """Redact secret-like patterns from exported string values."""
+    if not isinstance(text, str):
+        return ""
+    return SECRETISH.sub("[已遮蔽]", text)
+
+
+def office_state(
+    top: typing.Any,
+    owner: typing.Any,
+    prs: typing.Any,
+    stuck: typing.Any,
+    generated_at: typing.Any,
+    data_age: typing.Any,
+) -> dict[str, typing.Any]:
+    """Build the JSON view dictionary from values the screen already displays."""
+    top_entries = top if isinstance(top, (list, tuple)) else []
+    top_out: list[dict[str, str]] = []
+    for item in top_entries:
+        if isinstance(item, (tuple, list)):
+            t = item[0] if len(item) > 0 else ""
+            s = item[1] if len(item) > 1 else ""
+        elif isinstance(item, dict):
+            t = item.get("text", "")
+            s = item.get("style", "")
+        else:
+            t = str(item)
+            s = ""
+        if not isinstance(t, str):
+            t = ""
+        if (
+            "brew " in t
+            or "pip " in t
+            or "install" in t
+            or t.startswith("$ ")
+            or t.lstrip().startswith("$ ")
+        ):
+            continue
+        top_out.append({
+            "text": _state_redact(t),
+            "style": _state_redact(s),
+        })
+
+    owner_entries = owner if isinstance(owner, (list, tuple)) else []
+    owner_out = [_state_redact(x) for x in owner_entries]
+
+    pr_entries = prs if isinstance(prs, (list, tuple)) else []
+    prs_out: list[dict[str, typing.Any]] = []
+    for row in pr_entries:
+        if isinstance(row, dict):
+            num = row.get("number", 0)
+            review = row.get("review", "")
+            ec2 = row.get("ec2", "")
+            linux = row.get("linux", "")
+            mac = row.get("mac", "")
+            next_val = row.get("next", "")
+            owner_val = row.get("owner", "")
+            current_val = row.get("current", "")
+        else:
+            num = getattr(row, "number", 0)
+            review = getattr(row, "review", "")
+            ec2 = getattr(row, "ec2", "")
+            linux = getattr(row, "linux", "")
+            mac = getattr(row, "mac", "")
+            next_val = getattr(row, "next", "")
+            owner_val = getattr(row, "owner", "")
+            current_val = getattr(row, "current", "")
+
+        if not isinstance(num, int):
+            try:
+                num = int(num)
+            except (ValueError, TypeError):
+                num = 0
+
+        prs_out.append({
+            "number": num,
+            "review": _state_redact(review),
+            "ec2": _state_redact(ec2),
+            "linux": _state_redact(linux),
+            "mac": _state_redact(mac),
+            "next": _state_redact(next_val),
+            "owner": _state_redact(owner_val),
+            "current": _state_redact(current_val),
+        })
+
+    stuck_entries = stuck if isinstance(stuck, (list, tuple)) else []
+    stuck_out = [_state_redact(x) for x in stuck_entries]
+
+    age_val = None
+    if data_age is not None:
+        try:
+            age_val = float(data_age)
+        except (ValueError, TypeError):
+            age_val = None
+
+    return {
+        "schema_version": 1,
+        "generated_at": _state_redact(generated_at),
+        "data_age": age_val,
+        "top": top_out,
+        "owner": owner_out,
+        "prs": prs_out,
+        "stuck": stuck_out,
+        "office": [],
+    }
+
+
 def make_state_server(
     get_bytes: typing.Callable[[], bytes],
     host: str = "127.0.0.1",
@@ -9492,10 +9599,11 @@ def make_state_server(
 
 
 def main(argv: list[str] | None = None) -> int:
-    # #1234: GitHub reads use the AI login (gh-ai config) when it exists.
-    ai_gh = os.path.expanduser("~/.config/gh-ai")
-    if os.path.isdir(ai_gh):
-        os.environ.setdefault("GH_CONFIG_DIR", ai_gh)
+    # #1234: GitHub reads always use the AI login (gh-ai config), never the
+    # Owner's default login; if gh-ai is missing, reads fail instead.
+    os.environ["GH_CONFIG_DIR"] = os.path.expanduser("~/.config/gh-ai")
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        os.environ.pop(name, None)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interval", type=float, default=1.0,
                         help="seconds between snapshots (default 1; minimum 0.5)")
