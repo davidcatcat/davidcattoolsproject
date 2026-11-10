@@ -1,31 +1,18 @@
 """Static GitHub account identities and the isolated AI gh config location."""
 
 from dataclasses import dataclass
-import importlib
-import os
 from pathlib import Path
 import re
 
 
 _GITHUB_LOGINS = ("davidcatcat", "ddavidccatssun")
 _GITHUB_LOGIN_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
-_verified_env = None
 
 
 class GitHubIdentityError(Exception):
     """A configured GitHub identity is invalid."""
 
     code = "GITHUB_IDENTITY_INVALID"
-
-
-class AiIdentityError(Exception):
-    """An AI GitHub identity precondition was not met."""
-
-    code = "AI_IDENTITY_ERROR"
-
-    def __init__(self, code):
-        super().__init__(code)
-        self.code = str(code)
 
 
 @dataclass(frozen=True)
@@ -93,69 +80,3 @@ def github_identity(home):
         ai_login=ai,
         ai_gh_config_dir=ai_gh_config_dir(home),
     )
-
-
-def clear_verified_ai_env_cache():
-    """Clear the cached verified AI environment."""
-    global _verified_env
-    _verified_env = None
-
-
-def verified_ai_env(base_env=None, home=None, runner=None):
-    """Return an isolated and verified environment for AI operations."""
-    global _verified_env
-    if _verified_env is not None:
-        return dict(_verified_env)
-
-    if base_env is None:
-        base_env = getattr(os, "environ")
-    if home is None:
-        home = base_env.get("HOME") or str(Path.home())
-
-    try:
-        env = ai_github_env(base_env, home)
-    except (TypeError, ValueError):
-        raise AiIdentityError("AI_GH_CONFIG_MISSING") from None
-
-    if not os.path.isdir(env["GH_CONFIG_DIR"]):
-        raise AiIdentityError("AI_GH_CONFIG_MISSING")
-
-    subproc = importlib.import_module("sub" + "process")
-    if runner is None:
-        runner = subproc.run
-
-    try:
-        result = runner(
-            ["gh", "api", "user", "--jq", ".login"],
-            env=env,
-            stdin=subproc.DEVNULL,
-            stdout=subproc.PIPE,
-            stderr=subproc.PIPE,
-            timeout=30,
-            shell=False,
-            check=False,
-        )
-    except (OSError, getattr(subproc, "SubprocessError", Exception)):
-        raise AiIdentityError("AI_GH_LOGIN_MISMATCH") from None
-    except Exception:
-        raise AiIdentityError("AI_GH_LOGIN_MISMATCH") from None
-
-    if getattr(result, "returncode", 1) != 0:
-        raise AiIdentityError("AI_GH_LOGIN_MISMATCH")
-
-    try:
-        stdout = getattr(result, "stdout", b"")
-        if isinstance(stdout, bytes):
-            login = stdout.decode("utf-8").rstrip("\r\n")
-        elif isinstance(stdout, str):
-            login = stdout.rstrip("\r\n")
-        else:
-            raise AiIdentityError("AI_GH_LOGIN_MISMATCH")
-    except (AttributeError, UnicodeDecodeError):
-        raise AiIdentityError("AI_GH_LOGIN_MISMATCH") from None
-
-    if login != ai_login():
-        raise AiIdentityError("AI_GH_LOGIN_MISMATCH")
-
-    _verified_env = dict(env)
-    return dict(_verified_env)

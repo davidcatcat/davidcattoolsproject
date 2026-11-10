@@ -6,14 +6,14 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from llmtool.github_identity import AiIdentityError
+from llmtool.ai_github_exec import AiIdentityError
 from llmtool.task_advance import _publish_run_gh, _publish_run_git
 
 
 class TaskAdvanceAiIdentityTests(unittest.TestCase):
     def test_publish_run_gh_passes_verified_env(self):
         fake_env = {"AI_GH_ISOLATED": "1", "PATH": "/bin"}
-        with patch("llmtool.github_identity.verified_ai_env", return_value=fake_env):
+        with patch("llmtool.task_advance.verified_ai_env", return_value=fake_env):
             with patch("subprocess.run") as mock_run:
                 mock_run.return_value = subprocess.CompletedProcess(
                     ["gh", "pr", "list"], 0, stdout=b"[]", stderr=b""
@@ -28,7 +28,7 @@ class TaskAdvanceAiIdentityTests(unittest.TestCase):
 
     def test_publish_run_git_passes_verified_env(self):
         fake_env = {"AI_GH_ISOLATED": "1", "PATH": "/bin"}
-        with patch("llmtool.github_identity.verified_ai_env", return_value=fake_env):
+        with patch("llmtool.task_advance.verified_ai_env", return_value=fake_env):
             with patch("subprocess.run") as mock_run:
                 mock_run.return_value = subprocess.CompletedProcess(
                     ["git", "status"], 0, stdout=b"", stderr=b""
@@ -43,7 +43,7 @@ class TaskAdvanceAiIdentityTests(unittest.TestCase):
 
     def test_identity_refusal_skips_subprocess_and_returns_code_2(self):
         with patch(
-            "llmtool.github_identity.verified_ai_env",
+            "llmtool.task_advance.verified_ai_env",
             side_effect=AiIdentityError("AI_GH_LOGIN_MISMATCH"),
         ):
             with patch("subprocess.run") as mock_run:

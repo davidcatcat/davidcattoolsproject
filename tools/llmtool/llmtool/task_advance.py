@@ -19,6 +19,7 @@ from argparse import Namespace
 from . import active_pm_inbox, github_events, remote_test, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
 from . import mac_full_suite, task_submission_cli
+from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes
 
@@ -47,8 +48,8 @@ _HEX40 = re.compile(r'[0-9a-f]{40}')
 def _publish_run_git(root, args):
     cmd = ['git', *args]
     try:
-        env = github_identity.verified_ai_env()
-    except github_identity.AiIdentityError as exc:
+        env = verified_ai_env()
+    except AiIdentityError as exc:
         print(f'llmtool: GITHUB_AI_IDENTITY_REFUSED {exc.code}', file=sys.stderr)
         return subprocess.CompletedProcess(cmd, 2, stdout=b'', stderr=b'')
     return subprocess.run(cmd, cwd=root, stdin=subprocess.DEVNULL,
@@ -59,8 +60,8 @@ def _publish_run_git(root, args):
 def _publish_run_gh(root, args):
     cmd = ['gh', *args]
     try:
-        env = github_identity.verified_ai_env()
-    except github_identity.AiIdentityError as exc:
+        env = verified_ai_env()
+    except AiIdentityError as exc:
         print(f'llmtool: GITHUB_AI_IDENTITY_REFUSED {exc.code}', file=sys.stderr)
         return subprocess.CompletedProcess(cmd, 2, stdout=b'', stderr=b'')
     return subprocess.run(cmd, cwd=root, stdin=subprocess.DEVNULL,
