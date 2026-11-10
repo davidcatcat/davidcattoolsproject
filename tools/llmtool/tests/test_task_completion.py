@@ -62,6 +62,8 @@ class TaskCompletionTests(unittest.TestCase):
         policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
         policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
         policy['workers']['opencode-developer']['reason'] = 'test fixture allows isolated callback checks'
+        policy['workers']['company-gw']['dispatch'] = 'ALLOWED'
+        policy['workers']['company-gw']['reason'] = 'test fixture allows isolated route checks'
         self.policy_path = self.base / 'worker-dispatch.json'
         self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
         policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
