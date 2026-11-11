@@ -9,7 +9,7 @@ When the PM receives PASS, FAIL or BLOCKED for a Task, it records the next decis
 | Result | Required PM decision |
 | --- | --- |
 | Developer PASS | Send the exact-SHA candidate to the independent Reviewer for that Task. |
-| Reviewer FAIL | Return the bounded findings to the original Developer inside the same Task Contract, then request rereview of the affected scope. The repair dispatch lists **every** finding of the FAIL verdict, advisory and Low included. Mark each one as fix, defer with a reason, or dispute with evidence. Post deferred and disputed findings on the PR so the next Reviewer sees them (#521). PM repairs of a reviewed PR go through `llmtool task repair <task> --executor-task <d6> --pr <N>` so each repair is a recorded claim that `task high-debug --failed-corrections` can count (#521). A Reviewer FAIL is a repair step for that Task. It does not stop the whole flow. |
+| Reviewer FAIL | Return the bounded findings to the original Developer inside the same Task Contract, then request rereview of the affected scope. The repair dispatch lists **every** finding of the FAIL verdict, advisory and Low included. Mark each one as fix, defer with a reason, or dispute with evidence. Reviewer disputes follow the O3 procedure; the PM may defer only Low/advisory findings (E10). Post deferred and disputed findings on the PR so the next Reviewer sees them (#521). PM repairs of a reviewed PR go through `llmtool task repair <task> --executor-task <d6> --pr <N>` so each repair is a recorded claim that `task high-debug --failed-corrections` can count (#521). A Reviewer FAIL is a repair step for that Task. It does not stop the whole flow. |
 | Reviewer PASS | Hand off to the Integrator for exact-head CI, any required Mac/runtime gate and the merge decision under [safe-git](../safe-git/SKILL.md). Before a PASS merges or joins a merge train, the PM triages every advisory and Low finding. Any finding about process-global state (signal handlers, atexit, environment, cwd, locks) is fixed before the merge, not deferred (#521; e.g. #524 broke train 13's Mac CI). |
 | Test or CI FAIL | Make a bounded repair and rerun the check inside the original Task Contract, within the [repair bounds](defect-triage.md). |
 | BLOCKED | Diagnose the block first (next section). Then retry, reassign or isolate the Task. |
@@ -19,16 +19,22 @@ After recording the next decision, close out completed sessions and retire eligi
 
 ### Validate a Developer result before review (Owner 2026-11-02)
 
-A Developer result is not ready for review until the PM has validated it on EC2. Codex direct, AGY, OpenCode and home LLM `gw-agent` Developers do not run the Task's tests themselves. "Remote testing is handled by PM" in their reply means this step; it does not mean the PM runs the tests locally.
+`task advance` is the only normal flow: push -> EC2 before PR -> PR -> Linux CI -> review -> PASS -> mac-ci -> Mac CI -> merge with no main sync (M1, #1317); manual commands move to a recovery section.
+
+Codex direct, AGY, OpenCode and home LLM `gw-agent` Developers do not run the Task's tests themselves. "Remote testing is handled by PM" in their reply means validating on EC2 before the PR; it does not mean the PM runs the tests locally. A Developer result is not ready for review until the PM has validated it on EC2 before the PR.
+
+An EC2 remote-test failure is environment-specific only when exact-head CI passed the same module at the same SHA. Do not start a repair from test evidence alone while review of that head is running: wait for its verdict and carry every finding into the repair.
+
+Run tests locally on the Mac only for what EC2 cannot run: interactive TUI/PTY tests, and code outside `tools/llmtool/tests` (for example a new top-level tool). Use `PYTHONDONTWRITEBYTECODE=1`, set `PYTHONPATH` to the worktree, and do it in a registered test D6 created with `d6_worktree_lifecycle.py --agent-id`, not in the Developer's D6. A local run never replaces the remote-test receipt.
+
+#### Manual recovery flow
+
+When `task advance` cannot run, manual commands are recovery only:
 
 1. **Commit the result in its D6** without running tests inside it first. Local runs leave `__pycache__`, and ENV-2 then refuses the D6 (`D6_UNREGISTERED_LOCAL_STATE`, shown as `ENV_BOOTSTRAP_REJECTED`, #725). #775 fixed the env-probe `__pycache__` issue, but running tests in a D6 still creates `__pycache__`, so the no-tests-in-D6 rule remains. If anything stray appears, move it out; never delete Developer work.
 2. **Record the result head:** `d6_worktree_lifecycle.py --record-result-task-id <d6>`. Without this, remote-test refuses with `RECEIPT_HEAD_UNRECORDED` (or `RECEIPT_HEAD_MISMATCH` when the recorded head differs from `--sha`).
 3. **Run the Task's tests on EC2:** `llmtool task remote-test <task> --executor-task <d6> --sha <head> --ref refs/heads/<branch> --pr <N>`. Omit `--module` to use the admitted modules. Post the receipt on the PR: result, module, test count, head and receipt digest.
 4. **Then request the formal review** of that exact head.
-
-An EC2 remote-test failure is environment-specific only when exact-head CI passed the same module at the same SHA. Do not start a repair from test evidence alone while review of that head is running: wait for its verdict and carry every finding into the repair.
-
-Run tests locally on the Mac only for what EC2 cannot run: interactive TUI/PTY tests, and code outside `tools/llmtool/tests` (for example a new top-level tool). Use `PYTHONDONTWRITEBYTECODE=1`, set `PYTHONPATH` to the worktree, and do it in a separate checkout, not in the Developer's D6. A local run never replaces the remote-test receipt.
 
 ### Dispatch hygiene
 
@@ -74,7 +80,7 @@ Only the main PM merges, adopts Tasks, edits the #763 inventory or asks the Owne
 
 The PM plans work as packages of 3 to 6 related items with one shared goal, known dependencies and shared acceptance ([Owner instruction, relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6704957386)). A package may hold several bounded PRs. Each PR keeps its own Task scope, acceptance and D6, with one writer per D6 and no conflicting writers.
 
-Packaging changes no gate. The per-D6 cap of three Developer runs (one run plus two repairs), the [High Debug rule](pm-continuation-reference.md#high-debug), safety, authorization, formal review, EC2 and exact-head CI apply to each PR as before. Splitting or merging work to get around them is not allowed.
+Packaging changes no gate. The per-D6 cap is 2 repairs in total, the 2nd after an AI Debug with a confirmed cause (D1/O2); a 3rd valid FAIL splits into at most 3 child Tasks (D3) 待實作（WP-D）. The [High Debug rule](pm-continuation-reference.md#high-debug), safety, authorization, formal review, EC2 and exact-head CI apply to each PR as before. Splitting or merging work to get around them is not allowed.
 
 Independent packages run in parallel through Mode B sub-agent PMs with non-overlapping leases. Request formal review only for a finished PR head. On unfinished work, run only the checks that [Validate a Developer result before review](#validate-a-developer-result-before-review-owner-2026-11-02) allows, never tests inside a D6; final EC2, formal review and exact-head CI still decide.
 
@@ -92,7 +98,7 @@ Owner-reserved decisions, new permissions and security boundaries still stop the
 
    Before parking a difficult unresolved Task, record a Debug escalation disposition in its existing Issue/Task record: the qualified model/Worker route considered and, if selected, its result; or the concrete gate/refusal reason (dispatch, availability, data permission or budget) and recovery condition. This record is required for continuation, but it does not require a high-model call for every `BLOCKED` Task.
 
-   For substantial technical uncertainty, or after two failed corrections in the same confirmed root-cause/finding family, follow the [High Debug procedure](pm-continuation-reference.md#high-debug) and its [High Debug report](high-debug-report.md). It grants no implementation, acceptance or additional repair authority.
+   For substantial technical uncertainty, or after the first failed correction in the same confirmed root-cause/finding family before the 2nd repair, follow the [High Debug procedure](pm-continuation-reference.md#high-debug) and its [High Debug report](high-debug-report.md). The repair cap is 2 repairs in total, the 2nd after an AI Debug with a confirmed cause (D1/O2); a 3rd valid FAIL splits into at most 3 child Tasks (D3) 待實作（WP-D）.
 
    If the preferred route is unavailable or not authorized, choose another safe option if one exists. Do not increase spending, use a paid fallback, expand data permission or weaken D8. If the next useful action requires reserved authority, new spending/data permission, or no safe route remains, record the exact gate evidence and recovery condition and follow the Owner escalation rule below. Otherwise isolate only the affected Task and keep independent work moving.
    - **Retry or reassign:** reread and validate `worker-dispatch.json` before each action, record the gate decision and confirm fresh availability and all task, privacy, budget and review gates. Retry only transient failures within budget; never replay UNKNOWN or non-replayable operations. Reassign only after the prior writer releases the D6. Follow the [dispatch and handoff checklist](pm-continuation-reference.md#retry-and-reassignment); paid fallback is prohibited unless already authorized.
@@ -105,6 +111,7 @@ Escalate to the Owner only when one of these applies:
 
 - the work needs authority the team does not have;
 - the work cannot continue safely;
+- a Task that does not end successfully notifies the Owner (D4);
 - the decision belongs to the Owner under [owner-escalation](owner-escalation.md).
 
 Everything else is a PM decision: routine failures, Reviewer FAIL, a quota pause, a VPN outage and repair choices. Record the PM decision and continue. While the escalation is open, only the dependent action waits.
@@ -151,7 +158,7 @@ This single recurring schedule (about every 5 minutes in the PM session, for exa
 
 **Row audit:** each sweep record lists every running and queue row as ref, who is on it now (Task, PR check or sub-agent, with ID) and next step. Nobody is allowed for one sweep only: by the next sweep the row is dispatched, moved to queue or blocked with a real reason, or raised to the Owner. A short no-change record is not allowed while any row says Nobody (Owner 2026-11-07, #763).
 
-**Sweep record:** post one short comment per sweep on tracking Issue #763 (no new Issue, no raw logs) starting with the exact whole-line marker:
+**Sweep record:** post a sweep comment on tracking Issue #763 only when there is an unworked row, an Owner item, a dispatch, a state change or an anomaly (E4) (no new Issue, no raw logs), starting with the exact whole-line marker:
 
 `<!-- activity: type=pm_progress actor=PM target=PM status=SWEEP -->`
 
@@ -167,7 +174,7 @@ Sweep records must never use `target=Owner`, so [llmtool_monitor.py](../../scrip
 **Anomalies, notifications and schedule control:**
 
 - Zero new dispatch while executable work and a free Developer are available below the concurrency cap is an anomaly, not **IDLE**.
-- Normal sweeps are silent in chat (send no chat message) but still post the `type=pm_progress` sweep record on the tracking Issue; anomalies, sweep failures, Developer start failures and real Owner decisions also get dedicated GitHub records.
+- Normal sweeps are silent in chat (send no chat message) and post a sweep comment on tracking Issue #763 only when there is an unworked row, an Owner item, a dispatch, a state change or an anomaly (E4); anomalies, sweep failures, Developer start failures and real Owner decisions also get dedicated GitHub records.
 - Owner asks use `<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->`; a relayed Owner answer uses `<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->` (never an `actor=Owner` marker; the Owner does not use GitHub); verify both with `llmtool_monitor.py --once`.
 - An Owner ask is made only when its `type=waiting_owner` marker is posted and shows in `llmtool_monitor.py --once`. Post it before asking in chat; a chat-only ask does not count, because the Owner does not scroll back (Owner 2026-11-07, #763).
 - Status answers give numbers first (`dispatched`, `merged`, `remaining`).
@@ -199,7 +206,7 @@ For other GitHub activity posts, begin the post with whole-line `<!-- activity: 
 
 Confirm the receipt within 2 minutes of dispatch. Until then record only `DISPATCHED` / `UNKNOWN`, and never report the Worker as delivered, started or working. While waiting for a result, watch Worker state (`claude_bg_dispatch.py watch --name <worker-role>` for Claude, using the same role as dispatch); a blocked, waiting or gone Worker is handled under [BLOCKED](#blocked-diagnose-then-retry-reassign-or-isolate).
 
-Formal verdicts are posted with `gh pr comment`, never `gh pr review`, because Task advance scans issue comments. Merge only when every exact-head check is `SUCCESS` or `SKIPPED`, with macOS `SUCCESS` where required; `CANCELLED` or pending checks block the merge.
+Formal verdicts are posted with `gh pr comment`, never `gh pr review`, because Task advance scans issue comments. A skipped required check is NOT_RUN, never PASS. Merge only when every exact-head required check is `SUCCESS`, with macOS `SUCCESS` where required; `CANCELLED`, `NOT_RUN` or pending checks block the merge.
 
 **Code PRs merge only through llmtool (#1208).** A PR that changes any path not classified as documentation merges only through `llmtool task advance --merge` or a merge train (`llmtool task train`). Both refuse a missing, skipped or red required check. The PM never runs `gh pr merge` on such a PR, including Owner-direct and monitor PRs. Reason: audit #1174 found 60 hand-merged PRs with a required check missing ([#1208](https://github.com/davidcatcat/davidcattoolsproject/issues/1208)). This is a rule, not a technical block: a same-user AI can still run `gh pr merge` (S2), so never claim it prevents that. A documentation-only PR keeps its current gates: formal review and exact-head `check (docs)`. If the llmtool merge path is broken, the PM records the defect and waits for the fix or an Owner decision; it does not fall back to `gh pr merge`.
 
