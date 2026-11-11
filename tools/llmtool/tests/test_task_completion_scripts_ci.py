@@ -183,7 +183,7 @@ class ScriptsOnlyCiTests(unittest.TestCase):
 
     def test_mixed_empty_and_none_paths_keep_mac_and_linux_gate(self):
         for changed_paths in (['scripts/a.py', 'tools/llmtool/llmtool/task_completion.py'],
-                              ['scripts/a.py', 'tools/llmtool/README.md'],
+                              ['scripts/llmtool_monitor.py', 'tools/llmtool/README.md'],
                               ['tools/llmtool/llmtool/task_completion.py'], [], None):
             with self.subTest(changed_paths=changed_paths):
                 evidence, calls = self._collect(
