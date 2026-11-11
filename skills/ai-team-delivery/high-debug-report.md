@@ -6,7 +6,7 @@ This report is mandatory for a PM-assigned High Debug Task. Follow the [PM Conti
 
 ## Trigger, identity and authority
 
-The trigger is an ordinary repair failure in the same confirmed root-cause/finding family before the 2nd repair: 2 repairs in total, the 2nd after an AI Debug with a confirmed cause (D1/O2); a 3rd valid FAIL splits into at most 3 child Tasks (D3) 待實作（WP-D）. High-risk or deep technical uncertainty may trigger earlier when the PM records its evidence. The preferred diagnostic Worker is **`codex-developer` / Codex CLI / `gpt-6.1-sol`**, with high reasoning when supported. Use it only when existing dispatch, model availability, evidence/egress, D6 and task-budget gates permit, in a verified read-only context. Do not purchase or silently substitute a provider or model. A Debug report authorizes no mutation and does not replace independent review.
+The trigger is an ordinary repair failure in the same confirmed root-cause/finding family before the 2nd repair, following the [repair cap](pm-continuation-reference.md#repair-cap). High-risk or deep technical uncertainty may trigger earlier when the PM records its evidence. The preferred diagnostic Worker is **`codex-developer` / Codex CLI / `gpt-6.1-sol`**, with high reasoning when supported. Use it only when existing dispatch, model availability, evidence/egress, D6 and task-budget gates permit, in a verified read-only context. Do not purchase or silently substitute a provider or model. A Debug report authorizes no mutation and does not replace independent review.
 
 ## Mandatory report
 

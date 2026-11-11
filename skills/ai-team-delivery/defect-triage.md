@@ -57,7 +57,7 @@ issues in one tracked list with owner, target milestone and explanation.
 Do not create a PR for every review report: publish SHA-bound review evidence
 on the product PR or tracking Issue.
 
-**Bounded convergence (C-6):** The repair cap is 2 repairs in total, the 2nd after an AI Debug with a confirmed cause (D1/O2); a 3rd valid FAIL splits into at most 3 child Tasks (D3) 待實作（WP-D）. After the first unsuccessful correction in a confirmed root-cause/finding family, PM applies the mandatory [High Debug rule](pm-continuation.md#blocked-diagnose-then-retry-reassign-or-isolate) before the 2nd repair. Four independent review rounds, a third recurrence
+**Bounded convergence (C-6):** The repair cap follows the [High Debug repair cap](pm-continuation-reference.md#repair-cap). After the first unsuccessful correction in a confirmed root-cause/finding family, PM applies the mandatory [High Debug rule](pm-continuation.md#blocked-diagnose-then-retry-reassign-or-isolate) before the 2nd repair. Four independent review rounds, a third recurrence
 of equivalent findings, or disproportionate token/time spend trigger a
 **whole-feature cost/benefit decision**: safe reduced release, independently
 reviewed redesign or HOLD/reprioritize. Reviewer independent of the author

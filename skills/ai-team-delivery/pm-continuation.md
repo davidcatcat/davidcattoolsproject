@@ -80,7 +80,7 @@ Only the main PM merges, adopts Tasks, edits the #763 inventory or asks the Owne
 
 The PM plans work as packages of 3 to 6 related items with one shared goal, known dependencies and shared acceptance ([Owner instruction, relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6704957386)). A package may hold several bounded PRs. Each PR keeps its own Task scope, acceptance and D6, with one writer per D6 and no conflicting writers.
 
-Packaging changes no gate. The per-D6 cap is 2 repairs in total, the 2nd after an AI Debug with a confirmed cause (D1/O2); a 3rd valid FAIL splits into at most 3 child Tasks (D3) 待實作（WP-D）. The [High Debug rule](pm-continuation-reference.md#high-debug), safety, authorization, formal review, EC2 and exact-head CI apply to each PR as before. Splitting or merging work to get around them is not allowed.
+Packaging changes no gate. The per-D6 [repair cap](pm-continuation-reference.md#repair-cap), [High Debug rule](pm-continuation-reference.md#high-debug), safety, authorization, formal review, EC2 and exact-head CI apply to each PR as before. Splitting or merging work to get around them is not allowed.
 
 Independent packages run in parallel through Mode B sub-agent PMs with non-overlapping leases. Request formal review only for a finished PR head. On unfinished work, run only the checks that [Validate a Developer result before review](#validate-a-developer-result-before-review-owner-2026-11-02) allows, never tests inside a D6; final EC2, formal review and exact-head CI still decide.
 
@@ -98,7 +98,7 @@ Owner-reserved decisions, new permissions and security boundaries still stop the
 
    Before parking a difficult unresolved Task, record a Debug escalation disposition in its existing Issue/Task record: the qualified model/Worker route considered and, if selected, its result; or the concrete gate/refusal reason (dispatch, availability, data permission or budget) and recovery condition. This record is required for continuation, but it does not require a high-model call for every `BLOCKED` Task.
 
-   For substantial technical uncertainty, or after the first failed correction in the same confirmed root-cause/finding family before the 2nd repair, follow the [High Debug procedure](pm-continuation-reference.md#high-debug) and its [High Debug report](high-debug-report.md). The repair cap is 2 repairs in total, the 2nd after an AI Debug with a confirmed cause (D1/O2); a 3rd valid FAIL splits into at most 3 child Tasks (D3) 待實作（WP-D）.
+   For substantial technical uncertainty, or after the first failed correction in the same confirmed root-cause/finding family before the 2nd repair, follow the [High Debug procedure and repair cap](pm-continuation-reference.md#high-debug) and its [High Debug report](high-debug-report.md).
 
    If the preferred route is unavailable or not authorized, choose another safe option if one exists. Do not increase spending, use a paid fallback, expand data permission or weaken D8. If the next useful action requires reserved authority, new spending/data permission, or no safe route remains, record the exact gate evidence and recovery condition and follow the Owner escalation rule below. Otherwise isolate only the affected Task and keep independent work moving.
    - **Retry or reassign:** reread and validate `worker-dispatch.json` before each action, record the gate decision and confirm fresh availability and all task, privacy, budget and review gates. Retry only transient failures within budget; never replay UNKNOWN or non-replayable operations. Reassign only after the prior writer releases the D6. Follow the [dispatch and handoff checklist](pm-continuation-reference.md#retry-and-reassignment); paid fallback is prohibited unless already authorized.
@@ -158,6 +158,7 @@ This single recurring schedule (about every 5 minutes in the PM session, for exa
 
 **Row audit:** each sweep record lists every running and queue row as ref, who is on it now (Task, PR check or sub-agent, with ID) and next step. Nobody is allowed for one sweep only: by the next sweep the row is dispatched, moved to queue or blocked with a real reason, or raised to the Owner. A short no-change record is not allowed while any row says Nobody (Owner 2026-11-07, #763).
 
+<a id="sweep-record"></a>
 **Sweep record:** post a sweep comment on tracking Issue #763 only when there is an unworked row, an Owner item, a dispatch, a state change or an anomaly (E4) (no new Issue, no raw logs), starting with the exact whole-line marker:
 
 `<!-- activity: type=pm_progress actor=PM target=PM status=SWEEP -->`
@@ -174,7 +175,7 @@ Sweep records must never use `target=Owner`, so [llmtool_monitor.py](../../scrip
 **Anomalies, notifications and schedule control:**
 
 - Zero new dispatch while executable work and a free Developer are available below the concurrency cap is an anomaly, not **IDLE**.
-- Normal sweeps are silent in chat (send no chat message) and post a sweep comment on tracking Issue #763 only when there is an unworked row, an Owner item, a dispatch, a state change or an anomaly (E4); anomalies, sweep failures, Developer start failures and real Owner decisions also get dedicated GitHub records.
+- Normal sweeps are silent in chat (send no chat message) and post a sweep comment on tracking Issue #763 only under the [Sweep record condition](#sweep-record); anomalies, sweep failures, Developer start failures and real Owner decisions also get dedicated GitHub records.
 - Owner asks use `<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->`; a relayed Owner answer uses `<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->` (never an `actor=Owner` marker; the Owner does not use GitHub); verify both with `llmtool_monitor.py --once`.
 - An Owner ask is made only when its `type=waiting_owner` marker is posted and shows in `llmtool_monitor.py --once`. Post it before asking in chat; a chat-only ask does not count, because the Owner does not scroll back (Owner 2026-11-07, #763).
 - Status answers give numbers first (`dispatched`, `merged`, `remaining`).
