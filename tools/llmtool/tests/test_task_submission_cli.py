@@ -2612,6 +2612,43 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'ALLOWED')
         self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_POLICY_ALLOWED')
 
+    def test_codex_proposal_delegate_and_company_gw_retirement(self):
+        task = self._pm_task_with_codex_assignment()
+        gw_task = self._pm_task_with_assignment()
+        patch_text = ('diff --git a/sample.py b/sample.py\n'
+                      '--- a/sample.py\n+++ b/sample.py\n@@ -1 +1 @@\n'
+                      '-VALUE = 1\n+VALUE = 2\n')
+        codex_config = codex_developer_config()
+        output = io.StringIO()
+        args = self._codex_delegate_args(task)
+        gw_args = self._delegate_args(gw_task)
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=codex_config) as resolve, \
+                patch('llmtool.task_submission_cli.api_key',
+                      side_effect=AssertionError('Codex CLI credentials must remain CLI-owned')), \
+                patch('llmtool.task_submission_cli.create_client',
+                      wraps=submission_cli.create_client) as create_client_call, \
+                patch.object(CodexCLIProvider, 'complete', autospec=True,
+                             return_value=Reply(patch_text, {'elapsed_seconds': 0.25,
+                                                             'model': 'gpt-6-luna'})), \
+                redirect_stdout(output):
+            code = run_task_delegate(args)
+            self.assertEqual(code, 0, output.getvalue())
+            self.assertEqual(resolve.call_args.args, ('codex-developer',))
+            create_client_call.assert_called_once()
+            saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+            self.assertEqual(saved['dispatch_audit'][-1]['worker_key'], 'codex-developer')
+            self.assertEqual(saved['developer']['provider_profile'], 'codex')
+
+            create_client_call.reset_mock()
+            with self.assertRaisesRegex(LLMToolError, 'COMPANY_GW_DIRECT_RETIRED'):
+                run_task_delegate(gw_args)
+            create_client_call.assert_not_called()
+            saved_gw = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(
+                gw_task['task_id'])
+            self.assertIsNone(saved_gw['developer'])
+
     def test_captured_source_files_allow_an_ordinary_modify_proposal(self):
         source_files = submission_cli._text_developer_source_files(
             self.executor_root, self.executor_head, ['sample.py'])
