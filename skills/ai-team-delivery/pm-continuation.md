@@ -156,6 +156,8 @@ This single recurring schedule (about every 5 minutes in the PM session, for exa
 
 **Board:** every sweep writes `~/.local/state/llmtool/pm-board.json`. Check each row against its real Issue, PR or Task and update its text, not only `updated_at`. A closed Issue leaves the board. A row nobody works on is not `running`: find its next step, dispatch it or move it (Owner 2026-11-07, #763).
 
+**Main FULL Mac:** every sweep runs `llmtool ci full-mac-due` from canonical `main` and puts its JSON `code` in the sweep record. Only this command or a finished merge train starts a main FULL (Owner #1485). Exit 1 is a failed FULL or an alert: triage it at once. Exit 2 is a GitHub read or dispatch error: record it as an error, never as queued or passed. A manual FULL rerun stays traceable by its run and never replaces a PR's exact-head check.
+
 **Row audit:** each sweep record lists every running and queue row as ref, who is on it now (Task, PR check or sub-agent, with ID) and next step. Nobody is allowed for one sweep only: by the next sweep the row is dispatched, moved to queue or blocked with a real reason, or raised to the Owner. A short no-change record is not allowed while any row says Nobody (Owner 2026-11-07, #763).
 
 <a id="sweep-record"></a>
