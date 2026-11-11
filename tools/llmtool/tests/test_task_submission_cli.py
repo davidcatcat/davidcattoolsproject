@@ -3206,19 +3206,19 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(len(client.calls), 1)
 
     def test_apply_check_failure_is_durably_rejected(self):
-        task = self._pm_task_with_assignment()
+        task = self._pm_task_with_codex_assignment()
         client = FakeClient(Reply(
             'diff --git a/sample.py b/sample.py\n--- a/sample.py\n+++ b/sample.py\n'
             '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n', {}))
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=config('openai-compatible', 'gw')), \
+                      return_value=config()), \
                 patch('llmtool.task_submission_cli.api_key', return_value=None), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 patch('llmtool.task_submission_cli._text_developer_apply_check',
                       return_value=False), redirect_stdout(output):
-            code = run_task_delegate(self._delegate_args(
+            code = run_task_delegate(self._codex_delegate_args(
                 task, read_path=['sample.py'], write_path=['sample.py']))
         self.assertEqual(code, 1)
         developer = json.loads(output.getvalue())['developer']
@@ -3446,8 +3446,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIsNone(stored['developer']['artifact'])
 
     def test_provider_unavailable_is_durable_and_not_fallen_back(self):
-        task = self._pm_task_with_assignment()
-        args = self._delegate_args(task)
+        task = self._pm_task_with_codex_assignment()
+        args = self._codex_delegate_args(task)
         output = io.StringIO()
         def unavailable(profile, require_configured):
             raise LLMToolError('private configuration detail')
