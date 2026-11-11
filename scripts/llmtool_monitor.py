@@ -6645,7 +6645,7 @@ DEVELOPER_RESULTS = {   # llmtool developer state / error code -> plain words
 
 _llmtool_records: dict = {}   # record path -> (file key, the few fields the views use)
 LLMTOOL_RECORD_FIELDS = ("task_id", "state", "updated_at")
-LLMTOOL_RECORD_PARTS = {"developer": ("provider_profile", "state", "error_code", "model", "executor_task_id", "usage"),
+LLMTOOL_RECORD_PARTS = {"developer": ("provider_profile", "state", "error_code", "model", "executor_task_id", "usage", "audit_copy_path_sha256"),
                         "completion": ("executor_task_id", "state"), "pm_assignment": ("route",)}
 
 
@@ -7560,6 +7560,19 @@ def _gw_row(state: str, words: str, age: float, d6: str, registered: dict, task:
                      evidence=evidence, sid=sid)
 
 
+def _gw_task_for_run(run: str) -> tuple[str, str]:
+    """(task id, D6) of the llmtool Task whose gw-agent audit copy is this run's file,
+    matched by the SHA-256 of the path only; ("", "") when none."""
+    base = tempfile.gettempdir() if GW_AUDIT_ROOT is None else GW_AUDIT_ROOT
+    path = os.path.join(base, GW_AUDIT_PREFIX + run, "audit.jsonl")
+    digest = hashlib.sha256(os.fsencode(path)).hexdigest()
+    for _key, record in list(_llmtool_records.values()):
+        developer = record.get("developer") if type(record) is dict else None
+        if type(developer) is dict and developer.get("audit_copy_path_sha256") == digest:
+            return str(record.get("task_id") or ""), str(developer.get("executor_task_id") or "")
+    return "", ""
+
+
 def gw_rows(processes: list[Process], now: float, canonical: str) -> list[OfficeRow]:
     """Live and recently finished gw-agent Developer runs."""
     registered = registered_tasks(canonical)
@@ -7575,7 +7588,8 @@ def gw_rows(processes: list[Process], now: float, canonical: str) -> list[Office
         rows.append(_gw_row(WORKING, "執行中", age, d6, registered, _gw_auth_task(proc.gw[2]),
                             f"pid {proc.pid}", "程序"))
     for age, run in _gw_finished(now):
-        rows.append(_gw_row(DONE, "已結束", age, "", registered, "", run, "llmtool 稽核檔"))
+        task, d6 = _gw_task_for_run(run)
+        rows.append(_gw_row(DONE, "已結束", age, d6, registered, task, run, "llmtool 稽核檔"))
     return rows
 
 
