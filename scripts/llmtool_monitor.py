@@ -1628,7 +1628,7 @@ MARKER_ACTOR_TARGETS = {
     "test_result": (frozenset({"Codex", "OpenCode", "CompanyGW"}),
                     frozenset({"Tests", "CI"})),
 }
-MARKER_NAMES = {"CompanyGW": "company gw", "Tests": "tests"}
+MARKER_NAMES = {"CompanyGW": "home LLM gw-agent", "Tests": "tests"}
 # waiting_owner runs both ways: the PM/Integrator asks the Owner (BLOCKED, WAITING,
 # UNKNOWN) and an Owner-login comment answers as ANSWERED. Any other pairing of
 # direction, author login, and status is not a typed event.
@@ -7216,28 +7216,69 @@ def ec2_head_results(root: str | None = None) -> tuple[dict, str]:
     return ({sha: word for sha, (_, word) in latest.items()}, problem)
 
 
+_dispatch_listed: dict = {}  # root -> (folder mtime_ns, monotonic time, listing)
+
+
+def _dispatch_listing(root: str) -> list:
+    """[(file key, path)] of the regular *.json files in root, newest first,
+    reused while the folder is unchanged for at most REMOTE_TEST_RELIST seconds."""
+    folder = os.stat(root).st_mtime_ns
+    kept = _dispatch_listed.get(root)
+    if kept and kept[0] == folder and time.monotonic() - kept[1] < REMOTE_TEST_RELIST:
+        return kept[2]
+    stamped = []
+    with os.scandir(root) as entries:
+        for entry in entries:
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue   # removed since the folder was listed
+            if entry.name.endswith(".json") and stat.S_ISREG(info.st_mode):
+                stamped.append(((info.st_ino, info.st_mtime_ns, info.st_size), entry.path))
+    listing = sorted(stamped, key=lambda item: item[0][1], reverse=True)
+    if root not in _dispatch_listed and len(_dispatch_listed) >= 8:
+        _dispatch_listed.clear()
+    _dispatch_listed[root] = (folder, time.monotonic(), listing)
+    return listing
+
+
 def pm_last_dispatch(now: float, root: str | None = None) -> tuple[DispatchRecord | None, str]:
-    """Return the newest locally recorded admitted Developer dispatch."""
+    """Return the newest locally recorded admitted Developer dispatch.
+
+    Owner #120 B2: every Task file counts, not only the newest 32, so review
+    Tasks cannot push a dispatch out. Files are read newest first, at most
+    DISPATCH_BUDGET bytes per call, and unchanged files come from the cache.
+    Reading stops at a file written before the newest dispatch, once that
+    dispatch's own file time confirms the order. problem is "" when certain."""
     root = LLMTOOL_TASKS if root is None else root
-    entries, problem = _bounded_task_entries(root, _dispatch_parsed,
-                                             DISPATCH_BUDGET, _dispatch_entry)
-    eligible = [entry for entry in entries if entry.created <= now + REMOTE_TEST_SKEW]
-    newest = max(eligible, key=lambda entry: entry.created) if eligible else None
-    if not problem:
-        paths, _ = _remote_test_paths(root)
-        if len(paths) >= REMOTE_TEST_FILES:
-            oldest = None
-            for path in paths:
-                try:
-                    mtime = os.lstat(path).st_mtime
-                except OSError:
-                    continue
-                oldest = mtime if oldest is None else min(oldest, mtime)
-            if oldest is None or newest is None or newest.created < oldest:
-                problem = "task 僅讀最近 32 筆，上次派工未確認"
-    if (not problem and os.path.exists(root)
-            and not os.access(root, os.R_OK | os.X_OK)):
-        problem = "本機 Task 紀錄讀取失敗"
+    try:
+        stamped = _dispatch_listing(root)
+    except FileNotFoundError:
+        return None, ""
+    except OSError:
+        return None, "本機 Task 紀錄讀取失敗"
+    newest, ordered, problem, budget = None, False, "", DISPATCH_BUDGET
+    cached, kept = _dispatch_parsed.get(root, {}), {}
+    for key, path in stamped:
+        if ordered and key[1] / 1e9 < newest.created - REMOTE_TEST_SKEW:
+            break   # written before the newest dispatch, so it holds no newer one
+        if path in cached and cached[path][0] == key:
+            entry = cached[path][1]
+        else:
+            opened = _remote_test_open(path, budget)
+            if opened is None or opened[1] is False:
+                problem = "本機 Task 紀錄讀取失敗" if opened is None else REMOTE_TEST_OVER_BUDGET
+                break
+            key, raw = opened
+            budget -= len(raw or b"")
+            entry = _dispatch_entry(_remote_test_json(raw) if raw else None)
+        kept[path] = (key, entry)
+        if (entry is not None and entry.created <= now + REMOTE_TEST_SKEW
+                and (newest is None or entry.created > newest.created)):
+            newest, ordered = entry, entry.created <= key[1] / 1e9 + REMOTE_TEST_SKEW
+    if root not in _dispatch_parsed and len(_dispatch_parsed) >= 8:
+        _dispatch_parsed.clear()
+    _dispatch_parsed[root] = kept
     return newest, problem
 
 
