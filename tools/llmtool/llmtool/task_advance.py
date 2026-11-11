@@ -2331,11 +2331,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     if executor_task is not None and type(completion_executor) is str and executor_task != completion_executor:
         return _ack_consumed_events(_merge_refusal('OWNER_EXCEPTION_EXECUTOR_MISMATCH'),
                                     record, store, None)
-    active_executor = completion_executor
-    using_executor_task = False
-    if owner_exception is not None and not active_executor and type(executor_task) is str:
-        active_executor = executor_task
-        using_executor_task = True
+    active_executor = completion_executor or executor_task
+    using_executor_task = bool(owner_exception is not None and type(executor_task) is str)
     executor_task = active_executor
     number = _pr_number(record, pr_number)
     get = task_completion._github_get if github_get is None else github_get

@@ -48,19 +48,21 @@ class FakeGhRunner:
         return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
 
 
-def _base_record(task_id, head):
-    return {
+def _base_record(task_id, head, executor_task_id="exec-dummy-001"):
+    record = {
         "task_id": task_id,
         "run_id": "run-dummy-001",
         "record_sha256": "rec-dummy-sha256",
-        "completion": {
-            "executor_task_id": "exec-dummy-001",
-            "evidence": {"common_dir": "/tmp/common"},
-        },
         "completion_events": [],
         "review_repair_claims": [],
         "review_dispatch_claim": [],
     }
+    if executor_task_id is not None:
+        record["completion"] = {
+            "executor_task_id": executor_task_id,
+            "evidence": {"common_dir": "/tmp/common"},
+        }
+    return record
 
 
 def _base_d6(head):
@@ -75,6 +77,24 @@ def _base_d6(head):
         "dirty": False,
         "state": "CLEAN",
     }
+
+
+def _pm_deterministic_d6(head, **overrides):
+    d6 = {
+        "root": "/tmp/fake-repo",
+        "common_dir": "/tmp/common",
+        "task_id": "exec-pmd6-001",
+        "branch": "fake-branch",
+        "result_head": head,
+        "recorded_result_head": head,
+        "registered_result_head": head,
+        "dirty": False,
+        "state": "ACTIVE",
+        "registration_state": "ACTIVE",
+        "trusted_agent_id": "pm-deterministic",
+    }
+    d6.update(overrides)
+    return d6
 
 
 def _make_github_get(head, number, *, check_runs=None, files=None):
@@ -381,6 +401,176 @@ class TestTaskAdvanceOwnerException(unittest.TestCase):
             comment_body = comment_calls[0][1][body_idx]
             self.assertNotIn("OWNER_EXCEPTION_DETERMINISTIC_REDACTION", comment_body)
             self.assertIn("review_version=1", comment_body)
+
+    def test_executor_task_flag_without_owner_exception_refused(self):
+        task_id = "task-flag-no-exception"
+        record = _base_record(task_id, "a" * 40)
+        store = FakeStore(record)
+
+        # 1. advance() with merge=True and executor_task but no owner_exception
+        res_merge = advance(task_id=task_id, store=store, merge=True, executor_task="exec-pmd6-001")
+        self.assertEqual(res_merge["step"], "REFUSED")
+        self.assertEqual(res_merge["codes"], ["OWNER_EXCEPTION_EXECUTOR_REQUIRES_EXCEPTION"])
+
+        # 2. advance() with merge=False and executor_task
+        res_no_merge = advance(task_id=task_id, store=store, merge=False, executor_task="exec-pmd6-001")
+        self.assertEqual(res_no_merge["step"], "REFUSED")
+        self.assertEqual(res_no_merge["codes"], ["OWNER_EXCEPTION_EXECUTOR_REQUIRES_EXCEPTION"])
+
+        # 3. CLI run_task_advance refuses executor_task without owner_exception
+        cli_args = Namespace(
+            task_id=task_id,
+            merge=True,
+            owner_exception=None,
+            executor_task="exec-pmd6-001",
+            pr=42,
+            integration_pr=None,
+            reviewer_session_done=False,
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ret = run_task_advance(cli_args, store=store)
+        self.assertEqual(ret, 1)
+        self.assertIn("OWNER_EXCEPTION_EXECUTOR_REQUIRES_EXCEPTION", buf.getvalue())
+
+    def test_executor_task_mismatch_refused(self):
+        task_id = "task-executor-mismatch"
+        head = "a" * 40
+        url = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
+        record = _base_record(task_id, head, executor_task_id="exec-original-001")
+        store = FakeStore(record)
+
+        res = advance(
+            task_id=task_id,
+            store=store,
+            pr_number=42,
+            merge=True,
+            owner_exception=url,
+            executor_task="exec-different-002",
+        )
+        self.assertEqual(res["step"], "MERGE_REFUSED")
+        self.assertEqual(res["codes"], ["OWNER_EXCEPTION_EXECUTOR_MISMATCH"])
+
+    def test_executor_task_d6_refusals(self):
+        task_id = "task-d6-refusals"
+        head = "a" * 40
+        number = 42
+        url = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
+        record = _base_record(task_id, head, executor_task_id=None)
+        github_get = _make_github_get(head, number)
+
+        cases = [
+            ("wrong agent", _pm_deterministic_d6(head, trusted_agent_id="other-agent")),
+            ("dirty", _pm_deterministic_d6(head, dirty=True, state="DIRTY")),
+            ("unrecorded head", _pm_deterministic_d6(head, recorded_result_head="b" * 40)),
+            ("missing D6 (None)", None),
+            ("missing D6 (binding unavailable)", {"state": "D6_BINDING_UNAVAILABLE"}),
+            ("inactive registration", _pm_deterministic_d6(head, registration_state="RETIRED", state="RETIRED")),
+        ]
+
+        for desc, fake_d6 in cases:
+            with self.subTest(desc=desc):
+                store = FakeStore(record)
+                gh_runner = FakeGhRunner()
+                with patch.object(task_advance, "_d6_snapshot", return_value=fake_d6):
+                    res = advance(
+                        task_id=task_id,
+                        store=store,
+                        pr_number=number,
+                        merge=True,
+                        owner_exception=url,
+                        executor_task="exec-pmd6-001",
+                        github_get=github_get,
+                        merge_gh_runner=gh_runner,
+                    )
+                    self.assertEqual(res["step"], "MERGE_REFUSED")
+                    self.assertEqual(res["codes"], ["OWNER_EXCEPTION_EXECUTOR_INVALID"])
+                    self.assertFalse(any(c[1][:2] == ["pr", "merge"] for c in gh_runner.calls))
+
+    def test_valid_pm_deterministic_d6_reaches_merge_once(self):
+        task_id = "task-valid-pmd6-merge"
+        head = "a" * 40
+        number = 42
+        url = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
+        record = _base_record(task_id, head, executor_task_id=None)
+        store = FakeStore(record)
+
+        fake_evidence = {"exception_slot": "S2a", "verified_files": ["tools/foo.py"]}
+        fake_d6 = _pm_deterministic_d6(head)
+        with patch.object(task_advance, "_d6_snapshot", return_value=fake_d6), \
+             patch.object(owner_exception, "verify", return_value=(None, fake_evidence)), \
+             patch.object(task_advance.mac_full_suite, "request_full_suite",
+                          return_value=task_advance.mac_full_suite.MAC_FULL_SUITE_DISPATCHED):
+            gh_runner = FakeGhRunner()
+            github_get = _make_github_get(head, number)
+
+            res = advance(
+                task_id=task_id,
+                store=store,
+                pr_number=number,
+                merge=True,
+                owner_exception=url,
+                executor_task="exec-pmd6-001",
+                github_get=github_get,
+                merge_gh_runner=gh_runner,
+            )
+
+            self.assertEqual(res["step"], "MERGED")
+            self.assertEqual(res["codes"], [])
+
+            expected_exception = {
+                "type": owner_exception.EXCEPTION_TYPE,
+                "url": url,
+                "evidence": fake_evidence,
+            }
+            self.assertEqual(res["result"]["review_exception"], expected_exception)
+
+            # Record in store gets review_exception
+            stored_record = store.get(task_id)
+            self.assertEqual(stored_record.get("review_exception"), expected_exception)
+
+            # PR merge was called
+            merge_calls = [c for c in gh_runner.calls if c[1][:2] == ["pr", "merge"]]
+            self.assertEqual(len(merge_calls), 1)
+            self.assertEqual(merge_calls[0][1], [
+                "pr",
+                "merge",
+                str(number),
+                "--squash",
+                "--match-head-commit",
+                head,
+            ])
+
+    def test_valid_pm_deterministic_d6_with_matching_completion_executor(self):
+        task_id = "task-valid-pmd6-matching"
+        head = "a" * 40
+        number = 42
+        url = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
+        record = _base_record(task_id, head, executor_task_id="exec-pmd6-001")
+        store = FakeStore(record)
+
+        fake_evidence = {"exception_slot": "S2a", "verified_files": ["tools/foo.py"]}
+        fake_d6 = _pm_deterministic_d6(head)
+        with patch.object(task_advance, "_d6_snapshot", return_value=fake_d6), \
+             patch.object(owner_exception, "verify", return_value=(None, fake_evidence)), \
+             patch.object(task_advance.mac_full_suite, "request_full_suite",
+                          return_value=task_advance.mac_full_suite.MAC_FULL_SUITE_DISPATCHED):
+            gh_runner = FakeGhRunner()
+            github_get = _make_github_get(head, number)
+
+            res = advance(
+                task_id=task_id,
+                store=store,
+                pr_number=number,
+                merge=True,
+                owner_exception=url,
+                executor_task="exec-pmd6-001",
+                github_get=github_get,
+                merge_gh_runner=gh_runner,
+            )
+
+            self.assertEqual(res["step"], "MERGED")
+            self.assertEqual(res["codes"], [])
 
     def test_real_default_replacement_map_regression(self):
         dummy_entries = [{"value": "sample-dummy-val-1", "placeholder": "sample-dummy-plc-1"}]
