@@ -10,7 +10,7 @@ MAIN_SHA = 'e' * 40
 LINUX = 'check (Linux 3.14)'
 MACOS = 'check (macOS 3.13)'
 DOCS = 'check (docs)'
-CODE_FILES = ['src/module.py']
+CODE_FILES = ['tools/llmtool/llmtool/module.py']
 DOCS_FILES = ['docs/guide.md']
 SCRIPTS_FILES = ['scripts/llmtool_monitor.py', 'scripts/tool.sh']
 
