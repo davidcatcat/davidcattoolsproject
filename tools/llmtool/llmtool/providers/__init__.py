@@ -1,5 +1,7 @@
 """Static provider registry; metadata lookup never constructs a client."""
 
+from __future__ import annotations
+
 import re
 from types import MappingProxyType
 from typing import Iterable
