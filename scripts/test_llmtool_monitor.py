@@ -3518,6 +3518,19 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("公司 gw agent", names)
         self._gw_view(rows)
 
+    def test_finished_gw_agent_run_names_its_task_by_audit_path_digest(self):
+        root = Path(self.tmp.name) / "audits"
+        tasks = Path(self.tmp.name) / "tasks"
+        tasks.mkdir()
+        audit = self._gw_audit_copy(root, "abcd1234", 120)
+        digest = mon.hashlib.sha256(os.fsencode(str(audit))).hexdigest()
+        record = {"task_id": "f" * 32, "developer": {"executor_task_id": "wp-9", "audit_copy_path_sha256": digest}}
+        (tasks / ("f" * 32 + ".json")).write_text(json.dumps(record), encoding="utf-8")
+        with patch.object(mon, "GW_AUDIT_ROOT", str(root)), patch.object(mon, "LLMTOOL_TASKS", str(tasks)):
+            done = [row for row in self.rows() if row.name in mon.GW_ROSTER]
+        self.assertIn("task ffffffff", done[0].detail)
+        self.assertNotIn("未綁定 Task", done[0].detail)
+
     def test_gw_audit_copy_counts_only_as_the_users_own_plain_file(self):
         root = Path(self.tmp.name) / "audits"
         real = self._gw_audit_copy(Path(self.tmp.name) / "elsewhere", "real0000", 60)
