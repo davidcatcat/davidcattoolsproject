@@ -728,6 +728,26 @@ class MonitorTaskBaselineTests(unittest.TestCase):
                           lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertIn("OpenCode Task 紀錄讀取失敗，狀態未確認", drawn.values())
 
+    def test_opencode_panel_says_paused_only_for_a_paused_switch(self):
+        # Owner #120 B1: PAUSED reads 已暫停, never no record, read failure or a route outcome.
+        lines = mon.task_lines([], route=(30.0, 4, 0, "無法使用"), route_failed=True,
+                               paused="Owner 暫停派工（11-04）")
+        self.assertEqual(lines, ["OpenCode 已暫停（Owner 暫停派工（11-04））"])
+        task = mon.Task("/tmp/llmtool-x", "t1", "branch", ())
+        self.assertEqual(mon.task_lines([task], paused="PM 暫停派工（11-04）")[:2],
+                         ["OpenCode 已暫停（PM 暫停派工（11-04））", "任務 t1   分支 branch"])
+        self.assertEqual(mon.task_lines([]), ["近 7 天 llmtool Task 紀錄沒有 OpenCode 執行"])
+
+    def test_poll_reads_opencode_pause_from_the_dispatch_switch(self):
+        for value, expected in (("ALLOWED", ""), ("PAUSED", "Owner 暫停派工（11-04）")):
+            raw = json.dumps(policy({"opencode-developer": {
+                "dispatch": value, "decided_at": "2026-11-04"}})).encode()
+            self.monitor.office_due = 0.0
+            with patch.object(mon, "load_dispatch", return_value=(raw, "派工檔")), \
+                 patch.object(mon, "office_rows", return_value=[]):
+                self.poll([])
+            self.assertEqual(self.monitor.opencode_paused, expected)
+
     def test_office_is_rebuilt_at_most_every_office_every_seconds(self):
         with patch.object(mon, "office_rows", return_value=[]) as rows:
             self.poll([])
@@ -1094,21 +1114,21 @@ class ActivityViewTests(unittest.TestCase):
             for index in range(31):
                 self._plain_task_file(tasks, f"plain-{index}", NOW - 490 + index)
             entry, problem = mon.pm_last_dispatch(NOW, tasks)
-            self.assertEqual(entry.created, NOW - 700)
-            self.assertEqual(problem, "task 僅讀最近 32 筆，上次派工未確認")
+            self.assertEqual(entry.created, NOW - 700)   # an older file is not read
+            self.assertEqual(problem, "")
             work = mon.WorkBoard(owner=[], running=[], queue=[object()], blocked=[], done=[],
                                  github_known=True, board_known=True, github_status="",
                                  board_status="ok", board_age=0, skipped=0)
             line, style = mon.pm_progress_line(
                 work, (entry, problem), NOW)
-            self.assertIn("上次派工 ?", line)
+            self.assertIn("上次派工 11 分鐘前", line)
             self.assertEqual(style, "")
 
     def test_pm_last_dispatch_window_boundaries_and_no_dispatch(self):
         with tempfile.TemporaryDirectory() as tasks:
             dispatch = self._dispatch_record(tasks, "3" * 32, created=NOW - 100)
             os.utime(dispatch, (NOW - 200, NOW - 200))
-            for index in range(mon.REMOTE_TEST_FILES - 1):
+            for index in range(mon.REMOTE_TEST_FILES + 8):   # newer review Tasks (#120 B2)
                 self._plain_task_file(tasks, f"plain-{index}", NOW - 199 + index)
             entry, problem = mon.pm_last_dispatch(NOW, tasks)
             self.assertEqual(problem, "")
@@ -1128,8 +1148,8 @@ class ActivityViewTests(unittest.TestCase):
                 self._plain_task_file(tasks, f"plain-{index}", NOW - 100 + index)
             entry, problem = mon.pm_last_dispatch(NOW, tasks)
             self.assertIsNone(entry)
-            self.assertEqual(problem, "task 僅讀最近 32 筆，上次派工未確認")
-            self.assertNotIn("沒有派工", mon.pm_dispatch_line(entry, problem, NOW))
+            self.assertEqual(problem, "")   # every file read: no record, not a read failure
+            self.assertIn("沒有派工", mon.pm_dispatch_line(entry, problem, NOW))
 
         with tempfile.TemporaryDirectory() as tasks:
             for index in range(mon.REMOTE_TEST_FILES - 1):

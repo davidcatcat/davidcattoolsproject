@@ -416,6 +416,24 @@ def _owner_acceptance_required(files):
     return False
 
 
+# Mac workflow pull_request paths (#1518); a test pins them to the yml file.
+MAC_CI_PR_PATHS = (
+    'tools/llmtool/**', '!tools/llmtool/*.md', 'scripts/llmtool_monitor.py',
+    'scripts/test_llmtool_monitor.py', 'scripts/test_llmtool_monitor_github_reads.py',
+    '.github/workflows/llmtool-mac-ci.yml', 'tools/mac-runner/**', 'tools/safe-git/**')
+
+
+def _mac_ci_runs(paths):
+    def hit(path):
+        last = False
+        for pat in MAC_CI_PR_PATHS:
+            rx = re.escape(pat.lstrip('!')).replace(re.escape('**'), '.*')
+            rx = rx.replace(re.escape('*'), '[^/]*')
+            last = (not pat.startswith('!')) if re.fullmatch(rx, path) else last
+        return last
+    return any(hit(path) for path in paths)
+
+
 def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False,
                   owner_acceptance=None, acceptance_out=None):
     """Check every exact-head merge gate; return None or one refusal code.
@@ -461,7 +479,7 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
         required_checks = ['check (docs)']
     else:
         required_checks = ['check (Linux 3.14)']
-    requires_macos = not docs_only
+    requires_macos = not docs_only and _mac_ci_runs(paths)
     if requires_macos:
         required_checks.append('check (macOS 3.13)')
     names = {item['name'] for item in check_runs}
@@ -491,7 +509,7 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
                 f"{item['name']}={item.get('conclusion')}" for item in check_runs)
     elif _owner_acceptance_required(files):
         return 'MERGE_OWNER_ACCEPTANCE_MANUAL'
-    if not docs_only:
+    if requires_macos:
         mac_runs = [item for item in check_runs if item.get('name') == 'check (macOS 3.13)']
         # GitHub can retain the earlier skipped run after mac-ci starts a new
         # run on the same head. Any successful exact-head macOS run is enough;

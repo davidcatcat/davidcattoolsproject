@@ -413,6 +413,22 @@ class TestTaskAdvanceOwnerException(unittest.TestCase):
                 os.remove(temp_path)
 
 
+_EXEC_URL = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
+
+
+def _no_executor_record(task_id):
+    record = _base_record(task_id, "a" * 40)
+    record["completion"] = {"evidence": {"common_dir": "/tmp/common"}}
+    return record
+
+
+def _exec_d6(head, **overrides):
+    d6 = dict(_base_d6(head), task_id="d6-pm-1",
+              trusted_agent_id="pm-deterministic", registration_state="ACTIVE")
+    d6.update(overrides)
+    return d6
+
+
 class TestOwnerExceptionExecutorTask(unittest.TestCase):
     def test_executor_task_without_merge_or_exception_refused(self):
         store = FakeStore(_base_record("task-exec-1", "a" * 40))
@@ -421,6 +437,88 @@ class TestOwnerExceptionExecutorTask(unittest.TestCase):
                           owner_exception=url, executor_task="d6-pm-1")
             self.assertEqual(res["step"], "REFUSED")
             self.assertEqual(res["codes"], ["OWNER_EXCEPTION_EXECUTOR_REQUIRES_EXCEPTION"])
+
+    def test_executor_task_mismatch_refused(self):
+        store = FakeStore(_base_record("task-exec-2", "a" * 40))
+        gh_runner = FakeGhRunner()
+        with patch.object(task_advance, "_d6_snapshot") as snapshot:
+            res = advance(task_id="task-exec-2", store=store, merge=True,
+                          owner_exception=_EXEC_URL, executor_task="d6-other",
+                          merge_gh_runner=gh_runner)
+        self.assertEqual(res["step"], "MERGE_REFUSED")
+        self.assertEqual(res["codes"], ["OWNER_EXCEPTION_EXECUTOR_MISMATCH"])
+        snapshot.assert_not_called()
+        self.assertEqual(gh_runner.calls, [])
+
+    def test_executor_task_invalid_d6_refused(self):
+        head = "a" * 40
+        cases = {
+            "binding_unavailable": {"state": "D6_BINDING_UNAVAILABLE",
+                                    "code": "D6_BINDING_UNAVAILABLE"},
+            "wrong_agent": _exec_d6(head, trusted_agent_id="codex-developer"),
+            "missing_agent": _exec_d6(head, trusted_agent_id=None),
+            "not_active": _exec_d6(head, registration_state="RETIRED"),
+            "dirty": _exec_d6(head, dirty=True, state="DIRTY"),
+            "head_differs": _exec_d6(head, recorded_result_head="c" * 40),
+            "head_unrecorded": _exec_d6(head, recorded_result_head=None),
+        }
+        for name, d6 in cases.items():
+            with self.subTest(name):
+                store = FakeStore(_no_executor_record("task-exec-3"))
+                gh_runner = FakeGhRunner()
+                with patch.object(task_advance, "_d6_snapshot", return_value=d6) as snapshot, \
+                     patch.object(owner_exception, "verify") as verify:
+                    res = advance(task_id="task-exec-3", store=store, pr_number=42,
+                                  merge=True, owner_exception=_EXEC_URL,
+                                  executor_task="d6-pm-1",
+                                  github_get=_make_github_get(head, 42),
+                                  merge_gh_runner=gh_runner)
+                self.assertEqual(res["step"], "MERGE_REFUSED")
+                self.assertEqual(res["codes"], ["OWNER_EXCEPTION_EXECUTOR_INVALID"])
+                self.assertEqual(snapshot.call_args.args[1], "d6-pm-1")
+                self.assertIs(snapshot.call_args.kwargs.get("allow_cwd_fallback"), True)
+                verify.assert_not_called()
+                self.assertFalse(any(c[1][:2] == ["pr", "merge"] for c in gh_runner.calls))
+
+    def test_executor_task_valid_d6_passes_guard(self):
+        head = "a" * 40
+        store = FakeStore(_no_executor_record("task-exec-4"))
+        gh_runner = FakeGhRunner()
+        with patch.object(task_advance, "_d6_snapshot", return_value=_exec_d6(head)), \
+             patch.object(owner_exception, "verify",
+                          return_value=("OWNER_EXCEPTION_SCOPE", None)) as verify:
+            res = advance(task_id="task-exec-4", store=store, pr_number=42,
+                          merge=True, owner_exception=_EXEC_URL,
+                          executor_task="d6-pm-1",
+                          github_get=_make_github_get(head, 42),
+                          merge_gh_runner=gh_runner)
+        self.assertEqual(res["step"], "MERGE_REFUSED")
+        self.assertEqual(res["codes"], ["OWNER_EXCEPTION_SCOPE"])
+        verify.assert_called_once()
+        self.assertFalse(any(c[1][:2] == ["pr", "merge"] for c in gh_runner.calls))
+
+    def test_cli_executor_task_parsed_and_passed_to_advance(self):
+        from llmtool.cli import parser_for_cli
+        argv = ["task", "advance", "1" * 32, "--pr", "42", "--merge",
+                "--owner-exception", _EXEC_URL, "--executor-task", "d6-pm-1"]
+        args = parser_for_cli().parse_args(argv)
+        self.assertEqual(args.executor_task, "d6-pm-1")
+        self.assertIsNone(parser_for_cli().parse_args(argv[:-2]).executor_task)
+        store = FakeStore({"task_id": "1" * 32})
+        buf = io.StringIO()
+        with patch("llmtool.pm_caller.check_caller", return_value=None), \
+             patch.object(task_advance, "advance",
+                          return_value={"step": "MERGE_REFUSED", "codes": ["X"]}) as adv, \
+             redirect_stdout(buf):
+            ret = run_task_advance(args, store=store)
+        self.assertEqual(ret, 1)
+        adv.assert_called_once()
+        kwargs = adv.call_args.kwargs
+        self.assertEqual(kwargs["executor_task"], "d6-pm-1")
+        self.assertEqual(kwargs["owner_exception"], _EXEC_URL)
+        self.assertIs(kwargs["merge"], True)
+        self.assertEqual(kwargs["pr_number"], 42)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,7 +27,7 @@ import os
 import re
 import stat
 
-from . import mac_full_suite
+from . import mac_full_due
 from . import merge_train as _train_build
 from . import merge_train_store, task_advance, task_completion
 
@@ -231,9 +231,9 @@ def _finish_merged(record, expected_sha256, attempt, merge_sha, gh_runner, root,
             codes.append(TRAIN_PROVENANCE_COMMENT_FAILED)
     except Exception:
         codes.append(TRAIN_PROVENANCE_COMMENT_FAILED)
-    suite_code = mac_full_suite.request_full_suite(gh_runner, root, github_get)
-    if suite_code not in (mac_full_suite.MAC_FULL_SUITE_DISPATCHED,
-                          mac_full_suite.MAC_FULL_SUITE_ALREADY_QUEUED):
+    # Owner #1485 merge-train exception: one FULL at once, same dedupe and SHA checks.
+    suite_code = mac_full_due.request_train_full(gh_runner, root, github_get)
+    if suite_code not in mac_full_due.OK_CODES:
         codes.append(suite_code)
     return _result('MERGED', codes, outcome)
 
