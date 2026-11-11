@@ -1120,18 +1120,23 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         if merged:
             claim['state'] = 'MERGED'
             warning_codes = []
+            update_kwargs = {'merge_attempt': claim}
+            if review_exception is not None:
+                update_kwargs['review_exception'] = review_exception
+                record['review_exception'] = review_exception
             try:
                 store.compare_and_update(record['task_id'], expected={'merge_attempt':
-                    dict(claim, state='CLAIMED')}, merge_attempt=claim)
+                    dict(claim, state='CLAIMED')}, **update_kwargs)
             except Exception:
                 try:
                     store.compare_and_update(record['task_id'], expected={'merge_attempt':
-                        dict(claim, state='CLAIMED')}, merge_attempt=claim)
+                        dict(claim, state='CLAIMED')}, **update_kwargs)
                 except Exception:
                     warning_codes.append('MERGE_RESULT_RECORD_FAILED')
             outcome = _merge_success(record, number, head, review_version, gh_runner, root,
                                      warning_codes, owner_acceptance=owner_acceptance,
                                      acceptance_carry=acceptance_carry,
+                                     review_exception=review_exception,
                                      github_get=github_get)
             outcome['result']['main_behind_by'] = behind_by
             return outcome
@@ -1144,32 +1149,40 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         return _merge_refusal('MERGE_OUTCOME_UNKNOWN')
     claim['state'] = 'MERGED'
     warning_codes = []
+    update_kwargs = {'merge_attempt': claim}
+    if review_exception is not None:
+        update_kwargs['review_exception'] = review_exception
+        record['review_exception'] = review_exception
     try:
         store.compare_and_update(record['task_id'], expected={'merge_attempt':
-            dict(claim, state='CLAIMED')}, merge_attempt=claim)
+            dict(claim, state='CLAIMED')}, **update_kwargs)
     except Exception:
         # The remote merge succeeded. A bounded state-record retry cannot
         # repeat the merge and avoids leaving a transient failure as CLAIMED.
         try:
             store.compare_and_update(record['task_id'], expected={'merge_attempt':
-                dict(claim, state='CLAIMED')}, merge_attempt=claim)
+                dict(claim, state='CLAIMED')}, **update_kwargs)
         except Exception:
             pass
         warning_codes.append('MERGE_RESULT_RECORD_FAILED')
     outcome = _merge_success(record, number, head, review_version, gh_runner, root,
                              warning_codes, owner_acceptance=owner_acceptance,
                              acceptance_carry=acceptance_carry,
+                             review_exception=review_exception,
                              github_get=github_get)
     outcome['result']['main_behind_by'] = behind_by
     return outcome
 
 
 def _merge_success(record, number, head, review_version, gh_runner, root, warning_codes,
-                   *, owner_acceptance=None, acceptance_carry=None, github_get=None):
+                   *, owner_acceptance=None, acceptance_carry=None, review_exception=None,
+                   github_get=None):
     body = (f'llmtool task advance merge provenance: task={record["task_id"]} '
             f'head={head} review_version={review_version} checks=exact-head-success-or-skipped')
     if owner_acceptance is not None:
         body += f' owner_acceptance={owner_acceptance}'
+    if review_exception is not None:
+        body += f' review_exception={review_exception["type"]}'
     if acceptance_carry:
         acceptance_carry = dict(acceptance_carry, h1_review_version=review_version)
         files = ','.join(f"{item['path']}(+{item['additions']}/-{item['deletions']})"
@@ -1197,6 +1210,8 @@ def _merge_success(record, number, head, review_version, gh_runner, root, warnin
         result['owner_acceptance'] = owner_acceptance
     if acceptance_carry:
         result['owner_acceptance_carry'] = acceptance_carry
+    if review_exception is not None:
+        result['review_exception'] = review_exception
     return {'step': 'MERGED', 'codes': warning_codes, 'result': result}
 
 
@@ -2274,12 +2289,16 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             run_task_complete_call=None, record_github_event_call=None,
             github_get=None, cwd=None, publish_git_runner=None,
             publish_gh_runner=None, record_result_call=None, merge_gh_runner=None,
-            owner_acceptance=None, sleep_fn=None, sleep=None):
+            owner_acceptance=None, owner_exception=None, sleep_fn=None, sleep=None):
     """Perform one selected action and return a bounded JSON-ready summary."""
     if owner_acceptance is not None and not merge:
         # An Owner acceptance is only for a merge; refuse before anything runs.
         return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
                 'next': 'REFUSED', 'codes': ['OWNER_ACCEPTANCE_REQUIRES_MERGE'],
+                'acked': []}
+    if owner_exception is not None and not merge:
+        return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
+                'next': 'REFUSED', 'codes': ['OWNER_EXCEPTION_REQUIRES_MERGE'],
                 'acked': []}
     store = TaskStore() if store is None else store
     try:
@@ -2368,6 +2387,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             head=d6['result_head'], pr=pr, events=related['events'], github_get=get,
             gh_runner=_publish_run_gh if merge_gh_runner is None else merge_gh_runner,
             root=d6.get('root') or cwd or os.getcwd(), owner_acceptance=owner_acceptance,
+            owner_exception=owner_exception,
             sleep_fn=sleep_fn, sleep=sleep)
         merge_result.update(task_id=task_id, next=merge_result['step'])
         return _ack_consumed_events(merge_result, record, store, d6['result_head'])
