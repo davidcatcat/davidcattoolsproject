@@ -98,7 +98,16 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'remote_test_receipts', 'remote_test_outcomes', 'remote_test_dispatches',
     'review_dispatch_claim', 'review_repair_claims', 'high_debug',
     'abandonment', 'pm_session_adoptions', 'pm_provenance', 'merge_attempt',
-    'published_pr', 'repair_cap_override', 'publish_operations'))
+    'published_pr', 'repair_cap_override', 'publish_operations',
+    'review_exception'))
+# Owner-exception merge evidence (#1253, #1519). Only this one exception type
+# is persisted; its evidence is the exact owner_exception.verify() result.
+_REVIEW_EXCEPTION_TYPE = 'OWNER_EXCEPTION_DETERMINISTIC_REDACTION'
+_REVIEW_EXCEPTION_SLOTS = ('S2a', 'S2b')
+_REVIEW_EXCEPTION_FIELDS = frozenset(('type', 'url', 'evidence'))
+_REVIEW_EXCEPTION_EVIDENCE_FIELDS = frozenset((
+    'type', 'slot', 'url', 'pr', 'base', 'head', 'files'))
+MAX_REVIEW_EXCEPTION_FILES = 256
 # One bounded record per publish refusal after this publish's own gh pr create
 # (#1139). Values are only int, bool, null or short strings; no command output.
 MAX_PUBLISH_OPERATIONS = 8
@@ -1099,6 +1108,38 @@ def _valid_binding_mismatch_keys(item):
             len(set(keys)) == len(keys))
 
 
+def _valid_review_exception_file(item):
+    return (type(item) in (list, tuple) and len(item) == 3 and
+            type(item[0]) is str and 0 < len(item[0]) <= 1024 and
+            not item[0].startswith('/') and '\x00' not in item[0] and
+            type(item[1]) is str and re.fullmatch(r'[0-9a-f]{64}', item[1]) is not None and
+            type(item[2]) is int and 1 <= item[2] <= 1000000)
+
+
+def _validate_review_exception(item):
+    evidence = item.get('evidence') if type(item) is dict else None
+    files = evidence.get('files') if type(evidence) is dict else None
+    if (type(item) is not dict or set(item) != _REVIEW_EXCEPTION_FIELDS or
+            item.get('type') != _REVIEW_EXCEPTION_TYPE or
+            not _valid_github_comment_url_shape(item.get('url')) or
+            type(evidence) is not dict or
+            set(evidence) != _REVIEW_EXCEPTION_EVIDENCE_FIELDS or
+            evidence.get('type') != _REVIEW_EXCEPTION_TYPE or
+            evidence.get('url') != item.get('url') or
+            evidence.get('slot') not in _REVIEW_EXCEPTION_SLOTS or
+            type(evidence.get('pr')) is not int or
+            not 1 <= evidence['pr'] <= 9999999 or
+            type(evidence.get('base')) is not str or
+            re.fullmatch(r'[0-9a-f]{40}', evidence['base']) is None or
+            type(evidence.get('head')) is not str or
+            re.fullmatch(r'[0-9a-f]{40}', evidence['head']) is None or
+            type(files) not in (list, tuple) or
+            not 1 <= len(files) <= MAX_REVIEW_EXCEPTION_FILES or
+            not all(_valid_review_exception_file(entry) for entry in files) or
+            len({entry[0] for entry in files}) != len(files)):
+        _fail('TASK_REVIEW_EXCEPTION_INVALID')
+
+
 def _validate(record, *, strict=True):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
@@ -1106,6 +1147,7 @@ def _validate(record, *, strict=True):
     keys.discard('merge_attempt')
     keys.discard('published_pr')
     keys.discard('publish_operations')
+    keys.discard('review_exception')
     if type(record) is dict and 'pm_session_adoptions' in record:
         keys.discard('pm_session_adoptions')
     if (type(record) is not dict or
@@ -1136,6 +1178,8 @@ def _validate(record, *, strict=True):
             _fail('TASK_PUBLISHED_PR_INVALID')
     if 'publish_operations' in record:
         _validate_publish_operations(record)
+    if 'review_exception' in record:
+        _validate_review_exception(record['review_exception'])
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
             not _safe_identifier(record['task_id'], TASK_ID) or
             not _safe_identifier(record['run_id'], TASK_ID) or

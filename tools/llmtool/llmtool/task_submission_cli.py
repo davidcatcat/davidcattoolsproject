@@ -816,7 +816,7 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--high-debug-family',
                           help='root-cause family matching the confirmed High Debug diagnosis')
     delegate.add_argument('--context-stdin', action='store_true',
-                          help='company-gw/codex only: read bounded, sensitive-screened context from stdin')
+                          help='codex text proposals only: read bounded, sensitive-screened context from stdin')
     complete = actions.add_parser('complete', help='Collect verified Executor evidence and return it to the original PM')
     complete.add_argument('task_id', help='existing durable Task ID')
     complete.add_argument('--executor-task', required=True, help='registered D6 Executor task id bound at delegation')
@@ -4489,7 +4489,12 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None})
         site.after_result(result.session_id, task_input)
-        _bind_direct_native_session(registration, developer, completion, _GW_AGENT_SESSION)
+        # #1535: a D6 keeps the first gw-agent session it took. A later PM Task
+        # (fresh session, #1509) or repair round there keeps that session; a D6
+        # holding another route's session is still refused.
+        _bind_direct_native_session(registration, developer, completion, _GW_AGENT_SESSION,
+            repair=gw_agent_wiring._HEX_32.fullmatch(
+                registration.native_session_id or '') is not None)
     except _D6SessionRefused:
         return persist_failure('DEVELOPER_GW_AGENT_D6_SESSION_REFUSED',
                                state='DEVELOPER_OUTCOME_UNKNOWN')

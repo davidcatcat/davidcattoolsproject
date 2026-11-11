@@ -283,7 +283,7 @@ class TaskDriveTests(unittest.TestCase):
             if path.startswith('commits/'):
                 return skipped_checks
             if path == 'pulls/17/files?per_page=100':
-                return [{'filename': 'src/module.py'}]
+                return [{'filename': 'tools/llmtool/llmtool/module.py'}]
             return []
 
         def runner(_root, args):
