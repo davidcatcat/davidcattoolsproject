@@ -1,4 +1,8 @@
-"""Request workflow_dispatch run of the Mac full suite on main."""
+"""Request workflow_dispatch run of the Mac full suite on main.
+
+Rule: queued-like status -> ALREADY_QUEUED; only in_progress or none -> dispatch one,
+which becomes the single pending run. Status compare stays case-insensitive.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +20,10 @@ _WORKFLOW_RUNS_PATH = (
 
 def request_full_suite(gh_runner, root, github_get):
     """Request one workflow_dispatch run of llmtool-mac-ci.yml on main.
+
+    Rule: queued-like status -> ALREADY_QUEUED; only in_progress or none ->
+    dispatch one, which becomes the single pending run. Status compare stays
+    case-insensitive.
 
     Returns MAC_FULL_SUITE_ALREADY_QUEUED if a run is already queued or waiting,
     MAC_FULL_SUITE_DISPATCHED on exit 0, MAC_FULL_SUITE_DISPATCH_FAILED on runner

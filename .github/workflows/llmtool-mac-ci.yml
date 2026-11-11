@@ -13,7 +13,8 @@ name: llmtool Mac CI
 # tests are offline. HOSTED_CI_ENABLED is the kill switch: anything but 'true'
 # skips the job (MAC_CI_ENABLED, the old self-hosted switch, stays 'false' so
 # older self-hosted copies of this file on other branches never run), and a skipped job is NOT_RUN, not PASS.
-# Use workflow_dispatch after each merge train so the full suite runs.
+# Use workflow_dispatch after each merge train so the full suite runs;
+# workflow concurrency allows at most one running plus one pending full-main run (#1485).
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
@@ -33,13 +34,14 @@ permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
 jobs:
   select:
     name: select
     if: vars.HOSTED_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci' || github.event.label.name == 'mac-ci-intel')
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
-      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
     runs-on: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'mac-ci-intel') && 'macos-15' || 'macos-15-intel' }}
     timeout-minutes: 120
     outputs:
