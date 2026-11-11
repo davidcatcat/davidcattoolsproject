@@ -3605,8 +3605,8 @@ class OfficeViewTests(unittest.TestCase):
         rows = self.rows(llmtool_tasks=str(tasks))
         self.assertFalse(any(row.name in mon.GW_ROSTER for row in rows))
         names = self.by_name(rows)
-        self.assertEqual((names["公司 gw"].kind, names["公司 gw"].state), ("worker", mon.IDLE))
-        self.assertEqual((names["公司 gw agent"].kind, names["公司 gw agent"].state),
+        self.assertEqual((names[mon.HOME_GW].kind, names[mon.HOME_GW].state), ("worker", mon.IDLE))
+        self.assertEqual((names[mon.HOME_GW_AGENT].kind, names[mon.HOME_GW_AGENT].state),
                          ("worker", mon.PAUSED))
 
     def test_stale_gw_record_is_not_shown_as_running(self):
@@ -3625,7 +3625,7 @@ class OfficeViewTests(unittest.TestCase):
                 rows = self.rows(processes, llmtool_tasks=str(tasks))
                 self.assertFalse(any(row.name in mon.GW_ROSTER for row in rows))
                 self.assertNotIn("wp-1", mon._d6_running_tasks(rows))
-                self.assertIn("公司 gw", self.by_name(rows))
+                self.assertIn(mon.HOME_GW, self.by_name(rows))
 
     def test_gw_rows_open_no_task_file_and_no_audit_content(self):
         tasks = Path(self.tmp.name) / "tasks"
@@ -5765,7 +5765,7 @@ class OfficeViewTests(unittest.TestCase):
         app = mon.Process(5, 1, 5, "2-00:00:00", "S", "Antigravity App (AGY)", "Antigravity", "")
         agy = self.by_name(self.rows([app]))["agy"]
         self.assertEqual((agy.state, agy.detail), (mon.PAUSED, "Owner 暫停派工（10-22）；App 開著"))
-        self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
+        self.assertEqual((rows[mon.HOME_GW].state, rows[mon.HOME_GW].detail), (mon.IDLE, "可派工"))
         self.assertIsNone(rows["agy"].age)
 
     def test_missing_or_invalid_dispatch_says_it_cannot_tell_and_never_falls_back(self):
