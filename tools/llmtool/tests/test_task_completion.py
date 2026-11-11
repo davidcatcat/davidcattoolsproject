@@ -1179,7 +1179,7 @@ class TaskCompletionTests(unittest.TestCase):
 
         for allow_conflict in (False, True):
             with self.subTest(allow_conflict=allow_conflict):
-                task = self._active_pm_task(self._task(), route='company-gw')
+                task = self._active_pm_task(self._task(), route='codex')
                 paths = sorted([self.source_path] + (
                     ['README.md'] if allow_conflict else []))
                 task['developer'].update(
@@ -1397,7 +1397,7 @@ class TaskCompletionTests(unittest.TestCase):
         store = TaskStore(self.base / ('rename-conflict-task-complete-' + shape))
         for in_scope in (False, True):
             with self.subTest(route='task-complete', in_scope=in_scope):
-                task = self._active_pm_task(self._task(), route='company-gw')
+                task = self._active_pm_task(self._task(), route='codex')
                 paths = list(head['attributed']) if in_scope else [self.source_path]
                 task['developer'].update(
                     source_sha=head['segment_start'], read_paths=paths,
@@ -1444,7 +1444,7 @@ class TaskCompletionTests(unittest.TestCase):
 
     def test_task_complete_executor_route_waits_on_head_moved_to_out_of_scope_merge(self):
         store = TaskStore(self.base / 'moved-head-task-complete')
-        task = self._active_pm_task(self._task(), route='company-gw')
+        task = self._active_pm_task(self._task(), route='codex')
         task['completion']['evidence'].update(
             executor_native_session_id='native-executor',
             executor_native_session='VERIFIED')
@@ -1540,7 +1540,7 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(result['diff_sha256'], hashlib.sha256(full_diff).hexdigest())
 
         store = TaskStore(self.base / 'clean-main-merge-task-complete')
-        task = self._active_pm_task(self._task(), route='company-gw')
+        task = self._active_pm_task(self._task(), route='codex')
         task['developer'].update(
             artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
@@ -6466,7 +6466,7 @@ class CompletionAttributedPathsStoreTests(unittest.TestCase):
         registry_path.chmod(0o600)
 
     def _bound_task(self, head):
-        task = self._active_pm_task(self._task(), route='company-gw')
+        task = self._active_pm_task(self._task(), route='codex')
         paths = list(head['attributed'])
         task['developer'].update(
             source_sha=head['segment_start'], read_paths=paths, write_paths=paths,

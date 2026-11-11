@@ -920,7 +920,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
     def test_record_pm_accepts_codex_low_risk_and_refuses_other_routes_or_risk(self):
         for route, risk, expected in (
                 ('codex', 'LOW', True), ('opencode', 'LOW', True),
-                ('company-gw', 'LOW', True), ('claude', 'LOW', True),
+                ('company-gw', 'LOW', False), ('claude', 'LOW', True),
                 ('none', 'LOW', False),
                 ('codex', 'OTHER', False)):
             with self.subTest(route=route, risk=risk):
@@ -1325,7 +1325,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         response = json.dumps({
             'schema_version': 1, 'summary': 'Bounded test-only task.',
             'developer_assignment': {
-                'route': 'company-gw', 'risk': 'LOW', 'goal': 'Add one focused test.',
+                'route': 'codex', 'risk': 'LOW', 'goal': 'Add one focused test.',
                 'acceptance': acceptance,
             },
         })
@@ -3153,7 +3153,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         pm_response = json.dumps({
             'schema_version': 1, 'summary': 'Bounded low-risk task.',
             'developer_assignment': {
-                'route': 'company-gw', 'risk': 'LOW',
+                'route': 'codex', 'risk': 'LOW',
                 'goal': 'Add one focused test.', 'acceptance': acceptance,
             },
         })

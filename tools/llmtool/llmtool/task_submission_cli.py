@@ -428,7 +428,7 @@ def _read_pm_record_input(stream=None):
     except (ValueError, TypeError):
         raise LLMToolError('PM response must be one strict JSON object') from None
     assignment = _pm_assignment(response)
-    if (assignment is None or assignment['route'] not in ('company-gw', 'gw-agent', 'opencode', 'codex', 'agy', 'claude') or
+    if (assignment is None or assignment['route'] not in ('gw-agent', 'opencode', 'codex', 'agy', 'claude') or
             assignment['risk'] != 'LOW'):
         limit_error = _pm_assignment_limit_error(response)
         if limit_error is not None:
