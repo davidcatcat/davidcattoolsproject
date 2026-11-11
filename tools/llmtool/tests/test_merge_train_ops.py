@@ -197,8 +197,8 @@ class MergeTrainOpsTest(unittest.TestCase):
                                     return_value=self.main)
         self.read_main = patcher.start()
         self.addCleanup(patcher.stop)
-        suite_patcher = mock.patch.object(
-            mac_full_suite, 'request_full_suite',
+        suite_patcher = mock.patch(
+            'llmtool.mac_full_due.request_train_full',
             return_value=mac_full_suite.MAC_FULL_SUITE_DISPATCHED)
         self.request_full_suite = suite_patcher.start()
         self.addCleanup(suite_patcher.stop)
