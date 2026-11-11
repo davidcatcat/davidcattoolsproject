@@ -16,6 +16,14 @@ class HomeLlmNameTests(unittest.TestCase):
     def test_marker_token_stays_company_gw(self):
         self.assertIn("CompanyGW", mon.MARKER_ACTOR_TARGETS["test_result"][0])
 
+    def test_roster_names_come_from_the_name_constants(self):
+        # #120 A3: one place holds the roster names of the two home LLM rows.
+        self.assertIs(mon.WORKER_ROSTER[2][0], mon.HOME_GW)
+        self.assertIs(mon.WORKER_ROSTER[3][0], mon.HOME_GW_AGENT)
+        self.assertIs(mon.GW_ROSTER["gw-agent developer"], mon.HOME_GW_AGENT)
+        self.assertEqual([row[1] for row in mon.WORKER_ROSTER[2:]],
+                         ["company-gw", "company-gw-agent"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7534,7 +7534,9 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
 # credential), and a finished run from the time of the audit copy llmtool keeps
 # (developer_routes/gw_agent.py, collect). A company gw run is an API call
 # inside llmtool and leaves neither, so it has no row here.
-GW_ROSTER = {"gw-agent developer": "公司 gw agent"}
+HOME_GW = "公司 gw"               # roster name of the retired company-gw route (#120 A3)
+HOME_GW_AGENT = "公司 gw agent"   # roster name of the gw-agent route (#120 A3)
+GW_ROSTER = {"gw-agent developer": HOME_GW_AGENT}
 GW_AUDIT_ROOT = None   # None: the temp directory, resolved in _gw_finished (it may not exist)
 GW_AUDIT_PREFIX = "llmtool-gw-agent-audit-"
 GW_AUDIT_ID = re.compile(r"[A-Za-z0-9_]{1,16}")   # the random end of a mkdtemp name
@@ -7645,8 +7647,8 @@ def gw_rows(processes: list[Process], now: float, canonical: str) -> list[Office
 WORKER_ROSTER = (   # (display name, worker-dispatch.json key, sort order)
     ("opencode developer", "opencode-developer", 50),
     ("agy", "agy", 60),
-    ("公司 gw", "company-gw", 70),
-    ("公司 gw agent", "company-gw-agent", 75),
+    (HOME_GW, "company-gw", 70),
+    (HOME_GW_AGENT, "company-gw-agent", 75),
 )
 # Owner dispatch switches (Owner 2026-10-23): one record per Worker, kept apart
 # from live technical state. A PAUSED switch holds until the Owner changes it,
