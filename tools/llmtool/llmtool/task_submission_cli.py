@@ -833,6 +833,9 @@ def add_task_submission_parsers(actions):
     advance.add_argument('--owner-exception', metavar='URL',
                          help=('with --merge only: issue comment URL registering '
                                'deterministic redaction owner exception'))
+    advance.add_argument('--executor-task', metavar='D6',
+                         help=('with --merge and --owner-exception only: '
+                               'registered D6 Executor task id'))
     advance.add_argument('--integration-pr', type=int,
                          help='merged integration PR containing the reviewed head')
     advance.add_argument('--reviewer-session-done', action='store_true',
@@ -1343,6 +1346,12 @@ def run_task_advance(args, *, store=None, **adapters):
                 'acked': []})
         return 1
     owner_exception = getattr(args, 'owner_exception', None)
+    executor_task = getattr(args, 'executor_task', None)
+    if executor_task is not None and (not getattr(args, 'merge', False) or owner_exception is None):
+        _print({'task_id': args.task_id, 'step': 'REFUSED', 'result': None,
+                'next': 'REFUSED', 'codes': ['OWNER_EXCEPTION_EXECUTOR_REQUIRES_EXCEPTION'],
+                'acked': []})
+        return 1
     if owner_exception is not None and not getattr(args, 'merge', False):
         # --owner-exception is only for a merge; nothing else runs.
         _print({'task_id': args.task_id, 'step': 'REFUSED', 'result': None,
@@ -1359,6 +1368,8 @@ def run_task_advance(args, *, store=None, **adapters):
         adapters = dict(adapters, owner_acceptance=owner_acceptance)
     if owner_exception is not None:
         adapters = dict(adapters, owner_exception=owner_exception)
+    if executor_task is not None:
+        adapters = dict(adapters, executor_task=executor_task)
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured):
         result = advance(task_id=args.task_id, store=store,
