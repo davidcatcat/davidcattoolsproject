@@ -7098,8 +7098,8 @@ DISPATCH_ACCEPTED = frozenset({"DEVELOPER_DISPATCHING", "DEVELOPER_RESPONDED",
                                "DEVELOPER_OUTCOME_UNKNOWN", "DEVELOPER_OUTPUT_REJECTED"})
 # A refused dispatch can still leave a GitHub marker, so markers do not count.
 DISPATCH_PROVIDERS = {"codex-cli": "Codex", "opencode-cli": "OpenCode",
-                      "agy-cli": "AGY", "openai-compatible": "公司 gw",
-                      "gw-agent-cli": "gw agent"}
+                      "agy-cli": "AGY", "openai-compatible": "home LLM gw",
+                      "gw-agent-cli": "home LLM gw-agent"}
 
 
 @dataclass(frozen=True)

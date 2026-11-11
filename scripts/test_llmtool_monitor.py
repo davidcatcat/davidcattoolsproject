@@ -1048,8 +1048,8 @@ class ActivityViewTests(unittest.TestCase):
 
     def test_pm_dispatch_provider_words_issue_and_line_forms(self):
         provider_words = (("codex-cli", "Codex"), ("opencode-cli", "OpenCode"),
-                          ("agy-cli", "AGY"), ("openai-compatible", "公司 gw"),
-                          ("gw-agent-cli", "gw agent"), ("unknown", "Developer"))
+                          ("agy-cli", "AGY"), ("openai-compatible", "home LLM gw"),
+                          ("gw-agent-cli", "home LLM gw-agent"), ("unknown", "Developer"))
         for provider, label in provider_words:
             entry = mon.DispatchRecord(NOW - 60, provider, "965")
             self.assertEqual(mon.pm_dispatch_line(entry, "", NOW),
