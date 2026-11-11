@@ -436,10 +436,18 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     check_runs = checks['check_runs']
     if not check_runs:
         return 'MERGE_CHECKS_MISSING'
+    superseded = {}
+    for item in check_runs:
+        if (type(item) is dict and type(item.get('id')) is int and type(item.get('name')) is str and
+                item.get('head_sha') == head and item.get('status') == 'completed' and
+                item.get('conclusion') == 'success'):
+            superseded[item['name']] = max(item['id'], superseded.get(item['name'], 0))
+    # An older run is excused only by a newer SUCCESS of the same check name (#1433).
     if any(type(item) is not dict or type(item.get('name')) is not str or
            item.get('head_sha') != head or
-           item.get('status') != 'completed' or
-           item.get('conclusion') not in ('success', 'skipped') for item in check_runs):
+           (not (type(item.get('id')) is int and item['id'] < superseded.get(item['name'], 0)) and
+            (item.get('status') != 'completed' or
+             item.get('conclusion') not in ('success', 'skipped'))) for item in check_runs):
         return 'MERGE_CHECKS_NOT_GREEN'
     if pr.get('state') not in (None, 'open') or pr.get('merged') is True:
         return 'MERGE_PR_NOT_OPEN'
