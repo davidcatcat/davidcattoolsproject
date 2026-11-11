@@ -35,3 +35,12 @@ class MacCiPathFilterTests(unittest.TestCase):
     def test_llmtool_pr_still_needs_mac(self):
         self.assertEqual(_merge_checks(['tools/llmtool/llmtool/a.py']),
                          'MERGE_REQUIRED_CHECK_MISSING')
+
+    def test_rename_out_of_mac_paths_still_needs_mac(self):
+        moved = {'filename': 'reports/a.py', 'previous_filename': 'tools/llmtool/llmtool/a.py'}
+        def get(path):
+            if path.startswith('commits/'):
+                return {'total_count': 1, 'check_runs': [LINUX]}
+            return [moved]
+        self.assertEqual(task_advance._merge_checks(None, 1, HEAD, {'mergeable': True}, get),
+                         'MERGE_REQUIRED_CHECK_MISSING')

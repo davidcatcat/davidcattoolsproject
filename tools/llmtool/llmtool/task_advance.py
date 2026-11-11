@@ -479,7 +479,11 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
         required_checks = ['check (docs)']
     else:
         required_checks = ['check (Linux 3.14)']
-    requires_macos = not docs_only and _mac_ci_runs(paths)
+    old_paths = [item.get('previous_filename') for item in files
+                 if type(item) is dict and item.get('previous_filename') is not None]
+    if any(type(path) is not str for path in old_paths):
+        return 'MERGE_CHECKS_UNAVAILABLE'
+    requires_macos = not docs_only and _mac_ci_runs(paths + old_paths)
     if requires_macos:
         required_checks.append('check (macOS 3.13)')
     names = {item['name'] for item in check_runs}
