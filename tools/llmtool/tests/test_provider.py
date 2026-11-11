@@ -447,7 +447,7 @@ class ProviderTests(unittest.TestCase):
             client.opener.open = Mock(return_value=FakeResponse(json.dumps(success()).encode()))
             reply = client.complete(messages_for("ask", "test"))
             req = client.opener.open.call_args.args[0]
-            self.assertEqual(req.full_url, "http://10.29.7.58:4000/v1/chat/completions")
+            self.assertEqual(req.full_url, "http://192.0.2.10:4000/v1/chat/completions")
             payload = json.loads(req.data)
             self.assertEqual(payload["model"], "gw")
             self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": True})
