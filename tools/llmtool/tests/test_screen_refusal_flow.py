@@ -239,9 +239,6 @@ class RefusedTaskRerunTests(unittest.TestCase):
             ('opencode', 'opencode', 'proposal',
              lambda store, args, _runner: submission_cli.run_task_opencode_delegate(
                  args, store=store)),
-            ('company-gw', 'company-gw', 'proposal',
-             lambda store, args, _runner: submission_cli.run_task_delegate(
-                 args, store=store)),
         )
         for name, profile, mode, call in routes:
             with self.subTest(route=name):

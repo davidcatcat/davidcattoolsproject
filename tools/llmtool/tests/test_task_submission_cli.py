@@ -1399,7 +1399,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         registry_path.chmod(0o600)
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.create_client') as provider_call, \
-                self.assertRaisesRegex(LLMToolError, 'D6_CLAUDE_RESERVED'):
+                self.assertRaisesRegex(LLMToolError, 'COMPANY_GW_DIRECT_RETIRED'):
             run_task_delegate(self._delegate_args(task))
         saved = TaskStore(self.home / '.local' / 'state' / 'llmtool' / 'tasks').get(
             task['task_id'])
@@ -2865,7 +2865,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIsNone(saved['developer']['usage'])
 
     def test_task_complete_passes_executor_changed_paths_to_github_collector(self):
-        task = self._pm_task_with_assignment()
+        task = self._pm_task_with_codex_assignment()
         target = 'sample.py'
         patch_text = (f'diff --git a/{target} b/{target}\n'
                       f'--- a/{target}\n+++ b/{target}\n'
@@ -2877,11 +2877,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
         store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=config('openai-compatible', 'gw')), \
+                      return_value=config()), \
                 patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 redirect_stdout(io.StringIO()):
-            self.assertEqual(run_task_delegate(self._delegate_args(
+            self.assertEqual(run_task_delegate(self._codex_delegate_args(
                 task, read_path=[target], write_path=[target], context='VALUE = 1\n'),
                 store=store), 0)
 
@@ -3111,7 +3111,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(tests[0]['path'],
                          'tools/llmtool/tests/test_task_submission_cli.py')
 
-    def test_company_gw_patch_is_persisted_with_separate_logical_session_and_usage(self):
+    def test_company_gw_delegate_is_refused_and_persists_nothing(self):
         acceptance = ['new test passes']
         pm_response = json.dumps({
             'schema_version': 1, 'summary': 'Bounded low-risk task.',
@@ -3140,70 +3140,16 @@ class TaskSubmissionCLITests(unittest.TestCase):
         }))
         args = self._delegate_args(task, read_path=[target], write_path=[target],
                                    context='VALUE = 1\n')
-        output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
                       return_value=config('openai-compatible', 'gw')), \
                 patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
-                redirect_stdout(output):
-            code = run_task_delegate(args, store=store)
-        self.assertEqual(code, 0, output.getvalue())
-        result = json.loads(output.getvalue())
-        developer = result['developer']
-        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
-        self.assertEqual(developer['provider_profile'], 'company-gw')
-        self.assertEqual(developer['selection_source'], 'PM')
-        self.assertNotEqual(developer['session_id'], result['pm_session_id'])
-        self.assertEqual(developer['source_sha'], self.executor_head)
-        self.assertEqual(developer['source_sha_binding'], 'D6_REGISTRY_OBSERVED')
-        self.assertEqual(developer['artifact'], patch_text)
-        self.assertEqual(developer['usage']['total_tokens'], 35)
-        self.assertEqual(developer['usage']['served_model'], 'qwen3.8-27b')
+                self.assertRaisesRegex(LLMToolError, 'COMPANY_GW_DIRECT_RETIRED'):
+            run_task_delegate(args, store=store)
         stored = store.get(task['task_id'])
-        self.assertEqual(stored['developer']['usage']['served_model'], 'qwen3.8-27b')
-        self.assertEqual(developer['max_tokens'], 128)
-        self.assertEqual(developer['execution_result'], {
-            'status': 'UNVERIFIED', 'code': 'EXECUTOR_EVIDENCE_NOT_ATTACHED',
-        })
-        self.assertGreater(developer['input_bytes'], 0)
-        self.assertEqual(developer['egress_basis'],
-                         'Owner approved non-sensitive source and test context')
-        self.assertEqual(result['pm_session_id'], task['pm_session_id'])
-        self.assertEqual(result['completion']['state'], 'WAITING_EXECUTOR')
-        self.assertEqual(result['completion']['executor_task_id'], 'executor-task-1')
-        self.assertEqual(result['completion']['evidence']['source_sha'], self.executor_head)
-        self.assertNotIn('not-persisted', output.getvalue())
-        system_prompt = client.calls[0][0]['content']
-        self.assertIn('Do not use Markdown fences', system_prompt)
-        self.assertIn('diff --git a/example.py b/example.py', system_prompt)
-        self.assertIn('@@ -1,3 +1,3 @@\n unchanged line\n-old\n+new\n unchanged line', system_prompt)
-        self.assertIn('New files use --- /dev/null and +++ b/path', system_prompt)
-        self.assertIn('deletions use --- a/path and +++ /dev/null', system_prompt)
-        self.assertIn('Renames are not supported', system_prompt)
-        self.assertIn('The first line must be the diff --git header', system_prompt)
-        self.assertIn('blank lines', system_prompt)
-        self.assertIn('Copy context lines verbatim', system_prompt)
-        packet_text = client.calls[0][1]['content']
-        packet_json, context_section = packet_text.split(
-            TEXT_DEVELOPER_CONTEXT_SEPARATOR, 1)
-        developer_packet = json.loads(packet_json)
-        self.assertEqual(developer_packet['pm_selected_goal'], 'Add one focused test.')
-        self.assertEqual(developer_packet['acceptance'], ['new test passes'])
-        self.assertNotIn('context', developer_packet)
-        self.assertTrue(context_section.startswith('Context:\nVALUE = 1\n'))
-        self.assertTrue(context_section.endswith(
-            'Return only the unified diff, starting with "diff --git".'))
-        self.assertIn('The model has no tools, cannot read files, and all needed file content is provided below.',
-                      packet_text)
-        self.assertEqual(developer_packet['write_paths'], [target])
-        self.assertNotIn('original_request', developer_packet)
-        self.assertNotIn('pm_response', developer_packet)
-        self.assertNotIn('Implement a health-check', packet_text)
-        self.assertNotIn('Bounded test-only task.', packet_text)
-        saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
-        self.assertEqual(saved['developer']['artifact'], patch_text)
-        self.assertEqual(len(client.calls), 1)
+        self.assertIsNone(stored['developer'])
+        self.assertEqual(len(client.calls), 0)
 
     def test_apply_check_failure_is_durably_rejected(self):
         task = self._pm_task_with_codex_assignment()
@@ -3260,13 +3206,13 @@ class TaskSubmissionCLITests(unittest.TestCase):
              '-old\n+Bearer abcdefghijklmnop\n', 'DEVELOPER_OUTPUT_SENSITIVE'),
         )
         for response, error_code in rejected:
-            task = self._pm_task_with_assignment()
-            args = self._delegate_args(task)
+            task = self._pm_task_with_codex_assignment()
+            args = self._codex_delegate_args(task)
             client = FakeClient(Reply(response, {}))
             output = io.StringIO()
             with patch.dict(os.environ, {'HOME': str(self.home)}), \
                     patch('llmtool.task_submission_cli.resolve_profile_config',
-                          return_value=config('openai-compatible', 'gw')), \
+                          return_value=config()), \
                     patch('llmtool.task_submission_cli.api_key', return_value=None), \
                     patch('llmtool.task_submission_cli.create_client', return_value=client), \
                     redirect_stdout(output):
@@ -3289,18 +3235,18 @@ class TaskSubmissionCLITests(unittest.TestCase):
             '-VALUE = 1\n+FENCED_PROVIDER_PATCH_SENTINEL\n'
             '```\n'
         )
-        task = self._pm_task_with_assignment()
+        task = self._pm_task_with_codex_assignment()
         client = FakeClient(Reply(fenced_patch, {
             'prompt_tokens': 20, 'completion_tokens': 25, 'total_tokens': 45,
         }))
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=config('openai-compatible', 'gw')), \
+                      return_value=config()), \
                 patch('llmtool.task_submission_cli.api_key', return_value=None), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 redirect_stdout(output):
-            args = self._delegate_args(task, read_path=[target], write_path=[target],
+            args = self._codex_delegate_args(task, read_path=[target], write_path=[target],
                                        context='VALUE = 1\n')
             code = run_task_delegate(args)
             with self.assertRaisesRegex(
@@ -3344,18 +3290,18 @@ class TaskSubmissionCLITests(unittest.TestCase):
         )
         for error_code, response, marker in cases:
             with self.subTest(error_code=error_code):
-                task = self._pm_task_with_assignment()
+                task = self._pm_task_with_codex_assignment()
                 client = FakeClient(Reply(response, {
                     'prompt_tokens': 20, 'completion_tokens': 25, 'total_tokens': 45,
                 }))
                 output = io.StringIO()
                 with patch.dict(os.environ, {'HOME': str(self.home)}), \
                         patch('llmtool.task_submission_cli.resolve_profile_config',
-                              return_value=config('openai-compatible', 'gw')), \
+                              return_value=config()), \
                         patch('llmtool.task_submission_cli.api_key', return_value=None), \
                         patch('llmtool.task_submission_cli.create_client', return_value=client), \
                         redirect_stdout(output):
-                    code = run_task_delegate(self._delegate_args(task))
+                    code = run_task_delegate(self._codex_delegate_args(task))
                 self.assertEqual(code, 1)
                 result = json.loads(output.getvalue())
                 self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
@@ -3464,8 +3410,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         create.assert_not_called()
 
     def test_scope_overflow_and_out_of_scope_patch_fail_closed(self):
-        task = self._pm_task_with_assignment()
-        args = self._delegate_args(task, write_path=['tools/llmtool/tests/other.py'])
+        task = self._pm_task_with_codex_assignment()
+        args = self._codex_delegate_args(task, write_path=['tools/llmtool/tests/other.py'])
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 self.assertRaises(LLMToolError):
             run_task_delegate(args)
@@ -3473,11 +3419,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
         client = FakeClient(Reply(
             f'diff --git a/{target} b/{target}\n--- a/{target}\n+++ b/{target}\n'
             '@@ -1 +1 @@\n-old\n+new\n', {}))
-        args = self._delegate_args(task)
+        args = self._codex_delegate_args(task)
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=config('openai-compatible', 'gw')), \
+                      return_value=config()), \
                 patch('llmtool.task_submission_cli.api_key', return_value=None), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 redirect_stdout(output):
@@ -3489,13 +3435,13 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIsNone(rejected['artifact'])
 
     def test_ambiguous_provider_outcome_is_persisted_and_never_replayed(self):
-        task = self._pm_task_with_assignment()
+        task = self._pm_task_with_codex_assignment()
         client = FakeClient(error=coded_error('private timeout', 'PROVIDER_TIMEOUT', 'provider.test'))
-        args = self._delegate_args(task)
+        args = self._codex_delegate_args(task)
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=config('openai-compatible', 'gw')), \
+                      return_value=config()), \
                 patch('llmtool.task_submission_cli.api_key', return_value=None), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 redirect_stdout(output):
@@ -3509,7 +3455,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(len(client.calls), 1)
 
     def test_concurrent_stale_delegations_claim_once_before_provider_call(self):
-        task = self._pm_task_with_assignment()
+        task = self._pm_task_with_codex_assignment()
         backing = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
         read_barrier = threading.Barrier(2)
         synchronized_reads = [0]
@@ -3550,13 +3496,17 @@ class TaskSubmissionCLITests(unittest.TestCase):
 
         def delegate():
             try:
-                outcomes.append(run_task_delegate(self._delegate_args(task), store=StaleReadStore()))
+                args = self._codex_delegate_args(
+                    task, read_path=['tools/llmtool/tests/test_task_submission_cli.py'],
+                    write_path=['tools/llmtool/tests/test_task_submission_cli.py'],
+                    context='class TaskSubmissionCLITests: pass')
+                outcomes.append(run_task_delegate(args, store=StaleReadStore()))
             except Exception as exc:
                 outcomes.append(exc)
 
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=config('openai-compatible', 'gw')), \
+                      return_value=config()), \
                 patch('llmtool.task_submission_cli.api_key', return_value=None), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 patch('llmtool.task_submission_cli._print'):
@@ -3573,7 +3523,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
 
     def test_interrupted_after_durable_claim_is_not_completed_or_replayed(self):
-        task = self._pm_task_with_assignment()
+        task = self._pm_task_with_codex_assignment()
         backing = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
 
         class InterruptAfterClaimStore:
@@ -3604,11 +3554,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
             def append_dispatch_audit(self, task_id, entry, *, expected=None):
                 return backing.append_dispatch_audit(task_id, entry, expected=expected)
 
-        args = self._delegate_args(task)
+        args = self._codex_delegate_args(task)
         client = FakeClient(Reply('unused', {}))
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=config('openai-compatible', 'gw')), \
+                      return_value=config()), \
                 patch('llmtool.task_submission_cli.api_key', return_value=None), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client) as factory:
             with self.assertRaises(SystemExit) as interrupted:
@@ -3653,16 +3603,16 @@ class TaskSubmissionCLITests(unittest.TestCase):
         )
         for artifact in bad_artifacts:
             with self.subTest(artifact=artifact):
-                task = self._pm_task_with_assignment()
+                task = self._pm_task_with_codex_assignment()
                 client = FakeClient(Reply(artifact, {}))
                 output = io.StringIO()
                 with patch.dict(os.environ, {'HOME': str(self.home)}), \
                         patch('llmtool.task_submission_cli.resolve_profile_config',
-                              return_value=config('openai-compatible', 'gw')), \
+                              return_value=config()), \
                         patch('llmtool.task_submission_cli.api_key', return_value=None), \
                         patch('llmtool.task_submission_cli.create_client', return_value=client), \
                         redirect_stdout(output):
-                    code = run_task_delegate(self._delegate_args(task))
+                    code = run_task_delegate(self._codex_delegate_args(task))
                 self.assertEqual(code, 1)
                 result = json.loads(output.getvalue())
                 self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
@@ -4963,7 +4913,7 @@ class DelegateRepairCapTests(unittest.TestCase):
         binding.assert_not_called()
         launch.assert_not_called()
 
-    def test_proposal_cap_refuses_company_gw_and_codex(self):
+    def test_proposal_cap_refuses_codex(self):
         self._prior_assignments()
         registration = Namespace(
             task_id='executor-task-1', trusted_agent_id='test-agent',
@@ -4971,7 +4921,7 @@ class DelegateRepairCapTests(unittest.TestCase):
             root='/tmp/repair-cap-d6', common_dir='/tmp/repair-cap-d6/.git',
             branch='task/repair-cap')
         snapshot = Namespace(head='a' * 40)
-        for provider in ('company-gw', 'codex'):
+        for provider in ('codex',):
             with self.subTest(provider=provider):
                 task = self._task(route=provider)
                 args = self._args(task, provider, mode='proposal')
