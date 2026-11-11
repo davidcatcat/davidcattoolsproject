@@ -3317,7 +3317,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             self.assertEqual(store.attempt['state'], 'MERGED')
             self.assertEqual(sum(call[1] == 'merge' for call in gh_calls), 1)
 
-    def test_successful_merge_records_warning_when_mac_full_suite_dispatch_fails(self):
+    def test_successful_merge_requests_no_mac_full_suite(self):
+        """Owner #1485: a single merge requests no FULL; the sweep command decides."""
         review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
                   'review_result': {'verdict': 'PASS'}}
         event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
@@ -3364,8 +3365,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 head=HEAD, pr=pr, events=[event], github_get=github_get,
                 gh_runner=gh_runner, root='/repo')
             self.assertEqual(result['step'], 'MERGED')
-            self.assertEqual(mock_suite.call_count, 1)
-            self.assertEqual(result['codes'][-1], 'MAC_FULL_SUITE_DISPATCH_FAILED')
+            self.assertEqual(mock_suite.call_count, 0)
+            self.assertNotIn('MAC_FULL_SUITE_DISPATCH_FAILED', result['codes'])
 
 
 class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
