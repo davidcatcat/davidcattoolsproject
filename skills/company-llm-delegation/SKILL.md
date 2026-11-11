@@ -1,9 +1,9 @@
 ---
 name: company-llm-delegation
-description: Use when developing llmtool on the actual Mac with company VPN and deciding whether or how to delegate bounded test, log, or evidence analysis to the configured company LLM through llmtool.
+description: Use when an llmtool Developer Task is routed to gw-agent (home LLM) through the API Agent Gateway.
 ---
 
-# Company LLM Delegation
+# gw-agent (home LLM)
 
 Use this only as a development-time dogfood workflow. It does not implement A11c
 production routing and does not grant execution, mutation, approval, retry, fallback,
@@ -14,10 +14,10 @@ Research findings and benchmark history are preserved in [the 2026-11-03 history
 Home LLM `gw` may act as an agent-mode Developer through `gw-agent` on real repository
 code; Developer choice, mode and scope are PM decisions under the standing Owner
 authorization (#120, 2026-11-10), which supersedes the 2026-11-03 synthetic-only limit.
-Every result receives formal cross-family review. Pause after two consecutive failed
-runs, a write outside allowed paths, a credential or audit finding, or HTTP 429.
+Every result receives formal cross-family review. Pause after two consecutive failures
+at the lowest tier, a write outside allowed paths, a credential or audit finding, or HTTP 429.
 
-**Gateway only (Owner 2026-11-11, #120):** company/home LLM model work runs only through the API Agent Gateway (`gw-agent`). The `company-gw` direct and proposal routes are retired: llmtool refuses them (`COMPANY_GW_DIRECT_RETIRED`; worker `company-gw` is PAUSED), and a Gateway failure reports UNAVAILABLE without any fallback.
+**Gateway only (Owner 2026-11-11, #120):** Home LLM (`gw-agent`) model work runs only through the API Agent Gateway. The direct and proposal routes (`company-gw`) are retired: llmtool refuses them (`COMPANY_GW_DIRECT_RETIRED`; worker `company-gw` is PAUSED), and a Gateway failure reports UNAVAILABLE without any fallback.
 
 ## Decision order
 
@@ -25,7 +25,7 @@ runs, a write outside allowed paths, a credential or audit finding, or HTTP 429.
    any LLM. Run the test/lint/typecheck/build/schema/exit check, or use an existing
    deterministic collector such as `llmtool git --json`.
 2. **Bounded semantic triage.** If supplied evidence needs clustering, compression or
-   simple classification, the company LLM may be used through llmtool.
+   simple classification, gw-agent (home LLM) may be used through llmtool.
 3. **Strong judgement.** Root cause, source changes, architecture, security/auth/
    permission, concurrency/race, data corruption, test correctness, acceptance and
    merge decisions stay with Codex/Claude/human review against source and raw evidence.
@@ -35,7 +35,7 @@ runs, a write outside allowed paths, a credential or audit finding, or HTTP 429.
 - **Web search for gw (Owner 2026-10-28, [AGENTS.md](../../AGENTS.md)):** gw has no tools of its own. The PM or a Developer may search the web for the Task and add the relevant, non-sensitive results to gw's context (`--context-stdin`), labelled as untrusted reference material with their source URLs. Keep the excerpt short. The data rules below apply to it.
 
 - Work from the canonical Mac repository and identify the exact revision under test.
-- The company VPN/provider must already be configured and available. Use an explicit
+- The gateway provider must already be configured and available. Use an explicit
   configured profile name; do not rewrite active provider settings just for delegation.
 - Record a **data permission basis** for the exact bounded evidence being sent. The fact
   that a provider is internal does not automatically authorize every repository file,
@@ -61,8 +61,8 @@ runs, a write outside allowed paths, a credential or audit finding, or HTTP 429.
 - **A grant is not authorization.** A real Phase 0 invocation requires the Owner's
   authorization and a non-author check of its evidence.
 - **Off-repo only.** Live grant files must be outside every Git worktree.
-- **Company-only Phase 0 first.** A new or redesigned route must pass a pre-registered
-  Company-only reliability Phase 0 before any paired Codex benchmark.
+- **Gateway-only Phase 0 first.** A new or redesigned route must pass a pre-registered
+  gateway-only reliability Phase 0 before any paired Codex benchmark.
 
 See the [C1B test-triage Worker history](../../docs/history/company-llm-delegation-research-20261103.md#c1b-test-triage-worker-sourcefake-only) for the full grant safeguards and the [token-savings benchmark history](../../docs/history/company-llm-delegation-research-20261103.md#token-savings-benchmark) for the benchmark gate.
 
@@ -70,8 +70,7 @@ See the [C1B test-triage Worker history](../../docs/history/company-llm-delegati
 
 This classification applies to the triage use above and to the home LLM `gw-agent` Developer
 route in [AGENTS.md](../../AGENTS.md). Check the four layers separately. Record each
-layer as `PASS`, `FAIL` or `UNKNOWN`, with its time and evidence, in the
-[Worker dispatch authority and live technical state](../../tools/llmtool/ROADMAP.md):
+layer as `PASS`, `FAIL` or `UNKNOWN`, with its time and evidence:
 
 1. **TCP:** can a connection to the configured endpoint open? Example: a bounded
    `nc -z` connect, with no request body.
@@ -83,8 +82,8 @@ layer as `PASS`, `FAIL` or `UNKNOWN`, with its time and evidence, in the
 4. **Task execution:** did the route produce output for that task class that passed
    its deterministic checks and independent review?
 
-Do not infer a layer from an earlier layer, and do not infer it from the VPN service
-list (`scutil --nc list`). Use that list only as a hint for the Owner reminder in
+Do not infer a layer from an earlier layer, and do not infer it from network connection status
+(`scutil --nc list`). Use that list only as a hint for the Owner reminder in
 [WORKFLOW](../../tools/llmtool/WORKFLOW.md). A TCP `PASS` authorizes nothing. Layers
 2–4 require an llmtool call that the existing data-permission basis already covers,
 and C1B live calls also need the [Phase 0 grant safeguards](../../docs/history/company-llm-delegation-research-20261103.md#c1b-test-triage-worker-sourcefake-only).
@@ -113,25 +112,23 @@ Home LLM work grows by a ladder (Owner 2026-11-10, #120). The PM logs every call
 
 | Tier | Size |
 | --- | --- |
-| T1 | One contiguous edit in one existing file, exact BEFORE/AFTER given |
+| T1 | One contiguous edit in one existing file |
 | T2 | Tests, or up to 40 lines, in one file; at most 3 KB of context |
 | T3 | Code and tests in two files; at most 6 KB of context |
 | T4 | A new file, or up to 3 files; at most 10 KB of context |
 | T5 | A small feature |
 
-- Promote one tier after 3 first-try SOLVED in a row at the current tier. Drop one tier after 2 failures at a tier.
+- Promote one tier after 3 first-try SOLVED in a row at the current tier. On failure step down one size tier; pause only after 2 consecutive failures at the lowest tier.
+- Repairs follow D1: two in total, the second only after an AI Debug with a confirmed cause (O4).
 - Until T2 is stable (3 first-try SOLVED in a row at T2), no Task above T2.
-- One contiguous region per Task. Give exact BEFORE/AFTER text in proposal mode.
+- One contiguous region per Task.
 - In agent mode (gw-agent), name the line ranges to read; never ask for a whole large file. Put new tests in a new file.
-- Every failure gets a root-cause pass by the Claude Reviewer route (`task high-debug --route claude --early`) before the next try.
 
 ## Invocation
 
-Use the already configured company profile explicitly. For example:
+Use the already configured gateway profile explicitly. For example:
 
 ```sh
-llmtool ask --provider PROFILE_NAME --skill test-triage --file BOUNDED_EVIDENCE_FILE --verbose
-llmtool ask --provider PROFILE_NAME --skill log-triage --file BOUNDED_EVIDENCE_FILE --verbose
 llmtool context-pack --provider PROFILE_NAME --file BOUNDED_EVIDENCE_FILE --json --verbose
 ```
 
@@ -141,9 +138,9 @@ dogfood slice, so record whether their returned JSON actually matches the reques
 schema rather than treating prompt compliance as enforced. The plain example above is
 ordinary development triage, **not** the validated savings pipeline. Historical L01
 measurement used an explicit 4096 output-token budget plus temperature 0 and
-`enable_thinking=false` in the resolved company profile; the normal default
+`enable_thinking=false` in the resolved gateway profile; the normal default
 `max_tokens=2000` is not equivalent. Do not hardcode the example
-deployment endpoint into engineering workflows. Do not call the company gateway
+deployment endpoint into engineering workflows. Do not call the gateway
 directly for delegated engineering work; direct probes belong to explicit
 `validate-runtime` connectivity/runtime validation.
 
@@ -163,9 +160,9 @@ directly for delegated engineering work; direct probes belong to explicit
 4. Codex/Claude decides whether to adopt or override the summary; model-reported
    confidence is never an authority signal.
 5. After a repair, rerun the narrow deterministic check, then the required broader
-   regression. A company-model summary cannot override exit status or test results.
-6. If VPN/provider is unavailable, mark this optional dogfood step SKIPPED/BLOCKED and
-   continue the normal strong-model workflow unless live company-provider evidence is
+   regression. A gw-agent summary cannot override exit status or test results.
+6. If the gateway provider is unavailable, mark this optional dogfood step SKIPPED/BLOCKED and
+   continue the normal strong-model workflow unless live gateway-provider evidence is
    explicitly a required gate. Do not silently export the evidence to an external model.
 
 ## Development report
@@ -192,7 +189,7 @@ small redacted excerpt, or digest when raw evidence must remain elsewhere.
 ## Completion criteria
 
 - Deterministic work was not needlessly delegated.
-- The company-provider input was explicitly permitted, bounded and deterministically
+- The gateway-provider input was explicitly permitted, bounded and deterministically
   pre-redacted/discarded as needed before the provider call.
 - Returned test/file identifiers were deterministically checked against supplied
   evidence before being used as locators.
