@@ -1190,7 +1190,7 @@ class ActivityViewTests(unittest.TestCase):
             "state": "DEVELOPER_DISPATCHING", "created_at": "2026-01-01T00:00:00Z",
             "provider_type": 7}, "request": "ordinary task"})
         self.assertEqual(no_issue, mon.DispatchRecord(mon._remote_test_time("2026-01-01T00:00:00Z"),
-                                                       "", "", "a" * 32)))
+                                                       "", "", "a" * 32))
 
     def test_curses_activity_header_stays_visible_above_bottom_anchored_events(self):
         class Source:
