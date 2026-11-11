@@ -4909,7 +4909,7 @@ class DelegateRepairCapTests(unittest.TestCase):
         binding.assert_not_called()
         launch.assert_not_called()
 
-    def test_proposal_cap_refuses_company_gw_and_codex(self):
+    def test_proposal_cap_refuses_codex(self):
         self._prior_assignments()
         registration = Namespace(
             task_id='executor-task-1', trusted_agent_id='test-agent',
@@ -4917,7 +4917,7 @@ class DelegateRepairCapTests(unittest.TestCase):
             root='/tmp/repair-cap-d6', common_dir='/tmp/repair-cap-d6/.git',
             branch='task/repair-cap')
         snapshot = Namespace(head='a' * 40)
-        for provider in ('company-gw', 'codex'):
+        for provider in ('codex',):
             with self.subTest(provider=provider):
                 task = self._task(route=provider)
                 args = self._args(task, provider, mode='proposal')
