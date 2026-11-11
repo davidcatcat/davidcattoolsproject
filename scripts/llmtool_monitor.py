@@ -8447,7 +8447,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     gw_live: dict = {}
     for row in gw_runs:
         if row.state == WORKING:
-            gw_key = GW_ROSTER.get(row.name) or ("公司 gw" if row.name.startswith("home LLM") else None)
+            gw_key = GW_ROSTER.get(row.name) or (HOME_GW if row.name.startswith("home LLM") else None)
             if gw_key:
                 gw_live.setdefault(gw_key, []).append(row)
     raw, source = load_dispatch(canonical, dispatch)
@@ -8458,7 +8458,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         switch = switches.get(key)
         trouble = problem
         paused = not trouble and switch[0] == "PAUSED"
-        if live and not trouble and not paused and name != "公司 gw":
+        if live and not trouble and not paused and name != HOME_GW:
             continue   # the live CLI rows say everything
         notes, state, age, alert = [], None, None, ""
         if name == "opencode developer" and not live:
@@ -8470,7 +8470,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                     alert = "本 repo " + outcome[1]
         if name == "agy" and agy_open and not live:
             notes.append("App 開著")
-        if name == "公司 gw":
+        if name == HOME_GW:
             gw = llmtool_route_outcomes(now, llmtool_tasks).get("company-gw")
             if gw is not None:
                 age = gw[0]
