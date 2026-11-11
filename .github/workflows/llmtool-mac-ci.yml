@@ -53,7 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.head.sha || 'main' }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       # PRs use the validated Mac-required IDs plus changed/mapped test IDs.
@@ -166,7 +166,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.head.sha || 'main' }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Source revision
@@ -379,7 +379,7 @@ jobs:
       # (GITHUB_SHA), so a run is exact evidence for the SHA it reports.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.head.sha || 'main' }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       # Without the merge ref, a head behind the base is reported as a notice
