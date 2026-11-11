@@ -1540,7 +1540,7 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(result['diff_sha256'], hashlib.sha256(full_diff).hexdigest())
 
         store = TaskStore(self.base / 'clean-main-merge-task-complete')
-        task = self._active_pm_task(self._task(), route='company-gw')
+        task = self._active_pm_task(self._task(), route='codex')
         task['developer'].update(
             artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
@@ -6466,7 +6466,7 @@ class CompletionAttributedPathsStoreTests(unittest.TestCase):
         registry_path.chmod(0o600)
 
     def _bound_task(self, head):
-        task = self._active_pm_task(self._task(), route='company-gw')
+        task = self._active_pm_task(self._task(), route='codex')
         paths = list(head['attributed'])
         task['developer'].update(
             source_sha=head['segment_start'], read_paths=paths, write_paths=paths,
