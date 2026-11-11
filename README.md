@@ -190,10 +190,10 @@ Round-2/Round-3 dogfood changed the routing policy from a generic "cheap-first" 
 - `context-pack`: **EXPERIMENTAL for token-saving claims**. Round 3 replay showed clean
   provenance but only 3/7 target-record recall, with an instruction/gate semantic mismatch.
 
-For any new company-LLM delegation route—or any attempt to turn the L01 research
-pipeline into normal dogfood—run a **Company-only reliability Phase 0** first. Do not
+For any new home LLM delegation route—or any attempt to turn the L01 research
+pipeline into normal dogfood—run a **home-LLM-only reliability Phase 0** first. Do not
 spend Codex tokens on a paired benchmark until that exact route/pipeline passes its
-pre-registered Company-only gate. P1 now preserves validated usage metadata on parseable
+pre-registered home-LLM-only gate. P1 now preserves validated usage metadata on parseable
 provider failures, but it does not turn failed model output into a successful result.
 
 ## Home LLM benchmark (retired)

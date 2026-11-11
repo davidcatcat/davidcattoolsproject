@@ -150,7 +150,7 @@ are never treated as the same claim.
 | A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49 and sealed F1 PR #84 DONE/merged** | F2 real user-repo mutation NOT AUTHORIZED; next separate Security-reviewed F2 and A11b.3 approval design |
 | A11c — Integration & Real-world Acceptance | **S1a DONE/MERGED; S1b A MERGED; B1 candidate** | S1a product accepted via PR #128; S1b contract merged via PR #129; B production attestation/grant/route gates remain required; full production integration/real task acceptance NOT STARTED; no blanket company-first policy |
 
-### Company-LLM routing evidence after Round 3
+### Home LLM routing evidence after Round 3
 
 Round 3 is closed as an experiment record; PR #38 is merged. P1 from PR #39 is also
 merged and preserves a validated `prompt_tokens/completion_tokens/total_tokens` triplet
