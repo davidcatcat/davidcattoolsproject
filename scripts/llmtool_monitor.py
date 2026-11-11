@@ -1111,6 +1111,9 @@ class Monitor:
                 self.opencode_route_failed = False
             except Exception:  # preserve the last successful route summary
                 self.opencode_route_failed = True
+            switch = worker_dispatch(load_dispatch(canonical_root())[0])[0].get("opencode-developer")
+            self.opencode_paused = (f"{switch[1]} 暫停派工（{switch[2]}）"
+                                    if switch and switch[0] == "PAUSED" else "")
             if time.monotonic() >= self.quota_due:
                 self.quota_due = time.monotonic() + 60.0
                 try:
@@ -1449,7 +1452,9 @@ def edit_failures(stage: Stage) -> tuple[int, int]:
 
 
 def task_lines(tasks: list[Task], limit: int = 6, route=None,
-               route_failed: bool = False) -> list[str]:
+               route_failed: bool = False, paused: str = "") -> list[str]:
+    if paused:   # Owner #120 B1: a PAUSED switch, not "no record" or a read failure
+        return [f"OpenCode 已暫停（{paused}）"] + (task_lines(tasks, limit) if tasks else [])
     if not tasks:
         if route:
             age, total, succeeded, words = route
@@ -9100,7 +9105,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     print("\n".join(table_lines(mon.processes)))
     print("\n".join(["", *d6_lines(mon.d6), "", *record_lines(mon.records), "",
                      *task_lines(mon.tasks, 3, mon.opencode_route,
-                                 mon.opencode_route_failed)]))
+                                 mon.opencode_route_failed,
+                                 getattr(mon, "opencode_paused", ""))])))
     print("\n最近動態")
     print("\n".join(activity_lines(mon.tasks, github=github)))
     print(f"說明：{FOOTNOTE}。")
@@ -9245,7 +9251,8 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
     elif view == "tasks":
         lines = (d6_lines(mon.d6) + [""] + record_lines(mon.records) + [""]
                  + task_lines(mon.tasks, route=mon.opencode_route,
-                             route_failed=mon.opencode_route_failed))
+                             route_failed=mon.opencode_route_failed,
+                             paused=getattr(mon, "opencode_paused", "")))
         offset = max(0, min(offset, len(lines) - body))
         for row, line in enumerate(lines[offset:offset + body]):
             attr = curses.A_BOLD if line.startswith(("任務 ", "llmtool 任務紀錄", "D6 任務")) else 0
