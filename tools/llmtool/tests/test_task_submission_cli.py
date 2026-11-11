@@ -3289,18 +3289,18 @@ class TaskSubmissionCLITests(unittest.TestCase):
             '-VALUE = 1\n+FENCED_PROVIDER_PATCH_SENTINEL\n'
             '```\n'
         )
-        task = self._pm_task_with_assignment()
+        task = self._pm_task_with_codex_assignment()
         client = FakeClient(Reply(fenced_patch, {
             'prompt_tokens': 20, 'completion_tokens': 25, 'total_tokens': 45,
         }))
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=config('openai-compatible', 'gw')), \
+                      return_value=config()), \
                 patch('llmtool.task_submission_cli.api_key', return_value=None), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 redirect_stdout(output):
-            args = self._delegate_args(task, read_path=[target], write_path=[target],
+            args = self._codex_delegate_args(task, read_path=[target], write_path=[target],
                                        context='VALUE = 1\n')
             code = run_task_delegate(args)
             with self.assertRaisesRegex(
