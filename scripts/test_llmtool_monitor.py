@@ -5885,7 +5885,7 @@ class OfficeViewTests(unittest.TestCase):
                                             claude_root=str(self.claude),
                                             canonical=self.canonical, opencode_db="/nonexistent",
                                             cwd_of=lambda pid: None, dispatch=switches))
-        row = rows["公司 gw agent"]
+        row = rows[mon.HOME_GW_AGENT]
         self.assertEqual((row.state, row.detail, row.authority), (mon.IDLE, "可派工", "Owner"))
         # Any other comment on #120 fails closed for every Worker.
         other = self._dispatch({"company-gw-agent": dict(
@@ -5894,8 +5894,8 @@ class OfficeViewTests(unittest.TestCase):
                                             claude_root=str(self.claude),
                                             canonical=self.canonical, opencode_db="/nonexistent",
                                             cwd_of=lambda pid: None, dispatch=other))
-        self.assertEqual(rows["公司 gw agent"].state, mon.UNCHECKED)
-        self.assertEqual(rows["公司 gw"].state, mon.UNCHECKED)
+        self.assertEqual(rows[mon.HOME_GW_AGENT].state, mon.UNCHECKED)
+        self.assertEqual(rows[mon.HOME_GW].state, mon.UNCHECKED)
 
     def test_company_gw_row_reads_llmtool_outcomes_never_request_or_response(self):
         tasks = Path(tempfile.mkdtemp(dir=self.tmp.name))
@@ -5914,7 +5914,7 @@ class OfficeViewTests(unittest.TestCase):
                                             claude_root=str(self.claude),
                                             canonical=self.canonical, opencode_db="/nonexistent",
                                             cwd_of=lambda pid: None, llmtool_tasks=str(tasks)))
-        gw = rows["公司 gw"]
+        gw = rows[mon.HOME_GW]
         self.assertEqual(gw.detail, "可派工；本機 llmtool 紀錄（不分 repo）最近一次：輸出被拒"
                                     "（回應格式錯誤）（近 7 天 2 次，成功 0 次）")
         self.assertEqual((gw.age, gw.state), (3600.0, mon.ATTENTION))
