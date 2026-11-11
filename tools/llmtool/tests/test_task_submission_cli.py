@@ -3509,7 +3509,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(len(client.calls), 1)
 
     def test_concurrent_stale_delegations_claim_once_before_provider_call(self):
-        task = self._pm_task_with_assignment()
+        task = self._pm_task_with_codex_assignment()
         backing = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
         read_barrier = threading.Barrier(2)
         synchronized_reads = [0]
@@ -3550,13 +3550,17 @@ class TaskSubmissionCLITests(unittest.TestCase):
 
         def delegate():
             try:
-                outcomes.append(run_task_delegate(self._delegate_args(task), store=StaleReadStore()))
+                args = self._codex_delegate_args(
+                    task, read_path=['tools/llmtool/tests/test_task_submission_cli.py'],
+                    write_path=['tools/llmtool/tests/test_task_submission_cli.py'],
+                    context='class TaskSubmissionCLITests: pass')
+                outcomes.append(run_task_delegate(args, store=StaleReadStore()))
             except Exception as exc:
                 outcomes.append(exc)
 
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=config('openai-compatible', 'gw')), \
+                      return_value=config()), \
                 patch('llmtool.task_submission_cli.api_key', return_value=None), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 patch('llmtool.task_submission_cli._print'):
