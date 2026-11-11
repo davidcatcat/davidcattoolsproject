@@ -1893,6 +1893,16 @@ def _d6_snapshot(record, executor_task):
     evidence = completion.get('evidence') or {}
     common_dir = evidence.get('common_dir')
     if type(common_dir) is not str:
+        try:
+            cmd = ['git', 'rev-parse', '--path-format=absolute', '--git-common-dir']
+            proc = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, text=True, check=False, timeout=10)
+            if proc.returncode == 0 and proc.stdout.strip():
+                common_dir = proc.stdout.strip()
+        except Exception:
+            pass
+    if type(common_dir) is not str:
         return {'state': 'D6_BINDING_UNAVAILABLE', 'code': 'D6_BINDING_UNAVAILABLE'}
     try:
         registration = task_completion.read_d6_registration(
@@ -1909,7 +1919,9 @@ def _d6_snapshot(record, executor_task):
             'branch': registration.branch, 'result_head': snapshot.head,
             'recorded_result_head': recorded,
             'registered_result_head': registration.result_sha, 'dirty': not clean,
-            'state': 'CLEAN' if clean else 'DIRTY'}
+            'state': 'CLEAN' if clean else 'DIRTY',
+            'registration_state': getattr(registration, 'state', None),
+            'trusted_agent_id': getattr(registration, 'trusted_agent_id', getattr(registration, 'agent_id', None))}
 
 
 def _pr_snapshot(number, github_get):
@@ -2288,12 +2300,16 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             run_task_complete_call=None, record_github_event_call=None,
             github_get=None, cwd=None, publish_git_runner=None,
             publish_gh_runner=None, record_result_call=None, merge_gh_runner=None,
-            owner_acceptance=None, owner_exception=None, sleep_fn=None, sleep=None):
+            owner_acceptance=None, owner_exception=None, executor_task=None, sleep_fn=None, sleep=None):
     """Perform one selected action and return a bounded JSON-ready summary."""
     if owner_acceptance is not None and not merge:
         # An Owner acceptance is only for a merge; refuse before anything runs.
         return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
                 'next': 'REFUSED', 'codes': ['OWNER_ACCEPTANCE_REQUIRES_MERGE'],
+                'acked': []}
+    if executor_task is not None and (not merge or owner_exception is None):
+        return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
+                'next': 'REFUSED', 'codes': ['OWNER_EXCEPTION_EXECUTOR_REQUIRES_EXCEPTION'],
                 'acked': []}
     if owner_exception is not None and not merge:
         return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
@@ -2311,7 +2327,16 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             return _ack_consumed_events(
                 {'task_id': task_id, 'step': 'CLOSED', 'result': None,
                  'next': 'CLOSED', 'codes': []}, record, store, closed_head)
-    executor_task = (record.get('completion') or {}).get('executor_task_id')
+    completion_executor = (record.get('completion') or {}).get('executor_task_id')
+    if executor_task is not None and type(completion_executor) is str and executor_task != completion_executor:
+        return _ack_consumed_events(_merge_refusal('OWNER_EXCEPTION_EXECUTOR_MISMATCH'),
+                                    record, store, None)
+    active_executor = completion_executor
+    using_executor_task = False
+    if owner_exception is not None and not active_executor and type(executor_task) is str:
+        active_executor = executor_task
+        using_executor_task = True
+    executor_task = active_executor
     number = _pr_number(record, pr_number)
     get = task_completion._github_get if github_get is None else github_get
     d6 = _d6_snapshot(record, executor_task) if type(executor_task) is str else None
@@ -2373,6 +2398,17 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                      _refusal(exc, 'task_store_error_code')]}, record, store,
                 d6.get('result_head') if type(d6) is dict else None)
     if merge:
+        if using_executor_task:
+            if (type(d6) is not dict or d6.get('state') == 'D6_BINDING_UNAVAILABLE' or
+                    d6.get('trusted_agent_id') != 'pm-deterministic' or
+                    not (d6.get('registration_state') == 'ACTIVE' or d6.get('state') == 'ACTIVE') or
+                    d6.get('dirty') is True or d6.get('state') == 'DIRTY' or
+                    type(d6.get('result_head')) is not str or
+                    d6.get('recorded_result_head') != d6.get('result_head')):
+                return _ack_consumed_events(
+                    _merge_refusal('OWNER_EXCEPTION_EXECUTOR_INVALID'),
+                    record, store,
+                    d6.get('result_head') if type(d6) is dict and type(d6.get('result_head')) is str else None)
         if type(d6) is not dict or type(d6.get('result_head')) is not str:
             return _ack_consumed_events(_merge_refusal('MERGE_D6_UNAVAILABLE'),
                                         record, store, None)
