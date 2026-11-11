@@ -107,7 +107,8 @@ def plan_run(
             if root_task_id == task_id:
                 raise WiringRefused('SESSION_EXISTS')
 
-            return _plan_resumed_run(binding, repair_excerpt='', data_class=data_class)
+            # a new PM Task on a bound D6 starts a fresh gateway session;
+            # record_first_run rebinds the home (#120).
 
         if not isinstance(data_class, str) or not data_class:
             raise WiringRefused('SESSION_UNAVAILABLE')

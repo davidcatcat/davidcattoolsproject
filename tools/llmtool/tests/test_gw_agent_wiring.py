@@ -92,7 +92,7 @@ class GwAgentWiringTests(unittest.TestCase):
             )
         self.assertEqual(cm.exception.code, 'DEVELOPER_GW_AGENT_SESSION_EXISTS')
 
-    def test_first_run_resumes_other_task_session_with_empty_findings(self):
+    def test_other_task_on_bound_d6_plans_fresh_session(self):
         home, lock = open_locked_home(self.store_root, self.valid_executor_id)
         self.addCleanup(lock.release)
 
@@ -116,8 +116,8 @@ class GwAgentWiringTests(unittest.TestCase):
             data_class=self.valid_data_class,
         )
         expected = {
-            'gateway_task_id': root_task_r,
-            'resume_session': self.valid_session_id,
+            'gateway_task_id': other_task,
+            'resume_session': None,
             'findings': [],
             'data_class': self.valid_data_class,
         }
@@ -168,8 +168,8 @@ class GwAgentWiringTests(unittest.TestCase):
         )
         self.assertFalse(resumed_site.is_repair)
         with resumed_site:
-            self.assertTrue(resumed_site.is_repair)
-            self.assertEqual(resumed_site.resume_session, self.valid_session_id)
+            self.assertFalse(resumed_site.is_repair)
+            self.assertIsNone(resumed_site.resume_session)
 
         repair_site = SessionCallSite(
             self.store_root,

@@ -153,8 +153,9 @@ class GwAgentCallSiteTests(unittest.TestCase):
             data_class=self.valid_data_class,
         )
         with other_task_run:
-            self.assertEqual(other_task_run.resume_session, self.valid_session_id)
-            self.assertTrue(other_task_run.is_repair)
+            self.assertIsNone(other_task_run.resume_session)
+            self.assertFalse(other_task_run.is_repair)
+            self.assertEqual(other_task_run.gateway_task_id, 'task-synthetic-03')
 
         # Lock was released; repair run can acquire it.
         repair_site = SessionCallSite(

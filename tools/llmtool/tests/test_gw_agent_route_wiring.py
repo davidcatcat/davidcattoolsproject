@@ -1270,6 +1270,37 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get(first_task), root_record_before)
         self._release_d6()
 
+    def test_pm_repair_task_with_wider_scope_starts_fresh_session_and_rebinds(self):
+        self._delegate('gw-agent-first.md')
+        first_task = self.task_id
+        home = Path(self.store_root).parent / 'gw-agent-sessions' / 'executor-d6'
+        from llmtool.developer_routes import gw_agent
+        binding_before = gw_agent.read_session_binding(home, executor_task_id='executor-d6')
+        self.assertEqual(binding_before['root_task_id'], first_task)
+        (self.root / 'gw-agent-first.md').unlink()
+
+        seen = {}
+
+        def spy_runner(route, request, **kwargs):
+            seen.update(request)
+            return task_submission_cli.run_route(route, request, **kwargs)
+
+        code, second_task_record = self._delegate('gw-agent-second.md', route_runner=spy_runner)
+        second_task = self.task_id
+        self.assertEqual(code, 0)
+        self.assertIsNone(seen['session_id'])
+        self.assertEqual(seen['task']['task_id'], second_task)
+        self.assertEqual(seen['task']['findings'], [])
+        self.assertEqual(second_task_record['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(second_task_record['developer']['changed_files'], ['gw-agent-second.md'])
+
+        binding_after = gw_agent.read_session_binding(home, executor_task_id='executor-d6')
+        self.assertEqual(binding_after['root_task_id'], second_task)
+        self.assertNotEqual(binding_after['session_id'], binding_before['session_id'])
+
+        (self.root / 'gw-agent-second.md').unlink()
+        self._release_d6()
+
     def test_abandoned_task_session_is_cleared_by_sweep(self):
         target = 'gw-agent-sweep-abandoned.md'
         self._delegate(target)
