@@ -830,6 +830,9 @@ def add_task_submission_parsers(actions):
     advance.add_argument('--owner-acceptance', metavar='URL',
                          help=('with --merge only: PM relay ANSWERED issue comment URL that '
                                'records Owner acceptance of this PR and full head SHA'))
+    advance.add_argument('--owner-exception', metavar='URL',
+                         help=('with --merge only: issue comment URL registering '
+                               'deterministic redaction owner exception'))
     advance.add_argument('--integration-pr', type=int,
                          help='merged integration PR containing the reviewed head')
     advance.add_argument('--reviewer-session-done', action='store_true',
@@ -1339,6 +1342,13 @@ def run_task_advance(args, *, store=None, **adapters):
                 'next': 'REFUSED', 'codes': ['OWNER_ACCEPTANCE_REQUIRES_MERGE'],
                 'acked': []})
         return 1
+    owner_exception = getattr(args, 'owner_exception', None)
+    if owner_exception is not None and not getattr(args, 'merge', False):
+        # --owner-exception is only for a merge; nothing else runs.
+        _print({'task_id': args.task_id, 'step': 'REFUSED', 'result': None,
+                'next': 'REFUSED', 'codes': ['OWNER_EXCEPTION_REQUIRES_MERGE'],
+                'acked': []})
+        return 1
     store = TaskStore() if store is None else store
     try:
         pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
@@ -1347,6 +1357,8 @@ def run_task_advance(args, *, store=None, **adapters):
         return 1
     if owner_acceptance is not None:
         adapters = dict(adapters, owner_acceptance=owner_acceptance)
+    if owner_exception is not None:
+        adapters = dict(adapters, owner_exception=owner_exception)
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured):
         result = advance(task_id=args.task_id, store=store,
