@@ -1,6 +1,6 @@
 ---
 name: company-llm-delegation
-description: Use when developing llmtool on the actual Mac with company VPN and deciding whether or how to delegate bounded test, log, or evidence analysis to the configured company LLM through llmtool.
+description: Use when an llmtool Developer Task is routed to gw-agent (home LLM) through the API Agent Gateway.
 ---
 
 # Company LLM Delegation
@@ -14,8 +14,8 @@ Research findings and benchmark history are preserved in [the 2026-11-03 history
 Home LLM `gw` may act as an agent-mode Developer through `gw-agent` on real repository
 code; Developer choice, mode and scope are PM decisions under the standing Owner
 authorization (#120, 2026-11-10), which supersedes the 2026-11-03 synthetic-only limit.
-Every result receives formal cross-family review. Pause after two consecutive failed
-runs, a write outside allowed paths, a credential or audit finding, or HTTP 429.
+Every result receives formal cross-family review. Pause after two consecutive failures
+at the lowest tier, a write outside allowed paths, a credential or audit finding, or HTTP 429.
 
 **Gateway only (Owner 2026-11-11, #120):** company/home LLM model work runs only through the API Agent Gateway (`gw-agent`). The `company-gw` direct and proposal routes are retired: llmtool refuses them (`COMPANY_GW_DIRECT_RETIRED`; worker `company-gw` is PAUSED), and a Gateway failure reports UNAVAILABLE without any fallback.
 
@@ -70,8 +70,7 @@ See the [C1B test-triage Worker history](../../docs/history/company-llm-delegati
 
 This classification applies to the triage use above and to the home LLM `gw-agent` Developer
 route in [AGENTS.md](../../AGENTS.md). Check the four layers separately. Record each
-layer as `PASS`, `FAIL` or `UNKNOWN`, with its time and evidence, in the
-[Worker dispatch authority and live technical state](../../tools/llmtool/ROADMAP.md):
+layer as `PASS`, `FAIL` or `UNKNOWN`, with its time and evidence:
 
 1. **TCP:** can a connection to the configured endpoint open? Example: a bounded
    `nc -z` connect, with no request body.
@@ -113,25 +112,23 @@ Home LLM work grows by a ladder (Owner 2026-11-10, #120). The PM logs every call
 
 | Tier | Size |
 | --- | --- |
-| T1 | One contiguous edit in one existing file, exact BEFORE/AFTER given |
+| T1 | One contiguous edit in one existing file |
 | T2 | Tests, or up to 40 lines, in one file; at most 3 KB of context |
 | T3 | Code and tests in two files; at most 6 KB of context |
 | T4 | A new file, or up to 3 files; at most 10 KB of context |
 | T5 | A small feature |
 
-- Promote one tier after 3 first-try SOLVED in a row at the current tier. Drop one tier after 2 failures at a tier.
+- Promote one tier after 3 first-try SOLVED in a row at the current tier. On failure step down one size tier; pause only after 2 consecutive failures at the lowest tier.
+- Repairs follow D1: two in total, the second only after an AI Debug with a confirmed cause (O4).
 - Until T2 is stable (3 first-try SOLVED in a row at T2), no Task above T2.
-- One contiguous region per Task. Give exact BEFORE/AFTER text in proposal mode.
+- One contiguous region per Task.
 - In agent mode (gw-agent), name the line ranges to read; never ask for a whole large file. Put new tests in a new file.
-- Every failure gets a root-cause pass by the Claude Reviewer route (`task high-debug --route claude --early`) before the next try.
 
 ## Invocation
 
 Use the already configured company profile explicitly. For example:
 
 ```sh
-llmtool ask --provider PROFILE_NAME --skill test-triage --file BOUNDED_EVIDENCE_FILE --verbose
-llmtool ask --provider PROFILE_NAME --skill log-triage --file BOUNDED_EVIDENCE_FILE --verbose
 llmtool context-pack --provider PROFILE_NAME --file BOUNDED_EVIDENCE_FILE --json --verbose
 ```
 
