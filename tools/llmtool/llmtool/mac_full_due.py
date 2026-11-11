@@ -110,3 +110,73 @@ def sha_result(github_get, runs, sha, skip_id=None):
         if run.get('conclusion') in FAILED:
             return 'FAIL'
     return None
+
+
+def decide(github_get, *, now, quiet_seconds=QUIET_SECONDS):
+    """Return (code, detail) from GitHub state; never writes."""
+    sha, merged_at = main_state(github_get)
+    runs = full_runs(github_get)
+    detail = {'main_sha': sha, 'merge_age_seconds': int(now - merged_at)}
+    finished = [run for run in runs if run['status'] == 'completed' and
+                run.get('conclusion') in FAILED | {'success'}]
+    if finished and finished[0].get('conclusion') in FAILED:
+        detail['alert'] = {'sha': finished[0].get('head_sha'), 'run': finished[0].get('html_url'),
+                           'conclusion': finished[0].get('conclusion')}
+    active = [run.get('id') for run in runs if run['status'].lower() in ACTIVE]
+    if active:
+        return ACTIVE_RUN, dict(detail, active_runs=active)
+    result = sha_result(github_get, runs, sha)
+    if result == 'PASS':
+        return VERIFIED, detail
+    if result == 'FAIL':
+        return FULL_FAILED, detail
+    if quiet_seconds > 0 and now - merged_at < quiet_seconds:
+        return QUIET, detail
+    return DUE, detail
+
+
+def request_full(gh_runner, root, github_get, *, now=None, quiet_seconds=QUIET_SECONDS):
+    """Dispatch one FULL on main when due; return (code, detail)."""
+    now = time.time() if now is None else now
+    try:
+        code, detail = decide(github_get, now=now, quiet_seconds=quiet_seconds)
+        if code != DUE:
+            return code, detail
+        # Re-read just before dispatch so a run from an overlapping sweep is seen.
+        if any(run['status'].lower() in ACTIVE for run in full_runs(github_get)):
+            return ACTIVE_RUN, detail
+    except StateError as exc:
+        return UNAVAILABLE, {'read': str(exc)}
+    try:
+        result = gh_runner(root, ['workflow', 'run', 'llmtool-mac-ci.yml', '--ref', 'main'])
+        dispatched = getattr(result, 'returncode', 1) == 0
+    except Exception:
+        dispatched = False
+    return (DISPATCHED if dispatched else DISPATCH_FAILED), detail
+
+
+def request_train_full(gh_runner, root, github_get):
+    """Merge-train exception: no quiet period, same dedupe and SHA checks; return a code."""
+    return request_full(gh_runner, root, github_get, quiet_seconds=0)[0]
+
+
+def add_ci_parser(sub):
+    ci = sub.add_parser('ci', help='Deterministic CI helpers')
+    actions = ci.add_subparsers(dest='action', required=True)
+    actions.add_parser('full-mac-due', help='Dispatch the main FULL Mac suite only when due')
+    return ci
+
+
+def run_ci(args, *, gh_runner=None, github_get=None, root=None, now=None):
+    """Print one JSON line; exit 0 normal, 1 failed FULL or alert, 2 read or dispatch error."""
+    if github_get is None:
+        from .task_completion import _github_get as github_get
+    if gh_runner is None:
+        from .task_advance import _publish_run_gh as gh_runner
+    code, detail = request_full(gh_runner, os.getcwd() if root is None else root,
+                                github_get, now=now)
+    print(json.dumps(dict(detail, code=code), sort_keys=True))
+    if code in (UNAVAILABLE, DISPATCH_FAILED):
+        print(f'llmtool: {code}', file=sys.stderr)
+        return 2
+    return 0 if code in OK_CODES and 'alert' not in detail else 1
