@@ -1628,7 +1628,7 @@ MARKER_ACTOR_TARGETS = {
     "test_result": (frozenset({"Codex", "OpenCode", "CompanyGW"}),
                     frozenset({"Tests", "CI"})),
 }
-MARKER_NAMES = {"CompanyGW": "company gw", "Tests": "tests"}
+MARKER_NAMES = {"CompanyGW": "home LLM gw-agent", "Tests": "tests"}
 # waiting_owner runs both ways: the PM/Integrator asks the Owner (BLOCKED, WAITING,
 # UNKNOWN) and an Owner-login comment answers as ANSWERED. Any other pairing of
 # direction, author login, and status is not a typed event.
