@@ -394,6 +394,9 @@ class TestTaskAdvanceOwnerException(unittest.TestCase):
                     temp_dir = str(candidate)
                     break
 
+        if temp_dir is None:
+            self.fail("no writable temp dir outside the repo")
+
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=temp_dir, delete=False) as tf:
             json.dump(dummy_entries, tf)
             temp_path = tf.name
