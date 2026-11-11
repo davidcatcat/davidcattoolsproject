@@ -2,9 +2,10 @@
 
 import io
 import subprocess
+import unittest
+from unittest.mock import patch
 from argparse import Namespace
 from contextlib import redirect_stdout
-import pytest
 
 from llmtool import owner_exception, task_advance, task_submission_cli
 from llmtool.task_advance import advance
@@ -112,285 +113,270 @@ def _make_github_get(head, number, *, check_runs=None, files=None):
     return github_get
 
 
-def test_no_merge_refusal_cli_and_advance():
-    task_id = "task-no-merge"
-    url = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
-    record = _base_record(task_id, "a" * 40)
-    store = FakeStore(record)
+class TestTaskAdvanceOwnerException(unittest.TestCase):
+    def test_no_merge_refusal_cli_and_advance(self):
+        task_id = "task-no-merge"
+        url = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
+        record = _base_record(task_id, "a" * 40)
+        store = FakeStore(record)
 
-    # 1. advance() refuses without merge before any read
-    adv_res = advance(task_id=task_id, store=store, merge=False, owner_exception=url)
-    assert adv_res["step"] == "REFUSED"
-    assert adv_res["codes"] == ["OWNER_EXCEPTION_REQUIRES_MERGE"]
+        # 1. advance() refuses without merge before any read
+        adv_res = advance(task_id=task_id, store=store, merge=False, owner_exception=url)
+        self.assertEqual(adv_res["step"], "REFUSED")
+        self.assertEqual(adv_res["codes"], ["OWNER_EXCEPTION_REQUIRES_MERGE"])
 
-    # 2. CLI run_task_advance refuses without --merge
-    cli_args = Namespace(
-        task_id=task_id,
-        merge=False,
-        owner_exception=url,
-        pr=42,
-        integration_pr=None,
-        reviewer_session_done=False,
-    )
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        ret = run_task_advance(cli_args, store=store)
-    assert ret == 1
-    assert "OWNER_EXCEPTION_REQUIRES_MERGE" in buf.getvalue()
+        # 2. CLI run_task_advance refuses without --merge
+        cli_args = Namespace(
+            task_id=task_id,
+            merge=False,
+            owner_exception=url,
+            pr=42,
+            integration_pr=None,
+            reviewer_session_done=False,
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ret = run_task_advance(cli_args, store=store)
+        self.assertEqual(ret, 1)
+        self.assertIn("OWNER_EXCEPTION_REQUIRES_MERGE", buf.getvalue())
+
+    def test_verify_code_refusal(self):
+        task_id = "task-verify-refusal"
+        head = "a" * 40
+        number = 42
+        url = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
+        record = _base_record(task_id, head)
+        store = FakeStore(record)
+
+        with patch.object(task_advance, "_d6_snapshot", return_value=_base_d6(head)), \
+             patch.object(owner_exception, "verify", return_value=("OWNER_EXCEPTION_SCOPE", None)):
+            gh_runner = FakeGhRunner()
+            github_get = _make_github_get(head, number)
+
+            res = advance(
+                task_id=task_id,
+                store=store,
+                pr_number=number,
+                merge=True,
+                owner_exception=url,
+                github_get=github_get,
+                merge_gh_runner=gh_runner,
+            )
+
+            self.assertEqual(res["step"], "MERGE_REFUSED")
+            self.assertEqual(res["codes"], ["OWNER_EXCEPTION_SCOPE"])
+            self.assertFalse(any(c[1][:2] == ["pr", "merge"] for c in gh_runner.calls))
+
+    def test_success_merges_and_records_review_exception_without_pass(self):
+        task_id = "task-success-merge"
+        head = "a" * 40
+        number = 42
+        url = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
+        record = _base_record(task_id, head)
+        store = FakeStore(record)
+
+        fake_evidence = {"exception_slot": "S2a", "verified_files": ["tools/foo.py"]}
+        with patch.object(task_advance, "_d6_snapshot", return_value=_base_d6(head)), \
+             patch.object(owner_exception, "verify", return_value=(None, fake_evidence)), \
+             patch.object(task_advance.mac_full_suite, "request_full_suite",
+                          return_value=task_advance.mac_full_suite.MAC_FULL_SUITE_DISPATCHED):
+            gh_runner = FakeGhRunner()
+            github_get = _make_github_get(head, number)
+
+            res = advance(
+                task_id=task_id,
+                store=store,
+                pr_number=number,
+                merge=True,
+                owner_exception=url,
+                github_get=github_get,
+                merge_gh_runner=gh_runner,
+            )
+
+            self.assertEqual(res["step"], "MERGED")
+            self.assertEqual(res["codes"], [])
+
+            expected_exception = {
+                "type": owner_exception.EXCEPTION_TYPE,
+                "url": url,
+                "evidence": fake_evidence,
+            }
+            self.assertEqual(res["result"]["review_exception"], expected_exception)
+
+            # Record in store gets review_exception
+            stored_record = store.get(task_id)
+            self.assertEqual(stored_record.get("review_exception"), expected_exception)
+
+            # PR merge was called
+            merge_calls = [c for c in gh_runner.calls if c[1][:2] == ["pr", "merge"]]
+            self.assertEqual(len(merge_calls), 1)
+            self.assertEqual(merge_calls[0][1], [
+                "pr",
+                "merge",
+                str(number),
+                "--squash",
+                "--match-head-commit",
+                head,
+            ])
+
+            # Merge provenance comment names OWNER_EXCEPTION_DETERMINISTIC_REDACTION
+            comment_calls = [c for c in gh_runner.calls if c[1][:2] == ["pr", "comment"]]
+            self.assertEqual(len(comment_calls), 1)
+            body_idx = comment_calls[0][1].index("--body") + 1
+            comment_body = comment_calls[0][1][body_idx]
+            self.assertIn("OWNER_EXCEPTION_DETERMINISTIC_REDACTION", comment_body)
+
+            # No REVIEW_PASS event or verdict was written
+            self.assertFalse(any(
+                e.get("source") == "REVIEWER" or e.get("outcome") == "REVIEW_PASS"
+                for e in stored_record.get("completion_events", [])
+            ))
+
+    def test_failed_and_pending_ci_refuse(self):
+        task_id = "task-ci-refusal"
+        head = "a" * 40
+        number = 42
+        url = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
+        fake_evidence = {"slot": "S2a"}
+
+        with patch.object(task_advance, "_d6_snapshot", return_value=_base_d6(head)), \
+             patch.object(owner_exception, "verify", return_value=(None, fake_evidence)):
+            # 1. Failed CI
+            failed_checks = [
+                {
+                    "id": 1,
+                    "name": "check (docs)",
+                    "head_sha": head,
+                    "status": "completed",
+                    "conclusion": "failure",
+                }
+            ]
+            store_fail = FakeStore(_base_record(task_id, head))
+            gh_runner_fail = FakeGhRunner()
+            github_get_fail = _make_github_get(head, number, check_runs=failed_checks)
+
+            res_fail = advance(
+                task_id=task_id,
+                store=store_fail,
+                pr_number=number,
+                merge=True,
+                owner_exception=url,
+                github_get=github_get_fail,
+                merge_gh_runner=gh_runner_fail,
+            )
+            self.assertEqual(res_fail["step"], "MERGE_REFUSED")
+            self.assertIn("MERGE_CHECKS_NOT_GREEN", res_fail["codes"])
+            self.assertFalse(any(c[1][:2] == ["pr", "merge"] for c in gh_runner_fail.calls))
+
+            # 2. Pending macOS CI on code PR
+            code_files = [{"filename": "tools/llmtool/llmtool/task_advance.py"}]
+            pending_checks = [
+                {
+                    "id": 1,
+                    "name": "check (Linux 3.14)",
+                    "head_sha": head,
+                    "status": "completed",
+                    "conclusion": "success",
+                },
+                {
+                    "id": 2,
+                    "name": "check (macOS 3.13)",
+                    "head_sha": head,
+                    "status": "in_progress",
+                    "conclusion": None,
+                },
+            ]
+            store_pending = FakeStore(_base_record(task_id, head))
+            gh_runner_pending = FakeGhRunner()
+            github_get_pending = _make_github_get(
+                head, number, check_runs=pending_checks, files=code_files
+            )
+
+            res_pending = advance(
+                task_id=task_id,
+                store=store_pending,
+                pr_number=number,
+                merge=True,
+                owner_exception=url,
+                github_get=github_get_pending,
+                merge_gh_runner=gh_runner_pending,
+            )
+            self.assertEqual(res_pending["step"], "MERGE_REFUSED")
+            self.assertIn("MERGE_CHECKS_NOT_GREEN", res_pending["codes"])
+            self.assertIs(res_pending["result"].get("macos_check_pending"), True)
+            self.assertFalse(any(c[1][:2] == ["pr", "merge"] for c in gh_runner_pending.calls))
+
+    def test_ordinary_merge_path_unchanged(self):
+        task_id = "task-ordinary-merge"
+        head = "a" * 40
+        number = 42
+
+        with patch.object(task_advance, "_d6_snapshot", return_value=_base_d6(head)), \
+             patch.object(task_advance.mac_full_suite, "request_full_suite",
+                          return_value=task_advance.mac_full_suite.MAC_FULL_SUITE_DISPATCHED):
+            # 1. Ordinary merge without PASS refuses with MERGE_REVIEW_NOT_PASS
+            record_no_pass = _base_record(task_id, head)
+            store_no_pass = FakeStore(record_no_pass)
+            gh_runner_no_pass = FakeGhRunner()
+            github_get = _make_github_get(head, number)
+
+            res_no_pass = advance(
+                task_id=task_id,
+                store=store_no_pass,
+                pr_number=number,
+                merge=True,
+                owner_exception=None,
+                github_get=github_get,
+                merge_gh_runner=gh_runner_no_pass,
+            )
+            self.assertEqual(res_no_pass["step"], "MERGE_REFUSED")
+            self.assertIn("MERGE_REVIEW_NOT_PASS", res_no_pass["codes"])
+            self.assertFalse(any(c[1][:2] == ["pr", "merge"] for c in gh_runner_no_pass.calls))
+
+            # 2. Ordinary merge with PASS succeeds without review_exception
+            record_with_pass = _base_record(task_id, head)
+            record_with_pass["review_claims"] = [
+                {
+                    "pr": number,
+                    "head_sha": head,
+                    "version": 1,
+                    "state": "COMPLETED",
+                    "review_result": {"verdict": "PASS"},
+                }
+            ]
+            record_with_pass["completion_events"] = [
+                {
+                    "source": "REVIEWER",
+                    "source_sha": head,
+                    "version": 1,
+                    "outcome": "REVIEW_PASS",
+                }
+            ]
+            store_pass = FakeStore(record_with_pass)
+            gh_runner_pass = FakeGhRunner()
+
+            res_pass = advance(
+                task_id=task_id,
+                store=store_pass,
+                pr_number=number,
+                merge=True,
+                owner_exception=None,
+                github_get=github_get,
+                merge_gh_runner=gh_runner_pass,
+            )
+            self.assertEqual(res_pass["step"], "MERGED")
+            self.assertEqual(res_pass["codes"], [])
+            self.assertNotIn("review_exception", res_pass["result"])
+            self.assertNotIn("review_exception", store_pass.get(task_id))
+
+            # Provenance comment does not name OWNER_EXCEPTION_DETERMINISTIC_REDACTION
+            comment_calls = [c for c in gh_runner_pass.calls if c[1][:2] == ["pr", "comment"]]
+            self.assertEqual(len(comment_calls), 1)
+            body_idx = comment_calls[0][1].index("--body") + 1
+            comment_body = comment_calls[0][1][body_idx]
+            self.assertNotIn("OWNER_EXCEPTION_DETERMINISTIC_REDACTION", comment_body)
+            self.assertIn("review_version=1", comment_body)
 
 
-def test_verify_code_refusal(monkeypatch):
-    task_id = "task-verify-refusal"
-    head = "a" * 40
-    number = 42
-    url = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
-    record = _base_record(task_id, head)
-    store = FakeStore(record)
-
-    monkeypatch.setattr(task_advance, "_d6_snapshot", lambda r, e: _base_d6(head))
-    monkeypatch.setattr(
-        owner_exception, "verify", lambda u, n, get, **kw: ("OWNER_EXCEPTION_SCOPE", None)
-    )
-
-    gh_runner = FakeGhRunner()
-    github_get = _make_github_get(head, number)
-
-    res = advance(
-        task_id=task_id,
-        store=store,
-        pr_number=number,
-        merge=True,
-        owner_exception=url,
-        github_get=github_get,
-        merge_gh_runner=gh_runner,
-    )
-
-    assert res["step"] == "MERGE_REFUSED"
-    assert res["codes"] == ["OWNER_EXCEPTION_SCOPE"]
-    assert not any(c[1][:2] == ["pr", "merge"] for c in gh_runner.calls)
-
-
-def test_success_merges_and_records_review_exception_without_pass(monkeypatch):
-    task_id = "task-success-merge"
-    head = "a" * 40
-    number = 42
-    url = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
-    record = _base_record(task_id, head)
-    store = FakeStore(record)
-
-    fake_evidence = {"exception_slot": "S2a", "verified_files": ["tools/foo.py"]}
-    monkeypatch.setattr(task_advance, "_d6_snapshot", lambda r, e: _base_d6(head))
-    monkeypatch.setattr(
-        owner_exception, "verify", lambda u, n, get, **kw: (None, fake_evidence)
-    )
-    monkeypatch.setattr(
-        task_advance.mac_full_suite,
-        "request_full_suite",
-        lambda runner, root, get: task_advance.mac_full_suite.MAC_FULL_SUITE_DISPATCHED,
-    )
-
-    gh_runner = FakeGhRunner()
-    github_get = _make_github_get(head, number)
-
-    res = advance(
-        task_id=task_id,
-        store=store,
-        pr_number=number,
-        merge=True,
-        owner_exception=url,
-        github_get=github_get,
-        merge_gh_runner=gh_runner,
-    )
-
-    assert res["step"] == "MERGED"
-    assert res["codes"] == []
-
-    expected_exception = {
-        "type": owner_exception.EXCEPTION_TYPE,
-        "url": url,
-        "evidence": fake_evidence,
-    }
-    assert res["result"]["review_exception"] == expected_exception
-
-    # Record in store gets review_exception
-    stored_record = store.get(task_id)
-    assert stored_record.get("review_exception") == expected_exception
-
-    # PR merge was called
-    merge_calls = [c for c in gh_runner.calls if c[1][:2] == ["pr", "merge"]]
-    assert len(merge_calls) == 1
-    assert merge_calls[0][1] == [
-        "pr",
-        "merge",
-        str(number),
-        "--squash",
-        "--match-head-commit",
-        head,
-    ]
-
-    # Merge provenance comment names OWNER_EXCEPTION_DETERMINISTIC_REDACTION
-    comment_calls = [c for c in gh_runner.calls if c[1][:2] == ["pr", "comment"]]
-    assert len(comment_calls) == 1
-    body_idx = comment_calls[0][1].index("--body") + 1
-    comment_body = comment_calls[0][1][body_idx]
-    assert "OWNER_EXCEPTION_DETERMINISTIC_REDACTION" in comment_body
-
-    # No REVIEW_PASS event or verdict was written
-    assert not any(
-        e.get("source") == "REVIEWER" or e.get("outcome") == "REVIEW_PASS"
-        for e in stored_record.get("completion_events", [])
-    )
-
-
-def test_failed_and_pending_ci_refuse(monkeypatch):
-    task_id = "task-ci-refusal"
-    head = "a" * 40
-    number = 42
-    url = "https://github.com/example/repo/issues/1253#issuecomment-6788268483"
-    fake_evidence = {"slot": "S2a"}
-
-    monkeypatch.setattr(task_advance, "_d6_snapshot", lambda r, e: _base_d6(head))
-    monkeypatch.setattr(
-        owner_exception, "verify", lambda u, n, get, **kw: (None, fake_evidence)
-    )
-
-    # 1. Failed CI
-    failed_checks = [
-        {
-            "id": 1,
-            "name": "check (docs)",
-            "head_sha": head,
-            "status": "completed",
-            "conclusion": "failure",
-        }
-    ]
-    store_fail = FakeStore(_base_record(task_id, head))
-    gh_runner_fail = FakeGhRunner()
-    github_get_fail = _make_github_get(head, number, check_runs=failed_checks)
-
-    res_fail = advance(
-        task_id=task_id,
-        store=store_fail,
-        pr_number=number,
-        merge=True,
-        owner_exception=url,
-        github_get=github_get_fail,
-        merge_gh_runner=gh_runner_fail,
-    )
-    assert res_fail["step"] == "MERGE_REFUSED"
-    assert "MERGE_CHECKS_NOT_GREEN" in res_fail["codes"]
-    assert not any(c[1][:2] == ["pr", "merge"] for c in gh_runner_fail.calls)
-
-    # 2. Pending macOS CI on code PR
-    code_files = [{"filename": "tools/llmtool/llmtool/task_advance.py"}]
-    pending_checks = [
-        {
-            "id": 1,
-            "name": "check (Linux 3.14)",
-            "head_sha": head,
-            "status": "completed",
-            "conclusion": "success",
-        },
-        {
-            "id": 2,
-            "name": "check (macOS 3.13)",
-            "head_sha": head,
-            "status": "in_progress",
-            "conclusion": None,
-        },
-    ]
-    store_pending = FakeStore(_base_record(task_id, head))
-    gh_runner_pending = FakeGhRunner()
-    github_get_pending = _make_github_get(
-        head, number, check_runs=pending_checks, files=code_files
-    )
-
-    res_pending = advance(
-        task_id=task_id,
-        store=store_pending,
-        pr_number=number,
-        merge=True,
-        owner_exception=url,
-        github_get=github_get_pending,
-        merge_gh_runner=gh_runner_pending,
-    )
-    assert res_pending["step"] == "MERGE_REFUSED"
-    assert "MERGE_CHECKS_NOT_GREEN" in res_pending["codes"]
-    assert res_pending["result"].get("macos_check_pending") is True
-    assert not any(c[1][:2] == ["pr", "merge"] for c in gh_runner_pending.calls)
-
-
-def test_ordinary_merge_path_unchanged(monkeypatch):
-    task_id = "task-ordinary-merge"
-    head = "a" * 40
-    number = 42
-
-    monkeypatch.setattr(task_advance, "_d6_snapshot", lambda r, e: _base_d6(head))
-    monkeypatch.setattr(
-        task_advance.mac_full_suite,
-        "request_full_suite",
-        lambda runner, root, get: task_advance.mac_full_suite.MAC_FULL_SUITE_DISPATCHED,
-    )
-
-    # 1. Ordinary merge without PASS refuses with MERGE_REVIEW_NOT_PASS
-    record_no_pass = _base_record(task_id, head)
-    store_no_pass = FakeStore(record_no_pass)
-    gh_runner_no_pass = FakeGhRunner()
-    github_get = _make_github_get(head, number)
-
-    res_no_pass = advance(
-        task_id=task_id,
-        store=store_no_pass,
-        pr_number=number,
-        merge=True,
-        owner_exception=None,
-        github_get=github_get,
-        merge_gh_runner=gh_runner_no_pass,
-    )
-    assert res_no_pass["step"] == "MERGE_REFUSED"
-    assert "MERGE_REVIEW_NOT_PASS" in res_no_pass["codes"]
-    assert not any(c[1][:2] == ["pr", "merge"] for c in gh_runner_no_pass.calls)
-
-    # 2. Ordinary merge with PASS succeeds without review_exception
-    record_with_pass = _base_record(task_id, head)
-    record_with_pass["review_claims"] = [
-        {
-            "pr": number,
-            "head_sha": head,
-            "version": 1,
-            "state": "COMPLETED",
-            "review_result": {"verdict": "PASS"},
-        }
-    ]
-    record_with_pass["completion_events"] = [
-        {
-            "source": "REVIEWER",
-            "source_sha": head,
-            "version": 1,
-            "outcome": "REVIEW_PASS",
-        }
-    ]
-    store_pass = FakeStore(record_with_pass)
-    gh_runner_pass = FakeGhRunner()
-
-    res_pass = advance(
-        task_id=task_id,
-        store=store_pass,
-        pr_number=number,
-        merge=True,
-        owner_exception=None,
-        github_get=github_get,
-        merge_gh_runner=gh_runner_pass,
-    )
-    assert res_pass["step"] == "MERGED"
-    assert res_pass["codes"] == []
-    assert "review_exception" not in res_pass["result"]
-    assert "review_exception" not in store_pass.get(task_id)
-
-    # Provenance comment does not name OWNER_EXCEPTION_DETERMINISTIC_REDACTION
-    comment_calls = [c for c in gh_runner_pass.calls if c[1][:2] == ["pr", "comment"]]
-    assert len(comment_calls) == 1
-    body_idx = comment_calls[0][1].index("--body") + 1
-    comment_body = comment_calls[0][1][body_idx]
-    assert "OWNER_EXCEPTION_DETERMINISTIC_REDACTION" not in comment_body
-    assert "review_version=1" in comment_body
+if __name__ == "__main__":
+    unittest.main()
