@@ -1220,12 +1220,7 @@ def _merge_success(record, number, head, review_version, gh_runner, root, warnin
             warning_codes.append('MERGE_PROVENANCE_COMMENT_FAILED')
     except Exception:
         warning_codes.append('MERGE_PROVENANCE_COMMENT_FAILED')
-    suite_code = mac_full_suite.request_full_suite(gh_runner, root, github_get)
-    if suite_code not in (
-        mac_full_suite.MAC_FULL_SUITE_DISPATCHED,
-        mac_full_suite.MAC_FULL_SUITE_ALREADY_QUEUED,
-    ):
-        warning_codes.append(suite_code)
+    # Owner #1485: no FULL request per merge; `llmtool ci full-mac-due` decides.
     result = {'pr': number, 'head': head}
     if owner_acceptance is not None:
         result['owner_acceptance'] = owner_acceptance
