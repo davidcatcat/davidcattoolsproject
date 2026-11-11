@@ -200,14 +200,14 @@ GitHub 付費託管 runner 已停用，Actions 只負責把 job 派給自架 run
 | GitHub | 只有 llmtool 能讀寫，使用 AI 專用帳號（#926 安排上線） |
 | 程式碼存取 | 角色讀寫 llmtool 建立的 worktree，不直接碰 GitHub |
 | 審查失敗 | 第 1 次退回，PM 可決定續用原 developer 或換人；第 2 次交 AI Debug |
-| AI Debug | 查不到原因，或除錯後仍審查失敗，PM 通知 Owner |
-| 審查判斷 | 由 llmtool 照 Reviewer 結果走，PM 不能推翻 |
+| AI Debug | 查不到原因，或除錯後仍審查失敗，PM 通知 Owner（已由 D3/D4 取代，見 #1502） |
+| 審查判斷 | 由 llmtool 照 Reviewer 結果走，PM 不能推翻（已由 O3 爭議處理程序取代，見 #1502） |
 | 重審 | 只看上次審查後新改的部分；merge 前的每一行都要被審過 |
 | 測試失敗 | EC2、Linux CI、Mac CI、同步 main 失敗都直接退回 developer，不計審查次數 |
 | Mac CI 失敗後 | 修改後要重新審查 |
 | 修改後 | 任何修改都從 EC2 重新走一遍 |
 | 結案 | 不通知 Owner；進度由 Owner 自己詢問 |
-| merge 前 | llmtool 同步 main；HEAD 有變就重跑 CI，並由 Reviewer 對新 HEAD 給出正式結果；有衝突或重測失敗才退回 |
+| merge 前 | llmtool 同步 main；HEAD 有變就重跑 CI，並由 Reviewer 對新 HEAD 給出正式結果；有衝突或重測失敗才退回（已由 M1 取代：merge 前不同步 main，見 #1317、#1502） |
 | Reviewer 配對 | 依實際模型家族由 llmtool 驗證，不滿足就不接受 PASS |
 | OpenCode 預審 | 保留現行的免費跨模型預審 |
 | 測試重跑 | 只有環境異常或疑似不穩定的測試才重跑一次；程式錯誤直接退回 |

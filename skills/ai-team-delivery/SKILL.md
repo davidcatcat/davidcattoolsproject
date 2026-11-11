@@ -21,7 +21,7 @@ Before dispatch, record:
 
 For D8 Host/Worker admission and review controls, see the [D8 Host/Worker reference](pm-continuation-reference.md#d8-hostworker-admission-and-review).
 
-**Developer routing (Owner direction, 2026-10-21):** Codex, OpenCode and AGY are PM-selected Developer routes under the current policy. Work in a verified registered D6 worktree with the Task Contract's file scope, bounded repairs and required self-review. D8 provider caps, retry stops, timeout and cleanup apply to llmtool Host/Worker jobs. For current dispatch, route-specific and Reviewer rules, follow [AGENTS.md](../../AGENTS.md).
+**Developer routing (Owner direction, 2026-10-21; O1):** Codex is Reviewer and AI Debug only, never a Developer (O1; disabling Codex Developer in code is 待實作（WP-C）). PM-selected Developer routes are OpenCode, Claude Developer, AGY, and Home LLM `gw-agent` under [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json). Work in a verified registered D6 worktree with the Task Contract's file scope, bounded repairs and required self-review. D8 provider caps, retry stops, timeout and cleanup apply to llmtool Host/Worker jobs. For current dispatch, route-specific and Reviewer rules, follow [AGENTS.md](../../AGENTS.md).
 
 **AGY direct Developer:** Follow the [AGY direct Developer skill](../agy-direct-developer/SKILL.md) and the current route authorization in [AGENTS.md](../../AGENTS.md).
 
@@ -29,26 +29,29 @@ For D8 Host/Worker admission and review controls, see the [D8 Host/Worker refere
 
 | Route | Role | Who triggers it | Limits |
 | --- | --- | --- | --- |
-| Codex Developer | Implements and self-reviews the bounded Task | PM, through the current worker-dispatch gate | Registered D6 and task-scoped writes; bounded repairs; formal review and required CI |
+| Codex Developer | Retired from Developer work (O1); Codex is Reviewer and AI Debug only (disabling in code is 待實作（WP-C）) | None | No new Developer work |
+| Codex AI Debug | Read-only diagnostic task after two failed reviews/repairs | PM, under High Debug policy | Read-only in D6; no write authority; Codex high-tier model |
 | OpenCode Developer | Implements and self-reviews the bounded Task | PM, through the current worker-dispatch gate | Registered D6, task-local permissions and currently free approved model; no paid fallback; required independent review and CI |
-| Claude Developer | Implements the bounded Task | PM, only for an Owner-assigned Task allowed by the current dispatch entry | Assignment and environment gates, registered D6, task scope, independent review and CI |
+| Claude Developer | Implements and self-reviews the bounded Task | PM, through the current worker-dispatch gate | Registered D6, task scope, independent review and CI |
 | AGY Developer | Implements and self-reviews the bounded Task | PM, through the current worker-dispatch gate (`ALLOWED` since 2026-10-31) | Verified D6; auth, actual model, session, quota and scoped permissions; no Host D4/G3/M2, automatic retry or paid fallback; formal review from another model family |
 | Home LLM `gw-agent` Developer | Reads, edits and adds tests inside its Task scope through the API Agent Gateway; no shell or Git | PM, through llmtool (`gw-agent` only; the `company-gw` direct and proposal routes are retired, #120) | Line-range reads; write paths limited to the Task; independent review and CI |
-| Claude Reviewer | Formal independent Reviewer for Codex-authored changes | PM, after a pinned candidate is ready | Separate read-only context and D6 reviewer record; exact-head review; never reviews own change |
-| Codex Reviewer (`codex-reviewer`) | Formal independent Reviewer | PM, after a pinned candidate is ready | Separate read-only context and D6 reviewer record; exact-head review; never reviews own change; must be qualified and cross-family |
+| Claude Reviewer | Formal independent Reviewer paired by actual model family (reviews non-Claude work: AGY, OpenCode, gw-agent, etc.) | PM, after a pinned candidate is ready | Separate read-only context and D6 reviewer record; exact-head review; never reviews own change or same model family |
+| Codex Reviewer (`codex-reviewer`) | Formal independent Reviewer paired by actual model family (reviews non-Codex work: Claude Developer/PM changes, gw-agent, etc.; may review AGY and OpenCode if Claude is unavailable) | PM, after a pinned candidate is ready | Separate read-only context and D6 reviewer record; exact-head review; never reviews own change or same model family; must be qualified and cross-family |
 | EC2 remote-test runner | Runs focused remote test modules and returns a receipt via `llmtool task remote-test` | PM dispatches the task for selected focused modules | PM pre-review tool on private infrastructure, not CI; focused modules only; receipt is required evidence and does not replace formal review or CI |
 | Mac CI (GitHub-hosted) | Runs Mac-relevant CI checks | PR workflow for PRs; PM adds `mac-ci` after formal PASS and manually dispatches the full suite after each merge train | GitHub-hosted `macos-15-intel`; 120-minute job limit set in the workflow ([#1253](https://github.com/davidcatcat/davidcattoolsproject/issues/1253)); exact-head PR check; without `mac-ci`, the PR check is `NOT_RUN` |
 | Linux CI (GitHub-hosted) | Runs the full Linux suite sharded across parallel jobs | Automatically on each PR and main push | GitHub-hosted `ubuntu-24.04`; exact-head `check (Linux 3.14)`; Linux 3.9 is manual pre-release only |
 
 The EC2 remote-test runner is a PM pre-review tool on private infrastructure, not CI. The PM invokes it with `llmtool task remote-test` for selected focused modules; its receipt is required evidence and does not replace formal review or CI.
 
-## Developer convergence and formal review
+## Delivery flow and formal review
+
+Developer done -> task advance: push branch -> EC2 test before the PR -> open PR -> Linux CI -> review -> PASS -> mac-ci label -> Mac CI -> merge without syncing main (M1, #1317). task advance is the only normal flow; manual commands are recovery only.
+
+On test or CI failure, returning the failure to the Developer and tracking failure counts per task is 待實作（WP-D）.
 
 The Developer implements the bounded packet, performs a distinct-context self-review and fixes ordinary findings before formal review. An OpenCode Developer must also complete a qualified, actually-free pre-review from a different model family before handoff. If none is available, record the limitation and mark the OpenCode Task BLOCKED. This pre-review is not independent acceptance or the formal Reviewer gate. For other current dispatch, route-specific and formal Reviewer rules, follow [AGENTS.md](../../AGENTS.md).
 
 Submit one consolidated exact-SHA candidate to a qualified, authorized formal Reviewer from a different model family, following [AGENTS.md](../../AGENTS.md), with contract, diff, test results, CI provenance and applicable runtime evidence. Use a separate read-only Reviewer Session/context with its own D6 reviewer record, distinct from the Developer and the PM; nobody formally reviews their own change. Any other review is advisory only. The Reviewer reports severity, reproducibility, limitations and exact-SHA disposition on the PR or tracking Issue under the [Transition record](pm-continuation.md#transition-record) rule; an llmtool Task closed by `task complete --reviewer-task` uses the [formal verdict comment](formal-verdict.md). On FAIL, return bounded findings to the original Developer, rerun affected checks and request affected rereview ([continuation](pm-continuation.md)). Never merge on self-review, stale verdict or green CI alone.
-
-After review and exact-head CI pass, reconcile the tested SHA against the current target, assess integration changes, and merge only when every task-required gate passes under [safe-git](../safe-git/SKILL.md). A relevant source change invalidates affected checks and review.
 
 **Owner acceptance is a separate gate (#1208).** Owner product acceptance and formal cross-family review are two independent gates. When a Task needs Owner acceptance, its PR needs both, plus exact-head CI. A relayed Owner acceptance never replaces formal review or CI, and a formal PASS never replaces Owner acceptance. #888 is the case that must not repeat.
 
@@ -121,6 +124,5 @@ A work package is ready for handoff when its scoped changes, required checks and
 - [PM Continuation Contract](pm-continuation.md)
 - [Formal verdict comment](formal-verdict.md)
 - [Roadmap](../../tools/llmtool/ROADMAP.md)
-- [llmtool development workflow](../../tools/llmtool/WORKFLOW.md), for Cloud handoff or Mac/Cloud verification
 - [safe-git](../safe-git/SKILL.md)
 - [security-review](../security-review/SKILL.md), [qa-validation](../qa-validation/SKILL.md), [validate-runtime](../validate-runtime/SKILL.md)
