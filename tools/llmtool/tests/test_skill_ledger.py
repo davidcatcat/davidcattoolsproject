@@ -745,6 +745,50 @@ class SkillLedgerTests(unittest.TestCase):
         self.path.parent.chmod(0o755)
         self.assertEqual(ledger.verify_chain(), (False, 'LEDGER_UNREADABLE'))
 
+    def test_task_summary_reports_roles_and_leaves_bytes_unchanged(self):
+        # One recorded role, one revoked role, and one unrecorded role.
+        self.record(role='Developer', evidence_level='OBSERVED_READ')
+        receipt_b = self.record(role='Reviewer', evidence_level='HOOK_DELIVERED')
+        ledger.revoke(receipt_b, 'withdrawn')
+
+        ledger_bytes_before = self.path.read_bytes()
+        anchor_path = Path(str(self.path) + '.head')
+        anchor_bytes_before = anchor_path.read_bytes()
+
+        summary = ledger.task_summary('task-a', ['Developer', 'Reviewer', 'QA'])
+        self.assertEqual(summary['Developer'], 'OBSERVED_READ')
+        self.assertEqual(summary['Reviewer'], 'UNVERIFIED')
+        self.assertEqual(summary['QA'], 'UNVERIFIED')
+
+        # Ledger and anchor bytes must remain unchanged.
+        self.assertEqual(self.path.read_bytes(), ledger_bytes_before)
+        self.assertEqual(anchor_path.read_bytes(), anchor_bytes_before)
+
+    def test_task_summary_unreadable_ledger_returns_unverified(self):
+        # Unreadable ledger returns UNVERIFIED for all requested roles.
+        self.record(role='Developer', evidence_level='OBSERVED_READ')
+        target = self.path.parent / 'target'
+        target.write_text('')
+        self.path.unlink()
+        self.path.symlink_to(target)
+        summary = ledger.task_summary('task-a', ['Developer', 'Reviewer'])
+        self.assertEqual(summary, {'Developer': 'UNVERIFIED', 'Reviewer': 'UNVERIFIED'})
+
+    def test_task_summary_ignores_expired_records(self):
+        # Expired records do not count towards the summary.
+        self.record(role='Developer', evidence_level='OBSERVED_READ', ttl_seconds=1)
+        future = datetime.now(timezone.utc) + timedelta(days=1)
+        summary = ledger.task_summary('task-a', ['Developer'], now=future)
+        self.assertEqual(summary, {'Developer': 'UNVERIFIED'})
+
+    def test_task_summary_uses_newest_active_record(self):
+        # Newest active record takes precedence over older active record.
+        self.record(role='Developer', evidence_level='HOOK_DELIVERED')
+        self.record(role='Developer', evidence_level='OBSERVED_READ')
+        summary = ledger.task_summary('task-a', ['Developer'])
+        self.assertEqual(summary, {'Developer': 'OBSERVED_READ'})
+
+
 
 if __name__ == '__main__':
     unittest.main()

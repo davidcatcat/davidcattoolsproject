@@ -526,3 +526,65 @@ def revoke(receipt_id, reason):
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
+
+
+def task_summary(task_id, roles, now=None):
+    """Return a mapping of roles to their newest active evidence level."""
+    try:
+        summary = {role: 'UNVERIFIED' for role in roles}
+    except TypeError:
+        return {}
+    if type(task_id) is not str or not task_id or not summary:
+        return summary
+    path = _path()
+    try:
+        lock_fd = _locked(path)
+    except SkillLedgerError:
+        return summary
+    try:
+        try:
+            records = _read(path)
+        except SkillLedgerError:
+            return summary
+        if not _chain(records):
+            return summary
+        current = _stamp(now) if now is not None else datetime.now(timezone.utc)
+        if current is None:
+            return summary
+        revoked_receipts = {
+            item['revokes_receipt_id']
+            for item in records
+            if item.get('entry_type') == 'REVOCATION' and item.get('revokes_receipt_id')
+        }
+        remaining_roles = set(summary.keys())
+        for item in reversed(records):
+            if not remaining_roles:
+                break
+            if type(item) is not dict:
+                continue
+            if item.get('entry_type') == 'REVOCATION':
+                continue
+            if item.get('task_id') != task_id:
+                continue
+            role = item.get('role')
+            if role not in remaining_roles:
+                continue
+            if item.get('status') != 'ACTIVE':
+                continue
+            receipt_id = item.get('receipt_id')
+            if not receipt_id or receipt_id in revoked_receipts:
+                continue
+            expiry = _stamp(item.get('expires_at'))
+            if expiry is None or current >= expiry:
+                continue
+            level = item.get('evidence_level')
+            if level in EVIDENCE_LEVELS:
+                summary[role] = level
+            else:
+                summary[role] = 'UNVERIFIED'
+            remaining_roles.remove(role)
+        return summary
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+

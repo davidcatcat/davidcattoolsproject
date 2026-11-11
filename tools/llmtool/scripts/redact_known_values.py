@@ -27,10 +27,21 @@ class RedactStats:
     total: int
     skipped_binary: int
     skipped_oversized: int
+    unreadable: int
+    symlinks: int
 
 
 class RedactMapError(Exception):
     """Raised when the redaction map violates required constraints."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+
+
+class RedactPathError(Exception):
+    """Raised when --paths arguments violate required constraints."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
@@ -144,11 +155,28 @@ def load_and_validate_map(map_path: Path, repo_root: Path) -> list[tuple[str, st
     return entries
 
 
+def _matches_tracked(target_rel: Path, tracked_paths: list[Path]) -> bool:
+    """Return True if target_rel matches or contains at least one git-tracked file."""
+    if target_rel == Path("."):
+        return len(tracked_paths) > 0
+    for tp in tracked_paths:
+        if tp == target_rel:
+            return True
+        try:
+            tp.relative_to(target_rel)
+            return True
+        except ValueError:
+            pass
+    return False
+
+
 def _is_path_selected(tracked_rel: Path, targets: list[Path] | None) -> bool:
     """Return True if tracked path matches any target filter."""
     if targets is None:
         return True
     for target in targets:
+        if target == Path("."):
+            return True
         if tracked_rel == target:
             return True
         try:
@@ -180,38 +208,72 @@ def redact_repo(
     """Scan git-tracked files and replace or check values from map."""
     entries = load_and_validate_map(map_path, repo_root)
 
+    repo_root_resolved = repo_root.resolve()
+    tracked_files = get_git_tracked_files(repo_root)
+    tracked_paths = [Path(f) for f in tracked_files]
+
     target_paths: list[Path] | None = None
     if paths is not None:
+        if len(paths) == 0:
+            raise RedactPathError("PATHS_INVALID", "empty --paths list provided")
+
         target_paths = []
         for p in paths:
             user_target = Path(p)
             if user_target.is_absolute():
-                candidate = user_target.resolve()
+                candidate = user_target
             else:
-                cwd_candidate = (Path.cwd() / user_target).resolve()
                 try:
-                    rel = cwd_candidate.relative_to(repo_root.resolve())
-                    target_paths.append(rel)
-                    continue
+                    Path.cwd().resolve().relative_to(repo_root_resolved)
+                    candidate = Path.cwd() / user_target
                 except ValueError:
-                    candidate = (repo_root / user_target).resolve()
-            try:
-                rel = candidate.relative_to(repo_root.resolve())
-                target_paths.append(rel)
-            except ValueError:
-                pass
+                    candidate = repo_root / user_target
 
-    tracked_files = get_git_tracked_files(repo_root)
+            # 1. Path must exist (use lexists so symlinks themselves exist)
+            if not os.path.lexists(candidate):
+                raise RedactPathError(
+                    "PATHS_INVALID", f"path does not exist: {p}"
+                )
+
+            # 2. Path must be inside repo_root (without dereferencing symlink target)
+            norm_str = os.path.normpath(str(candidate))
+            parent_real = os.path.realpath(os.path.dirname(norm_str))
+            basename = os.path.basename(norm_str)
+            target_canonical = Path(parent_real) / basename if basename else Path(parent_real)
+
+            if target_canonical == repo_root_resolved:
+                rel = Path(".")
+            else:
+                try:
+                    rel = target_canonical.relative_to(repo_root_resolved)
+                except ValueError:
+                    raise RedactPathError(
+                        "PATHS_INVALID", f"path is outside repository: {p}"
+                    )
+
+            # 3. Path must select at least one git-tracked file
+            if not _matches_tracked(rel, tracked_paths):
+                raise RedactPathError(
+                    "PATHS_INVALID", f"path matches no git-tracked file: {p}"
+                )
+
+            target_paths.append(rel)
 
     mapping = {val: plc for val, plc in entries}
     pattern: re.Pattern[str] | None = None
+    byte_pattern: re.Pattern[bytes] | None = None
     if entries:
         pattern = re.compile("|".join(re.escape(val) for val, _ in entries))
+        byte_pattern = re.compile(
+            b"|".join(re.escape(val.encode("utf-8")) for val, _ in entries)
+        )
 
     per_file_counts: dict[str, int] = {}
     total_replacements = 0
     skipped_binary = 0
     skipped_oversized = 0
+    unreadable = 0
+    symlinks = 0
 
     for rel_str in tracked_files:
         rel_path = Path(rel_str)
@@ -219,12 +281,19 @@ def redact_repo(
             continue
 
         full_path = repo_root / rel_path
-        if not full_path.is_file():
-            continue
 
         try:
-            st = full_path.stat()
+            st = os.lstat(full_path)
         except OSError:
+            unreadable += 1
+            continue
+
+        # Symlinks are never read or written
+        if stat.S_ISLNK(st.st_mode):
+            symlinks += 1
+            continue
+
+        if not stat.S_ISREG(st.st_mode):
             continue
 
         # Skip oversized files
@@ -232,24 +301,33 @@ def redact_repo(
             skipped_oversized += 1
             continue
 
-        # Read bytes to check for binary content
+        # Read bytes
         try:
             with open(full_path, "rb") as f:
                 raw_bytes = f.read()
         except OSError:
+            unreadable += 1
             continue
 
-        if b"\0" in raw_bytes:
+        is_binary = b"\0" in raw_bytes
+        text: str | None = None
+        if not is_binary:
+            try:
+                text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                is_binary = True
+
+        if is_binary:
             skipped_binary += 1
+            if byte_pattern:
+                matches = byte_pattern.findall(raw_bytes)
+                count = len(matches)
+                if count > 0:
+                    per_file_counts[rel_str] = count
+                    total_replacements += count
             continue
 
-        try:
-            text = raw_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            skipped_binary += 1
-            continue
-
-        if not pattern:
+        if not pattern or text is None:
             continue
 
         if check_mode:
@@ -279,6 +357,8 @@ def redact_repo(
         total=total_replacements,
         skipped_binary=skipped_binary,
         skipped_oversized=skipped_oversized,
+        unreadable=unreadable,
+        symlinks=symlinks,
     )
 
 
@@ -339,15 +419,34 @@ def main(argv: list[str] | None = None) -> int:
             check_mode=args.check,
             paths=args.paths,
         )
+    except RedactPathError as exc:
+        sys.stderr.write(f"{exc.code}: {exc.message}\n")
+        return 2
     except RedactMapError as exc:
         sys.stderr.write(f"{exc.code}: {exc.message}\n")
         return 2
+
+    incomplete = (
+        stats.skipped_oversized > 0
+        or stats.unreadable > 0
+        or stats.symlinks > 0
+    )
 
     if args.check:
         if stats.total > 0:
             for path in sorted(stats.per_file.keys()):
                 print(f"{path}: {stats.per_file[path]}")
+            print(f"skipped_binary: {stats.skipped_binary}")
+            print(f"skipped_oversized: {stats.skipped_oversized}")
+            print(f"unreadable: {stats.unreadable}")
+            print(f"symlinks: {stats.symlinks}")
             return 1
+        print(f"skipped_binary: {stats.skipped_binary}")
+        print(f"skipped_oversized: {stats.skipped_oversized}")
+        print(f"unreadable: {stats.unreadable}")
+        print(f"symlinks: {stats.symlinks}")
+        if incomplete:
+            return 3
         return 0
 
     # Default dry run or apply mode
@@ -355,6 +454,13 @@ def main(argv: list[str] | None = None) -> int:
         if stats.per_file[path] > 0:
             print(f"{path}: {stats.per_file[path]}")
     print(f"Total: {stats.total}")
+    print(f"skipped_binary: {stats.skipped_binary}")
+    print(f"skipped_oversized: {stats.skipped_oversized}")
+    print(f"unreadable: {stats.unreadable}")
+    print(f"symlinks: {stats.symlinks}")
+
+    if args.apply and incomplete:
+        return 3
     return 0
 
 
