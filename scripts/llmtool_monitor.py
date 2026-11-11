@@ -7566,11 +7566,7 @@ def _gw_task_for_run(run: str) -> tuple[str, str]:
     base = tempfile.gettempdir() if GW_AUDIT_ROOT is None else GW_AUDIT_ROOT
     path = os.path.join(base, GW_AUDIT_PREFIX + run, "audit.jsonl")
     digest = hashlib.sha256(os.fsencode(path)).hexdigest()
-    for record_path in _llmtool_paths(LLMTOOL_TASKS):
-        try:
-            record = _llmtool_record(record_path, os.stat(record_path))
-        except OSError:
-            continue
+    for _key, record in list(_llmtool_records.values()):
         developer = record.get("developer") if type(record) is dict else None
         if type(developer) is dict and developer.get("audit_copy_path_sha256") == digest:
             return str(record.get("task_id") or ""), str(developer.get("executor_task_id") or "")

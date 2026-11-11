@@ -3526,6 +3526,7 @@ class OfficeViewTests(unittest.TestCase):
         digest = mon.hashlib.sha256(os.fsencode(str(audit))).hexdigest()
         record = {"task_id": "f" * 32, "developer": {"executor_task_id": "wp-9", "audit_copy_path_sha256": digest}}
         (tasks / ("f" * 32 + ".json")).write_text(json.dumps(record), encoding="utf-8")
+        mon._llmtool_record(str(tasks / ("f" * 32 + ".json")), os.stat(tasks / ("f" * 32 + ".json")))
         with patch.object(mon, "GW_AUDIT_ROOT", str(root)), patch.object(mon, "LLMTOOL_TASKS", str(tasks)):
             done = [row for row in self.rows() if row.name in mon.GW_ROSTER]
         self.assertIn("task ffffffff", done[0].detail)
