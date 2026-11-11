@@ -816,7 +816,7 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--high-debug-family',
                           help='root-cause family matching the confirmed High Debug diagnosis')
     delegate.add_argument('--context-stdin', action='store_true',
-                          help='company-gw/codex only: read bounded, sensitive-screened context from stdin')
+                          help='codex text proposals only: read bounded, sensitive-screened context from stdin')
     complete = actions.add_parser('complete', help='Collect verified Executor evidence and return it to the original PM')
     complete.add_argument('task_id', help='existing durable Task ID')
     complete.add_argument('--executor-task', required=True, help='registered D6 Executor task id bound at delegation')
