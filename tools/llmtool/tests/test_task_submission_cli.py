@@ -3464,8 +3464,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         create.assert_not_called()
 
     def test_scope_overflow_and_out_of_scope_patch_fail_closed(self):
-        task = self._pm_task_with_assignment()
-        args = self._delegate_args(task, write_path=['tools/llmtool/tests/other.py'])
+        task = self._pm_task_with_codex_assignment()
+        args = self._codex_delegate_args(task, write_path=['tools/llmtool/tests/other.py'])
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 self.assertRaises(LLMToolError):
             run_task_delegate(args)
@@ -3473,11 +3473,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
         client = FakeClient(Reply(
             f'diff --git a/{target} b/{target}\n--- a/{target}\n+++ b/{target}\n'
             '@@ -1 +1 @@\n-old\n+new\n', {}))
-        args = self._delegate_args(task)
+        args = self._codex_delegate_args(task)
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=config('openai-compatible', 'gw')), \
+                      return_value=config()), \
                 patch('llmtool.task_submission_cli.api_key', return_value=None), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 redirect_stdout(output):
