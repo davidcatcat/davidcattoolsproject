@@ -9106,7 +9106,7 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     print("\n".join(["", *d6_lines(mon.d6), "", *record_lines(mon.records), "",
                      *task_lines(mon.tasks, 3, mon.opencode_route,
                                  mon.opencode_route_failed,
-                                 getattr(mon, "opencode_paused", ""))])))
+                                 getattr(mon, "opencode_paused", ""))]))
     print("\n最近動態")
     print("\n".join(activity_lines(mon.tasks, github=github)))
     print(f"說明：{FOOTNOTE}。")
