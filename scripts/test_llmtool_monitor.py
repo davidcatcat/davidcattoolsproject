@@ -3501,7 +3501,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("D6 wp-1", mon._row_detail(row))
         self.assertIn("wp-1", mon._d6_running_tasks(rows))
         # The gw-agent switch is PAUSED in the fixture: its status row stays and says so.
-        status = self.by_name(rows)["公司 gw agent"]
+        status = self.by_name(rows)[mon.HOME_GW_AGENT]
         self.assertIn("有 1 個執行中", status.detail)
         lines = self._gw_view(rows)
         at = next(i for i, line in enumerate(lines) if "gw-agent developer pid 91" in line)
@@ -3534,8 +3534,8 @@ class OfficeViewTests(unittest.TestCase):
         self.assertAlmostEqual(done[0].age, 120, delta=1)
         self.assertIn("已結束", done[0].detail)
         names = self.by_name(rows)
-        self.assertIn("公司 gw", names)          # the status row is back
-        self.assertIn("公司 gw agent", names)
+        self.assertIn(mon.HOME_GW, names)          # the status row is back
+        self.assertIn(mon.HOME_GW_AGENT, names)
         self._gw_view(rows)
 
     def test_finished_gw_agent_run_names_its_task_by_audit_path_digest(self):
@@ -3597,7 +3597,7 @@ class OfficeViewTests(unittest.TestCase):
         live = [row for row in rows if row.name in mon.GW_ROSTER]
         self.assertEqual([(row.state, row.sid) for row in live], [(mon.WORKING, "pid 91")])
         self.assertIn("task 1d091894", mon._row_detail(live[0]))
-        self.assertIn("公司 gw agent", self.by_name(rows))
+        self.assertIn(mon.HOME_GW_AGENT, self.by_name(rows))
 
     def test_no_gw_run_keeps_todays_status_rows(self):
         tasks = Path(self.tmp.name) / "tasks"
