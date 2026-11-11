@@ -830,6 +830,9 @@ def add_task_submission_parsers(actions):
     advance.add_argument('--owner-acceptance', metavar='URL',
                          help=('with --merge only: PM relay ANSWERED issue comment URL that '
                                'records Owner acceptance of this PR and full head SHA'))
+    advance.add_argument('--owner-exception', metavar='URL',
+                         help=('with --merge only: issue comment URL registering '
+                               'deterministic redaction owner exception'))
     advance.add_argument('--integration-pr', type=int,
                          help='merged integration PR containing the reviewed head')
     advance.add_argument('--reviewer-session-done', action='store_true',
@@ -1339,6 +1342,13 @@ def run_task_advance(args, *, store=None, **adapters):
                 'next': 'REFUSED', 'codes': ['OWNER_ACCEPTANCE_REQUIRES_MERGE'],
                 'acked': []})
         return 1
+    owner_exception = getattr(args, 'owner_exception', None)
+    if owner_exception is not None and not getattr(args, 'merge', False):
+        # --owner-exception is only for a merge; nothing else runs.
+        _print({'task_id': args.task_id, 'step': 'REFUSED', 'result': None,
+                'next': 'REFUSED', 'codes': ['OWNER_EXCEPTION_REQUIRES_MERGE'],
+                'acked': []})
+        return 1
     store = TaskStore() if store is None else store
     try:
         pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
@@ -1347,6 +1357,8 @@ def run_task_advance(args, *, store=None, **adapters):
         return 1
     if owner_acceptance is not None:
         adapters = dict(adapters, owner_acceptance=owner_acceptance)
+    if owner_exception is not None:
+        adapters = dict(adapters, owner_exception=owner_exception)
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured):
         result = advance(task_id=args.task_id, store=store,
@@ -5567,7 +5579,7 @@ def run_task_delegate(args, *, store=None):
     if args.provider == 'opencode':
         _check_delegate_repair_cap(args, store)
         return run_task_opencode_delegate(args, store=store)
-    if args.provider not in ('company-gw', 'codex'):
+    if args.provider != 'codex':
         raise LLMToolError('unsupported Developer route')
     if not getattr(args, 'context_stdin', False) and not hasattr(args, 'context'):
         raise LLMToolError('text Developer delegation requires explicit --context-stdin')
@@ -5610,7 +5622,7 @@ def run_task_delegate(args, *, store=None):
         task, source_sha=source_sha, read_paths=read_paths, write_paths=write_paths,
         acceptance=acceptance, context=context,
         pm_goal=(pm_assignment['goal'] if args.selection_source == 'PM' else task['request']),
-        developer_route=('codex-cli' if args.provider == 'codex' else 'company-gw'))
+        developer_route='codex-cli')
     input_bytes = len(json.dumps(messages, ensure_ascii=True, sort_keys=True,
                                  separators=(',', ':')).encode('utf-8'))
     if input_bytes > REQUEST_LIMIT:
@@ -5665,13 +5677,11 @@ def run_task_delegate(args, *, store=None):
         raise LLMToolError(
             'developer assignment already exists; duplicate dispatch refused') from None
     try:
-        profile = ('company-gw' if args.provider == 'company-gw' else
-                   'codex-developer')
+        profile = 'codex-developer'
         try:
             config = resolve_profile_config(profile, require_configured=True)
         except Exception as exc:
-            if (args.provider == 'codex' and
-                    str(exc) == 'requested provider profile is not defined'):
+            if str(exc) == 'requested provider profile is not defined':
                 developer.update(state='DEVELOPER_UNAVAILABLE',
                                  error_code='DEVELOPER_PROFILE_UNAVAILABLE')
                 saved = store.update(task['task_id'], developer=developer)
@@ -5679,22 +5689,13 @@ def run_task_delegate(args, *, store=None):
                 return 1
             raise
         provider = selected_provider(config)
-        if args.provider == 'company-gw':
-            if provider.get('type') != 'openai-compatible':
-                raise LLMToolError('company-gw profile is not an openai-compatible route')
-            credential = api_key(config)
-            client = create_client(config, credential)
-            max_tokens = config['generation']['max_tokens']
-            if type(max_tokens) is not int or not 1 <= max_tokens <= 1_000_000:
-                raise LLMToolError('company-gw output budget is invalid')
-        else:
-            if provider.get('type') != 'codex-cli':
-                raise LLMToolError('codex profile is not a codex-cli route')
-            # CodexCLIProvider owns an isolated, read-only process with a fixed
-            # output ceiling and configured timeout. It returns a proposal only;
-            # this host never grants it file, shell, Git, or network access.
-            client = create_client(config)
-            max_tokens = None
+        if provider.get('type') != 'codex-cli':
+            raise LLMToolError('codex profile is not a codex-cli route')
+        # CodexCLIProvider owns an isolated, read-only process with a fixed
+        # output ceiling and configured timeout. It returns a proposal only;
+        # this host never grants it file, shell, Git, or network access.
+        client = create_client(config)
+        max_tokens = None
     except Exception as exc:
         code = _provider_error_code(exc).replace('PM_', 'DEVELOPER_', 1)
         developer.update(state='DEVELOPER_UNAVAILABLE', error_code=code)
@@ -5714,25 +5715,22 @@ def run_task_delegate(args, *, store=None):
         return 1
     try:
         worker_dispatch.authorize_dispatch(
-            store, task['task_id'],
-            'company-gw' if args.provider == 'company-gw' else 'codex-developer',
-            'DISPATCH')
+            store, task['task_id'], 'codex-developer', 'DISPATCH')
     except worker_dispatch.WorkerDispatchDenied as exc:
         developer.update(state='DEVELOPER_UNAVAILABLE', error_code=exc.dispatch_code)
         saved = store.update(task['task_id'], developer=developer)
         _print(_task_view(saved))
         return 1
-    if args.provider == 'codex':
-        try:
-            _validate_codex_call_binding(
-                store, task, developer, completion, registration, snapshot,
-                args.executor_task)
-        except Exception:
-            developer.update(state='DEVELOPER_UNAVAILABLE',
-                             error_code='DEVELOPER_CALL_BINDING_INVALID')
-            saved = store.update(task['task_id'], developer=developer)
-            _print(_task_view(saved))
-            return 1
+    try:
+        _validate_codex_call_binding(
+            store, task, developer, completion, registration, snapshot,
+            args.executor_task)
+    except Exception:
+        developer.update(state='DEVELOPER_UNAVAILABLE',
+                         error_code='DEVELOPER_CALL_BINDING_INVALID')
+        saved = store.update(task['task_id'], developer=developer)
+        _print(_task_view(saved))
+        return 1
     try:
         result = client.complete(messages)
     except Exception as exc:
@@ -5742,10 +5740,6 @@ def run_task_delegate(args, *, store=None):
         _print(_task_view(saved))
         return 1
     usage = reply_usage(result.metadata)
-    served_model = result.metadata.get('served_model')
-    if args.provider == 'company-gw' and usage is not None and type(served_model) is str:
-        usage = dict(usage)
-        usage['served_model'] = served_model
     source_files = _text_developer_source_files(
         registration.root, source_sha, write_paths)
     if source_files is None:

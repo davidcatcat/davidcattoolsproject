@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import re
+import sys
 from typing import Any, Callable
 
 from . import github_identity
@@ -84,11 +85,17 @@ def default_replacement_map() -> list[tuple[str, str]]:
     """Load the user redaction map via redact_known_values.load_and_validate_map."""
     scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
     module_path = scripts_dir / "redact_known_values.py"
-    spec = importlib.util.spec_from_file_location("redact_known_values", module_path)
+    module_name = "_llmtool_redact_known_values"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load redact_known_values from {module_path}")
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    sys.modules[module_name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
     repo_root = mod.find_repo_root()
     map_path = mod.resolve_map_path(None)
     return mod.load_and_validate_map(map_path, repo_root)
