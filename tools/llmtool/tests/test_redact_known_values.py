@@ -24,6 +24,9 @@ sys.modules[_spec.name] = _mod
 _spec.loader.exec_module(_mod)
 
 MAX_FILE_SIZE = _mod.MAX_FILE_SIZE
+RedactStats = _mod.RedactStats
+RedactPathError = _mod.RedactPathError
+RedactMapError = _mod.RedactMapError
 main = _mod.main
 redact_repo = _mod.redact_repo
 
@@ -111,7 +114,7 @@ class TestRedactKnownValues(unittest.TestCase):
         return code, out_buf.getvalue(), err_buf.getvalue()
 
     def test_dry_run_counts_and_leaves_files_unchanged(self) -> None:
-        """Dry run prints per-file replacement counts and total, leaving files intact."""
+        """Dry run prints per-file replacement counts, total, and skip counts."""
         file_path = _commit_file(
             self.repo_dir,
             "sample.txt",
@@ -124,6 +127,10 @@ class TestRedactKnownValues(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertIn("sample.txt: 1", out)
         self.assertIn("Total: 1", out)
+        self.assertIn("skipped_binary: 0", out)
+        self.assertIn("skipped_oversized: 0", out)
+        self.assertIn("unreadable: 0", out)
+        self.assertIn("symlinks: 0", out)
         # Verify file content is unchanged
         self.assertEqual(
             file_path.read_text(encoding="utf-8"),
@@ -153,13 +160,17 @@ class TestRedactKnownValues(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertIn("sample.txt: 1", out)
         self.assertIn("Total: 1", out)
+        self.assertIn("skipped_binary: 0", out)
+        self.assertIn("skipped_oversized: 0", out)
+        self.assertIn("unreadable: 0", out)
+        self.assertIn("symlinks: 0", out)
         # File is replaced with placeholder
         replaced = file_path.read_text(encoding="utf-8")
         self.assertEqual(replaced, f"Connect to {FAKE_PLC_BASE} now.\n")
         self.assertNotIn(FAKE_VAL_BASE, replaced)
 
     def test_check_exit_codes(self) -> None:
-        """Check mode exits 1 when value found and 0 when clean."""
+        """Check mode exits 1 when value found, prints counts, and exits 0 when clean."""
         file_path = _commit_file(
             self.repo_dir,
             "sample.txt",
@@ -179,9 +190,13 @@ class TestRedactKnownValues(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertIn("sample.txt: 1", out)
         self.assertNotIn("Total:", out)
+        self.assertIn("skipped_binary: 0", out)
+        self.assertIn("skipped_oversized: 0", out)
+        self.assertIn("unreadable: 0", out)
+        self.assertIn("symlinks: 0", out)
         self.assertNotIn(FAKE_VAL_BASE, out)
 
-        # After replacement, check mode must exit 0
+        # After replacement, check mode must exit 0 and print counts
         file_path.write_text(f"Address is {FAKE_PLC_BASE}.\n", encoding="utf-8")
         code_clean, out_clean, err_clean = self._run_cli(
             [
@@ -194,7 +209,10 @@ class TestRedactKnownValues(unittest.TestCase):
         )
         self.assertEqual(code_clean, 0)
         self.assertEqual(err_clean, "")
-        self.assertEqual(out_clean, "")
+        self.assertIn("skipped_binary: 0", out_clean)
+        self.assertIn("skipped_oversized: 0", out_clean)
+        self.assertIn("unreadable: 0", out_clean)
+        self.assertIn("symlinks: 0", out_clean)
 
     def test_refuses_0644_map(self) -> None:
         """Map with permissions 0644 must be rejected with exit code 2."""
@@ -345,13 +363,14 @@ class TestRedactKnownValues(unittest.TestCase):
         self.assertIn("dir_a/file_a.txt: 1", out)
         self.assertNotIn("dir_b/file_b.txt", out)
         self.assertIn("Total: 1", out)
+        self.assertIn("skipped_binary: 0", out)
 
         # file_a replaced, file_b unchanged
         self.assertIn(FAKE_PLC_BASE, file_a.read_text(encoding="utf-8"))
         self.assertIn(FAKE_VAL_BASE, file_b.read_text(encoding="utf-8"))
 
     def test_binary_and_oversized_files_skipped(self) -> None:
-        """Binary files and files exceeding 2 MiB are skipped and counted."""
+        """Binary files are scanned as bytes and counted; oversized files (>2 MiB) are skipped and counted."""
         # Binary file containing fake value
         _commit_file(
             self.repo_dir,
@@ -373,7 +392,15 @@ class TestRedactKnownValues(unittest.TestCase):
         )
         self.assertEqual(stats.skipped_binary, 1)
         self.assertEqual(stats.skipped_oversized, 1)
-        self.assertEqual(stats.total, 0)
+        self.assertEqual(stats.unreadable, 0)
+        self.assertEqual(stats.symlinks, 0)
+        # Binary file is scanned as bytes, so hit is reported
+        self.assertEqual(stats.total, 1)
+        # But binary file is never rewritten by apply
+        self.assertEqual(
+            (self.repo_dir / "data.bin").read_bytes(),
+            f"prefix\0{FAKE_VAL_BASE}".encode("utf-8"),
+        )
 
     def test_untracked_files_ignored(self) -> None:
         """Untracked files are not read or modified."""
@@ -481,6 +508,230 @@ class TestRedactKnownValues(unittest.TestCase):
         )
         self.assertEqual(code, 2)
         self.assertIn("MAP_EMPTY_VALUE", err)
+
+    # -------------------------------------------------------------------------
+    # Acceptance tests for Task rules
+    # -------------------------------------------------------------------------
+
+    def test_rule1_paths_invalid_scenarios(self) -> None:
+        """Rule 1: --paths with missing, outside, or non-matching path exits 2 and prints PATHS_INVALID."""
+        target_file = _commit_file(
+            self.repo_dir,
+            "target.txt",
+            f"Target address is {FAKE_VAL_BASE}\n",
+        )
+
+        # Case 1: Missing path
+        code_missing, _, err_missing = self._run_cli(
+            [
+                "--apply",
+                "--paths",
+                "does_not_exist.txt",
+                "--map",
+                str(self.default_map_path),
+                "--repo",
+                str(self.repo_dir),
+            ]
+        )
+        self.assertEqual(code_missing, 2)
+        self.assertIn("PATHS_INVALID", err_missing)
+
+        # Case 2: Path outside repository
+        outside_file = self.map_dir / "outside_repo.txt"
+        outside_file.write_text("outside repo\n", encoding="utf-8")
+        code_outside, _, err_outside = self._run_cli(
+            [
+                "--apply",
+                "--paths",
+                str(outside_file),
+                "--map",
+                str(self.default_map_path),
+                "--repo",
+                str(self.repo_dir),
+            ]
+        )
+        self.assertEqual(code_outside, 2)
+        self.assertIn("PATHS_INVALID", err_outside)
+
+        # Case 3: Path matching no tracked file (untracked file in repo)
+        untracked = self.repo_dir / "untracked_file.txt"
+        untracked.write_text("untracked\n", encoding="utf-8")
+        code_untracked, _, err_untracked = self._run_cli(
+            [
+                "--apply",
+                "--paths",
+                "untracked_file.txt",
+                "--map",
+                str(self.default_map_path),
+                "--repo",
+                str(self.repo_dir),
+            ]
+        )
+        self.assertEqual(code_untracked, 2)
+        self.assertIn("PATHS_INVALID", err_untracked)
+
+        # Case 4: Empty --paths list
+        code_empty, _, err_empty = self._run_cli(
+            [
+                "--apply",
+                "--paths",
+                "--map",
+                str(self.default_map_path),
+                "--repo",
+                str(self.repo_dir),
+            ]
+        )
+        self.assertEqual(code_empty, 2)
+        self.assertIn("PATHS_INVALID", err_empty)
+
+        # Verify no file was written across all failed attempts
+        self.assertEqual(
+            target_file.read_text(encoding="utf-8"),
+            f"Target address is {FAKE_VAL_BASE}\n",
+        )
+
+    def test_rule2_counts_printed_and_incomplete_scan_exit_codes(self) -> None:
+        """Rule 2: Every mode prints skip counts; --check and --apply exit 3 on incomplete scan."""
+        # Commit oversized file (> 2 MiB) with no map hits
+        oversized_content = "y" * (MAX_FILE_SIZE + 100)
+        _commit_file(self.repo_dir, "huge.txt", oversized_content)
+
+        # Commit a symlink pointing to an external file
+        outside_dummy = self.map_dir / "dummy.txt"
+        outside_dummy.write_text("clean\n", encoding="utf-8")
+        symlink_path = self.repo_dir / "link_dummy"
+        symlink_path.symlink_to(outside_dummy)
+        subprocess.run(["git", "add", "link_dummy"], cwd=self.repo_dir, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "add link_dummy"], cwd=self.repo_dir, capture_output=True, check=True)
+
+        # Commit a clean text file
+        _commit_file(self.repo_dir, "clean.txt", "Plain text without targets\n")
+
+        # Dry run prints counts and exits 0
+        code_dry, out_dry, err_dry = self._run_cli(
+            ["--map", str(self.default_map_path), "--repo", str(self.repo_dir)]
+        )
+        self.assertEqual(code_dry, 0)
+        self.assertEqual(err_dry, "")
+        self.assertIn("skipped_binary: 0", out_dry)
+        self.assertIn("skipped_oversized: 1", out_dry)
+        self.assertIn("unreadable: 0", out_dry)
+        self.assertIn("symlinks: 1", out_dry)
+
+        # --check with no hits exits 3 (INCOMPLETE_SCAN)
+        code_check, out_check, err_check = self._run_cli(
+            ["--check", "--map", str(self.default_map_path), "--repo", str(self.repo_dir)]
+        )
+        self.assertEqual(code_check, 3)
+        self.assertEqual(err_check, "")
+        self.assertIn("skipped_oversized: 1", out_check)
+        self.assertIn("symlinks: 1", out_check)
+
+        # --apply exits 3 (INCOMPLETE_SCAN) after writing nothing for skipped files
+        code_apply, out_apply, err_apply = self._run_cli(
+            ["--apply", "--map", str(self.default_map_path), "--repo", str(self.repo_dir)]
+        )
+        self.assertEqual(code_apply, 3)
+        self.assertEqual(err_apply, "")
+        self.assertIn("skipped_oversized: 1", out_apply)
+        self.assertIn("symlinks: 1", out_apply)
+
+        # When a hit is present, --check exits 1 despite incomplete scan
+        _commit_file(self.repo_dir, "hit.txt", f"Target {FAKE_VAL_BASE}\n")
+        code_hit, out_hit, err_hit = self._run_cli(
+            ["--check", "--map", str(self.default_map_path), "--repo", str(self.repo_dir)]
+        )
+        self.assertEqual(code_hit, 1)
+        self.assertEqual(err_hit, "")
+        self.assertIn("hit.txt: 1", out_hit)
+
+    def test_rule3_tracked_symlinks_never_read_or_written(self) -> None:
+        """Rule 3: Tracked symlinks are never read or written and are left untouched."""
+        outside_target = self.map_dir / "ext_target.txt"
+        outside_target.write_text(f"Host: {FAKE_VAL_BASE}\n", encoding="utf-8")
+
+        symlink_path = self.repo_dir / "tracked_symlink"
+        symlink_path.symlink_to(outside_target)
+        subprocess.run(["git", "add", "tracked_symlink"], cwd=self.repo_dir, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "add tracked_symlink"], cwd=self.repo_dir, capture_output=True, check=True)
+
+        code, out, err = self._run_cli(
+            ["--apply", "--map", str(self.default_map_path), "--repo", str(self.repo_dir)]
+        )
+        self.assertEqual(code, 3)
+        self.assertEqual(err, "")
+        self.assertIn("symlinks: 1", out)
+        # Symlink is still a symlink and points to the outside target
+        self.assertTrue(os.path.islink(symlink_path))
+        # Outside target is left untouched
+        self.assertEqual(
+            outside_target.read_text(encoding="utf-8"),
+            f"Host: {FAKE_VAL_BASE}\n",
+        )
+
+    def test_rule4_binary_files_scanned_as_bytes(self) -> None:
+        """Rule 4: Binary files scanned as bytes for map values; --apply never rewrites them."""
+        raw_bin = b"hdr\x00data_" + FAKE_VAL_BASE.encode("utf-8") + b"_tail\xff"
+        bin_file = _commit_file(self.repo_dir, "sample.bin", raw_bin)
+
+        # --check reports hit in binary file and exits 1
+        code_check, out_check, err_check = self._run_cli(
+            ["--check", "--map", str(self.default_map_path), "--repo", str(self.repo_dir)]
+        )
+        self.assertEqual(code_check, 1)
+        self.assertEqual(err_check, "")
+        self.assertIn("sample.bin: 1", out_check)
+        self.assertIn("skipped_binary: 1", out_check)
+
+        # --apply reports hit, counts skipped_binary, exits 0, and never rewrites binary file
+        code_apply, out_apply, err_apply = self._run_cli(
+            ["--apply", "--map", str(self.default_map_path), "--repo", str(self.repo_dir)]
+        )
+        self.assertEqual(code_apply, 0)
+        self.assertEqual(err_apply, "")
+        self.assertIn("sample.bin: 1", out_apply)
+        self.assertIn("Total: 1", out_apply)
+        self.assertIn("skipped_binary: 1", out_apply)
+        self.assertEqual(bin_file.read_bytes(), raw_bin)
+
+    def test_happy_path_clean_scan(self) -> None:
+        """Happy path: clean repository with ordinary files scans cleanly in all modes."""
+        _commit_file(self.repo_dir, "clean.txt", "Safe clean text content without any hits\n")
+
+        # Dry run
+        code_dry, out_dry, err_dry = self._run_cli(
+            ["--map", str(self.default_map_path), "--repo", str(self.repo_dir)]
+        )
+        self.assertEqual(code_dry, 0)
+        self.assertEqual(err_dry, "")
+        self.assertIn("Total: 0", out_dry)
+        self.assertIn("skipped_binary: 0", out_dry)
+        self.assertIn("skipped_oversized: 0", out_dry)
+        self.assertIn("unreadable: 0", out_dry)
+        self.assertIn("symlinks: 0", out_dry)
+
+        # Check mode
+        code_check, out_check, err_check = self._run_cli(
+            ["--check", "--map", str(self.default_map_path), "--repo", str(self.repo_dir)]
+        )
+        self.assertEqual(code_check, 0)
+        self.assertEqual(err_check, "")
+        self.assertIn("skipped_binary: 0", out_check)
+        self.assertIn("skipped_oversized: 0", out_check)
+        self.assertIn("unreadable: 0", out_check)
+        self.assertIn("symlinks: 0", out_check)
+
+        # Apply mode
+        code_apply, out_apply, err_apply = self._run_cli(
+            ["--apply", "--map", str(self.default_map_path), "--repo", str(self.repo_dir)]
+        )
+        self.assertEqual(code_apply, 0)
+        self.assertEqual(err_apply, "")
+        self.assertIn("Total: 0", out_apply)
+        self.assertIn("skipped_binary: 0", out_apply)
+        self.assertIn("skipped_oversized: 0", out_apply)
+        self.assertIn("unreadable: 0", out_apply)
+        self.assertIn("symlinks: 0", out_apply)
 
 
 if __name__ == "__main__":
