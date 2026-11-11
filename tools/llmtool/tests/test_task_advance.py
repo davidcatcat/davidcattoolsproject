@@ -2670,7 +2670,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 if path.startswith('commits/'):
                     return checks
                 if path.endswith('/files?per_page=100'):
-                    return [{'filename': 'src/module.py'}]
+                    return [{'filename': 'tools/llmtool/llmtool/module.py'}]
                 if path.startswith('pulls/'):
                     return current
                 return []
@@ -3423,7 +3423,7 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
             if path.startswith('commits/'):
                 return {'total_count': len(check_runs), 'check_runs': check_runs}
             if path.endswith('/files?per_page=100'):
-                return [{'filename': 'src/module.py'}]
+                return [{'filename': 'tools/llmtool/llmtool/module.py'}]
             if path == 'pulls/17':
                 pulls_calls += 1
                 if pulls_calls > 1 and current_pr_head is not None:
