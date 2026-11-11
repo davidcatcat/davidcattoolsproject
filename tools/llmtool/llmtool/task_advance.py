@@ -950,7 +950,8 @@ def _owner_acceptance_code(url, number, head, github_get, *, carry_out=None):
 
 
 def _merge_once(*, store, record, number, head, pr, events, github_get,
-                gh_runner, root, owner_acceptance=None, sleep_fn=None, sleep=None):
+                gh_runner, root, owner_acceptance=None, owner_exception=None,
+                sleep_fn=None, sleep=None):
     _sleep = time.sleep if sleep_fn is None and sleep is None else (sleep_fn if sleep_fn is not None else sleep)
     if type(number) is not int or number < 1:
         return _merge_refusal('MERGE_PR_UNAVAILABLE')
@@ -979,9 +980,25 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
                 break
             if pr.get('mergeable') is not None:
                 break
-    review_version = _merge_pass_claim(record, number, head, events)
-    if type(review_version) is not int:
-        return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
+    review_exception = None
+    if owner_exception is not None:
+        from . import owner_exception as owner_exception_mod
+        v_code, v_evidence = owner_exception_mod.verify(
+            owner_exception, number, github_get,
+            replacement_map=owner_exception_mod.default_replacement_map(),
+        )
+        if v_code is not None:
+            return _merge_refusal(v_code)
+        review_version = None
+        review_exception = {
+            'type': owner_exception_mod.EXCEPTION_TYPE,
+            'url': owner_exception,
+            'evidence': v_evidence,
+        }
+    else:
+        review_version = _merge_pass_claim(record, number, head, events)
+        if type(review_version) is not int:
+            return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
     acceptance_out = {}
     code = _merge_checks(record, number, head, pr, github_get,
                          allow_missing_macos=True, owner_acceptance=owner_acceptance,
