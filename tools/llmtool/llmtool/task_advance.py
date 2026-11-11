@@ -1888,10 +1888,20 @@ def _pr_number(record, requested):
     return claims[-1].get('pr') if claims and type(claims[-1]) is dict else None
 
 
-def _d6_snapshot(record, executor_task):
+def _d6_snapshot(record, executor_task, allow_cwd_fallback=False, cwd=None):
     completion = record.get('completion') or {}
     evidence = completion.get('evidence') or {}
     common_dir = evidence.get('common_dir')
+    if type(common_dir) is not str and allow_cwd_fallback:
+        try:
+            cmd = ['git', 'rev-parse', '--path-format=absolute', '--git-common-dir']
+            proc = subprocess.run(
+                cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, text=True, check=False, timeout=10)
+            if proc.returncode == 0 and proc.stdout.strip():
+                common_dir = proc.stdout.strip()
+        except Exception:
+            pass
     if type(common_dir) is not str:
         return {'state': 'D6_BINDING_UNAVAILABLE', 'code': 'D6_BINDING_UNAVAILABLE'}
     try:
@@ -1909,7 +1919,9 @@ def _d6_snapshot(record, executor_task):
             'branch': registration.branch, 'result_head': snapshot.head,
             'recorded_result_head': recorded,
             'registered_result_head': registration.result_sha, 'dirty': not clean,
-            'state': 'CLEAN' if clean else 'DIRTY'}
+            'state': 'CLEAN' if clean else 'DIRTY',
+            'registration_state': getattr(registration, 'state', None),
+            'trusted_agent_id': getattr(registration, 'trusted_agent_id', getattr(registration, 'agent_id', None))}
 
 
 def _pr_snapshot(number, github_get):
