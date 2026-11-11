@@ -7,7 +7,7 @@
 - Repository: `davidcatcat/davidcattoolsproject`; canonical actual Mac root `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
 - Branch: `bench/llmtool-token-savings-large-evidence-20261006`; existing Draft PR #37.
 - Exact runtime/fixture revision tested: `6858ad60780b280cbc2c3f619b8aee7380145b73`. Fetched and fast-forwarded from `7ba13e4af19b1db8b841168de06753fb0d44368b`; the fetched delta was the Stage-A handoff. Expected remote SHA matched.
-- macOS 15.7.9 (24G830); offline/measurement extraction Python 3.9.6; canonical llmtool venv Python 3.13.3. Company VPN route to `10.29.7.58` used `utun4`; no route/VPN changes.
+- macOS 15.7.9 (24G830); offline/measurement extraction Python 3.9.6; canonical llmtool venv Python 3.13.3. Company VPN route to `192.0.2.10` used `utun4`; no route/VPN changes.
 - Direct contract: [Stage-A handoff](llmtool_token_savings_large_evidence_stage_a_handoff_20261006.md) and [frozen preregistration](token_benchmark/20261006_round2/stage_a/preregistration.json). Independent [preregistration review](llmtool_token_savings_large_evidence_preregistration_review_20261006.md) preceded this execution; it is not a review of these results.
 - Frozen preregistration SHA-256: `6ee3ddc5a9b015510bc4d5051a050bcd714d4771af6512c429b50a8de73d9683`. All 16 registered artifact hashes matched before live calls and again after execution. No frozen artifact was modified.
 - [Execution helper](token_benchmark/20261006_round2/stage_a/execution_helper.py) SHA-256: `30e279993e1fba6f60447b64d0d5a4e156a9d050dbe1ea879a61d9ba1f08f483`; unchanged across all six measured sessions. It reads gold bytes only to check registered digests, never their content for prompt/coverage/selection decisions.
@@ -69,7 +69,7 @@ CONTROL initial prompts contained only frozen task/schema/full fixture. DOGFOOD 
 
 All three requests used llmtool through its official `llmtool.entrypoint.main` under the canonical installed venv, with a local narrow observer around the existing OpenAI-compatible client. The observer checked the actual outgoing Request then passed it unchanged to the original opener; it did not replace transport, read raw response bodies, call curl or modify payloads.
 
-Temporary HOME profile `company-round2`: openai-compatible; `http://10.29.7.58:4000`; requested `gw`; timeout 120; null api_key/api_key_env; temperature 0; max_tokens 4096; `provider_options.enable_thinking=false`. Each actual Request proved **`chat_template_kwargs.enable_thinking=false`**, model=gw, temperature=0, max_tokens=4096 and **no Authorization**. Resolved profile and full user-message digest matched.
+Temporary HOME profile `company-round2`: openai-compatible; `http://192.0.2.10:4000`; requested `gw`; timeout 120; null api_key/api_key_env; temperature 0; max_tokens 4096; `provider_options.enable_thinking=false`. Each actual Request proved **`chat_template_kwargs.enable_thinking=false`**, model=gw, temperature=0, max_tokens=4096 and **no Authorization**. Resolved profile and full user-message digest matched.
 
 Temporary config SHA-256: `17a21fe7fe23b8aa230732b4b272d725693ec5d3655fd58f2103aeea7afb1b1f`. Observer SHA-256: `f1a3a8fd063f90ded8b5218098a8f63ebbc25747b9f750660443673bcea33d20`. Actual request body/input digests and all request observations are in results.json. Real user config path was absent before and after; no config mutation or credential inspection. Only preregistered synthetic data was delegated.
 

@@ -12,7 +12,7 @@
   - Lead 自己跑測試、重現 M1–M7、用 gateway 實測；另外由一個獨立的 reviewer 唯讀審查整份 diff，並與 base 比對。
 - 安全邊界：
   - CLI 一律以 `env -i HOME=<暫存目錄>` 執行，沒有讀取真實的憑證或設定。
-  - 唯一的網路服務是公司 gateway（`http://10.29.7.58:4000`，route `gw`，`enable_thinking: false`）。Lead 呼叫 7 次、reviewer 呼叫 5 次。
+  - 唯一的網路服務是公司 gateway（`http://192.0.2.10:4000`，route `gw`，`enable_thinking: false`）。Lead 呼叫 7 次、reviewer 呼叫 5 次。
   - 沒有呼叫真的 Claude CLI、Codex CLI 或 OpenAI API。
 
 ## 結論：REQUEST CHANGES（先不要 merge）

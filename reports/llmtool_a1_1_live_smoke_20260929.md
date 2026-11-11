@@ -15,7 +15,7 @@
 
 ## Gateway connectivity
 
-The read-only request to `http://10.29.7.58:4000/v1/models` connected successfully and returned **HTTP 200**. The response advertised model/route `gw`.
+The read-only request to `http://192.0.2.10:4000/v1/models` connected successfully and returned **HTTP 200**. The response advertised model/route `gw`.
 
 The `configure` wizard saved the intended settings:
 
@@ -23,7 +23,7 @@ The `configure` wizard saved the intended settings:
 providers:
   default:
     type: openai-compatible
-    base_url: http://10.29.7.58:4000
+    base_url: http://192.0.2.10:4000
     model: gw
     timeout_seconds: 120.0
     api_key: null

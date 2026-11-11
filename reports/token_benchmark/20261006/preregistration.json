@@ -73,7 +73,7 @@
   },
   "company": {
     "profile": "default",
-    "base_url": "http://10.29.7.58:4000",
+    "base_url": "http://192.0.2.10:4000",
     "model": "gw",
     "selection": "User-authorized explicit CLI overrides on existing default profile; no config mutation.",
     "vpn_route": "utun4 observed on actual Mac; route does not prove inference readiness.",

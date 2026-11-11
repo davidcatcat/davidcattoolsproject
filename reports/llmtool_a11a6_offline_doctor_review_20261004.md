@@ -9,7 +9,7 @@
   - 在 canonical repo 進行，沒有使用 worktree、clone 或專案副本。review 時暫時 checkout PR 分支，完成後切回原本的分支。
   - 逐行閱讀 diff 與 store／reader 程式碼。
   - 本機執行完整測試，用 `gh` 確認 CI。
-  - 用公司 gateway（`http://10.29.7.58:4000`，route `gw` = qwen3.6-35b-a3b，`enable_thinking: false`，不需要 key）實測。所有測試都用 `env -i` 加上獨立的 `HOME`／`LLMTOOL_HOME`（scratchpad 裡用 `mktemp -d` 建立），沒有碰使用者真正的設定和 store。
+  - 用公司 gateway（`http://192.0.2.10:4000`，route `gw` = qwen3.6-35b-a3b，`enable_thinking: false`，不需要 key）實測。所有測試都用 `env -i` 加上獨立的 `HOME`／`LLMTOOL_HOME`（scratchpad 裡用 `mktemp -d` 建立），沒有碰使用者真正的設定和 store。
 
 ## 結論
 
