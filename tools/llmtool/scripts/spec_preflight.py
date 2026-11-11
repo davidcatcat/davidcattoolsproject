@@ -66,6 +66,66 @@ def check(spec: dict[str, Any]) -> list[str]:
     return failures
 
 
+def check_edits(spec: dict[str, Any], repo: str | Path | None = None) -> tuple[str, int] | None:
+    """Validate optional spec field 'edits' under the given repo directory.
+
+    Returns None if valid or if 'edits' is not present.
+    On failure returns (code, index) where code is one of:
+      - EDIT_COUNT_OVER_CAP
+      - EDIT_PATH_OUT_OF_SCOPE
+      - EDIT_NEW_TEXT_INVALID
+      - EDIT_ANCHOR_MISSING
+      - EDIT_ANCHOR_NOT_UNIQUE
+    """
+    if "edits" not in spec or spec["edits"] is None:
+        return None
+
+    edits = spec["edits"]
+    if not isinstance(edits, list):
+        return None
+
+    if len(edits) > 6:
+        return ("EDIT_COUNT_OVER_CAP", 6)
+
+    write_list = spec.get("write")
+    write_paths = set(write_list) if isinstance(write_list, list) else set()
+    repo_dir = Path.cwd() if repo is None else Path(repo)
+
+    for index, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            return ("EDIT_PATH_OUT_OF_SCOPE", index)
+
+        path = edit.get("path")
+        if not isinstance(path, str) or path not in write_paths:
+            return ("EDIT_PATH_OUT_OF_SCOPE", index)
+
+        new_text = edit.get("new")
+        old_text = edit.get("old")
+
+        if not isinstance(new_text, str) or len(new_text) == 0 or new_text == old_text:
+            return ("EDIT_NEW_TEXT_INVALID", index)
+
+        if not isinstance(old_text, str) or len(old_text) == 0:
+            return ("EDIT_ANCHOR_MISSING", index)
+
+        target_file = repo_dir / path
+        if not target_file.is_file():
+            return ("EDIT_ANCHOR_MISSING", index)
+
+        try:
+            content = target_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return ("EDIT_ANCHOR_MISSING", index)
+
+        count = content.count(old_text)
+        if count == 0:
+            return ("EDIT_ANCHOR_MISSING", index)
+        if count > 1:
+            return ("EDIT_ANCHOR_NOT_UNIQUE", index)
+
+    return None
+
+
 # WP-120L (#120): the home LLM ladder runs from T1 to T5.
 LADDER_MAX_TIER = 5
 
@@ -138,11 +198,35 @@ def spec_tier(spec, context_bytes=0):
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     ladder_log: str | None = None
-    if len(args) == 1:
-        spec_path = args[0]
-    elif len(args) == 3 and args[1] == "--ladder":
-        spec_path, ladder_log = args[0], args[2]
-    else:
+    repo_dir: Path = Path.cwd()
+    spec_path: str | None = None
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--ladder":
+            if i + 1 >= len(args):
+                print("SPEC_PREFLIGHT_INVALID")
+                return 2
+            ladder_log = args[i + 1]
+            i += 2
+        elif arg == "--repo":
+            if i + 1 >= len(args):
+                print("SPEC_PREFLIGHT_INVALID")
+                return 2
+            repo_dir = Path(args[i + 1])
+            i += 2
+        elif arg.startswith("-"):
+            print("SPEC_PREFLIGHT_INVALID")
+            return 2
+        else:
+            if spec_path is not None:
+                print("SPEC_PREFLIGHT_INVALID")
+                return 2
+            spec_path = arg
+            i += 1
+
+    if spec_path is None:
         print("SPEC_PREFLIGHT_INVALID")
         return 2
 
@@ -162,6 +246,17 @@ def main(argv: list[str] | None = None) -> int:
     if failures:
         print("SPEC_PREFLIGHT_FAIL:" + ",".join(failures))
         return 1
+
+    if "edits" in spec and spec["edits"] is not None:
+        if not isinstance(spec["edits"], list):
+            print("SPEC_PREFLIGHT_INVALID")
+            return 2
+        edit_failure = check_edits(spec, repo=repo_dir)
+        if edit_failure is not None:
+            code, index = edit_failure
+            print(f"SPEC_PREFLIGHT_INVALID:{code}:{index}")
+            return 2
+
     if ladder_log is None:
         print("SPEC_PREFLIGHT_OK")
         return 0
