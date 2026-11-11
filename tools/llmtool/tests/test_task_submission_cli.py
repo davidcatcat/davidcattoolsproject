@@ -2865,7 +2865,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIsNone(saved['developer']['usage'])
 
     def test_task_complete_passes_executor_changed_paths_to_github_collector(self):
-        task = self._pm_task_with_assignment()
+        task = self._pm_task_with_codex_assignment()
         target = 'sample.py'
         patch_text = (f'diff --git a/{target} b/{target}\n'
                       f'--- a/{target}\n+++ b/{target}\n'
@@ -2877,11 +2877,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
         store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=config('openai-compatible', 'gw')), \
+                      return_value=config()), \
                 patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 redirect_stdout(io.StringIO()):
-            self.assertEqual(run_task_delegate(self._delegate_args(
+            self.assertEqual(run_task_delegate(self._codex_delegate_args(
                 task, read_path=[target], write_path=[target], context='VALUE = 1\n'),
                 store=store), 0)
 
