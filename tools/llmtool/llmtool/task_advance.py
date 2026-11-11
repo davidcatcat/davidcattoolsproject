@@ -2398,6 +2398,17 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                      _refusal(exc, 'task_store_error_code')]}, record, store,
                 d6.get('result_head') if type(d6) is dict else None)
     if merge:
+        if using_executor_task:
+            if (type(d6) is not dict or d6.get('state') == 'D6_BINDING_UNAVAILABLE' or
+                    d6.get('trusted_agent_id') != 'pm-deterministic' or
+                    not (d6.get('registration_state') == 'ACTIVE' or d6.get('state') == 'ACTIVE') or
+                    d6.get('dirty') is True or d6.get('state') == 'DIRTY' or
+                    type(d6.get('result_head')) is not str or
+                    d6.get('recorded_result_head') != d6.get('result_head')):
+                return _ack_consumed_events(
+                    _merge_refusal('OWNER_EXCEPTION_EXECUTOR_INVALID'),
+                    record, store,
+                    d6.get('result_head') if type(d6) is dict and type(d6.get('result_head')) is str else None)
         if type(d6) is not dict or type(d6.get('result_head')) is not str:
             return _ack_consumed_events(_merge_refusal('MERGE_D6_UNAVAILABLE'),
                                         record, store, None)
