@@ -21,7 +21,7 @@ CONFIG = '''active_provider: company-preflight
 providers:
   company-preflight:
     type: openai-compatible
-    base_url: http://10.29.7.58:4000
+    base_url: http://192.0.2.10:4000
     model: gw
     timeout_seconds: 120
     api_key: null
@@ -46,7 +46,7 @@ audit_path = Path(os.environ['PREFLIGHT_AUDIT_FILE'])
 
 def audited_init(self, provider, generation, key=None):
     assert provider['type'] == 'openai-compatible'
-    assert provider['base_url'] == 'http://10.29.7.58:4000'
+    assert provider['base_url'] == 'http://192.0.2.10:4000'
     assert provider['model'] == 'gw' and provider['timeout_seconds'] == 120
     assert provider['api_key'] is None and provider['api_key_env'] is None
     assert provider['provider_options'] == {'enable_thinking': False}
@@ -56,7 +56,7 @@ def audited_init(self, provider, generation, key=None):
     original_open = self.opener.open
     def audited_open(req, *args, **kwargs):
         body = json.loads(req.data)
-        assert req.full_url == 'http://10.29.7.58:4000/v1/chat/completions'
+        assert req.full_url == 'http://192.0.2.10:4000/v1/chat/completions'
         assert req.get_method() == 'POST'
         assert not req.has_header('Authorization')
         assert body['chat_template_kwargs'] == {'enable_thinking': False}

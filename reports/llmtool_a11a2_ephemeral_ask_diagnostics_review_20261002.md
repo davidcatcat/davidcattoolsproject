@@ -89,7 +89,7 @@ lifecycle、output mode、錯誤分類與「只呼叫一次 provider」都符合
 ### 公司 gateway
 
 - 3 次 `ask`（normal、`--verbose`、`--debug`）都在約 75 秒後回傳 `llmtool: gateway request timed out`、`code=PROVIDER_TIMEOUT`、rc=1，diagnostics 的分類與輸出格式正確。
-- 隨後直接用 `curl` 檢查：VPN 路由仍然經由 `utun4`，但 `10.29.7.58:4000` 的 TCP 連線在 5 秒後逾時，`/v1/models` 與 chat 都無法連線。
+- 隨後直接用 `curl` 檢查：VPN 路由仍然經由 `utun4`，但 `192.0.2.10:4000` 的 TCP 連線在 5 秒後逾時，`/v1/models` 與 chat 都無法連線。
 - **gateway 的成功路徑在 review 時無法驗證（環境問題），不視為 llmtool 的問題。** 成功路徑的相容性改由上方的 stub server 驗證。
 
 ## 問題清單

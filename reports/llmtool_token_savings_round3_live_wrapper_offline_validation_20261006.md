@@ -57,7 +57,7 @@ Instruction files deliberately have no terminal LF. User-message bytes are exact
 Each Request has exactly two messages, ordered `system`, `user`, and exactly the
 top-level fields `model`, `temperature`, `max_tokens`, `messages`,
 `chat_template_kwargs`. POST endpoint is
-`http://10.29.7.58:4000/v1/chat/completions`; **the endpoint was not contacted**.
+`http://192.0.2.10:4000/v1/chat/completions`; **the endpoint was not contacted**.
 Actual constructed bodies prove `model=gw`, numeric non-bool `temperature=0`,
 integer non-bool `max_tokens=4096`, exactly `enable_thinking=false`, and no
 Authorization. Config timeout is 120 seconds.
