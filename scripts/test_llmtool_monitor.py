@@ -5772,7 +5772,7 @@ class OfficeViewTests(unittest.TestCase):
         (Path(self.canonical) / "tools" / "llmtool" / "worker-dispatch.json").unlink()
         mon._dispatch_cache.clear()
         rows = self.by_name(self.rows())
-        for name in ("opencode developer", "agy", "公司 gw"):
+        for name in ("opencode developer", "agy", mon.HOME_GW):
             self.assertEqual((rows[name].state, rows[name].detail.split("；")[0]),
                              (mon.UNCHECKED, mon.DISPATCH_PROBLEMS["missing"]))
         self._write_dispatch({}, raw="{not json")
@@ -5784,7 +5784,7 @@ class OfficeViewTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 self._write_dispatch(bad)
                 rows = self.by_name(self.rows())
-                for name in ("opencode developer", "agy", "公司 gw"):
+                for name in ("opencode developer", "agy", mon.HOME_GW):
                     self.assertEqual((rows[name].state, rows[name].detail.split("；")[0]),
                                      (mon.UNCHECKED, mon.DISPATCH_PROBLEMS["rejected"]))
 
@@ -5865,9 +5865,9 @@ class OfficeViewTests(unittest.TestCase):
                          (mon.PAUSED, "Owner 暫停派工（10-22）；有 1 個 CLI 開著（非派工）"))
         self.assertIn("opencode cli #1", rows)
         self.assertEqual(rows["agy"].detail, "Owner 暫停派工（10-22）")
-        self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
-        self.assertEqual((rows["公司 gw agent"].state, rows["公司 gw agent"].detail,
-                          rows["公司 gw agent"].authority),
+        self.assertEqual((rows[mon.HOME_GW].state, rows[mon.HOME_GW].detail), (mon.IDLE, "可派工"))
+        self.assertEqual((rows[mon.HOME_GW_AGENT].state, rows[mon.HOME_GW_AGENT].detail,
+                          rows[mon.HOME_GW_AGENT].authority),
                          (mon.PAUSED, "PM 暫停派工（11-03）", "PM"))
         no_cli = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
                                               claude_root=str(self.claude),
