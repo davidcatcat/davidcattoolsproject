@@ -1888,15 +1888,15 @@ def _pr_number(record, requested):
     return claims[-1].get('pr') if claims and type(claims[-1]) is dict else None
 
 
-def _d6_snapshot(record, executor_task):
+def _d6_snapshot(record, executor_task, allow_cwd_fallback=False, cwd=None):
     completion = record.get('completion') or {}
     evidence = completion.get('evidence') or {}
     common_dir = evidence.get('common_dir')
-    if type(common_dir) is not str:
+    if type(common_dir) is not str and allow_cwd_fallback:
         try:
             cmd = ['git', 'rev-parse', '--path-format=absolute', '--git-common-dir']
             proc = subprocess.run(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL, text=True, check=False, timeout=10)
             if proc.returncode == 0 and proc.stdout.strip():
                 common_dir = proc.stdout.strip()
@@ -2336,7 +2336,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     executor_task = active_executor
     number = _pr_number(record, pr_number)
     get = task_completion._github_get if github_get is None else github_get
-    d6 = _d6_snapshot(record, executor_task) if type(executor_task) is str else None
+    d6 = _d6_snapshot(record, executor_task, allow_cwd_fallback=using_executor_task, cwd=cwd) if type(executor_task) is str else None
     if (number is None and type(d6) is dict and d6.get('dirty') is False and
             type(d6.get('root')) is str and d6.get('root') and
             type(d6.get('branch')) is str and d6.get('branch') and

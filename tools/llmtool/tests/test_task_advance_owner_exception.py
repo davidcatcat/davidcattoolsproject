@@ -572,6 +572,59 @@ class TestTaskAdvanceOwnerException(unittest.TestCase):
             self.assertEqual(res["step"], "MERGED")
             self.assertEqual(res["codes"], [])
 
+    def test_ordinary_path_missing_common_dir_d6_binding_unavailable(self):
+        task_id = "task-missing-common-dir"
+        record = {
+            "task_id": task_id,
+            "run_id": "run-dummy-001",
+            "record_sha256": "rec-dummy-sha256",
+            "completion_events": [],
+            "review_repair_claims": [],
+            "review_dispatch_claim": [],
+            "completion": {
+                "executor_task_id": "exec-dummy-001",
+                "evidence": {},
+            },
+        }
+        store = FakeStore(record)
+
+        # 1. _d6_snapshot on ordinary path does not invoke subprocess or fall back to cwd
+        with patch.object(task_advance.subprocess, "run") as mock_subproc:
+            res_d6 = task_advance._d6_snapshot(record, "exec-dummy-001")
+            mock_subproc.assert_not_called()
+            self.assertEqual(res_d6, {"state": "D6_BINDING_UNAVAILABLE", "code": "D6_BINDING_UNAVAILABLE"})
+
+        # 2. advance() without owner-exception (merge=False) does not invoke subprocess and returns D6_BINDING_UNAVAILABLE
+        with patch.object(task_advance.subprocess, "run") as mock_subproc:
+            res_advance = advance(task_id=task_id, store=store, merge=False)
+            mock_subproc.assert_not_called()
+            self.assertEqual(res_advance["step"], "D6_BINDING_UNAVAILABLE")
+            self.assertEqual(res_advance["codes"], ["D6_BINDING_UNAVAILABLE"])
+
+        # 3. advance() without owner-exception (merge=True) does not invoke subprocess and returns MERGE_D6_UNAVAILABLE
+        with patch.object(task_advance.subprocess, "run") as mock_subproc:
+            res_merge = advance(task_id=task_id, store=store, merge=True)
+            mock_subproc.assert_not_called()
+            self.assertEqual(res_merge["step"], "MERGE_REFUSED")
+            self.assertEqual(res_merge["codes"], ["MERGE_D6_UNAVAILABLE"])
+
+        # 4. _d6_snapshot with allow_cwd_fallback=True resolves against cwd
+        fake_proc = subprocess.CompletedProcess(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            0,
+            stdout="/fake/git/common\n",
+            stderr="",
+        )
+        with patch.object(task_advance.subprocess, "run", return_value=fake_proc) as mock_subproc, \
+             patch.object(task_advance.task_completion, "read_d6_registration") as mock_read_reg:
+            mock_read_reg.side_effect = Exception("stop_after_read")
+            res_fallback = task_advance._d6_snapshot(
+                record, "exec-dummy-001", allow_cwd_fallback=True, cwd="/fake/cwd"
+            )
+            mock_subproc.assert_called_once()
+            self.assertEqual(mock_subproc.call_args[1].get("cwd"), "/fake/cwd")
+            self.assertEqual(res_fallback["state"], "D6_BINDING_UNAVAILABLE")
+
     def test_real_default_replacement_map_regression(self):
         dummy_entries = [{"value": "sample-dummy-val-1", "placeholder": "sample-dummy-plc-1"}]
         repo_root = Path(__file__).resolve().parents[3]
