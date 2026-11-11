@@ -5472,6 +5472,8 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
 
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
+    if getattr(args, 'provider', None) == 'company-gw':
+        raise LLMToolError('COMPANY_GW_DIRECT_RETIRED: direct company-gw delegation is retired; use gw-agent (#120)')
     if getattr(args, 'background', False):
         provider = getattr(args, 'provider', None)
         if provider == 'codex' and getattr(args, 'mode', 'proposal') != 'direct':
