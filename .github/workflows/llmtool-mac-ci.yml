@@ -2,8 +2,10 @@ name: llmtool Mac CI
 
 # Feature branches are tested through their pull request, not again on push:
 # a branch push plus its PR used to run the same commit twice (Issue #99).
-# The PM triggers workflow_dispatch after each merge train for main's full
-# suite. pull_request jobs run on macos-15 unless the PR has the mac-ci-intel
+# main's full suite runs on workflow_dispatch from `llmtool ci full-mac-due`
+# (PM sweep, 30-minute quiet period) or a finished merge train (#1485); every
+# job checks out github.sha, the SHA the run reports. pull_request jobs
+# run on macos-15 unless the PR has the mac-ci-intel
 # label, and workflow_dispatch (main full suite) runs on macos-15-intel (#1253,
 # Owner 2026-11-09: the repository is public; the Owner's Mac no longer takes
 # CI jobs). Python
@@ -140,14 +142,15 @@ jobs:
           GH_API_VALUE: ${{ github.token }}
         run: |
           main_sha=$(git rev-parse HEAD)
+          echo "full main suite checkout: $main_sha (run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT)"
           due=$(python3 -I -B tools/llmtool/scripts/ci_mac_full_due.py \
-            --repo "$GITHUB_REPOSITORY" --sha "$main_sha" --event "$GITHUB_EVENT_NAME")
+            --repo "$GITHUB_REPOSITORY" --sha "$main_sha" --event "$GITHUB_EVENT_NAME" --run-id "$GITHUB_RUN_ID")
           if [ "$due" = DUE ]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
             echo "full main suite due at $main_sha"
           elif [ "$due" = SKIP ]; then
             echo 'run=false' >> "$GITHUB_OUTPUT"
-            echo "no new merges since $main_sha"
+            echo "full main suite already passed at $main_sha"
           else
             echo "::error::unexpected full-suite gate result"
             exit 1
