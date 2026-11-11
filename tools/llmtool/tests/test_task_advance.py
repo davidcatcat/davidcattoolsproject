@@ -2762,7 +2762,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 if path.startswith('commits/'):
                     return {'total_count': len(check_runs), 'check_runs': check_runs}
                 if path.endswith('/files?per_page=100'):
-                    return [{'filename': f} for f in (files or ['src/module.py'])]
+                    return [{'filename': f} for f in (files or ['tools/llmtool/llmtool/module.py'])]
                 if path.startswith('pulls/'):
                     return pr
                 return []
@@ -2898,7 +2898,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 if path.startswith('commits/'):
                     return {'total_count': len(checks), 'check_runs': checks}
                 if path.endswith('/files?per_page=100'):
-                    return files if files is not None else [{'filename': 'src/module.py'}]
+                    return files if files is not None else [{'filename': 'tools/llmtool/llmtool/module.py'}]
                 if path.endswith('/comments?per_page=100'):
                     return comments if comments is not None else []
                 if path.startswith('pulls/'):
@@ -2972,7 +2972,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             ('failed check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux 3.14)',
                 'status': 'completed', 'conclusion': 'failure'}]}, 'MERGE_CHECKS_NOT_GREEN'),
             ('missing checks', {'checks': []}, 'MERGE_CHECKS_MISSING'),
-            ('missing required macOS check', {'files': [{'filename': 'src/module.py'}],
+            ('missing required macOS check', {'files': [{'filename': 'tools/llmtool/llmtool/module.py'}],
                 'checks': [{'head_sha': HEAD,
                 'name': 'check (Linux 3.14)', 'status': 'completed', 'conclusion': 'success'}]},
              'MERGE_REQUIRED_CHECK_MISSING'),
