@@ -105,3 +105,85 @@ class MacFullDueCases(unittest.TestCase):
         self.github.finish()
         self.assertEqual(self.sweep(T0 + 4400), due.VERIFIED)
         self.assertEqual(len(self.gh.calls), 2)
+
+    def test_e_same_sha_already_passed_is_not_rerun(self):
+        self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+        self.github.finish()
+        for minute in (35, 60, 600):
+            self.assertEqual(self.sweep(T0 + minute * 60), due.VERIFIED)
+        self.assertEqual(len(self.gh.calls), 1)
+
+    def test_e_success_without_full_shards_is_not_trusted(self):
+        self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+        self.github.finish(jobs=[dict(job, conclusion='skipped') for job in OK_JOBS])
+        self.assertEqual(self.sweep(T0 + 2100), due.DISPATCHED)
+
+    def test_f_failed_full_keeps_fail_raises_alert_and_never_passes(self):
+        self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+        self.github.finish('failure')
+        code, detail = due.request_full(self.gh, '/repo', self.github, now=T0 + 2100)
+        self.assertEqual(code, due.FULL_FAILED)
+        self.assertEqual(detail['alert']['conclusion'], 'failure')
+        self.assertEqual(len(self.gh.calls), 1)
+        self.github.merge('f' * 40, T0 + 2200)
+        code, detail = due.request_full(self.gh, '/repo', self.github, now=T0 + 4000)
+        self.assertEqual((code, detail['alert']['sha']), (due.DISPATCHED, 'a' * 40))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(due.run_ci(None, gh_runner=self.gh, github_get=self.github,
+                                        root='/repo', now=T0 + 4100), 1)
+        self.assertEqual(json.loads(out.getvalue())['code'], due.ACTIVE_RUN)
+
+    def test_j_paused_sweep_resumes_from_github_state(self):
+        self.github.merge('e' * 40, T0)
+        self.assertEqual(self.sweep(T0 + 6 * 3600), due.DISPATCHED)
+        self.assertEqual(self.github.runs[0]['head_sha'], 'e' * 40)
+
+    def test_k_overlapping_sweep_run_is_seen_before_dispatch(self):
+        reads = []
+
+        def other_sweep():
+            reads.append(1)
+            if len(reads) == 2:
+                FakeGh(self.github)('/repo', [])
+        self.github.on_runs = other_sweep
+        self.assertEqual(self.sweep(T0 + 1800), due.ACTIVE_RUN)
+        self.assertEqual(self.gh.calls, [])
+        self.assertEqual(len(self.github.runs), 1)
+
+    def test_l_merge_train_requests_full_at_once_without_duplicate(self):
+        self.github.merge('1' * 40, T0)
+        self.assertEqual(due.request_train_full(self.gh, '/repo', self.github), due.DISPATCHED)
+        self.assertEqual(due.request_train_full(self.gh, '/repo', self.github), due.ACTIVE_RUN)
+        self.github.finish()
+        self.assertEqual(due.request_train_full(self.gh, '/repo', self.github), due.VERIFIED)
+        self.assertEqual(len(self.gh.calls), 1)
+
+    def test_read_or_dispatch_failure_is_an_error_never_queued_or_passed(self):
+        for prefix in ('branches/', 'commits/', 'actions/workflows/'):
+            with self.subTest(prefix=prefix):
+                self.github.fail = prefix
+                self.assertEqual(self.sweep(T0 + 1800), due.UNAVAILABLE)
+        self.github.fail = None
+        self.assertEqual(self.sweep(T0 + 1800), due.DISPATCHED)
+        self.github.finish()
+        self.github.fail = 'actions/runs/'
+        self.assertEqual(self.sweep(T0 + 2100), due.UNAVAILABLE)
+        self.github.fail = None
+        self.github.merge('2' * 40, T0)
+        failing = FakeGh(self.github, returncode=1)
+        self.assertEqual(due.request_full(failing, '/repo', self.github, now=T0 + 1800)[0],
+                         due.DISPATCH_FAILED)
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(due.run_ci(None, gh_runner=failing, github_get=self.github,
+                                        root='/repo', now=T0 + 1800), 2)
+        self.assertIn(due.DISPATCH_FAILED, err.getvalue())
+
+    def test_dispatch_argv_targets_main(self):
+        self.sweep(T0 + 1800)
+        self.assertEqual(self.gh.calls, [['workflow', 'run', 'llmtool-mac-ci.yml', '--ref', 'main']])
+
+
+if __name__ == '__main__':
+    unittest.main()
