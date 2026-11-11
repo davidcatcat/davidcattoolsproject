@@ -728,6 +728,26 @@ class MonitorTaskBaselineTests(unittest.TestCase):
                           lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertIn("OpenCode Task 紀錄讀取失敗，狀態未確認", drawn.values())
 
+    def test_opencode_panel_says_paused_only_for_a_paused_switch(self):
+        # Owner #120 B1: PAUSED reads 已暫停, never no record, read failure or a route outcome.
+        lines = mon.task_lines([], route=(30.0, 4, 0, "無法使用"), route_failed=True,
+                               paused="Owner 暫停派工（11-04）")
+        self.assertEqual(lines, ["OpenCode 已暫停（Owner 暫停派工（11-04））"])
+        task = mon.Task("/tmp/llmtool-x", "t1", "branch", ())
+        self.assertEqual(mon.task_lines([task], paused="PM 暫停派工（11-04）")[:2],
+                         ["OpenCode 已暫停（PM 暫停派工（11-04））", "任務 t1   分支 branch"])
+        self.assertEqual(mon.task_lines([]), ["近 7 天 llmtool Task 紀錄沒有 OpenCode 執行"])
+
+    def test_poll_reads_opencode_pause_from_the_dispatch_switch(self):
+        for value, expected in (("ALLOWED", ""), ("PAUSED", "Owner 暫停派工（11-04）")):
+            raw = json.dumps(policy({"opencode-developer": {
+                "dispatch": value, "decided_at": "2026-11-04"}})).encode()
+            self.monitor.office_due = 0.0
+            with patch.object(mon, "load_dispatch", return_value=(raw, "派工檔")), \
+                 patch.object(mon, "office_rows", return_value=[]):
+                self.poll([])
+            self.assertEqual(self.monitor.opencode_paused, expected)
+
     def test_office_is_rebuilt_at_most_every_office_every_seconds(self):
         with patch.object(mon, "office_rows", return_value=[]) as rows:
             self.poll([])
