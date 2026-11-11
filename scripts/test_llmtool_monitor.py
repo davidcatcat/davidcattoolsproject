@@ -1048,8 +1048,8 @@ class ActivityViewTests(unittest.TestCase):
 
     def test_pm_dispatch_provider_words_issue_and_line_forms(self):
         provider_words = (("codex-cli", "Codex"), ("opencode-cli", "OpenCode"),
-                          ("agy-cli", "AGY"), ("openai-compatible", "公司 gw"),
-                          ("gw-agent-cli", "gw agent"), ("unknown", "Developer"))
+                          ("agy-cli", "AGY"), ("openai-compatible", "home LLM gw"),
+                          ("gw-agent-cli", "home LLM gw-agent"), ("unknown", "Developer"))
         for provider, label in provider_words:
             entry = mon.DispatchRecord(NOW - 60, provider, "965")
             self.assertEqual(mon.pm_dispatch_line(entry, "", NOW),
@@ -3501,7 +3501,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("D6 wp-1", mon._row_detail(row))
         self.assertIn("wp-1", mon._d6_running_tasks(rows))
         # The gw-agent switch is PAUSED in the fixture: its status row stays and says so.
-        status = self.by_name(rows)["公司 gw agent"]
+        status = self.by_name(rows)[mon.HOME_GW_AGENT]
         self.assertIn("有 1 個執行中", status.detail)
         lines = self._gw_view(rows)
         at = next(i for i, line in enumerate(lines) if "gw-agent developer pid 91" in line)
@@ -3534,8 +3534,8 @@ class OfficeViewTests(unittest.TestCase):
         self.assertAlmostEqual(done[0].age, 120, delta=1)
         self.assertIn("已結束", done[0].detail)
         names = self.by_name(rows)
-        self.assertIn("公司 gw", names)          # the status row is back
-        self.assertIn("公司 gw agent", names)
+        self.assertIn(mon.HOME_GW, names)          # the status row is back
+        self.assertIn(mon.HOME_GW_AGENT, names)
         self._gw_view(rows)
 
     def test_finished_gw_agent_run_names_its_task_by_audit_path_digest(self):
@@ -3597,7 +3597,7 @@ class OfficeViewTests(unittest.TestCase):
         live = [row for row in rows if row.name in mon.GW_ROSTER]
         self.assertEqual([(row.state, row.sid) for row in live], [(mon.WORKING, "pid 91")])
         self.assertIn("task 1d091894", mon._row_detail(live[0]))
-        self.assertIn("公司 gw agent", self.by_name(rows))
+        self.assertIn(mon.HOME_GW_AGENT, self.by_name(rows))
 
     def test_no_gw_run_keeps_todays_status_rows(self):
         tasks = Path(self.tmp.name) / "tasks"
@@ -3605,8 +3605,8 @@ class OfficeViewTests(unittest.TestCase):
         rows = self.rows(llmtool_tasks=str(tasks))
         self.assertFalse(any(row.name in mon.GW_ROSTER for row in rows))
         names = self.by_name(rows)
-        self.assertEqual((names["公司 gw"].kind, names["公司 gw"].state), ("worker", mon.IDLE))
-        self.assertEqual((names["公司 gw agent"].kind, names["公司 gw agent"].state),
+        self.assertEqual((names[mon.HOME_GW].kind, names[mon.HOME_GW].state), ("worker", mon.IDLE))
+        self.assertEqual((names[mon.HOME_GW_AGENT].kind, names[mon.HOME_GW_AGENT].state),
                          ("worker", mon.PAUSED))
 
     def test_stale_gw_record_is_not_shown_as_running(self):
@@ -3625,7 +3625,7 @@ class OfficeViewTests(unittest.TestCase):
                 rows = self.rows(processes, llmtool_tasks=str(tasks))
                 self.assertFalse(any(row.name in mon.GW_ROSTER for row in rows))
                 self.assertNotIn("wp-1", mon._d6_running_tasks(rows))
-                self.assertIn("公司 gw", self.by_name(rows))
+                self.assertIn(mon.HOME_GW, self.by_name(rows))
 
     def test_gw_rows_open_no_task_file_and_no_audit_content(self):
         tasks = Path(self.tmp.name) / "tasks"
@@ -5765,14 +5765,14 @@ class OfficeViewTests(unittest.TestCase):
         app = mon.Process(5, 1, 5, "2-00:00:00", "S", "Antigravity App (AGY)", "Antigravity", "")
         agy = self.by_name(self.rows([app]))["agy"]
         self.assertEqual((agy.state, agy.detail), (mon.PAUSED, "Owner 暫停派工（10-22）；App 開著"))
-        self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
+        self.assertEqual((rows[mon.HOME_GW].state, rows[mon.HOME_GW].detail), (mon.IDLE, "可派工"))
         self.assertIsNone(rows["agy"].age)
 
     def test_missing_or_invalid_dispatch_says_it_cannot_tell_and_never_falls_back(self):
         (Path(self.canonical) / "tools" / "llmtool" / "worker-dispatch.json").unlink()
         mon._dispatch_cache.clear()
         rows = self.by_name(self.rows())
-        for name in ("opencode developer", "agy", "公司 gw"):
+        for name in ("opencode developer", "agy", mon.HOME_GW):
             self.assertEqual((rows[name].state, rows[name].detail.split("；")[0]),
                              (mon.UNCHECKED, mon.DISPATCH_PROBLEMS["missing"]))
         self._write_dispatch({}, raw="{not json")
@@ -5784,7 +5784,7 @@ class OfficeViewTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 self._write_dispatch(bad)
                 rows = self.by_name(self.rows())
-                for name in ("opencode developer", "agy", "公司 gw"):
+                for name in ("opencode developer", "agy", mon.HOME_GW):
                     self.assertEqual((rows[name].state, rows[name].detail.split("；")[0]),
                                      (mon.UNCHECKED, mon.DISPATCH_PROBLEMS["rejected"]))
 
@@ -5865,9 +5865,9 @@ class OfficeViewTests(unittest.TestCase):
                          (mon.PAUSED, "Owner 暫停派工（10-22）；有 1 個 CLI 開著（非派工）"))
         self.assertIn("opencode cli #1", rows)
         self.assertEqual(rows["agy"].detail, "Owner 暫停派工（10-22）")
-        self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
-        self.assertEqual((rows["公司 gw agent"].state, rows["公司 gw agent"].detail,
-                          rows["公司 gw agent"].authority),
+        self.assertEqual((rows[mon.HOME_GW].state, rows[mon.HOME_GW].detail), (mon.IDLE, "可派工"))
+        self.assertEqual((rows[mon.HOME_GW_AGENT].state, rows[mon.HOME_GW_AGENT].detail,
+                          rows[mon.HOME_GW_AGENT].authority),
                          (mon.PAUSED, "PM 暫停派工（11-03）", "PM"))
         no_cli = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
                                               claude_root=str(self.claude),
@@ -5885,7 +5885,7 @@ class OfficeViewTests(unittest.TestCase):
                                             claude_root=str(self.claude),
                                             canonical=self.canonical, opencode_db="/nonexistent",
                                             cwd_of=lambda pid: None, dispatch=switches))
-        row = rows["公司 gw agent"]
+        row = rows[mon.HOME_GW_AGENT]
         self.assertEqual((row.state, row.detail, row.authority), (mon.IDLE, "可派工", "Owner"))
         # Any other comment on #120 fails closed for every Worker.
         other = self._dispatch({"company-gw-agent": dict(
@@ -5894,8 +5894,8 @@ class OfficeViewTests(unittest.TestCase):
                                             claude_root=str(self.claude),
                                             canonical=self.canonical, opencode_db="/nonexistent",
                                             cwd_of=lambda pid: None, dispatch=other))
-        self.assertEqual(rows["公司 gw agent"].state, mon.UNCHECKED)
-        self.assertEqual(rows["公司 gw"].state, mon.UNCHECKED)
+        self.assertEqual(rows[mon.HOME_GW_AGENT].state, mon.UNCHECKED)
+        self.assertEqual(rows[mon.HOME_GW].state, mon.UNCHECKED)
 
     def test_company_gw_row_reads_llmtool_outcomes_never_request_or_response(self):
         tasks = Path(tempfile.mkdtemp(dir=self.tmp.name))
@@ -5914,7 +5914,7 @@ class OfficeViewTests(unittest.TestCase):
                                             claude_root=str(self.claude),
                                             canonical=self.canonical, opencode_db="/nonexistent",
                                             cwd_of=lambda pid: None, llmtool_tasks=str(tasks)))
-        gw = rows["公司 gw"]
+        gw = rows[mon.HOME_GW]
         self.assertEqual(gw.detail, "可派工；本機 llmtool 紀錄（不分 repo）最近一次：輸出被拒"
                                     "（回應格式錯誤）（近 7 天 2 次，成功 0 次）")
         self.assertEqual((gw.age, gw.state), (3600.0, mon.ATTENTION))

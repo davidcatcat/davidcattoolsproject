@@ -3749,7 +3749,7 @@ class TaskCompletionTests(unittest.TestCase):
 
     def test_mixed_or_empty_paths_keep_full_code_ci_requirements(self):
         result_sha = 'a' * 40
-        for changed_paths in (['docs/guide.md', 'src/code.py'], []):
+        for changed_paths in (['docs/guide.md', 'tools/llmtool/llmtool/code.py'], []):
             with self.subTest(changed_paths=changed_paths):
                 self.assertFalse(task_completion._docs_only_ci(changed_paths))
                 api = self._github_response_sequence(result_sha, {}, [], {
