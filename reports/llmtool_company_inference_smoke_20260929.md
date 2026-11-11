@@ -8,7 +8,7 @@
 
 - `tools/llmtool/.venv/bin/llmtool` was initially absent in the clean main worktree. A local venv was created and `pip install -e tools/llmtool` succeeded.
 - `llmtool --version` returned `0.1.0`; `llmtool providers` listed `openai-compatible`.
-- Inference used a newly created temporary HOME, not the real user HOME or config. The temporary profile was `company-qwen`, type `openai-compatible`, base URL `http://10.29.7.58:4000`, model `gw`, timeout 30 seconds, no API key or key environment variable, and `enable_thinking: false`.
+- Inference used a newly created temporary HOME, not the real user HOME or config. The temporary profile was `company-qwen`, type `openai-compatible`, base URL `http://192.0.2.10:4000`, model `gw`, timeout 30 seconds, no API key or key environment variable, and `enable_thinking: false`.
 - Redacted `config show` matched the requested profile. The temporary HOME was removed after testing.
 
 ## Inference results
@@ -21,7 +21,7 @@
 | Reasoning leak | **NO** | No reasoning fields or reasoning content appeared in stdout/stderr. |
 | Prompt echo | **NO** | Full prompt was not echoed. |
 | Credential leak | **NO** | No credential was configured, read, or emitted. |
-| VPN route | **PASS** | Route to `10.29.7.58` used interface `utun4`; gateway was present (`10.123.144.1`). |
+| VPN route | **PASS** | Route to `192.0.2.10` used interface `utun4`; gateway was present (`10.123.144.1`). |
 | Company `/v1/models` | **PASS (prior probe)** | Earlier VPN ON connectivity probe in this conversation returned HTTP 200 and valid model/route JSON. |
 
 ## Overall

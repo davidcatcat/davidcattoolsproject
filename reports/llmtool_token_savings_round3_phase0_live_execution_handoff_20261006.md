@@ -70,7 +70,7 @@ Any drift is a hard STOP before network.
 ## Provider contract
 
 Endpoint:
-`http://10.29.7.58:4000/v1/chat/completions`
+`http://192.0.2.10:4000/v1/chat/completions`
 
 Model route:
 `gw`
