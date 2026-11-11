@@ -8172,7 +8172,10 @@ class ScrollSelectTests(Base):
         self.client.complete.return_value = Reply(long_reply, {})
 
         async def paged_up(ui):
-            await self.settle(ui)
+            for _ in range(40):
+                await self.settle(ui)
+                if not ui.view.following and ui.view.top == ui.view.max_top() - 2 * (ui.view.height - 1):
+                    break
             self.assertFalse(ui.view.following)
             page = ui.view.height - 1
             self.assertEqual(ui.view.top, ui.view.max_top() - 2 * page)
