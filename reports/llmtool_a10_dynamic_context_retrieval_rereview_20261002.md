@@ -11,7 +11,7 @@
 - 方式：
   - **唯讀**，在 canonical repo 進行。canonical repo 當時就 checkout 在這個分支，review 時沒有切換分支，也沒有使用 worktree、clone 或專案副本。
   - 逐行閱讀 `8066049..9543f36` 的程式 diff。
-  - 以暫存 HOME 與公司 gateway profile 實測：`http://10.29.7.58:4000`，route `gw`，`enable_thinking: false`，共 7 次呼叫。
+  - 以暫存 HOME 與公司 gateway profile 實測：`http://192.0.2.10:4000`，route `gw`，`enable_thinking: false`，共 7 次呼叫。
   - fixture 放在 scratchpad：`app/big.log` 340,025 B、`app/diagram.png`、`app/color.log`（ANSI）、`app/plain.log`、`app/libfoo.so`、`app/cache.bin`。另有一個未設定完成的 profile `broken`。
 
 ## 結論：APPROVE（可以 merge）

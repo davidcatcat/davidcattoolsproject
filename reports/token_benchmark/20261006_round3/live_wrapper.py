@@ -22,7 +22,7 @@ if str(ROOT / 'tools/llmtool') not in sys.path:
     sys.path.insert(0, str(ROOT / 'tools/llmtool'))
 import format_probe as probe
 
-ENDPOINT = 'http://10.29.7.58:4000/v1/chat/completions'
+ENDPOINT = 'http://192.0.2.10:4000/v1/chat/completions'
 FIELDS = frozenset(('model', 'temperature', 'max_tokens', 'messages', 'chat_template_kwargs'))
 GOLD_SHA = '0e54eb372345ba64105512744c09a7cb60027fbebeebd04fd7834f51bbf2e8d8'
 FROZEN = HERE.parent / '20261006_round2/stage_a'
@@ -35,7 +35,7 @@ CONFIG = b'''active_provider: company-round3-phase0
 providers:
   company-round3-phase0:
     type: openai-compatible
-    base_url: http://10.29.7.58:4000
+    base_url: http://192.0.2.10:4000
     model: gw
     timeout_seconds: 120
     api_key: null

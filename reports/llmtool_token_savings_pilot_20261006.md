@@ -117,7 +117,7 @@ no prior conversation/session context or opposite-variant answer was supplied.
 
 Safe `llmtool config show` projection found only the existing `default` profile,
 `openai-compatible`, with no configured endpoint/model. The user then explicitly
-**authorized `default` plus CLI overrides**, `--base-url http://10.29.7.58:4000
+**authorized `default` plus CLI overrides**, `--base-url http://192.0.2.10:4000
 --model gw`, without configuration mutation. This resolves the profile prerequisite
 for this run; it does not pretend a persisted company profile existed.
 
@@ -150,7 +150,7 @@ provider fallback, active-profile switch, or config write was performed.
 - B02 manual retry: same input/profile/model/skill, `--max-tokens 8192`.
 - B03 initial only: `context-pack --json --verbose --timeout 60 --max-tokens 8192`.
 - All commands also used the explicitly authorized `--provider default --base-url
-  http://10.29.7.58:4000 --model gw --file <same-fixture>`.
+  http://192.0.2.10:4000 --model gw --file <same-fixture>`.
 - Successful provider metadata reported model **`qwen3.6-35b-a3b`**, separately from
   requested route/model `gw`.
 - Counts: **5 attempts = 3 successes + 2 failures; 2 manual retries; 0 automated

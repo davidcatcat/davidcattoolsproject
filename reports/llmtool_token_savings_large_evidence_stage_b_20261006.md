@@ -56,7 +56,7 @@ The first Stage-B background references the last recorded Stage-A session; this 
 
 ## Company phase and actual Request proof
 
-One live llmtool `ask --skill test-triage --provider company-round2 --file <bounded synthetic input> --verbose`, invoked through its official `llmtool.entrypoint.main` under the canonical venv. Isolated temporary HOME/config exactly matches preregistration: openai-compatible, `http://10.29.7.58:4000`, model gw, timeout 120, null key/key-env, enable_thinking=false, temperature 0, max_tokens 4096.
+One live llmtool `ask --skill test-triage --provider company-round2 --file <bounded synthetic input> --verbose`, invoked through its official `llmtool.entrypoint.main` under the canonical venv. Isolated temporary HOME/config exactly matches preregistration: openai-compatible, `http://192.0.2.10:4000`, model gw, timeout 120, null key/key-env, enable_thinking=false, temperature 0, max_tokens 4096.
 
 The unchanged Stage-A narrow observer checks the actual outgoing Request and delegates unchanged to the original opener. It proved **chat_template_kwargs.enable_thinking=false**, model=gw, temperature=0, max_tokens=4096 and **no Authorization**. No direct curl/mock transport, raw-response inspection or config/credential mutation. VPN route used utun4. Synthetic data permission is explicit in this benchmark task.
 

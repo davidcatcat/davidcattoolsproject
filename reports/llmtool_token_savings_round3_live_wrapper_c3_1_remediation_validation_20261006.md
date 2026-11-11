@@ -122,7 +122,7 @@ are unchanged. After committing, the new manifest was loaded through
 each captured **one** real constructed Request, with **zero network calls and zero
 socket opens**. Freeze facts matched both starting-head and new manifests exactly.
 
-The endpoint `10.29.7.58:4000` was **not accessed**. These are offline Request
+The endpoint `192.0.2.10:4000` was **not accessed**. These are offline Request
 construction/fake-response tests, not successful Company inference attempts.
 
 ## Exact-head Python 3.9 results

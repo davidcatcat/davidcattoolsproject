@@ -374,7 +374,7 @@ def observe_request_without_mutation(request):
         raise ValueError('REQUEST_OBSERVER_CONTRACT_FAILURE')
     headers = request.header_items()
     checks = {
-        'url': request.full_url == 'http://10.29.7.58:4000/v1/chat/completions',
+        'url': request.full_url == 'http://192.0.2.10:4000/v1/chat/completions',
         'method': request.get_method() == 'POST',
         'enable_thinking': body.get('chat_template_kwargs') == {'enable_thinking': False}
         and body.get('chat_template_kwargs', {}).get('enable_thinking') is False,
