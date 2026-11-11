@@ -960,12 +960,12 @@ class ActivityViewTests(unittest.TestCase):
             marker = mon.ActivityEvent(now - 12 * 60, "developer_dispatch", "", "",
                                        "ASSIGNED", "#763", actor="PM", target="AGY")
             lines = mon.activity_lines([], github=Source([marker]), tasks_root=tasks)
-            self.assertEqual(lines[0], "PM 上次派工：12 分鐘前（→ AGY，#763）")
+            self.assertEqual(lines[0], "PM 上次派工：12 分鐘前（→ AGY，#763，Task aaaaaaaa）")
 
             stale_tasks = Path(tasks) / "stale"
             self._dispatch_record(stale_tasks, "b" * 32, created=now - 31 * 60)
             lines = mon.activity_lines([], github=Source([]), tasks_root=str(stale_tasks))
-            self.assertEqual(lines[0], "⚠ PM 上次派工：31 分鐘前；超過 30 分鐘沒有派工（→ AGY，#763）")
+            self.assertEqual(lines[0], "⚠ PM 上次派工：31 分鐘前；超過 30 分鐘沒有派工（→ AGY，#763，Task bbbbbbbb）")
 
             lines = mon.activity_lines([], github=Source([]), tasks_root=str(Path(tasks) / "empty"))
             self.assertEqual(lines[0], "⚠ PM 上次派工：本機紀錄沒有派工")
@@ -1016,7 +1016,7 @@ class ActivityViewTests(unittest.TestCase):
             self.assertEqual(
                 mon.activity_lines([], github=Source([newer_marker]),
                                    tasks_root=tasks)[0],
-                "PM 上次派工：12 分鐘前（→ Codex，#763）")
+                "PM 上次派工：12 分鐘前（→ Codex，#763，Task cccccccc）")
 
     def test_pm_dispatch_accepted_states_refused_states_newest_and_future(self):
         with tempfile.TemporaryDirectory() as tasks:
@@ -1210,7 +1210,7 @@ class ActivityViewTests(unittest.TestCase):
             "state": "DEVELOPER_DISPATCHING", "created_at": "2026-01-01T00:00:00Z",
             "provider_type": 7}, "request": "ordinary task"})
         self.assertEqual(no_issue, mon.DispatchRecord(mon._remote_test_time("2026-01-01T00:00:00Z"),
-                                                       "", ""))
+                                                       "", "", "a" * 32))
 
     def test_curses_activity_header_stays_visible_above_bottom_anchored_events(self):
         class Source:
