@@ -985,7 +985,6 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         from . import owner_exception as owner_exception_mod
         v_code, v_evidence = owner_exception_mod.verify(
             owner_exception, number, github_get,
-            replacement_map=owner_exception_mod.default_replacement_map(),
         )
         if v_code is not None:
             return _merge_refusal(v_code)

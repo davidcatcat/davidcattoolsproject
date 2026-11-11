@@ -1,7 +1,11 @@
 """Tests for task advance owner exception handling under issue #1253."""
 
 import io
+import json
+import os
 import subprocess
+import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 from argparse import Namespace
@@ -54,7 +58,7 @@ def _base_record(task_id, head):
         },
         "completion_events": [],
         "review_repair_claims": [],
-        "review_claims": [],
+        "review_dispatch_claim": [],
     }
 
 
@@ -335,7 +339,7 @@ class TestTaskAdvanceOwnerException(unittest.TestCase):
 
             # 2. Ordinary merge with PASS succeeds without review_exception
             record_with_pass = _base_record(task_id, head)
-            record_with_pass["review_claims"] = [
+            record_with_pass["review_dispatch_claim"] = [
                 {
                     "pr": number,
                     "head_sha": head,
@@ -376,6 +380,22 @@ class TestTaskAdvanceOwnerException(unittest.TestCase):
             comment_body = comment_calls[0][1][body_idx]
             self.assertNotIn("OWNER_EXCEPTION_DETERMINISTIC_REDACTION", comment_body)
             self.assertIn("review_version=1", comment_body)
+
+    def test_real_default_replacement_map_regression(self):
+        dummy_entries = [{"value": "sample-dummy-val-1", "placeholder": "sample-dummy-plc-1"}]
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
+            json.dump(dummy_entries, tf)
+            temp_path = tf.name
+
+        try:
+            os.chmod(temp_path, 0o600)
+            with patch.dict(os.environ, {"LLMTOOL_REDACT_MAP": temp_path}):
+                result = owner_exception.default_replacement_map()
+            self.assertEqual(result, [("sample-dummy-val-1", "sample-dummy-plc-1")])
+            self.assertIn("_llmtool_redact_known_values", sys.modules)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
 
 if __name__ == "__main__":
