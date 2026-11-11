@@ -41,9 +41,9 @@ split and assign agents; **llmtool** performs authorized deterministic
 Provider/Worker invocation, policy, state, evidence and events, **not**
 complex AI-driven task planning. The local one-time owner handoff -> Worker
 completion -> same Integrator wake is an unverified M2 product target.
-Company gw remains an API-only advisory Provider with quality- and
-egress-gated, task-specific net premium-Token measurements; unknown cost
-and usage remain UNKNOWN.
+The home LLM is used only through the API Agent Gateway route `gw-agent`;
+the direct and proposal `company-gw` routes are retired and refused
+(Owner 2026-11-11, #120). Unknown cost and usage remain UNKNOWN.
 
 **D-007 mobile parallel development:** while away from the Mac, the owner
 can start a separate Codex Cloud task from ChatGPT mobile after the
@@ -150,7 +150,7 @@ are never treated as the same claim.
 | A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49 and sealed F1 PR #84 DONE/merged** | F2 real user-repo mutation NOT AUTHORIZED; next separate Security-reviewed F2 and A11b.3 approval design |
 | A11c — Integration & Real-world Acceptance | **S1a DONE/MERGED; S1b A MERGED; B1 candidate** | S1a product accepted via PR #128; S1b contract merged via PR #129; B production attestation/grant/route gates remain required; full production integration/real task acceptance NOT STARTED; no blanket company-first policy |
 
-### Company-LLM routing evidence after Round 3
+### Home LLM routing evidence after Round 3
 
 Round 3 is closed as an experiment record; PR #38 is merged. P1 from PR #39 is also
 merged and preserves a validated `prompt_tokens/completion_tokens/total_tokens` triplet
@@ -752,13 +752,14 @@ UUID and directory, and `task show` lists `pm_recovery` (`claude --resume SESSIO
 in that directory). The file check shows the session exists locally; it does not prove the
 caller is that session.
 
-### Bounded company Developer proposal and D6 completion evidence
+### Developer proposals (company-gw retired) and D6 completion evidence
 
-`task delegate` can request a bounded company-gw code proposal for a PM-assigned
-low-risk task. It reads the current root, branch, source HEAD and Executor identity
-from the registered D6 record; do not supply a SHA as an identity claim. The
-company provider returns a diff proposal only. An already authorized Executor
-must apply it and run the allowed checks in its registered worktree.
+The `company-gw` code proposal route is retired (Owner 2026-11-11, #120):
+`task delegate --provider company-gw` is refused with `COMPANY_GW_DIRECT_RETIRED`
+before any Task store write; home LLM work runs only through `gw-agent`.
+The retired route read the root, branch, source HEAD and Executor identity from
+the registered D6 record and returned a diff proposal only; an authorized
+Executor applied it and ran the allowed checks.
 
 For `task delegate --provider codex`, llmtool resolves the explicitly configured
 `codex-developer` profile (`type: codex-cli`) and records that profile's model. It never uses

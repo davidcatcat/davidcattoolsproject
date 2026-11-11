@@ -1094,21 +1094,21 @@ class ActivityViewTests(unittest.TestCase):
             for index in range(31):
                 self._plain_task_file(tasks, f"plain-{index}", NOW - 490 + index)
             entry, problem = mon.pm_last_dispatch(NOW, tasks)
-            self.assertEqual(entry.created, NOW - 700)
-            self.assertEqual(problem, "task 僅讀最近 32 筆，上次派工未確認")
+            self.assertEqual(entry.created, NOW - 700)   # an older file is not read
+            self.assertEqual(problem, "")
             work = mon.WorkBoard(owner=[], running=[], queue=[object()], blocked=[], done=[],
                                  github_known=True, board_known=True, github_status="",
                                  board_status="ok", board_age=0, skipped=0)
             line, style = mon.pm_progress_line(
                 work, (entry, problem), NOW)
-            self.assertIn("上次派工 ?", line)
+            self.assertIn("上次派工 11 分鐘前", line)
             self.assertEqual(style, "")
 
     def test_pm_last_dispatch_window_boundaries_and_no_dispatch(self):
         with tempfile.TemporaryDirectory() as tasks:
             dispatch = self._dispatch_record(tasks, "3" * 32, created=NOW - 100)
             os.utime(dispatch, (NOW - 200, NOW - 200))
-            for index in range(mon.REMOTE_TEST_FILES - 1):
+            for index in range(mon.REMOTE_TEST_FILES + 8):   # newer review Tasks (#120 B2)
                 self._plain_task_file(tasks, f"plain-{index}", NOW - 199 + index)
             entry, problem = mon.pm_last_dispatch(NOW, tasks)
             self.assertEqual(problem, "")
@@ -1128,8 +1128,8 @@ class ActivityViewTests(unittest.TestCase):
                 self._plain_task_file(tasks, f"plain-{index}", NOW - 100 + index)
             entry, problem = mon.pm_last_dispatch(NOW, tasks)
             self.assertIsNone(entry)
-            self.assertEqual(problem, "task 僅讀最近 32 筆，上次派工未確認")
-            self.assertNotIn("沒有派工", mon.pm_dispatch_line(entry, problem, NOW))
+            self.assertEqual(problem, "")   # every file read: no record, not a read failure
+            self.assertIn("沒有派工", mon.pm_dispatch_line(entry, problem, NOW))
 
         with tempfile.TemporaryDirectory() as tasks:
             for index in range(mon.REMOTE_TEST_FILES - 1):
