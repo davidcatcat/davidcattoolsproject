@@ -413,5 +413,14 @@ class TestTaskAdvanceOwnerException(unittest.TestCase):
                 os.remove(temp_path)
 
 
+class TestOwnerExceptionExecutorTask(unittest.TestCase):
+    def test_executor_task_without_merge_or_exception_refused(self):
+        store = FakeStore(_base_record("task-exec-1", "a" * 40))
+        for merge, url in ((False, "https://github.com/example/repo/issues/1253#issuecomment-6788268483"), (True, None)):
+            res = advance(task_id="task-exec-1", store=store, merge=merge,
+                          owner_exception=url, executor_task="d6-pm-1")
+            self.assertEqual(res["step"], "REFUSED")
+            self.assertEqual(res["codes"], ["OWNER_EXCEPTION_EXECUTOR_REQUIRES_EXCEPTION"])
+
 if __name__ == "__main__":
     unittest.main()
