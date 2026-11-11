@@ -906,21 +906,21 @@ class CanonicalStepStructureTests(unittest.TestCase):
         self.assertIn("needs: [select, shards]", workflow_text)
         self.assertEqual(workflow_text.count("name: check (macOS 3.13)"), 1)
 
-    def test_concurrency_block_placement_on_select_job_only(self):
+    def test_concurrency_block_at_workflow_level(self):
         workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-        self.assertNotIn("concurrency", workflow)
-        jobs = workflow.get("jobs", {})
-        select_job = jobs.get("select", {})
-        self.assertIn("concurrency", select_job)
-        select_concurrency = select_job.get("concurrency", {})
+        self.assertIn("concurrency", workflow)
+        workflow_concurrency = workflow.get("concurrency", {})
         expected_group = (
             "${{ github.workflow }}-${{ "
             "github.event_name == 'workflow_dispatch' && 'full-main' "
             "|| format('{0}-{1}', github.event_name, github.ref) }}"
         )
         expected_cancel = "${{ github.event_name != 'workflow_dispatch' }}"
-        self.assertEqual(select_concurrency.get("group"), expected_group)
-        self.assertEqual(select_concurrency.get("cancel-in-progress"), expected_cancel)
+        self.assertEqual(workflow_concurrency.get("group"), expected_group)
+        self.assertEqual(workflow_concurrency.get("cancel-in-progress"), expected_cancel)
+        jobs = workflow.get("jobs", {})
+        select_job = jobs.get("select", {})
+        self.assertNotIn("concurrency", select_job)
         check_job = jobs.get("check", {})
         self.assertNotIn("concurrency", check_job)
 

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import types
 import unittest
+import yaml
 
 from llmtool.mac_full_suite import (
     MAC_FULL_SUITE_ALREADY_QUEUED,
@@ -195,6 +197,109 @@ class TestMacFullSuite(unittest.TestCase):
                          MAC_FULL_SUITE_STATE_UNAVAILABLE)
         self.assertEqual(runner.calls, [])
         self.assertEqual(github_get.calls, [])
+
+    def test_consecutive_merges(self) -> None:
+        """Consecutive merges: first dispatches, later ones while queued skip."""
+        runner = FakeRunner(returncode=0)
+        # First merge: no runs are queued or running yet.
+        github_get_empty = FakeGithubGet(response={'workflow_runs': []})
+        result1 = request_full_suite(runner, '/repo/root', github_get_empty)
+        self.assertEqual(result1, MAC_FULL_SUITE_DISPATCHED)
+        self.assertEqual(runner.calls, [('/repo/root', _EXPECTED_ARGV)])
+
+        # Later merge while the run is queued: skips.
+        runner.calls.clear()
+        github_get_queued = FakeGithubGet(response={'workflow_runs': [
+            {'status': 'queued'},
+        ]})
+        result2 = request_full_suite(runner, '/repo/root', github_get_queued)
+        self.assertEqual(result2, MAC_FULL_SUITE_ALREADY_QUEUED)
+        self.assertEqual(runner.calls, [])
+
+        # Another merge while waiting/pending/requested: also skips.
+        for queued_status in ('waiting', 'pending', 'requested'):
+            with self.subTest(status=queued_status):
+                github_get_waiting = FakeGithubGet(response={'workflow_runs': [
+                    {'status': queued_status},
+                ]})
+                result = request_full_suite(runner, '/repo/root', github_get_waiting)
+                self.assertEqual(result, MAC_FULL_SUITE_ALREADY_QUEUED)
+                self.assertEqual(runner.calls, [])
+
+    def test_main_moves_while_run_in_progress(self) -> None:
+        """Main moves while a run is in progress: one dispatch, then skip while pending."""
+        runner = FakeRunner(returncode=0)
+        # Main moves while a run is in progress: dispatch one run.
+        github_get_in_progress = FakeGithubGet(response={'workflow_runs': [
+            {'status': 'in_progress'},
+        ]})
+        result1 = request_full_suite(runner, '/repo/root', github_get_in_progress)
+        self.assertEqual(result1, MAC_FULL_SUITE_DISPATCHED)
+        self.assertEqual(runner.calls, [('/repo/root', _EXPECTED_ARGV)])
+
+        # Main moves again while the dispatched run is now pending: skip.
+        runner.calls.clear()
+        github_get_pending = FakeGithubGet(response={'workflow_runs': [
+            {'status': 'pending'},
+            {'status': 'in_progress'},
+        ]})
+        result2 = request_full_suite(runner, '/repo/root', github_get_pending)
+        self.assertEqual(result2, MAC_FULL_SUITE_ALREADY_QUEUED)
+        self.assertEqual(runner.calls, [])
+
+    def test_cancelled_and_failed_runs_ignored(self) -> None:
+        """Cancelled and failed runs are ignored and do not block dispatch."""
+        runner = FakeRunner(returncode=0)
+        github_get = FakeGithubGet(response={'workflow_runs': [
+            {'status': 'completed', 'conclusion': 'cancelled'},
+            {'status': 'completed', 'conclusion': 'failure'},
+            {'status': 'cancelled'},
+            {'status': 'failure'},
+        ]})
+        result = request_full_suite(runner, '/repo/root', github_get)
+        self.assertEqual(result, MAC_FULL_SUITE_DISPATCHED)
+        self.assertEqual(runner.calls, [('/repo/root', _EXPECTED_ARGV)])
+
+    def test_dispatch_failure_returns_dispatch_failed(self) -> None:
+        """Dispatch failure from runner exit non-zero or exception returns DISPATCH_FAILED."""
+        runner_exit_nonzero = FakeRunner(returncode=1)
+        github_get = FakeGithubGet(response={'workflow_runs': []})
+        result1 = request_full_suite(runner_exit_nonzero, '/repo/root', github_get)
+        self.assertEqual(result1, MAC_FULL_SUITE_DISPATCH_FAILED)
+
+        runner_exception = FakeRunner(raise_exc=RuntimeError('runner failed'))
+        result2 = request_full_suite(runner_exception, '/repo/root', github_get)
+        self.assertEqual(result2, MAC_FULL_SUITE_DISPATCH_FAILED)
+
+    def test_workflow_concurrency_configuration(self) -> None:
+        """Assert workflow top-level concurrency and that job select has no concurrency."""
+        repo_root = Path(__file__).resolve().parents[3]
+        workflow_path = repo_root / '.github' / 'workflows' / 'llmtool-mac-ci.yml'
+        self.assertTrue(workflow_path.is_file(), f'Workflow file missing: {workflow_path}')
+
+        with open(workflow_path, 'r', encoding='utf-8') as f:
+            workflow_content = f.read()
+
+        # Check top comments mention one running plus one pending full-main run (#1485)
+        self.assertIn('one running plus one pending full-main run (#1485)', workflow_content)
+
+        workflow = yaml.safe_load(workflow_content)
+        self.assertIsInstance(workflow, dict)
+
+        concurrency = workflow.get('concurrency')
+        self.assertIsInstance(concurrency, dict, 'Workflow must have top-level concurrency')
+        expected_group = (
+            "${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && "
+            "'full-main' || format('{0}-{1}', github.event_name, github.ref) }}"
+        )
+        self.assertEqual(concurrency.get('group'), expected_group)
+        self.assertEqual(
+            concurrency.get('cancel-in-progress'),
+            "${{ github.event_name != 'workflow_dispatch' }}"
+        )
+
+        select_job = workflow.get('jobs', {}).get('select', {})
+        self.assertNotIn('concurrency', select_job, 'Job select must have no concurrency key')
 
 
 if __name__ == '__main__':
