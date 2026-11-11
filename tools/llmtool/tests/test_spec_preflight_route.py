@@ -88,6 +88,16 @@ class RouteTierTests(unittest.TestCase):
         status, output = self._run_main(spec, [])
         self.assertEqual((status, output), (0, "SPEC_PREFLIGHT_OK:tier=1,current=1\n"))
 
+    def test_newest_row_per_task_counts(self):
+        # Retries of one task count once: only the newest row is used.
+        rows = [dict(self.row(1, 'FAILED'), task='t1'), dict(self.row(1, 'SOLVED'), task='t1')]
+        self.assertEqual(ladder_tier(rows), (1, 1, False))
+
+    def test_correction_and_note_rows_are_ignored(self):
+        solved = [dict(self.row(1, 'SOLVED'), task='t%d' % i) for i in range(2)]
+        extra = [dict(self.row(1, 'SOLVED'), kind=k) for k in ('CORRECTION x', 'note y')]
+        self.assertEqual(ladder_tier(solved + extra), (1, 2, False))
+
 
 if __name__ == "__main__":
     unittest.main()

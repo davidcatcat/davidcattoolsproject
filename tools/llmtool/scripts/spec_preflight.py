@@ -90,6 +90,10 @@ def ladder_tier(entries, max_tier=LADDER_MAX_TIER, route=None):
     'gw-agent' counts only rows whose tier is '<route>-N'.
     """
     tier, streak, failures = 1, 0, 0
+    # Count only the newest real row per task; CORRECTION and note rows are annotations.
+    kept = [e for e in entries if isinstance(e, dict) and not str(e.get("kind", "")).startswith(("CORRECTION", "note"))]
+    last = {e.get("task"): i for i, e in enumerate(kept) if e.get("task")}
+    entries = [e for i, e in enumerate(kept) if not e.get("task") or last[e.get("task")] == i]
     for entry in entries:
         if not isinstance(entry, dict):
             continue
