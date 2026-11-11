@@ -7102,6 +7102,7 @@ class DispatchRecord:
     created: float
     provider: str
     issue: str
+    task: str = ""   # Owner #120 B2: the dispatched Task
 
 
 def _dispatch_entry(record) -> DispatchRecord | None:
@@ -7122,7 +7123,7 @@ def _dispatch_entry(record) -> DispatchRecord | None:
     provider = provider if type(provider) is str else ""
     request = record.get("request")
     found = CODEX_WORK_ISSUE.match(request) if type(request) is str else None
-    return DispatchRecord(created, provider, found.group(1) if found else "")
+    return DispatchRecord(created, provider, found.group(1) if found else "", task)
 
 
 def _task_load(path: str, budget: int):
@@ -7257,7 +7258,7 @@ def pm_dispatch_line(entry: DispatchRecord | None, problem: str, now: float) -> 
     line += f"（→ {provider}"
     if entry.issue:
         line += f"，#{entry.issue}"
-    return line + "）"
+    return line + (f"，Task {entry.task[:8]}" if entry.task else "") + "）"
 
 
 def _codex_work_entry(record) -> CodexWork | None:
