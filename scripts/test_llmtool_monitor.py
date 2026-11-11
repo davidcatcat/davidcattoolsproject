@@ -5925,12 +5925,12 @@ class OfficeViewTests(unittest.TestCase):
             "%Y-%m-%dT%H:%M:%S" + (".000000Z" if micro else "Z"))
 
     def test_ec2_worker_running_remote_test_shows_task_sha_and_modules_from_argv(self):
-        host_words = ("ec2-user", "52.221.189.89", "example-host", "/srv/repo", "RAW-ARGV-SECRET")
+        host_words = ("ec2-user", "198.51.100.20", "example-host", "/srv/repo", "RAW-ARGV-SECRET")
         snap = mon.parse_processes(ps(
             f"  10     1    10   02:05 S    python3 -I -m llmtool task remote-test {self.TASK} "
             f"--executor-task wp-1 --sha {self.SHA} --ref RAW-ARGV-SECRET "
             "--module test_remote_test --module=test_task_store",
-            f"  11    10    10   02:04 S    ssh -o BatchMode=yes ec2-user@52.221.189.89 python3 - "
+            f"  11    10    10   02:04 S    ssh -o BatchMode=yes ec2-user@198.51.100.20 python3 - "
             f"{self.SHA} refs/RAW-ARGV-SECRET /srv/repo /usr/bin/python3 test_remote_test"), 999)
         row, text = self._ec2(snap.processes)
         self.assertEqual((row.state, row.kind, row.age), (mon.WORKING, "worker", 125.0))

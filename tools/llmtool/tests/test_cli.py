@@ -693,7 +693,7 @@ class CLITests(unittest.TestCase):
         created = yaml.safe_load(user.read_text())
         self.assertIsNone(created["providers"]["default"]["base_url"])
         self.assertIsNone(created["providers"]["default"]["model"])
-        self.assertNotIn("10.29.7.58", user.read_text())
+        self.assertNotIn("192.0.2.10", user.read_text())
         self.assertNotIn("gw", user.read_text())
         user.write_text("generation: {max_tokens: 42}")
         self.assert_failure(self.run_cli("config", "init"))

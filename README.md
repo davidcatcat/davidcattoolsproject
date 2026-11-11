@@ -206,7 +206,7 @@ sh scripts/llm-benchmark.sh
 
 Defaults:
 
-- Gateway: `http://10.29.7.58:4000`
+- Gateway: `http://192.0.2.10:4000`
 - Route: `gw`
 - Long-context probes: approximately 8k, 16k, 32k, and 64k tokens
 - Output: a Markdown report plus raw JSON responses under `reports/`
@@ -214,7 +214,7 @@ Defaults:
 Override settings when needed:
 
 ```bash
-BASE_URL=http://10.29.7.58:4000 MODEL=gw CONTEXT_SIZES="8000 16000 32000 64000" sh scripts/llm-benchmark.sh
+BASE_URL=http://192.0.2.10:4000 MODEL=gw CONTEXT_SIZES="8000 16000 32000 64000" sh scripts/llm-benchmark.sh
 ```
 
 The benchmark covers long-context retention, evidence-disciplined Kubernetes log diagnosis, Git diff review, cross-file root-cause analysis, and context compression/evidence preservation.
