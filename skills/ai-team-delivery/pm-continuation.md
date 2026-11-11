@@ -176,6 +176,8 @@ Sweep records must never use `target=Owner`, so [llmtool_monitor.py](../../scrip
 
 ## Transition record
 
+Task records are evidence: disk cleanup never deletes a TaskStore record that names a published PR (`published_pr`); it compresses and archives it instead (#1208 3b).
+
 Record every state transition on the Task's PR or tracking Issue, or in the llmtool TaskStore when the runtime records it. Each record contains:
 
 - Task ID;
