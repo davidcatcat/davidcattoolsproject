@@ -181,6 +181,8 @@ def parser_for_cli():
     add_review_authority_parser(sub)
     add_dispatch_check_parser(sub)
     add_board_check_parser(sub)
+    from .mac_full_due import add_ci_parser
+    add_ci_parser(sub)
     add_trust_parser(sub)
     validate = sub.add_parser("validate", help="Assess commands or Context Packets offline; never execute")
     actions = validate.add_subparsers(dest="action", required=True)
@@ -541,6 +543,9 @@ def main(argv=None):
             return run_dispatch_check(args)
         if args.command == 'board-check':
             return run_board_check(args)
+        if args.command == 'ci':
+            from .mac_full_due import run_ci
+            return run_ci(args)
         if args.command == 'trust':
             return run_trust(args)
         if args.command == 'task':
