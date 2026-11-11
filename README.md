@@ -22,7 +22,7 @@ This repository currently provides:
 - `safe-git` — safely fetch, synchronize, commit, and push Git changes.
 - `ai-team-delivery` — coordinate delegated AI product delivery, independent reviews, Mac operator handoffs, technical decisions, and safe merges without treating the requirements owner as the PM.
 - `validate-runtime` — validate provider/runtime connectivity and end-to-end evidence with isolated test state.
-- `company-llm-delegation` — route deterministic work away from LLMs and delegate only bounded permitted triage through llmtool to the configured company provider.
+- `company-llm-delegation` — route deterministic work away from LLMs and delegate only bounded permitted work through llmtool to gw-agent (home LLM) via the API Agent Gateway.
 - `agy-direct-developer` — run one Owner-assigned Developer Task with AGY (Antigravity CLI): assignment gate, CLI invocation, write-scope checks and hand-back.
 - `artifact-verification` — verify JSON schemas, path constraints, role constants, external IDs and evidence labels before publishing reports, runbooks or handoff artifacts.
 
@@ -172,7 +172,7 @@ Keep the skill focused, define a clear process, and end with checkable completio
 
 The Owner accepted a **UI-only** design direction on 2026-10-22, inspired by Claude Code and Codex CLI: chat-first terminal layout, polished editing and slash-command picker, compact configurable status and optional read-only detail views. See the [new TUI decision meeting](docs/meetings/2026-10-22-llmtool-tui-ui-ux-decision.md), [A3.5 roadmap](tools/llmtool/ROADMAP.md) and [current vs planned UI support](tools/llmtool/README.md#a35-ux-1ux-2--opt-in-full-screen-chat-and-truthful-status). **No new Core, routing, background, Git or approval engine is authorized as TUI work.**
 
-## Company LLM delegation evidence
+## Home LLM delegation evidence
 
 Round-2/Round-3 dogfood changed the routing policy from a generic "cheap-first" idea to
 **route-by-task evidence**:
@@ -196,9 +196,11 @@ spend Codex tokens on a paired benchmark until that exact route/pipeline passes 
 pre-registered Company-only gate. P1 now preserves validated usage metadata on parseable
 provider failures, but it does not turn failed model output into a successful result.
 
-## Company LLM benchmark
+## Home LLM benchmark (retired)
 
-Run the internal LLM benchmark from the repository root:
+`scripts/llm-benchmark.sh` is retired (Owner 2026-11-11, #120) and exits with
+status 2; home LLM work runs only through `gw-agent`. The text below records
+how the benchmark was run from the repository root:
 
 ```bash
 sh scripts/llm-benchmark.sh
