@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 from argparse import Namespace
 from contextlib import redirect_stdout
+from pathlib import Path
 
 from llmtool import owner_exception, task_advance, task_submission_cli
 from llmtool.task_advance import advance
@@ -383,12 +384,23 @@ class TestTaskAdvanceOwnerException(unittest.TestCase):
 
     def test_real_default_replacement_map_regression(self):
         dummy_entries = [{"value": "sample-dummy-val-1", "placeholder": "sample-dummy-plc-1"}]
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
+        repo_root = Path(__file__).resolve().parents[3]
+        temp_dir = None
+        for candidate in (Path("/tmp"), Path.home(), repo_root.parent):
+            try:
+                candidate.resolve().relative_to(repo_root.resolve())
+            except ValueError:
+                if candidate.exists() and os.access(candidate, os.W_OK):
+                    temp_dir = str(candidate)
+                    break
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=temp_dir, delete=False) as tf:
             json.dump(dummy_entries, tf)
             temp_path = tf.name
 
         try:
             os.chmod(temp_path, 0o600)
+            sys.modules.pop("_llmtool_redact_known_values", None)
             with patch.dict(os.environ, {"LLMTOOL_REDACT_MAP": temp_path}):
                 result = owner_exception.default_replacement_map()
             self.assertEqual(result, [("sample-dummy-val-1", "sample-dummy-plc-1")])
