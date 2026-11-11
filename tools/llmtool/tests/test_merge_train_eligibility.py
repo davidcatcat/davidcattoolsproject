@@ -256,7 +256,7 @@ class EligibleMemberTests(_Base):
 
     def test_scripts_only_member_without_macos_refuses(self):
         routes = _routes(**{CHECKS: _checks(_run(101, LINUX)),
-                            FILES: [{'filename': 'scripts/tool.sh'}]})
+                            FILES: [{'filename': 'scripts/llmtool_monitor.py'}]})
         self.assertRefused(self.check(routes=routes), 'MERGE_REQUIRED_CHECK_MISSING')
 
     def test_superseded_train_does_not_block(self):

@@ -1979,6 +1979,107 @@ class GwAgentRealStoreTests(unittest.TestCase):
                 self._assert_gw_evidence_names(
                     run['saved'], _EARLIER_SESSION if name == 'd6-holds-another' else None)
 
+    # #1535: the D6 keeps the first gw-agent session it took (the lifecycle
+    # helper refuses a second one). A later PM Task or repair round on that
+    # D6 runs in another gateway session and must not end OUTCOME_UNKNOWN.
+
+    def _write_once_lifecycle(self, calls):
+        def lifecycle(_registration, value):
+            calls.append(value)
+            if self._d6_session() is not None:
+                return 'D6_BIND_NATIVE_SESSION_ALREADY_SET'
+            self._set_d6_session(value)
+            return 'BOUND'
+        return lifecycle
+
+    def _gw_home_binding(self):
+        from llmtool.developer_routes import gw_agent
+        home = Path(self.store_root).parent / 'gw-agent-sessions' / 'executor-d6'
+        return gw_agent.read_session_binding(home, executor_task_id='executor-d6')
+
+    def _assert_kept_d6_session(self, code, task, first_session):
+        developer = task['developer']
+        self.assertEqual((code, developer['state'], developer['error_code']),
+                         (0, 'DEVELOPER_RESPONDED', None))
+        self.assertEqual(self._d6_session(), first_session)
+        self._assert_gw_evidence_names(task, first_session)
+        return developer['execution']['native_session_id']
+
+    def test_second_pm_task_on_bound_d6_keeps_the_d6_session(self):
+        calls = []
+        bind = self._write_once_lifecycle(calls)
+        code, first = self._delegate('gw-agent-one.md', bind=bind)
+        self.assertEqual(code, 0)
+        first_session = first['developer']['execution']['native_session_id']
+        self.assertEqual(self._d6_session(), first_session)
+        self._gw_home_binding()
+        (self.root / 'gw-agent-one.md').unlink()
+        self.server.script.clear()
+        code, second = self._delegate('gw-agent-two.md', bind=bind)
+        session = self._assert_kept_d6_session(code, second, first_session)
+        # #1509 stands: a fresh gateway session, and the home names the new Task.
+        self.assertNotEqual(session, first_session)
+        binding = self._gw_home_binding()
+        self.assertEqual((binding['root_task_id'], binding['session_id']),
+                         (second['task_id'], session))
+        self.assertEqual(calls, [first_session])
+        (self.root / 'gw-agent-two.md').unlink()
+        self._release_d6()
+
+    def test_repair_round_after_a_second_task_resumes_its_session(self):
+        calls = []
+        bind = self._write_once_lifecycle(calls)
+        code, _first = self._delegate('gw-agent-one.md', bind=bind)
+        self.assertEqual(code, 0)
+        first_session = self._d6_session()
+        (self.root / 'gw-agent-one.md').unlink()
+        self.server.script.clear()
+        code, second = self._delegate('gw-agent-two.md', bind=bind)
+        second_session = self._assert_kept_d6_session(code, second, first_session)
+        (self.root / 'gw-agent-two.md').unlink()
+        self.server.script.clear()
+        seen = {}
+
+        def spy_runner(route, request, **kwargs):
+            seen.update(request)
+            return task_submission_cli.run_route(route, request, **kwargs)
+
+        with patch.object(task_submission_cli, '_validate_repair_packet',
+                          side_effect=lambda value: value):
+            code, repair = self._delegate(
+                'gw-agent-two.md', bind=bind, route_runner=spy_runner,
+                repair_packet={'reviewer_text_excerpt_untrusted_data':
+                               'synthetic finding'})
+        self.assertEqual(seen['session_id'], second_session)
+        self.assertEqual(seen['task']['task_id'], second['task_id'])
+        self.assertEqual(self._assert_kept_d6_session(code, repair, first_session),
+                         second_session)
+        self.assertEqual(calls, [first_session])
+        (self.root / 'gw-agent-two.md').unlink()
+        self._release_d6()
+
+    def test_bound_gw_home_with_foreign_d6_session_is_still_refused(self):
+        calls = []
+        code, _first = self._delegate('gw-agent-one.md',
+                                      bind=self._write_once_lifecycle(calls))
+        self.assertEqual(code, 0)
+        self._gw_home_binding()
+        (self.root / 'gw-agent-one.md').unlink()
+        self.server.script.clear()
+        foreign = '01234567-89ab-cdef-0123-456789abcdef'
+        self._set_d6_session(foreign)
+        code, second = self._delegate('gw-agent-two.md',
+                                      bind=self._write_once_lifecycle(calls))
+        developer = second['developer']
+        self.assertEqual(code, 1)
+        self.assertEqual((developer['state'], developer['error_code']),
+                         ('DEVELOPER_OUTCOME_UNKNOWN', 'DEVELOPER_GW_AGENT_D6_SESSION_REFUSED'))
+        self.assertIsNone(developer['artifact'])
+        self.assertEqual(self._d6_session(), foreign)
+        self.assertEqual(len(calls), 1)
+        (self.root / 'gw-agent-two.md').unlink()
+        self._release_d6()
+
     def _complete_with_reviewer_session(self, target, reviewer_native):
         result_sha = '4' * 40
         git_evidence = {
