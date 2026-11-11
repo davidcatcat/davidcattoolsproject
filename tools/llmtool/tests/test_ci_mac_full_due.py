@@ -13,20 +13,42 @@ import ci_mac_full_due  # noqa: E402
 
 
 class MacFullDueTests(unittest.TestCase):
-    def test_workflow_dispatch_is_due(self):
-        self.assertTrue(ci_mac_full_due.is_due("workflow_dispatch"))
+    def github(self, conclusion="success", sha="a" * 40):
+        due = ci_mac_full_due.mac_full_due
+        runs = [{"id": 7, "status": "completed", "conclusion": conclusion, "head_sha": sha}]
+        jobs = [{"name": name, "conclusion": "success"} for name in due.JOBS]
+        return lambda path: {"workflow_runs": runs} if path == due.RUNS else {"jobs": jobs}
+
+    def test_passed_sha_skips_new_or_failed_sha_is_due(self):
+        self.assertFalse(ci_mac_full_due.is_due("workflow_dispatch", "a" * 40, self.github()))
+        self.assertTrue(ci_mac_full_due.is_due("workflow_dispatch", "b" * 40, self.github()))
+        failed = self.github("failure")
+        self.assertTrue(ci_mac_full_due.is_due("workflow_dispatch", "a" * 40, failed))
+
+    def test_rerun_of_the_same_run_is_due(self):
+        self.assertTrue(ci_mac_full_due.is_due("workflow_dispatch", "a" * 40, self.github(), 7))
+
+    def test_api_failure_is_never_skip_or_due(self):
+        def broken(path):
+            raise OSError("api down")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = ci_mac_full_due.main(["--repo", "o/r", "--sha", "a" * 40,
+                                         "--event", "workflow_dispatch"], broken)
+        self.assertEqual((code, stdout.getvalue()), (1, ""))
+        self.assertIn("unavailable", stderr.getvalue())
 
     def test_schedule_is_rejected_as_unexpected(self):
         with self.assertRaisesRegex(ValueError, "unexpected event 'schedule'"):
-            ci_mac_full_due.is_due("schedule")
+            ci_mac_full_due.is_due("schedule", "a" * 40, None)
 
     def test_cli_emits_due_for_workflow_dispatch(self):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             self.assertEqual(
                 ci_mac_full_due.main(
-                    ["--repo", "owner/repo", "--sha", "a" * 40,
-                     "--event", "workflow_dispatch"]
+                    ["--repo", "owner/repo", "--sha", "b" * 40,
+                     "--event", "workflow_dispatch", "--run-id", "8"], self.github()
                 ),
                 0,
             )
