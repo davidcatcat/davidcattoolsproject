@@ -2336,7 +2336,10 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     executor_task = active_executor
     number = _pr_number(record, pr_number)
     get = task_completion._github_get if github_get is None else github_get
-    d6 = _d6_snapshot(record, executor_task, allow_cwd_fallback=using_executor_task, cwd=cwd) if type(executor_task) is str else None
+    if using_executor_task:
+        d6 = _d6_snapshot(record, executor_task, allow_cwd_fallback=True, cwd=cwd)
+    else:
+        d6 = _d6_snapshot(record, executor_task) if type(executor_task) is str else None
     if (number is None and type(d6) is dict and d6.get('dirty') is False and
             type(d6.get('root')) is str and d6.get('root') and
             type(d6.get('branch')) is str and d6.get('branch') and
