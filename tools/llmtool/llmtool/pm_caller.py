@@ -21,10 +21,11 @@ Refusal codes:
 - ``PM_CALLER_NOT_TASK_OWNER``: the record has no ``pm_session_id`` or it is
   another session's.
 
-An empty environment variable counts as unset. Only the ``task advance`` and
-``task drive`` CLI adapters use this check. Worker result callbacks
-(``task complete``, ``claude-result``), ``abandon``, ``delegate`` and the
-internal calls that ``advance`` makes are not checked here.
+An empty environment variable counts as unset. Only the ``task advance``,
+``task drive`` and ``task remote-test`` CLI adapters use this check (#1230 A1).
+Worker result callbacks (``task complete``, ``claude-result``), ``abandon``,
+``delegate``, ``bind``, ``review-dispatch``, ``repair`` and the internal calls
+that ``advance`` makes, including its remote test, are not checked here.
 
 Known limit: fenced sessions are now refused, but the check is still not taken
 under the adoption lock, so a Task adopted between the check and the call is
