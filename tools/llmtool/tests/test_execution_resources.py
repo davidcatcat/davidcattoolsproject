@@ -83,6 +83,14 @@ class ExecutionResourcesTests(unittest.TestCase):
         self.assertTrue(all(path.name == 'worker-dispatch.json'
                             for path in worker_dispatch._policy_candidates()))
 
+    def test_codex_writes_no_code_and_agy_reason_names_no_model(self):
+        # #1502 O1 / WP-C: Codex is Reviewer and AI Debug only.
+        workers = worker_dispatch._parse_policy(POLICY_PATH.read_bytes())['workers']
+        self.assertEqual(workers['codex-developer']['dispatch'], 'PAUSED')
+        self.assertEqual(workers['codex-reviewer']['dispatch'], 'ALLOWED')
+        self.assertEqual(workers['codex-debug']['dispatch'], 'ALLOWED')
+        self.assertNotIn('gemini', workers['agy']['reason'].lower())
+
 
 if __name__ == '__main__':
     unittest.main()
