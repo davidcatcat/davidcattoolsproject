@@ -1415,10 +1415,14 @@ class TaskStoreTests(unittest.TestCase):
                 lock_owner[0] = None
             return original_unlock(lock_fd)
 
+        unlocked_finished_reads = []
+
         def slow_finished_get(task_id):
             if task_id in finished_ids:
                 if lock_owner[0] == threading.get_ident():
                     locked_finished_reads.append(task_id)
+                else:
+                    unlocked_finished_reads.append(task_id)
                 time.sleep(0.005)
             return original_get(task_id)
 
@@ -1442,11 +1446,10 @@ class TaskStoreTests(unittest.TestCase):
             except LLMToolError as exc:
                 outcomes.append(exc.task_store_error_code)
 
-        # 60 finished tasks * 5 ms = 300 ms per full scan, while the lock wait
-        # timeout is 100 ms: holding the lock during the scan would time out
-        # the second bind with TASK_D6_BINDING_BUSY.
-        with patch.object(task_store_module, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 0.1), \
-                patch.object(store, '_lock_sidecar', side_effect=tracked_lock), \
+        # #1631: a 100 ms lock wait raced the locked commit on slow runners.
+        # Keep the product lock timeout; the read lists below prove that the
+        # scans read the finished Tasks and never under the binding lock.
+        with patch.object(store, '_lock_sidecar', side_effect=tracked_lock), \
                 patch.object(store, '_unlock_sidecar', side_effect=tracked_unlock), \
                 patch.object(store, 'get', side_effect=slow_finished_get):
             threads = [threading.Thread(target=bind, args=(i, task))
@@ -1456,8 +1459,9 @@ class TaskStoreTests(unittest.TestCase):
             for thread in threads:
                 thread.join(timeout=10)
         self.assertTrue(all(not thread.is_alive() for thread in threads))
-        self.assertEqual(outcomes, ['BOUND', 'BOUND'])
         self.assertEqual(locked_finished_reads, [])
+        self.assertTrue(finished_ids <= set(unlocked_finished_reads))
+        self.assertEqual(outcomes, ['BOUND', 'BOUND'])
 
         claude_task = self._codex_dispatch_task()
         store.create(claude_task)
