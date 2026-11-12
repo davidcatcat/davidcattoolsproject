@@ -25,6 +25,10 @@ WORKERS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
     'company-gw', 'company-gw-agent', 'claude-reviewer', 'codex-reviewer',
 ))
+# #1502 WP-B: the AI Debug routes have their own keys. A policy file written
+# before them (exactly WORKERS) still parses; a debug key it lacks is refused
+# with WORKER_POLICY_ENTRY_MISSING. A file with only one debug key is invalid.
+DEBUG_WORKERS = frozenset(('codex-debug', 'claude-debug'))
 DISPATCH_STATES = frozenset(('ALLOWED', 'PAUSED', 'OWNER_ASSIGNMENT_ONLY'))
 AUDIT_ACTIONS = frozenset((
     'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
@@ -128,7 +132,7 @@ def _parse_policy(raw, patterns=None):
             type(value.get('schema_version')) is not int or
             value['schema_version'] != POLICY_SCHEMA_VERSION or
             type(value.get('workers')) is not dict or
-            set(value['workers']) != WORKERS):
+            set(value['workers']) not in (WORKERS, WORKERS | DEBUG_WORKERS)):
         raise ValueError('invalid policy shape')
     for key, worker in value['workers'].items():
         # Keep the current Owner-authored v1 file shape. The Owner label is
@@ -249,8 +253,10 @@ def evaluate(worker_key, owner_assignment_ref=None, task_id=None):
     except (OSError, UnicodeError, ValueError, TypeError):
         return PolicyDecision(worker_key, False, 'WORKER_POLICY_INVALID', digest)
 
-    if worker_key not in WORKERS:
+    if worker_key not in WORKERS | DEBUG_WORKERS:
         return PolicyDecision(worker_key, False, 'WORKER_UNKNOWN', digest)
+    if worker_key not in policy['workers']:
+        return PolicyDecision(worker_key, False, 'WORKER_POLICY_ENTRY_MISSING', digest)
     state = policy['workers'][worker_key]['dispatch']
     if state == 'ALLOWED':
         return PolicyDecision(worker_key, True, 'OWNER_POLICY_ALLOWED', digest)
