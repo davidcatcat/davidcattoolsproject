@@ -127,6 +127,28 @@ class DeveloperRouteContractTests(unittest.TestCase):
                 self.run_case(**values)
             self.assertEqual(caught.exception.code, code)
 
+    def test_agy_exit_nonzero_keeps_a_screened_stderr_tail(self):
+        # #1606: AGY_EXIT_NONZERO carries the exit code and a bounded,
+        # screened one-line stderr tail; other routes keep no text.
+        self.route.name = 'agy'
+        key = 'q' * 24
+        cred = b'api_' + b'key'  # built here so the spec text holds no credential shape
+        stderr = b'x' * 4000 + b'\nfatal: ' + cred + b'=' + key.encode() + b' boom\x07\n'
+        with self.assertRaises(RouteError) as caught:
+            self.run_case(code=3, stderr=stderr)
+        reason = caught.exception.blocked_reason
+        self.assertEqual(caught.exception.code, 'AGY_EXIT_NONZERO')
+        self.assertTrue(reason.startswith('exit_code=3 stderr_tail='))
+        self.assertIn('boom', reason)
+        self.assertNotIn(key, reason)
+        self.assertNotIn('\n', reason)
+        self.assertNotIn('\x07', reason)
+        self.assertLessEqual(len(reason.encode('utf-8')), 2048)
+        self.route.name = 'FAKE'
+        with self.assertRaises(RouteError) as caught:
+            self.run_case(code=3, stderr=b'boom')
+        self.assertIsNone(caught.exception.blocked_reason)
+
     def test_post_run_git_mutation_classified_before_dirty_state(self):
         changed = {'files': self.after['files'],
                    'git_state': {'head': 'b' * 40}}
