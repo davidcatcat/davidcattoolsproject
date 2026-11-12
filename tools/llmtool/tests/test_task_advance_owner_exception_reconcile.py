@@ -8,7 +8,7 @@ from unittest.mock import patch
 from llmtool import owner_exception, task_advance
 from llmtool.task_store import TaskStore
 from test_owner_exception import (BASE_SHA, FILE_PATH, HEAD_HASH, HEAD_SHA, REPLACEMENT_MAP,
-                                  SLUG, URL, make_fake_github_get)
+                                  SLUG, URL, make_comment_body, make_fake_github_get)
 from test_task_advance_review_exception_store import _record
 
 OTHER_HEAD = 'c' * 40
@@ -70,6 +70,42 @@ class OwnerExceptionReconcileTests(unittest.TestCase):
         self.assertEqual(self.gh_calls, [])
         # A second reconcile finds the claim MERGED and changes nothing.
         self.assert_refused('MERGE_ALREADY_CLAIMED')
+
+    def test_refuses_a_pr_merged_at_another_head(self):
+        self.claim()
+        self.assert_refused('MERGE_STALE_HEAD', pr_head_sha=OTHER_HEAD)
+
+    def test_refuses_a_claim_for_another_head(self):
+        self.claim(head=OTHER_HEAD)
+        self.assert_refused('MERGE_CONFLICTING_PR')
+
+    def test_refuses_a_claim_for_another_pr(self):
+        self.claim(pr=43)
+        self.assert_refused('MERGE_CONFLICTING_PR')
+
+    def test_refuses_an_invalid_exception_registration(self):
+        self.claim()
+        self.assert_refused('OWNER_EXCEPTION_MARKER',
+                            comment_body=make_comment_body(marker='<!-- invalid marker -->'))
+        self.assert_refused('OWNER_EXCEPTION_SHA_MISMATCH',
+                            comment_body=make_comment_body(head=OTHER_HEAD))
+
+    def test_refuses_a_merge_attempt_that_is_not_claimed(self):
+        claim = self.claim()
+        self.store.compare_and_update(self.task_id, expected={'merge_attempt': claim},
+                                      merge_attempt=dict(claim, state='UNKNOWN'))
+        self.assert_refused('MERGE_ALREADY_CLAIMED')
+
+    def test_a_pr_that_is_not_merged_is_not_reconciled(self):
+        self.claim()
+        before = self.store.get(self.task_id)
+        for state in ('open', 'closed'):
+            with self.subTest(state=state):
+                outcome = self.merge(pr_state=state, pr_merged=False)
+                self.assertEqual(outcome['step'], 'MERGE_REFUSED')
+                self.assertNotIn('MERGE_RECONCILED', outcome['codes'])
+                self.assertEqual(self.gh_calls, [])
+                self.assertEqual(self.store.get(self.task_id), before)
 
 
 if __name__ == '__main__':
