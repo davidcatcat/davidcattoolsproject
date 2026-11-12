@@ -37,47 +37,6 @@ llmtool executes an approved route and plan; it does not decide which AI owns co
 
 [Historical AI-led operating model decisions are archived](../../docs/history/governance-archive-20261103.md#ai-led-team-operating-model).
 
-#### Invocation authority, lifecycle and failure
-
-Use existing action/policy/approval interfaces and `run_budget`, not a new approval
-ledger. D1 receipts/synthetic HostIssuer, G7 development rights, a S1a preview and
-model approval are **not production authority**. Before a real call, a separately
-reviewed host grant must name authentic issuer/delegated scope, task/paired
-contracts/run/SHA/epoch, reviewer Session/route/profile/model, exact packet digest,
-data scope, deadline and one-call allowance; recheck revocation/expiry and actual
-state just before submission. Missing accepted production host/issuer wiring
-blocks real invocation; contract merge and fake-provider tests do not create it.
-The trusted host must enforce one-use admission across invocations/restarts;
-reusing the same grant, including after timeout/unknown outcome, is rejected.
-Its production authority/replay mechanism needs separate accepted evidence;
-do not repurpose D1's synthetic sink or add a second approval store here.
-This round grants no such wiring or smoke permission. No explicit verdict file
-write is in v1; adding one requires its own scope/permission review.
-
-Invoke only approved `claude-cli` via its existing provider and CLIProcessLifecycle:
-`--print --output-format text --no-session-persistence --safe-mode --tools "WebSearch,WebFetch"`,
-stdin packet, argv/no shell, isolated non-repository runtime cwd, existing minimal
-child environment and approved auth-home provenance. Only WebSearch and WebFetch
-are allowed; do not enable other tools, MCP or repo access. Never start an interactive
-peer session. Attest the independently assigned
-reviewer role/logical invocation Session through the trusted host and owned-child
-launch record; provider brand/model text does not establish non-authorship.
-Both reviewer agent ID and Session ID differ from **every** pinned author.
-Ephemeral provider cwd/owned-child lifecycle is the existing isolation path,
-not another project checkout or daemon; stop only this call's owned children.
-
-S1b ceiling: one provider attempt, zero retries/fallback/repairs, configured call
-timeout <=120 seconds, whole foreground run <=180 seconds, packet byte limits
-above, parsed response <=64 KiB. Existing provider transport stdout/stderr ceiling
-remains 1 MiB each; oversize verdict is rejected, not truncated or echoed.
-Reuse prospective budget admission and record actual elapsed/calls/usage;
-unknown tokens/cost stay null, never zero. Claude text mode cannot attest/enforce
-a hard monetary/token cap: if the approved route requires such a cap, BLOCKED
-before calling, not a fabricated guarantee. Route must expressly accept the
-one-call/time/byte bounds and unknown-cost limitation.
-
-Unavailable/auth/timeout/cancel/nonzero exit/partial or invalid output, missing
-authority, stale/drifted observations or unknown cleanup returns a sanitized
 BLOCKED/INCOMPLETE reason with invocation status and evidence references. Never
 fallback to company/Codex/premium, retry, infer PASS from exit0 or claim successful
 cleanup without lifecycle evidence. Preserve existing provider error codes and
