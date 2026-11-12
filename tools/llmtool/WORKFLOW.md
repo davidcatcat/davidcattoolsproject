@@ -37,63 +37,6 @@ llmtool executes an approved route and plan; it does not decide which AI owns co
 
 [Historical AI-led operating model decisions are archived](../../docs/history/governance-archive-20261103.md#ai-led-team-operating-model).
 
-### S1b foreground review contract (DRAFT)
-
-**STATUS: contract accepted/merged via [PR #129](https://github.com/davidcatcat/davidcattoolsproject/pull/129)
-at `8468164d5503953f941b24c1f2318d5decda42b5`; S1b Product A is an accepted/merged fake-only slice via PR #131; B1 fake-first source is MERGED via PR #133 with independent product review.
-T1 native release is HOLD_REPRIORITIZE. Real Claude remains BLOCKED;
-actual automatic handoff NOT DELIVERED, pending B.**
-This is the docs-only response to the accepted
-[S1b handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127091068)
-and [N1–N5 review](https://github.com/davidcatcat/davidcattoolsproject/pull/128#issuecomment-6125617914).
-The original contract PR changed only ROADMAP.md/WORKFLOW.md. Independent non-author contract
-review, applicable exact-head CI and authorized merge precede any product work;
-then pin a product handoff, pass fresh G7 C2/C3/C4 and independent exact-branch
-baseline acceptance. Neither this text nor its merge authorizes provider egress.
-
-#### Public outcome, scope and stage predicates (N1)
-
-The proposed product command is one foreground
-`llmtool task review --contract <ready-file> --acceptance-contract <final-file> --expect <file> --events <file> --json`.
-It validates preparation, collects actual read-only evidence, submits one permitted
-packet to the existing independent Claude CLI text/no-tools provider, and returns
-a bounded verdict/developer handoff on stdout. No background work, ledger append,
-automatic artifact persistence, repair, test execution, Git/PR mutation or merge.
-The collector supplies trusted current UTC plus monotonic time; caller timestamps
-are claims, not the admission clock. The existing `task inspect` surface/schema,
-TTL and runtime NOT_VERIFIED/authorized=False semantics remain unchanged.
-
-Use **two separately pinned, immutable existing TaskContracts**, selected together
-by the authorized Coordinator before readiness events exist: a preparation task
-with only required pre-review checks/artifacts, and a distinct final acceptance
-task with those checks **plus required Security and Functional REVIEW criteria**.
-The packet pins both TaskBindings/task IDs, run IDs, versions/digests and the
-explicit criterion mapping; both bind the same exact source SHA and author set.
-The preparation goal explicitly excludes product completion. Do not derive it by
-stripping criteria from a submitted final contract, silently edit a contract,
-reuse final-task events under the preparation binding or manufacture prior review.
-Missing/unapproved pairing is BLOCKED. This reuses TaskContract without changing
-its schema or making required review optional; outstanding final review criteria
-are always visible in the review result.
-
-| Decision | Required conjunction |
-| --- | --- |
-| Admit review | Preparation inspection `structural_validation == SUCCESS` **and** `reported_state == WAITING_REVIEW` **and** valid latest pinned HandoffRecord; all mapped pre-review criteria supported by actual accepted evidence; no rejected supplementary evidence; fresh collector, independent reviewer, policy/route/budget gates all pass |
-| Accept final completion claim | Final-task inspection SUCCESS **and** reported_state COMPLETED **and** both exact-bound reviewer verdicts APPROVE, authenticated invocation provenance and all final required actual evidence accepted under the contract |
-| Any other state/result | No call or completion promotion; FAILED/BLOCKED/RUNNING/STALE/INCOMPLETE/unknown never becomes eligible from exit0 or valid JSON |
-
-The preparation handoff's outstanding criteria must equal its own inspection
-result (empty on SUCCESS); the packet/result separately lists the final REVIEW
-criteria still outstanding. This prevents an impossible trigger requiring a
-previous review. Rejected/failed/partial supplementary evidence still caps the
-aggregate; model claims never substitute for checks. A successful review does
-not append COMPLETED to either ledger, certify semantic correctness, grant
-execution rights or declare DONE; a later authorized consumer must independently
-verify final evidence and delivery gates. Existing S1a runtime is never upgraded.
-The final check evidence must be independently validated under its final binding
-against the same original execution artifacts; remapping readiness criterion IDs
-does not rewrite or authenticate a caller EvidenceRecord.
-
 #### Historical evidence and live identity (N2/N3)
 
 Historical COMPLETED/FAILED records may supply **historical context** only after
