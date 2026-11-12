@@ -1015,7 +1015,7 @@ expensive-model consumption while preserving fixed acceptance and evidence:
 
 The current design details and engineering guidance live in
 [ROADMAP](../docs/history/llmtool-roadmap-archive-20261028.md#architecture-refinement--planning-only) and
-[WORKFLOW](../tools/llmtool/WORKFLOW.md#task-contract-company-llm-and-evidence).
+[WORKFLOW](https://github.com/davidcatcat/davidcattoolsproject/blob/cf3a1c4a306b3be9b058d32b0bf7047d33727f1c/tools/llmtool/WORKFLOW.md#task-contract-company-llm-and-evidence).
 Enforcement/execution gates belong to A11b; cheap-first integration, independent
 verification and bounded repair belong to A11c. Neither is implemented or started
 here; the existing section 15 company/external fallback boundary remains intact.
