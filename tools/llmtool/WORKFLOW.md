@@ -37,30 +37,6 @@ llmtool executes an approved route and plan; it does not decide which AI owns co
 
 [Historical AI-led operating model decisions are archived](../../docs/history/governance-archive-20261103.md#ai-led-team-operating-model).
 
-| Result | Meaning for an acceptance check |
-| --- | --- |
-| PASS | Executed on identified bytes/environment and met that criterion |
-| FAIL | Executed and contradicted the criterion |
-| INCOMPLETE | Interrupted, partial, missing/ambiguous evidence or unresolved disagreement prevents a decision |
-| NOT-TESTED | The check was not executed; include the reason |
-
-Keep existing SKIPPED-CONFIG/AUTH/ENVIRONMENT labels from validate-runtime as
-specific non-PASS reasons, mapped to NOT-TESTED when aggregating acceptance.
-Required non-PASS checks block VERIFIED/DONE; optional checks retain their explicit
-status without being promoted to PASS. VERIFIED requires all contract-required
-evidence; DONE additionally requires the contract's review/delivery/merge gates.
-These words describe planned task acceptance, not new CLI commands, exits or A11a
-run status values. Tests and deterministic checks only cover their tested cases;
-they cannot guarantee all semantic correctness. Preserve required human/semantic
-review evidence and disclose coverage limits even when checks pass.
-
-Future cost evaluations must include context preparation, retry/repair, escalation
-and all review calls, with reported input/output usage and trustworthy pricing
-versions. Record missing tokens/cost as unknown/null, never zero; a known subtotal
-is partial, not the total. Development-time paired Token Savings Benchmark evidence
-may quantify dogfood ROI when its measurement contract is satisfied; it still does
-not implement budget enforcement or an automatic cost router.
-
 ## Quality-gate model
 
 Engineering evidence is split by purpose. Do not use one green result as a substitute
