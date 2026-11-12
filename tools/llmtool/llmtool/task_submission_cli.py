@@ -1297,7 +1297,9 @@ def run_task_review_prompt(args, *, store=None):
             'Verdict FAIL for any unmet acceptance item, a required test absent from the diff, '
             'a test the evidence shows failing, or any real defect.',
             'A pending CI check or a test not run here is not unmet.',
-            'Put each code finding on its own line starting with "Finding:".',
+            'Put each code finding on its own line as "Finding: F<n> [<severity>] <file:line> <text>", '
+            'numbered F1, F2, ... in order, with severity Blocker, High, Medium, Low or Advisory; '
+            'Low and Advisory findings are not blocking.',
             'A verdict with no defect has no such line, and no other line in the review text '
             'may start with "Finding", "-" or "*".',
             '',

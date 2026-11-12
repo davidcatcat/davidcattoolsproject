@@ -27,6 +27,12 @@ FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
   Reviewer (from `llmtool task show`) and the same HEAD.
 - The `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT` line appears on formal Claude or Codex
   PASS comments.
+- Each finding has a stable ID and a severity on its own line:
+  `Finding: F<n> [<severity>] <file:line> <text>`, numbered F1, F2, ... in order, with
+  severity `Blocker`, `High`, `Medium`, `Low` or `Advisory` ([#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502)
+  §4.12). `Low` and `Advisory` findings are not blocking; only they may be deferred (E10).
+  A dispute, a re-review and an arbitration name findings by these IDs. A verdict whose
+  findings carry no IDs counts every finding as blocking.
 - A Claude PASS in this exact form, unedited, satisfies the gate. Under [Owner D6
   (#846)](https://github.com/davidcatcat/davidcattoolsproject/issues/846), an
   independent `codex-reviewer` PASS is eligible for Tasks authored through Claude,
