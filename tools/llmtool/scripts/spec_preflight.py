@@ -138,8 +138,8 @@ def check_edits(spec: dict[str, Any], repo: str | Path | None = None) -> tuple[s
     return None
 
 
-# WP-120L (#120): the home LLM ladder runs from T1 to T5.
-LADDER_MAX_TIER = 5
+# WP-120L (#120): the home LLM ladder runs from T1 to T6 (T6: Owner decision A, #763).
+LADDER_MAX_TIER = 6
 
 
 def _row_tier(value, route):
@@ -190,12 +190,13 @@ def ladder_tier(entries, max_tier=LADDER_MAX_TIER, route=None):
 
 
 # limits per tier as (files written, context bytes, gw-agent turns)
-LADDER_SIZES = {1: (1, 1536, 6), 2: (1, 3072, 10), 3: (2, 6144, 12), 4: (3, 10240, 16)}
+LADDER_SIZES = {1: (1, 1536, 6), 2: (1, 3072, 10), 3: (2, 6144, 12), 4: (3, 10240, 16),
+                5: (4, 16384, 16), 6: (5, 24576, 16)}
 
 
 def spec_tier(spec, context_bytes=0):
     """Return the smallest ladder tier whose limits fit the spec: write count,
-    context bytes, and (for gw-agent specs) turn count; 5 if none fits."""
+    context bytes, and (for gw-agent specs) turn count; LADDER_MAX_TIER if none fits."""
     writes = spec.get("write") if isinstance(spec.get("write"), list) else []
     reads = spec.get("read") if isinstance(spec.get("read"), list) else []
     agent = spec.get("provider") == "gw-agent"
@@ -204,7 +205,7 @@ def spec_tier(spec, context_bytes=0):
         files, limit_bytes, turn_limit = LADDER_SIZES[tier]
         if len(writes) <= files and context_bytes <= limit_bytes and (not agent or turns <= turn_limit):
             return tier
-    return 5
+    return LADDER_MAX_TIER
 
 
 def main(argv: list[str] | None = None) -> int:
