@@ -1350,6 +1350,23 @@ def run_task_review_dispatch(args, *, store=None):
     return _print(result)
 
 
+# #1519: (step, code) pairs that still exit 0; every other code exits 1.
+_ADVANCE_EXIT_ZERO = frozenset({('MERGED', 'MERGE_RECONCILED'),
+                                ('READY_FOR_INTEGRATION', 'WAITING_INTEGRATION')})
+
+
+def _advance_exit_code(result):
+    """Return 0 for no codes or only allowed (step, code) pairs, else 1."""
+    codes = result.get('codes')
+    if not codes:
+        return 0
+    step = result.get('step')
+    if (type(step) is str and type(codes) is list and
+            all(type(code) is str and (step, code) in _ADVANCE_EXIT_ZERO for code in codes)):
+        return 0
+    return 1
+
+
 def run_task_advance(args, *, store=None, **adapters):
     """Thin CLI adapter for one idempotent Task advancement step.
 
@@ -1400,7 +1417,7 @@ def run_task_advance(args, *, store=None, **adapters):
         from . import gw_agent_sessions
         gw_agent_sessions.sweep_quietly(TaskStore() if store is None else store)
     _print(result)
-    return 1 if result.get('codes') else 0
+    return _advance_exit_code(result)
 
 
 def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapters):
