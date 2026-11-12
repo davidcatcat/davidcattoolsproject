@@ -8304,7 +8304,10 @@ def _bind_d6_pr_rows(rows: list[OfficeRow], canonical: str,
             continue
         branch = details[4]
         pr = prs.get(branch, (None, "OPEN"))[0] if prs is not None and branch else None
-        if pr is None:
+        if pr is None and prs is not None and branch:
+            # #1592: the PR list was read and has no PR for this branch yet.
+            out.append(replace(row, work=f"尚未開 PR（D6 {task_id}）", work_bound=False))
+        elif pr is None:
             out.append(replace(row, work=f"PR 未確認（D6 {task_id}）", work_bound=False))
         else:
             out.append(replace(row, work=f"PR #{pr} · D6 {task_id}", work_bound=True))
