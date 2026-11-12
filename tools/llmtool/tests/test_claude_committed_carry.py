@@ -111,6 +111,34 @@ class ClaudeCommittedCarryTests(unittest.TestCase):
         self.assert_no_carry(outcome)
         self.assertEqual(task_advance.derive_repair_state(outcome[1]), 'BLOCKED')
 
+    def test_an_out_of_scope_commit_carries_nothing(self):
+        self.assert_no_carry(self.run_case(committed=('src.py', 'outside.py')))
+
+    def test_a_commit_that_is_not_on_the_d6_base_carries_nothing(self):
+        self.assert_no_carry(self.run_case(ancestor=False))
+
+    def test_a_d6_without_committed_work_carries_nothing(self):
+        self.assert_no_carry(self.run_case(base=HEAD))
+
+    def test_an_unverified_timeout_or_refusal_carries_nothing(self):
+        for code in ('CLAUDE_TIMEOUT', 'CLAUDE_STATUS_FAILED'):
+            with self.subTest(code=code):
+                status_code, task, direct_event = self.run_case(runner_error=RouteError(code))
+                self.assertEqual((status_code, task['developer']['error_code']), (1, code))
+                self.assertEqual(task['developer']['source_sha'], HEAD)
+                direct_event.assert_not_called()
+        self.assert_no_carry(self.run_case(status='error'))
+
+    def test_a_d6_with_another_developer_result_carries_nothing(self):
+        delivered = {'developer': {'executor_task_id': 'executor-d6',
+                                   'state': 'DEVELOPER_RESPONDED'}}
+        self.assert_no_carry(self.run_case(others=(delivered,)))
+
+    def test_a_refused_store_write_keeps_the_launch_source(self):
+        self.assert_no_carry(self.run_case(
+            store_error=worker_dispatch.WorkerDispatchDenied('WORKER_REASSIGN_PRECONDITION')))
+
+
 
 if __name__ == '__main__':
     unittest.main()
