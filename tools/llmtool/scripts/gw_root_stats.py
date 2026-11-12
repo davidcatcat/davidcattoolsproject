@@ -116,3 +116,38 @@ def summary(rows, t0=T0):
     return {'t0': t0, 'roots': len(rows), 'by_kind': kinds,
             'tokens_known': sum(row['total_tokens'] != UNKNOWN for row in rows),
             'merge_known': sum(row['last_merged_at'] != UNKNOWN for row in rows)}
+
+
+def main(argv=None):
+    state = Path.home() / '.local' / 'state' / 'llmtool'
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--ledger', default=str(state / 'gw-validation' / 'roots.jsonl'))
+    parser.add_argument('--tasks', default=str(state / 'tasks'))
+    parser.add_argument('--d6-dir', help='.git/llmtool-worktrees of the canonical repo')
+    parser.add_argument('--github-cache', help='JSON {"<pr>": {"merged_at": ...}}, fetched elsewhere')
+    parser.add_argument('--t0', default=T0)
+    parser.add_argument('--out-dir', required=True)
+    args = parser.parse_args(argv)
+    github = {}
+    if args.github_cache:
+        try:
+            github = json.loads(Path(args.github_cache).read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            github = {}
+    github = github if isinstance(github, dict) else {}
+    roots = group_roots(load_jsonl(args.ledger), load_tasks(args.tasks), args.t0)
+    rows = [root_row(root_id, row, tasks, github, args.d6_dir)
+            for root_id, (row, tasks) in sorted(roots.items())]
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    with open(out / 'roots.csv', 'w', newline='', encoding='utf-8') as handle:
+        writer = csv.DictWriter(handle, fieldnames=FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    (out / 'summary.json').write_text(
+        json.dumps(summary(rows, args.t0), indent=1, sort_keys=True) + '\n', encoding='utf-8')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
