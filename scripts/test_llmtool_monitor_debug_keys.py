@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import tempfile
 import unittest
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
@@ -45,6 +46,32 @@ class DebugKeyTests(unittest.TestCase):
             with self.subTest(extra=extra):
                 self.assertEqual(mon.worker_dispatch(raw(mon.DISPATCH_WORKERS | extra)),
                                  ({}, "rejected"))
+
+
+class DebugRosterTests(unittest.TestCase):
+    NOW = 1_800_000_000.0
+
+    def _rows(self, keys):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "worker-dispatch.json")
+            with open(path, "wb") as stream:
+                stream.write(raw(keys))
+            rows = mon.office_rows([], self.NOW, codex_root=tmp, claude_root=tmp, canonical=tmp,
+                                   opencode_db=os.path.join(tmp, "none.db"),
+                                   cwd_of=lambda pid: None, cpu_of=lambda pid: 0.0,
+                                   dispatch=path, llmtool_tasks=os.path.join(tmp, "tasks"))
+        return {row.name: row for row in rows}
+
+    def test_roster_shows_the_debug_switches(self):
+        rows = self._rows(mon.DISPATCH_WORKERS | mon.DISPATCH_DEBUG_WORKERS)
+        for name in ("codex debug", "claude debug"):
+            self.assertEqual((rows[name].state, rows[name].detail), (mon.IDLE, "可派工"))
+
+    def test_older_file_without_debug_keys_has_no_debug_rows(self):
+        rows = self._rows(mon.DISPATCH_WORKERS)
+        self.assertNotIn("codex debug", rows)
+        self.assertNotIn("claude debug", rows)
+        self.assertIn("agy", rows)
 
 
 if __name__ == "__main__":
