@@ -39,10 +39,10 @@
 
 - **Home LLM `gw-agent` Developer (E9):**
   - Company `gw` (home LLM) runs only through the API Agent Gateway (`gw-agent`) since the Owner decision of 2026-11-11 (#120); the `company-gw` direct and proposal routes are retired, llmtool refuses them and a Gateway failure reports UNAVAILABLE without fallback.
-  - Company `gw` may act as an agent-mode Developer through `gw-agent` on real repository code; Developer choice, mode and scope are PM decisions under the standing Owner authorization (#120, 2026-11-10), which supersedes the 2026-11-03 synthetic-only limit. Every result receives formal cross-family review. Pause after two consecutive failed runs, a write outside allowed paths, a credential or audit finding, or HTTP 429.
+  - Company `gw` may act as an agent-mode Developer through `gw-agent` on real repository code; Developer choice, mode and scope are PM decisions under the standing Owner authorization (#120, 2026-11-10), which supersedes the 2026-11-03 synthetic-only limit. Every result receives formal cross-family review. On a failure, step down one task-size tier first; pause only after two consecutive failures at the lowest tier, a write outside allowed paths, a credential or audit finding, or HTTP 429 (E9).
   - `gw` may propose code, tests and self-review, but has no shell, filesystem, Git, credential or approval authority. An authorized execution environment applies accepted patches and runs tests.
   - Before each call, record the exact non-sensitive input/egress basis and bounded budget. Do not send secrets, private/customer data or restricted logs.
-  - Allow at most one evidence-guided repair within the existing task budget; no hidden paid fallback. Record actual usage, retries, repairs and outcome, or UNKNOWN.
+  - Repairs follow D1 (O4): two in total, the second only after AI Debug confirms the cause; no hidden paid fallback. Record actual usage, retries, repairs and outcome, or UNKNOWN.
   - Classify availability using the [four-layer rule](skills/company-llm-delegation/SKILL.md#availability-classification). VPN/provider unavailability does not stop other Developers.
 
 - **Formal Reviewer:**
