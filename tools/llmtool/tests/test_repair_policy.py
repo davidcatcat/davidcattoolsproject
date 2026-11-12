@@ -123,5 +123,33 @@ class AdmissionTests(unittest.TestCase):
             self.assertEqual(str(caught.exception), code)
 
 
+class LineageTests(unittest.TestCase):
+    P = GOOD
+
+    def test_only_a_root_splits_and_never_into_a_fourth_child(self):
+        split = lambda kind, have, new: rp.admit_split(
+            kind=kind, child_count=have, new_children=new, policy=self.P)
+        self.assertIsNone(split('root', 0, 3))
+        self.assertEqual(split('root', 3, 1), 'SPLIT_CHILD_LIMIT')
+        self.assertEqual(split('root', rp.UNKNOWN, 1), 'SPLIT_CHILD_LIMIT')
+        self.assertEqual(split('child', 0, 1), 'SPLIT_NOT_ROOT')
+        self.assertEqual(split('replan', 0, 1), 'SPLIT_NOT_ROOT')
+        self.assertEqual(split('root', 0, 0), 'SPLIT_CHILDREN_INVALID')
+
+    def test_one_replan_per_lineage_from_a_child_only(self):
+        replan = lambda kind, used, replaces=('c1',): rp.admit_replan(
+            kind=kind, replan_used=used, replaces=list(replaces), policy=self.P)
+        self.assertIsNone(replan('child', 0))
+        self.assertEqual(replan('child', 1), 'REPLAN_USED')
+        self.assertEqual(replan('child', rp.UNKNOWN), 'REPLAN_USED')
+        self.assertEqual(replan('root', 0), 'REPLAN_NOT_CHILD')
+        self.assertEqual(replan('child', 0, ()), 'REPLAN_REPLACES_INVALID')
+
+    def test_drop_needs_a_reason(self):
+        self.assertIsNone(rp.admit_drop(reason='original behaviour unchanged: see PR'))
+        for reason in (None, '', '   ', 'x' * 501):
+            self.assertEqual(rp.admit_drop(reason=reason), 'DROP_REASON_REQUIRED')
+
+
 if __name__ == '__main__':
     unittest.main()

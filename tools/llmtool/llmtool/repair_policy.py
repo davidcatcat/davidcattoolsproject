@@ -135,3 +135,39 @@ def test_failure_action(*, test_fail_count, policy):
     """After an EC2, Linux CI or Mac CI failure caused by the code: REPAIR or STOPPED."""
     done = _used(test_fail_count, policy['test_fail_max'])
     return 'REPAIR' if done < policy['test_fail_max'] else 'STOPPED'
+
+
+TERMINAL_STATES = ('CLOSED', 'DROPPED', 'STOPPED', 'FAILED_FINAL')
+# D4: every Task that does not end in success notifies the Owner; CLOSED does not.
+OWNER_NOTICE_STATES = ('DROPPED', 'STOPPED', 'FAILED_FINAL')
+WAITING_REASONS = ('AUTH', 'QUOTA', 'ROUTE_UNAVAILABLE', 'NO_REVIEWER', 'DISPUTE', 'ENV')
+
+
+def admit_split(*, kind, child_count, new_children, policy):
+    """None admits a SPLIT of new_children child Tasks; only a ROOT splits."""
+    if kind != 'root':
+        return 'SPLIT_NOT_ROOT'
+    if type(new_children) is not int or new_children < 1:
+        return 'SPLIT_CHILDREN_INVALID'
+    if _used(child_count, policy['child_max']) + new_children > policy['child_max']:
+        return 'SPLIT_CHILD_LIMIT'
+    return None
+
+
+def admit_replan(*, kind, replan_used, replaces, policy):
+    """None admits the lineage's one REPLAN, chosen at PM_DECIDE of a child Task."""
+    if kind != 'child':
+        return 'REPLAN_NOT_CHILD'
+    if (type(replaces) is not list or not replaces or len(set(replaces)) != len(replaces) or
+            any(type(item) is not str or not item for item in replaces)):
+        return 'REPLAN_REPLACES_INVALID'
+    if _used(replan_used, policy['replan_max']) >= policy['replan_max']:
+        return 'REPLAN_USED'
+    return None
+
+
+def admit_drop(*, reason):
+    """None admits a DROP; a DROP must record why the original function is not affected."""
+    if type(reason) is not str or not reason.strip() or len(reason) > 500:
+        return 'DROP_REASON_REQUIRED'
+    return None
