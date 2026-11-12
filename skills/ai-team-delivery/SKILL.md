@@ -21,7 +21,7 @@ Before dispatch, record:
 
 For D8 Host/Worker admission and review controls, see the [D8 Host/Worker reference](pm-continuation-reference.md#d8-hostworker-admission-and-review).
 
-**Developer routing (Owner direction, 2026-10-21; O1):** Codex is Reviewer and AI Debug only, never a Developer (O1; disabling Codex Developer in code is 待實作（WP-C）). PM-selected Developer routes are OpenCode, Claude Developer, AGY, and Home LLM `gw-agent` under [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json). Work in a verified registered D6 worktree with the Task Contract's file scope, bounded repairs and required self-review. D8 provider caps, retry stops, timeout and cleanup apply to llmtool Host/Worker jobs. For current dispatch, route-specific and Reviewer rules, follow [AGENTS.md](../../AGENTS.md).
+**Developer routing (Owner direction, 2026-10-21; O1):** Codex is Reviewer and AI Debug only, never a Developer (O1; `codex-developer` is `PAUSED` in code, WP-C). PM-selected Developer routes are OpenCode, Claude Developer, AGY, and Home LLM `gw-agent` under [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json). Work in a verified registered D6 worktree with the Task Contract's file scope, bounded repairs and required self-review. D8 provider caps, retry stops, timeout and cleanup apply to llmtool Host/Worker jobs. For current dispatch, route-specific and Reviewer rules, follow [AGENTS.md](../../AGENTS.md).
 
 **AGY direct Developer:** Follow the [AGY direct Developer skill](../agy-direct-developer/SKILL.md) and the current route authorization in [AGENTS.md](../../AGENTS.md).
 
@@ -29,7 +29,7 @@ For D8 Host/Worker admission and review controls, see the [D8 Host/Worker refere
 
 | Route | Role | Who triggers it | Limits |
 | --- | --- | --- | --- |
-| Codex Developer | Retired from Developer work (O1); Codex is Reviewer and AI Debug only (disabling in code is 待實作（WP-C）) | None | No new Developer work |
+| Codex Developer | Retired from Developer work (O1); Codex is Reviewer and AI Debug only (`codex-developer` is `PAUSED`, WP-C) | None | No new Developer work |
 | Codex AI Debug | Read-only diagnostic task after two failed reviews/repairs | PM, under High Debug policy | Read-only in D6; no write authority; Codex high-tier model |
 | OpenCode Developer | Implements and self-reviews the bounded Task | PM, through the current worker-dispatch gate | Registered D6, task-local permissions and currently free approved model; no paid fallback; required independent review and CI |
 | Claude Developer | Implements and self-reviews the bounded Task | PM, through the current worker-dispatch gate | Registered D6, task scope, independent review and CI |
