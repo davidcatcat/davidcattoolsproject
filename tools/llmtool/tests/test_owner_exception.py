@@ -408,6 +408,32 @@ class OwnerExceptionVerifierTests(unittest.TestCase):
             self.assertEqual(res, [('fake-val', 'fake-plc')])
             self.assertEqual(buf.getvalue(), '')
 
+    def test_allow_merged_accepts_only_a_closed_merged_pr(self):
+        # #1519: the reconcile path verifies an exception PR that is already merged.
+        gh_get = make_fake_github_get(pr_state='closed', pr_merged=True)
+        code, evidence = owner_exception.verify(
+            URL, 42, gh_get, replacement_map=REPLACEMENT_MAP, allow_merged=True)
+        self.assertIsNone(code)
+        self.assertEqual((evidence['pr'], evidence['head']), (42, HEAD_SHA))
+        for state, merged in (('open', False), ('closed', False), ('open', True)):
+            with self.subTest(state=state, merged=merged):
+                gh_get = make_fake_github_get(pr_state=state, pr_merged=merged)
+                self.assertEqual(owner_exception.verify(
+                    URL, 42, gh_get, replacement_map=REPLACEMENT_MAP, allow_merged=True),
+                    ('OWNER_EXCEPTION_UNAVAILABLE', None))
+
+    def test_allow_merged_still_checks_the_head(self):
+        gh_get = make_fake_github_get(pr_state='closed', pr_merged=True, pr_head_sha='c' * 40)
+        self.assertEqual(owner_exception.verify(
+            URL, 42, gh_get, replacement_map=REPLACEMENT_MAP, allow_merged=True),
+            ('OWNER_EXCEPTION_SHA_MISMATCH', None))
+
+    def test_default_still_refuses_a_merged_pr(self):
+        gh_get = make_fake_github_get(pr_state='closed', pr_merged=True)
+        self.assertEqual(owner_exception.verify(
+            URL, 42, gh_get, replacement_map=REPLACEMENT_MAP),
+            ('OWNER_EXCEPTION_UNAVAILABLE', None))
+
 
 if __name__ == '__main__':
     unittest.main()
