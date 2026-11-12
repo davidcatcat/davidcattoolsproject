@@ -3502,7 +3502,12 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("wp-1", mon._d6_running_tasks(rows))
         # The gw-agent switch is PAUSED in the fixture: its status row stays and says so.
         status = self.by_name(rows)[mon.HOME_GW_AGENT]
-        self.assertIn("有 1 個執行中", status.detail)
+        self.assertIn("工作中（1 件）", status.detail)
+        # #1592: with the switch open, the row stays and says it is working.
+        open_switch = self._dispatch({"company-gw-agent": dict(GW_AGENT_OWNER_ALLOWED)})
+        status = self.by_name(self.rows(self._gw_agent_process(self.task, audit),
+                                        dispatch=open_switch))[mon.HOME_GW_AGENT]
+        self.assertEqual((status.state, status.detail), (mon.WORKING, "可派工；工作中（1 件）"))
         lines = self._gw_view(rows)
         at = next(i for i, line in enumerate(lines) if "gw-agent developer pid 91" in line)
         self.assertLess(lines.index(next(l for l in lines if mon.LIVE_SECTION in l)), at)
