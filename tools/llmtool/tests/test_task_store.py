@@ -1038,6 +1038,38 @@ class TaskStoreTests(unittest.TestCase):
                 with self.assertRaises(LLMToolError):
                     task_store_module._validate(malformed)
 
+    def test_agy_exit_nonzero_keeps_a_screened_exit_diagnostic(self):
+        # #1606: an AGY_EXIT_NONZERO block may keep a bounded, screened
+        # exit diagnostic; other codes and unscreened text stay refused.
+        self._allow_agy_by_fixture_policy()
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        reason = 'exit_code=3 stderr_tail=fatal: model run failed'
+        developer = self._developer_assignment(provider='agy', max_tokens=None)
+        developer.update(
+            state='BLOCKED', provider_type='agy-cli', model='gemini-test',
+            backend_session_semantics='CLI_REPORTED_SESSION_ID', owner_assignment_ref=None,
+            error_code='AGY_EXIT_NONZERO', blocked_reason=reason, execution=None)
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=developer)
+        self.assertEqual(saved['developer']['blocked_reason'], reason)
+        cred = 'api_' + 'key'  # built here so the spec text holds no credential shape
+        refused = (
+            ('other code', dict(saved['developer'], error_code='AGY_MODEL_MISMATCH')),
+            ('no exit prefix', dict(saved['developer'], blocked_reason='fatal')),
+            ('too long', dict(saved['developer'],
+                              blocked_reason='exit_code=3 ' + 'x' * 2048)),
+            ('credential', dict(saved['developer'],
+                                blocked_reason='exit_code=3 %s=secret-value' % cred)),
+            ('control', dict(saved['developer'], blocked_reason='exit_code=3 bad\x01')),
+        )
+        for label, candidate in refused:
+            with self.subTest(label):
+                malformed = dict(saved, developer=candidate)
+                malformed['record_sha256'] = task_store_module._digest(malformed)
+                with self.assertRaises(LLMToolError):
+                    task_store_module._validate(malformed)
+
     def test_non_claude_d6_binding_refuses_second_live_task_for_each_route(self):
         self._allow_codex_dispatch()
         store = TaskStore(Path(self.temp.name).resolve())

@@ -116,7 +116,8 @@ Home LLM work grows by a ladder (Owner 2026-11-10, #120). The PM logs every call
 | T2 | Tests, or up to 40 lines, in one file; at most 3 KB of context |
 | T3 | Code and tests in two files; at most 6 KB of context |
 | T4 | A new file, or up to 3 files; at most 10 KB of context |
-| T5 | A small feature |
+| T5 | A small feature: up to 4 files; at most 16 KB of context; at most 16 gw-agent turns |
+| T6 | Up to 5 files; at most 24 KB of context; at most 16 gw-agent turns. Every edit needs a line hint, an anchor and the full new text |
 
 - Promote one tier after 3 first-try SOLVED in a row at the current tier. On failure step down one size tier; pause only after 2 consecutive failures at the lowest tier.
 - Repairs follow D1: two in total, the second only after an AI Debug with a confirmed cause (O4).

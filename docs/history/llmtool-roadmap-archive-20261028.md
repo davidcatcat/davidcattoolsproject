@@ -1186,7 +1186,7 @@ real-repository mutation, satisfy A11c.2, or retire the temporary ai-loop.
 | --- | --- |
 | **S1a — DONE/MERGED via PR #128** | Deterministic Task Event validation, state replay and read-only handoff preview: `llmtool task inspect --contract <file> --expect <file> --events <file> --observed-at <UTC-time> --json`. Independent expectation input pins identity/source/epoch; bounded explicit files and stdout only; no agent launch, provider call, Git/PR mutation, command execution or implicit ledger write. |
 | **S1b — Product A fake-only MERGED via PR #131** | Proposed one foreground task review command, paired immutable preparation/final TaskContracts, actual read-only identity collector, exact-SHA packet and structured Security/Functional verdict. Independent contract review + merge precede a separately pinned product task; actual provider invocation additionally requires authentic host/route permission. No authority is inherited from S1a. |
-| **S1b-B — B1 fake-first source MERGED via PR #133; native/production enablement gated** | [B contract](../../tools/llmtool/WORKFLOW.md#s1b-production-enablement-b-contract-draft) accepted via PR #130; A fake-only merged via PR #131. B1 implements typed host composition, static-policy validation and provider-only layout in the same ReceiptLedger under its task-specific scope. Native fake fixture plan APPROVE; actual fake tests are separate from product review/T1 release acceptance. D1 v1 unchanged. Public factory remains unavailable; no production Host installation/ledger, data export or real Claude call. T2/T3 and real handoff remain NOT_AUTHORIZED/BLOCKED. |
+| **S1b-B — B1 fake-first source MERGED via PR #133; native/production enablement gated** | [B contract](https://github.com/davidcatcat/davidcattoolsproject/blob/cf3a1c4a306b3be9b058d32b0bf7047d33727f1c/tools/llmtool/WORKFLOW.md#s1b-production-enablement-b-contract-draft) accepted via PR #130; A fake-only merged via PR #131. B1 implements typed host composition, static-policy validation and provider-only layout in the same ReceiptLedger under its task-specific scope. Native fake fixture plan APPROVE; actual fake tests are separate from product review/T1 release acceptance. D1 v1 unchanged. Public factory remains unavailable; no production Host installation/ledger, data export or real Claude call. T2/T3 and real handoff remain NOT_AUTHORIZED/BLOCKED. |
 | **S2 — future separate authority/execution contract** | Permission-controlled llmtool-executed repair/execution retains A11b approval, sandbox, recovery/audit, budgets and **F2 for any direct llmtool repository mutation**. Separately authorized Developer CLI source edits/Commit/Push are Worker-owned Git actions, not evidence that llmtool F2 passed. No automatic merge authority. |
 
 S1a reuses the existing `task_verification.TaskContract`/`TaskBinding` and A11a
@@ -1213,11 +1213,11 @@ reviewed source `c9c8747b59ac49b18dbc521e8af9ac7f803212fe`, merge
 APPROVE and exact-source/post-merge Python 3.9/3.14 CI PASS. N4 physical-path
 guidance uses `/private/tmp` (no symlink ancestors); N5 current status is corrected
 here and in WORKFLOW, with README deferred to the next authorized product touch.
-See the [S1a validation and delivery contract](../../tools/llmtool/WORKFLOW.md#s1a-offline-task-event-inspection-contract).
+See the [S1a validation and delivery contract](https://github.com/davidcatcat/davidcattoolsproject/blob/cf3a1c4a306b3be9b058d32b0bf7047d33727f1c/tools/llmtool/WORKFLOW.md#s1a-offline-task-event-inspection-contract).
 
 **S1b contract accepted via PR #129; no provider grant:** the accepted
 [handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127091068)
-is concretized in the [normative draft contract](../../tools/llmtool/WORKFLOW.md#s1b-foreground-review-contract-draft).
+is concretized in the [normative draft contract](https://github.com/davidcatcat/davidcattoolsproject/blob/cf3a1c4a306b3be9b058d32b0bf7047d33727f1c/tools/llmtool/WORKFLOW.md#s1b-foreground-review-contract-draft).
 Product A now implements foreground `task review` validation and fake-only
 packet/verdict testing. Real Claude text/no-tools remains BLOCKED pending B;
 actual automatic handoff is NOT DELIVERED. Product A fake-only review was accepted
@@ -1236,7 +1236,7 @@ separately pinned product task are required before authoring product code.
 **S1b Production Enablement (B), B1 source merged / enablement gated:** the merged
 [A/B ordered delivery contract](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127970737)
 schedules B in parallel with Product A. Its normative draft is the
-[B contract](../../tools/llmtool/WORKFLOW.md#s1b-production-enablement-b-contract-draft). An automatic
+[B contract](https://github.com/davidcatcat/davidcattoolsproject/blob/cf3a1c4a306b3be9b058d32b0bf7047d33727f1c/tools/llmtool/WORKFLOW.md#s1b-production-enablement-b-contract-draft). An automatic
 no-tools review starts as shadow/pre-review only and never replaces independent
 Security/Functional APPROVE; promotion needs 0 false-APPROVE on seeded defects.
 Unknown usage stays UNKNOWN; no savings claim. This grants no code scope,
@@ -1326,7 +1326,7 @@ observed Owner relays separately from initial task authorization; missing usage
 or intervention evidence stays UNKNOWN. Documents, fake tests and historical
 smoke results do not satisfy a new real-task acceptance. Company Live, real
 Step-0 and Native Gate B still require their separate explicit authorizations.
-See [the foreground workflow](../../tools/llmtool/WORKFLOW.md#supervised-self-hosting-dogfood-m1).
+See [the foreground workflow](https://github.com/davidcatcat/davidcattoolsproject/blob/cf3a1c4a306b3be9b058d32b0bf7047d33727f1c/tools/llmtool/WORKFLOW.md#supervised-self-hosting-dogfood-m1).
 
 ### A11c.1a — Local Reviewer subagent and work-package pilot (2026-10-14)
 
@@ -1338,7 +1338,7 @@ Separate A11c integration acceptance must **actually** demonstrate Codex-to-Clau
 
 This is an adapter proposal inside existing A11c.1, not another milestone or
 controller. The normative sequence, binding, replay/cleanup rules and future
-test matrix are in [WORKFLOW](../../tools/llmtool/WORKFLOW.md#a11c1-cross-cli-handoff-adapter-proposal-issue-120).
+test matrix are in [WORKFLOW](https://github.com/davidcatcat/davidcattoolsproject/blob/cf3a1c4a306b3be9b058d32b0bf7047d33727f1c/tools/llmtool/WORKFLOW.md#a11c1-cross-cli-handoff-adapter-proposal-issue-120).
 READY_FOR_REVIEW is a cue mapped to existing SUCCESS + WAITING_REVIEW and
 HandoffRecord, not a TaskContract/TaskState schema change. PASS requires both
 bound Security and Functional APPROVE; CHANGES_REQUESTED maps to the existing

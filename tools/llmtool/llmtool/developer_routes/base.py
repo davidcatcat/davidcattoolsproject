@@ -481,6 +481,18 @@ def _git_status_paths(root):
     return tuple(paths)
 
 
+def _exit_diagnostic(code, stderr):
+    """#1606: exit code plus a bounded, screened, one-line stderr tail."""
+    from ..task_submission_cli import _redact_rejected_output
+    from ..test_output_excerpts import _emitted_sensitive
+    text = _redact_rejected_output(stderr.decode('utf-8', 'replace'))
+    text = ''.join(c for c in text.replace('\n', ' | ') if ' ' <= c <= '~')
+    reason = 'exit_code=%d stderr_tail=%s' % (code, text[-1536:])
+    if _emitted_sensitive(reason):
+        return 'exit_code=%d stderr_tail=[withheld]' % code
+    return reason
+
+
 def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
               runner=None, boundary, snapshot):
     """Run one route only after dispatch, D6, and OS write-boundary checks."""
@@ -728,7 +740,8 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     if code < 0:
         raise RouteError(_route_code(route, 'INTERRUPTED'))
     if code != 0:
-        raise RouteError(_route_code(route, 'EXIT_NONZERO'))
+        raise RouteError(_route_code(route, 'EXIT_NONZERO'), blocked_reason=(
+            _exit_diagnostic(code, stderr) if route.name == 'agy' else None))
     try:
         stdout_hash = hashlib.sha256(stdout).hexdigest()
         elapsed = int((time.monotonic() - started) * 1000)
