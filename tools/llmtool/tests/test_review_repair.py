@@ -833,6 +833,20 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(recorded, [])
         self.assertNotIn('review_repair_claims', self.store.get(TASK))
 
+    def test_codex_developer_repair_is_retired_before_claim(self):
+        # #1502 O1 / WP-C: a Codex Developer Task gets no repair route.
+        record = self.store.get(TASK)
+        record['developer']['provider_profile'] = 'codex'
+        record['pm_assignment']['route'] = 'codex'
+        self.store = TempTaskStore(self.temp.name, record)
+        recorded = []
+        with self.assertRaises(LLMToolError) as caught:
+            self.dispatch(repair_task_recorder=lambda **kwargs: recorded.append(kwargs))
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_CODEX_DEVELOPER_RETIRED')
+        self.assertEqual((recorded, self.calls), ([], []))
+        self.assertNotIn('review_repair_claims', self.store.get(TASK))
+        self.assertIsNone(review_repair._worker_key('codex'))
+
     def test_missing_provider_runtime_refused_before_claim(self):
         # #1502 WP-C: the runtime check applies to the Claude CLI route.
         record = self.store.get(TASK)

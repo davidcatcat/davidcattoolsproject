@@ -541,7 +541,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
 
         for profile, expected_worker, expected_task in (
                 ('claude', 'claude-developer', 'd6-owner-task'),
-                ('codex', 'codex-developer', 'original-task')):
+                ('agy', 'agy', 'original-task')):   # #1502 WP-C: no Codex repair route
             with self.subTest(profile=profile):
                 task = {
                     'task_id': 'original-task',
