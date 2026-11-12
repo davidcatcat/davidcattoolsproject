@@ -5897,6 +5897,18 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(rows[mon.HOME_GW_AGENT].state, mon.UNCHECKED)
         self.assertEqual(rows[mon.HOME_GW].state, mon.UNCHECKED)
 
+    def test_retired_company_gw_row_is_hidden_while_paused(self):
+        # #1592 (Owner 2026-11-12): the PAUSED company-gw switch stays in the file
+        # but gets no roster row; the other Workers keep theirs.
+        switches = self._dispatch({"company-gw": {"dispatch": "PAUSED", "decided_by": "Owner",
+                                                  "decided_at": "2026-11-11"}})
+        rows = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude),
+                                            canonical=self.canonical, opencode_db="/nonexistent",
+                                            cwd_of=lambda pid: None, dispatch=switches))
+        self.assertNotIn(mon.HOME_GW, rows)
+        self.assertEqual({mon.HOME_GW_AGENT, "agy", "opencode developer"} - set(rows), set())
+
     def test_company_gw_row_reads_llmtool_outcomes_never_request_or_response(self):
         tasks = Path(tempfile.mkdtemp(dir=self.tmp.name))
         def task(name, age, state, code):
