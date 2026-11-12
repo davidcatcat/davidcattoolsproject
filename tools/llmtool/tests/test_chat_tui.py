@@ -4941,7 +4941,9 @@ class PMConversationTests(BoundedPMTest):
                       [_delta('C'), _result('C')]]
 
         async def queued(ui):
-            await self.until(ui, lambda ui: len(ui.pm_outbox) == 3, 'three queued')
+            # #1612: the turn's worker thread writes 'first'; wait for that write too.
+            await self.until(ui, lambda ui: len(ui.pm_outbox) == 3
+                             and len(self.fakes[0].users()) == 1, 'three queued, first sent')
             text = ui.conversation.text
             for number, draft in ((1, 'a'), (2, 'b'), (3, 'c')):
                 self.assertIn('你（已排入佇列（第 %d 則））\n  %s' % (number, draft), text)
