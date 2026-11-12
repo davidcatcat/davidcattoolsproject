@@ -43,7 +43,6 @@ def _update_claim_state(store, task_id, claim, state):
 
 def _worker_key(profile):
     return {'company-gw': 'company-gw', 'gw-agent': 'company-gw-agent',
-            'codex': 'codex-developer',
             'opencode': 'opencode-developer', 'claude': 'claude-developer',
             'agy': 'agy'}.get(profile)
 
@@ -97,7 +96,9 @@ def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_
             type(provenance.get('pm_cwd')) is not str):
         _refuse('REPAIR_PM_SESSION_UNAVAILABLE')
     route = developer.get('provider_profile')
-    if route not in ('codex', 'opencode', 'agy', 'claude', 'gw-agent'):
+    if route == 'codex':   # #1502 O1 / WP-C: Codex is Reviewer and AI Debug only
+        _refuse('REPAIR_CODEX_DEVELOPER_RETIRED')
+    if route not in ('opencode', 'agy', 'claude', 'gw-agent'):
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     pm_assignment = task.get('pm_assignment')
     if type(pm_assignment) is not dict or type(pm_assignment.get('goal')) is not str:
@@ -309,12 +310,14 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                   developer.get('backend_session_semantics') == 'CLI_REPORTED_SESSION_ID')
     if profile == 'claude' and not claude_cli:
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
+    if profile == 'codex':   # #1502 O1 / WP-C: Codex is Reviewer and AI Debug only
+        _refuse('REPAIR_CODEX_DEVELOPER_RETIRED')
     worker = _worker_key(profile)
     if worker is None:
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     if profile == 'company-gw':
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
-    if profile in ('codex', 'claude') and shutil.which(profile) is None:
+    if profile == 'claude' and shutil.which(profile) is None:
         _refuse('RUNTIME_NOT_ON_PATH')
     if remote_test_receipt is None:
         packet, _event = _failed_event(task, executor_task=executor_task,
