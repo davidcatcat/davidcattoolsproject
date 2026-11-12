@@ -1181,14 +1181,19 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         except LLMToolError: raise
         except Exception: _refuse('HIGH_DEBUG_EVIDENCE_INVALID')
     else: evidence_text = ''
-    worker_key = 'claude-reviewer' if route == 'claude' else 'codex-developer'
+    # #1502 WP-B: AI Debug has its own dispatch keys, apart from Reviewer and Developer.
+    worker_key = 'claude-debug' if route == 'claude' else 'codex-debug'
     policy = worker_dispatch.evaluate(worker_key, None, task_id)
     if not policy.allowed:
         _refuse('HIGH_DEBUG_DISPATCH_REFUSED')
     account = None
     config_dir = None
     if route == 'claude':
-        role_settings = role_config.resolve_role('reviewer')
+        # #1502 WP-B: the claude-debug role uses the Claude Reviewer account until
+        # the Owner configures it separately.
+        role_settings = role_config.resolve_role('claude-debug')
+        if role_settings.get('source') == 'builtin':
+            role_settings = role_config.resolve_role('reviewer')
         if (role_settings.get('source') == 'builtin' or
                 role_settings.get('config_dir') is None or
                 role_settings.get('account') is None):

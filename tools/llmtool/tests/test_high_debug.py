@@ -1702,8 +1702,8 @@ class HighDebugTests(unittest.TestCase):
         created_agents = []
         _result, store, mock_eval, mock_resolve = self._run_claude_case(
             report, created_agent_id=created_agents)
-        mock_eval.assert_called_with('claude-reviewer', None, 'a' * 32)
-        mock_resolve.assert_called_with('reviewer')
+        mock_eval.assert_called_with('claude-debug', None, 'a' * 32)
+        mock_resolve.assert_called_with('claude-debug')
         self.assertEqual(created_agents, ['claude-high-debug-claude-opus-5-5'])
         self.assertEqual(len(store.entries), 1)
         entry = store.entries[0]
