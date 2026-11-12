@@ -32,7 +32,7 @@ _CLAUDE_EFFORT = 'medium'
 _REFUSAL_CODES = frozenset((
     'HIGH_DEBUG_RUN_FAILED', 'HIGH_DEBUG_WROTE_FILES',
     'HIGH_DEBUG_REPORT_INVALID', 'HIGH_DEBUG_QUOTA_EXHAUSTED',
-    'HIGH_DEBUG_MODEL_UNVERIFIED'))
+    'HIGH_DEBUG_MODEL_UNVERIFIED', 'HIGH_DEBUG_AUTH_FAILED'))
 _SCREEN_HIT_LIMIT = 32
 _SCREEN_RULES = (
     ('private_key', re.compile(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----', re.I)),
@@ -933,6 +933,36 @@ _CODEX_SETTINGS = (
 )
 
 
+# #1502 WP-B: only these two Codex failures may switch AI Debug to the Claude
+# route. Anything else (timeout, screen refusal, unknown result) stops as before.
+DEBUG_FALLBACK_CODES = frozenset(('HIGH_DEBUG_QUOTA_EXHAUSTED', 'HIGH_DEBUG_AUTH_FAILED'))
+_CODEX_QUOTA = re.compile(r'usage limit|hit your limit|quota|rate.?limit|\b429\b', re.I)
+_CODEX_LOGIN = re.compile(
+    r'not logged in|log ?in again|unauthori[sz]ed|\b401\b|authentication (?:failed|required)', re.I)
+
+
+def _codex_failure_code(stdout, stderr):
+    """Classify a failed Codex run from stderr and its error events only.
+
+    Agent messages are not read, so a report that mentions a rate limit is not
+    taken for one. Login wins over quota; anything else is HIGH_DEBUG_RUN_FAILED.
+    """
+    texts = [(stderr or b'')[:65536].decode('utf-8', 'replace')]
+    for line in (stdout or b'')[:1024 * 1024].splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if type(event) is dict and event.get('type') in ('error', 'turn.failed'):
+            texts.append(json.dumps(event, sort_keys=True))
+    text = '\n'.join(texts)
+    if _CODEX_LOGIN.search(text):
+        return 'HIGH_DEBUG_AUTH_FAILED'
+    if _CODEX_QUOTA.search(text):
+        return 'HIGH_DEBUG_QUOTA_EXHAUSTED'
+    return 'HIGH_DEBUG_RUN_FAILED'
+
+
 def _run_codex(*, prompt, cwd, output_path):
     from . import codex_direct_developer
     argv = ['codex', 'exec', '--ignore-user-config', '--ignore-rules',
@@ -1283,7 +1313,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
             actual_runner = _run_codex
         result = actual_runner(prompt=prompt, cwd=diagnosis_root or d6, output_path=output_path)
         if route == 'codex':
-            if result.returncode != 0: raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
+            if result.returncode != 0:
+                raise _AttemptFailed(_codex_failure_code(result.stdout, result.stderr))
             events_raw = result.stdout
             if len(events_raw) > 1024 * 1024 or len(result.stderr) > 65536:
                 raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
