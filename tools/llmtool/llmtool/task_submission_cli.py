@@ -934,6 +934,9 @@ def add_task_submission_parsers(actions):
     remote_test.add_argument('--pr', type=int, help='PR whose recorded head is the expected SHA')
     remote_test.add_argument('--hosted', action='store_true',
                              help='run on the GitHub-hosted workflow instead of EC2')
+    remote_test.add_argument('--pm-session',
+                             help=('caller PM session (native UUID or pm- ID); default: '
+                                   'CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID'))
 
 
 def run_task_status(args, *, store=None, stdout=None):
@@ -1009,6 +1012,22 @@ def run_task_remote_test(args, *, store=None, stdout=None):
                              pr=args.pr, store=store,
                              hosted=getattr(args, 'hosted', False))
     return _print(result, stdout)
+
+
+def run_task_remote_test_checked(args, *, store=None, stdout=None):
+    """CLI entry for ``task remote-test``: the caller's PM session must own the Task.
+
+    #1230 A1 (#1124 rest, item 2): only the CLI checks the caller. ``task advance``
+    checks its own caller and then calls ``run_task_remote_test`` directly.
+    """
+    from . import pm_caller
+    store = TaskStore() if store is None else store
+    try:
+        pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
+    except pm_caller.PMCallerRefused as exc:
+        _print(pm_caller.refusal(args.task_id, exc.code), stdout)
+        return 1
+    return run_task_remote_test(args, store=store, stdout=stdout)
 
 
 _REVIEW_CI_CHECKS = ('check (Linux 3.14)', 'check (macOS 3.13)', 'check (docs)')
