@@ -7665,6 +7665,9 @@ DISPATCH_VALUES = frozenset({"ALLOWED", "PAUSED", "OWNER_ASSIGNMENT_ONLY"})
 DISPATCH_WORKERS = frozenset({"codex-developer", "claude-developer", "opencode-developer", "agy",
                               "company-gw", "company-gw-agent", "claude-reviewer",
                               "codex-reviewer"})
+# #1502 WP-B: the AI Debug keys are optional, as in the gate: a file without
+# them is valid, a file with only one of them is not.
+DISPATCH_DEBUG_WORKERS = frozenset({"codex-debug", "claude-debug"})
 # The gw Agent route (#120) accepts exactly one of two entries, as the gate
 # does: PAUSED by the PM with the bare issue as evidence (WP3b), or ALLOWED by
 # the Owner with exactly the 2026-11-10 standing authorization comment (#120).
@@ -7807,7 +7810,8 @@ def worker_dispatch(raw: bytes | None) -> tuple[dict, str]:
     try:
         ok = (type(data) is dict and set(data) == {"schema_version", "workers"} and
               type(data["schema_version"]) is int and data["schema_version"] == 1 and
-              type(workers) is dict and set(workers) == DISPATCH_WORKERS and
+              type(workers) is dict and
+              set(workers) in (DISPATCH_WORKERS, DISPATCH_WORKERS | DISPATCH_DEBUG_WORKERS) and
               all(_dispatch_entry_ok(key, item) for key, item in workers.items()))
     except (TypeError, ValueError):   # e.g. an unhashable value where a name belongs
         ok = False
