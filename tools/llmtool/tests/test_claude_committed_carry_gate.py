@@ -87,6 +87,49 @@ class CommittedCarryGateTests(unittest.TestCase):
         self.assertIsNone(wd.authorize_task_store_change(current, {
             'developer': developer, 'completion': completion}, {'developer': self.dispatching}))
         self.assertEqual(current['dispatch_audit'][-1]['action'], 'COMMITTED_RESULT_CARRY')
+    def test_the_real_store_stores_the_carry(self):
+        saved = self.write(*self.carry(), self.dispatching)
+        evidence = saved['developer']['direct_result_callback']['evidence']
+        self.assertEqual((saved['developer']['state'], saved['developer']['source_sha'],
+                          evidence['source_sha'], evidence['result_head'],
+                          saved['completion']['evidence']['result_head']),
+                         ('DEVELOPER_RESPONDED', BASE, BASE, HEAD, HEAD))
+        audit = saved['dispatch_audit'][-1]
+        self.assertEqual((audit['action'], audit['decision'], audit['assignment_id']),
+                         ('COMMITTED_RESULT_CARRY', 'ALLOWED', 'f' * 32))
+
+    def assert_denied(self, carry, code):
+        with self.assertRaises(wd.WorkerDispatchDenied) as caught:
+            self.write(*carry, self.dispatching)
+        self.assertEqual(caught.exception.dispatch_code, code)
+        self.assertEqual(self.store.get(TASK)['developer']['source_sha'], HEAD)
+
+    def test_refused_carries(self):
+        cases = [{'head': '3' * 40}, {'write_paths': ['x', 'y']}, {'artifact_sha256': '0' * 64},
+                 {'record': False},
+                 {'execution': {'status': 'TIMEOUT'}}, {'execution': {'process_exit_code': 1}},
+                 {'execution': {'cleanup_status': 'UNKNOWN'}}, {'execution': {'native_session_id': None}}]
+        for change in [{'assignment_id': '9' * 32}] + cases:
+            with self.subTest(change=change):
+                self.setUp()
+                self.assert_denied(self.carry(**change), 'WORKER_COMMITTED_CARRY_PRECONDITION'
+                                   if change in cases else 'WORKER_REASSIGN_PRECONDITION')
+
+    def test_unbound_carry_is_refused_and_a_refusal_is_counted(self):
+        changes = dict(zip(('developer', 'completion'), self.carry()))
+        self.assertEqual(wd.authorize_task_store_change(self.store.get(TASK), changes).dispatch_code,
+                         'WORKER_COMMITTED_CARRY_PRECONDITION')
+        self.assert_denied(self.carry(record=False), 'WORKER_COMMITTED_CARRY_PRECONDITION')
+        self.assert_denied(self.carry(), 'WORKER_COMMITTED_CARRY_LIMIT')
+
+    def test_a_carry_that_starts_a_reviewer_handoff_keeps_the_normal_gates(self):
+        developer, completion = self.carry()
+        developer['direct_result_callback']['review_handoff'] = {'dispatch_state': 'DISPATCHING'}
+        attempts = wd.task_store_attempts(self.store.get(TASK), {'developer': developer})
+        self.assertEqual([action for _worker, action in attempts], ['REVIEWER_HANDOFF', 'REASSIGN'])
+        self.assert_denied((developer, completion), 'WORKER_REASSIGN_PRECONDITION')
+
+
 
 if __name__ == '__main__':
     unittest.main()
