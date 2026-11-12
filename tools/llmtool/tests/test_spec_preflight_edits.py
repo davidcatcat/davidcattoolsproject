@@ -198,5 +198,28 @@ class SpecPreflightEditsTests(unittest.TestCase):
             )
 
 
+    def big_repo(self, directory):
+        lines = [f"line {i}" for i in range(1, 2101)]
+        (Path(directory) / "sample.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return directory
+
+    def test_large_file_edit_needs_line_hint(self):
+        with tempfile.TemporaryDirectory() as repo_dir:
+            edit = {"path": "sample.txt", "old": "line 1500\n", "new": "line x\n"}
+            spec = dict(self.base_spec, edits=[edit])
+            status, output = self.run_main(spec, repo=self.big_repo(repo_dir))
+            self.assertEqual((status, output), (2, "SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_MISSING:0\n"))
+            for line, expected in ((1490, "SPEC_PREFLIGHT_OK\n"), (1400, "SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_WRONG:0\n")):
+                spec = dict(self.base_spec, edits=[dict(edit, line=line)])
+                self.assertEqual(self.run_main(spec, repo=repo_dir)[1], expected)
+
+    def test_gw_agent_spec_writing_large_file_needs_edits(self):
+        with tempfile.TemporaryDirectory() as repo_dir:
+            spec = dict(self.base_spec, provider="gw-agent")
+            status, output = self.run_main(spec, repo=self.big_repo(repo_dir))
+            self.assertEqual((status, output), (2, "SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_MISSING:-1\n"))
+            (Path(repo_dir) / "sample.txt").write_text("short\n", encoding="utf-8")
+            self.assertEqual(self.run_main(spec, repo=repo_dir), (0, "SPEC_PREFLIGHT_OK\n"))
+
 if __name__ == "__main__":
     unittest.main()
