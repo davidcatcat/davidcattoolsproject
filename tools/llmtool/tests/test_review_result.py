@@ -340,6 +340,32 @@ class UnknownClaimReconcileShapeTests(unittest.TestCase):
         self.assertEqual(self.state(), 'UNKNOWN')
 
 
+class StableFindingIdTests(unittest.TestCase):
+    """#1502 WP-D section 4.12: finding IDs, severity and blocking."""
+
+    def test_ids_map_to_severity_and_low_or_advisory_never_block(self):
+        body = ('Verdict: FAIL\nFinding: F1 [High] a.py:3 wrong\n'
+                'Finding: F2 [Low] a.py:9 style\nFinding: F3 [Advisory] b.py:1 note\n'
+                'Finding: F10 [Medium] c.py:2 gap\nFinding: F4 [Blocker] d.py:5 crash\n')
+        self.assertEqual(review_result.finding_ids(body),
+                         {'F1': 'High', 'F2': 'Low', 'F3': 'Advisory',
+                          'F10': 'Medium', 'F4': 'Blocker'})
+        self.assertEqual(review_result.blocking_findings(body), ['F1', 'F4', 'F10'])
+
+    def test_only_low_findings_leave_no_blocking_finding(self):
+        self.assertEqual(review_result.blocking_findings(
+            'Finding: F1 [Low] a.py:1 x\nFinding: F2 [Advisory] a.py:2 y\n'), [])
+
+    def test_legacy_or_malformed_verdicts_are_none(self):
+        for body in ('no findings\n', 'Finding: a.py:1 bug\n',
+                     'Finding: F1 [High] a.py:1 x\nFinding: F1 [Low] a.py:2 y\n',
+                     'Finding: F1 [Severe] a.py:1 x\n', 'Finding: F0 [High] a.py:1 x\n',
+                     'Finding: F1 [High] a.py:1 x\nFinding: [P1] issue\n', None):
+            with self.subTest(body=body):
+                self.assertIsNone(review_result.finding_ids(body))
+                self.assertIsNone(review_result.blocking_findings(body))
+
+
 class PriorityFindingTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
