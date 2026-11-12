@@ -18,7 +18,7 @@ from argparse import Namespace
 
 from . import active_pm_inbox, github_events, remote_test, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
-from . import mac_full_suite, task_submission_cli
+from . import mac_full_suite, review_transcript, task_submission_cli
 from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes
@@ -435,7 +435,7 @@ def _mac_ci_runs(paths):
 
 
 def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False,
-                  owner_acceptance=None, acceptance_out=None):
+                  owner_acceptance=None, acceptance_out=None, skip_owner_acceptance=False):
     """Check every exact-head merge gate; return None or one refusal code.
 
     acceptance_out, when given, is a dict that gets the carried-acceptance
@@ -511,7 +511,7 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
             acceptance_out.update(carry)
             acceptance_out['h1_checks'] = sorted(
                 f"{item['name']}={item.get('conclusion')}" for item in check_runs)
-    elif _owner_acceptance_required(files):
+    elif not skip_owner_acceptance and _owner_acceptance_required(files):
         return 'MERGE_OWNER_ACCEPTANCE_MANUAL'
     if requires_macos:
         mac_runs = [item for item in check_runs if item.get('name') == 'check (macOS 3.13)']
@@ -1265,7 +1265,9 @@ def label_mac_ci_for_skipped_check(*, task_id, store=None, pr_number=None,
             pr.get('state') not in (None, 'open') or pr.get('merged') is True or
             pr.get('mergeable') is not True):
         return None
-    code = _merge_checks(record, number, head, pr, get, allow_missing_macos=True)
+    # #1576: Owner acceptance gates the merge only, never the Mac run that precedes it.
+    code = _merge_checks(record, number, head, pr, get, allow_missing_macos=True,
+                         skip_owner_acceptance=True)
     if code != 'MERGE_MACOS_CHECK_SKIPPED':
         return None
     try:
@@ -2313,7 +2315,7 @@ def _closed_train_member_head(record, task_id, store):
 
 def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=False,
             reviewer_session_done=False, dispatch_review_call=None,
-            record_review_result_call=None, repair_review_call=None,
+            record_review_result_call=None, repair_review_call=None, relay_verdict_call=None,
             run_task_complete_call=None, record_github_event_call=None,
             github_get=None, cwd=None, publish_git_runner=None,
             publish_gh_runner=None, record_result_call=None, merge_gh_runner=None,
@@ -2525,13 +2527,39 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                      c.get('pr') == number and c.get('head_sha') == d6['result_head'])
         invoke = record_review_result_call or review_result.record_review_result
         try:
-            result = invoke(store=store, task_id=task_id, executor_task=executor_task,
-                            pr_number=number, version=claim['version'],
-                            # First check for a posted comment without creating a
-                            # REVIEW_BLOCKED event for a missing verdict.
-                            reviewer_session_done=False,
-                            github_get=get)
-            if type(result) is dict and result.get('state') == 'REVIEW_BLOCKED':
+            # First check for a posted comment without creating a
+            # REVIEW_BLOCKED event for a missing verdict.
+            review_args = dict(store=store, task_id=task_id, executor_task=executor_task,
+                               pr_number=number, version=claim['version'],
+                               reviewer_session_done=False, github_get=get)
+            result = invoke(**review_args)
+            relay_codes, relayed = [], False
+            if (type(result) is dict and result.get('state') == 'NOT_READY' and
+                    claim.get('state') == 'DISPATCHED'):
+                # #1568: a read-only Claude Reviewer cannot post its own verdict.
+                # Post its one claim-bound transcript block unedited, then re-read.
+                _, relay_code, block = (relay_verdict_call or
+                                        review_transcript.unposted_verdict)(claim, record)
+                if relay_code is not None:
+                    relay_codes = ['REVIEWER_VERDICT_UNPOSTED', relay_code]
+                elif block is not None:
+                    try:
+                        _post_review_verdict_comment(
+                            _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
+                            d6.get('root') or cwd or os.getcwd(), number, block)
+                    except _PublishRefusal:
+                        relay_codes = ['REVIEWER_VERDICT_UNPOSTED',
+                                       'REVIEW_VERDICT_COMMENT_FAILED']
+                    else:
+                        relayed, result = True, invoke(**review_args)
+            if relay_codes:
+                step = 'REVIEW_NOT_POSTED'
+                codes.extend(relay_codes)
+            elif relayed and (type(result) is not dict or result.get('state') == 'NOT_READY'):
+                # Posted but not read back yet: stop instead of posting twice.
+                step = 'REVIEW_OUTCOME_UNKNOWN'
+                codes.append('REVIEWER_VERDICT_RELAY_UNCONFIRMED')
+            elif type(result) is dict and result.get('state') == 'REVIEW_BLOCKED':
                 step = 'REVIEWER_ATTENTION'
                 codes.append('REVIEWER_ATTENTION')
             elif (type(result) is dict and result.get('state') == 'NOT_READY' and

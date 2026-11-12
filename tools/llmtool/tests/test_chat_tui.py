@@ -7177,6 +7177,7 @@ class PMConversationTests(BoundedPMTest):
 
     def test_w60_double_click_in_the_detail_selects_a_word(self):
         async def clicked(ui, copies):
+            await self.until(ui, lambda ui: 'Status (from' in ui.task_view.text, 'status row')
             left, top, _height = ui._pane_geometry()
             lines = ui.task_view.text.splitlines()
             row = next(n for n, line in enumerate(lines) if line.startswith('Status (from'))
@@ -7184,7 +7185,8 @@ class PMConversationTests(BoundedPMTest):
             x = left + 1 + get_cwidth(lines[row][:lines[row].index('TaskStore')]) + 2
             y = top + 1 + row
             await self.w60_mouse(ui, press(x, y), release(x, y), press(x, y), release(x, y))
-            self.assertTrue(ui.task_view.wait_copy())
+            # #1573: the last release can still be queued; wait until its copy is recorded.
+            await self.until(ui, lambda ui: ui.task_view.wait_copy() and copies, 'word copied')
             self.assertEqual(copies[-1:], ['TaskStore'])
 
         self.w60_open([clicked])

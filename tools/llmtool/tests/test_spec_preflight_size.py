@@ -23,11 +23,12 @@ class SpecTierTests(unittest.TestCase):
     def test_three_writes_9000_bytes_is_tier_4(self):
         self.assertEqual(spec_tier({"write": ["a", "b", "c"]}, context_bytes=9000), 4)
 
-    def test_four_writes_never_fit(self):
+    def test_four_writes_is_tier_5(self):
         self.assertEqual(spec_tier({"write": ["a", "b", "c", "d"]}), 5)
 
     def test_one_write_huge_context_never_fits(self):
-        self.assertEqual(spec_tier({"write": ["a"]}, context_bytes=20000), 5)
+        self.assertEqual(spec_tier({"write": ["a"]}, context_bytes=30000),
+                         spec_preflight.LADDER_MAX_TIER)
 
     def test_spec_with_no_read_or_write_key_is_tier_1(self):
         self.assertEqual(spec_tier({"request": "r"}), 1)
@@ -50,7 +51,17 @@ class SpecTierTests(unittest.TestCase):
     def test_agent_twenty_reads_one_write_never_fits(self):
         # 20 reads + 1 write = 23 turns, beyond every tier limit.
         spec = {"read": [str(i) for i in range(20)], "write": ["a"], "provider": "gw-agent"}
-        self.assertEqual(spec_tier(spec), 5)
+        self.assertEqual(spec_tier(spec), spec_preflight.LADDER_MAX_TIER)
+    def test_tier_5_and_tier_6_limits(self):
+        self.assertEqual(spec_tier({"write": list("abcd")}, context_bytes=16384), 5)
+        self.assertEqual(spec_tier({"write": list("abcde")}, context_bytes=24576), 6)
+        self.assertEqual(spec_tier({"write": list("abcdef")}), 6)
+        self.assertEqual(spec_preflight.LADDER_MAX_TIER, 6)
+
+    def test_ladder_promotes_up_to_tier_6(self):
+        log = [{"tier": tier, "outcome": "SOLVED", "attempts": 1}
+               for tier in range(1, 7) for _ in range(3)]
+        self.assertEqual(spec_preflight.ladder_tier(log), (6, 3, True))
 
 
 if __name__ == "__main__":
