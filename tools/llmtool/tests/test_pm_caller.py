@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from llmtool import pm_caller
+from llmtool import pm_runtime
 from llmtool import task_submission_cli
 from llmtool.cli import parser_for_cli
 from llmtool.task_store import TaskStore, new_id
@@ -310,6 +311,59 @@ class PMCallerDriveTests(unittest.TestCase):
         label.assert_called_once()
         self.assertEqual(code, 0)
         self.assertEqual(result['step'], 'CLOSED')
+
+
+class PMCallerFenceTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.state_root = Path(temp.name).resolve()
+
+    def test_fenced_owner_refused_before_reading_store(self):
+        pm_runtime.write_session_fence(
+            OWNER, 'pm-' + OTHER, '2026-11-12T00:00:00Z', self.state_root)
+        store = Mock()
+        with _environment(claude=OWNER):
+            with self.assertRaises(pm_caller.PMCallerRefused) as caught:
+                pm_caller.check_caller(store, 't', state_root=self.state_root)
+            self.assertEqual(caught.exception.code, pm_caller.SESSION_FENCED)
+        store.get.assert_not_called()
+
+    def test_unfenced_owner_allowed(self):
+        store = _MutableStore({'task_id': 't', 'pm_session_id': 'pm-' + OWNER})
+        with _environment(claude=OWNER):
+            caller_key = pm_caller.check_caller(
+                store, 't', state_root=self.state_root)
+        self.assertEqual(caller_key, 'pm-' + OWNER)
+
+    def test_garbage_fence_file_refused(self):
+        fence_file = self.state_root / ('pm-' + OWNER + '.fence.json')
+        fence_file.write_text('{garbage\n', encoding='utf-8')
+        store = Mock()
+        with _environment(claude=OWNER):
+            with self.assertRaises(pm_caller.PMCallerRefused) as caught:
+                pm_caller.check_caller(store, 't', state_root=self.state_root)
+            self.assertEqual(caught.exception.code, pm_caller.SESSION_FENCED)
+        store.get.assert_not_called()
+
+    def test_guarded_refuses_when_fence_is_written_after_check_caller(self):
+        store = _MutableStore({'task_id': 't', 'pm_session_id': 'pm-' + OWNER})
+        with _environment(claude=OWNER):
+            caller_key = pm_caller.check_caller(
+                store, 't', state_root=self.state_root)
+        self.assertEqual(caller_key, 'pm-' + OWNER)
+
+        call = Mock()
+        invoke = pm_caller.guarded(
+            call, store, 't', caller_key, state_root=self.state_root)
+
+        pm_runtime.write_session_fence(
+            OWNER, 'pm-' + OTHER, '2026-11-12T00:00:00Z', self.state_root)
+
+        with self.assertRaises(pm_caller.PMCallerRefused) as caught:
+            invoke()
+        self.assertEqual(caught.exception.code, pm_caller.SESSION_FENCED)
+        call.assert_not_called()
 
 
 if __name__ == '__main__':
