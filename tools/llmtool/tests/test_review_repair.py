@@ -118,15 +118,15 @@ def _record():
              'received_at': '2026-10-27T01:01:00Z'}
     record = {
         'task_id': TASK, 'run_id': RUN,
-        'developer': {'assignment_id': 'f' * 32, 'provider_profile': 'codex',
-                      'model': 'gpt-test', 'owner_assignment_ref': None,
+        'developer': {'assignment_id': 'f' * 32, 'provider_profile': 'agy',
+                      'model': 'gemini-test', 'owner_assignment_ref': None,
                       'selection_source': 'PM', 'read_paths': ['tools/llmtool/llmtool'],
                       'write_paths': ['tools/llmtool/llmtool/review_repair.py'],
                       'acceptance': ['Repair the reported issue.'],
                       'egress_basis': 'Task authorized source files only.',
                       'state': 'DEVELOPER_RESPONDED'},
         'completion': {'executor_task_id': EXECUTOR, 'evidence': {'common_dir': '/tmp/git'}},
-        'pm_assignment': {'route': 'codex', 'risk': 'LOW', 'goal': 'Repair the issue.',
+        'pm_assignment': {'route': 'agy', 'risk': 'LOW', 'goal': 'Repair the issue.',
                           'acceptance': ['Repair the reported issue.']},
         'pm_provenance': {'pm_native_session_id': '12345678-1234-1234-1234-123456789abc',
                           'pm_cwd': '/repo'},
@@ -834,6 +834,12 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertNotIn('review_repair_claims', self.store.get(TASK))
 
     def test_missing_provider_runtime_refused_before_claim(self):
+        # #1502 WP-C: the runtime check applies to the Claude CLI route.
+        record = self.store.get(TASK)
+        record['developer']['provider_profile'] = 'claude'
+        record['developer']['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        record['pm_assignment']['route'] = 'claude'
+        self.store = TempTaskStore(self.temp.name, record)
         recorded = []
         with self.assertRaisesRegex(Exception, 'refused') as raised:
             self.dispatch(runtime_path=None,
@@ -953,7 +959,7 @@ class ReviewRepairTests(unittest.TestCase):
         args, passed_store = seen[0]
         self.assertIs(passed_store, self.store)
         self.assertEqual((args.provider, args.mode, args.executor_task),
-                         ('codex', 'direct', EXECUTOR))
+                         ('agy', 'direct', EXECUTOR))
         self.assertEqual(args.read_path, ['tools/llmtool/llmtool'])
         self.assertEqual(args.write_path, ['tools/llmtool/llmtool/review_repair.py'])
         self.assertEqual(args.acceptance[0], 'Repair the reported issue.')
@@ -987,7 +993,7 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertTrue(response['summary'].startswith('LLMTOOL_RUNTIME recorded bounded'))
         self.assertIn('no PM or provider decision was made', response['summary'])
         assignment = response['developer_assignment']
-        self.assertEqual(assignment['route'], 'codex')
+        self.assertEqual(assignment['route'], 'agy')
         self.assertEqual(assignment['goal'], task['pm_assignment']['goal'])
         self.assertIn('comment id 9', assignment['acceptance'][-1])
         self.assertIn(HEAD, assignment['acceptance'][-1])
