@@ -807,8 +807,8 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--acceptance', action='append', required=True, help='bounded acceptance condition; repeat as needed')
     delegate.add_argument('--egress-basis', required=True, help='task-specific non-sensitive data authorization basis')
     delegate.add_argument('--data-class', help='required data classification for gw-agent direct Tasks')
-    delegate.add_argument('--owner-ref', help=('Owner assignment comment URL: required for Claude direct Tasks; '
-                                'optional for AGY, validated when given'))
+    delegate.add_argument('--owner-ref', help=('Owner assignment comment URL: optional for '
+                                'Claude and AGY direct Tasks, validated when given'))
     delegate.add_argument('--high-debug-ref',
                           help='trusted GitHub comment URL authorizing a repair-cap override')
     delegate.add_argument('--high-debug-task',
@@ -3971,7 +3971,9 @@ def _claude_committed_carry(task, store, registration, snapshot, developer, comp
 def run_task_claude_delegate(args, *, store, route_runner=None):
     """Run Claude CLI in its Owner-assigned, registered D6 worktree."""
     owner_ref = getattr(args, 'owner_ref', None)
-    if (type(owner_ref) is not str or
+    # #1502 WP-C: Claude Developer is PM-selected (ALLOWED); --owner-ref is optional
+    # but must be a valid Owner reference when given.
+    if owner_ref is not None and (type(owner_ref) is not str or
             worker_dispatch.owner_comment_ref().fullmatch(owner_ref) is None):
         raise LLMToolError('--provider claude requires a valid --owner-ref before Task mutation')
     if getattr(args, 'mode', None) != 'direct':
@@ -5639,8 +5641,6 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('--provider claude requires --mode direct')
         if getattr(args, 'background', False):
             raise LLMToolError('--provider claude does not support --background')
-        if getattr(args, 'owner_ref', None) is None:
-            raise LLMToolError('--provider claude requires --owner-ref')
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         _check_delegate_repair_cap(args, store)
         return run_task_claude_delegate(args, store=store)
