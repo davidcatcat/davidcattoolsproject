@@ -291,6 +291,55 @@ class UnknownClaimReconcileTests(unittest.TestCase):
                 self.assertEqual(self.state(), 'UNKNOWN')
 
 
+class UnknownClaimReconcileShapeTests(unittest.TestCase):
+    """#1636: claim shape, another claim, same family and a store conflict."""
+
+    run_result = ReviewResultTests.run_result
+    setUp = UnknownClaimReconcileTests.setUp
+    state = UnknownClaimReconcileTests.state
+
+    def test_claim_with_failure_reason_or_no_session_does_not_settle(self):
+        for name, change in (('r', {'failure_reason': 'NO_FINAL_MESSAGE',
+                                    'native_session_id': 'review-session'}), ('n', {})):
+            with self.subTest(change=change):
+                Path(self.temp.name, name).mkdir(mode=0o700)
+                store = _store(Path(self.temp.name, name), claim_state='CLAIMED')
+                record = store.get(TASK)
+                store.compare_and_update(
+                    TASK, expected={'record_sha256': record['record_sha256']},
+                    review_dispatch_claim=[dict(record['review_dispatch_claim'][0],
+                                                state='UNKNOWN', **change)])
+                self.store = ReconcileStore(store, 'gw-agent')
+                self.assertEqual(self.run_result([_comment()])['state'], 'REVIEW_PASS')
+                self.assertEqual(self.state(), 'UNKNOWN')
+
+    def test_pass_for_another_reviewer_claim_settles_only_that_claim(self):
+        first = self.store.get(TASK)['review_dispatch_claim'][0]
+        second = dict(first, version=2, reviewer_task='reviewer-other', state='CLAIMED',
+                      native_session_id=None)
+        for claims in ([first, second],
+                       [first, dict(second, state='UNKNOWN', native_session_id='other')]):
+            self.store.compare_and_update(
+                TASK, expected={'record_sha256': self.store.get(TASK)['record_sha256']},
+                review_dispatch_claim=claims)
+        self.run_result([_comment(version=2)])
+        self.assertEqual(self.state(1), 'UNKNOWN')
+        self.run_result([_comment(version=2)], version=2)
+        self.assertEqual((self.state(1), self.state(2)), ('UNKNOWN', 'DISPATCHED'))
+
+    def test_claude_developer_task_or_store_conflict_does_not_settle(self):
+        self.store.family = 'claude'
+        self.run_result([_comment()])
+        self.assertEqual(self.state(), 'UNKNOWN')
+        self.store.family = 'gw-agent'
+        with patch.object(self.store.store, 'compare_and_update', side_effect=RuntimeError):
+            with self.assertRaises(Exception) as caught:
+                self.run_result([_comment()])
+        self.assertEqual(caught.exception.review_dispatch_code,
+                         'REVIEW_RESULT_CLAIM_RECONCILE_FAILED')
+        self.assertEqual(self.state(), 'UNKNOWN')
+
+
 class PriorityFindingTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
