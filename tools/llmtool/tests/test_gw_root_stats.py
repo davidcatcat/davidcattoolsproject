@@ -29,3 +29,17 @@ class GroupRootsTests(unittest.TestCase):
         self.assertIsNone(roots['t3'][0])
         self.assertIsNone(stats.root_tag({'request': 'ROOT='}))
         self.assertEqual(stats.root_tag({'request': 'ROOT=r2. piece'}), 'r2')
+
+
+class RootRowTests(unittest.TestCase):
+    def test_known_and_unknown_fields(self):
+        done = task('t1', 'ROOT=r1 a', published_pr={'pr': 7},
+                    completion={'executor_task_id': 'd1'}, developer={'usage': {'total_tokens': 10}})
+        failed = task('t2', 'ROOT=r1 b', developer={'error_code': 'X'})
+        github = {'7': {'merged_at': '2026-11-12T01:00:00Z'}}
+        row = stats.root_row('r1', {'root_id': 'r1', 'source_url': 'u'}, [done, failed], github)
+        self.assertEqual((row['kind'], row['tasks'], row['d6s'], row['prs']), ('ROOT', 2, 1, '7'))
+        self.assertEqual((row['total_tokens'], row['d6_records']), ('UNKNOWN', 'UNKNOWN'))
+        self.assertEqual((row['last_merged_at'], row['error_codes']), ('2026-11-12T01:00:00Z', 'X'))
+        self.assertEqual(stats.root_row('t9', None, [task('t9', 'x')], {})['kind'], 'UNTAGGED')
+        self.assertEqual(stats.root_row('r9', None, [task('t9', 'ROOT=r9')], {})['kind'], 'UNDECLARED')

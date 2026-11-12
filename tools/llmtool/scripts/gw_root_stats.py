@@ -71,3 +71,48 @@ def group_roots(ledger, tasks, t0=T0):
         if first is not None and first >= t0:
             roots[task['task_id']] = (None, [task])
     return roots
+
+
+FIELDS = ('root_id', 'kind', 'source_url', 'declared_stratum', 'tasks', 'd6s', 'd6_records',
+          'first_dispatch', 'prs', 'last_merged_at', 'total_tokens', 'error_codes')
+
+
+def _ids(values):
+    return sorted({value for value in values if isinstance(value, (str, int))}, key=str)
+
+
+def root_row(root_id, ledger_row, tasks, github, d6_dir=None):
+    row = ledger_row or {}
+    d6s = _ids((task.get('completion') or {}).get('executor_task_id') for task in tasks)
+    firsts = [time for time in map(first_gw_dispatch, tasks) if time]
+    prs = _ids((task.get('published_pr') or {}).get('pr') for task in tasks)
+    merged = [(github.get(str(pr)) or {}).get('merged_at') for pr in prs]
+    tokens = [((task.get('developer') or {}).get('usage') or {}).get('total_tokens') for task in tasks]
+    errors = _ids((task.get('developer') or {}).get('error_code') for task in tasks)
+    return {
+        'root_id': root_id,
+        'kind': (row.get('kind', 'ROOT') if ledger_row else
+                 'UNTAGGED' if [task.get('task_id') for task in tasks] == [root_id] else 'UNDECLARED'),
+        'source_url': row.get('source_url', UNKNOWN),
+        'declared_stratum': row.get('declared_stratum', UNKNOWN),
+        'tasks': len(tasks),
+        'd6s': len(d6s),
+        'd6_records': (sum((Path(d6_dir) / (str(d6) + '.json')).is_file() for d6 in d6s)
+                       if d6_dir else UNKNOWN),
+        'first_dispatch': min(firsts) if firsts else UNKNOWN,
+        'prs': ' '.join(str(pr) for pr in prs) or UNKNOWN,
+        'last_merged_at': (max(merged) if merged and all(isinstance(m, str) for m in merged)
+                           else UNKNOWN),
+        'total_tokens': (sum(tokens) if tokens and all(type(n) is int for n in tokens)
+                         else UNKNOWN),
+        'error_codes': ' '.join(str(code) for code in errors),
+    }
+
+
+def summary(rows, t0=T0):
+    kinds = {}
+    for row in rows:
+        kinds[row['kind']] = kinds.get(row['kind'], 0) + 1
+    return {'t0': t0, 'roots': len(rows), 'by_kind': kinds,
+            'tokens_known': sum(row['total_tokens'] != UNKNOWN for row in rows),
+            'merge_known': sum(row['last_merged_at'] != UNKNOWN for row in rows)}
