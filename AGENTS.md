@@ -27,7 +27,7 @@
   - Codex advisory output from PM analysis is not an independent pre-review. A separately dispatched Codex advisory/pre-review Worker needs an Owner-authorized entry; if it is missing, refuse.
 
 - **OpenCode Developer:**
-  - Use the OpenCode CLI in a verified registered D6 task worktree. Check the actual free DeepSeek model, session semantics, task-local permissions, exact writable-file allowlist and bounded task budget. OpenCode direct CLI work does not wait for Host D4/G3/M2. Follow the repair policy, use no paid fallback, self-review and hand back for PR and independent review/CI. The PM runs tests through `llmtool task remote-test` on EC2; Developers do not run tests in the D6.
+  - Use the OpenCode CLI in a verified registered D6 task worktree. Check the actual free DeepSeek model, session semantics, task-local permissions, exact writable-file allowlist and bounded task budget. OpenCode direct CLI work does not wait for Host D4/G3/M2. Follow the repair policy, use no paid fallback, self-review and hand back for PR and independent review/CI. The PM runs tests through `llmtool task remote-test` on EC2; Developers do not run tests in the D6. Before hand-off, the OpenCode Developer completes a qualified, actually-free pre-review from a different model family; if none is available, record the limitation and mark the Task BLOCKED. This pre-review is not the formal Reviewer gate.
   - D8 Host/Worker provider caps, retry stop, timeouts and cleanup still apply to llmtool-owned Worker invocations.
   - Keep credential, secret, personal/customer-data and restricted-log protection unchanged. Do not infer containment from prompt text or a resident TUI PID.
 
@@ -37,7 +37,7 @@
   - `ALLOWED` alone does not prove a working adapter.
   - On quota exhaustion, record bounded Task progress, SHA, changed files, unfinished checks and state (including UNKNOWN); release Writer ownership before reassignment. Never replay uncertain mutations or buy a fallback.
 
-- **Company LLM Developer:**
+- **Home LLM `gw-agent` Developer (E9):**
   - Company `gw` (home LLM) runs only through the API Agent Gateway (`gw-agent`) since the Owner decision of 2026-11-11 (#120); the `company-gw` direct and proposal routes are retired, llmtool refuses them and a Gateway failure reports UNAVAILABLE without fallback.
   - Company `gw` may act as an agent-mode Developer through `gw-agent` on real repository code; Developer choice, mode and scope are PM decisions under the standing Owner authorization (#120, 2026-11-10), which supersedes the 2026-11-03 synthetic-only limit. Every result receives formal cross-family review. Pause after two consecutive failed runs, a write outside allowed paths, a credential or audit finding, or HTTP 429.
   - `gw` may propose code, tests and self-review, but has no shell, filesystem, Git, credential or approval authority. An authorized execution environment applies accepted patches and runs tests.
