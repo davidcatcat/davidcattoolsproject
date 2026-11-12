@@ -5843,9 +5843,15 @@ class TaskCompletionTests(unittest.TestCase):
 
             if not skip_remote_test:
                 with patch.object(remote_test, 'run_remote_test', side_effect=run_with_ssh):
-                    rc, remote = call(['task', 'remote-test', task_id,
+                    # #1230 A1: the CLI refuses a caller with no PM session.
+                    rc, refused = call(['task', 'remote-test', task_id,
                         '--executor-task', d6_task, '--sha', head,
                         '--ref', 'refs/heads/feat/executor', '--module', 'test_fixture'])
+                    self.assertEqual((rc, refused['codes']), (1, ['PM_CALLER_SESSION_MISSING']))
+                    rc, remote = call(['task', 'remote-test', task_id,
+                        '--executor-task', d6_task, '--sha', head,
+                        '--ref', 'refs/heads/feat/executor', '--module', 'test_fixture',
+                        '--pm-session', task['pm_session_id']])
                 self.assertIsNone(rc)
                 self.assertEqual(remote['result'], 'PASS')
 
