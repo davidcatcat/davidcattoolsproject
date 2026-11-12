@@ -2405,6 +2405,13 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
     field = 'docs_check' if docs_only else 'code_check'
     selected = [workflow for workflow in ci_trust['workflows']
                 if workflow[field] is not None]
+    # #1558: like task_advance._merge_checks, Mac only for Mac-workflow paths.
+    if (not docs_only and type(changed_paths) is list and changed_paths and
+            all(type(path) is str for path in changed_paths)):
+        from . import task_advance  # imported here: task_advance imports this module
+        if not task_advance._mac_ci_runs(changed_paths):
+            selected = [workflow for workflow in selected
+                        if workflow[field] != _MAC_CHECK]
     if not selected:
         _stop('TRUST_CI_INVALID')
     results = []

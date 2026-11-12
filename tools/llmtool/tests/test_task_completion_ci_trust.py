@@ -137,6 +137,16 @@ class OwnerValuesGoldenTests(unittest.TestCase):
             'actions/runs/200/attempts/1/jobs?per_page=100',
             f'commits/{SHA}/check-runs?per_page=100'])
 
+    def test_reports_only_code_path_needs_linux_but_not_mac(self):
+        result, get = _collect(_linux(), ['reports/x/results.json'])
+        self.assertEqual(result['required_checks'], ['check (Linux 3.14)'])
+        self.assertEqual(get.call_args_list[0].args[0], 'actions/workflows/llmtool-linux-ci.yml')
+
+    def test_llmtool_code_path_still_needs_mac(self):
+        result, _ = _collect(_mac() + _linux(), ['tools/llmtool/llmtool/a.py'])
+        self.assertEqual(result['required_checks'],
+                         ['check (Linux 3.14)', 'check (macOS 3.13)'])
+
     def test_docs_only_path_golden(self):
         result, get = _collect(_linux_docs(), DOCS_PATHS)
         self.assertEqual(result, {
