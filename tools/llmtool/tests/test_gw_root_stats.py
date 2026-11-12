@@ -43,3 +43,23 @@ class RootRowTests(unittest.TestCase):
         self.assertEqual((row['last_merged_at'], row['error_codes']), ('2026-11-12T01:00:00Z', 'X'))
         self.assertEqual(stats.root_row('t9', None, [task('t9', 'x')], {})['kind'], 'UNTAGGED')
         self.assertEqual(stats.root_row('r9', None, [task('t9', 'ROOT=r9')], {})['kind'], 'UNDECLARED')
+
+
+class MainTests(unittest.TestCase):
+    def test_main_writes_csv_and_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / 'tasks').mkdir()
+            ledger = base / 'roots.jsonl'
+            ledger.write_text(json.dumps({'root_id': 'r1'}) + '\nnot json\n', encoding='utf-8')
+            item = task('t1', 'ROOT=r1 a', developer={'usage': {'total_tokens': 10}})
+            (base / 'tasks' / 't1.json').write_text(json.dumps(item), encoding='utf-8')
+            self.assertEqual(stats.main(['--ledger', str(ledger), '--tasks', str(base / 'tasks'),
+                                         '--out-dir', str(base / 'out')]), 0)
+            text = (base / 'out' / 'roots.csv').read_text(encoding='utf-8')
+            rows = list(csv.DictReader(text.splitlines()))
+            self.assertEqual([(row['root_id'], row['total_tokens'], row['last_merged_at'])
+                              for row in rows], [('r1', '10', 'UNKNOWN')])
+            summary = json.loads((base / 'out' / 'summary.json').read_text(encoding='utf-8'))
+            self.assertEqual((summary['roots'], summary['tokens_known'], summary['merge_known']),
+                             (1, 1, 0))
