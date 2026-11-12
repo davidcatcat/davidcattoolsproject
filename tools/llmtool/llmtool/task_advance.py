@@ -18,7 +18,7 @@ from argparse import Namespace
 
 from . import active_pm_inbox, github_events, remote_test, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
-from . import mac_full_suite, task_submission_cli
+from . import mac_full_suite, review_transcript, task_submission_cli
 from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes
@@ -2313,7 +2313,7 @@ def _closed_train_member_head(record, task_id, store):
 
 def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=False,
             reviewer_session_done=False, dispatch_review_call=None,
-            record_review_result_call=None, repair_review_call=None,
+            record_review_result_call=None, repair_review_call=None, relay_verdict_call=None,
             run_task_complete_call=None, record_github_event_call=None,
             github_get=None, cwd=None, publish_git_runner=None,
             publish_gh_runner=None, record_result_call=None, merge_gh_runner=None,
@@ -2525,13 +2525,39 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                      c.get('pr') == number and c.get('head_sha') == d6['result_head'])
         invoke = record_review_result_call or review_result.record_review_result
         try:
-            result = invoke(store=store, task_id=task_id, executor_task=executor_task,
-                            pr_number=number, version=claim['version'],
-                            # First check for a posted comment without creating a
-                            # REVIEW_BLOCKED event for a missing verdict.
-                            reviewer_session_done=False,
-                            github_get=get)
-            if type(result) is dict and result.get('state') == 'REVIEW_BLOCKED':
+            # First check for a posted comment without creating a
+            # REVIEW_BLOCKED event for a missing verdict.
+            review_args = dict(store=store, task_id=task_id, executor_task=executor_task,
+                               pr_number=number, version=claim['version'],
+                               reviewer_session_done=False, github_get=get)
+            result = invoke(**review_args)
+            relay_codes, relayed = [], False
+            if (type(result) is dict and result.get('state') == 'NOT_READY' and
+                    claim.get('state') == 'DISPATCHED'):
+                # #1568: a read-only Claude Reviewer cannot post its own verdict.
+                # Post its one claim-bound transcript block unedited, then re-read.
+                _, relay_code, block = (relay_verdict_call or
+                                        review_transcript.unposted_verdict)(claim, record)
+                if relay_code is not None:
+                    relay_codes = ['REVIEWER_VERDICT_UNPOSTED', relay_code]
+                elif block is not None:
+                    try:
+                        _post_review_verdict_comment(
+                            _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
+                            d6.get('root') or cwd or os.getcwd(), number, block)
+                    except _PublishRefusal:
+                        relay_codes = ['REVIEWER_VERDICT_UNPOSTED',
+                                       'REVIEW_VERDICT_COMMENT_FAILED']
+                    else:
+                        relayed, result = True, invoke(**review_args)
+            if relay_codes:
+                step = 'REVIEW_NOT_POSTED'
+                codes.extend(relay_codes)
+            elif relayed and (type(result) is not dict or result.get('state') == 'NOT_READY'):
+                # Posted but not read back yet: stop instead of posting twice.
+                step = 'REVIEW_OUTCOME_UNKNOWN'
+                codes.append('REVIEWER_VERDICT_RELAY_UNCONFIRMED')
+            elif type(result) is dict and result.get('state') == 'REVIEW_BLOCKED':
                 step = 'REVIEWER_ATTENTION'
                 codes.append('REVIEWER_ATTENTION')
             elif (type(result) is dict and result.get('state') == 'NOT_READY' and
