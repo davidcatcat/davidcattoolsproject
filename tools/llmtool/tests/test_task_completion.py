@@ -64,6 +64,8 @@ class TaskCompletionTests(unittest.TestCase):
         policy['workers']['opencode-developer']['reason'] = 'test fixture allows isolated callback checks'
         policy['workers']['company-gw']['dispatch'] = 'ALLOWED'
         policy['workers']['company-gw']['reason'] = 'test fixture allows isolated route checks'
+        # #1502 WP-C: the real policy pauses codex-developer; these fixtures keep it.
+        policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
         self.policy_path = self.base / 'worker-dispatch.json'
         self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
         policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
