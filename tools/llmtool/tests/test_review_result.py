@@ -253,6 +253,44 @@ class ReviewResultTests(unittest.TestCase):
         self.assertEqual(handler.call_args.args[0].reviewer, 'codex-reviewer')
 
 
+class ReconcileStore(FamilyStore):
+    def compare_and_update(self, *args, **kwargs):
+        return self.store.compare_and_update(*args, **kwargs)
+
+
+class UnknownClaimReconcileTests(unittest.TestCase):
+    """#1636: only one bound Claude PASS after the claim settles an UNKNOWN claim."""
+
+    run_result = ReviewResultTests.run_result
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = ReconcileStore(_store(self.temp.name, claim_state='UNKNOWN'), 'gw-agent')
+
+    def state(self, version=1):
+        return next(item['state'] for item in self.store.get(TASK)['review_dispatch_claim']
+                    if item['version'] == version)
+
+    def test_one_bound_pass_after_the_claim_settles_it_once(self):
+        self.assertEqual(self.run_result([_comment()])['state'], 'REVIEW_PASS')
+        self.assertEqual(self.state(), 'DISPATCHED')
+        self.assertFalse(self.run_result([_comment()])['created'])
+        self.assertEqual(self.state(), 'DISPATCHED')
+
+    def test_other_verdicts_do_not_settle(self):
+        late = '2026-10-27T02:00:00Z'
+        for comments in ([_comment(head='e' * 40)], [_comment(version=2)], [_comment('FAIL')],
+                         [_comment('FIX')], [_comment(), _comment(comment_id=8, created=late)],
+                         [_comment(), _comment('FAIL', comment_id=8)], [_comment(actor='Codex')],
+                         [_comment(created='2026-10-26T23:59:59Z')],
+                         [_comment(created='2026-10-27T00:00:00Z')],
+                         [dict(_comment(), updated_at=late)]):
+            with self.subTest(comments=comments):
+                self.run_result(comments)
+                self.assertEqual(self.state(), 'UNKNOWN')
+
+
 class PriorityFindingTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

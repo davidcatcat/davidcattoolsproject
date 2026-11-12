@@ -129,6 +129,52 @@ def _claim_for(task, *, executor_task, pr_number, version):
     return claim, head
 
 
+_UTC_SECONDS = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z')
+
+
+def _settle_unknown_claim(store, task, claim, comments, *, head, version):
+    """#1636: settle an UNKNOWN Claude review claim from its one bound PASS.
+
+    Only a claim with no failure reason and a started Reviewer session may
+    settle. The PR must hold exactly one verdict bound to this claim's head
+    and version, and it must be a formal Claude PASS posted after the claim.
+    Anything else leaves the claim UNKNOWN. The dispatch is never replayed.
+    """
+    claimed_at = claim.get('claimed_at')
+    if (claim.get('state') != 'UNKNOWN' or 'failure_reason' in claim or
+            'binding_mismatch_keys' in claim or
+            type(claim.get('reviewer_task')) is not str or
+            type(claim.get('native_session_id')) is not str or
+            type(claimed_at) is not str or _UTC_SECONDS.fullmatch(claimed_at) is None):
+        return False
+    bound = []
+    for comment in comments:
+        verdict = _comment_verdict(comment, head=head, version=version, task=task)
+        if verdict is not None:
+            bound.append((verdict, comment))
+    if len(bound) != 1:
+        return False
+    verdict, comment = bound[0]
+    posted_at = verdict[0]
+    if (verdict[2] != 'REVIEW_PASS' or type(posted_at) is not str or
+            _UTC_SECONDS.fullmatch(posted_at) is None or posted_at <= claimed_at or
+            not task_completion.is_formal_claude_pass(
+                comment.get('body'), task_id=task['task_id'], run_id=task['run_id'],
+                contract_digest=task['task_binding']['contract_digest'], result_sha=head)):
+        return False
+    from .review_dispatch import _now
+    stored = task.get('review_dispatch_claim')
+    claims = [stored] if type(stored) is dict else stored
+    settled = dict(claim, state='DISPATCHED', updated_at=_now())
+    updated = [settled if item is claim else item for item in claims]
+    try:
+        store.compare_and_update(task['task_id'], expected={'review_dispatch_claim': stored},
+                                 review_dispatch_claim=updated)
+    except Exception:
+        _refuse('REVIEW_RESULT_CLAIM_RECONCILE_FAILED')
+    return True
+
+
 def _completed_claim_result(task, claim, *, version):
     """Classify a completed claim's stored verdict and return its event identity."""
     task_id = task.get('task_id')
@@ -217,6 +263,8 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
         task_id, event_id=event_id, run_id=task['run_id'],
         session_id='review-' + event_id, source='REVIEWER', source_sha=head,
         sequence=0, payload_sha256=payload_sha256)
+    if claim.get('state') == 'UNKNOWN':
+        _settle_unknown_claim(store, task, claim, comments, head=head, version=version)
     return {'state': outcome, 'event_id': event_id,
             'created': result['created'], 'comment_id': comment_id,
             'head': head, 'version': version}
