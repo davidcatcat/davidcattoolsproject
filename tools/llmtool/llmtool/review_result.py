@@ -111,6 +111,43 @@ def _comment_verdict(comment, *, head, version, task):
     return (updated_at, comment_id, outcome, findings)
 
 
+# #1502 WP-D (spec section 4.12): stable finding IDs with a severity.
+_FINDING_ID = re.compile(
+    r'Finding: (F[1-9][0-9]{0,2}) \[(Blocker|High|Medium|Low|Advisory)\] \S')
+NON_BLOCKING_SEVERITIES = ('Low', 'Advisory')
+
+
+def finding_ids(body):
+    """Map each stable finding ID to its severity, or None for a legacy verdict.
+
+    A finding line reads "Finding: F<n> [<severity>] <file:line> <text>". A body
+    with no such line, a "Finding" line without an ID, or a repeated ID is
+    legacy: None, and every finding in it counts as blocking.
+    """
+    if type(body) is not str:
+        return None
+    found = {}
+    for line in body.splitlines():
+        text = line.strip()
+        if not text.startswith('Finding'):
+            continue
+        match = _FINDING_ID.match(text)
+        if match is None or match.group(1) in found:
+            return None
+        found[match.group(1)] = match.group(2)
+    return found or None
+
+
+def blocking_findings(body):
+    """Sorted blocking finding IDs (every severity but Low and Advisory), or None if legacy."""
+    found = finding_ids(body)
+    if found is None:
+        return None
+    return sorted((fid for fid, severity in found.items()
+                   if severity not in NON_BLOCKING_SEVERITIES),
+                  key=lambda fid: int(fid[1:]))
+
+
 def _claim_for(task, *, executor_task, pr_number, version):
     claims = task.get('review_dispatch_claim')
     if type(claims) is dict:
