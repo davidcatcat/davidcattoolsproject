@@ -1567,8 +1567,8 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
 
 
 def run_task_high_debug(args, *, store=None, runner=None, create_d6=None):
-    from .high_debug import run_high_debug
-    return run_high_debug(store=TaskStore() if store is None else store,
+    from .high_debug import run_high_debug_with_fallback
+    return run_high_debug_with_fallback(store=TaskStore() if store is None else store,
         task_id=args.task_id, executor_task=args.executor_task, pr_number=args.pr,
         family=args.family, failed_corrections=getattr(args, 'failed_corrections', None),
         early_reason=getattr(args, 'early', None), evidence=getattr(args, 'evidence_file', None),
