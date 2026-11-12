@@ -4267,6 +4267,25 @@ class TaskStore:
                                   ('review_result' not in after))) and
                                 all(old == new for i, (old, new) in
                                     enumerate(zip(old_claims, new_claims)) if i != index))
+                            if (not allowed_claim_transition and
+                                    before.get('state') == 'UNKNOWN' and
+                                    after.get('state') == 'DISPATCHED'):
+                                # #1636: an UNKNOWN review claim settles only with its
+                                # started session and a recorded Reviewer event for its
+                                # head; review_result checks the one bound PASS first.
+                                allowed_claim_transition = (
+                                    'failure_reason' not in before and
+                                    'binding_mismatch_keys' not in before and
+                                    type(before.get('native_session_id')) is str and
+                                    set(after) == set(before) and
+                                    all(before.get(key) == after.get(key) for key in before
+                                        if key not in ('state', 'updated_at')) and
+                                    any(type(event) is dict and
+                                        event.get('source') == 'REVIEWER' and
+                                        event.get('source_sha') == before.get('head_sha')
+                                        for event in current.get('completion_events') or ()) and
+                                    all(old == new for i, (old, new) in
+                                        enumerate(zip(old_claims, new_claims)) if i != index))
                 if not allowed_claim_transition:
                     _fail('REVIEW_DISPATCH_CLAIM_TRANSITION_INVALID')
             if 'review_repair_claims' in changes:
