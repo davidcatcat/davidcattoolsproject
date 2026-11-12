@@ -6305,11 +6305,9 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("無法確認是否隔離", row.detail)
         self.assertEqual(row.state, mon.IDLE)
         self.assertEqual(row.alert, "")
-        stopped, = mon.runner_rows([], now, root)
-        self.assertEqual((stopped.state, stopped.age, stopped.alert),
-                         (mon.IDLE, None, ""))
-        self.assertTrue(stopped.detail.startswith("已退役（#1253：CI 改用 GitHub 主機）"))
-        self.assertFalse(any(line.startswith("⚠") for line, _ in mon.office_view([stopped])))
+        # #1592: a runner folder without a running listener is retired: no row, no queue line.
+        self.assertEqual(mon.runner_rows([], now, root), [])
+        self.assertEqual(mon.runner_rows([], now, [root], waiting_jobs=["job 1"]), [])
         # No runner configured, or no place given: no row (the office tests stay hermetic).
         self.assertEqual(mon.runner_rows([], now, self.tmp.name), [])
         self.assertEqual(mon.runner_rows([], now, None), [])
@@ -6376,13 +6374,10 @@ class OfficeViewTests(unittest.TestCase):
             "執行中：llmtool Mac CI（PR #343 @aaaaaaa）（3 分鐘）；專用帳號 ghrunner2"), rows[1].detail)
         self.assertNotIn("排隊", rows[1].detail)
         self.assertTrue(rows[1].detail.endswith(f"日誌：{roots[1]}/_diag"))
-        # Runner 2 stopped: its own row says so; runner 1 is unaffected. An
-        # empty queue gets no line.
+        # Runner 2 stopped: it is retired and gets no row (#1592); runner 1 is
+        # unaffected. An empty queue gets no line.
         rows = mon.runner_rows([one], now, roots, where.get, {30: "專用帳號 ghrunner"}.get, ci=[])
-        self.assertEqual([(r.name, r.state) for r in rows],
-                         [("mac ci runner #1", mon.IDLE), ("mac ci runner #2", mon.IDLE)])
-        self.assertEqual(rows[1].alert, "")
-        self.assertTrue(rows[1].detail.startswith("已退役（#1253：CI 改用 GitHub 主機）"))
+        self.assertEqual([(r.name, r.state) for r in rows], [("mac ci runner", mon.IDLE)])
         # Only running jobs, none waiting: no line either.
         rows = mon.runner_rows([one, two, job], now, roots, where.get,
                                {30: "專用帳號 ghrunner", 40: "專用帳號 ghrunner2"}.get, ci=ci[:1])
