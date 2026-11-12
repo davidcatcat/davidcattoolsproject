@@ -116,6 +116,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
         policy['workers']['opencode-developer']['reason'] = 'test fixture allows isolated route checks'
         policy['workers']['company-gw']['dispatch'] = 'ALLOWED'
         policy['workers']['company-gw']['reason'] = 'test fixture allows isolated route checks'
+        # #1502 WP-C: the real policy pauses codex-developer; these route tests keep it.
+        policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
+        policy['workers']['codex-developer']['reason'] = 'test fixture allows isolated route checks'
         self.policy_path = Path(self.temp.name).resolve() / 'worker-dispatch.json'
         self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
         policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
@@ -4083,6 +4086,14 @@ class CodexChildLivenessTests(unittest.TestCase):
         task['developer'] = developer
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
+        # #1502 WP-C: the real policy pauses codex-developer; keep an ALLOWED fixture.
+        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+        policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
+        policy_path = Path(tmp.name).resolve() / 'worker-dispatch.json'
+        policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', policy_path)
+        policy_patch.start()
+        self.addCleanup(policy_patch.stop)
         store = TaskStore(Path(tmp.name).resolve() / 'tasks')
         store.create(task)
         with patch.object(submission_cli.worker_dispatch,
