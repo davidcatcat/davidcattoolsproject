@@ -37,35 +37,6 @@ llmtool executes an approved route and plan; it does not decide which AI owns co
 
 [Historical AI-led operating model decisions are archived](../../docs/history/governance-archive-20261103.md#ai-led-team-operating-model).
 
-no developer or repair. Changed source/run/epoch/contract requires new evidence
-and separately permitted review, not reuse of this verdict/grant. BLOCKED returns
-the specific missing gate for Coordinator disposition and preserves state.
-Nonblocking Low is one #120 backlog using Issue #92 ACCEPT/DEFER/FIX; no infinite
-review loop. N4/N5 status/physical-path wording is maintained here/ROADMAP; README
-maintenance is included in Product A's authorized ordinary README touch.
-
-#### Product allowlist and acceptance plan (no execution grant)
-
-After contract acceptance, a separately pinned product task may change only
-`tools/llmtool/llmtool/{task_review.py,task_review_cli.py,task_review_collector.py,cli.py}`,
-`tools/llmtool/tests/{test_task_review.py,test_task_review_cli.py,test_task_review_collector.py}`,
-and `tools/llmtool/{README.md,ROADMAP.md,WORKFLOW.md}`. These are thin adapters/tests
-reusing TaskContract/TaskBinding/task_lifecycle, A5 hardened reads, existing
-provider/lifecycle/privacy/error/diagnostics/authorization/budget components.
-This is a proposed future allowlist, not permission to edit those files now.
-Changes to existing shared schemas/providers/authorization/Git hardening need
-explicit accepted scope amendment before authoring; do not copy or weaken them
-to avoid that gate. No daemon/scheduler/second framework/logging/approval store,
-F2/S2 mutation, Git write, automatic repair or PR merge. Company Round 1–3 evidence/policies remain unchanged;
-no company call, rerun or new savings claim.
-
-| Required future test | Expected behavior |
-| --- | --- |
-| Fake provider full journey | Paired pinned contracts, current verified collector, all actual pre-review criteria, valid WAITING_REVIEW handoff and explicit fake host grant -> one packet/call, exact-bound Security+Functional verdict, outstanding final gates visible |
-| N1 combinations | SUCCESS with RUNNING/BLOCKED/FAILED/COMPLETED, WAITING_REVIEW without valid handoff, incomplete aggregate/supplementary evidence, unapproved pairing or forged review -> zero calls; final false completion rejected |
-| N2 clocks/history | Historical terminal context vs fresh live TTL, exact expiry boundary, future/rollback/missing heartbeat and expiry during call -> no renewal/resume or false liveness |
-| N3 identity/source | Wrong/unknown Session/author/role/root/common-dir/remote/branch/import, duplicate branch ownership, unexpected writer/test/lock/config, forged expect/events -> fail closed before call |
-| Packet/route safety | Wrong SHA/digest/criterion/CI head, unsafe/aliased/changing file, oversize/deep/duplicate/binary input, secret/private path/log, arbitrary evidence URL, no issuer/route/budget -> zero calls and no sensitive echo |
 | Provider/verdict | Unavailable/auth/timeout/cancel/nonzero/oversize/partial output, invalid enum/schema/identity/evidence, plain APPROVE or self-review -> non-PASS, zero retries/fallbacks, owned-child cleanup evidence |
 | Drift and effects | HEAD/index/source/contract/run/epoch/sequence/Session/permission change before submission or during review invalidates eligibility/verdict; no Git writes/test/repair/extra file/journal persistence or unapproved subprocess/network calls |
 
