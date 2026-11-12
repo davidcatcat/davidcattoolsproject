@@ -33,8 +33,10 @@ DISPATCH_STATES = frozenset(('ALLOWED', 'PAUSED', 'OWNER_ASSIGNMENT_ONLY'))
 AUDIT_ACTIONS = frozenset((
     'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
     'TIMEOUT_CONTINUATION', 'REVIEWER_HANDOFF', 'REVIEWER_RETRY',
+    'COMMITTED_RESULT_CARRY',
 ))
 MAX_TIMEOUT_CONTINUATIONS_PER_TASK = 1
+MAX_COMMITTED_CARRIES = 1  # per Developer assignment (#1148)
 def _policy_candidates():
     """List policy locations for this actual module layout, in authority order."""
     module = Path(__file__).resolve()
@@ -502,8 +504,50 @@ def _developer_identity_changed(old_developer, new_developer):
             not _gw_agent_served_model_binding(old_developer, new_developer))
 
 
+def _committed_carry_valid(current, changes, expected, old, new):
+    """#1148: a finished Claude run with no new edit carries the D6's committed head.
+
+    Only source_sha moves, from the launch head to the D6 base. The Claude route
+    checks the Git facts (registered head, ancestry, committed paths) first."""
+    head, base = old.get('source_sha'), new.get('source_sha')
+    execution, artifact = new.get('execution'), new.get('artifact')
+    callback = new.get('direct_result_callback')
+    completion = changes.get('completion', current.get('completion'))
+    if not (type(expected) is dict and expected.get('developer') == old and
+            all(type(sha) is str and re.fullmatch(r'[0-9a-f]{40}', sha) for sha in (head, base)) and
+            all(old.get(field) == new.get(field) for field in (
+                'executor_task_id', 'read_paths', 'write_paths', 'acceptance',
+                'context_sha256', 'egress_basis', 'input_bytes', 'created_at')) and
+            old.get('execution') is None and type(execution) is dict and
+            type(callback) is dict and type(completion) is dict and
+            type(artifact) is str and artifact and new.get('error_code') is None and
+            new.get('artifact_sha256') == hashlib.sha256(artifact.encode('utf-8')).hexdigest()):
+        return False
+    session, digest = execution.get('native_session_id'), execution.get('stdout_sha256')
+    bound = {'task_id': current.get('task_id'), 'run_id': current.get('run_id'),
+             'source_sha': base, 'result_head': head}
+    return (execution.get('status') == 'DONE' and execution.get('cleanup_status') == 'CONFIRMED' and
+            type(execution.get('process_exit_code')) is int and
+            execution['process_exit_code'] == 0 and type(session) is str and bool(session) and
+            type(digest) is str and re.fullmatch(r'[0-9a-f]{64}', digest) is not None and
+            callback.get('executor_task_id') == completion.get('executor_task_id') ==
+            new.get('executor_task_id') and
+            all(type(item) is dict and all(item.get(key) == value for key, value in bound.items())
+                for item in (callback.get('evidence'), completion.get('evidence'))) and
+            callback['evidence'].get('carried_result') == {
+                'mode': 'NO_RUN_CHANGES', 'assignment_id': old.get('assignment_id'),
+                'd6_base': base, 'carried_head': head})
+
 def task_store_attempts(current, changes):
     """Return every gated worker/action touched by one TaskStore transition."""
+    old, new = current.get('developer'), changes.get('developer')
+    if (type(old) is dict and type(new) is dict and old.get('provider_profile') == 'claude' and
+            old.get('state') == 'DEVELOPER_DISPATCHING' and
+            new.get('state') == 'DEVELOPER_RESPONDED' and
+            old.get('source_sha') != new.get('source_sha') and
+            all(old.get(field) == new.get(field)
+                for field in _DEVELOPER_IDENTITY_FIELDS if field != 'source_sha')):
+        return [('claude-developer', 'COMMITTED_RESULT_CARRY')]
     old_developer = current.get('developer')
     new_developer = changes.get('developer', old_developer)
     if type(new_developer) is not dict:
@@ -661,6 +705,16 @@ def authorize_task_store_change(current, changes, expected=None):
                 decision = PolicyDecision(worker_key, False,
                                           'WORKER_TIMEOUT_CONTINUATION_LIMIT',
                                           decision.policy_sha256)
+        if action == 'COMMITTED_RESULT_CARRY':
+            prior = sum(1 for item in audit if type(item) is dict and
+                        item.get('action') == action and
+                        item.get('assignment_id') in (None, old_developer.get('assignment_id')))
+            reason = ('WORKER_COMMITTED_CARRY_LIMIT' if prior >= MAX_COMMITTED_CARRIES else
+                      None if _committed_carry_valid(current, changes, expected, old_developer,
+                                                     new_developer)
+                      else 'WORKER_COMMITTED_CARRY_PRECONDITION')
+            if reason is not None:
+                decision = PolicyDecision(worker_key, False, reason, decision.policy_sha256)
         if action in ('RETRY', 'RECOVERY', 'REPAIR') and type(old_developer) is dict:
             expected_old_state = {
                 'RETRY': (),
