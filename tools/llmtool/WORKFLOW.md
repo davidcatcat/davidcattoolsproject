@@ -37,44 +37,6 @@ llmtool executes an approved route and plan; it does not decide which AI owns co
 
 [Historical AI-led operating model decisions are archived](../../docs/history/governance-archive-20261103.md#ai-led-team-operating-model).
 
-#### Exact-SHA packet and privacy boundary
-
-The immutable packet version 1 pins: both original contracts/bindings and
-criterion map; author and independent reviewer bindings; base/subject exact SHA,
-selected source blobs and complete changed-path diff; epoch/sequence/handoff/check
-digest; pre-submission collector observation digest; selected actual command/exit/
-environment/artifact evidence; exact-head CI repo/run/job/conclusion references;
-approved provider/profile/model route and host permission reference. Every part
-has its source identifier, byte length and SHA256. Canonical UTF-8 JSON (sorted
-keys, compact separators, `ensure_ascii=False`, no duplicate keys/nonfinite
-numbers) has SHA256 of UTF-8 `llmtool.review-packet.v1` + NUL + canonical packet
-bytes, excluding its digest field. Preserve original TaskContract digest rules;
-packet serialization does not redefine them. Source/diff SHA and original artifact digests are independently
-verified, not simply copied from caller assertions. A packet hash proves byte
-identity, not authorization or that tests ran.
-
-Limits: total exported packet <=256 KiB; each unchanged TaskContract <=64 KiB
-and its existing limits; diff plus selected source <=128 KiB; selected test/CI
-metadata <=32 KiB; <=32 source paths and <=128 evidence references. The total
-limit always wins. Inputs retain S1a safe stable no-follow regular-file/inode
-checks, UTF-8/duplicate-key/record limits, plus S1b JSON depth <=16 before object
-construction. No binary/submodule/external path
-export; reject oversize, incomplete/truncated diff or absent relevant source
-rather than silently summarizing away a changed path. Selected context must
-include enough original code for each reviewed change; otherwise BLOCKED.
-
-Only an explicitly allowlisted source/evidence export scope may leave the host.
-Before any call, deterministically screen paths/content/metadata using existing
-privacy components and deny secrets/auth files/credentials/private raw logs,
-prompts, home paths/Session IDs and sensitive findings. Export stable opaque
-identity/provenance references; local trusted collector retains the comparison
-to actual private identity. Screen the entire rendered prompt and returned
-verdict too; refusal outputs fixed codes, never rejected content. Approval of a
-hash or redaction does not grant data routing. Issue #66's excerpt route is a
-separate prerequisite if excerpts are selected, not blanket diff/log permission.
-Unresolved privacy or provenance is BLOCKED. No raw packet/provider text in
-diagnostics/journal; originals remain at their authorized source for inspection.
-
 #### Invocation authority, lifecycle and failure
 
 Use existing action/policy/approval interfaces and `run_budget`, not a new approval
