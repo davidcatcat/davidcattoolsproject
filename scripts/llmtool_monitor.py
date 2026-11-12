@@ -819,10 +819,9 @@ def summary(processes: list[Process], lingering: list, sessions=None,
             ci_view: "CiView | None" = None, now: float | None = None) -> str:
     # An agent family counts its open CLIs, the processes office rows stand
     # for; its daemons and servers are listed in the table, not counted.
-    # Runners and Workers are counted as the office rows count them: one Mac
-    # runner per Listener (its Worker process is not another runner), the
-    # Linux runners in GitHub's list only while that list is fresh, and the
-    # EC2 remote-test worker, which is always a member.
+    # The retired self-hosted Mac and EC2 runners are not counted (#1592).
+    # The EC2 remote-test worker stays, but this function has no live state
+    # for it, so it reads 未確認 instead of a constant.
     members = {p.pid for p in agent_clis(processes, sessions)}
     counts: dict[str, int] = {}
     for p in processes:
@@ -831,13 +830,7 @@ def summary(processes: list[Process], lingering: list, sessions=None,
             continue
         counts[family(p.role)] = counts.get(family(p.role), 0) + 1
     order = ("Claude", "Codex", "OpenCode", "Kilo", "llmtool", "ai-loop")
-    now = time.time() if now is None else now
-    fresh = (ci_view is not None and ci_view.runners is not None and not ci_view.error
-             and now - ci_view.seen_at <= GITHUB_STALE)
-    linux = sum(_runner_system(runner[0], runner[1]) == "linux" for runner in ci_view.runners) if fresh else 0
-    parts = [f"{k} {counts[k]}" for k in order if k in counts] + [
-        f"Mac runner {sum(p.role == 'Actions runner' for p in processes)}",
-        f"EC2 runner {linux if fresh else '未確認'}", "EC2 worker 1"]
+    parts = [f"{k} {counts[k]}" for k in order if k in counts] + ["EC2 worker 未確認"]
     parts += [f"other {counts['other']}"] if "other" in counts else []
     text = "  ".join(parts)
     return text + (f"  ·  ⚠ possible leftover groups: {', '.join(map(str, lingering))}" if lingering else "")

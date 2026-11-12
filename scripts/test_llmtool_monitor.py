@@ -51,9 +51,9 @@ def tearDownModule():
     _ISOLATED.cleanup()
 
 
-# The runner and worker counts every header ends with when no runner runs and
-# GitHub was not read.
-NO_RUNNERS = "  Mac runner 0  EC2 runner 未確認  EC2 worker 1"
+# The worker count every header ends with: the retired self-hosted runners are
+# not counted and the EC2 worker has no live state here (#1592).
+NO_RUNNERS = "  EC2 worker 未確認"
 
 
 def ps(*rows):
@@ -7095,15 +7095,12 @@ class GitHubRunnerTests(unittest.TestCase):
             self.MAC, self.linux("ec2-llmtool-01"), self.linux("ec2-llmtool-02", "offline"),
             {"name": "ec2-self-runner-3", "os": "unknown", "status": "online", "busy": False,
              "labels": [{"name": "local-ec2-linux-ci-pending"}]}]})
-        fresh = mon.CiView(runners, NOW - 30)
-        self.assertEqual(mon.summary(procs, [], [], ci_view=fresh, now=NOW),
-                         "Codex 1  Mac runner 2  EC2 runner 3  EC2 worker 1")
-        # old, failed or never-read runner data is not counted
-        for view in (mon.CiView(runners, NOW - mon.GITHUB_STALE - 1),
-                     mon.CiView(runners, NOW - 30, error="逾時"),
-                     mon.CiView(None, 0.0, error="逾時"), None):
-            self.assertEqual(mon.summary(procs, [], [], ci_view=view, now=NOW),
-                             "Codex 1  Mac runner 2  EC2 runner 未確認  EC2 worker 1")
+        # #1592: the retired self-hosted runners are not counted, whatever GitHub
+        # or the process table says, and the EC2 worker is not a constant "1".
+        for view in (mon.CiView(runners, NOW - 30), mon.CiView(None, 0.0, error="逾時"), None):
+            text = mon.summary(procs, [], [], ci_view=view, now=NOW)
+            self.assertEqual(text, "Codex 1  EC2 worker 未確認")
+            self.assertNotIn("runner", text)
 
     def test_an_ec2_runner_with_only_a_pending_label_is_a_linux_runner(self):
         runners = mon.ci_runners({"runners": [
