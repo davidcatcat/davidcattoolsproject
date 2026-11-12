@@ -5744,6 +5744,19 @@ def quota_warnings(now, codex_root=None, claude_root=None, codex_quota_path=None
     return out
 
 
+HALTED = "已停止"                 # a subagent its parent stopped (#1592): not a hang
+OFFICE_HALTED_WINDOW = 10 * 60   # a stopped subagent's row stays this long
+
+
+def _subagent_stopped(meta: dict, tail: list) -> bool:
+    """A subagent that was stopped, not one that went quiet: its meta state
+    field says so when present, else its log ends with the stop's marker."""
+    if type(meta.get("state")) is str:
+        return meta["state"].lower() in ("killed", "stopped")
+    last = tail[-1] if tail else {}
+    return last.get("type") == "user" and "[Request interrupted by user" in str(last.get("message"))
+
+
 def claude_rows(now: float, root=None,
                 canonical: str | None = None, live: dict | None = None) -> list[OfficeRow]:
     """live: {session id: (registry entry, who answers)} of running CLIs; what
@@ -5827,7 +5840,10 @@ def claude_rows(now: float, root=None,
                 state = DONE
             else:
                 state = WORKING if sub_age <= OFFICE_STALL else STALLED
-            if (state == DONE and sub_age > OFFICE_DONE_WINDOW) or sub_age > OFFICE_WINDOW:
+            if meta.get("finished") is not True and _subagent_stopped(meta, _jsonl_tail(log_path)):
+                state = HALTED
+            if ((state == DONE and sub_age > OFFICE_DONE_WINDOW) or sub_age > OFFICE_WINDOW
+                    or state == HALTED and sub_age > OFFICE_HALTED_WINDOW):
                 continue
             sub_detail = _label(meta.get("description")) or "（未命名工作）"
             if state == WORKING:

@@ -4700,6 +4700,22 @@ class OfficeViewTests(unittest.TestCase):
         subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
         self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
 
+    def test_stopped_claude_subagent_shows_halted_then_drops(self):
+        # #1592: a subagent its parent stopped is 已停止, not 無回應, for a short time.
+        self._write(self.claude / "proj" / "s1.jsonl", [{"cwd": self.canonical}], age=10)
+        sub = self.claude / "proj" / "s1" / "subagents"
+        stop = {"type": "user", "message": {"content": [
+            {"type": "text", "text": "[Request interrupted by user for tool use]"}]}}
+        for name, age, meta, end in (("hung", 1200, {}, {}), ("stopped", 300, {}, stop),
+                                     ("now", 30, {}, stop), ("killed", 300, {"state": "killed"}, {}),
+                                     ("old", mon.OFFICE_HALTED_WINDOW + 60, {}, stop)):
+            self._write(sub / f"agent-{name}.jsonl", [end], age=age)
+            (sub / f"agent-{name}.meta.json").write_text(
+                json.dumps(dict(meta, description=name)), encoding="utf-8")
+        subs = {row.detail: row.state for row in self.rows() if row.name == "claude subagent"}
+        self.assertEqual(subs, {"hung": mon.STALLED, "stopped": mon.HALTED, "now": mon.HALTED,
+                                "killed": mon.HALTED})
+
     def test_claude_metadata_tail_does_not_refresh_conversation_activity(self):
         project = self.claude / "proj"
         stamp = lambda age: datetime.fromtimestamp(self.NOW - age, timezone.utc).strftime(
