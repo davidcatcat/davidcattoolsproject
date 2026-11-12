@@ -37,66 +37,6 @@ llmtool executes an approved route and plan; it does not decide which AI owns co
 
 [Historical AI-led operating model decisions are archived](../../docs/history/governance-archive-20261103.md#ai-led-team-operating-model).
 
-  checked. Bound file bytes, records, identities and evidence references. Reject
-  unknown/duplicate JSON keys, malformed/truncated/oversize input and unsafe
-  symlink/nonregular files without echoing raw input or secrets.
-  On Mac use physical input paths such as `/private/tmp`; `/tmp` and
-  `/var/folders` have symlink ancestors and are deliberately rejected (N4).
-- Match every event's Agent + logical Session, Role, assigned Root/common-dir/
-  branch, Task, Run, exact SHA and contract version/digest to those expectations.
-  Wrong role/root/run/task/source/contract rejects; developer roots cannot claim
-  `main` or a peer task branch. Developer identity cannot count as its own
-  independent reviewer: reviewer agent ID **and** logical Session ID must each differ
-  from all pinned authors/developers. Unknown authorship is INCOMPLETE.
-  Provider/Profile/Role/Agent remain distinct concepts.
-- Require unique event IDs, the pinned epoch, strictly ordered sequence and
-  expected prior state; start at 1, then consecutive +1. Reject duplicates, old epochs, replay/out-of-order events,
-  illegal state skips and post-terminal events. A changed SHA/contract/epoch
-  invalidates old review/handoff evidence. Pin exact limits, sequence/resume rules,
-  allowed transitions and stable exit/error taxonomy in the implementation
-  contract before coding; no model may relax them.
-- Expiry validation uses an explicit observation-time input. Missing/ambiguous
-  UTC time is rejected; seconds-only `YYYY-MM-DDTHH:MM:SSZ`, no machine-clock default.
-  Independent heartbeat TTL is 1..86400 seconds. Missing/ambiguous
-  time, expired heartbeat or clock rollback remains stale/unknown/incomplete;
-  heartbeat loss does not prove a process died. No automatic resume, renewal,
-  failure declaration, process kill or workspace cleanup. Missing identity or
-  execution provenance never becomes a healthy live observation.
-- Return separate `reported_state`, `structural_validation` and
-  `runtime_evidence_status`. Offline runtime evidence stays **NOT_VERIFIED** and
-  `authorized=False`; structural success/exit0 is only input validation, even for
-  a COMPLETED record. Existing `verify_task` may evaluate caller-supplied evidence
-  structurally, but its PASS cannot certify that checks or independent review
-  actually ran. Model claims satisfy no acceptance criterion. Required actual
-  evidence binds tested SHA/patch digest, command, exit, environment and artifacts;
-  missing/unverified results cannot establish PASS/VERIFIED/DONE.
-- Ledger status, review text, identity strings, digest or handoff proposal never
-  authorizes Git, provider, command execution or PR changes. S1a starts no agent,
-  runs no command/test/Git/gh subprocess, makes no provider call, and writes no
-  implicit state. Output uses sanitized bounded metadata/references, preserving
-  A11a privacy rules rather than copying raw logs/diffs/prompts into diagnostics.
-
-S1b's proposed [foreground review contract](#s1b-foreground-review-contract-draft)
-defines the separate exact-SHA packet and permitted data route; it is not an
-S1a provider path or an execution grant. S2 later adds permission-controlled
-repair/execution under A11b's separately accepted approval/sandbox/recovery/audit/
-budget gates. **F2 remains NOT AUTHORIZED**;
-S1a does not imply A11b DONE or full A11c acceptance.
-No daemon/scheduler or duplicate approval/logging
-system. Company-LLM Round 1–3 evidence and existing measurement/privacy policy
-are reused without rerunning benchmarks; no company or other provider calls in
-S1a, no new savings claim, and company integration stays deferred.
-
-The product slice needs focused positive replay and negative binding/sequence/
-transition/expiry/self-review tests; false model-only completion, corrupt input,
-file safety/privacy, explicit non-PASS runtime labels and no-subprocess/no-write
-checks; relevant TaskContract/A11a/CLI regressions; required full checks and
-exact-head Python 3.9/3.14 CI; focused native Mac file/CLI checks where applicable.
-Publish a separate Draft product PR for independent Claude Security + Functional
-review. Offline tests do not satisfy later live collector, concurrent ledger or
-real-agent/repair acceptance. Keep required missing gates blocking and use Issue #92
-for nonblocking Low dispositions.
-
 ### S1b foreground review contract (DRAFT)
 
 **STATUS: contract accepted/merged via [PR #129](https://github.com/davidcatcat/davidcattoolsproject/pull/129)
