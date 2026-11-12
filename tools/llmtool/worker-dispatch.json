@@ -2,11 +2,11 @@
   "schema_version": 1,
   "workers": {
     "codex-developer": {
-      "dispatch": "ALLOWED",
+      "dispatch": "PAUSED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-31",
-      "reason": "Owner resumed Codex Developer as the primary strong Developer route; existing task-scope, privacy, budget, D6, review and CI gates remain required",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665"
+      "decided_at": "2026-11-11",
+      "reason": "Owner decision O1 (#1502): Codex writes no code and serves only as Reviewer (codex-reviewer) and AI Debug (codex-debug); no Codex Developer dispatch, repair or timeout continuation",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6685246395"
     },
     "claude-developer": {
       "dispatch": "ALLOWED",
@@ -26,7 +26,7 @@
       "dispatch": "ALLOWED",
       "decided_by": "Owner",
       "decided_at": "2026-11-04",
-      "reason": "PM-selected AGY Developer route uses gemini-4-argon-medium and requires its formal Reviewer (Claude Reviewer) to be a different model family than the actual author; pause after 2 consecutive route failures; no automatic retry or fallback",
+      "reason": "PM-selected AGY Developer route on its configured model; requires its formal Reviewer (Claude Reviewer) to be a different model family than the actual author; pause after 2 consecutive route failures; no automatic retry or fallback",
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6683494255"
     },
     "company-gw": {
