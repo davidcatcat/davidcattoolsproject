@@ -288,16 +288,35 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), 'SENTINEL_STORE_GET')
         self.assertEqual(store.gets, ['a' * 32])
 
-    def test_claude_delegate_without_owner_ref_is_still_refused_before_store_read(self):
-        class UnreadStore:
-            def __getattr__(self, name):
-                raise AssertionError('store must not be read before owner-ref validation')
+    def test_claude_delegate_owner_ref_is_optional_but_validated(self):
+        # #1502 WP-C: --owner-ref is optional for the PM-selected Claude Developer;
+        # a given ref must still be a valid Owner comment reference.
+        class SentinelStore:
+            def __init__(self):
+                self.gets = []
 
-        args = Namespace(provider='claude', mode='direct', owner_ref=None, task_id='a' * 32,
-                         background=False, acceptance=['the result is recorded'])
-        with self.assertRaises(LLMToolError) as caught:
-            task_submission_cli.run_task_delegate(args, store=UnreadStore())
-        self.assertEqual(str(caught.exception), '--provider claude requires --owner-ref')
+            def task_ids(self):
+                return []
+
+            def completion_d6_task_ids(self, _executor_task):
+                return []
+
+            def get(self, task_id):
+                self.gets.append(task_id)
+                raise LLMToolError('SENTINEL_STORE_GET')
+
+        invalid = '--provider claude requires a valid --owner-ref before Task mutation'
+        for owner_ref, expected, gets in ((None, 'SENTINEL_STORE_GET', ['a' * 32]),
+                                          ('not-an-owner-ref', invalid, [])):
+            with self.subTest(owner_ref=owner_ref):
+                store = SentinelStore()
+                args = Namespace(provider='claude', mode='direct', owner_ref=owner_ref,
+                                 task_id='a' * 32, background=False, context_stdin=False,
+                                 selection_source='PM', acceptance=['the result is recorded'])
+                with self.assertRaises(LLMToolError) as caught:
+                    task_submission_cli.run_task_delegate(args, store=store)
+                self.assertEqual(str(caught.exception), expected)
+                self.assertEqual(store.gets, gets)
 
     def _fixture_policy(self, agy_row):
         """Write a self-contained v1 policy fixture; never the live file."""
