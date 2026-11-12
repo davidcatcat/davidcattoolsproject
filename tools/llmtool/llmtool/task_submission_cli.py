@@ -3916,6 +3916,58 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     return 1
 
 
+class _ClaudeCommittedCarry(Exception):
+    """The finished run's committed-result carry was stored (#1148)."""
+
+
+def _claude_committed_carry(task, store, registration, snapshot, developer, completion,
+                            result, write_paths, test_policy):
+    """#1148/#1279: return (developer, completion) that carry the D6's committed head.
+
+    Only a finished Claude run with no new edit qualifies: the registered D6 result
+    head is the launch head, the committed work since the D6 base is inside
+    write_paths and 64 KiB, and no other Task delivered a result on this D6.
+    Anything else, or any error, returns None (CLAUDE_NO_CHANGES)."""
+    try:
+        base, head = registration.source_sha, snapshot.head
+        if (result.status != 'DONE' or result.exit_code != 0 or not result.session_id or
+                result.cleanup_status != 'CONFIRMED' or type(result.stdout_sha256) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', base) is None or base == head or
+                registration.result_sha != head or developer['source_sha'] != head or
+                developer['execution'] is not None or task_completion.read_d6_registration(
+                    registration.task_id, registration.common_dir) != registration):
+            return None
+        task_completion._git(registration.root, ('merge-base', '--is-ancestor', base, head),
+                             limit=4096)
+        committed = task_completion._committed_changed_paths(registration.root, base, head)
+        changed_paths, raw = task_completion._worktree_diff(registration.root, base)
+        if (sorted(set(changed_paths)) != committed or not raw or len(raw) > 64 * 1024 or
+                any(path not in write_paths for path in committed) or any(
+                    (store.get(other).get('developer') or {}).get('executor_task_id') ==
+                    registration.task_id and store.get(other)['developer']['state'] ==
+                    'DEVELOPER_RESPONDED' for other in store.task_ids()
+                    if other != task['task_id'])):
+            return None
+        usage = _normalize_agy_usage(result.usage)
+        callback = _direct_result_callback(task, registration, base, result_head=head,
+                                           test_policy=test_policy)
+        callback['evidence']['carried_result'] = {
+            'mode': 'NO_RUN_CHANGES', 'assignment_id': developer['assignment_id'],
+            'd6_base': base, 'carried_head': head}
+        return dict(developer, state='DEVELOPER_RESPONDED', source_sha=base,
+            artifact=raw.decode('utf-8', 'strict'), artifact_sha256=hashlib.sha256(raw).hexdigest(),
+            error_code=None, direct_result_callback=callback, usage=usage, execution={
+                'status': 'DONE', 'native_session_id': result.session_id,
+                'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
+                'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
+                'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
+                'source_bytes': None, 'source_file_count': None,
+                'source_manifest_sha256': None}), dict(completion, evidence=dict(
+                    completion['evidence'], source_sha=base, result_head=head))
+    except Exception:
+        return None
+
+
 def run_task_claude_delegate(args, *, store, route_runner=None):
     """Run Claude CLI in its Owner-assigned, registered D6 worktree."""
     owner_ref = getattr(args, 'owner_ref', None)
@@ -4112,7 +4164,16 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
             raise RouteError('CLAUDE_D6_BINDING_CHANGED')
         changed_paths, raw = task_completion._worktree_diff(registration.root, snapshot.head)
         if not changed_paths or not raw:
-            raise RouteError('CLAUDE_NO_CHANGES')
+            carry = _claude_committed_carry(task, store, registration, snapshot, developer,
+                                            completion, result, write_paths, test_policy)
+            if carry is None:
+                raise RouteError('CLAUDE_NO_CHANGES')
+            try:
+                store.compare_and_update(task['task_id'], expected={'developer': developer},
+                                         developer=carry[0], completion=carry[1])
+            except Exception:
+                raise RouteError('CLAUDE_NO_CHANGES') from None
+            raise _ClaudeCommittedCarry()
         if len(raw) > 64 * 1024:
             raise RouteError('CLAUDE_OUTPUT_TOO_LARGE')
         if any(path not in write_paths for path in changed_paths):
@@ -4128,6 +4189,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None}, usage=usage)
+    except _ClaudeCommittedCarry:
+        return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
     except RouteError as exc:
         error_code = ('CLAUDE_DISPATCH_DENIED' if owner_gate_denied else exc.code)
         developer.update(state='BLOCKED', provider_type='claude-cli', model=model,
