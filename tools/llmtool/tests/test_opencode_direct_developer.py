@@ -145,7 +145,10 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertEqual(value['agents'][AGENT]['steps'], 12)
         self.assertEqual(value['agents'][AGENT]['permissions'], value['permissions'])
         self.assertEqual(value['policies'][-1], {
-            'action': 'integration.use', 'resource': '*', 'effect': 'deny'})
+            'action': 'integration.use', 'resource': 'opencode#*', 'effect': 'allow'})
+        self.assertEqual([(p['resource'], p['effect']) for p in value['policies']
+                          if p['action'] == 'integration.use'],
+                         [('*', 'deny'), ('opencode#*', 'allow')])
 
     def test_configured_agent_steps_are_bounded(self):
         value = configuration(read_paths=['source.py'], write_paths=['source.py'], steps=23)
