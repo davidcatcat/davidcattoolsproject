@@ -2003,8 +2003,14 @@ def _validate(record, *, strict=True):
                     developer['state'] == 'DEVELOPER_OUTCOME_UNKNOWN' and
                     developer['error_code'] == 'CODEX_BLOCKED' and
                     type(execution) is dict and execution.get('status') == 'BLOCKED')
+                # #1606: AGY_EXIT_NONZERO keeps a bounded, screened exit diagnostic.
+                agy_exit_block = (
+                    developer['provider_profile'] == 'agy' and
+                    developer['state'] == 'BLOCKED' and
+                    developer['error_code'] == 'AGY_EXIT_NONZERO' and
+                    type(reason) is str and reason.startswith('exit_code='))
                 if (not (agy_isolation_block or agy_dispatch_block or claude_isolation_block or
-                         claude_dispatch_block or codex_block) or
+                         claude_dispatch_block or codex_block or agy_exit_block) or
                         type(reason) is not str or
                         len(reason.encode('utf-8')) > 2048 or
                         any((ord(char) < 32 and char not in '\t\n\r') or
