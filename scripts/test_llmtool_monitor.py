@@ -9144,6 +9144,10 @@ class PrBoardTests(unittest.TestCase):
         # 4. An UNCHECKED row, unbound, or bound to this very PR.
         unchecked = self._agy_row(None, cpu=None)
         self.assertEqual((unchecked.state, unchecked.work), (mon.UNCHECKED, "PR 未確認（D6 wp-1）"))
+        # #1592: a PR list that was read but has no PR for the branch means none yet.
+        no_pr_yet = self._agy_row({})
+        self.assertEqual((no_pr_yet.state, no_pr_yet.work, no_pr_yet.work_bound),
+                         (mon.WORKING, "尚未開 PR（D6 wp-1）", False))
         unchecked_here = self._agy_row(self.PRS, cpu=None)
         self.assertTrue(mon._names_pr(unchecked_here, 978, "abcdef0"))
         for row in (unread, raised, no_prs, unchecked, unchecked_here):
