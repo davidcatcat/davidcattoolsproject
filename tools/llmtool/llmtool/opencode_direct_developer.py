@@ -472,6 +472,8 @@ def configuration(*, read_paths, write_paths, model=MODEL,
             {'action': 'provider.use', 'resource': '*', 'effect': 'deny'},
             {'action': 'provider.use', 'resource': 'opencode', 'effect': 'allow'},
             {'action': 'integration.use', 'resource': '*', 'effect': 'deny'},
+            # #1605 Owner A: OpenCode 2.2.6+ routes the free model via this one.
+            {'action': 'integration.use', 'resource': 'opencode#*', 'effect': 'allow'},
         ],
         'agents': {
             # Read then edit need two tool-capable rounds before the final summary.

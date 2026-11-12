@@ -6,8 +6,8 @@ description: Implement a feature or bug fix from an agreed requirement through t
 # Implement Feature
 
 For the requirements-owner/AI-team responsibility split, start with
-[ai-team-delivery](../ai-team-delivery/SKILL.md). The Developer implements and
-tests the approved product goal. The Claude PM dispatches the work, hands it off
+[ai-team-delivery](../ai-team-delivery/SKILL.md). The Developer implements the
+approved product goal and writes its tests. The Claude PM dispatches the work, hands it off
 for independent review, and merges eligible changes. The owner may be the Mac
 command operator but is not the technical PM or agent prompt courier.
 
@@ -22,11 +22,12 @@ Deliver a working change, not just code generation.
 5. Add or update tests through public interfaces. For runtime/execution features, derive
    failure-path acceptance cases from the provider/runtime checklist in
    [review-change](../review-change/SKILL.md); keep the safety review rules there.
-6. Run the narrow tests after each meaningful slice.
-7. Run required checks for the changed artifacts. Documentation-only work uses documentation
-   validation (links, examples, schema/status consistency); run application tests/builds when
-   production behavior or package resources change, or repository instructions require them.
-8. Manually exercise the user-facing flow when practical.
+6. Do not run tests in the D6. The PM runs the Task's test modules on EC2
+   (`llmtool task remote-test`) before the PR; exact-head CI is the formal check.
+7. Name the required checks for the changed artifacts: documentation-only work needs
+   `check (docs)`; production behavior or package-resource changes need the Task's test modules
+   on EC2 and exact-head CI.
+8. Name any user-facing flow to exercise by hand; the PM runs it outside the D6.
 9. Use `review-change` on the final diff.
 10. Run any additional gate explicitly required by the Task Contract/milestone: `bug-hunt`, `security-review`, `qa-validation`, or `validate-runtime`. Do not assume ordinary review satisfies those gates.
 11. Use `safe-git` only when the user asks to commit, synchronize, or push.
