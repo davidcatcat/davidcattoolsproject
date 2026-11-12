@@ -1265,7 +1265,9 @@ def label_mac_ci_for_skipped_check(*, task_id, store=None, pr_number=None,
             pr.get('state') not in (None, 'open') or pr.get('merged') is True or
             pr.get('mergeable') is not True):
         return None
-    code = _merge_checks(record, number, head, pr, get, allow_missing_macos=True)
+    # #1576: Owner acceptance gates the merge only, never the Mac run that precedes it.
+    code = _merge_checks(record, number, head, pr, get, allow_missing_macos=True,
+                         skip_owner_acceptance=True)
     if code != 'MERGE_MACOS_CHECK_SKIPPED':
         return None
     try:

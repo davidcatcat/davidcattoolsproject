@@ -2787,6 +2787,21 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         self.assertEqual(result['step'], 'WAITING_CI')
         self.assertEqual(calls, [])
 
+        # #1576: a TUI PR (Owner acceptance path) still gets mac-ci after PASS ...
+        result, calls = run_case(files=['tools/llmtool/llmtool/chat_tui.py'])
+        self.assertEqual(result['step'], 'WAITING_CI')
+        self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
+        green = [{'head_sha': HEAD, 'name': name, 'status': 'completed', 'conclusion': 'success'}
+                 for name in ('check (Linux 3.14)', 'check (macOS 3.13)')]
+
+        def tui_get(path):
+            if path.startswith('commits/'):
+                return {'total_count': 2, 'check_runs': green}
+            return [{'filename': 'tools/llmtool/llmtool/chat_tui.py'}]
+        # ... while its merge still needs the Owner acceptance.
+        self.assertEqual(task_advance._merge_checks(base_record(), 17, HEAD, {'mergeable': True},
+                                                    tui_get), 'MERGE_OWNER_ACCEPTANCE_MANUAL')
+
         variants = [
             ('pending Linux', [
                 {'head_sha': HEAD, 'name': 'check (Linux 3.14)',
