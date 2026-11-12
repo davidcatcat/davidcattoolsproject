@@ -480,11 +480,23 @@ class ReviewRepairTests(unittest.TestCase):
                          self.store.get(TASK)['review_repair_claims'][0]['repair_task_id'])
         self.assertEqual(len(self.calls), 1)
 
+    def _confirm_rca(self, family=f'pr-{PR}'):
+        # #1502 WP-D (D1): a second review repair needs an RCA_CONFIRMED Debug on the failed HEAD.
+        record = self.store.get(TASK)
+        report = 'Root cause evidence.'
+        record['high_debug'] = [{
+            'family': family, 'status': 'RCA_CONFIRMED',
+            'examined_sha': HEAD, 'recorded_at': '2026-10-27T03:00:00Z',
+            'report': report, 'report_sha256': hashlib.sha256(
+                report.encode()).hexdigest()}]
+        self.store = TempTaskStore(self.temp.name, record)
+
     def test_failed_claim_starts_a_new_repair_attempt(self):
         self.dispatch()
         record = self.store.get(TASK)
         record['review_repair_claims'][0]['state'] = 'FAILED'
         self.store = TempTaskStore(self.temp.name, record)
+        self._confirm_rca()
         result = self.dispatch()
         claims = self.store.get(TASK)['review_repair_claims']
         self.assertEqual(result['claim']['attempt'], 2)
@@ -505,6 +517,7 @@ class ReviewRepairTests(unittest.TestCase):
 
     def test_retry_claim_is_failed_atomically_with_new_attempt(self):
         self._repair_history(1)
+        self._confirm_rca('network')
         retry_id = self.store.get(TASK)['review_repair_claims'][-1]['repair_task_id']
         result = self.dispatch(family='network', retry_claim_id=retry_id,
                                github_get=lambda _path: [_comment(version=2)])
@@ -649,6 +662,7 @@ class ReviewRepairTests(unittest.TestCase):
             self._stored_claim(attempt=n, family=EC2_FAMILY, comment_id=None,
                                repair_id=f'{n:032x}')
             for n in range(1, MAX + 1)])
+        self._confirm_rca()
         for expected in range(1, MAX + 1):
             result = self.dispatch()
             self.assertEqual((result['claim']['family'], result['claim']['attempt']),
