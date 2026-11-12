@@ -66,6 +66,12 @@ def check(spec: dict[str, Any]) -> list[str]:
     return failures
 
 
+# #1570: a home LLM that must find an anchor in a long file reads it in large
+# chunks and can exhaust its context (Task 1e61753d), so long files need a line hint.
+LARGE_FILE_LINES = 2000
+LINE_HINT_WINDOW = 20
+
+
 def check_edits(spec: dict[str, Any], repo: str | Path | None = None) -> tuple[str, int] | None:
     """Validate optional spec field 'edits' under the given repo directory.
 
@@ -122,6 +128,12 @@ def check_edits(spec: dict[str, Any], repo: str | Path | None = None) -> tuple[s
             return ("EDIT_ANCHOR_MISSING", index)
         if count > 1:
             return ("EDIT_ANCHOR_NOT_UNIQUE", index)
+        if content.count("\n") >= LARGE_FILE_LINES:
+            line = edit.get("line")
+            if type(line) is not int or line < 1:
+                return ("EDIT_LINE_HINT_MISSING", index)
+            if abs(content[:content.index(old_text)].count("\n") + 1 - line) > LINE_HINT_WINDOW:
+                return ("EDIT_LINE_HINT_WRONG", index)
 
     return None
 
@@ -256,6 +268,13 @@ def main(argv: list[str] | None = None) -> int:
             code, index = edit_failure
             print(f"SPEC_PREFLIGHT_INVALID:{code}:{index}")
             return 2
+    elif spec.get("provider") == "gw-agent":
+        for path in spec.get("write") or []:
+            target = repo_dir / path if isinstance(path, str) else None
+            if (target is not None and target.is_file() and
+                    target.read_bytes().count(b"\n") >= LARGE_FILE_LINES):
+                print("SPEC_PREFLIGHT_INVALID:EDIT_LINE_HINT_MISSING:-1")
+                return 2
 
     if ladder_log is None:
         print("SPEC_PREFLIGHT_OK")
