@@ -1015,7 +1015,7 @@ def run_task_remote_test(args, *, store=None, stdout=None):
 
 
 def run_task_remote_test_checked(args, *, store=None, stdout=None):
-    """CLI entry for ``task remote-test``: the caller's PM session must own the Task."""
+    """CLI entry for ``task remote-test``: the caller's PM session must own the Task.
 
     #1230 A1 (#1124 rest, item 2): only the CLI checks the caller. ``task advance``
     checks its own caller and then calls ``run_task_remote_test`` directly.
