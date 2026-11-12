@@ -6285,12 +6285,13 @@ class OfficeViewTests(unittest.TestCase):
         # No runner configured, or no place given: no row (the office tests stay hermetic).
         self.assertEqual(mon.runner_rows([], now, self.tmp.name), [])
         self.assertEqual(mon.runner_rows([], now, None), [])
+        alone = lambda: mon.runner_rows([listener], now, None, {30: root}.get, {30: None}.get)
         with patch.object(os.path, "expanduser", return_value=os.path.dirname(root)):
-            row, = mon.runner_rows([], now, root)
+            row, = alone()
         self.assertTrue(row.detail.endswith(f"日誌：~/{os.path.basename(root)}/_diag"))
         os.chmod(os.path.join(root, "_diag"), 0)   # e.g. the runner account's folder
         try:
-            row, = mon.runner_rows([], now, root)
+            row, = alone()
         finally:
             os.chmod(os.path.join(root, "_diag"), 0o755)
         self.assertNotIn("日誌", row.detail)
@@ -7187,7 +7188,9 @@ class GitHubRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             with open(os.path.join(root, ".runner"), "w") as handle:
                 json.dump({"agentName": mac[0]}, handle)
-            mac_rows = mon.runner_rows([], NOW, root, ci=[], waiting_jobs=mac_jobs)
+            listener = mon.Process(30, 1, 30, "01:00", "S", "Actions runner", "Runner.Listener")
+            mac_rows = mon.runner_rows([listener], NOW, root, {30: root}.get, {30: None}.get,
+                                       ci=[], waiting_jobs=mac_jobs)
         mac_queue, = [row for row in mac_rows if row.kind == "shared"]
         self.assertEqual((mac_queue.name, mac_queue.detail),
                          ("mac ci 排隊", "排隊 1 個：Mac workflow: check"))
