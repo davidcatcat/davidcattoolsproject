@@ -37,41 +37,6 @@ llmtool executes an approved route and plan; it does not decide which AI owns co
 
 [Historical AI-led operating model decisions are archived](../../docs/history/governance-archive-20261103.md#ai-led-team-operating-model).
 
-| Provider/verdict | Unavailable/auth/timeout/cancel/nonzero/oversize/partial output, invalid enum/schema/identity/evidence, plain APPROVE or self-review -> non-PASS, zero retries/fallbacks, owned-child cleanup evidence |
-| Drift and effects | HEAD/index/source/contract/run/epoch/sequence/Session/permission change before submission or during review invalidates eligibility/verdict; no Git writes/test/repair/extra file/journal persistence or unapproved subprocess/network calls |
-
-Focused new tests first, then relevant S1a/TaskContract/provider/privacy/budget/
-authorization regressions, required full checks and exact-head Python 3.9/3.14 CI.
-Native read-only Mac collector/file/provenance cases require independently reviewed
-bounded commands and exact tested source; fake provider first. Real Claude Mac
-smoke is NOT_AUTHORIZED/NOT_TESTED until explicit authentic host and data-route
-approval, accepted source gates and non-author Security/Functional review; a
-required missing native/production gate blocks corresponding product acceptance.
-Do not label fake tests live PASS or relax permissions to satisfy a gate. Deliver
-one separate Draft product PR with exact evidence and independent review; author
-never approves or merges it. The original docs PR required link/anchor/scope/contradiction
-validation, applicable exact-head CI and independent Claude contract review only;
-no application build/provider smoke or G5/G6/benchmark rerun.
-
-Before work, pin a **Task Contract** with task ID, version/digest, goal, authorized
-scope, forbidden scope, acceptance criteria and required evidence. Keep the exact
-contract available at each handoff. No model, developer or reviewer may silently
-change it, remove a condition or lower acceptance requirements. A user-authorized
-change creates a new version, preserving its predecessor and authorization;
-reassess the plan, approvals and affected evidence rather than inheriting VERIFIED.
-Routine repairs within the existing scope do not require changing the contract.
-
-Prefer an authorized, available company LLM for context preparation, summaries,
-classification, log normalization, initial planning and first review when the data
-is permitted for that profile. Preserve source/revision references, unknowns,
-contradictions, constraints, unresolved findings and necessary evidence references.
-Schema validity does not establish factual correctness. A summary never replaces
-the pinned contract or original verification evidence; keep originals accessible
-under the applicable data policy. First review cannot replace required independent
-or external review. Company-provider unavailability is an environment/auth limit,
-not a reason to declare PASS or silently choose an external provider. Documentation
-work does not require a company-provider call merely to follow this preference.
-
 Use three context layers: pinned contract, compressible working context, and
 structured evidence. Company LLM compression applies only to working context;
 it must retain restrictions, unresolved issues and evidence links. If context
