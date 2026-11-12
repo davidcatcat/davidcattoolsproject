@@ -94,6 +94,14 @@ class TaskStoreTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve() / 'tasks'
         self.store = TaskStore(self.root)
+        # #1502 WP-C: the real policy pauses codex-developer; these store tests keep it.
+        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+        policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
+        policy_path = Path(self.temp.name).resolve() / 'worker-dispatch.json'
+        policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        patcher = patch.object(worker_dispatch, '_POLICY_PATH', policy_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_merge_attempt_unknown_can_be_reclaimed_for_same_pr_and_head(self):
         task = self._codex_dispatch_task()
