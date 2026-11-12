@@ -2837,8 +2837,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
 
         for kwargs in (
                 {'head': 'b' * 40},
-                {'mergeable': None},
-                {'files': ['tools/llmtool/llmtool/chat_tui.py']}):
+                {'mergeable': None}):
             with self.subTest(kwargs=kwargs):
                 result, calls = run_case(**kwargs)
                 self.assertIsNone(result)

@@ -65,7 +65,7 @@ does not replace independent review. Do not auto-merge main.
 Cloud needs repository and push authorization; it does not automatically
 inherit Mac checkout, VPN/Keychain or unpushed files. GitHub refs remain
 shared between independent Cloud and Mac branches. See
-[Workflow](WORKFLOW.md#d-007-independent-mobile-codex-cloud-delivery),
+[Workflow](https://github.com/davidcatcat/davidcattoolsproject/blob/cf3a1c4a306b3be9b058d32b0bf7047d33727f1c/tools/llmtool/WORKFLOW.md#d-007-independent-mobile-codex-cloud-delivery),
 [Roadmap](../../docs/history/llmtool-roadmap-archive-20261028.md#owner-accepted-collaboration-architecture-and-mobile-codex-cloud-lane-2026-10-17)
 and [official Codex Cloud guide](https://help.openai.com/en/articles/20001545-using-codex-cloud).
 
@@ -2953,7 +2953,7 @@ directory FDs, identity checks and bounded repeated-content reads detect drift;
 platforms fail closed. Same-UID checks are cooperative, not an OS sandbox.
 
 See [Issue #120's accepted v1 product contract](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6123940052)
-and the [workflow gates](WORKFLOW.md#s1a-offline-task-event-inspection-contract).
+and the [workflow gates](https://github.com/davidcatcat/davidcattoolsproject/blob/cf3a1c4a306b3be9b058d32b0bf7047d33727f1c/tools/llmtool/WORKFLOW.md#s1a-offline-task-event-inspection-contract).
 Company Round 1–3 evidence/privacy/accounting rules remain unchanged; no provider
 or benchmark call and no new savings claim is part of S1a.
 
@@ -3036,7 +3036,7 @@ execution/CI/Session provenance; local SHA/digest reads alone do not prove it.
 One fake attempt, no retry/fallback/repair, <=120s call and <=180s foreground;
 unknown-cost routes or required unenforceable hard spend caps fail closed.
 No S2/F2, test execution, automatic source repair or Git/PR mutation/merge.
-[WORKFLOW contract](WORKFLOW.md#s1b-foreground-review-contract-draft) and
+[WORKFLOW contract](https://github.com/davidcatcat/davidcattoolsproject/blob/cf3a1c4a306b3be9b058d32b0bf7047d33727f1c/tools/llmtool/WORKFLOW.md#s1b-foreground-review-contract-draft) and
 [Product A/B handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127970737)
 remain normative. B's contract checkpoint/implementation/native acceptance and
 separately authorized actual Claude Mac smoke remain required for real automatic
@@ -3074,7 +3074,7 @@ bytes. Some complete originals will still be BLOCKED by privacy; this is intenti
 Unexpected post-consume exceptions retain one attempted call and UNKNOWN.
 Independent product Security/Functional review and T1/T2/T3 release/route gates
 remain required; no F2/S2, auto repair/merge or production enablement is delivered.
-See [B1 contract](WORKFLOW.md#b1-authority-adapters-and-fake-first-acceptance).
+See [B1 contract](https://github.com/davidcatcat/davidcattoolsproject/blob/cf3a1c4a306b3be9b058d32b0bf7047d33727f1c/tools/llmtool/WORKFLOW.md#b1-authority-adapters-and-fake-first-acceptance).
 
 
 ## Issue #135 — Codex tool-event audit collector (not an activation)
@@ -3207,7 +3207,7 @@ Live still needs a separate one-call route/data/model/cost/window grant, permitt
 physical executable and dedicated Auth HOME, Host/ledger provisioning and the
 outstanding pre-Live reviews. No original Reviewer wake-up, reduced manual relay,
 useful live adoption or full M2 completion is claimed. See the
-[Worker Source/Fake contract](WORKFLOW.md#foreground-worker-sourcefake-contract-issue-120).
+[Worker Source/Fake contract](https://github.com/davidcatcat/davidcattoolsproject/blob/cf3a1c4a306b3be9b058d32b0bf7047d33727f1c/tools/llmtool/WORKFLOW.md#foreground-worker-sourcefake-contract-issue-120).
 
 ```sh
 llmtool task review-request --bundle ABS_PRIVATE_BUNDLE --bundle-sha256 FULL_SHA256 \

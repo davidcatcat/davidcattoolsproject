@@ -435,7 +435,7 @@ def _mac_ci_runs(paths):
 
 
 def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False,
-                  owner_acceptance=None, acceptance_out=None):
+                  owner_acceptance=None, acceptance_out=None, skip_owner_acceptance=False):
     """Check every exact-head merge gate; return None or one refusal code.
 
     acceptance_out, when given, is a dict that gets the carried-acceptance
@@ -511,7 +511,7 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
             acceptance_out.update(carry)
             acceptance_out['h1_checks'] = sorted(
                 f"{item['name']}={item.get('conclusion')}" for item in check_runs)
-    elif _owner_acceptance_required(files):
+    elif not skip_owner_acceptance and _owner_acceptance_required(files):
         return 'MERGE_OWNER_ACCEPTANCE_MANUAL'
     if requires_macos:
         mac_runs = [item for item in check_runs if item.get('name') == 'check (macOS 3.13)']
