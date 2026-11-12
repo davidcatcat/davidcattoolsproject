@@ -7535,8 +7535,8 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
 # credential), and a finished run from the time of the audit copy llmtool keeps
 # (developer_routes/gw_agent.py, collect). A company gw run is an API call
 # inside llmtool and leaves neither, so it has no row here.
-HOME_GW = "公司 gw"               # roster name of the retired company-gw route (#120 A3)
-HOME_GW_AGENT = "公司 gw agent"   # roster name of the gw-agent route (#120 A3)
+HOME_GW = "home LLM gw"               # roster name of the retired company-gw route (#120 A3)
+HOME_GW_AGENT = "home LLM gw-agent"   # roster name of the gw-agent route (#120 A3)
 GW_ROSTER = {"gw-agent developer": HOME_GW_AGENT}
 GW_AUDIT_ROOT = None   # None: the temp directory, resolved in _gw_finished (it may not exist)
 GW_AUDIT_PREFIX = "llmtool-gw-agent-audit-"

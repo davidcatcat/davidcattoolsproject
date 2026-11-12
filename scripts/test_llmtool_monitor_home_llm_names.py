@@ -1,3 +1,4 @@
+import inspect
 import os
 import sys
 import unittest
@@ -23,6 +24,11 @@ class HomeLlmNameTests(unittest.TestCase):
         self.assertIs(mon.GW_ROSTER["gw-agent developer"], mon.HOME_GW_AGENT)
         self.assertEqual([row[1] for row in mon.WORKER_ROSTER[2:]],
                          ["company-gw", "company-gw-agent"])
+
+    def test_roster_rows_use_the_home_llm_names(self):
+        # Owner #120 c6800664561: user-visible names say home LLM / gw-agent.
+        self.assertEqual((mon.HOME_GW, mon.HOME_GW_AGENT), ("home LLM gw", "home LLM gw-agent"))
+        self.assertNotIn("公司", inspect.getsource(mon.office_rows))
 
 
 if __name__ == "__main__":
