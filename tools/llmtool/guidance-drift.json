@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "hashes": {
-    "AGENTS.md": "d0ca7f6ac00924ed9645edd408e695a4352cf4e5c8b23ea12e3025aa9f248ed3",
-    "CLAUDE.md": "af337d19862611be2773b97a647f33f176479135856dedaafebf29b53fd5b497"
+    "AGENTS.md": "b4bcfff4ba6db84dcaa55a9a7edcf85a852de38b98c590d84e335ddf644893ff",
+    "CLAUDE.md": "924aa8310e3a67b7c7179faeccbcd1cf525b31adc435e6d4c857838629e81c45"
   },
   "codex_only": []
 }
