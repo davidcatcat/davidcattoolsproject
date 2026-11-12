@@ -2122,6 +2122,8 @@ def _reviewer_author_family(developer):
             return 'claude'
         if type(model) is str and model.startswith('gemini-'):
             return 'other'
+        if type(model) is str and model.startswith('gpt-'):
+            return 'codex'  # #1604: OpenAI models (gpt-oss-*) share the codex family
         return None
     elif profile in ('opencode', 'company-gw', 'company-gw-agent', 'gw-agent'):
         return _recorded_model_family(developer.get('model')) or 'other'
