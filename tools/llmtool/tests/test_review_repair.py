@@ -989,6 +989,7 @@ class ReviewRepairTests(unittest.TestCase):
 
     def test_repair_task_rejects_recorder_without_task_id(self):
         task = _record()
+        task['developer']['provider_profile'] = 'agy'   # #1502 WP-C: Codex writes no code
         packet = {'verdict_comment_id': 9, 'failed_head': HEAD, 'version': 1,
                   'findings_count': 1}
 
@@ -1014,6 +1015,7 @@ class ReviewRepairTests(unittest.TestCase):
         child_id = '2' * 32
         child_executor = 'executor-child'
         root_record = _record()
+        root_record['developer']['provider_profile'] = 'agy'   # #1502 WP-C: Codex writes no code
         root_record['review_repair_claims'] = [{
             'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 1,
             'attempt': 1, 'family': f'pr-{PR}', 'state': 'DISPATCHED',
