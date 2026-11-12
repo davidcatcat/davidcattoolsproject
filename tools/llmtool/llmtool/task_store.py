@@ -1350,7 +1350,7 @@ def _validate(record, *, strict=True):
                      (type(item['family']) is not str or
                       re.fullmatch(r'[a-z0-9._-]{1,64}', item['family']) is None)) or
                     ('high_debug_report_sha256' in item and
-                     (item.get('attempt') != 3 or
+                     (item.get('attempt') not in (2, 3) or
                       type(item['high_debug_report_sha256']) is not str or
                       re.fullmatch(r'[0-9a-f]{64}', item['high_debug_report_sha256']) is None)) or
                     item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN', 'FAILED') or
@@ -1376,6 +1376,17 @@ def _validate(record, *, strict=True):
                 _fail('REVIEW_REPAIR_CLAIM_INVALID')
             if any(item.get('attempt') != index
                    for index, item in enumerate(family_claims, 1)):
+                _fail('REVIEW_REPAIR_CLAIM_INVALID')
+            # #1502 WP-D (D1): repair #2 may bind the RCA_CONFIRMED Debug on its HEAD.
+            second = family_claims[1] if len(family_claims) >= 2 else None
+            if (second is not None and 'high_debug_report_sha256' in second and
+                    not any(type(entry) is dict and entry.get('family') ==
+                            second.get('family', f"pr-{second['pr']}") and
+                            entry.get('status') == 'RCA_CONFIRMED' and
+                            entry.get('examined_sha') == second['head_sha'] and
+                            entry.get('report_sha256') ==
+                            second['high_debug_report_sha256']
+                            for entry in record.get('high_debug', []))):
                 _fail('REVIEW_REPAIR_CLAIM_INVALID')
             if len(family_claims) == 3:
                 third = family_claims[2]
