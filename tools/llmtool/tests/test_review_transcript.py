@@ -45,6 +45,16 @@ class UnpostedVerdictTest(unittest.TestCase):
                          ('ENDED', 'REVIEWER_VERDICT_BINDING_MISMATCH', None))
         self.assertEqual(self.relay(verdict(), verdict())[1], 'REVIEWER_VERDICT_AMBIGUOUS')
 
+    def test_fenced_verdict_with_trailing_prose_posts_only_verdict_lines(self):
+        self.assertEqual(self.relay('Post this:\n\n```\n' + verdict() + '\n```\n\nNot run: CI.'),
+                         ('ENDED', None, verdict()))
+        self.assertEqual(self.relay(verdict() + '\nNot run: CI.')[2], verdict())
+
+    def test_extra_lines_inside_the_verdict_are_refused(self):
+        lines = verdict().split('\n')
+        self.assertEqual(self.relay('\n'.join(lines[:2] + ['Internal note.'] + lines[2:])),
+                         ('ENDED', 'REVIEWER_VERDICT_NOT_EXACT', None))
+
     def test_ended_session_without_verdict_returns_code(self):
         self.assertEqual(self.relay('No verdict.'),
                          ('ENDED', 'REVIEWER_VERDICT_MISSING', None))

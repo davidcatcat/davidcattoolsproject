@@ -12,6 +12,7 @@ from .errors import LLMToolError
 _UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z')
 _REVIEWER = re.compile(r'reviewer-[0-9a-f]{20}\Z')
 _MARKER = '<!-- activity: type=review_verdict actor='
+_ACCEPT = 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT'
 
 
 def session_state(session_id, config_dir, *, run=subprocess.run, claude=None):
@@ -48,8 +49,20 @@ def verdict_blocks(session_id, config_dir, reviewer_task):
             for item in content:
                 text = item.get('text') if type(item) is dict else None
                 if type(text) is str and item.get('type') == 'text':
-                    blocks += [(_MARKER + part).rstrip() for part in text.split(_MARKER)[1:]]
+                    blocks += [_verdict_lines(_MARKER + part) for part in text.split(_MARKER)[1:]]
     return blocks
+
+
+def _verdict_lines(text):
+    # Only the verdict is ever posted: stop at a code fence, or after the binding
+    # line (and an ACCEPT line right after it). Prose after it is never kept.
+    lines = []
+    for line in text.split('\n'):
+        if line.lstrip().startswith('```') or (line != _ACCEPT and any(
+                kept.startswith('LLMTOOL-REVIEW-BINDING ') for kept in lines)):
+            break
+        lines.append(line)
+    return '\n'.join(lines).rstrip()
 
 
 def select_verdict(blocks, *, task, head, version):
@@ -58,13 +71,18 @@ def select_verdict(blocks, *, task, head, version):
     binding = task_completion._review_binding_line(
         task['task_id'], task['run_id'], task['task_binding']['contract_digest'], head)
     stamp = '1970-01-01T00:00:00Z'
-    bound = [block for block in blocks
-             if binding in [line.strip() for line in block.splitlines()] and
+    named = [block for block in blocks if binding in block.split('\n')]
+    # Exactly marker, Verdict line, binding and at most one ACCEPT line; else refuse.
+    bound = [block for block in named
+             if len(block.split('\n')) == len(set(block.split('\n')[2:])) + 2 and
+             set(block.split('\n')[2:]) in ({binding}, {binding, _ACCEPT}) and
+             task_completion._VERDICT_MARKER.fullmatch(block.split('\n')[0]) and
              review_result._comment_verdict(
                  {'id': 0, 'body': block, 'created_at': stamp, 'updated_at': stamp},
                  head=head, version=version, task=task) is not None]
     if len(bound) != 1:
-        return ('REVIEWER_VERDICT_AMBIGUOUS' if bound else
+        return ('REVIEWER_VERDICT_AMBIGUOUS' if len(bound) > 1 else
+                'REVIEWER_VERDICT_NOT_EXACT' if named else
                 'REVIEWER_VERDICT_BINDING_MISMATCH'), None
     return None, bound[0]
 
