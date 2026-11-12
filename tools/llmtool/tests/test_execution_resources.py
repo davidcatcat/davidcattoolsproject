@@ -72,7 +72,8 @@ class ExecutionResourcesTests(unittest.TestCase):
 
     def test_worker_dispatch_policy_stays_separate_from_inventory(self):
         policy = worker_dispatch._parse_policy(POLICY_PATH.read_bytes())
-        self.assertEqual(set(policy['workers']), worker_dispatch.WORKERS)
+        self.assertEqual(set(policy['workers']),
+                         worker_dispatch.WORKERS | worker_dispatch.DEBUG_WORKERS)
         self.assertNotIn('hosts', policy)
         self.assertNotIn('runners', policy)
 

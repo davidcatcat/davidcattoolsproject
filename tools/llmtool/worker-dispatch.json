@@ -56,6 +56,20 @@
       "decided_at": "2026-10-25",
       "reason": "formal Reviewer for Claude Developer and Claude PM changes (cross-family pairing, AGENTS.md Formal Reviewer); separate read-only context",
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6397242605"
+    },
+    "codex-debug": {
+      "dispatch": "ALLOWED",
+      "decided_by": "Owner",
+      "decided_at": "2026-11-11",
+      "reason": "AI Debug route (O1, O2, #1502 WP-B): read-only Codex diagnosis; it switches to claude-debug only when Codex reports quota exhausted or login failed",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6792528804"
+    },
+    "claude-debug": {
+      "dispatch": "ALLOWED",
+      "decided_by": "Owner",
+      "decided_at": "2026-11-11",
+      "reason": "AI Debug fallback route (#1502 WP-B): read-only Claude diagnosis used only after Codex Debug reports quota exhausted or login failed; account defaults to the Claude Reviewer role",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6792528804"
     }
   }
 }
