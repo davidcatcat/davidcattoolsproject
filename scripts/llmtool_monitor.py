@@ -6277,21 +6277,18 @@ def runner_rows(processes: list[Process], now: float, root=None,
     not, kept apart from this account or not, its current or last job,
     restarts and where its logs are. The runners share one GitHub queue, so
     the waiting jobs are one line of their own under the runner rows (W47),
-    not a note on runner #1. `root` is the folder (or list of folders) where
-    a stopped runner is looked for."""
+    not a note on runner #1. `root` is the folder (or list of folders) a
+    lone running listener falls back to. A runner folder without a running
+    listener is a retired self-hosted runner (#1253) and gets no row (#1592)."""
     roots = [root] if isinstance(root, str) else list(root or [])
     listeners = sorted((p for p in processes if p.role == "Actions runner"), key=lambda p: p.pid)
-    found = []   # (root, listener or None)
+    found = []   # (root, listener)
     for listener in listeners:
         user = user_of(listener.pid) or ""
         home = f"/Users/{user}/actions-runner" if RUNNER_ACCOUNT.fullmatch(user) else None
         place = cwd_of(listener.pid) or home or (roots[0] if len(listeners) == 1 and roots else None)
         if place:
             found.append((place, listener))
-    seen = {os.path.realpath(place) for place, _ in found}
-    found += [(place, None) for place in roots if os.path.realpath(place) not in seen
-              and (os.path.isfile(os.path.join(place, ".runner"))
-                   or RUNNER_ACCOUNT.fullmatch(os.path.basename(os.path.dirname(place)) or ""))]
     found.sort(key=lambda item: item[0])
     rows = []
     for number, (place, listener) in enumerate(found, 1):
