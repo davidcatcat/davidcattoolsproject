@@ -182,5 +182,49 @@ class LineageOutcomeTests(unittest.TestCase):
         self.assertTrue(due('OTHER', '2026-11-13T11:59:59Z'))
 
 
+class LineageBoundTests(unittest.TestCase):
+    """#1502 WP-D spec 3-3: the automatic loop of one lineage is bounded."""
+
+    P = GOOD
+
+    def test_lineage_worst_case_is_bounded(self):
+        # Every review FAILs, every Debug confirms a cause, every test repair is used.
+        runs = {'review': 0, 'test': 0, 'debug': 0}
+        lineage = {'group_debug': 0}
+
+        def task(kind):
+            fails, debug_status, parent_debug = 0, None, 0
+            runs['review'] += 1
+            while True:
+                fails += 1
+                action = rp.review_action(kind=kind, fail_count=fails, debug_status=debug_status,
+                                          group_debug_used=lineage['group_debug'], policy=self.P)
+                if action == 'DEBUG':
+                    self.assertIsNone(rp.admit_debug(kind=kind, parent_debug_used=parent_debug,
+                                                     group_debug_used=lineage['group_debug'],
+                                                     policy=self.P))
+                    runs['debug'] += 1
+                    parent_debug += kind != 'child'
+                    lineage['group_debug'] += kind == 'child'
+                    debug_status = 'RCA_CONFIRMED'
+                    action = rp.review_action(kind=kind, fail_count=fails, debug_status=debug_status,
+                                              group_debug_used=lineage['group_debug'], policy=self.P)
+                if action != 'REPAIR':
+                    break
+                runs['review'] += 1
+            for done in range(3):
+                if rp.test_failure_action(test_fail_count=done, policy=self.P) == 'REPAIR':
+                    runs['test'] += 1
+            return action
+
+        self.assertEqual(task('root'), 'SPLIT')
+        for _child in range(3):
+            self.assertEqual(task('child'), 'PM_DECIDE')
+        self.assertEqual(task('replan'), 'FAILED_FINAL')
+        self.assertEqual(runs['review'], 13)
+        self.assertEqual(runs['review'] + runs['test'], 23)
+        self.assertEqual(runs['debug'], 3)
+
+
 if __name__ == '__main__':
     unittest.main()
