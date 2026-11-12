@@ -104,3 +104,34 @@ def review_action(*, kind, fail_count, debug_status=None, group_debug_used=0, po
             return escalate
         return 'DEBUG'
     return 'REPAIR' if debug_status == 'RCA_CONFIRMED' else escalate
+
+
+def admit_repair(*, repair_count, rca_confirmed, policy):
+    """None admits one more review repair; else the refusal code.
+
+    At most repair_max repairs; every repair after the first needs an
+    RCA_CONFIRMED Debug bound to the failed HEAD (D1).
+    """
+    done = _used(repair_count, policy['repair_max'])
+    if done >= policy['repair_max']:
+        return 'REPAIR_LIMIT_REACHED'
+    if done >= 1 and rca_confirmed is not True:
+        return 'REPAIR_DEBUG_REQUIRED'
+    return None
+
+
+def admit_debug(*, kind, parent_debug_used=0, group_debug_used=0, policy):
+    """None admits one AI Debug; ROOT and REPLAN own one each, children share one."""
+    if kind not in KINDS:
+        _refuse('LINEAGE_KIND_INVALID')
+    if kind == 'child':
+        used, limit, code = group_debug_used, policy['group_debug_max'], 'DEBUG_GROUP_USED'
+    else:
+        used, limit, code = parent_debug_used, policy['parent_debug_max'], 'DEBUG_PARENT_USED'
+    return code if _used(used, limit) >= limit else None
+
+
+def test_failure_action(*, test_fail_count, policy):
+    """After an EC2, Linux CI or Mac CI failure caused by the code: REPAIR or STOPPED."""
+    done = _used(test_fail_count, policy['test_fail_max'])
+    return 'REPAIR' if done < policy['test_fail_max'] else 'STOPPED'

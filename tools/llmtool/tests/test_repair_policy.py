@@ -89,5 +89,39 @@ class ReviewCountingTests(unittest.TestCase):
                          'FAILED_FINAL')
 
 
+class AdmissionTests(unittest.TestCase):
+    P = GOOD
+
+    def test_second_repair_needs_a_bound_rca_and_two_is_the_limit(self):
+        admit = lambda done, rca=False: rp.admit_repair(
+            repair_count=done, rca_confirmed=rca, policy=self.P)
+        self.assertIsNone(admit(0))
+        self.assertEqual(admit(1), 'REPAIR_DEBUG_REQUIRED')
+        self.assertIsNone(admit(1, True))
+        self.assertEqual(admit(2, True), 'REPAIR_LIMIT_REACHED')
+        self.assertEqual(admit(rp.UNKNOWN, True), 'REPAIR_LIMIT_REACHED')
+
+    def test_one_parent_debug_per_task_and_one_group_debug_per_lineage(self):
+        debug = lambda kind, parent=0, group=0: rp.admit_debug(
+            kind=kind, parent_debug_used=parent, group_debug_used=group, policy=self.P)
+        self.assertIsNone(debug('root'))
+        self.assertEqual(debug('root', parent=1), 'DEBUG_PARENT_USED')
+        self.assertEqual(debug('replan', parent=rp.UNKNOWN), 'DEBUG_PARENT_USED')
+        self.assertIsNone(debug('child', parent=1))
+        self.assertEqual(debug('child', group=1), 'DEBUG_GROUP_USED')
+
+    def test_test_failures_repair_twice_then_stop(self):
+        action = lambda done: rp.test_failure_action(test_fail_count=done, policy=self.P)
+        self.assertEqual([action(0), action(1), action(2), action(rp.UNKNOWN)],
+                         ['REPAIR', 'REPAIR', 'STOPPED', 'STOPPED'])
+
+    def test_unknown_kind_and_zero_fail_count_refuse(self):
+        for kwargs, code in ((dict(kind='leaf', fail_count=1), 'LINEAGE_KIND_INVALID'),
+                             (dict(kind='root', fail_count=0), 'REVIEW_FAIL_COUNT_INVALID')):
+            with self.assertRaises(LLMToolError) as caught:
+                rp.review_action(policy=self.P, **kwargs)
+            self.assertEqual(str(caught.exception), code)
+
+
 if __name__ == '__main__':
     unittest.main()
