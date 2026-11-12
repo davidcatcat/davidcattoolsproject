@@ -295,6 +295,48 @@ class TaskStoreTests(unittest.TestCase):
                          'REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
         self.assertEqual(self.store.get(task['task_id']), saved)
 
+    def test_second_review_repair_claim_binds_a_confirmed_debug_on_its_head(self):
+        # #1502 WP-D (D1): repair #2 may carry the RCA_CONFIRMED report digest for its HEAD.
+        from llmtool import high_debug
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        entry = dict(high_debug._failed_entry(
+            family='pr-17', head='a' * 40, d6='executor-1-hd1-aaaaaaa',
+            code='HIGH_DEBUG_RUN_FAILED', observed='UNKNOWN', effort='UNKNOWN',
+            usage={'input': 1, 'cached': 0, 'output': 1, 'reasoning': 0},
+            recorded_at='2026-10-27T00:00:30Z', failed_corrections=None,
+            early_reason='review FAIL 2'), status='RCA_CONFIRMED')
+        self.store.append_high_debug(task['task_id'], entry)
+        first = {
+            'executor_task': 'executor-1', 'pr': 17, 'head_sha': 'b' * 40,
+            'version': 1, 'attempt': 1, 'family': 'pr-17', 'state': 'CLAIMED',
+            'repair_task_id': new_id(), 'comment_id': 9, 'packet_sha256': 'b' * 64,
+            'claimed_at': '2026-10-27T00:00:00Z',
+        }
+        for claims in ([first], [dict(first, state='DISPATCHED')]):
+            saved = self.store.get(task['task_id'])
+            self.store.compare_and_update(task['task_id'],
+                expected={'record_sha256': saved['record_sha256']},
+                review_repair_claims=claims)
+        first = dict(first, state='DISPATCHED')
+        second = dict(first, head_sha='a' * 40, version=2, attempt=2, state='CLAIMED',
+                      repair_task_id=new_id(), claimed_at='2026-10-27T00:01:00Z',
+                      high_debug_report_sha256=entry['report_sha256'])
+        saved = self.store.get(task['task_id'])
+        for bad in ([first, dict(second, high_debug_report_sha256='0' * 64)],
+                    [first, dict(second, head_sha='c' * 40)]):
+            with self.assertRaises(LLMToolError) as caught:
+                self.store.compare_and_update(task['task_id'],
+                    expected={'record_sha256': saved['record_sha256']},
+                    review_repair_claims=bad)
+            self.assertEqual(caught.exception.task_store_error_code,
+                             'REVIEW_REPAIR_CLAIM_INVALID')
+        updated = self.store.compare_and_update(task['task_id'],
+            expected={'record_sha256': saved['record_sha256']},
+            review_repair_claims=[first, second])
+        self.assertEqual(updated['review_repair_claims'][1]['high_debug_report_sha256'],
+                         entry['report_sha256'])
+
     def test_retry_claim_transition_is_atomic_with_next_attempt(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
