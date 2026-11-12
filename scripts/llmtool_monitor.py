@@ -8485,6 +8485,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
             continue   # an optional key (#1502 WP-B debug route) absent from an older file
         trouble = problem
         paused = not trouble and switch[0] == "PAUSED"
+        if name == HOME_GW and paused:
+            continue   # #1592: the retired company-gw route gets no row while PAUSED
         if live and not trouble and not paused and name != HOME_GW:
             continue   # the live CLI rows say everything
         notes, state, age, alert = [], None, None, ""

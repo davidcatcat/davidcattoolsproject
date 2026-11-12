@@ -1408,6 +1408,38 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         'github_record':'POSTED' if posted else 'UNPOSTED'},sort_keys=True))
 
 
+# #1502 WP-B: a Claude Debug refusal that means the route cannot run now.
+_CLAUDE_DEBUG_UNAVAILABLE = DEBUG_FALLBACK_CODES | {
+    'HIGH_DEBUG_DISPATCH_REFUSED', 'HIGH_DEBUG_ACCOUNT_UNCONFIGURED'}
+
+
+def run_high_debug_with_fallback(*, route='codex', **kwargs):
+    """Run AI Debug; switch from Codex to Claude only on DEBUG_FALLBACK_CODES.
+
+    Every other refusal stops as before and nothing is resent. When neither
+    route can run, refuse with HIGH_DEBUG_WAITING, a reason code (AUTH first,
+    then QUOTA, else ROUTE_UNAVAILABLE), the time and a resume condition.
+    """
+    try:
+        return run_high_debug(route=route, **kwargs)
+    except LLMToolError as error:
+        first = getattr(error, 'high_debug_code', None)
+        if route != 'codex' or first not in DEBUG_FALLBACK_CODES:
+            raise
+    try:
+        return run_high_debug(route='claude', **kwargs)
+    except LLMToolError as error:
+        second = getattr(error, 'high_debug_code', None)
+        if second not in _CLAUDE_DEBUG_UNAVAILABLE:
+            raise
+    codes = (first, second)
+    reason = ('AUTH' if 'HIGH_DEBUG_AUTH_FAILED' in codes else
+              'QUOTA' if codes == ('HIGH_DEBUG_QUOTA_EXHAUSTED',) * 2 else 'ROUTE_UNAVAILABLE')
+    since = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    _refuse('HIGH_DEBUG_WAITING', f'reason={reason} codex={first} claude={second} '
+            f'waiting_since={since} resume_condition=a_debug_route_can_run')
+
+
 def _screen_disposition_main(argv=None):
     import argparse
 
