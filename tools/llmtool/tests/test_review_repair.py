@@ -278,6 +278,15 @@ class ReviewRepairTests(unittest.TestCase):
         self.runtime_path_patch = patch.object(
             review_repair.shutil, 'which', return_value='/usr/bin/codex')
         self.runtime_path_patch.start()
+        # #1502 WP-C: the real policy pauses codex-developer; these repair tests keep it.
+        dispatch = review_repair.worker_dispatch
+        policy = json.loads(Path(dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+        policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
+        policy_path = Path(self.temp.name).resolve() / 'worker-dispatch.json'
+        policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        self.policy_patch = patch.object(dispatch, '_POLICY_PATH', policy_path)
+        self.policy_patch.start()
+        self.addCleanup(self.policy_patch.stop)
 
     def tearDown(self):
         self.runtime_path_patch.stop()
