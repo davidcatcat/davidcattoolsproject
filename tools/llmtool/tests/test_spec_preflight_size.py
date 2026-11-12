@@ -52,6 +52,16 @@ class SpecTierTests(unittest.TestCase):
         # 20 reads + 1 write = 23 turns, beyond every tier limit.
         spec = {"read": [str(i) for i in range(20)], "write": ["a"], "provider": "gw-agent"}
         self.assertEqual(spec_tier(spec), spec_preflight.LADDER_MAX_TIER)
+    def test_tier_5_and_tier_6_limits(self):
+        self.assertEqual(spec_tier({"write": list("abcd")}, context_bytes=16384), 5)
+        self.assertEqual(spec_tier({"write": list("abcde")}, context_bytes=24576), 6)
+        self.assertEqual(spec_tier({"write": list("abcdef")}), 6)
+        self.assertEqual(spec_preflight.LADDER_MAX_TIER, 6)
+
+    def test_ladder_promotes_up_to_tier_6(self):
+        log = [{"tier": tier, "outcome": "SOLVED", "attempts": 1}
+               for tier in range(1, 7) for _ in range(3)]
+        self.assertEqual(spec_preflight.ladder_tier(log), (6, 3, True))
 
 
 if __name__ == "__main__":
