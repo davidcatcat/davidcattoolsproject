@@ -985,6 +985,11 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     if any(type(claim) is dict and claim.get('head_sha') == head and
            claim.get('pr') != number for claim in _claims(record)):
         return _merge_refusal('MERGE_CONFLICTING_PR')
+    if owner_exception is not None and pr.get('merged') is True:
+        prior = record.get('merge_attempt')
+        if type(prior) is dict:
+            return _reconcile_exception_merge(store, record, number, head, pr, prior,
+                                              owner_exception, github_get)
     if pr.get('mergeable') is None:
         # GitHub may still be computing mergeability.
         for _ in range(3):
@@ -1193,6 +1198,54 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
                              github_get=github_get)
     outcome['result']['main_behind_by'] = behind_by
     return outcome
+
+
+def _reconcile_exception_merge(store, record, number, head, pr, prior, owner_exception,
+                              github_get):
+    """Reconcile an owner-exception merge (#1519); no merge, label or comment is sent."""
+    if prior.get('pr') != number or prior.get('head_sha') != head:
+        return _merge_refusal('MERGE_CONFLICTING_PR')
+    if prior.get('state') != 'CLAIMED':
+        return _merge_refusal('MERGE_ALREADY_CLAIMED')
+    pr_head = pr.get('head') if type(pr) is dict else None
+    if (type(pr_head) is not dict or pr_head.get('sha') != head or
+            pr.get('state') != 'closed' or pr.get('merged') is not True):
+        return _merge_refusal('MERGE_STALE_HEAD')
+    from . import owner_exception as owner_exception_mod
+    v_code, v_evidence = owner_exception_mod.verify(
+        owner_exception, number, github_get, allow_merged=True,
+    )
+    if v_code is not None:
+        return _merge_refusal(v_code)
+    if type(v_evidence) is not dict or v_evidence.get('head') != head:
+        return _merge_refusal('OWNER_EXCEPTION_SHA_MISMATCH')
+    review_exception = {
+        'type': owner_exception_mod.EXCEPTION_TYPE,
+        'url': owner_exception,
+        'evidence': v_evidence,
+    }
+    claim = dict(prior, state='MERGED')
+    try:
+        store.compare_and_update(
+            record['task_id'],
+            expected={'merge_attempt': prior},
+            merge_attempt=claim,
+            review_exception=review_exception,
+        )
+    except Exception:
+        return _merge_refusal('MERGE_RESULT_RECORD_FAILED')
+    record['merge_attempt'] = claim
+    record['review_exception'] = review_exception
+    return {
+        'step': 'MERGED',
+        'codes': ['MERGE_RECONCILED'],
+        'result': {
+            'pr': number,
+            'head': head,
+            'review_exception': review_exception,
+            'reconciled': True,
+        },
+    }
 
 
 def _merge_success(record, number, head, review_version, gh_runner, root, warning_codes,
