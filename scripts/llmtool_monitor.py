@@ -7651,6 +7651,8 @@ WORKER_ROSTER = (   # (display name, worker-dispatch.json key, sort order)
     (HOME_GW, "company-gw", 70),
     (HOME_GW_AGENT, "company-gw-agent", 75),
 )
+# #1502 WP-B: AI Debug switch rows; shown only when the dispatch file has the keys.
+DEBUG_ROSTER = (("codex debug", "codex-debug", 80), ("claude debug", "claude-debug", 85))
 # Owner dispatch switches (Owner 2026-10-23): one record per Worker, kept apart
 # from live technical state. A PAUSED switch holds until the Owner changes it,
 # whatever quota, login or app state is observed. Without a readable, valid
@@ -8456,10 +8458,12 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 gw_live.setdefault(gw_key, []).append(row)
     raw, source = load_dispatch(canonical, dispatch)
     switches, problem = worker_dispatch(raw)
-    for name, key, order in WORKER_ROSTER:
+    for name, key, order in WORKER_ROSTER + DEBUG_ROSTER:
         live = (opencode if name == "opencode developer" else agy if name == "agy"
                 else gw_live.get(name, []))
         switch = switches.get(key)
+        if switch is None and not problem:
+            continue   # an optional key (#1502 WP-B debug route) absent from an older file
         trouble = problem
         paused = not trouble and switch[0] == "PAUSED"
         if live and not trouble and not paused and name != HOME_GW:
