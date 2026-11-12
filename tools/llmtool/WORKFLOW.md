@@ -37,63 +37,6 @@ llmtool executes an approved route and plan; it does not decide which AI owns co
 
 [Historical AI-led operating model decisions are archived](../../docs/history/governance-archive-20261103.md#ai-led-team-operating-model).
 
-#### Historical evidence and live identity (N2/N3)
-
-Historical COMPLETED/FAILED records may supply **historical context** only after
-sequence/epoch, exact source/contract/run, original execution/verdict provenance
-and immutable artifact digests are verified. Report their original timestamp and
-validation scope separately from present liveness. The archival structural
-check may use the recorded terminal time, explicitly labeled historical rather
-than current inspection SUCCESS; it cannot renew eligibility or bypass S1a TTL.
-Missing original proof is NOT_VERIFIED, including structurally valid terminal
-records. Changed source/contract invalidates reuse for the new task. No review
-call is admitted from archived terminal records, even if historically valid.
-
-Live eligibility uses the existing 1..86400-second pinned heartbeat TTL, current
-trusted UTC and monotonic observations. Reject future/rollback/expired events,
-stale collector samples, inconsistent clocks, unknown Session or partial state.
-Immediately before submission and after response, take a new trusted observation
-(no older than 5 seconds at decision time) and recheck source, contract pair,
-task/run, epoch/last sequence/handoff, writer ownership, Session and remaining TTL.
-Expiry or drift during review invalidates the verdict for acceptance. Heartbeat
-loss is unknown liveness, not proof of death; no auto-resume/renew/kill/cleanup.
-
-A small host adapter around `git_intel`, task_lifecycle and existing runtime
-evidence performs the collector. Its trust source is the pre-existing reviewed
-G7 root/owner/task registration and trusted CLI host Session records, selected
-outside `--expect`/events/model content. Record provenance references/digests and
-compare independent expectations to observations; expectations constrain values
-but cannot authenticate them. Env UUID, PID, TTY, helper ancestry, a matching
-caller JSON or an archive alone is insufficient logical Session proof. If the
-host cannot attest a logical Session and its current ownership, BLOCKED before
-the provider call; do not add a self-attestation fallback. Cooperative same-UID
-trust remains the G7 assumption, not OS isolation or hostile-peer protection.
-
-Required actual observations: physical assigned root/dev/inode/UID/mode/no-follow
-ancestors; registered locked worktree/common-dir/repository/remote; unique owned
-branch and exact HEAD/index/clean tracked state; registered untracked/ignored
-baseline preservation; current writers/tests/locks; developer/reviewer logical
-Agent/Session/Role and authorship; approved executable/prefix/import/pyvenv home
-provenance. Each developer branch has one owner; reject duplicate claims,
-peer/main/automation takeover, symlinks, unsafe config/env/filter/hooks, wrong-root
-imports, unknown writer or drift. Do not execute a caller-selected interpreter
-or import peer code to establish provenance: attest the collector's own runtime
-in-process and require trusted host launch evidence for the reviewer runtime.
-
-Local Git reads use a pinned trusted executable, fixed allowlisted argv, literal
-validated refs/paths, no shell, disabled hooks/fsmonitor/filters/textconv/ext-diff,
-no pager/prompts/lazy-fetch/replacement objects and bounded output/time. Reuse A5
-hardened reads; any required new read primitive is individually reviewed/tested,
-not arbitrary caller argv. Per-read deadline <=10 seconds, whole collection
-<=30 seconds, <=32 reads, metadata <=1 MiB/read and <=2 MiB total before packet
-minimization. No fetch/ref update/install/switch/clean or peer/historical-process signaling.
-Bounded read timeout cleanup stops only its own Git child under the existing
-A5 lifecycle principle. Remote PR/CI
-reads use an explicitly permitted fixed GitHub route, repo/PR/head binding,
-<=8 requests, <=10 seconds/request within that same 30-second collection bound;
-no redirects to arbitrary hosts, URL fetching from events or credential export.
-Missing remote permission/facts means BLOCKED, never an empty successful result.
-
 #### Exact-SHA packet and privacy boundary
 
 The immutable packet version 1 pins: both original contracts/bindings and
