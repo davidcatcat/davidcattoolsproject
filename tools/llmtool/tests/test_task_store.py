@@ -1000,10 +1000,10 @@ class TaskStoreTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_agy_owner_assignment_ref_may_be_none_but_claude_still_needs_a_valid_ref(self):
+    def test_agy_owner_assignment_ref_may_be_none_but_must_be_valid(self):
         # #785 M18: AGY dispatch is decided by the live gate, so the store
         # accepts an AGY record whose ref is None. A supplied ref must still
-        # be valid, the key stays required for AGY, and Claude keeps its rule.
+        # be valid and the key stays required for AGY. Claude: next test.
         self._allow_agy_by_fixture_policy()
         artifact = ('diff --git a/src.py b/src.py\n'
                     '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
@@ -1034,8 +1034,6 @@ class TaskStoreTests(unittest.TestCase):
                                        owner_assignment_ref='https://example.invalid/x')),
             ('agy non-string ref', dict(saved['developer'], owner_assignment_ref=7)),
             ('agy missing key', missing_key),
-            ('claude None ref', dict(saved['developer'], provider_profile='claude',
-                                     provider_type='claude-cli')),
             ('codex None ref', dict(saved['developer'], provider_profile='codex',
                                     provider_type='codex-cli')),
         )
@@ -1045,6 +1043,21 @@ class TaskStoreTests(unittest.TestCase):
                 malformed['record_sha256'] = task_store_module._digest(malformed)
                 with self.assertRaises(LLMToolError):
                     task_store_module._validate(malformed)
+
+    def test_claude_cli_owner_assignment_ref_may_be_none_but_must_be_valid(self):
+        # #1502 WP-C: the PM-selected Claude Developer needs no --owner-ref, so
+        # the store accepts its record with a None ref; a given ref stays checked.
+        record = self.store.get(self._claude_cli_task()['task_id'])
+        for ref, accepted in ((None, True), ('https://example.invalid/x', False)):
+            with self.subTest(ref=ref):
+                candidate = dict(record, developer=dict(record['developer'],
+                                                        owner_assignment_ref=ref))
+                candidate['record_sha256'] = task_store_module._digest(candidate)
+                if accepted:
+                    task_store_module._validate(candidate)
+                else:
+                    with self.assertRaises(LLMToolError):
+                        task_store_module._validate(candidate)
 
     def test_agy_exit_nonzero_keeps_a_screened_exit_diagnostic(self):
         # #1606: an AGY_EXIT_NONZERO block may keep a bounded, screened

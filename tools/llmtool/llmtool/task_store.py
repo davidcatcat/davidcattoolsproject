@@ -1696,11 +1696,13 @@ def _validate(record, *, strict=True):
             if 'owner_assignment_ref' in developer:
                 from .worker_dispatch import owner_comment_ref
                 ref = developer['owner_assignment_ref']
-                # #785 M18: AGY dispatch is decided by the live gate, so an AGY
-                # record may carry None; any non-None ref must still be valid.
-                agy_without_ref = developer['provider_profile'] == 'agy' and ref is None
+                # #785 M18 / #1502 WP-C: AGY and Claude Developer dispatch is decided
+                # by the live gate, so their records may carry None; any non-None
+                # ref must still be valid.
+                ref_optional = (developer['provider_profile'] in ('agy', 'claude') and
+                                ref is None)
                 try:
-                    valid_owner_ref = agy_without_ref or (
+                    valid_owner_ref = ref_optional or (
                         type(ref) is str and owner_comment_ref().fullmatch(ref) is not None)
                 except LLMToolError:
                     _fail('TASK_STORE_REPOSITORY_CONFIG_INVALID')
