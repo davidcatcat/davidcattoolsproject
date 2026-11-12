@@ -107,9 +107,11 @@ def verify(
     github_get: Callable[[str], Any],
     *,
     replacement_map: list[tuple[str, str]] | None = None,
+    allow_merged: bool = False,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Verify that url registers a scoped deterministic redaction for PR number.
 
+    When allow_merged is True, accept a PR that is already closed and merged.
     Return (None, evidence) on valid pass, or (code, None) on refusal.
     """
     if not isinstance(url, str):
@@ -265,7 +267,10 @@ def verify(
 
     if not isinstance(pull, dict):
         return 'OWNER_EXCEPTION_UNAVAILABLE', None
-    if pull.get('state') != 'open' or pull.get('merged') is True:
+    if allow_merged is True:
+        if pull.get('state') != 'closed' or pull.get('merged') is not True:
+            return 'OWNER_EXCEPTION_UNAVAILABLE', None
+    elif pull.get('state') != 'open' or pull.get('merged') is True:
         return 'OWNER_EXCEPTION_UNAVAILABLE', None
 
     pr_base = pull.get('base')
