@@ -189,6 +189,73 @@ class PMCallerStoreTests(unittest.TestCase):
         advance.assert_called_once()
         self.assertEqual(json.loads(output.getvalue())['step'], 'CLOSED')
 
+    def _remote_test(self, task_id, *extra, claude=''):
+        argv = ['task', 'remote-test', task_id, '--executor-task', 'executor-1',
+                '--sha', 'a' * 40, '--ref', 'refs/heads/feat/x', *extra]
+        args = parser_for_cli().parse_args(argv)
+        output = io.StringIO()
+        with _environment(claude=claude), \
+                patch('llmtool.remote_test.run_remote_test',
+                      return_value={'result': 'PASS'}) as run:
+            code = task_submission_cli.run_task_remote_test_checked(
+                args, store=self.store, stdout=output)
+        return code, output.getvalue(), run
+
+    def test_remote_test_refuses_missing_identity(self):
+        task_id = self._task(OWNER)
+        code, output, run = self._remote_test(task_id)
+        run.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output), {
+            'task_id': task_id, 'step': 'REFUSED', 'result': None, 'next': 'REFUSED',
+            'codes': ['PM_CALLER_SESSION_MISSING'], 'acked': []})
+
+    def test_remote_test_refuses_non_owner(self):
+        task_id = self._task(OWNER)
+        for extra, claude in (((), OTHER), (('--pm-session', OTHER), '')):
+            with self.subTest(extra=extra, claude=claude):
+                code, output, run = self._remote_test(task_id, *extra, claude=claude)
+                run.assert_not_called()
+                self.assertEqual(code, 1)
+                self.assertEqual(json.loads(output)['codes'], ['PM_CALLER_NOT_TASK_OWNER'])
+
+    def test_remote_test_refuses_conflicting_explicit_session(self):
+        task_id = self._task(OWNER)
+        code, output, run = self._remote_test(task_id, '--pm-session', OWNER, claude=OTHER)
+        run.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output)['codes'], ['PM_CALLER_SESSION_CONFLICT'])
+
+    def test_remote_test_refuses_fenced_owner(self):
+        task_id = self._task(OWNER)
+        pm_runtime.write_session_fence(OWNER, 'pm-' + OTHER, '2026-11-12T00:00:00Z')
+        code, output, run = self._remote_test(task_id, claude=OWNER)
+        run.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output)['codes'], ['PM_CALLER_SESSION_FENCED'])
+
+    def test_remote_test_runs_for_owner(self):
+        task_id = self._task(OWNER)
+        for extra, claude in ((('--pm-session', OWNER), ''), ((), OWNER)):
+            with self.subTest(extra=extra, claude=claude):
+                code, output, run = self._remote_test(task_id, *extra, claude=claude)
+                self.assertIsNone(code)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.args, (task_id,))
+                self.assertEqual(run.call_args.kwargs['executor_task'], 'executor-1')
+                self.assertEqual(json.loads(output), {'result': 'PASS'})
+
+    def test_advance_internal_remote_test_is_not_caller_checked(self):
+        from llmtool import task_advance
+        task_id = self._task(OWNER)
+        with _environment(), patch('llmtool.remote_test.run_remote_test',
+                                   return_value={'result': 'PASS'}) as run, \
+                redirect_stdout(io.StringIO()):
+            result = task_advance._run_remote_test(
+                self.store, task_id, 'executor-1', 'a' * 40, 'refs/pull/1/head', 1)
+        run.assert_called_once()
+        self.assertEqual(result, {'result': 'PASS'})
+
     def test_drive_adapter_refuses_non_owner_before_any_call(self):
         task_id = self._task(OWNER)
         args = parser_for_cli().parse_args(['task', 'drive', task_id, '--merge'])
