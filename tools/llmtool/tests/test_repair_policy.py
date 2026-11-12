@@ -151,5 +151,36 @@ class LineageTests(unittest.TestCase):
             self.assertEqual(rp.admit_drop(reason=reason), 'DROP_REASON_REQUIRED')
 
 
+class LineageOutcomeTests(unittest.TestCase):
+    P = GOOD
+
+    def test_owner_notice_for_every_unsuccessful_end_only(self):
+        self.assertEqual([rp.owner_notice(state) for state in
+                          ('DROPPED', 'STOPPED', 'FAILED_FINAL', 'CLOSED', 'OPEN')],
+                         [True, True, True, False, False])
+
+    def test_root_closes_only_when_every_obligation_closed(self):
+        child = lambda name, state: {'id': name, 'kind': 'child', 'state': state}
+        self.assertEqual(rp.root_outcome([child('a', 'CLOSED'), child('b', 'CLOSED')]), 'CLOSED')
+        self.assertEqual(rp.root_outcome([child('a', 'CLOSED'), child('b', 'OPEN')]), 'OPEN')
+        self.assertEqual(rp.root_outcome([child('a', 'CLOSED'), child('b', 'DROPPED')]), 'FAILED')
+        replan = {'id': 'r', 'kind': 'replan', 'state': 'CLOSED', 'replaces': ['b']}
+        # A CLOSED REPLAN meets the obligation of the child it replaced.
+        self.assertEqual(rp.root_outcome([child('a', 'CLOSED'), child('b', 'STOPPED'), replan]),
+                         'CLOSED')
+        failed = dict(replan, state='FAILED_FINAL')
+        self.assertEqual(rp.root_outcome([child('a', 'CLOSED'), child('b', 'STOPPED'), failed]),
+                         'FAILED')
+
+    def test_auth_waiting_notifies_at_once_others_after_24_hours(self):
+        due = lambda reason, since: rp.waiting_notice_due(
+            reason=reason, waiting_since=since, now='2026-11-13T12:00:00Z', policy=self.P)
+        self.assertTrue(due('AUTH', '2026-11-13T11:59:59Z'))
+        self.assertFalse(due('ENV', '2026-11-12T12:00:01Z'))
+        self.assertTrue(due('ENV', '2026-11-12T12:00:00Z'))
+        self.assertTrue(due('NO_REVIEWER', 'yesterday'))
+        self.assertTrue(due('OTHER', '2026-11-13T11:59:59Z'))
+
+
 if __name__ == '__main__':
     unittest.main()

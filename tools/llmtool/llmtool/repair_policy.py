@@ -171,3 +171,49 @@ def admit_drop(*, reason):
     if type(reason) is not str or not reason.strip() or len(reason) > 500:
         return 'DROP_REASON_REQUIRED'
     return None
+
+
+def owner_notice(state):
+    """True when a Task in this end state notifies the Owner (D4)."""
+    return state in OWNER_NOTICE_STATES
+
+
+def root_outcome(tasks):
+    """OPEN, CLOSED or FAILED for a split ROOT from its child and REPLAN Tasks.
+
+    tasks: dicts with id, kind ('child' or 'replan'), state and, for a REPLAN,
+    replaces (the child ids whose obligation it takes over). A child replaced by
+    a CLOSED REPLAN has met its obligation. The ROOT result never notifies the
+    Owner again: each non-successful Task already did (D4).
+    """
+    if type(tasks) is not list or not tasks or any(type(task) is not dict for task in tasks):
+        return 'OPEN'
+    if any(task.get('state') not in TERMINAL_STATES for task in tasks):
+        return 'OPEN'
+    covered = set()
+    for task in tasks:
+        if task.get('kind') == 'replan' and task.get('state') == 'CLOSED':
+            covered.update(task.get('replaces') or ())
+    for task in tasks:
+        if task.get('state') == 'CLOSED':
+            continue
+        if task.get('kind') == 'child' and task.get('id') in covered:
+            continue
+        return 'FAILED'
+    return 'CLOSED'
+
+def waiting_notice_due(*, reason, waiting_since, now, policy):
+    """E5: AUTH notifies at once; any other WAITING after waiting_notify_after_hours.
+
+    WAITING has no time limit of its own; only the notice is timed. A malformed
+    reason or time notifies at once.
+    """
+    from datetime import datetime, timedelta
+    if reason == 'AUTH' or reason not in WAITING_REASONS:
+        return True
+    try:
+        since = datetime.strptime(waiting_since, '%Y-%m-%dT%H:%M:%SZ')
+        current = datetime.strptime(now, '%Y-%m-%dT%H:%M:%SZ')
+    except (TypeError, ValueError):
+        return True
+    return current - since >= timedelta(hours=policy['waiting_notify_after_hours'])
