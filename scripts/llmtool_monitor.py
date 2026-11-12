@@ -8480,8 +8480,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         paused = not trouble and switch[0] == "PAUSED"
         if name == HOME_GW and paused:
             continue   # #1592: the retired company-gw route gets no row while PAUSED
-        if live and not trouble and not paused and name != HOME_GW:
-            continue   # the live CLI rows say everything
+        if live and not trouble and not paused and name not in gw_live:
+            continue   # the live CLI rows say everything; a gw row counts its runs (#1592)
         notes, state, age, alert = [], None, None, ""
         if name == "opencode developer" and not live:
             outcome = opencode_outcome(now, opencode_db, canonical)
@@ -8502,7 +8502,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 notes.append(f"本機 llmtool 紀錄（不分 repo）最近一次：{gw[3]}"
                              f"（近 7 天 {gw[1]} 次，成功 {gw[2]} 次）")
         if live:
-            notes.append(f"有 {len(live)} 個執行中" if name in gw_live
+            notes.append(f"工作中（{len(live)} 件）" if name in gw_live
                          else f"有 {len(live)} 個 CLI 開著（非派工）")
         if trouble:
             label, state, authority = DISPATCH_PROBLEMS[trouble], UNCHECKED, ""
@@ -8516,7 +8516,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
             if paused:
                 state, age = PAUSED, None
             elif state is None:
-                state = IDLE
+                state = WORKING if name in gw_live else IDLE
         if paused:
             alert = ""   # the Owner already stopped dispatch; a fault is not news
         rows.append(OfficeRow(name, state, "；".join([label] + notes), age, order,
