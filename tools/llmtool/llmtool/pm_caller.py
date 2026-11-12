@@ -15,6 +15,8 @@ Refusal codes:
   explicit value picks one.
 - ``PM_CALLER_SESSION_CONFLICT``: the explicit value differs from every set
   environment value.
+- ``PM_CALLER_SESSION_FENCED``: the caller's own native session has a #1126
+  transfer fence; unreadable fences also refuse.
 - ``TASK_RECORD_UNAVAILABLE``: the Task record cannot be read.
 - ``PM_CALLER_NOT_TASK_OWNER``: the record has no ``pm_session_id`` or it is
   another session's.
@@ -24,11 +26,9 @@ An empty environment variable counts as unset. Only the ``task advance`` and
 (``task complete``, ``claude-result``), ``abandon``, ``delegate`` and the
 internal calls that ``advance`` makes are not checked here.
 
-Known limit: this check is not serialized with ``task adopt``. Until the PR
-#1126 transfer lock and fence are on main, a Task adopted by another session
-between this check and the guarded call is not detected until the next
-guarded call (``task drive`` re-checks before every advance and Mac CI label
-call). A fenced session check is added after #1126 lands.
+Known limit: fenced sessions are now refused, but the check is still not taken
+under the adoption lock, so a Task adopted between the check and the call is
+caught at the next guarded call.
 """
 
 import os
@@ -42,6 +42,7 @@ SESSION_MISSING = 'PM_CALLER_SESSION_MISSING'
 SESSION_INVALID = 'PM_CALLER_SESSION_INVALID'
 SESSION_AMBIGUOUS = 'PM_CALLER_SESSION_AMBIGUOUS'
 SESSION_CONFLICT = 'PM_CALLER_SESSION_CONFLICT'
+SESSION_FENCED = 'PM_CALLER_SESSION_FENCED'
 NOT_TASK_OWNER = 'PM_CALLER_NOT_TASK_OWNER'
 TASK_RECORD_UNAVAILABLE = 'TASK_RECORD_UNAVAILABLE'
 
@@ -98,9 +99,25 @@ def owner_refusal_code(store, task_id, caller_key):
     return None
 
 
-def check_caller(store, task_id, explicit=None, environ=None):
+def fence_refusal_code(caller_key, state_root=None):
+    """Return SESSION_FENCED when caller_key is fenced, else None."""
+    if not isinstance(caller_key, str) or not caller_key.startswith('pm-'):
+        return None
+    native = caller_key[3:]
+    if active_pm_inbox.PM_NATIVE_SESSION_ID.fullmatch(native) is None:
+        return None
+    from . import pm_runtime
+    if pm_runtime.read_session_fence(native, state_root) is not None:
+        return SESSION_FENCED
+    return None
+
+
+def check_caller(store, task_id, explicit=None, environ=None, state_root=None):
     """Resolve the caller and require it to own the Task; return the caller key."""
     caller_key = resolve_caller_session(explicit, environ)
+    code = fence_refusal_code(caller_key, state_root=state_root)
+    if code is not None:
+        raise PMCallerRefused(code)
     code = owner_refusal_code(store, task_id, caller_key)
     if code is not None:
         raise PMCallerRefused(code)
@@ -113,7 +130,7 @@ def refusal(task_id, code):
             'next': 'REFUSED', 'codes': [code], 'acked': []}
 
 
-def guarded(call, store, task_id, caller_key):
+def guarded(call, store, task_id, caller_key, state_root=None):
     """Wrap ``call`` so every invocation re-checks Task ownership first.
 
     A refused invocation does not call ``call`` and raises ``PMCallerRefused``.
@@ -123,6 +140,9 @@ def guarded(call, store, task_id, caller_key):
     reported as ``MAX_STEPS`` with an earlier step's codes.
     """
     def invoke(**kwargs):
+        code = fence_refusal_code(caller_key, state_root=state_root)
+        if code is not None:
+            raise PMCallerRefused(code)
         code = owner_refusal_code(store, task_id, caller_key)
         if code is not None:
             raise PMCallerRefused(code)
