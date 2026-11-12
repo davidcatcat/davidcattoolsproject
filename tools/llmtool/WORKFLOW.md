@@ -37,47 +37,6 @@ llmtool executes an approved route and plan; it does not decide which AI owns co
 
 [Historical AI-led operating model decisions are archived](../../docs/history/governance-archive-20261103.md#ai-led-team-operating-model).
 
-BLOCKED/INCOMPLETE reason with invocation status and evidence references. Never
-fallback to company/Codex/premium, retry, infer PASS from exit0 or claim successful
-cleanup without lifecycle evidence. Preserve existing provider error codes and
-A11a diagnostics schema. No implicit journal or packet persistence; stdout is
-the explicit result channel. A provider failure cannot renew a grant or task.
-
-#### Verdict/result schema and bounded developer handoff
-
-Version 1 verdict is one strict JSON object (no fences/prose/unknown or duplicate
-keys), <=64 KiB, bounded depth <=16. Required fields: `schema_version`, `review_id`,
-both `ready_task` and `acceptance_task` TaskBindings, `source_sha`, `epoch`,
-`sequence`, `packet_digest`, `observation_digest`, opaque `reviewer_binding_digest`,
-`security`, `functional`, `findings`, `criterion_evidence`. Each decision is exactly
-APPROVE/CHANGES_REQUIRED/BLOCKED. <=32 findings have unique ID, Security/Functional
-category, #92 severity/priority, explicit release_blocker boolean, bounded
-control-free summary/reproducer and allowlisted path/criterion/evidence refs.
-<=32 criterion-evidence entries reference existing final criterion IDs and packet
-evidence/digests; no model-supplied command, URL or path becomes executable input.
-Text fields <=1024 UTF-8 bytes; IDs/digests follow existing validators. Missing
-criteria, contradictory blocker+APPROVE, binding mismatch, self-review, absent
-provenance or malformed verdict is INCOMPLETE, never accepted review evidence.
-Severity/priority/blocker consistency follows #92's user-impact rules; an
-explicit false blocker flag cannot waive a required security/functional gate.
-
-The host envelope records `structural_validation`, `reported_state`, separate
-`collector_status`, `invocation_status`, `verdict_validation`, independent
-Security/Functional decisions and outstanding final criteria, plus task/source/
-packet/evidence references and the host's post-response observation digest
-(which cannot exist in the pre-call packet). The verdict echoes the pre-call
-observation digest; the host compares the post-call observation before accepting
-it. `authorized=False` is retained: this result grants
-no subsequent effect. Collector validation authenticates only its stated
-observations; actual invocation evidence proves a call ran, not test execution
-or semantic correctness. The S1a runtime field remains NOT_VERIFIED; don't
-overwrite it with collector/invocation success. Result exit0 requires both
-validated APPROVE verdicts and accepted provenance, but still means review result,
-not COMPLETED/DONE/merge. Valid CHANGES_REQUIRED/BLOCKED or incomplete prerequisites
-exit1; invalid local input/schema exit2 via existing sanitized error handling.
-
-CHANGES_REQUIRED returns a bounded handoff referencing exact source/contract,
-findings, required criteria and originals to the registered developer; it starts
 no developer or repair. Changed source/run/epoch/contract requires new evidence
 and separately permitted review, not reuse of this verdict/grant. BLOCKED returns
 the specific missing gate for Coordinator disposition and preserves state.
