@@ -3088,6 +3088,99 @@ class TaskCompletionTests(unittest.TestCase):
                                   review_text=mismatched_contract_body)
                          ['evidence']['formal_review_state'], 'UNVERIFIED')
 
+    def test_canonical_verdict_body_normalizes_only_line_endings_and_body_end(self):
+        canonical = task_completion._canonical_verdict_body
+        self.assertEqual(canonical('a\r\nb\rc\n'), 'a\nb\nc')
+        self.assertEqual(canonical('a\nb \n\n  \t\n'), 'a\nb')
+        # Interior blank lines, leading text and per-line spacing are kept.
+        self.assertEqual(canonical('a\n\nb'), 'a\n\nb')
+        self.assertEqual(canonical('\na\nb'), '\na\nb')
+        self.assertEqual(canonical(' a\nb'), ' a\nb')
+        self.assertNotEqual(canonical('a\n\nb'), canonical('a\nb'))
+        self.assertIsNone(canonical(None))
+        self.assertIsNone(canonical(b'a'))
+
+    def test_codex_formal_pass_matches_whole_canonical_claim_body(self):
+        """#1719: the PASS comment must equal the claim review_text as a whole body."""
+        result_sha, _ = self._make_result()
+        pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},
+              'base': {'repo': {'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'user': {'login': 'author-user'}}
+        checks = {'total_count': 1, 'check_runs': [
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+        marker = '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->'
+        status = f'Verdict: PASS | Version: v1 | HEAD: {result_sha}'
+        accept = 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT'
+        notes = 'Findings: none.'
+        binding = self._review_binding(head=result_sha)
+        body = '\n'.join((marker, status, accept, binding))
+        case_number = [0]
+
+        def evaluate(comment_body, review_text):
+            case_number[0] += 1
+            reviewer_root = self.base / ('reviewer-body-' + str(case_number[0]))
+            reviewer_branch = 'review/body-' + str(case_number[0])
+            self._git('worktree', 'add', '-b', reviewer_branch,
+                      str(reviewer_root), result_sha)
+            self._write_registration('reviewer-task', 'codex-reviewer',
+                'native-reviewer-session', reviewer_root, reviewer_branch,
+                result_sha, result_sha, native_session_id='native-reviewer-session',
+                github_login='reviewer-user', state='REVIEW_PENDING')
+            comment = {'id': 44, 'user': {'login': 'reviewer-user'},
+                       'body': comment_body, 'created_at': '2026-10-21T10:00:00Z',
+                       'updated_at': '2026-10-21T10:00:00Z'}
+            task = {'task_id': '1' * 32, 'run_id': '2' * 32,
+                    'task_binding': {'contract_digest': '3' * 64},
+                    'developer': {'provider_profile': 'claude'},
+                    'review_dispatch_claim': [{
+                        'pr': 10, 'head_sha': result_sha, 'reviewer_task': 'reviewer-task',
+                        'version': 1, 'state': 'COMPLETED',
+                        'review_result': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                            'contract_digest': '3' * 64, 'head': result_sha,
+                            'verdict': 'PASS', 'review_text': review_text}}]}
+            api = self._github_response_sequence(result_sha, pr, [], checks,
+                                                 comments=[comment])
+            with patch('llmtool.task_store.TaskStore') as task_store:
+                task_store.return_value.get.return_value = task
+                with patch('llmtool.task_completion._github_get', side_effect=api):
+                    return task_completion.collect_github_evidence(
+                        **self._github_kwargs(result_sha, task_record=task))
+
+        genuine = {
+            'identical': (body, body),
+            'claim has one trailing newline': (body, body + '\n'),
+            'comment has one trailing newline': (body + '\n', body),
+            'claim uses CRLF line endings': (body, body.replace('\n', '\r\n')),
+            'claim uses CR line endings': (body, body.replace('\n', '\r')),
+        }
+        for name, (comment_body, review_text) in genuine.items():
+            with self.subTest(case=name):
+                evidence = evaluate(comment_body, review_text)
+                self.assertEqual(evidence['evidence']['formal_review_state'], 'ACCEPTED')
+                self.assertEqual(evidence['missing_gates'], [])
+
+        # The old non-empty-line comparison accepted the first case (#1719).
+        forged = {
+            'extra blank line inside claim': (
+                body, '\n'.join((marker, status, accept, '', binding))),
+            'extra blank line inside comment': (
+                '\n'.join((marker, status, accept, '', binding)), body),
+            'comment misses a claim line': (
+                body, '\n'.join((marker, status, accept, notes, binding))),
+            'comment changes a claim line': (
+                body, '\n'.join((marker, status, accept, binding + ' extra'))),
+            'comment and claim order differ': (
+                body, '\n'.join((marker, status, binding, accept))),
+            'trailing text after binding line': (body + '\nPosted later.', body),
+            'leading text before marker': ('Relayed note\n' + body, body),
+            'leading blank line before marker': ('\n' + body, body),
+        }
+        for name, (comment_body, review_text) in forged.items():
+            with self.subTest(case=name):
+                evidence = evaluate(comment_body, review_text)
+                self.assertEqual(evidence['evidence']['formal_review_state'], 'UNVERIFIED')
+
     def test_approved_review_family_matrix_fails_closed(self):
         result_sha, _ = self._make_result()
         reviewer_root = self.base / 'reviewer-family-matrix'
