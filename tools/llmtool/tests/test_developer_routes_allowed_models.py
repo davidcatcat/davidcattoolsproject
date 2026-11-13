@@ -51,7 +51,27 @@ class AllowedModelsConfigTests(unittest.TestCase):
                 self.assertEqual(entry['allowed_models'], [entry['default_model']])
         self.assertEqual(self.shipped['schema_version'], 1)
 
-    def test_sixteen_items_are_accepted(self):
+    def test_only_default_model_is_accepted(self):
+        for route in ROUTE_NAMES:
+            with self.subTest(route=route):
+                config = self.load_with(route, lambda entry: entry.update(
+                    allowed_models=[entry['default_model']]))
+                entry = config['routes'][route]
+                self.assertEqual(entry['allowed_models'], [entry['default_model']])
+
+    def test_extra_valid_model_is_invalid(self):
+        # PR #1759 F1: a well-formed extra model next to the default is refused.
+        for route in ROUTE_NAMES:
+            for order in ('default_first', 'default_last'):
+                with self.subTest(route=route, order=order):
+                    def mutate(entry, route=route, order=order):
+                        extra = [entry['default_model'], OTHER_MODEL[route]]
+                        entry['allowed_models'] = (
+                            extra if order == 'default_first' else extra[::-1])
+                    self.assert_invalid(route, mutate)
+
+    def test_sixteen_items_are_invalid(self):
+        # The former 16-item maximum no longer admits extra models.
         for route in ROUTE_NAMES:
             with self.subTest(route=route):
                 prefix = 'claude-example-' if route == 'claude' else 'example-model-'
@@ -59,8 +79,38 @@ class AllowedModelsConfigTests(unittest.TestCase):
                 def mutate(entry, prefix=prefix):
                     entry['allowed_models'] = [entry['default_model']] + [
                         f'{prefix}{index}' for index in range(15)]
-                config = self.load_with(route, mutate)
-                self.assertEqual(len(config['routes'][route]['allowed_models']), 16)
+                self.assert_invalid(route, mutate)
+
+    def test_different_single_model_is_invalid(self):
+        # A one-item list that differs from the default, even only by case.
+        for route in ROUTE_NAMES:
+            with self.subTest(route=route):
+                self.assert_invalid(route, lambda entry, route=route: entry.update(
+                    allowed_models=[OTHER_MODEL[route]]))
+        self.assert_invalid('agy', lambda entry: entry.update(
+            allowed_models=[entry['default_model'].upper()]))
+        self.assert_invalid('gw-agent', lambda entry: entry.update(
+            allowed_models=[entry['default_model'] + '-b']))
+
+    def test_default_model_changed_without_list_is_invalid(self):
+        # Changing default_model alone leaves allowed_models stale: refused.
+        for route in ROUTE_NAMES:
+            with self.subTest(route=route):
+                def mutate(entry, route=route):
+                    entry['default_model'] = OTHER_MODEL[route]
+                    if route == 'gw-agent':
+                        entry['profile']['model'] = OTHER_MODEL[route]
+                self.assert_invalid(route, mutate)
+
+    def test_check_route_model_allows_only_default_after_load(self):
+        config = load_route_config()
+        for route in ROUTE_NAMES:
+            with self.subTest(route=route):
+                default = config['routes'][route]['default_model']
+                self.assertEqual(check_route_model(config, route, default), default)
+                with self.assertRaises(RouteError) as caught:
+                    check_route_model(config, route, OTHER_MODEL[route])
+                self.assertEqual(caught.exception.code, 'ROLE_MODEL_NOT_ALLOWED')
 
     def test_missing_key_is_invalid(self):
         for route in ROUTE_NAMES:

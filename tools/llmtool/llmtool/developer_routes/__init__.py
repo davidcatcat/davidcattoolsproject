@@ -38,12 +38,19 @@ def _claude_model_ok(value):
 
 
 def _allowed_models_ok(value, default_model, model_ok):
-    """Return True when value is a valid allowed_models list containing default_model."""
+    """Return True when value is exactly [default_model], a valid one-item list.
+
+    Security repair (PR #1759 F1): until the Owner decides to allow more
+    models, a route's allowed_models must list only its current default
+    model. Any extra or different entry is refused at load.
+    """
     return (type(value) is list and 1 <= len(value) <= _MAX_ALLOWED_MODELS and
             all(type(item) is str for item in value) and
             len(set(value)) == len(value) and
             all(model_ok(item) for item in value) and
-            default_model in value)
+            default_model in value and
+            len(value) == 1 and type(default_model) is str and
+            value[0] == default_model)
 
 
 def check_route_model(config, route, model):
