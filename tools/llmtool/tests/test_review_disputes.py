@@ -697,8 +697,8 @@ class DisputeCliTests(_Case):
 class DisputeCliRouteTests(_Case):
     """Security v91 F2: `llmtool task dispute` reaches run_task_dispute via cli.main."""
 
-    def test_task_actions_routes_dispute_with_a_fresh_source_check(self):
-        self.assertEqual(cli.TASK_ACTIONS['dispute'], ('run_task_dispute', True))
+    def test_task_actions_routes_dispute_without_a_fresh_source_check(self):
+        self.assertEqual(cli.TASK_ACTIONS['dispute'], ('run_task_dispute', False))
         for action in ('open', 'defer', 'rule'):
             argv = ['task', 'dispute', action, TASK, '--pr', str(PR), '--finding', 'F1',
                     '--evidence-ref', REF]
@@ -714,7 +714,7 @@ class DisputeCliRouteTests(_Case):
                 [call] = handler.call_args_list
                 self.assertEqual((call.args[0].action, call.args[0].dispute_action),
                                  ('dispute', action))
-                fresh.assert_called_once_with()
+                fresh.assert_not_called()
 
     def _main(self, argv):
         out = io.StringIO()
