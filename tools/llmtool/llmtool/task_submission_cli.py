@@ -1025,6 +1025,26 @@ def _lineage_of(record):
             'recorded_at': _timestamp()}
 
 
+def _lineage_task(store, task_id, pm_session):
+    """A Task bound to this PM session and not abandoned."""
+    record = store.get(task_id)
+    if record.get('pm_session_id') != pm_session:
+        _lineage_refuse('LINEAGE_PM_SESSION_DENIED')
+    if record.get('abandonment') is not None:
+        _lineage_refuse('LINEAGE_TASK_ABANDONED')
+    return record
+
+
+def _lineage_members(store, lineage_id):
+    """The other Tasks of one lineage, each as its lineage plus its id."""
+    members = []
+    for task_id in store.task_ids():
+        line = None if task_id == lineage_id else store.get(task_id).get('lineage')
+        if type(line) is dict and line.get('lineage_id') == lineage_id:
+            members.append(dict(line, id=task_id))
+    return members
+
+
 def run_task_remote_test(args, *, store=None, stdout=None):
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,

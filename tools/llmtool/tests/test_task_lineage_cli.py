@@ -30,6 +30,20 @@ class LineageCase(unittest.TestCase):
         self.store.create(task)
         return task['task_id']
 
+    def member(self, root, kind='child', replaces=()):
+        task_id = self.task()
+        record_lineage(self.store, task_id, {
+            'lineage_id': root, 'kind': kind, 'parent': root, 'replaces': list(replaces),
+            'state': 'OPEN', 'reason': None, 'base_sha': MAIN, 'recorded_at': AT})
+        return task_id
+
+    def parked_root(self):
+        root = self.task()
+        record_lineage(self.store, root, {
+            'lineage_id': root, 'kind': 'root', 'parent': None, 'replaces': [],
+            'state': 'PARKED', 'reason': 'split', 'base_sha': None, 'recorded_at': AT})
+        return root
+
     def refused(self, code, call, *args, **kwargs):
         with self.assertRaises(LLMToolError) as caught:
             call(self.store, *args, **kwargs)
@@ -60,6 +74,17 @@ class LineageNoneTests(LineageCase):
         self.refused('TASK_LINEAGE_INVALID',
                      lambda _store: cli._lineage_of({'task_id': plain, 'lineage': None}))
         self.assertEqual(cli._lineage_of({'task_id': plain})['kind'], 'root')
+
+
+class LineageMemberTests(LineageCase):
+    def test_lineage_tasks_belong_to_their_pm_and_members_are_read_from_the_store(self):
+        root = self.parked_root()
+        child, plain = self.member(root), self.task()
+        self.assertEqual(cli._lineage_task(self.store, child, PM)['task_id'], child)
+        self.refused('LINEAGE_PM_SESSION_DENIED', cli._lineage_task, child, 'pm-other')
+        self.assertEqual([item['id'] for item in cli._lineage_members(self.store, root)],
+                         [child])
+        self.assertEqual(cli._lineage_members(self.store, plain), [])
 
 
 if __name__ == '__main__':
