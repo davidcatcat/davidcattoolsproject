@@ -21,6 +21,7 @@ from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import _record
 from review_trust_fixture import start_module as _start_trust_fixture
 from review_trust_fixture import stop_module as _stop_trust_fixture
+import worker_policy_fixture
 _IMPORT_HOME_PATCH.stop()
 
 
@@ -45,12 +46,11 @@ class WorkerDispatchTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
-        self.policy_path = self.root / 'worker-dispatch.json'
-        self.policy = self._fixture_policy()
-        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
-        self.policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
-        self.policy_patch.start()
-        self.addCleanup(self.policy_patch.stop)
+        # #1692: the shared test policy (every worker ALLOWED) goes through the
+        # real reader, parser and gate. A refusal case sets PAUSED or
+        # OWNER_ASSIGNMENT_ONLY explicitly on the row it tests.
+        self.policy_path = worker_policy_fixture.install(self, self.root)
+        self.policy = json.loads(self.policy_path.read_text(encoding='utf-8'))
         self.repository_patch = patch.object(worker_dispatch, 'repository_config',
             return_value={'slug': 'davidcatcat/davidcattoolsproject',
                           'dispatch_issue': 289, 'dispatch_evidence_pr': 283})
@@ -59,28 +59,6 @@ class WorkerDispatchTests(unittest.TestCase):
         self.store = TaskStore(self.root / 'tasks')
         self.task = self._task()
         self.store.create(self.task)
-
-    @staticmethod
-    def _fixture_policy():
-        evidence = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
-        workers = {
-            worker: {
-                'dispatch': 'ALLOWED', 'decided_by': 'Owner',
-                'decided_at': '2026-10-22', 'reason': 'test policy state',
-                'evidence': evidence,
-            }
-            for worker in worker_dispatch.WORKERS
-        }
-        workers['company-gw-agent'] = {
-            'dispatch': 'PAUSED', 'decided_by': 'PM',
-            'decided_at': '2026-11-03',
-            'reason': 'Paused pending the Owner decision tracked by #120',
-            'evidence': 'https://github.com/davidcatcat/davidcattoolsproject/issues/120',
-        }
-        return {
-            'schema_version': 1,
-            'workers': workers,
-        }
 
     def _task(self):
         request = 'Bounded non-sensitive Developer task.'
@@ -224,6 +202,13 @@ class WorkerDispatchTests(unittest.TestCase):
     def test_company_gw_agent_accepts_only_pending_pm_pause_or_exact_owner_allow(self):
         self.assertIn('company-gw-agent', worker_dispatch.WORKERS)
         self.assertEqual(worker_dispatch.worker_key_for('gw-agent'), 'company-gw-agent')
+        # The shared fixture starts ALLOWED; this refusal case sets the exact
+        # PM-paused row itself (#1692) instead of relying on a default.
+        self.assertTrue(worker_dispatch.evaluate('company-gw-agent').allowed)
+        self.policy = worker_policy_fixture.policy_document({'company-gw-agent': 'PAUSED'})
+        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+        self.assertEqual(self.policy['workers']['company-gw-agent']['evidence'],
+                         worker_dispatch._GW_AGENT_PAUSED_REF)
         # A PM-paused row validates and evaluates to OWNER_PAUSED.
         decision = worker_dispatch.evaluate('company-gw-agent')
         self.assertFalse(decision.allowed)
