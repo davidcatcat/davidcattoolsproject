@@ -1521,6 +1521,11 @@ def label_mac_ci_for_skipped_check(*, task_id, store=None, pr_number=None,
     if not has_mac_ci:
         runner = _publish_run_gh if merge_gh_runner is None else merge_gh_runner
         try:
+            # #1781 (I4): `task drive` calls this outside advance; re-check here too.
+            _external_action_guard(store, task_id)()
+        except _ExternalActionRefused as refused:
+            return _merge_refusal(refused.code)
+        try:
             labeled = runner(d6.get('root') or cwd or os.getcwd(),
                              ['pr', 'edit', str(number), '--add-label', 'mac-ci'])
         except Exception:
@@ -2573,34 +2578,155 @@ def _lineage_after_merge(result, store, task_id, record, *, merged_now=False):
     return result
 
 
-def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=False,
-            reviewer_session_done=False, dispatch_review_call=None,
-            record_review_result_call=None, repair_review_call=None, relay_verdict_call=None,
-            run_task_complete_call=None, record_github_event_call=None,
-            github_get=None, cwd=None, publish_git_runner=None,
-            publish_gh_runner=None, record_result_call=None, merge_gh_runner=None,
-            owner_acceptance=None, owner_exception=None, executor_task=None, sleep_fn=None, sleep=None):
-    """Perform one selected action and return a bounded JSON-ready summary."""
+def _advance_refused(task_id, code):
+    return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
+            'next': 'REFUSED', 'codes': [code], 'acked': []}
+
+
+# #1781 (security v91, I4): split vs advance. Every external action of one
+# advance step re-reads the Task under its update lock right before it runs
+# (TaskStore.check_external_action) and is refused for a PENDING split
+# reservation. Reads, and the cleanup or record of an action this call already
+# took, are never refused, so a refusal never leaves a half-done action behind.
+_EXTERNAL_GIT = frozenset(('add', 'commit', 'merge', 'push'))
+_READ_OR_CLEANUP_GH = (['pr', 'list'], ['pr', 'view'], ['pr', 'close'], ['api', 'user'],
+                       # The merge claim, a locked compare-and-set that the store
+                       # refuses for a PENDING Task, is the re-check of the merge.
+                       ['pr', 'merge'])
+_RECORD_COMMENT_PREFIXES = (_ACTIVITY_MARKER + '\n',
+                            'llmtool task advance merge provenance: ')
+
+
+class _ExternalActionRefused(BaseException):
+    """The per-action re-check refused; it ends the advance step with its code.
+
+    A BaseException, so no step's ``except Exception`` turns it into another
+    code or goes on to the action it stopped.
+    """
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+def _external_action_guard(store, task_id):
+    """Return guard(): re-check the Task under its update lock, else raise."""
+    check = getattr(store, 'check_external_action', None)
+
+    def guard():
+        if not callable(check):
+            return  # an injected test double; TaskStore always has the check
+        try:
+            check(task_id)
+        except Exception as exc:
+            code = getattr(exc, 'task_store_error_code', None)
+            raise _ExternalActionRefused(
+                code if type(code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', code)
+                else 'TASK_RECORD_UNAVAILABLE') from None
+    return guard
+
+
+def _external_command(args, *, gh):
+    """True for a git or gh command that starts an external action for the Task."""
+    if type(args) not in (list, tuple) or not args or any(type(a) is not str for a in args):
+        return True
+    args = list(args)
+    if not gh:
+        return args[0] in _EXTERNAL_GIT and args != ['merge', '--abort']
+    if args[:2] in _READ_OR_CLEANUP_GH:
+        return False
+    if args[:2] == ['pr', 'comment'] and '--body' in args[:-1]:
+        body = args[args.index('--body') + 1]
+        if body.startswith(_RECORD_COMMENT_PREFIXES):
+            return False
+    return True
+
+
+def _guarded_runner(guard, runner, *, gh):
+    def run(root, args, *rest, **kwargs):
+        if _external_command(args, gh=gh):
+            guard()
+        return runner(root, args, *rest, **kwargs)
+    return run
+
+
+def _guarded_call(guard, call):
+    def run(*args, **kwargs):
+        guard()
+        return call(*args, **kwargs)
+    return run
+
+
+def advance(*, task_id, store=None, merge=False, owner_acceptance=None,
+            owner_exception=None, executor_task=None, dispatch_review_call=None,
+            repair_review_call=None, publish_git_runner=None, publish_gh_runner=None,
+            merge_gh_runner=None, **options):
+    """Perform one selected action and return a bounded JSON-ready summary.
+
+    #1781 (security v91): the step runs holding the Task's advance lease, so no
+    split reserves the Task while it runs, and every external action re-checks
+    the Task under its update lock right before it runs.
+    """
     if owner_acceptance is not None and not merge:
         # An Owner acceptance is only for a merge; refuse before anything runs.
-        return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
-                'next': 'REFUSED', 'codes': ['OWNER_ACCEPTANCE_REQUIRES_MERGE'],
-                'acked': []}
+        return _advance_refused(task_id, 'OWNER_ACCEPTANCE_REQUIRES_MERGE')
     if executor_task is not None and (not merge or owner_exception is None):
-        return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
-                'next': 'REFUSED', 'codes': ['OWNER_EXCEPTION_EXECUTOR_REQUIRES_EXCEPTION'],
-                'acked': []}
+        return _advance_refused(task_id, 'OWNER_EXCEPTION_EXECUTOR_REQUIRES_EXCEPTION')
     if owner_exception is not None and not merge:
-        return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
-                'next': 'REFUSED', 'codes': ['OWNER_EXCEPTION_REQUIRES_MERGE'],
-                'acked': []}
+        return _advance_refused(task_id, 'OWNER_EXCEPTION_REQUIRES_MERGE')
     store = TaskStore() if store is None else store
+    with contextlib.ExitStack() as held:
+        lease = getattr(store, 'advance_lease', None)
+        if callable(lease):
+            try:
+                held.enter_context(lease(task_id))
+            except Exception as exc:
+                code = getattr(exc, 'task_store_error_code', None)
+                return _advance_refused(task_id, 'TASK_ADVANCE_LEASE_BUSY'
+                                        if code == 'TASK_ADVANCE_LEASE_BUSY'
+                                        else 'TASK_RECORD_UNAVAILABLE')
+        guard = _external_action_guard(store, task_id)
+        try:
+            return _advance_step(
+                task_id=task_id, store=store, merge=merge, guard=guard,
+                owner_acceptance=owner_acceptance, owner_exception=owner_exception,
+                executor_task=executor_task,
+                dispatch_review_call=_guarded_call(
+                    guard, dispatch_review_call or review_dispatch.dispatch_review),
+                repair_review_call=_guarded_call(
+                    guard, repair_review_call or review_repair.repair_review),
+                publish_git_runner=_guarded_runner(
+                    guard, publish_git_runner or _publish_run_git, gh=False),
+                publish_gh_runner=_guarded_runner(
+                    guard, publish_gh_runner or _publish_run_gh, gh=True),
+                merge_gh_runner=_guarded_runner(
+                    guard, merge_gh_runner or _publish_run_gh, gh=True),
+                **options)
+        except _ExternalActionRefused as refused:
+            return _advance_refused(task_id, refused.code)
+
+
+def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
+                  merge=False, reviewer_session_done=False, dispatch_review_call,
+                  record_review_result_call=None, repair_review_call, relay_verdict_call=None,
+                  run_task_complete_call=None, record_github_event_call=None,
+                  github_get=None, cwd=None, publish_git_runner, publish_gh_runner,
+                  record_result_call=None, merge_gh_runner,
+                  owner_acceptance=None, owner_exception=None, executor_task=None,
+                  sleep_fn=None, sleep=None):
+    """One advance step; the caller holds the advance lease and passes guarded runners."""
     try:
         record = store.get(task_id)
     except Exception:
-        return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
-                'next': 'REFUSED', 'codes': ['TASK_RECORD_UNAVAILABLE'], 'acked': []}
+        return _advance_refused(task_id, 'TASK_RECORD_UNAVAILABLE')
     lineage = record.get('lineage')
+    if type(lineage) is dict and lineage.get('state') == 'PENDING':
+        # #1781 (I4): a split reservation made before this advance took its lease;
+        # refuse before any D6, PR, review, claim or GitHub read.
+        if merge:
+            return dict(_merge_refusal('TASK_LINEAGE_PENDING'), task_id=task_id,
+                        next='MERGE_REFUSED', acked=[])
+        return _advance_refused(task_id, 'TASK_LINEAGE_PENDING')
     if merge and type(lineage) is dict and lineage.get('state') != 'OPEN':
         # #1502 WP-D D10: refuse before any D6, PR, review or claim read.
         code = 'MERGE_ROOT_PARKED' if lineage['state'] == 'PARKED' else 'MERGE_LINEAGE_ENDED'
@@ -2748,6 +2874,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         else:
             step = 'REVIEW_OUTCOME_UNKNOWN'
     if step == 'RUN_REMOTE_TEST':
+        guard()  # #1781: an EC2 run is an external action
         try:
             remote_result = _run_remote_test(store, task_id, executor_task, d6['result_head'],
                                              f'refs/pull/{number}/head', number)
@@ -3042,6 +3169,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         cleared = []
 
         def pre_pr_gate(head, branch):
+            guard()  # #1781: the pre-PR EC2 run is an external action
             status, hold = _pre_pr_remote_gate(record, store, executor_task, head, branch)
             if hold is None and status is not None:
                 cleared.append(head)

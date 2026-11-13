@@ -1287,9 +1287,14 @@ def _split_checks(store, root_id, children, *, pm_session, reason, preflight):
     if preflight and (line['state'] not in ('OPEN', 'PARKED') or
                       root.get('merge_attempt') is not None):
         _lineage_refuse('SPLIT_ROOT_NOT_OPEN')
+    from .task_store import split_child_started
     digests = []
     for index, child_id in enumerate(children):
         record = _lineage_new_member(store, child_id, pm_session, {root_id, *children[:index]})
+        if split_child_started(record):
+            # #1781: a child with a Developer launch or result, completion or
+            # published PR; the reservation write repeats this under the child lock.
+            _lineage_refuse('SPLIT_CHILD_STARTED')
         digests.append(record.get('record_sha256'))
     return line, digests
 
@@ -2058,8 +2063,6 @@ def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapter
     #1124: the caller's PM session must own the Task before the drive starts,
     and ownership is re-checked before every advance and Mac CI label call.
     """
-    from . import task_advance
-    from .task_drive import drive
     from . import pm_caller
     store = TaskStore() if store is None else store
     try:
@@ -2068,6 +2071,32 @@ def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapter
     except pm_caller.PMCallerRefused as exc:
         _print(pm_caller.refusal(args.task_id, exc.code))
         return 1
+    # #1781 (security v91): the drive holds the Task's advance lease for its whole
+    # run, polls included, so no split reserves this Task mid-drive
+    # (SPLIT_CHILD_ADVANCING); the PENDING check below then runs under the lease.
+    with contextlib.ExitStack() as held:
+        lease = getattr(store, 'advance_lease', None)
+        if callable(lease):
+            try:
+                held.enter_context(lease(args.task_id))
+            except LLMToolError as exc:
+                _print(_advance_lease_refusal(args.task_id, exc))
+                return 1
+        return _run_task_drive_leased(args, store, caller_key, sleep, advance_call, adapters)
+
+
+def _advance_lease_refusal(task_id, exc):
+    code = getattr(exc, 'task_store_error_code', None)
+    if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
+        code = 'TASK_ADVANCE_LEASE_UNAVAILABLE'
+    return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
+            'next': 'REFUSED', 'codes': [code], 'acked': []}
+
+
+def _run_task_drive_leased(args, store, caller_key, sleep, advance_call, adapters):
+    from . import task_advance
+    from .task_drive import drive
+    from . import pm_caller
     pending = _pending_split_refusal(store, args.task_id)
     if pending is not None:
         _print(pending)

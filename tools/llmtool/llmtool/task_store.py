@@ -5,6 +5,7 @@ ledger. A task's logical PM session is an llmtool identifier; it is not a claim
 that the selected provider exposes a resumable native session.
 """
 
+import contextlib
 import errno
 import fcntl
 import hashlib
@@ -480,6 +481,8 @@ _D6_CLAIM_ARGUMENTS = frozenset(('_d6_claims', 'd6_claims'))
 ASSIGNMENTS_SCHEMA_VERSION = 1
 ASSIGNMENTS_NAME = '.developer-assignments.json'
 ASSIGNMENTS_LOCK_NAME = '.developer-assignments.lock'
+# #1781: per-Task advance lease sidecar, '.<task_id>.json.advance.lock'.
+ADVANCE_LEASE_SUFFIX = '.advance.lock'
 ASSIGNMENTS_MAX_BYTES = 256 * 1024
 MAX_ASSIGNMENTS = 128
 MAX_ASSIGNMENT_AUDIT = 16
@@ -1393,17 +1396,55 @@ def park_lineage_root(store, task_id, lineage):
 # PENDING Task (TASK_LINEAGE_PENDING), so dispatch, repair, review, merge,
 # abandonment and lineage ends can never use an uncommitted child.
 
+def split_reserved(record):
+    """True for a PENDING split reservation (uncommitted or not yet finalized)."""
+    line = record.get('lineage') if type(record) is dict else None
+    return type(line) is dict and line.get('state') == 'PENDING'
+
+
+# #1781 (security v91): a split child must not have started. These Developer
+# states mean a provider was launched or answered; a completion, a published PR
+# or a merge claim means the Task already left the Developer step.
+_SPLIT_STARTED_DEVELOPER_STATES = frozenset((
+    'DEVELOPER_DISPATCHING', 'DEVELOPER_RESPONDED', 'DEVELOPER_OUTCOME_UNKNOWN',
+    'DEVELOPER_OUTPUT_REJECTED'))
+
+
+def split_child_started(record):
+    """True when a Task has a Developer launch or result, a completion, a published
+    PR or a merge claim, so it can no longer become a split child."""
+    if type(record) is not dict:
+        return True
+    developer = record.get('developer')
+    return (record.get('merge_attempt') is not None or
+            record.get('published_pr') is not None or
+            record.get('completion') is not None or
+            (type(developer) is dict and
+             developer.get('state') in _SPLIT_STARTED_DEVELOPER_STATES))
+
+
 def reserve_split_child(store, task_id, lineage, *, expected_sha256):
     """Prepare: write one child PENDING, bound to its split op.
 
     Under the child's lock the store refuses unless the record still has the
-    digest the caller checked, no lineage, no merge_attempt and no abandonment.
+    digest the caller checked, no lineage, no merge_attempt, no abandonment and
+    nothing started (split_child_started: SPLIT_CHILD_STARTED).
+
+    #1781 (security v91): first the child's advance lease is taken exclusively
+    without waiting; an advance or drive of the child holds it shared for its
+    whole run, so the reservation refuses SPLIT_CHILD_ADVANCING. The lease is
+    kept across the locked write, so no advance starts while it is written; an
+    advance that starts after it reads PENDING and refuses.
     """
     if (type(lineage) is not dict or lineage.get('kind') != 'child' or
             lineage.get('state') != 'PENDING' or not _hex32(lineage.get('split_op'))):
         _fail('TASK_LINEAGE_INVALID')
-    return store._update(task_id, expected={'record_sha256': expected_sha256},
-                         changes={'lineage': dict(lineage)}, trusted_split='RESERVE')
+    lease = store._take_advance_lease_exclusive(task_id)
+    try:
+        return store._update(task_id, expected={'record_sha256': expected_sha256},
+                             changes={'lineage': dict(lineage)}, trusted_split='RESERVE')
+    finally:
+        store._unlock_sidecar(lease)
 
 
 def commit_split_root(store, task_id, lineage, *, child_max, expected):
@@ -4099,6 +4140,82 @@ class TaskStore:
             finally:
                 os.close(lock_fd)
 
+    # #1781 (security v91): split vs advance. `task advance` and `task drive` hold
+    # a Task's advance lease shared for their whole run; a split reservation of
+    # that Task takes it exclusively without waiting (reserve_split_child). The
+    # lease is a sidecar, distinct from the Task's update lock, and is always
+    # taken before that lock, never while holding it.
+
+    def _advance_lease_name(self, task_id):
+        return '.' + self._name(task_id) + ADVANCE_LEASE_SUFFIX
+
+    @contextlib.contextmanager
+    def advance_lease(self, task_id):
+        """Hold this Task's advance lease shared; a holder past the wait is BUSY."""
+        directory = self._dirfd()
+        try:
+            lock_fd = self._lock_sidecar(directory, self._advance_lease_name(task_id),
+                                         exclusive=False, code='TASK_ADVANCE_LEASE')
+        finally:
+            os.close(directory)
+        try:
+            yield
+        finally:
+            self._unlock_sidecar(lock_fd)
+
+    def _take_advance_lease_exclusive(self, task_id):
+        """Take the advance lease exclusively without waiting; return its fd.
+
+        A held lease means an advance or drive of this Task is running: refuse
+        SPLIT_CHILD_ADVANCING. The caller releases it with _unlock_sidecar.
+        """
+        name = self._advance_lease_name(task_id)
+        directory = self._dirfd()
+        lock_fd = None
+        try:
+            try:
+                lock_fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                  0o600, dir_fd=directory)
+                info = os.fstat(lock_fd)
+            except OSError:
+                _fail('TASK_ADVANCE_LEASE_UNAVAILABLE')
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                    stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                _fail('TASK_ADVANCE_LEASE_INVALID')
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                _fail('SPLIT_CHILD_ADVANCING')
+            except OSError as exc:
+                _fail('SPLIT_CHILD_ADVANCING' if _is_contention_error(exc)
+                      else 'TASK_ADVANCE_LEASE_UNAVAILABLE')
+            held, lock_fd = lock_fd, None
+            return held
+        finally:
+            os.close(directory)
+            if lock_fd is not None:
+                os.close(lock_fd)
+
+    def check_external_action(self, task_id):
+        """Re-read a Task under its update lock right before an external action.
+
+        #1781 (I4): a PENDING split reservation takes no external action
+        (TASK_LINEAGE_PENDING). Read-only; returns the record read under the lock.
+        """
+        directory = self._dirfd()
+        try:
+            lock_fd = self._lock_sidecar(directory, '.' + self._name(task_id) + '.lock',
+                                         exclusive=True, code='TASK_STORE')
+            try:
+                record = self._read_at(directory, task_id)
+            finally:
+                self._unlock_sidecar(lock_fd)
+        finally:
+            os.close(directory)
+        if split_reserved(record):
+            _fail('TASK_LINEAGE_PENDING')
+        return record
+
     @staticmethod
     def _lock_worker_availability(directory, *, exclusive):
         return TaskStore._lock_sidecar(directory, WORKER_AVAILABILITY_LOCK_NAME,
@@ -4424,6 +4541,9 @@ class TaskStore:
             if (old_line is not None or current.get('merge_attempt') is not None or
                     current.get('abandonment') is not None):
                 _fail('LINEAGE_MEMBER_INVALID')
+            if split_child_started(current):
+                # #1781: checked under the child lock, in the reservation write.
+                _fail('SPLIT_CHILD_STARTED')
             return
         if action == 'FINALIZE':
             if (type(old_line) is not dict or new_line != dict(old_line, state='OPEN') or
