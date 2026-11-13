@@ -24,6 +24,7 @@ from llmtool.task_submission_cli import (
 )
 from review_trust_fixture import start_module as _start_trust_fixture
 from review_trust_fixture import stop_module as _stop_trust_fixture
+import worker_policy_fixture
 
 # Capture the real loader before the module fixture replaces it.
 _GENUINE_LOAD_TRUST = _trust_module.load_trust
@@ -49,16 +50,10 @@ class CodexDelegateTests(unittest.TestCase):
         self.bin = self.base / 'bin'
         self.bin.mkdir()
         self.store = TaskStore(self.base / 'tasks')
-        # #1502 WP-C: the real policy pauses codex-developer; the Codex route tests keep it.
-        dispatch = task_submission_cli.worker_dispatch
-        policy_dir = self.base
-        policy = json.loads(Path(dispatch._POLICY_PATH).read_text(encoding='utf-8'))
-        policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
-        policy_path = Path(policy_dir) / 'worker-dispatch.json'
-        policy_path.write_text(json.dumps(policy), encoding='utf-8')
-        policy_patch = patch.object(dispatch, '_POLICY_PATH', policy_path)
-        policy_patch.start()
-        self.addCleanup(policy_patch.stop)
+        # #1502 WP-C: the real policy pauses codex-developer; the Codex route tests
+        # keep it. #1692: they use the shared test policy (codex-developer ALLOWED),
+        # never the live worker-dispatch.json.
+        worker_policy_fixture.install(self, {'codex-developer': 'ALLOWED'})
         self._registered_worktree()
 
     def _git(self, *args, cwd=None):

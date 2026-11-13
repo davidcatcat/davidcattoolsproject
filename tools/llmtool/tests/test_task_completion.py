@@ -21,12 +21,12 @@ from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import (_record, result_head_admitted, run_task_complete,
                                          run_task_review_prompt)
 from llmtool import task_completion
-from llmtool import worker_dispatch
 from llmtool import opencode_direct_developer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import d6_worktree_lifecycle  # noqa: E402
 import review_trust_fixture  # noqa: E402
+import worker_policy_fixture  # noqa: E402
 
 
 def setUpModule(): review_trust_fixture.start_module()
@@ -59,18 +59,10 @@ class TaskCompletionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
-        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
-        policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
-        policy['workers']['opencode-developer']['reason'] = 'test fixture allows isolated callback checks'
-        policy['workers']['company-gw']['dispatch'] = 'ALLOWED'
-        policy['workers']['company-gw']['reason'] = 'test fixture allows isolated route checks'
-        # #1502 WP-C: the real policy pauses codex-developer; these fixtures keep it.
-        policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
-        self.policy_path = self.base / 'worker-dispatch.json'
-        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
-        policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
-        policy_patch.start()
-        self.addCleanup(policy_patch.stop)
+        # #1692: the shared test policy (every worker ALLOWED, including the
+        # opencode-developer, company-gw and codex-developer routes these
+        # fixtures use), never the live worker-dispatch.json.
+        self.policy_path = worker_policy_fixture.install(self)
         self.root = self.base / 'executor'
         self.root.mkdir(mode=0o700)
         self._git('init', '-b', 'feat/executor')

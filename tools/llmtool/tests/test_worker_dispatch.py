@@ -96,6 +96,30 @@ class WorkerDispatchTests(unittest.TestCase):
         worker_policy_fixture.set_dispatch(self.policy, worker, state)
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
 
+    def test_shared_fixture_decisions_ignore_a_flipped_live_policy_row(self):
+        # #1692: under the shared test policy the gate never reads a live-policy
+        # location, so flipping any single live row changes no ordinary decision.
+        live_locations = {Path(worker_dispatch._DEFAULT_POLICY_PATH),
+                          *worker_dispatch._policy_candidates()}
+        self.assertEqual(Path(worker_dispatch._POLICY_PATH), self.policy_path)
+        self.assertNotIn(self.policy_path, live_locations)
+        keys = sorted(worker_dispatch.WORKERS | worker_dispatch.DEBUG_WORKERS)
+        baseline = {key: worker_dispatch.evaluate(key) for key in keys}
+        self.assertTrue(all(decision.allowed for decision in baseline.values()))
+        for key in keys:
+            with self.subTest(flipped=key):
+                live = worker_policy_fixture.write(
+                    self.root / f'live-{key}.json', worker_policy_fixture.policy({key: 'PAUSED'}))
+                # Control: the flipped file is a real refusal when it is the policy read.
+                with patch.object(worker_dispatch, '_POLICY_PATH', live), \
+                        patch.object(worker_dispatch, '_DEFAULT_POLICY_PATH', live), \
+                        patch.object(worker_dispatch, '_policy_candidates', return_value=[live]):
+                    self.assertEqual(worker_dispatch.evaluate(key).reason_code, 'OWNER_PAUSED')
+                with patch.object(worker_dispatch, '_DEFAULT_POLICY_PATH', live), \
+                        patch.object(worker_dispatch, '_policy_candidates', return_value=[live]):
+                    for other in keys:
+                        self.assertEqual(worker_dispatch.evaluate(other), baseline[other])
+
     def test_repository_reference_patterns_follow_validated_identity_and_escape_slug(self):
         owner_ref, evidence_ref = worker_dispatch._build_reference_patterns({
             'slug': 'example-org/repo.name',

@@ -5,7 +5,6 @@ import json
 import multiprocessing
 import os
 import sys
-import tempfile
 import time
 import unittest
 from copy import deepcopy
@@ -24,6 +23,7 @@ from test_review_authority import (
 from llmtool import task_completion
 from llmtool import worker_dispatch
 import review_trust_fixture
+import worker_policy_fixture
 
 
 PROCESS_WAIT_SECONDS = 60
@@ -75,10 +75,12 @@ class _TestDispatchStore:
         return deepcopy(self.record)
 
 
-def _mp_worker_dispatch(hostpath, pin_args, ready, final, expect, events, approval, packet_input, ledger_path, ledger_nonce, budget, barrier, result_queue):
+def _mp_worker_dispatch(hostpath, pin_args, ready, final, expect, events, approval, packet_input, ledger_path, ledger_nonce, budget, barrier, result_queue, policy_path):
     """Subprocess worker for cross-process / concurrent barrier replay test."""
     # Spawned children do not inherit the parent's mock; never read a real trust.json.
     review_trust_fixture.start_module()
+    # Nor the parent's policy patch (#1692): use the parent's shared test policy file.
+    patch.object(worker_dispatch, '_POLICY_PATH', Path(policy_path)).start()
     try:
         from test_task_review import FakeHost
         fclock = FakeHost(ready, final, expect, events).clock
@@ -105,6 +107,8 @@ def _mp_worker_dispatch(hostpath, pin_args, ready, final, expect, events, approv
 
 class ReviewHandoffTests(unittest.TestCase):
     def setUp(self):
+        # #1692: the shared test policy, never the live worker-dispatch.json.
+        self.policy_path = worker_policy_fixture.install(self)
         self.dispatch_store = _TestDispatchStore()
         patcher = patch('llmtool.task_store.TaskStore', return_value=self.dispatch_store)
         patcher.start()
@@ -119,18 +123,13 @@ class ReviewHandoffTests(unittest.TestCase):
 
     def test_paused_reviewer_policy_is_audited_and_provider_is_not_called(self):
         h = self.harness(mode='success')
-        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
-        policy['workers']['claude-reviewer']['dispatch'] = 'PAUSED'
-        policy['workers']['claude-reviewer']['reason'] = 'test pause'
-        with tempfile.TemporaryDirectory() as directory:
-            policy_path = Path(directory) / 'worker-dispatch.json'
-            policy_path.write_text(json.dumps(policy), encoding='utf-8')
-            store = _TestDispatchStore()
-            store.bind(h.expect.task, h.expect.source_sha)
-            with patch.object(worker_dispatch, '_POLICY_PATH', policy_path), \
-                    patch('llmtool.review_handoff.run_foreground_review') as invoke:
-                receipt, raw = rh.dispatch_review_handoff(
-                    h.issuer, h.ledger, budget=h.fake.budget, dispatch_store=store)
+        # The prior hand-off transition is recorded while the reviewer is ALLOWED.
+        store = _TestDispatchStore()
+        store.bind(h.expect.task, h.expect.source_sha)
+        worker_policy_fixture.update(self.policy_path, 'claude-reviewer', 'PAUSED')
+        with patch('llmtool.review_handoff.run_foreground_review') as invoke:
+            receipt, raw = rh.dispatch_review_handoff(
+                h.issuer, h.ledger, budget=h.fake.budget, dispatch_store=store)
         invoke.assert_not_called()
         self.assertEqual(receipt.code, 'OWNER_PAUSED')
         self.assertEqual(receipt.provider_calls, 0)
@@ -482,7 +481,8 @@ class ReviewHandoffTests(unittest.TestCase):
                 target=_mp_worker_dispatch,
                 args=(str(h.hostpath), pin_args, h.ready, h.final, h.expect, h.events,
                       h.fake.approval, h.packet_input, str(h.ledger_path),
-                      h.ledger.creation_nonce, h.fake.budget, barrier, queue)
+                      h.ledger.creation_nonce, h.fake.budget, barrier, queue,
+                      str(self.policy_path))
             )
             for _ in range(2)
         ]
@@ -526,7 +526,8 @@ class ReviewHandoffTests(unittest.TestCase):
             target=_mp_worker_dispatch,
             args=(str(h.hostpath), pin_args, h.ready, h.final, h.expect, h.events,
                   h.fake.approval, h.packet_input, str(h.ledger_path),
-                  h.ledger.creation_nonce, h.fake.budget, barrier, queue)
+                  h.ledger.creation_nonce, h.fake.budget, barrier, queue,
+                  str(self.policy_path))
         )
         proc.start()
         barrier.wait(timeout=PROCESS_WAIT_SECONDS)
