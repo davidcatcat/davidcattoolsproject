@@ -1,4 +1,9 @@
-"""One-shot, bounded EC2 test execution for an admitted D6 Task result."""
+"""One-shot, bounded EC2 test execution for an admitted D6 Task result.
+
+``run_incident_remote_test`` (#1706 R9) runs the same session for a main
+incident: an admitted incident SHA and its failing modules, recorded on the
+incident instead of a Task.
+"""
 
 import hashlib
 import io
@@ -419,6 +424,23 @@ def _fresh_pr_head(pr):
     return head['sha']
 
 
+def _ssh_argv(config, sha, ref, modules):
+    """The one EC2 SSH command; every dynamic value is a validated argv word."""
+    return ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
+            config['user'] + '@' + config['host'], 'python3', '-', sha, ref,
+            config['repo_path'], config['python'], *modules]
+
+
+def _command_digest(argv):
+    return hashlib.sha256(json.dumps(argv, separators=(',', ':')).encode() +
+                          _REMOTE_SCRIPT.encode()).hexdigest()
+
+
+def _ssh_transport(argv, script, timeout):
+    return subprocess.run(argv, input=script.encode(), stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, timeout=timeout, check=False)
+
+
 def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
                     store=None, config_path=None, transport=None,
                     hosted=False, get=None, post=None, get_bytes=None, now=None):
@@ -508,11 +530,8 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         config = _config(config_path)
     except LLMToolError:
         return denied('CONFIG_INVALID')
-    argv = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
-            config['user'] + '@' + config['host'], 'python3', '-', sha, ref,
-            config['repo_path'], config['python'], *selected]
-    command_digest = hashlib.sha256(json.dumps(argv, separators=(',', ':')).encode() +
-                                    _REMOTE_SCRIPT.encode()).hexdigest()
+    argv = _ssh_argv(config, sha, ref, selected)
+    command_digest = _command_digest(argv)
     for known in task.get('remote_test_receipts', []):
         if (known.get('executor_task') == executor_task and known.get('source_sha') == sha and
                 known.get('modules') == list(selected) and
@@ -521,9 +540,7 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
             record_remote_test_event(store, task_id, known)
             return known
     if transport is None:
-        def transport(argv, script, timeout):
-            return subprocess.run(argv, input=script.encode(), stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, timeout=timeout, check=False)
+        transport = _ssh_transport
     started = _now()
     try:
         result = transport(argv, _REMOTE_SCRIPT, _SSH_TIMEOUT)
@@ -554,6 +571,165 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     saved = store.append_remote_test_receipt(task_id, receipt)
     record_remote_test_event(store, task_id, saved)
     return saved
+
+
+# #1706 R9: reproduce a main incident's failing modules on EC2 ------------------
+
+INCIDENT_UNKNOWN = 'INCIDENT_UNKNOWN'
+INCIDENT_UNREADABLE = 'INCIDENT_UNREADABLE'
+INCIDENT_NOT_OPEN = 'INCIDENT_NOT_OPEN'
+INCIDENT_ARGUMENT_INVALID = 'INCIDENT_ARGUMENT_INVALID'
+INCIDENT_SHA_NOT_RECORDED = 'INCIDENT_SHA_NOT_RECORDED'
+INCIDENT_MODULE_NOT_FAILING = 'INCIDENT_MODULE_NOT_FAILING'
+INCIDENT_MODULE_CAP = 'INCIDENT_MODULE_CAP'
+INCIDENT_CONFIG_INVALID = 'CONFIG_INVALID'
+INCIDENT_RECEIPT_SENSITIVE = 'RECEIPT_SENSITIVE'
+INCIDENT_RECEIPT_INCONSISTENT = 'RECEIPT_INCONSISTENT'
+_INCIDENT_RECORD_ATTEMPTS = 3
+
+
+def _screen_incident_receipt(parsed):
+    """Screen every output-derived field of a validated receipt (PR #1763, CWE-532).
+
+    ``final`` lines and ``failure_excerpt`` are the only receipt strings taken
+    from test output. Each goes through the sensitive-content screen; any hit
+    refuses the whole receipt (None). A final line that passes the screen but
+    is not in the unittest summary grammar (``main_incident_store.FINAL_SUMMARY``)
+    is redacted to ``main_incident_store.FINAL_REDACTED``; the store checks both
+    again before it records the receipt. The Task remote-test path does not use
+    this function.
+    """
+    from . import main_incident_store as incident_store
+    finals = parsed['final']
+    excerpt = parsed.get('failure_excerpt')
+    values = list(finals) + ([excerpt] if excerpt is not None else [])
+    if any(_emitted_sensitive(value) for value in values):
+        return None
+    screened = dict(parsed)
+    screened['final'] = [line if incident_store.FINAL_SUMMARY.fullmatch(line)
+                         else incident_store.FINAL_REDACTED for line in finals]
+    return screened
+
+
+def _incident_denied(code, incident_id):
+    """A refusal before anything ran; nothing is recorded anywhere."""
+    from . import main_incident_store as incident_store
+    safe = (incident_id if type(incident_id) is str and
+            incident_store.INCIDENT_ID.fullmatch(incident_id) else None)
+    return {'result': 'ADMISSION_DENIED', 'code': code, 'incident_id': safe,
+            'persisted': False}
+
+
+def _record_incident_result(incident_store, incident_id, entry, root):
+    """Append entry to the incident, rereading after a concurrent change.
+
+    The record is forward only, so a newer version still holds every SHA and
+    failing module the run was admitted on; the store re-checks that anyway.
+    """
+    code = incident_store.INCIDENT_RECORD_CONFLICT
+    for _ in range(_INCIDENT_RECORD_ATTEMPTS):
+        try:
+            current = incident_store.get(incident_id, root)
+            saved = incident_store.append_remote_test(
+                incident_id, current['record_sha256'], entry, root)
+        except LLMToolError as exc:
+            code = getattr(exc, 'incident_code', None) or incident_store.INCIDENT_RECORD_UNAVAILABLE
+            if code == incident_store.INCIDENT_RECORD_CONFLICT:
+                continue
+            break
+        return dict(entry, incident_id=incident_id, persisted=True,
+                    record_sha256=saved['record_sha256'])
+    return dict(entry, incident_id=incident_id, persisted=False, record_code=code)
+
+
+def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
+                             config_path=None, transport=None, now=None):
+    """Run a main incident's failing modules at one of its SHAs over EC2 SSH.
+
+    Admission (each refusal has a stable code and runs nothing): the incident
+    must be readable and still open; ``sha`` must be recorded in it (a failing
+    head, the last-good head or a merge SHA in a recorded range); every module
+    must be recorded as failing in it (``modules`` empty means all of them);
+    at most ``_MAX_REMOTE_MODULES`` modules.
+
+    The run is the Task remote-test session: the same fixed remote program,
+    module cap, SSH timeout, receipt validation and output screening, and the
+    remote program's own workspace and log cleanup. Before recording, every
+    output-derived receipt field (``final`` and ``failure_excerpt``) is
+    screened again (``_screen_incident_receipt``): a sensitive hit records
+    UNKNOWN/RECEIPT_SENSITIVE without the receipt, and a final line outside the
+    unittest summary grammar is stored as ``main_incident_store.FINAL_REDACTED``.
+    A receipt whose fields contradict its result
+    (``main_incident_store.receipt_consistent``, e.g. PASS with a non-zero
+    exit code) records UNKNOWN/RECEIPT_INCONSISTENT without the receipt.
+    The store accepts only the exact allowlisted receipt fields. The SHA itself is the
+    fetched ref, so the remote checks FETCH_HEAD against it; nothing pushes,
+    resets or updates a ref, and no CI job is triggered or rerun.
+
+    The result (sha, modules, result, code, receipt, where=EC2) is appended to
+    the incident with ``main_incident_store.append_remote_test``, never to a
+    Task. ``transport(argv, script, timeout)`` is injectable; ``root`` is the
+    TaskStore root the incident store sits beside; ``now`` is an epoch or None.
+    """
+    from . import main_incident_store as incident_store
+    if type(incident_id) is not str or not incident_store.INCIDENT_ID.fullmatch(incident_id):
+        return _incident_denied(INCIDENT_UNKNOWN, incident_id)
+    if (type(sha) is not str or not _SHA.fullmatch(sha) or
+            type(modules) not in (tuple, list, set, frozenset) or
+            any(type(item) is not str or not _MODULE.fullmatch(item) for item in modules)):
+        return _incident_denied(INCIDENT_ARGUMENT_INVALID, incident_id)
+    try:
+        record = incident_store.get(incident_id, root)
+    except LLMToolError as exc:
+        missing = getattr(exc, 'incident_code', None) == incident_store.INCIDENT_RECORD_UNAVAILABLE
+        return _incident_denied(INCIDENT_UNKNOWN if missing else INCIDENT_UNREADABLE,
+                                incident_id)
+    if record['outcome'] != incident_store.OPEN:
+        return _incident_denied(INCIDENT_NOT_OPEN, incident_id)
+    if sha not in incident_store.admitted_shas(record):
+        return _incident_denied(INCIDENT_SHA_NOT_RECORDED, incident_id)
+    failing = incident_store.failing_modules(record)
+    selected = tuple(sorted(set(modules or failing)))
+    if len(selected) > _MAX_REMOTE_MODULES:
+        return _incident_denied(INCIDENT_MODULE_CAP, incident_id)
+    if not selected or not set(selected) <= failing:
+        return _incident_denied(INCIDENT_MODULE_NOT_FAILING, incident_id)
+    try:
+        config = _config(config_path)
+    except LLMToolError:
+        return _incident_denied(INCIDENT_CONFIG_INVALID, incident_id)
+    argv = _ssh_argv(config, sha, sha, selected)
+    command_digest = _command_digest(argv)
+
+    def finish(result, code, receipt=None):
+        entry = {'sha': sha, 'modules': list(selected), 'result': result, 'code': code,
+                 'receipt': receipt, 'where': incident_store.REMOTE_TEST_WHERE,
+                 'recorded_at': incident_store.utc_stamp(now)}
+        return _record_incident_result(incident_store, incident_id, entry, root)
+
+    if transport is None:
+        transport = _ssh_transport
+    try:
+        result = transport(argv, _REMOTE_SCRIPT, _SSH_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return finish('TIMEOUT', 'SSH_TIMEOUT')
+    except (OSError, ConnectionError):
+        return finish('UNAVAILABLE', 'SSH_UNAVAILABLE')
+    stdout = result.stdout if type(result.stdout) is bytes else str(result.stdout).encode()
+    if result.returncode != 0 and not stdout:
+        code = {75: 'REMOTE_BUSY', 76: 'REMOTE_LOCK_UNSAFE'}.get(result.returncode, 'SSH_FAILED')
+        return finish('UNAVAILABLE', code)
+    parsed = _validate_remote_receipt(stdout, sha=sha, modules=selected)
+    if parsed is None:
+        return finish('UNKNOWN', 'RECEIPT_INVALID')
+    screened = _screen_incident_receipt(parsed)
+    if screened is None:
+        return finish('UNKNOWN', INCIDENT_RECEIPT_SENSITIVE)
+    receipt = dict(screened, incident_id=incident_id, command_digest=command_digest)
+    if not incident_store.receipt_consistent(receipt):
+        return finish('UNKNOWN', INCIDENT_RECEIPT_INCONSISTENT)
+    receipt['receipt_digest'] = incident_store.remote_test_digest(receipt)
+    return finish(parsed['result'], None, receipt)
 
 
 def _new_nonce():
