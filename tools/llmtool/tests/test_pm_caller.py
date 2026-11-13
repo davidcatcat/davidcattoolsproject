@@ -354,6 +354,118 @@ class PMCallerStoreTests(unittest.TestCase):
         self.assertEqual(result['step'], 'DISPATCH_REVIEW')
         self.assertEqual(result['result'], {'state': 'DISPATCHED'})
 
+    def _repair(self, task_id, *extra, claude=''):
+        argv = ['task', 'repair', task_id, '--executor-task', 'executor-1',
+                '--pr', '17', *extra]
+        args = parser_for_cli().parse_args(argv)
+        output = io.StringIO()
+        with _environment(claude=claude), \
+                patch('llmtool.review_repair.repair_review',
+                      return_value={'state': 'REPAIR_DISPATCHED'}) as repair, \
+                redirect_stdout(output):
+            code = task_submission_cli.run_task_repair(args, store=self.store)
+        return code, output.getvalue(), repair
+
+    def test_repair_refuses_missing_identity(self):
+        task_id = self._task(OWNER)
+        code, output, repair = self._repair(task_id)
+        repair.assert_not_called()
+        self.assertEqual(code, 1)
+        lines = output.splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0]), {
+            'task_id': task_id, 'step': 'REFUSED', 'result': None, 'next': 'REFUSED',
+            'codes': ['PM_CALLER_SESSION_MISSING'], 'acked': []})
+
+    def test_repair_refuses_non_owner(self):
+        task_id = self._task(OWNER)
+        for extra, claude in (((), OTHER), (('--pm-session', OTHER), '')):
+            with self.subTest(extra=extra, claude=claude):
+                code, output, repair = self._repair(task_id, *extra, claude=claude)
+                repair.assert_not_called()
+                self.assertEqual(code, 1)
+                lines = output.splitlines()
+                self.assertEqual(len(lines), 1)
+                self.assertEqual(json.loads(lines[0])['codes'],
+                                 ['PM_CALLER_NOT_TASK_OWNER'])
+
+    def test_repair_refuses_conflicting_explicit_session(self):
+        task_id = self._task(OWNER)
+        code, output, repair = self._repair(task_id, '--pm-session', OWNER, claude=OTHER)
+        repair.assert_not_called()
+        self.assertEqual(code, 1)
+        lines = output.splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])['codes'], ['PM_CALLER_SESSION_CONFLICT'])
+
+    def test_repair_refuses_fenced_owner(self):
+        task_id = self._task(OWNER)
+        pm_runtime.write_session_fence(OWNER, 'pm-' + OTHER, '2026-11-12T00:00:00Z')
+        code, output, repair = self._repair(task_id, claude=OWNER)
+        repair.assert_not_called()
+        self.assertEqual(code, 1)
+        lines = output.splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])['codes'], ['PM_CALLER_SESSION_FENCED'])
+
+    def test_repair_runs_for_owner(self):
+        task_id = self._task(OWNER)
+        for extra, claude in ((('--pm-session', OWNER), ''), ((), OWNER)):
+            with self.subTest(extra=extra, claude=claude):
+                code, output, repair = self._repair(task_id, *extra, claude=claude)
+                self.assertIsNone(code)
+                repair.assert_called_once_with(
+                    store=self.store, task_id=task_id, executor_task='executor-1',
+                    pr_number=17, family=None, github_get=None, dispatch_adapter=None,
+                    current_head=None, auto_review=False, review_dispatcher=None,
+                    delegate_callable=None, repair_task_recorder=None)
+                self.assertEqual(json.loads(output), {'state': 'REPAIR_DISPATCHED'})
+
+    def test_repair_passes_family_and_auto_review_for_owner(self):
+        task_id = self._task(OWNER)
+        code, _, repair = self._repair(task_id, '--family', 'pr-17-root',
+                                       '--auto-review', '--pm-session', 'pm-' + OWNER)
+        self.assertIsNone(code)
+        repair.assert_called_once_with(
+            store=self.store, task_id=task_id, executor_task='executor-1',
+            pr_number=17, family='pr-17-root', github_get=None, dispatch_adapter=None,
+            current_head=None, auto_review=True, review_dispatcher=None,
+            delegate_callable=None, repair_task_recorder=None)
+
+    def test_advance_internal_repair_is_not_caller_checked(self):
+        from llmtool import task_advance
+        head = 'a' * 40
+        store = _MutableStore({'task_id': 't', 'pm_session_id': 'pm-' + OWNER,
+                               'completion': {'executor_task_id': 'executor-1'}})
+        d6 = {'root': str(self.home), 'branch': 'feat/x', 'dirty': False,
+              'result_head': head, 'recorded_result_head': head}
+
+        def github_get(_path):
+            return {}
+
+        repair_call = Mock(return_value={'state': 'REPAIR_DISPATCHED'})
+        with _environment(), \
+                patch.object(task_advance, '_closed_train_member_head', return_value=None), \
+                patch.object(task_advance, '_d6_snapshot', return_value=d6), \
+                patch.object(task_advance, '_merged_review_target', return_value=None), \
+                patch.object(task_advance, 'decide', return_value='REPAIR_REVIEW'), \
+                patch.object(task_advance, '_remote_test_status',
+                             return_value=(None, None, None)), \
+                patch.object(pm_caller, 'check_caller',
+                             wraps=pm_caller.check_caller) as check, \
+                patch('llmtool.review_repair.repair_review') as module_repair, \
+                redirect_stdout(io.StringIO()):
+            result = task_advance.advance(task_id='t', store=store, pr_number=17,
+                                          github_get=github_get,
+                                          repair_review_call=repair_call)
+        check.assert_not_called()
+        module_repair.assert_not_called()
+        repair_call.assert_called_once_with(
+            store=store, task_id='t', executor_task='executor-1', pr_number=17,
+            auto_review=False, github_get=github_get, retry_claim_id=None)
+        self.assertEqual(result['step'], 'REPAIR_REVIEW')
+        self.assertEqual(result['result'], {'state': 'REPAIR_DISPATCHED'})
+
     def test_drive_adapter_refuses_non_owner_before_any_call(self):
         task_id = self._task(OWNER)
         args = parser_for_cli().parse_args(['task', 'drive', task_id, '--merge'])
