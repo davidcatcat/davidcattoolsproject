@@ -1,10 +1,12 @@
 import hashlib
 import json
 import io
-from contextlib import redirect_stderr
+from contextlib import ExitStack, redirect_stderr
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,11 +28,39 @@ def _runtime_parts(*pieces):
 import review_trust_fixture
 
 
+_MODULE_PATCHES = []
+_MODULE_POSTS = []
+
+
+def _offline_comment_list(_pr_number):
+    raise AssertionError('a test reached the GitHub comment list')
+
+
+def _offline_comment_post(_root, _pr_number, _body):
+    raise AssertionError('a test reached the GitHub comment post')
+
+
 def setUpModule():
     review_trust_fixture.start_module()
+    # #1705: verdict-post receipts go to a module temp directory, and no test
+    # here may reach GitHub; tests that post inject their own list and post.
+    posts = tempfile.TemporaryDirectory()
+    _MODULE_POSTS.append(posts)
+    post_dir = Path(posts.name).resolve() / 'posts'
+    for name, value in (
+            ('_verdict_post_dir', lambda _store: review_dispatch._private_post_dir(post_dir)),
+            ('_list_issue_comments', _offline_comment_list),
+            ('_create_issue_comment', _offline_comment_post)):
+        patcher = patch.object(review_dispatch, name, value)
+        patcher.start()
+        _MODULE_PATCHES.append(patcher)
 
 
 def tearDownModule():
+    while _MODULE_PATCHES:
+        _MODULE_PATCHES.pop().stop()
+    while _MODULE_POSTS:
+        _MODULE_POSTS.pop().cleanup()
     review_trust_fixture.stop_module()
 
 
@@ -1187,7 +1217,12 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
         executor = SimpleNamespace(root='/repo/executor', common_dir='/repo/.git')
         preflight = (self.task_id, executor, HEAD, 'e' * 40, 'codex-reviewer')
         reviewer = SimpleNamespace(root='/repo/reviewer')
-        review_text = _codex_review_text() + '\nFinding: retained finding text'
+        # The real parser only accepts text carrying this Task's run-bound line,
+        # so the stored verdict carries it too; the replay post checks it.
+        task = self.store.get(self.task_id)
+        review_text = _codex_review_text(
+            run_id=task['run_id'], contract=task['task_binding']['contract_digest']
+        ) + '\nFinding: retained finding text'
         calls = []
 
         def invoke(store, preflights):
@@ -1215,6 +1250,9 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
         self.assertNotIn('review_result', first)
         self.assertNotIn('review_result', second)
         self.assertEqual(calls, ['called'])
+        # The fresh caller owns the post; the replay inside its window waits.
+        self.assertEqual(first['verdict_post'], {'state': 'CALLER_POSTING'})
+        self.assertEqual(second['verdict_post'], {'state': 'IN_PROGRESS'})
 
     def test_sensitive_codex_review_text_is_withheld_on_fresh_and_replay(self):
         executor = SimpleNamespace(root='/repo/executor', common_dir='/repo/.git')
@@ -1297,6 +1335,243 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
         self.assertEqual(claim['binding_mismatch_keys'], ['head'])
         self.assertNotIn('review_result', claim)
         self.assertNotIn(wrong_head, json.dumps(claim))
+
+
+class VerdictPostTests(unittest.TestCase):
+    """#1705: a COMPLETED claim's stored verdict is posted once, verbatim."""
+
+    LOGIN = 'reviewer-user'
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store, self.task_id = _real_store(Path(self.temp.name) / 'store')
+        self.task = self.store.get(self.task_id)
+        self.text = _codex_review_text(
+            run_id=self.task['run_id'],
+            contract=self.task['task_binding']['contract_digest'])
+        self.claim = dict(_claim(), state='COMPLETED', native_session_id='codex-thread',
+                          account_mode='CODEX_CLI')
+        self.claim['review_result'] = {
+            'task_id': self.task_id, 'run_id': self.task['run_id'],
+            'contract_digest': self.task['task_binding']['contract_digest'],
+            'head': HEAD, 'verdict': 'PASS', 'review_text': self.text}
+        self.post_dir = Path(self.temp.name).resolve() / 'posts'
+        patcher = patch.object(
+            review_dispatch, '_verdict_post_dir',
+            lambda _store: review_dispatch._private_post_dir(self.post_dir))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.now = 1000.0
+        self.comments = []
+        self.posts = []
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def comment(self, comment_id, body, login=None):
+        return {'id': comment_id, 'user': {'login': login or self.LOGIN}, 'body': body}
+
+    def poster(self, _root, pr_number, body):
+        self.posts.append((pr_number, body))
+        return self.comment(900 + len(self.posts), body)
+
+    def ensure(self, lister=None, poster=None):
+        return review_dispatch._ensure_verdict_posted(
+            store=self.store, task=self.task, task_id=self.task_id, claim=self.claim,
+            text=self.text, login_resolver=lambda: self.LOGIN, root='/repo/executor',
+            lister=lister or (lambda _pr: list(self.comments)),
+            poster=poster or self.poster, clock=lambda: self.now,
+            allowed=lambda: True)
+
+    def receipt(self):
+        name = review_dispatch._verdict_post_name(self.task_id, self.claim)
+        return review_dispatch._read_receipt(self.post_dir, name)
+
+    def test_forged_body_by_another_author_is_ignored_and_posted_once(self):
+        # Same exact body and binding line, but not written by the posting login.
+        self.comments = [self.comment(7, self.text, login='someone-else')]
+        first = self.ensure()
+        self.assertEqual(first, {'state': 'POSTED', 'comment_id': 901})
+        self.assertEqual(self.posts, [(42, self.text)])
+        self.assertEqual(self.receipt()['state'], 'POSTED')
+        # A replay finds this login's exact comment and never posts again.
+        self.comments.append(self.comment(901, self.text))
+        second = self.ensure()
+        self.assertEqual(second, {'state': 'ALREADY_POSTED', 'comment_id': 901})
+        self.assertEqual(len(self.posts), 1)
+
+    def test_comment_without_this_claims_binding_line_does_not_count(self):
+        other = self.text.replace('run=' + self.task['run_id'], 'run=' + 'c' * 32)
+        self.assertNotEqual(other, self.text)
+        self.comments = [self.comment(7, other)]
+        self.assertEqual(self.ensure()['state'], 'POSTED')
+        self.assertEqual(self.posts, [(42, self.text)])
+
+    def test_fresh_caller_post_is_not_taken_over_until_stale(self):
+        verdict_post, keep_text = review_dispatch._reserve_caller_post(
+            store=self.store, task_id=self.task_id, claim=self.claim, text=self.text,
+            clock=lambda: self.now)
+        self.assertEqual((verdict_post, keep_text), ({'state': 'CALLER_POSTING'}, True))
+        listed = []
+
+        def lister(pr):
+            listed.append(pr)
+            return list(self.comments)
+
+        self.now += review_dispatch._VERDICT_POST_STALE_SECONDS - 1
+        self.assertEqual(self.ensure(lister=lister), {'state': 'IN_PROGRESS'})
+        self.assertEqual((listed, self.posts), ([], []))
+        # After the window the caller has ended; a replay takes over and posts.
+        self.now += 2
+        self.assertEqual(self.ensure(lister=lister)['state'], 'POSTED')
+        self.assertEqual(listed, [42])
+        self.assertEqual(self.posts, [(42, self.text)])
+        self.assertEqual(self.receipt()['owner'], 'dispatch')
+
+    def test_stale_owner_is_fenced_when_a_newer_attempt_claimed(self):
+        newer = dict(
+            review_dispatch._receipt_identity(self.task_id, self.claim, self.text),
+            state='POSTING', owner='dispatch', attempt='f' * 32,
+            started_at=self.now, updated_at=self.now)
+        name = review_dispatch._verdict_post_name(self.task_id, self.claim)
+
+        def lister_then_newer_attempt(_pr):
+            # A newer attempt claims between this owner's list and its post.
+            review_dispatch._write_receipt(self.post_dir, name, newer)
+            return []
+
+        with self.assertRaises(LLMToolError) as raised:
+            self.ensure(lister=lister_then_newer_attempt)
+        self.assertEqual(raised.exception.review_verdict_post_code, 'VERDICT_POST_FENCED')
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_VERDICT_POST_FAILED')
+        self.assertEqual(self.posts, [])
+        # The newer attempt's receipt is left exactly as it wrote it.
+        self.assertEqual(self.receipt(), newer)
+
+    def test_stale_owner_is_fenced_when_its_lock_file_was_replaced(self):
+        lock = self.post_dir / (
+            review_dispatch._verdict_post_name(self.task_id, self.claim) + '.lock')
+
+        def lister_then_new_lock(_pr):
+            lock.unlink()
+            lock.touch(mode=0o600)
+            return []
+
+        with self.assertRaises(LLMToolError) as raised:
+            self.ensure(lister=lister_then_new_lock)
+        self.assertEqual(raised.exception.review_verdict_post_code, 'VERDICT_POST_FENCED')
+        self.assertEqual(self.posts, [])
+
+    def test_already_posted_needs_a_byte_exact_body(self):
+        crlf = self.text.replace('\n', '\r\n')
+        trailing = self.text + '\n'
+        self.assertNotEqual(crlf, self.text)
+        # Bound comments by this login whose bytes differ are a conflict, not a match.
+        self.comments = [self.comment(7, crlf), self.comment(8, trailing)]
+        with self.assertRaises(LLMToolError) as raised:
+            self.ensure()
+        self.assertEqual(raised.exception.review_verdict_post_code, 'VERDICT_POST_CONFLICT')
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.receipt()['state'], 'FAILED')
+        # Only the byte-identical comment is reported as already posted.
+        self.comments.append(self.comment(9, self.text))
+        self.assertEqual(self.ensure(), {'state': 'ALREADY_POSTED', 'comment_id': 9})
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.receipt()['comment_id'], 9)
+
+    def test_two_exact_matches_are_a_duplicate_conflict_and_never_posted(self):
+        self.comments = [self.comment(7, self.text), self.comment(8, self.text)]
+        with self.assertRaises(LLMToolError) as raised:
+            self.ensure()
+        self.assertEqual(raised.exception.review_verdict_post_code, 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_VERDICT_POST_FAILED')
+        self.assertEqual(self.posts, [])
+        receipt = self.receipt()
+        self.assertEqual(receipt['state'], 'FAILED')
+        self.assertEqual(receipt['code'], 'VERDICT_POST_DUPLICATE')
+        # A replay reports the same conflict and still posts nothing.
+        with self.assertRaises(LLMToolError) as again:
+            self.ensure()
+        self.assertEqual(again.exception.review_verdict_post_code, 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(self.posts, [])
+
+    def test_duplicate_after_a_posted_receipt_is_not_already_posted(self):
+        self.assertEqual(self.ensure(), {'state': 'POSTED', 'comment_id': 901})
+        self.comments = [self.comment(901, self.text), self.comment(902, self.text)]
+        with self.assertRaises(LLMToolError) as raised:
+            self.ensure()
+        self.assertEqual(raised.exception.review_verdict_post_code, 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(len(self.posts), 1)
+        # The POSTED receipt is kept, so the verdict is never posted again.
+        self.assertEqual(self.receipt()['state'], 'POSTED')
+        self.assertEqual(self.receipt()['comment_id'], 901)
+
+    def test_posted_receipt_durably_records_a_duplicate_conflict(self):
+        self.assertEqual(self.ensure(), {'state': 'POSTED', 'comment_id': 901})
+        posted = self.receipt()
+        self.comments = [self.comment(901, self.text), self.comment(902, self.text)]
+        self.now += 5
+        with self.assertRaises(LLMToolError) as raised:
+            self.ensure()
+        self.assertEqual(raised.exception.review_verdict_post_code, 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_VERDICT_POST_FAILED')
+        self.assertFalse(hasattr(raised.exception, 'review_verdict_receipt'))
+        self.assertEqual(len(self.posts), 1)
+        # The reloaded receipt carries the conflict code and keeps every POSTED fact.
+        reloaded = self.receipt()
+        self.assertEqual(reloaded['code'], 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(reloaded['updated_at'], self.now)
+        for key in ('state', 'comment_id', 'verified', 'owner', 'attempt',
+                    'started_at', 'text_sha256'):
+            self.assertEqual(reloaded[key], posted[key])
+        self.assertEqual(reloaded['state'], 'POSTED')
+        self.assertEqual(reloaded['comment_id'], 901)
+        # A replay reports the same conflict and still never reposts.
+        with self.assertRaises(LLMToolError) as again:
+            self.ensure()
+        self.assertEqual(again.exception.review_verdict_post_code, 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.receipt()['code'], 'VERDICT_POST_DUPLICATE')
+
+    def test_posted_duplicate_whose_receipt_cannot_be_written_says_so(self):
+        self.assertEqual(self.ensure(), {'state': 'POSTED', 'comment_id': 901})
+        posted = self.receipt()
+        self.comments = [self.comment(901, self.text), self.comment(902, self.text)]
+
+        def refuse_write(*_args, **_kwargs):
+            raise review_dispatch._PostError('VERDICT_POST_RECEIPT_WRITE_FAILED')
+
+        with patch.object(review_dispatch, '_write_receipt', refuse_write):
+            with self.assertRaises(LLMToolError) as raised:
+                self.ensure()
+        self.assertEqual(raised.exception.review_verdict_post_code, 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(raised.exception.review_verdict_receipt, 'WRITE_FAILED')
+        self.assertEqual(len(self.posts), 1)
+        # The earlier POSTED receipt is left as it was.
+        self.assertEqual(self.receipt(), posted)
+
+    def test_one_exact_match_is_already_posted(self):
+        self.comments = [self.comment(7, self.text)]
+        self.assertEqual(self.ensure(), {'state': 'ALREADY_POSTED', 'comment_id': 7})
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.receipt()['state'], 'POSTED')
+
+    def test_one_exact_match_plus_forged_author_copy_is_already_posted(self):
+        self.comments = [self.comment(6, self.text, login='someone-else'),
+                         self.comment(7, self.text)]
+        self.assertEqual(self.ensure(), {'state': 'ALREADY_POSTED', 'comment_id': 7})
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.receipt()['comment_id'], 7)
+
+    def test_created_comment_with_normalized_body_is_reported_unverified(self):
+        def normalizing_poster(_root, pr_number, body):
+            self.posts.append((pr_number, body))
+            return self.comment(77, body.replace('\n', '\r\n'))
+
+        output = self.ensure(poster=normalizing_poster)
+        self.assertEqual(output, {'state': 'POSTED_UNVERIFIED', 'comment_id': 77})
+        self.assertEqual(self.posts, [(42, self.text)])
+        self.assertIs(self.receipt()['verified'], False)
 
 
 class ReviewRefusalReceiptTests(unittest.TestCase):

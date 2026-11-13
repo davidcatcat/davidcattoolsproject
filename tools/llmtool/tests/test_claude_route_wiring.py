@@ -21,6 +21,7 @@ from llmtool.task_store import TaskStore
 
 
 import review_trust_fixture
+import worker_policy_fixture
 
 
 _SKILL_MANIFEST = {'commit': 'd' * 40, 'role': 'developer', 'gate': 'develop',
@@ -31,9 +32,12 @@ _SKILL_FILES = [('CLAUDE.md', 'Claude repository rules.\n'),
 
 def setUpModule():
     review_trust_fixture.start_module()
+    # #1692: the shared all-ALLOWED test policy, never the live file.
+    worker_policy_fixture.start_module()
 
 
 def tearDownModule():
+    worker_policy_fixture.stop_module()
     review_trust_fixture.stop_module()
 
 
@@ -678,31 +682,16 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name).resolve()
-        policy_path = root / 'worker-dispatch.json'
         owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
                      'issues/289#issuecomment-1234567890')
         d6_id, other_d6_id = 'c' * 32, 'd' * 32
         task_id, second_task_id = 'a' * 32, 'b' * 32
-        policy_workers = {
-            worker: {'dispatch': 'ALLOWED', 'decided_by': 'Owner',
-                'decided_at': '2026-11-05', 'reason': 'test policy state',
-                'evidence': 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'}
-            for worker in worker_dispatch.WORKERS
-        }
-        policy_workers['company-gw-agent'] = {
-            'dispatch': 'PAUSED', 'decided_by': 'PM',
-            'decided_at': '2026-11-03',
-            'reason': 'Paused pending the Owner decision tracked by #120',
-            'evidence': 'https://github.com/davidcatcat/davidcattoolsproject/issues/120',
-        }
-        policy_workers['claude-developer'] = {
-            'dispatch': 'OWNER_ASSIGNMENT_ONLY', 'decided_by': 'Owner',
-            'decided_at': '2026-11-05', 'reason': 'test D6-bound assignment',
-            'evidence': 'https://github.com/davidcatcat/davidcattoolsproject/issues/289',
-            'owner_assignments': [{'task_id': d6_id, 'owner_assignment_ref': owner_ref}],
-        }
-        policy_path.write_text(json.dumps({'schema_version': 1, 'workers': policy_workers}),
-                               encoding='utf-8')
+        # The shared test policy with claude-developer explicitly assignment-only.
+        policy_path = worker_policy_fixture.write(
+            root / 'worker-dispatch.json', worker_policy_fixture.policy())
+        worker_policy_fixture.update(
+            policy_path, 'claude-developer', 'OWNER_ASSIGNMENT_ONLY',
+            owner_assignments=[{'task_id': d6_id, 'owner_assignment_ref': owner_ref}])
         policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', policy_path)
         with policy_patch:
             store = TaskStore(root / 'tasks')
@@ -805,10 +794,9 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             self.assertIsNone(store.get(denied_task_id)['developer'])
 
             llm_keyed_id = '8' * 32
-            policy_workers['claude-developer']['owner_assignments'] = [{
-                'task_id': llm_keyed_id, 'owner_assignment_ref': owner_ref}]
-            policy_path.write_text(json.dumps({'schema_version': 1,
-                'workers': policy_workers}), encoding='utf-8')
+            worker_policy_fixture.update(
+                policy_path, 'claude-developer', 'OWNER_ASSIGNMENT_ONLY',
+                owner_assignments=[{'task_id': llm_keyed_id, 'owner_assignment_ref': owner_ref}])
             llm_keyed = record_for(llm_keyed_id, d6_id,
                 developer=developer_for(d6_id, llm_keyed_id))
             with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as denied:

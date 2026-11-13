@@ -19,6 +19,7 @@ from llmtool.task_store import TaskStore
 
 
 import review_trust_fixture
+import worker_policy_fixture
 
 
 _SKILL_MANIFEST = {'commit': 'd' * 40, 'role': 'developer', 'gate': 'develop',
@@ -29,9 +30,12 @@ _SKILL_FILES = [('AGENTS.md', 'AGENTS repository rules.\n'),
 
 def setUpModule():
     review_trust_fixture.start_module()
+    # #1692: the shared all-ALLOWED test policy, never the live file.
+    worker_policy_fixture.start_module()
 
 
 def tearDownModule():
+    worker_policy_fixture.stop_module()
     review_trust_fixture.stop_module()
 
 
@@ -319,24 +323,13 @@ class AgyRouteWiringTests(unittest.TestCase):
                 self.assertEqual(store.gets, gets)
 
     def _fixture_policy(self, agy_row):
-        """Write a self-contained v1 policy fixture; never the live file."""
-        evidence = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
-        workers = {
-            key: {'dispatch': 'PAUSED', 'decided_by': 'Owner', 'decided_at': '2026-11-08',
-                  'reason': 'test fixture', 'evidence': evidence}
-            for key in worker_dispatch.WORKERS
-        }
-        workers['company-gw-agent'] = {
-            'dispatch': 'PAUSED', 'decided_by': 'PM', 'decided_at': '2026-11-08',
-            'reason': 'test fixture', 'evidence': worker_dispatch._GW_AGENT_PAUSED_REF}
-        workers['agy'] = dict({'decided_by': 'Owner', 'decided_at': '2026-11-08',
-                               'reason': 'test fixture', 'evidence': evidence}, **agy_row)
+        """The shared test policy with the AGY row set explicitly; never the live file."""
+        value = worker_policy_fixture.set_dispatch(
+            worker_policy_fixture.policy(), 'agy', agy_row['dispatch'],
+            owner_assignments=agy_row.get('owner_assignments'))
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        path = Path(temp.name) / 'worker-dispatch.json'
-        path.write_text(json.dumps({'schema_version': 1, 'workers': workers}),
-                        encoding='utf-8')
-        return path
+        return worker_policy_fixture.write(Path(temp.name) / 'worker-dispatch.json', value)
 
     def test_agy_without_owner_ref_is_refused_by_restrictive_policy_without_store_write(self):
         task_id = 'a' * 32

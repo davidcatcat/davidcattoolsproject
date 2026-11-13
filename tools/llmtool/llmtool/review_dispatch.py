@@ -2,6 +2,7 @@
 
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
+import hashlib
 import io
 import json
 import math
@@ -12,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 
 from .errors import LLMToolError
 from . import github_identity, role_config, task_completion, worker_dispatch
@@ -41,6 +43,15 @@ REVIEW_OUTPUT_ABSENT = 'REVIEW_OUTPUT_ABSENT'
 _REVIEW_REFUSALS_DIR = 'review-refusals'
 _RECEIPT_NAME_RE = re.compile(r'^[0-9a-zA-Z._-]+-[0-9a-zA-Z._-]+-[0-9]+\.json\Z')
 _RECEIPT_PRUNE_LIMIT = 64
+# #1705: one durable post receipt and one lock file per COMPLETED Codex claim.
+_VERDICT_POSTS_DIR = 'review-verdict-posts'
+_VERDICT_POST_NAME_RE = re.compile(r'^[0-9A-Za-z][0-9A-Za-z._-]{0,127}\Z')
+_VERDICT_RECEIPT_MAX = 4096
+# A caller-owned post (task advance) runs one gh call with a 30 second timeout,
+# so after this window it has ended and another replay may take the post over.
+_VERDICT_POST_STALE_SECONDS = 300
+_VERDICT_POST_TIMEOUT = 30
+_VERDICT_COMMENT_PAGES = 30
 
 
 def _unique_json_object(pairs):
@@ -97,16 +108,21 @@ def _select_reviewer(task, requested=None):
     return reviewer_key
 
 
+def _gh_env():
+    """Return the minimal gh environment bound to the AI account configuration."""
+    home = os.environ.get('HOME') or os.path.expanduser('~')
+    return {'PATH': task_completion._GH_PATH, 'HOME': home,
+            'LC_ALL': 'C', 'GH_PROMPT_DISABLED': '1',
+            'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1',
+            'GH_CONFIG_DIR': github_identity.ai_gh_config_dir(home)}
+
+
 def _resolve_github_login():
     """Resolve the authenticated GitHub account without exposing credentials."""
     gh = shutil.which('gh', path=task_completion._GH_PATH)
     if gh is None:
         _refuse('REVIEWER_GITHUB_LOGIN_UNAVAILABLE')
-    home = os.environ.get('HOME') or os.path.expanduser('~')
-    env = {'PATH': task_completion._GH_PATH, 'HOME': home,
-           'LC_ALL': 'C', 'GH_PROMPT_DISABLED': '1',
-           'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1',
-           'GH_CONFIG_DIR': github_identity.ai_gh_config_dir(home)}
+    env = _gh_env()
     try:
         result = subprocess.run(
             [gh, 'api', 'user', '--jq', '.login'], env=env,
@@ -620,10 +636,441 @@ def _write_refusal_receipt(*, store, task_id, pr_number, head, version,
     return receipt_path
 
 
+class _PostError(Exception):
+    """A fixed verdict-post failure name; never review text, output or a path."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+def _verdict_post_failure(code, *, receipt_failed=False):
+    message = 'Reviewer verdict not posted: ' + code
+    if receipt_failed:
+        message += '; the post receipt was not stored'
+    error = LLMToolError(message)
+    error.review_dispatch_code = 'REVIEW_VERDICT_POST_FAILED'
+    error.review_verdict_post_code = code
+    if receipt_failed:
+        error.review_verdict_receipt = 'WRITE_FAILED'
+    return error
+
+
+def _list_issue_comments(pr_number):
+    """Return every PR comment, or raise when the read cannot be proven complete."""
+    if type(pr_number) is not int or pr_number < 1:
+        raise _PostError('VERDICT_POST_LIST_FAILED')
+    comments = []
+    for page in range(1, _VERDICT_COMMENT_PAGES + 1):
+        batch = task_completion._github_get(
+            f'issues/{pr_number}/comments?per_page=100&page={page}')
+        if type(batch) is not list:
+            raise _PostError('VERDICT_POST_LIST_FAILED')
+        comments.extend(batch)
+        if len(batch) < 100:
+            return comments
+    raise _PostError('VERDICT_POST_LIST_FAILED')
+
+
+def _create_issue_comment(root, pr_number, body):
+    """Post body verbatim as the AI account; return the created comment or None."""
+    if type(pr_number) is not int or pr_number < 1 or type(body) is not str:
+        raise _PostError('VERDICT_POST_COMMAND_FAILED')
+    gh = shutil.which('gh', path=task_completion._GH_PATH)
+    if gh is None:
+        raise _PostError('VERDICT_POST_COMMAND_FAILED')
+    # The body goes on stdin as JSON, so it is never in argv and never re-wrapped.
+    payload = json.dumps({'body': body}).encode('utf-8')
+    try:
+        result = subprocess.run(
+            [gh, 'api', '--method', 'POST',
+             f'repos/{{owner}}/{{repo}}/issues/{pr_number}/comments', '--input', '-'],
+            cwd=str(root), env=_gh_env(), input=payload, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, check=False, timeout=_VERDICT_POST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # The comment may exist; the next replay re-reads the PR before posting.
+        raise _PostError('VERDICT_POST_TIMEOUT') from None
+    except OSError:
+        raise _PostError('VERDICT_POST_COMMAND_FAILED') from None
+    if result.returncode:
+        raise _PostError('VERDICT_POST_COMMAND_FAILED')
+    try:
+        created = json.loads(result.stdout.decode('utf-8'))
+    except (AttributeError, UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    return created if type(created) is dict else None
+
+
+def _private_post_dir(directory):
+    directory = Path(directory)
+    try:
+        os.makedirs(str(directory), mode=0o700, exist_ok=True)
+        info = os.lstat(str(directory))
+    except OSError:
+        raise _PostError('VERDICT_POST_RECEIPT_UNAVAILABLE') from None
+    if (not stat.S_ISDIR(info.st_mode) or
+            (hasattr(os, 'getuid') and info.st_uid != os.getuid())):
+        raise _PostError('VERDICT_POST_RECEIPT_UNAVAILABLE')
+    return directory
+
+
+def _verdict_post_dir(store):
+    root = getattr(store, 'root', None)
+    if not isinstance(root, Path):
+        raise _PostError('VERDICT_POST_RECEIPT_UNAVAILABLE')
+    return _private_post_dir(root.parent / _VERDICT_POSTS_DIR)
+
+
+def _verdict_post_name(task_id, claim):
+    reviewer_task = claim.get('reviewer_task') if type(claim) is dict else None
+    if type(task_id) is not str or type(reviewer_task) is not str:
+        raise _PostError('VERDICT_POST_RECEIPT_UNAVAILABLE')
+    name = f'{task_id}-{reviewer_task}'
+    if _VERDICT_POST_NAME_RE.fullmatch(name) is None:
+        raise _PostError('VERDICT_POST_RECEIPT_UNAVAILABLE')
+    return name
+
+
+def _receipt_identity(task_id, claim, text):
+    # Only a digest of the text is stored; never the review text itself.
+    return {'schema_version': 1, 'task_id': task_id, 'pr': claim.get('pr'),
+            'head': claim.get('head_sha'), 'version': claim.get('version'),
+            'reviewer_task': claim.get('reviewer_task'),
+            'text_sha256': hashlib.sha256(
+                text.encode('utf-8', 'surrogatepass')).hexdigest()}
+
+
+def _lock_current(fd, path):
+    """True only while the held lock is still the file at the lock path."""
+    try:
+        held, named = os.fstat(fd), os.lstat(str(path))
+    except OSError:
+        return False
+    return (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino)
+
+
+def _acquire_post_lock(directory, name):
+    """Take the claim's exclusive post lock; None means another poster holds it.
+
+    The kernel drops the lock when its holder exits, so a crashed poster never
+    leaves it held. The lock file is never removed, so every poster locks the
+    same file.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        raise _PostError('VERDICT_POST_LOCK_UNAVAILABLE') from None
+    path = Path(directory) / (name + '.lock')
+    flags = (os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0) |
+             getattr(os, 'O_CLOEXEC', 0))
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except OSError:
+        raise _PostError('VERDICT_POST_LOCK_UNAVAILABLE') from None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    except OSError:
+        os.close(fd)
+        raise _PostError('VERDICT_POST_LOCK_UNAVAILABLE') from None
+    if not _lock_current(fd, path):
+        os.close(fd)
+        return None
+    return fd
+
+
+def _read_receipt(directory, name):
+    path = Path(directory) / (name + '.json')
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0)
+    try:
+        fd = os.open(str(path), flags)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise _PostError('VERDICT_POST_RECEIPT_UNAVAILABLE') from None
+    data = b''
+    try:
+        while len(data) <= _VERDICT_RECEIPT_MAX:
+            chunk = os.read(fd, _VERDICT_RECEIPT_MAX + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+    except OSError:
+        raise _PostError('VERDICT_POST_RECEIPT_UNAVAILABLE') from None
+    finally:
+        os.close(fd)
+    if len(data) > _VERDICT_RECEIPT_MAX:
+        raise _PostError('VERDICT_POST_RECEIPT_UNAVAILABLE')
+    try:
+        record = json.loads(data.decode('utf-8'), object_pairs_hook=_unique_json_object)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise _PostError('VERDICT_POST_RECEIPT_UNAVAILABLE') from None
+    if type(record) is not dict:
+        raise _PostError('VERDICT_POST_RECEIPT_UNAVAILABLE')
+    return record
+
+
+def _check_receipt(receipt, identity):
+    started = receipt.get('started_at')
+    if (any(receipt.get(key) != value for key, value in identity.items()) or
+            receipt.get('state') not in ('POSTING', 'POSTED', 'FAILED') or
+            receipt.get('owner') not in ('caller', 'dispatch') or
+            type(receipt.get('attempt')) is not str or
+            type(started) not in (int, float) or not math.isfinite(started)):
+        raise _PostError('VERDICT_POST_RECEIPT_UNAVAILABLE')
+    return receipt
+
+
+def _write_receipt(directory, name, record):
+    """Atomically replace the claim's post receipt; raise when it is not stored."""
+    data = (json.dumps(record, sort_keys=True) + '\n').encode('utf-8')
+    if len(data) > _VERDICT_RECEIPT_MAX:
+        raise _PostError('VERDICT_POST_RECEIPT_WRITE_FAILED')
+    directory = Path(directory)
+    temp = directory / f'.{name}.tmp.{os.urandom(8).hex()}'
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0) |
+             getattr(os, 'O_CLOEXEC', 0))
+    try:
+        fd = os.open(str(temp), flags, 0o600)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(str(temp), str(directory / (name + '.json')))
+    except OSError:
+        try:
+            os.unlink(str(temp))
+        except OSError:
+            pass
+        raise _PostError('VERDICT_POST_RECEIPT_WRITE_FAILED') from None
+
+
+def _verdict_binding_line(task, task_id, claim, text):
+    """Return the run-bound binding line the stored verdict text must carry."""
+    result = claim.get('review_result')
+    binding = task.get('task_binding') if type(task) is dict else None
+    if (type(result) is not dict or type(binding) is not dict or
+            result.get('task_id') != task_id or
+            type(result.get('run_id')) is not str or
+            result.get('run_id') != task.get('run_id') or
+            type(result.get('head')) is not str or
+            result.get('head') != claim.get('head_sha') or
+            type(result.get('contract_digest')) is not str or
+            result.get('contract_digest') != binding.get('contract_digest') or
+            result.get('review_text') != text):
+        raise _PostError('VERDICT_POST_BINDING_INVALID')
+    line = (f"LLMTOOL-REVIEW-BINDING v1 task={task_id} run={result['run_id']} "
+            f"contract={result['contract_digest']} head={result['head']}")
+    if line not in text.splitlines():
+        raise _PostError('VERDICT_POST_BINDING_INVALID')
+    return line
+
+
+def _find_posted_verdict(comments, login, text, binding_line):
+    """Return (exact comment, conflict, duplicate) from the expected login's comments.
+
+    A body alone never counts: the author must be the posting login and the
+    body must equal the stored text byte for byte, binding line included. A
+    bound comment by that login whose body differs is a conflict, not a match.
+    More than one exact match is a duplicate, never an already-posted verdict.
+    """
+    match, conflict, duplicate = None, False, False
+    for comment in comments:
+        if type(comment) is not dict:
+            continue
+        user, body = comment.get('user'), comment.get('body')
+        if (type(user) is not dict or user.get('login') != login or
+                type(body) is not str or binding_line not in body):
+            continue
+        if body == text and binding_line in body.splitlines():
+            if match is None:
+                match = comment
+            else:
+                duplicate = True
+        else:
+            conflict = True
+    return match, conflict, duplicate
+
+
+def _comment_id(comment):
+    value = comment.get('id') if type(comment) is dict else None
+    return value if type(value) is int and not isinstance(value, bool) else None
+
+
+def _reserve_caller_post(*, store, task_id, claim, text, clock):
+    """Record that the fresh caller posts this verdict.
+
+    Returns (verdict_post, keep_text). keep_text is False when another poster
+    already holds this claim, so the caller gets no text and cannot post twice.
+    """
+    try:
+        directory = _verdict_post_dir(store)
+        name = _verdict_post_name(task_id, claim)
+        fd = _acquire_post_lock(directory, name)
+    except _PostError as exc:
+        return {'state': 'RECEIPT_UNAVAILABLE', 'code': exc.code}, True
+    if fd is None:
+        return {'state': 'IN_PROGRESS'}, False
+    try:
+        if _read_receipt(directory, name) is not None:
+            return {'state': 'IN_PROGRESS'}, False
+        now = clock()
+        _write_receipt(directory, name, dict(
+            _receipt_identity(task_id, claim, text), state='POSTING', owner='caller',
+            attempt=os.urandom(16).hex(), started_at=now, updated_at=now))
+    except _PostError as exc:
+        return {'state': 'RECEIPT_UNAVAILABLE', 'code': exc.code}, True
+    finally:
+        os.close(fd)
+    return {'state': 'CALLER_POSTING'}, True
+
+
+def _ensure_verdict_posted(*, store, task, task_id, claim, text, login_resolver, root,
+                           lister, poster, clock, allowed):
+    """Post a COMPLETED claim's stored verdict once, verbatim, under its lock."""
+    try:
+        directory = _verdict_post_dir(store)
+        name = _verdict_post_name(task_id, claim)
+        fd = _acquire_post_lock(directory, name)
+    except _PostError as exc:
+        raise _verdict_post_failure(exc.code) from None
+    if fd is None:
+        return {'state': 'IN_PROGRESS'}
+    try:
+        return _post_under_lock(
+            fd=fd, directory=directory, name=name, task=task, task_id=task_id,
+            claim=claim, text=text, login_resolver=login_resolver, root=root,
+            lister=lister, poster=poster, clock=clock, allowed=allowed)
+    finally:
+        os.close(fd)
+
+
+def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_resolver,
+                     root, lister, poster, clock, allowed):
+    identity = _receipt_identity(task_id, claim, text)
+    lock_path = Path(directory) / (name + '.lock')
+    try:
+        receipt = _read_receipt(directory, name)
+        if receipt is not None:
+            _check_receipt(receipt, identity)
+        binding_line = _verdict_binding_line(task, task_id, claim, text)
+    except _PostError as exc:
+        raise _verdict_post_failure(exc.code) from None
+    now = clock()
+    if (receipt is not None and receipt['state'] == 'POSTING' and
+            receipt['owner'] == 'caller' and
+            now - receipt['started_at'] < _VERDICT_POST_STALE_SECONDS):
+        return {'state': 'IN_PROGRESS'}
+    login = login_resolver()
+    if receipt is not None and receipt['state'] == 'POSTED':
+        # Never post twice; report only what this read verifies.
+        try:
+            comments = lister(claim.get('pr'))
+        except Exception:
+            comments = None
+        match, _conflict, duplicate = (
+            _find_posted_verdict(comments, login, text, binding_line)
+            if type(comments) is list else (None, False, False))
+        if duplicate:
+            # Record the conflict durably on the receipt, keeping its POSTED
+            # facts (state, owner, attempt, comment id); nothing is posted.
+            try:
+                _write_receipt(directory, name, dict(
+                    receipt, code='VERDICT_POST_DUPLICATE', updated_at=clock()))
+            except _PostError:
+                raise _verdict_post_failure(
+                    'VERDICT_POST_DUPLICATE', receipt_failed=True) from None
+            raise _verdict_post_failure('VERDICT_POST_DUPLICATE')
+        if match is not None:
+            return {'state': 'ALREADY_POSTED', 'comment_id': _comment_id(match)}
+        output = {'state': 'POSTED_UNVERIFIED'}
+        if _comment_id(receipt) is not None:
+            output['comment_id'] = receipt['comment_id']
+        return output
+    # Take the post over with a new attempt; an older owner is fenced by it.
+    attempt = os.urandom(16).hex()
+    base = dict(identity, owner='dispatch', attempt=attempt, started_at=now)
+
+    def record(state, **extra):
+        _write_receipt(directory, name, dict(base, state=state, updated_at=clock(), **extra))
+
+    def failed(code):
+        try:
+            record('FAILED', code=code)
+        except _PostError:
+            return _verdict_post_failure(code, receipt_failed=True)
+        return _verdict_post_failure(code)
+
+    try:
+        record('POSTING')
+    except _PostError as exc:
+        raise _verdict_post_failure(exc.code, receipt_failed=True) from None
+    try:
+        comments = lister(claim.get('pr'))
+    except Exception:
+        comments = None
+    if type(comments) is not list:
+        raise failed('VERDICT_POST_LIST_FAILED')
+    match, conflict, duplicate = _find_posted_verdict(comments, login, text, binding_line)
+    if duplicate:
+        raise failed('VERDICT_POST_DUPLICATE')
+    if match is not None:
+        output = {'state': 'ALREADY_POSTED', 'comment_id': _comment_id(match)}
+        try:
+            record('POSTED', comment_id=_comment_id(match), verified=True)
+        except _PostError:
+            output['receipt'] = 'WRITE_FAILED'
+        return output
+    if conflict:
+        raise failed('VERDICT_POST_CONFLICT')
+    if not allowed():
+        raise failed('VERDICT_POST_NOT_ALLOWED')
+    # Fence right before posting: only this attempt, still holding the named
+    # lock, may post. A newer attempt's receipt is never overwritten here.
+    try:
+        current = _read_receipt(directory, name)
+    except _PostError:
+        current = None
+    if (type(current) is not dict or current.get('attempt') != attempt or
+            current.get('state') != 'POSTING' or not _lock_current(fd, lock_path)):
+        raise _verdict_post_failure('VERDICT_POST_FENCED')
+    try:
+        created = poster(root, claim.get('pr'), text)
+    except _PostError as exc:
+        raise failed(exc.code) from None
+    except Exception:
+        raise failed('VERDICT_POST_COMMAND_FAILED') from None
+    user = created.get('user') if type(created) is dict else None
+    verified = (type(created) is dict and created.get('body') == text and
+                type(user) is dict and user.get('login') == login)
+    output = {'state': 'POSTED' if verified else 'POSTED_UNVERIFIED'}
+    if _comment_id(created) is not None:
+        output['comment_id'] = _comment_id(created)
+    try:
+        record('POSTED', comment_id=_comment_id(created), verified=verified)
+    except _PostError:
+        # The comment exists; the receipt still says POSTING, so the next replay
+        # re-reads the PR and finds it instead of posting again.
+        output['receipt'] = 'WRITE_FAILED'
+    return output
+
+
 def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     create_d6=None, dispatch_session=None, bind_session=None,
-                    prompt_renderer=None, codex_runner=None, reviewer=None):
-    """Claim once, create a read-only Reviewer D6 and bind its dispatched session."""
+                    prompt_renderer=None, codex_runner=None, reviewer=None,
+                    comment_lister=None, comment_poster=None, post_clock=None):
+    """Claim once, create a read-only Reviewer D6 and bind its dispatched session.
+
+    #1705: a fresh COMPLETED Codex verdict is handed to the caller to post under
+    a durable caller-owned post receipt. A replay of a COMPLETED claim posts the
+    stored text itself, once and verbatim, under the claim's exclusive lock.
+    """
+    clock = post_clock or time.time
     task = store.get(task_id)
     _, executor, head, _base, reviewer_key = _preflight(
         store, task_id, executor_task, pr_number, version, task=task,
@@ -644,7 +1091,20 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             _refuse('REVIEW_DISPATCH_CLAIM_MISMATCH')
         if prior.get('state') == 'COMPLETED':
             result = prior.get('review_result')
-            return _review_return(prior, result)
+            output = _review_return(prior, result)
+            stored = result.get('review_text') if type(result) is dict else None
+            if (type(stored) is not str or not stored or
+                    output.get('review_text') != stored):
+                # Withheld or screened text is never posted.
+                output['verdict_post'] = {'state': 'WITHHELD'}
+                return output
+            output['verdict_post'] = _ensure_verdict_posted(
+                store=store, task=task, task_id=task_id, claim=prior, text=stored,
+                login_resolver=_resolve_github_login, root=executor.root,
+                lister=comment_lister or _list_issue_comments,
+                poster=comment_poster or _create_issue_comment, clock=clock,
+                allowed=lambda: _policy(task, reviewer_key).allowed)
+            return output
         if prior['state'] == 'CLAIMED':
             unknown = dict(prior, state='UNKNOWN', updated_at=_now())
             updated_claims = [unknown if claim is prior else claim for claim in claims]
@@ -803,9 +1263,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         updated_claims = [dispatched if item is claim else item for item in claims + [claim]]
         store.compare_and_update(task_id, expected={'review_dispatch_claim': claims + [claim]},
                                  review_dispatch_claim=updated_claims)
-        if reviewer_key == 'codex-reviewer':
-            return _review_return(dispatched, codex_result)
-        return dispatched
+        if reviewer_key != 'codex-reviewer':
+            return dispatched
+        output = _review_return(dispatched, codex_result)
     except Exception as exc:
         unknown = dict(claim, state='UNKNOWN', updated_at=_now())
         if session_id is not None:
@@ -860,3 +1320,16 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         if hasattr(exc, 'review_refusal'):
             outcome_error.review_refusal = exc.review_refusal
         raise outcome_error from None
+    # The claim is durably COMPLETED. Nothing below may turn it UNKNOWN.
+    text = output.get('review_text')
+    stored = dispatched['review_result']['review_text']
+    if type(text) is not str or not text or text != stored:
+        output.pop('review_text', None)
+        output['verdict_post'] = {'state': 'WITHHELD'}
+        return output
+    verdict_post, keep_text = _reserve_caller_post(
+        store=store, task_id=task_id, claim=dispatched, text=stored, clock=clock)
+    output['verdict_post'] = verdict_post
+    if not keep_text:
+        output.pop('review_text', None)
+    return output

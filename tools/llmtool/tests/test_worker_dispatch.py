@@ -21,6 +21,7 @@ from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import _record
 from review_trust_fixture import start_module as _start_trust_fixture
 from review_trust_fixture import stop_module as _stop_trust_fixture
+import worker_policy_fixture
 _IMPORT_HOME_PATCH.stop()
 
 
@@ -45,12 +46,9 @@ class WorkerDispatchTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
-        self.policy_path = self.root / 'worker-dispatch.json'
-        self.policy = self._fixture_policy()
-        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
-        self.policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
-        self.policy_patch.start()
-        self.addCleanup(self.policy_patch.stop)
+        # #1692: the shared all-ALLOWED test policy, never the live file.
+        self.policy_path = worker_policy_fixture.install(self)
+        self.policy = worker_policy_fixture.read(self.policy_path)
         self.repository_patch = patch.object(worker_dispatch, 'repository_config',
             return_value={'slug': 'davidcatcat/davidcattoolsproject',
                           'dispatch_issue': 289, 'dispatch_evidence_pr': 283})
@@ -59,28 +57,6 @@ class WorkerDispatchTests(unittest.TestCase):
         self.store = TaskStore(self.root / 'tasks')
         self.task = self._task()
         self.store.create(self.task)
-
-    @staticmethod
-    def _fixture_policy():
-        evidence = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
-        workers = {
-            worker: {
-                'dispatch': 'ALLOWED', 'decided_by': 'Owner',
-                'decided_at': '2026-10-22', 'reason': 'test policy state',
-                'evidence': evidence,
-            }
-            for worker in worker_dispatch.WORKERS
-        }
-        workers['company-gw-agent'] = {
-            'dispatch': 'PAUSED', 'decided_by': 'PM',
-            'decided_at': '2026-11-03',
-            'reason': 'Paused pending the Owner decision tracked by #120',
-            'evidence': 'https://github.com/davidcatcat/davidcattoolsproject/issues/120',
-        }
-        return {
-            'schema_version': 1,
-            'workers': workers,
-        }
 
     def _task(self):
         request = 'Bounded non-sensitive Developer task.'
@@ -117,9 +93,32 @@ class WorkerDispatchTests(unittest.TestCase):
         }
 
     def _set_state(self, worker, state):
-        self.policy['workers'][worker]['dispatch'] = state
-        self.policy['workers'][worker]['reason'] = 'test policy state'
+        worker_policy_fixture.set_dispatch(self.policy, worker, state)
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+
+    def test_shared_fixture_decisions_ignore_a_flipped_live_policy_row(self):
+        # #1692: under the shared test policy the gate never reads a live-policy
+        # location, so flipping any single live row changes no ordinary decision.
+        live_locations = {Path(worker_dispatch._DEFAULT_POLICY_PATH),
+                          *worker_dispatch._policy_candidates()}
+        self.assertEqual(Path(worker_dispatch._POLICY_PATH), self.policy_path)
+        self.assertNotIn(self.policy_path, live_locations)
+        keys = sorted(worker_dispatch.WORKERS | worker_dispatch.DEBUG_WORKERS)
+        baseline = {key: worker_dispatch.evaluate(key) for key in keys}
+        self.assertTrue(all(decision.allowed for decision in baseline.values()))
+        for key in keys:
+            with self.subTest(flipped=key):
+                live = worker_policy_fixture.write(
+                    self.root / f'live-{key}.json', worker_policy_fixture.policy({key: 'PAUSED'}))
+                # Control: the flipped file is a real refusal when it is the policy read.
+                with patch.object(worker_dispatch, '_POLICY_PATH', live), \
+                        patch.object(worker_dispatch, '_DEFAULT_POLICY_PATH', live), \
+                        patch.object(worker_dispatch, '_policy_candidates', return_value=[live]):
+                    self.assertEqual(worker_dispatch.evaluate(key).reason_code, 'OWNER_PAUSED')
+                with patch.object(worker_dispatch, '_DEFAULT_POLICY_PATH', live), \
+                        patch.object(worker_dispatch, '_policy_candidates', return_value=[live]):
+                    for other in keys:
+                        self.assertEqual(worker_dispatch.evaluate(other), baseline[other])
 
     def test_repository_reference_patterns_follow_validated_identity_and_escape_slug(self):
         owner_ref, evidence_ref = worker_dispatch._build_reference_patterns({
@@ -166,6 +165,7 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertIn('company-gw-agent', worker_dispatch.WORKERS)
         self.assertEqual(worker_dispatch.worker_key_for('gw-agent'), 'company-gw-agent')
         # A PM-paused row validates and evaluates to OWNER_PAUSED.
+        self._set_state('company-gw-agent', 'PAUSED')
         decision = worker_dispatch.evaluate('company-gw-agent')
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
@@ -226,7 +226,6 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(parsed['workers']['company-gw-agent']['dispatch'], 'PAUSED')
 
     def test_owner_policy_states_are_read_from_the_exact_schema(self):
-        self._set_state('agy', 'ALLOWED')
         self._set_state('opencode-developer', 'PAUSED')
         self.assertTrue(worker_dispatch.evaluate('codex-developer').allowed)
         self.assertTrue(worker_dispatch.evaluate('company-gw').allowed)
@@ -536,7 +535,6 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_PAUSED')
 
     def test_allowed_taskstore_assignment_and_adapter_attempt_are_both_audited(self):
-        self._set_state('company-gw', 'ALLOWED')
         developer = self.developer()
         saved = self.store.compare_and_update(
             self.task['task_id'], expected={'developer': None, 'state': 'PM_RESPONDED'},
@@ -857,7 +855,6 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(denied.dispatch_code, 'OWNER_PAUSED')
 
     def test_codex_timeout_continuation_adapter_consumes_recorded_action(self):
-        self._set_state('codex-developer', 'ALLOWED')
         pending = self.developer(state='DEVELOPER_PENDING', provider='codex')
         pending.update(max_tokens=None, executor_task_id='executor-task-1')
         self.store.compare_and_update(self.task['task_id'],

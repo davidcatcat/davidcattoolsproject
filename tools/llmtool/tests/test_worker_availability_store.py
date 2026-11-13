@@ -22,6 +22,7 @@ def stamp(value):
 
 
 import review_trust_fixture
+import worker_policy_fixture
 
 
 def setUpModule():
@@ -37,6 +38,8 @@ class WorkerAvailabilityStoreTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve() / 'tasks'
+        # #1692: the shared test policy, never the live worker-dispatch.json.
+        self.policy_path = worker_policy_fixture.install(self)
         self.store = TaskStore(self.root)
 
     def _observation(self, *, worker='codex-developer', layer='runtime',
@@ -85,10 +88,11 @@ class WorkerAvailabilityStoreTests(unittest.TestCase):
 
     def test_observations_do_not_change_dispatch_policy_or_task_assignment(self):
         task = self.store.create(make_task_record())
-        before_policy = Path(worker_dispatch._POLICY_PATH).read_bytes()
+        self.assertEqual(Path(worker_dispatch._POLICY_PATH), self.policy_path)
+        before_policy = self.policy_path.read_bytes()
         before_task = self.store.get(task['task_id'])
         self._observation(worker='opencode-developer', status='PASS')
-        self.assertEqual(Path(worker_dispatch._POLICY_PATH).read_bytes(), before_policy)
+        self.assertEqual(self.policy_path.read_bytes(), before_policy)
         self.assertEqual(self.store.get(task['task_id']), before_task)
 
     def test_invalid_worker_layer_status_source_digest_and_time_rejected(self):

@@ -7,21 +7,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from llmtool import worker_dispatch
+import worker_policy_fixture
 
 REPOSITORY = {'slug': 'davidcatcat/davidcattoolsproject',
               'dispatch_issue': 289, 'dispatch_evidence_pr': 283}
-EVIDENCE = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
-GW_AGENT = {'dispatch': 'PAUSED', 'decided_by': 'PM', 'decided_at': '2026-11-03',
-            'reason': 'Paused pending the Owner decision tracked by #120',
-            'evidence': 'https://github.com/davidcatcat/davidcattoolsproject/issues/120'}
 
 
 def policy(keys):
-    workers = {key: {'dispatch': 'ALLOWED', 'decided_by': 'Owner', 'decided_at': '2026-11-12',
-                     'reason': 'test policy state', 'evidence': EVIDENCE}
-               for key in keys}
-    workers['company-gw-agent'] = dict(GW_AGENT)
-    return {'schema_version': 1, 'workers': workers}
+    # #1692: the shared all-ALLOWED test policy limited to ``keys``.
+    return worker_policy_fixture.policy(keys=keys)
 
 
 class DebugWorkerKeyTests(unittest.TestCase):
