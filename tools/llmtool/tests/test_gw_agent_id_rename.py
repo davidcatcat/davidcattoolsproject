@@ -257,11 +257,25 @@ def _delegate_provider_argument(tree):
             yield node
 
 
-# The only places the retired id may be written: the legacy alias tables.
+def _module_constant(name):
+    """A top-level assignment to name (a test module's legacy fixture constant)."""
+    def find(tree):
+        for node in tree.body:
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name) and node.targets[0].id == name):
+                yield node
+    return find
+
+
+# The only places the retired id may be written: the legacy alias tables
+# (the alias map and the retired-route parse list of task delegate).
 _ALIAS_TABLES = {
     'worker_dispatch.py': _assignments_to('RETIRED_WORKER_ALIASES'),
     'task_submission_cli.py': _delegate_provider_argument,
 }
+# Test modules under scripts/ load old records on purpose; each may name the
+# retired id only in one top-level fixture constant.
+_FIXTURE_CONSTANT = _module_constant('LEGACY_WORKER_ID')
 # Modules that read stored records naming the retired id: they use the shared
 # alias (worker_dispatch.stored_worker_id) and keep no table of their own.
 _SHARED_ALIAS_READERS = ('task_store.py',)
@@ -272,20 +286,44 @@ def _names_retired_id(node):
                for child in ast.walk(node))
 
 
-def _stray_lines(text, find_table=None):
+def _allowed_spans(table):
+    """(line, start, end) of each string constant in the table that is exactly
+    the retired id; AST columns are UTF-8 byte offsets."""
+    return {(node.lineno, node.col_offset, node.end_col_offset)
+            for node in ast.walk(table)
+            if isinstance(node, ast.Constant) and node.value == RETIRED
+            and node.lineno == node.end_lineno}
+
+
+def _stray_lines(text, find_table=None, required=True):
     """Line numbers naming the retired id outside the one alias table.
 
-    With a table finder there must be exactly one table and it must itself
-    name the retired id, so the guard cannot pass because a table moved."""
+    Only the exact retired-id constants inside the table are allowed, so a
+    second use on a table line (code or comment) is still reported. With a
+    required table finder there must be exactly one table and it must itself
+    name the retired id, so the guard cannot pass because a table moved.
+    With required=False there may be no table, and then nothing is allowed."""
     allowed = set()
     if find_table is not None:
         tables = list(find_table(ast.parse(text)))
-        if len(tables) != 1 or not _names_retired_id(tables[0]):
+        if (len(tables) > 1 or (required and not tables)
+                or (tables and not _names_retired_id(tables[0]))):
             raise AssertionError(f'expected one alias table naming {RETIRED}, '
                                  f'found {len(tables)}')
-        allowed = set(range(tables[0].lineno, tables[0].end_lineno + 1))
-    return [number for number, line in enumerate(text.splitlines(), 1)
-            if RETIRED in line and number not in allowed]
+        if tables:
+            allowed = _allowed_spans(tables[0])
+    needle = RETIRED.encode('utf-8')
+    stray = []
+    for number, line in enumerate(text.split('\n'), 1):
+        raw = line.encode('utf-8')
+        start = raw.find(needle)
+        while start != -1:
+            if not any(row == number and begin <= start and start + len(needle) <= end
+                       for row, begin, end in allowed):
+                stray.append(number)
+                break
+            start = raw.find(needle, start + 1)
+    return stray
 
 
 class RetiredIdGuardTests(unittest.TestCase):
@@ -346,24 +384,28 @@ class RetiredIdGuardTests(unittest.TestCase):
             for table in ('RETIRED_WORKER_ALIASES', 'RETIRED_WORKER_IDS'):
                 self.assertEqual(list(_assignments_to(table)(tree)), [])
 
-    def test_script_modules_never_name_the_retired_id(self):
-        # High Debug #1780 completeness: every script beside the package reads
-        # stored ids through the shared alias and keeps no table of its own.
-        # The alias tables and the retired-route parse list live only in the
-        # package (checked above). Test modules under scripts/ are fixtures that
-        # load old records on purpose, as tools/llmtool/tests does, so they are
-        # not scanned here.
+    def test_script_modules_name_the_retired_id_only_in_a_fixture_constant(self):
+        # High Debug #1780 completeness: every *.py under tools/llmtool/scripts
+        # and scripts is scanned. A script reads stored ids through the shared
+        # alias and never names the retired id; the alias tables and the
+        # retired-route parse list live only in the package (checked above).
+        # A test module (test_*.py) may name it only in one top-level
+        # LEGACY_WORKER_ID fixture constant (Codex v1 F1 on PR #1791).
+        scanned = set()
         for directory in (_LLMTOOL_ROOT / 'scripts', _REPO_ROOT / 'scripts'):
-            modules = sorted(path for path in directory.glob('*.py')
-                             if not path.name.startswith('test_'))
+            modules = sorted(directory.glob('*.py'))
             with self.subTest(directory=str(directory.relative_to(_REPO_ROOT))):
                 self.assertTrue(modules)
             for path in modules:
+                scanned.add(path)
+                finder = _FIXTURE_CONSTANT if path.name.startswith('test_') else None
                 with self.subTest(module=str(path.relative_to(_REPO_ROOT))):
-                    self.assertEqual(_stray_lines(path.read_text(encoding='utf-8')), [])
-        # The monitor and gw_root_stats, checked in detail above, are in the scan.
-        self.assertTrue(_MONITOR.is_file())
-        self.assertTrue(_GW_ROOT_STATS.is_file())
+                    self.assertEqual(_stray_lines(path.read_text(encoding='utf-8'), finder,
+                                                  required=False), [])
+        # The monitor, gw_root_stats and the monitor's legacy-record tests are in the scan.
+        for path in (_MONITOR, _GW_ROOT_STATS, _REPO_ROOT / 'scripts' / 'test_llmtool_monitor.py',
+                     _REPO_ROOT / 'scripts' / 'test_llmtool_monitor_gw_done.py'):
+            self.assertIn(path, scanned)
 
     def test_dispatch_policy_never_names_the_retired_id(self):
         self.assertEqual(_stray_lines(_POLICY.read_text(encoding='utf-8')), [])
@@ -375,6 +417,36 @@ class RetiredIdGuardTests(unittest.TestCase):
         self.assertEqual(_stray_lines(source), [2, 4])
         with self.assertRaisesRegex(AssertionError, 'expected one alias table'):
             _stray_lines("ROUTE = 'gw-agent'\n", _assignments_to('RETIRED_WORKER_ALIASES'))
+
+    def test_guard_reports_a_second_use_on_a_table_line(self):
+        # Codex v1 F2 on PR #1791: only the table's own constants are allowed.
+        table = _assignments_to('RETIRED_WORKER_ALIASES')
+        allowed = "RETIRED_WORKER_ALIASES = {'company-gw-agent': 'gw-agent'}\n"
+        self.assertEqual(_stray_lines(allowed, table), [])
+        for source in (
+                "RETIRED_WORKER_ALIASES = {'company-gw-agent': 'gw-agent'}; "
+                "ROUTE = 'company-gw-agent'\n",
+                "RETIRED_WORKER_ALIASES = {'company-gw-agent': 'gw-agent'}  # company-gw-agent\n",
+                "RETIRED_WORKER_ALIASES = {'company-gw-agent': 'company-gw-agent is retired'}\n",
+                "RETIRED_WORKER_ALIASES = {'company-gw-agent': 'gw-agent',  # company-gw-agent\n}\n"):
+            with self.subTest(source=source):
+                self.assertEqual(_stray_lines(source, table), [1])
+
+    def test_guard_fixture_constant_is_optional_but_single(self):
+        fixture = "LEGACY_WORKER_ID = 'company-gw-agent'\nX = {LEGACY_WORKER_ID: 1}\n"
+        self.assertEqual(_stray_lines(fixture, _FIXTURE_CONSTANT, required=False), [])
+        self.assertEqual(_stray_lines("X = 'gw-agent'\n", _FIXTURE_CONSTANT, required=False), [])
+        self.assertEqual(_stray_lines("X = 'company-gw-agent'\n", _FIXTURE_CONSTANT,
+                                      required=False), [1])
+        self.assertEqual(_stray_lines(fixture + "Y = 'company-gw-agent'\n", _FIXTURE_CONSTANT,
+                                      required=False), [3])
+        # A function-local constant is not the module fixture.
+        self.assertEqual(_stray_lines("def f():\n    LEGACY_WORKER_ID = 'company-gw-agent'\n",
+                                      _FIXTURE_CONSTANT, required=False), [2])
+        for source in (fixture + fixture, "LEGACY_WORKER_ID = 'gw-agent'\n"):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(AssertionError, 'expected one alias table'):
+                    _stray_lines(source, _FIXTURE_CONSTANT, required=False)
 
 
 if __name__ == '__main__':

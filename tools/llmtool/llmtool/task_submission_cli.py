@@ -798,8 +798,8 @@ def add_task_submission_parsers(actions):
     delegate = actions.add_parser('delegate', help='Dispatch an explicitly selected Developer for an existing task')
     delegate.add_argument('task_id', help='existing durable Task ID')
     delegate.add_argument('--provider', required=True,
-                          # company-gw and company-gw-agent stay parseable only so
-                          # that the delegate refuses them with a stable code.
+                          # company-gw and the retired gw Agent id stay parseable only
+                          # so that the delegate refuses them with a stable code.
                           choices=('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude',
                                    'company-gw-agent'),
                           help='explicit Developer route')

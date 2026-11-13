@@ -2268,6 +2268,7 @@ GW_AGENT_OWNER_EVIDENCE = GW_AGENT_EVIDENCE + "#issuecomment-6760670167"   # #12
 GW_AGENT_OLD_OWNER_EVIDENCE = GW_AGENT_EVIDENCE + "#issuecomment-6594101520"   # #120 D1 = A (superseded)
 GW_AGENT_OWNER_ALLOWED = {"dispatch": "ALLOWED", "decided_by": "Owner",
                           "evidence": GW_AGENT_OWNER_EVIDENCE}
+LEGACY_WORKER_ID = "company-gw-agent"   # #1502 WP-E: the retired gw Agent id, fixture data only
 
 
 def policy(workers):
@@ -2366,8 +2367,8 @@ class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
             # gw-agent: only PAUSED + PM + exactly issues/120 (#120 WP3b),
             # or ALLOWED + Owner + exactly the D1 = A comment (#120)
             # #1502 WP-E: the retired key in place of gw-agent fails closed in both.
-            "retired gw-agent key": {"gw-agent": None, "company-gw-agent": dict(GW_AGENT_ENTRY)},
-            "retired gw-agent key beside gw-agent": {"company-gw-agent": dict(GW_AGENT_ENTRY)},
+            "retired gw-agent key": {"gw-agent": None, LEGACY_WORKER_ID: dict(GW_AGENT_ENTRY)},
+            "retired gw-agent key beside gw-agent": {LEGACY_WORKER_ID: dict(GW_AGENT_ENTRY)},
             "gw-agent allowed by Owner D1": {"gw-agent": dict(GW_AGENT_OWNER_ALLOWED)},
             "gw-agent allowed by Owner D1 + assignment": {"gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, owner_assignments=[good])},

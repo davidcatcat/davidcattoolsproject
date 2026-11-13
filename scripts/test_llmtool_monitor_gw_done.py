@@ -12,6 +12,8 @@ if SCRIPTS not in sys.path:
 
 import llmtool_monitor as mon
 
+LEGACY_WORKER_ID = "company-gw-agent"   # #1502 WP-E: the retired gw Agent id, fixture data only
+
 
 def _write_record(root, task_id, developer, **extra):
     record = {"task_id": task_id, "developer": developer, **extra}
@@ -53,7 +55,7 @@ class TestLlmtoolMonitorGwDone(unittest.TestCase):
         # #1502 WP-E: a record written with the retired id still reads.
         task_id = "agent00123456789"
         dev = {
-            "provider_profile": "company-gw-agent",
+            "provider_profile": LEGACY_WORKER_ID,
             "state": "DEVELOPER_COMPLETED",
             "model": "gw-test-model",
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
@@ -93,27 +95,27 @@ class TestLlmtoolMonitorGwDone(unittest.TestCase):
 
     def test_without_the_gate_module_ids_show_as_stored_and_no_legacy_row(self):
         _write_record(self.root, "agent00123456789",
-                      {"provider_profile": "company-gw-agent", "state": "DEVELOPER_COMPLETED"})
+                      {"provider_profile": LEGACY_WORKER_ID, "state": "DEVELOPER_COMPLETED"})
         with patch.object(mon, "_checkout_llmtool_module", return_value=None):
             self.assertEqual(mon._retired_worker_aliases(), {})
-            self.assertEqual(mon.stored_worker_id("company-gw-agent"), "company-gw-agent")
+            self.assertEqual(mon.stored_worker_id(LEGACY_WORKER_ID), LEGACY_WORKER_ID)
             self.assertEqual(mon.gw_task_rows(self.now, self.root), [])
 
     def test_non_string_profile_is_skipped(self):
-        for index, profile in enumerate((["company-gw-agent"], {"a": 1}, 7, None)):
+        for index, profile in enumerate(([LEGACY_WORKER_ID], {"a": 1}, 7, None)):
             _write_record(self.root, f"badprofile{index:06d}",
                           {"provider_profile": profile, "state": "DEVELOPER_COMPLETED"})
         self.assertEqual(mon.gw_task_rows(self.now, self.root), [])
 
     def test_retired_gw_agent_id_reads_as_gw_agent_in_route_views(self):
         # #1502 WP-E: the retired id reads as gw-agent through the gate's alias.
-        self.assertEqual(mon.stored_worker_id("company-gw-agent"), "gw-agent")
+        self.assertEqual(mon.stored_worker_id(LEGACY_WORKER_ID), "gw-agent")
         for value in ("gw-agent", "company-gw", "agy", None, 7):
             self.assertEqual(mon.stored_worker_id(value), value)
         _write_record(self.root, "a1" * 16,
-                      {"provider_profile": "company-gw-agent", "state": "DEVELOPER_RESPONDED"})
+                      {"provider_profile": LEGACY_WORKER_ID, "state": "DEVELOPER_RESPONDED"})
         _write_record(self.root, "b2" * 16, None,
-                      pm_assignment={"route": "company-gw-agent"}, state="PM_RESPONDED")
+                      pm_assignment={"route": LEGACY_WORKER_ID}, state="PM_RESPONDED")
         outcomes = mon.llmtool_route_outcomes(self.now, self.root)
         self.assertEqual(set(outcomes), {"gw-agent"})
         self.assertEqual(outcomes["gw-agent"][1:3], (1, 1))
@@ -121,7 +123,7 @@ class TestLlmtoolMonitorGwDone(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertTrue(any("派給 gw-agent" in line for line in lines), lines)
         self.assertTrue(any("PM 建議 gw-agent" in line for line in lines), lines)
-        self.assertFalse(any("company-gw-agent" in line for line in lines), lines)
+        self.assertFalse(any(LEGACY_WORKER_ID in line for line in lines), lines)
 
     def test_missing_usage(self):
         task_id = "nousage123456789"
