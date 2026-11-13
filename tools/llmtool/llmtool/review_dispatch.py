@@ -2,6 +2,7 @@
 
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
+import functools
 import hashlib
 import io
 import json
@@ -19,7 +20,10 @@ from .errors import LLMToolError
 from . import github_identity, role_config, task_completion, worker_dispatch
 
 
-_CODEX_REVIEW_MODEL = 'gpt-6-luna'
+# #1502 WP-E R1: the fallbacks equal the roles registry's listed models and,
+# like every resolved model, pass the shared registry check before launch.
+_CODEX_REVIEW_MODEL = 'gpt-6.1-sol'
+_CLAUDE_REVIEW_MODEL = 'claude-opus-5-5'
 _CODEX_REVIEW_EFFORT = 'high'
 _CODEX_REVIEW_TIMEOUT = 600
 _CODEX_REVIEW_MAX_OUTPUT = 1024 * 1024
@@ -79,6 +83,17 @@ def _refuse(code, message='Reviewer dispatch refused; details omitted', *, reaso
 
 def _now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def _admit_review_model(reviewer_key, model):
+    """#1502 WP-E R1: return model only when the shared registry check admits it.
+
+    Refuses with REVIEW_DISPATCH code ROLE_MODEL_NOT_ALLOWED; never a fallback.
+    """
+    try:
+        return role_config.check_registry_model(reviewer_key, model)
+    except LLMToolError:
+        _refuse('ROLE_MODEL_NOT_ALLOWED')
 
 
 def _policy(task, reviewer_key):
@@ -229,6 +244,7 @@ def _create_d6(*, task_id, base_sha, repo_root, executor_task, github_login,
 
 def _codex_argv(executable, reviewer_root, *, model=_CODEX_REVIEW_MODEL,
                 effort=_CODEX_REVIEW_EFFORT):
+    model = _admit_review_model('codex-reviewer', model)
     return [executable, '--no-daemon', '--ask-for-approval', 'never', 'exec',
             '--ignore-user-config', '--ignore-rules', '--ephemeral',
             '--strict-config', '--color', 'never', '--json', '--model',
@@ -515,6 +531,7 @@ def _record_codex_quota(raw_stdout):
 def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
                     model=_CODEX_REVIEW_MODEL, effort=_CODEX_REVIEW_EFFORT,
                     config_dir=None):
+    model = _admit_review_model('codex-reviewer', model)
     executable = shutil.which('codex')
     if executable is None:
         _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
@@ -558,10 +575,12 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
         head=head, version=version)
 
 
-def _dispatch(*, task_id, prompt, repo_root, env):
+def _dispatch(*, task_id, prompt, repo_root, env, model):
+    # #1502 WP-E R1: the admitted model is passed explicitly; the bridge checks it again.
+    model = _admit_review_model('claude-reviewer', model)
     script = Path(__file__).resolve().parents[1] / 'scripts' / 'claude_bg_dispatch.py'
     args = [sys.executable, '-B', str(script), 'dispatch', '--new', '--name',
-            'claude-reviewer', '--task-id', task_id, '--prompt', prompt,
+            'claude-reviewer', '--model', model, '--task-id', task_id, '--prompt', prompt,
             '--repo-root', str(repo_root)]
     result = subprocess.run(args, cwd=str(repo_root), env=env,
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -1148,11 +1167,14 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     if (reviewer_key == 'claude-reviewer' and
             (reviewer_role['source'] == 'builtin' or config_dir is None)):
         _refuse('REVIEWER_ACCOUNT_UNCONFIGURED')
+    claude_model = None
     if reviewer_key == 'codex-reviewer':
         if reviewer_role.get('provider') not in (None, 'codex'):
             _refuse('REVIEWER_CONFIG_INVALID')
         codex_model = reviewer_role.get('model') or _CODEX_REVIEW_MODEL
         codex_effort = reviewer_role.get('effort') or _CODEX_REVIEW_EFFORT
+        # #1502 WP-E R1: admitted before the claim, so a refusal records nothing.
+        codex_model = _admit_review_model('codex-reviewer', codex_model)
         from .codex_direct_developer import validate_profile
         try:
             validate_profile(codex_model, codex_effort)
@@ -1161,6 +1183,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         account_mode = ('ROLES' if reviewer_role['source'] == 'roles' else 'CODEX_CLI')
     else:
         codex_model, codex_effort = _CODEX_REVIEW_MODEL, _CODEX_REVIEW_EFFORT
+        claude_model = _admit_review_model(
+            'claude-reviewer', reviewer_role.get('model') or _CLAUDE_REVIEW_MODEL)
         account_mode = {
             'roles': 'ROLES', 'env': 'EXPLICIT', 'cli': 'EXPLICIT',
             'pm_runtime': 'LEGACY', 'builtin': 'BUILTIN_DEFAULT',
@@ -1180,7 +1204,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
 
     repo_root = str(Path(executor.common_dir).parent)
     create = create_d6 or _create_d6
-    send = dispatch_session or _dispatch
+    # The built-in Claude bridge always receives the admitted model explicitly.
+    send = dispatch_session or functools.partial(_dispatch, model=claude_model)
     bind = bind_session or _bind_d6
     session_id = None
     try:

@@ -22,6 +22,8 @@ REF = 'https://github.com/' + REPOSITORY + '/issues/12#issuecomment-345'
 ISSUE_URL = 'https://api.github.com/repos/' + REPOSITORY + '/issues/12'
 ROUTE = {'default_model': 'model-default', 'default_effort': 'medium',
          'allowed_models': ['model-default', 'model-user', 'model-env', 'model-cli']}
+# The claude-reviewer model listed in developer-routes.json (#1502 WP-E).
+REVIEWER_MODEL = 'claude-opus-5-5'
 
 
 def comment(route='agy', model='model-extra', marker=True):
@@ -205,19 +207,20 @@ class AccountBase(ResolverBase):
 class AliasTests(AccountBase):
     def test_legacy_reviewer_entry_resolves_for_the_new_id(self):
         self.save({'accounts': self.accounts,
-                   'roles': {'reviewer': {'account': 'work', 'model': 'sonnet'}}})
+                   'roles': {'reviewer': {'account': 'work', 'model': REVIEWER_MODEL}}})
         for role in ('claude-reviewer', 'reviewer'):
             with self.subTest(role=role):
                 resolved = self.resolve(role)
                 self.assertEqual((resolved['role'], resolved['account'], resolved['model'],
-                                  resolved['source']), (role, 'work', 'sonnet', 'roles'))
+                                  resolved['source']), (role, 'work', REVIEWER_MODEL, 'roles'))
 
     def test_exact_role_entry_wins_over_its_alias(self):
+        # The registry lists one claude-reviewer model, so the entries differ by effort.
         self.save({'accounts': self.accounts,
-                   'roles': {'reviewer': {'model': 'legacy-model'},
-                             'claude-reviewer': {'model': 'new-model'}}})
-        self.assertEqual(self.resolve('claude-reviewer')['model'], 'new-model')
-        self.assertEqual(self.resolve('reviewer')['model'], 'legacy-model')
+                   'roles': {'reviewer': {'effort': 'low'},
+                             'claude-reviewer': {'effort': 'high'}}})
+        self.assertEqual(self.resolve('claude-reviewer')['effort'], 'high')
+        self.assertEqual(self.resolve('reviewer')['effort'], 'low')
 
     def add_codex_account(self):
         codex_dir = self.root / 'codex-account'
@@ -439,7 +442,7 @@ class RolesCommandTests(AccountBase):
 
     def test_prints_one_line_per_role_without_paths(self):
         self.save({'accounts': self.accounts,
-                   'roles': {'reviewer': {'account': 'work', 'model': 'sonnet',
+                   'roles': {'reviewer': {'account': 'work', 'model': REVIEWER_MODEL,
                                           'effort': 'high'}}})
         status, lines = self.run_roles()
         self.assertEqual(status, 0)
@@ -447,7 +450,12 @@ class RolesCommandTests(AccountBase):
         self.assertEqual(sorted(rows), sorted(role_config.KNOWN_ROLES))
         self.assertTrue(all(len(row) == 6 for row in rows.values()))
         self.assertEqual(rows['claude-reviewer'],
-                         ['claude-reviewer', 'claude', 'work', 'sonnet', 'high', 'roles'])
+                         ['claude-reviewer', 'claude', 'work', REVIEWER_MODEL, 'high', 'roles'])
+        # #1502 WP-E: an unconfigured review/debug role shows its registry model.
+        roles = load_route_config()['roles']
+        for role in ('codex-reviewer', 'codex-debug', 'claude-debug'):
+            with self.subTest(role=role):
+                self.assertEqual(rows[role][3], roles[role]['allowed_models'][0])
         agy = load_route_config()['routes']['agy']
         self.assertEqual(rows['agy-developer'],
                          ['agy-developer', 'agy', '-', agy['default_model'],

@@ -11,6 +11,9 @@ from llmtool.config import (
 from llmtool.errors import LLMToolError
 from llmtool.role_config import resolve_role
 
+# The claude-reviewer model listed in developer-routes.json (#1502 WP-E).
+REVIEWER_MODEL = "claude-opus-5-5"
+
 
 class RoleConfigTests(unittest.TestCase):
     def setUp(self):
@@ -32,7 +35,9 @@ class RoleConfigTests(unittest.TestCase):
 
     def account_config(self):
         return {"accounts": {"work": {"kind": "claude", "config_dir": str(self.account_dir)}},
-                "roles": {"reviewer": {"account": "work", "model": "sonnet", "effort": "high"}}}
+                # #1502 WP-E: a reviewer model must be the registry's listed model.
+                "roles": {"reviewer": {"account": "work", "model": REVIEWER_MODEL,
+                                       "effort": "high"}}}
 
     def test_precedence_cli_over_environment_over_role_over_legacy_over_builtin(self):
         self.assertEqual(resolve_role("coder", environ={}, home=self.home), {
@@ -66,7 +71,25 @@ class RoleConfigTests(unittest.TestCase):
                          ("env-model", "medium", "env"))
         reviewer = resolve_role("reviewer", environ={}, home=self.home)
         self.assertEqual((reviewer["account"], reviewer["model"], reviewer["source"]),
-                         ("work", "sonnet", "roles"))
+                         ("work", REVIEWER_MODEL, "roles"))
+
+    def test_reviewer_model_outside_the_registry_is_refused_at_every_layer(self):
+        # #1502 WP-E R1: the resolver applies the shared check after precedence.
+        self.save(self.account_config())
+        for cli, env in (
+                (None, {"LLMTOOL_ROLE_REVIEWER_MODEL": "claude-other-model"}),
+                ({"model": "gpt-6.1-sol"}, {}),
+                ({"model": "anthropic/" + REVIEWER_MODEL}, {})):
+            with self.subTest(cli=cli, env=env):
+                with self.assertRaises(LLMToolError) as caught:
+                    resolve_role("reviewer", cli=cli, environ=env, home=self.home)
+                self.assertEqual(caught.exception.role_config_code, "ROLE_MODEL_NOT_ALLOWED")
+        config = self.account_config()
+        config["roles"]["reviewer"]["model"] = REVIEWER_MODEL.upper()
+        self.save(config)
+        with self.assertRaises(LLMToolError) as caught:
+            resolve_role("reviewer", environ={}, home=self.home)
+        self.assertEqual(caught.exception.role_config_code, "ROLE_MODEL_NOT_ALLOWED")
 
     def test_project_config_cannot_set_roles_or_accounts(self):
         self.cwd.joinpath(".llmtool.yaml").write_text("roles: {pm: {model: attacker}}\n", encoding="utf-8")
@@ -138,7 +161,7 @@ class RoleConfigTests(unittest.TestCase):
         self.save(self.account_config())
         env = {"LLMTOOL_ROLE_PM_MODEL": "pm-model"}
         reviewer = resolve_role("reviewer", environ=env, home=self.home)
-        self.assertEqual((reviewer["model"], reviewer["source"]), ("sonnet", "roles"))
+        self.assertEqual((reviewer["model"], reviewer["source"]), (REVIEWER_MODEL, "roles"))
         pm = resolve_role("pm", environ=env, home=self.home)
         self.assertEqual((pm["model"], pm["source"]), ("pm-model", "env"))
 

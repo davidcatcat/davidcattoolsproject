@@ -14,7 +14,7 @@ from .write_boundary import (
 __all__ = [
     'DeveloperRoute', 'RouteError', 'RouteResult', 'capture_snapshot', 'run_route',
     'AgyRoute', 'ClaudeRoute', 'GwAgentRoute', 'owner_assignment_gate', 'load_route_config',
-    'check_route_model',
+    'check_route_model', 'check_registry_role_model', 'REGISTRY_ROLES',
     'SandboxExecBoundary', 'UnsupportedBoundary', 'WriteBoundary',
     'for_platform',
 ]
@@ -87,6 +87,9 @@ _ROLE_MODEL_CHECKS = {
     'codex-debug': _codex_role_model_ok,
     'claude-debug': _claude_role_model_ok,
 }
+# The canonical review/debug role ids the roles registry governs. A legacy
+# alias (for example 'reviewer') is never accepted here; callers map it first.
+REGISTRY_ROLES = frozenset(_ROLE_MODEL_CHECKS)
 
 
 def _role_models(roles):
@@ -135,6 +138,39 @@ def check_route_model(config, route, model):
     allowed = entry.get('allowed_models') if type(entry) is dict else None
     if (type(model) is not str or type(allowed) is not list or
             not any(type(item) is str and item == model for item in allowed)):
+        raise RouteError('ROLE_MODEL_NOT_ALLOWED')
+    return model
+
+
+def check_registry_role_model(config, role, model):
+    """Return model when the roles registry admits it for one review/debug role.
+
+    #1502 WP-E invariant R1: the one shared launch check for codex-reviewer,
+    claude-reviewer, codex-debug and claude-debug. config is a
+    load_route_config() result; None loads the repository file. Every refusal
+    fails closed with RouteError('ROLE_MODEL_NOT_ALLOWED'):
+
+    * the file is unreadable or invalid, or its roles registry is absent or
+      invalid (a route-only config admits no review/debug model);
+    * role is not one of the canonical ids (aliases are mapped by the caller);
+    * model is not a str, or its full identifier is not of the role's model
+      family (no provider-prefix stripping, no case folding);
+    * model is not exactly one of the role's allowed_models.
+
+    There is no owner_override exemption and no other bypass.
+    """
+    try:
+        if config is None:
+            config = load_route_config()
+        roles = config.get('roles') if type(config) is dict else None
+        registry = _role_models(roles)
+    except RouteError:
+        raise RouteError('ROLE_MODEL_NOT_ALLOWED') from None
+    model_ok = _ROLE_MODEL_CHECKS.get(role) if type(role) is str else None
+    if model_ok is None or type(model) is not str or not model_ok(model):
+        raise RouteError('ROLE_MODEL_NOT_ALLOWED')
+    if not any(type(item) is str and item == model
+               for item in registry[role]['allowed_models']):
         raise RouteError('ROLE_MODEL_NOT_ALLOWED')
     return model
 
