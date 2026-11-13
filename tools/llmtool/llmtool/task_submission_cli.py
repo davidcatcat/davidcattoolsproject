@@ -1971,6 +1971,30 @@ def _advance_exit_code(result):
     return 1
 
 
+def _split_pending(record):
+    """True for an uncommitted-or-unfinalized split reservation (Owner B, #1502)."""
+    line = record.get('lineage') if type(record) is dict else None
+    return type(line) is dict and line.get('state') == 'PENDING'
+
+
+def _pending_split_refusal(store, task_id):
+    """The refusal line for a PENDING split child, else None (Owner B, PR #1768).
+
+    The TaskStore write gate refuses every write to a PENDING Task, but advance,
+    drive and repair can push a branch, open a PR or launch a provider before
+    their first store write. This read-side check stops them first. A record
+    that cannot be read is left to the step itself, which refuses it.
+    """
+    try:
+        record = store.get(task_id)
+    except Exception:
+        return None
+    if not _split_pending(record):
+        return None
+    return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
+            'next': 'REFUSED', 'codes': ['TASK_LINEAGE_PENDING'], 'acked': []}
+
+
 def run_task_advance(args, *, store=None, **adapters):
     """Thin CLI adapter for one idempotent Task advancement step.
 
@@ -2003,6 +2027,10 @@ def run_task_advance(args, *, store=None, **adapters):
         pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
     except pm_caller.PMCallerRefused as exc:
         _print(pm_caller.refusal(args.task_id, exc.code))
+        return 1
+    pending = _pending_split_refusal(store, args.task_id)
+    if pending is not None:
+        _print(pending)
         return 1
     if owner_acceptance is not None:
         adapters = dict(adapters, owner_acceptance=owner_acceptance)
@@ -2039,6 +2067,10 @@ def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapter
                                             getattr(args, 'pm_session', None))
     except pm_caller.PMCallerRefused as exc:
         _print(pm_caller.refusal(args.task_id, exc.code))
+        return 1
+    pending = _pending_split_refusal(store, args.task_id)
+    if pending is not None:
+        _print(pending)
         return 1
     label_call = adapters.pop('label_mac_ci_call', None)
     advance_call = pm_caller.guarded(
@@ -2220,6 +2252,10 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
         pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
     except pm_caller.PMCallerRefused as exc:
         _print(pm_caller.refusal(args.task_id, exc.code))
+        return 1
+    pending = _pending_split_refusal(store, args.task_id)
+    if pending is not None:
+        _print(pending)
         return 1
     from .review_repair import repair_review
     result = repair_review(
@@ -6300,6 +6336,9 @@ def run_task_delegate(args, *, store=None):
         # can lose the refusal when the D6 tree changes during the active run,
         # and would also make the caller depend on a child startup response.
         existing = store.get(args.task_id)
+        if _split_pending(existing):
+            # Owner B (#1502, PR #1768): never fork a Developer for a PENDING split child.
+            raise LLMToolError('TASK_LINEAGE_PENDING')
         previous = existing.get('developer')
         expected_profile = provider
         if (type(previous) is dict and
@@ -7044,6 +7083,9 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
     """
     store = TaskStore() if store is None else store
     task = store.get(args.task_id)
+    if _split_pending(task):
+        # Owner B (#1502, PR #1768): no PM or Reviewer call for a PENDING split child.
+        raise LLMToolError('TASK_LINEAGE_PENDING')
     if (type(task.get('developer')) is dict and
             task['developer'].get('provider_profile') == 'claude' and
             task.get('abandonment') is not None):

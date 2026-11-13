@@ -5,10 +5,14 @@ that records the op and its full child list is the single commit point; then the
 children become OPEN. Faults are injected through a store wrapper around the
 trusted split writes, so no test sleeps and no production check is bypassed.
 """
+import contextlib
 import hashlib
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from llmtool import repair_policy
@@ -423,6 +427,102 @@ class PendingVisibilityTests(TwoPhaseCase):
         self.refused('DROP_NOT_CHILD', lambda: cli.lineage_end(
             self.store, child, 'DROPPED', pm_session=PM, reason='not needed'))
         self.assert_no_lineage(child)
+
+
+def _forbidden(name):
+    def call(*_args, **_kwargs):
+        raise AssertionError(name + ' ran for a PENDING split child')
+    return call
+
+
+class PendingEntryPointTests(TwoPhaseCase):
+    """Owner B: dispatch, repair, merge and close never use an uncommitted PENDING child.
+
+    The downstream step of each CLI entry point is replaced by a call that fails
+    the test if it runs, so a refusal proves the entry point stopped first. The
+    PM-caller check is injected (it is not under test); the store, its central
+    write gate and every lineage check are real.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.root, self.child = self.task(), self.task()
+        with self.assertRaises(Crash):
+            self.split(self.root, [self.child], FaultStore(self.store, fault_at(
+                'COMMIT', self.root, code=None, error=Crash())))
+        self.assertEqual(self.state(self.child), 'PENDING')
+        self.before = self.digests(self.root, self.child)
+        caller = mock.patch('llmtool.pm_caller.check_caller', return_value=PM)
+        caller.start()
+        self.addCleanup(caller.stop)
+
+    def tearDown(self):
+        # Nothing an entry point did changed the child or its ROOT.
+        self.assert_unchanged(self.before)
+        self.assertEqual(self.state(self.child), 'PENDING')
+
+    def cli_refused(self, call):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(call(), 1)
+        printed = json.loads(out.getvalue())
+        self.assertEqual((printed['step'], printed['codes']), ('REFUSED', ['TASK_LINEAGE_PENDING']))
+
+    def advance_args(self, merge):
+        return SimpleNamespace(task_id=self.child, pm_session=PM, merge=merge, pr=None,
+                               integration_pr=None, reviewer_session_done=False,
+                               owner_acceptance=None, owner_exception=None,
+                               executor_task=None, max_steps=1, poll_seconds=0)
+
+    def test_dispatch_never_starts_a_developer(self):
+        args = SimpleNamespace(task_id=self.child, provider='opencode', background=True,
+                               mode='direct', acceptance=['Bounded acceptance item.'],
+                               executor_task=new_id())
+        with mock.patch.object(cli.worker_dispatch, 'evaluate',
+                               return_value=SimpleNamespace(allowed=True, reason_code=None)), \
+                mock.patch.object(cli, '_delegate_d6_binding', _forbidden('D6 binding')), \
+                mock.patch.object(cli, '_run_background_delegate', _forbidden('delegate')):
+            self.refused('TASK_LINEAGE_PENDING',
+                         lambda: cli.run_task_delegate(args, store=self.store))
+        self.refused('TASK_LINEAGE_PENDING', lambda: self.store.append_dispatch_audit(
+            self.child, {'decision': 'ALLOWED'}))
+
+    def test_repair_never_runs(self):
+        args = SimpleNamespace(task_id=self.child, pm_session=PM, executor_task=new_id(),
+                               pr=17, family=None, auto_review=False)
+        with mock.patch('llmtool.review_repair.repair_review', _forbidden('repair')):
+            self.cli_refused(lambda: cli.run_task_repair(args, store=self.store))
+
+    def test_advance_and_drive_never_publish_review_or_merge(self):
+        for merge in (False, True):
+            with self.subTest(merge=merge), \
+                    mock.patch('llmtool.task_advance.advance', _forbidden('advance')):
+                self.cli_refused(lambda: cli.run_task_advance(self.advance_args(merge),
+                                                              store=self.store))
+            with self.subTest(drive=merge), \
+                    mock.patch('llmtool.task_drive.drive', _forbidden('drive')):
+                self.cli_refused(lambda: cli.run_task_drive(self.advance_args(merge),
+                                                            store=self.store))
+
+    def test_merge_refuses_before_any_github_read_or_claim(self):
+        from llmtool import task_advance
+        result = task_advance.advance(task_id=self.child, store=self.store, merge=True,
+                                      github_get=_forbidden('GitHub read'),
+                                      merge_gh_runner=_forbidden('gh merge'))
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertNotIn('merge_attempt', self.store.get(self.child))
+        self.refused('TASK_LINEAGE_PENDING',
+                     lambda: self.store.update(self.child, merge_attempt=CLAIM))
+
+    def test_close_never_completes_abandons_or_closes(self):
+        args = SimpleNamespace(task_id=self.child, executor_task=new_id(),
+                               reviewer_task=None, pr=None)
+        with mock.patch.object(cli, 'run_task_direct_result_event', _forbidden('complete')):
+            self.refused('TASK_LINEAGE_PENDING',
+                         lambda: cli.run_task_complete(args, store=self.store))
+        self.refused('TASK_LINEAGE_PENDING', lambda: self.store.abandon(
+            self.child, pm_session_id=PM, reason='not needed'))
+        self.assertIsNone(cli.lineage_close_merged(self.store, self.child))
 
 
 if __name__ == '__main__':
