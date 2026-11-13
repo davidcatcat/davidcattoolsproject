@@ -1050,6 +1050,42 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             self.assertTrue(recent.exists())
 
 
+class GwAgentShippedServedModelTests(unittest.TestCase):
+    """#1502 WP-E: the shipped route accepts today's served model 'gw' only.
+
+    Uses the real developer-routes.json and the real served-model check
+    (#1773, CWE-863); only HOME is isolated so no user config is read.
+    """
+
+    def setUp(self):
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        env = patch.dict(os.environ, {'HOME': home.name})
+        env.start()
+        self.addCleanup(env.stop)
+        self.route_config = load_route_config()['routes']['gw-agent']
+
+    def test_shipped_route_lists_served_model_gw(self):
+        self.assertEqual(self.route_config['allowed_models'], ['gw'])
+        self.assertEqual(self.route_config['default_model'], 'gw')
+        self.assertEqual(self.route_config['profile']['model'], 'gw')
+
+    def test_gateway_profile_serving_gw_passes(self):
+        model, effort = task_submission_cli._gw_agent_developer_profile(
+            self.route_config, served_model='gw')
+        self.assertEqual(model, 'gw')
+        self.assertEqual(effort, self.route_config['default_effort'])
+
+    def test_unlisted_served_model_is_still_refused(self):
+        for served in ('example-model-b', 'gw-agent-default', 'GW', 'gw-b'):
+            with self.subTest(served=served):
+                with self.assertRaises(LLMToolError) as caught:
+                    task_submission_cli._gw_agent_developer_profile(
+                        self.route_config, served_model=served)
+                self.assertEqual(caught.exception.role_config_code,
+                                 'ROLE_MODEL_NOT_ALLOWED')
+                self.assertIn('ROLE_MODEL_NOT_ALLOWED', str(caught.exception))
+
 
 class _NoSandboxBoundary:
     """The OS sandbox is proven by the real-sandbox route test; this runs on any host."""
@@ -1221,7 +1257,10 @@ class GwAgentRealStoreTests(unittest.TestCase):
         real_config = load_route_config()
         real_config['routes']['gw-agent']['package_path'] = str(
             Path(__file__).resolve().parents[2] / 'api-agent-gateway')
-        if list_provider_model:
+        if (list_provider_model and provider_model not in
+                real_config['routes']['gw-agent']['allowed_models']):
+            # The shipped route already lists 'gw' (#1502 WP-E); add only
+            # another served model, never a duplicate entry.
             real_config['routes']['gw-agent']['allowed_models'] = [
                 real_config['routes']['gw-agent']['default_model'], provider_model]
         decision = worker_dispatch.PolicyDecision('company-gw-agent', True,
