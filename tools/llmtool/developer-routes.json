@@ -4,6 +4,7 @@
     "agy": {
       "executable": "agy",
       "default_model": "gemini-3.8-flash-medium",
+      "allowed_models": ["gemini-3.8-flash-medium"],
       "default_effort": "medium",
       "denied_dirs": [".gemini"],
       "state_dirs": {"policy": "private-temp-only"}
@@ -11,6 +12,7 @@
     "claude": {
       "executable": "claude",
       "default_model": "claude-opus-5-5",
+      "allowed_models": ["claude-opus-5-5"],
       "default_effort": "high",
       "denied_dirs": [".claude"],
       "state_dirs": {"policy": "private-temp-only"}
@@ -18,6 +20,7 @@
     "gw-agent": {
       "package_path": "~/.local/lib/api-agent-gateway",
       "default_model": "gw-agent-default",
+      "allowed_models": ["gw-agent-default"],
       "default_effort": "low",
       "profile_name": "llmtool-direct",
       "profile": {

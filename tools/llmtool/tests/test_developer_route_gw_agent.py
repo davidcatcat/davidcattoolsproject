@@ -231,11 +231,13 @@ class GwAgentRouteTests(unittest.TestCase):
             'schema_version': 1,
             'routes': {
                 'agy': {'executable': 'agy', 'default_model': 'agy-model',
+                        'allowed_models': ['agy-model'],
                         'default_effort': 'low', 'denied_dirs': ['.gemini'],
                         'state_dirs': {'policy': 'private-temp-only'}},
                 'gw-agent': {
                     'package_path': str(Path(self.temp.name) / 'gateway'),
-                    'default_model': 'fake-model', 'default_effort': 'low',
+                    'default_model': 'fake-model', 'allowed_models': ['fake-model'],
+                    'default_effort': 'low',
                     'profile_name': 'fake',
                     'profile': {'model': 'fake-model', 'auth_env': None},
                     'authorization_ref': 'pm-task-ref',
