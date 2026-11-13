@@ -6579,8 +6579,9 @@ class CompletionAttributedPathsStoreTests(unittest.TestCase):
 
 
 class CompletionTestTimeoutTests(unittest.TestCase):
-    def test_registered_test_timeout_is_300_seconds(self):
-        self.assertEqual(task_completion._TEST_TIMEOUT, 300)
+    def test_registered_test_timeout_is_600_seconds(self):
+        # #1703: test_task_completion alone needs ~310 s on the Mac.
+        self.assertEqual(task_completion._TEST_TIMEOUT, 600)
 
 
 if __name__ == '__main__':
