@@ -2268,6 +2268,7 @@ GW_AGENT_OWNER_EVIDENCE = GW_AGENT_EVIDENCE + "#issuecomment-6760670167"   # #12
 GW_AGENT_OLD_OWNER_EVIDENCE = GW_AGENT_EVIDENCE + "#issuecomment-6594101520"   # #120 D1 = A (superseded)
 GW_AGENT_OWNER_ALLOWED = {"dispatch": "ALLOWED", "decided_by": "Owner",
                           "evidence": GW_AGENT_OWNER_EVIDENCE}
+LEGACY_WORKER_ID = "company-gw-agent"   # #1502 WP-E: the retired gw Agent id, fixture data only
 
 
 def policy(workers):
@@ -2276,7 +2277,7 @@ def policy(workers):
     entry = {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-10-22",
              "reason": "test", "evidence": POLICY_EVIDENCE}
     full = {key: dict(entry) for key in sorted(mon.DISPATCH_WORKERS)}
-    full["company-gw-agent"] = dict(GW_AGENT_ENTRY)   # pending the Owner decision (#120)
+    full["gw-agent"] = dict(GW_AGENT_ENTRY)   # pending the Owner decision (#120)
     for key, item in workers.items():
         if item is None:
             full.pop(key, None)
@@ -2363,58 +2364,61 @@ class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
             "unhashable switch": {"agy": {"dispatch": []}},
             "object switch": {"agy": {"dispatch": {}}},
             "date not a string": {"agy": {"decided_at": 20261022}},
-            # company-gw-agent: only PAUSED + PM + exactly issues/120 (#120 WP3b),
+            # gw-agent: only PAUSED + PM + exactly issues/120 (#120 WP3b),
             # or ALLOWED + Owner + exactly the D1 = A comment (#120)
-            "gw-agent allowed by Owner D1": {"company-gw-agent": dict(GW_AGENT_OWNER_ALLOWED)},
-            "gw-agent allowed by Owner D1 + assignment": {"company-gw-agent": dict(
+            # #1502 WP-E: the retired key in place of gw-agent fails closed in both.
+            "retired gw-agent key": {"gw-agent": None, LEGACY_WORKER_ID: dict(GW_AGENT_ENTRY)},
+            "retired gw-agent key beside gw-agent": {LEGACY_WORKER_ID: dict(GW_AGENT_ENTRY)},
+            "gw-agent allowed by Owner D1": {"gw-agent": dict(GW_AGENT_OWNER_ALLOWED)},
+            "gw-agent allowed by Owner D1 + assignment": {"gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, owner_assignments=[good])},
-            "gw-agent allowed by PM D1": {"company-gw-agent": dict(
+            "gw-agent allowed by PM D1": {"gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, decided_by="PM")},
-            "gw-agent paused by Owner D1": {"company-gw-agent": dict(
+            "gw-agent paused by Owner D1": {"gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, dispatch="PAUSED")},
-            "gw-agent paused by Owner bare #120": {"company-gw-agent": {"decided_by": "Owner"}},
-            "gw-agent assignment only by Owner D1": {"company-gw-agent": dict(
+            "gw-agent paused by Owner bare #120": {"gw-agent": {"decided_by": "Owner"}},
+            "gw-agent assignment only by Owner D1": {"gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, dispatch="OWNER_ASSIGNMENT_ONLY")},
-            "gw-agent paused by PM D1": {"company-gw-agent": {"evidence": GW_AGENT_OWNER_EVIDENCE}},
-            "gw-agent allowed by Owner bare #120": {"company-gw-agent": dict(
+            "gw-agent paused by PM D1": {"gw-agent": {"evidence": GW_AGENT_OWNER_EVIDENCE}},
+            "gw-agent allowed by Owner bare #120": {"gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_EVIDENCE)},
-            "gw-agent allowed by Owner other comment": {"company-gw-agent": dict(
+            "gw-agent allowed by Owner other comment": {"gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_EVIDENCE + "#issuecomment-6760670168")},
-            "gw-agent allowed by Owner old comment": {"company-gw-agent": dict(
+            "gw-agent allowed by Owner old comment": {"gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_OLD_OWNER_EVIDENCE)},
-            "gw-agent allowed by Owner comment +1 digit": {"company-gw-agent": dict(
+            "gw-agent allowed by Owner comment +1 digit": {"gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_OWNER_EVIDENCE + "0")},
-            "gw-agent allowed by Owner comment -1 digit": {"company-gw-agent": dict(
+            "gw-agent allowed by Owner comment -1 digit": {"gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_OWNER_EVIDENCE[:-1])},
-            "gw-agent allowed by Owner comment trailing slash": {"company-gw-agent": dict(
+            "gw-agent allowed by Owner comment trailing slash": {"gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_OWNER_EVIDENCE + "/")},
-            "gw-agent allowed by Owner comment on #1200": {"company-gw-agent": dict(
+            "gw-agent allowed by Owner comment on #1200": {"gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED,
                 evidence=GW_AGENT_EVIDENCE + "0#issuecomment-6760670167")},
-            "gw-agent allowed by Owner lower-case switch": {"company-gw-agent": dict(
+            "gw-agent allowed by Owner lower-case switch": {"gw-agent": dict(
                 GW_AGENT_OWNER_ALLOWED, dispatch="allowed")},
             "other key Owner D1 comment": {"company-gw": {"evidence": GW_AGENT_OWNER_EVIDENCE}},
-            "gw-agent missing": {"company-gw-agent": None},
-            "gw-agent allowed": {"company-gw-agent": {"dispatch": "ALLOWED"}},
-            "gw-agent assignment only": {"company-gw-agent": {"dispatch": "OWNER_ASSIGNMENT_ONLY"}},
-            "gw-agent by Owner": {"company-gw-agent": {"decided_by": "Owner"}},
-            "gw-agent by Owner #289": {"company-gw-agent": {"decided_by": "Owner",
+            "gw-agent missing": {"gw-agent": None},
+            "gw-agent allowed": {"gw-agent": {"dispatch": "ALLOWED"}},
+            "gw-agent assignment only": {"gw-agent": {"dispatch": "OWNER_ASSIGNMENT_ONLY"}},
+            "gw-agent by Owner": {"gw-agent": {"decided_by": "Owner"}},
+            "gw-agent by Owner #289": {"gw-agent": {"decided_by": "Owner",
                                                             "evidence": POLICY_EVIDENCE}},
-            "gw-agent allowed by Owner #289": {"company-gw-agent": {
+            "gw-agent allowed by Owner #289": {"gw-agent": {
                 "dispatch": "ALLOWED", "decided_by": "Owner", "evidence": POLICY_EVIDENCE}},
-            "gw-agent PM #289": {"company-gw-agent": {"evidence": POLICY_EVIDENCE}},
-            "gw-agent comment on #120": {"company-gw-agent": {
+            "gw-agent PM #289": {"gw-agent": {"evidence": POLICY_EVIDENCE}},
+            "gw-agent comment on #120": {"gw-agent": {
                 "evidence": GW_AGENT_EVIDENCE + "#issuecomment-1"}},
-            "gw-agent other issue": {"company-gw-agent": {"evidence": GW_AGENT_EVIDENCE + "0"}},
-            "gw-agent decided_by pm": {"company-gw-agent": {"decided_by": "pm"}},
-            "gw-agent empty reason": {"company-gw-agent": {"reason": ""}},
-            "gw-agent bad date": {"company-gw-agent": {"decided_at": "2026-11-31"}},
-            "gw-agent extra field": {"company-gw-agent": {"note": "x"}},
-            "gw-agent assignment ok": {"company-gw-agent": {"owner_assignments": [good]}},
-            "gw-agent assignment bad ref": {"company-gw-agent": {"owner_assignments": [
+            "gw-agent other issue": {"gw-agent": {"evidence": GW_AGENT_EVIDENCE + "0"}},
+            "gw-agent decided_by pm": {"gw-agent": {"decided_by": "pm"}},
+            "gw-agent empty reason": {"gw-agent": {"reason": ""}},
+            "gw-agent bad date": {"gw-agent": {"decided_at": "2026-11-31"}},
+            "gw-agent extra field": {"gw-agent": {"note": "x"}},
+            "gw-agent assignment ok": {"gw-agent": {"owner_assignments": [good]}},
+            "gw-agent assignment bad ref": {"gw-agent": {"owner_assignments": [
                 dict(good, owner_assignment_ref=GW_AGENT_EVIDENCE + "#issuecomment-1")]}},
-            "gw-agent unhashable switch": {"company-gw-agent": {"dispatch": []}},
-            "gw-agent evidence not a string": {"company-gw-agent": {"evidence": None}},
+            "gw-agent unhashable switch": {"gw-agent": {"dispatch": []}},
+            "gw-agent evidence not a string": {"gw-agent": {"evidence": None}},
             "other key PM #120 paused": {"company-gw": {"dispatch": "PAUSED", "decided_by": "PM",
                                                         "evidence": GW_AGENT_EVIDENCE}},
             "other key Owner #120": {"company-gw": {"evidence": GW_AGENT_EVIDENCE}},
@@ -2443,7 +2447,7 @@ class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
         switches, problem = mon.worker_dispatch(
             json.dumps(policy(cases["gw-agent allowed by Owner D1"])).encode())
         self.assertEqual(problem, "")
-        self.assertEqual(switches["company-gw-agent"][:2], ("ALLOWED", "Owner"))
+        self.assertEqual(switches["gw-agent"][:2], ("ALLOWED", "Owner"))
         for label in ("gw-agent allowed", "gw-agent by Owner", "gw-agent PM #289",
                       "other key PM #120 paused", "gw-agent missing",
                       "gw-agent allowed by PM D1", "gw-agent paused by Owner D1",
@@ -2456,7 +2460,8 @@ class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
                       "gw-agent allowed by Owner comment trailing slash",
                       "gw-agent allowed by Owner comment on #1200",
                       "gw-agent allowed by Owner lower-case switch",
-                      "other key Owner D1 comment"):
+                      "other key Owner D1 comment", "retired gw-agent key",
+                      "retired gw-agent key beside gw-agent"):
             with self.subTest(must_reject=label):
                 self.assertEqual(mon.worker_dispatch(json.dumps(policy(cases[label])).encode())[1],
                                  "rejected")
@@ -3533,7 +3538,7 @@ class OfficeViewTests(unittest.TestCase):
         status = self.by_name(rows)[mon.HOME_GW_AGENT]
         self.assertIn("工作中（1 件）", status.detail)
         # #1592: with the switch open, the row stays and says it is working.
-        open_switch = self._dispatch({"company-gw-agent": dict(GW_AGENT_OWNER_ALLOWED)})
+        open_switch = self._dispatch({"gw-agent": dict(GW_AGENT_OWNER_ALLOWED)})
         status = self.by_name(self.rows(self._gw_agent_process(self.task, audit),
                                         dispatch=open_switch))[mon.HOME_GW_AGENT]
         self.assertEqual((status.state, status.detail), (mon.WORKING, "可派工；工作中（1 件）"))
@@ -5930,7 +5935,7 @@ class OfficeViewTests(unittest.TestCase):
 
     def test_company_gw_agent_owner_allowed_shows_as_dispatchable(self):
         # #120 D1 = A: the Owner's exact decision comment opens the gw Agent route.
-        switches = self._dispatch({"company-gw-agent": dict(GW_AGENT_OWNER_ALLOWED)})
+        switches = self._dispatch({"gw-agent": dict(GW_AGENT_OWNER_ALLOWED)})
         rows = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
                                             claude_root=str(self.claude),
                                             canonical=self.canonical, opencode_db="/nonexistent",
@@ -5938,7 +5943,7 @@ class OfficeViewTests(unittest.TestCase):
         row = rows[mon.HOME_GW_AGENT]
         self.assertEqual((row.state, row.detail, row.authority), (mon.IDLE, "可派工", "Owner"))
         # Any other comment on #120 fails closed for every Worker.
-        other = self._dispatch({"company-gw-agent": dict(
+        other = self._dispatch({"gw-agent": dict(
             GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_EVIDENCE + "#issuecomment-6594101521")})
         rows = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
                                             claude_root=str(self.claude),

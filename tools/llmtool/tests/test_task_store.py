@@ -4191,6 +4191,118 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(created['backend_session_semantics'],
                          'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL')
 
+    # #1502 WP-E (Codex v1 F1 on PR #1774): a Task stored before the gw Agent
+    # rename names the route by its retired id. It reads as gw-agent through
+    # worker_dispatch.stored_worker_id; a new write naming the retired id fails.
+    _RETIRED_GW_AGENT = 'company-gw-agent'
+
+    def _path(self, task_id):
+        return self.root / (task_id + '.json')
+
+    def _store_as_written(self, value):
+        """Put a record on disk as an older llmtool wrote it, digest included."""
+        value = dict(value)
+        value['record_sha256'] = task_store_module._digest(value)
+        self._path(value['task_id']).write_bytes(task_store_module._json_bytes(value))
+        return value
+
+    def _legacy_gw_agent_task(self):
+        task = self._codex_dispatch_task()
+        task['pm_assignment'] = dict(task['pm_assignment'], route='gw-agent')
+        self.store.create(task)
+        developer = self._developer_assignment(provider='gw-agent')
+        developer['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        current = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=developer)
+        legacy = dict(
+            current,
+            developer=dict(current['developer'], provider_profile=self._RETIRED_GW_AGENT),
+            pm_assignment=dict(current['pm_assignment'], route=self._RETIRED_GW_AGENT))
+        return current, self._store_as_written(legacy)
+
+    def test_stored_task_with_the_retired_gw_agent_id_reads_as_gw_agent(self):
+        current, legacy = self._legacy_gw_agent_task()
+        raw = self._path(legacy['task_id']).read_bytes()
+        loaded = self.store.get(legacy['task_id'])
+        self.assertEqual(loaded['developer']['provider_profile'], 'gw-agent')
+        self.assertEqual(loaded['pm_assignment']['route'], 'gw-agent')
+        # Only the retired ids change; the read copy is a valid, self-consistent record.
+        self.assertEqual({key: value for key, value in loaded.items() if key != 'record_sha256'},
+                         {key: value for key, value in current.items() if key != 'record_sha256'})
+        self.assertEqual(loaded['record_sha256'], task_store_module._digest(loaded))
+        task_store_module._validate(dict(loaded))   # strict: raises if invalid
+        # A read never rewrites the stored record.
+        self.assertEqual(self._path(legacy['task_id']).read_bytes(), raw)
+        self.assertIn(self._RETIRED_GW_AGENT.encode(), raw)
+
+    def test_update_of_a_legacy_task_writes_the_current_gw_agent_id(self):
+        _current, legacy = self._legacy_gw_agent_task()
+        loaded = self.store.get(legacy['task_id'])
+        claimed = {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+                   'claimed_at': '2026-11-06T00:00:00Z'}
+        saved = self.store.compare_and_update(
+            legacy['task_id'], expected={'record_sha256': loaded['record_sha256'],
+                                         'developer': loaded['developer']},
+            merge_attempt=claimed)
+        self.assertEqual(saved['merge_attempt'], claimed)
+        self.assertEqual(saved['developer']['provider_profile'], 'gw-agent')
+        raw = self._path(legacy['task_id']).read_bytes()
+        self.assertNotIn(self._RETIRED_GW_AGENT.encode(), raw)
+        self.assertEqual(self.store.get(legacy['task_id']), saved)
+
+    def test_legacy_active_pm_task_reads_its_retired_route_as_gw_agent(self):
+        value = self._active_pm_record(route='gw-agent')
+        created = self.store.create(value)
+        response = json.loads(created['response'])
+        response['developer_assignment']['route'] = self._RETIRED_GW_AGENT
+        stored_response = json.dumps(response, separators=(',', ':'))
+        self._store_as_written(dict(
+            created, response=stored_response,
+            pm_assignment=dict(created['pm_assignment'], route=self._RETIRED_GW_AGENT)))
+        loaded = self.store.get(value['task_id'])
+        self.assertEqual(loaded['pm_assignment']['route'], 'gw-agent')
+        # The PM response is kept exactly as written.
+        self.assertEqual(loaded['response'], stored_response)
+
+    def test_legacy_task_with_a_changed_digest_stays_invalid(self):
+        _current, legacy = self._legacy_gw_agent_task()
+        tampered = dict(legacy, updated_at='2026-10-22T00:00:00Z')
+        self._path(legacy['task_id']).write_bytes(task_store_module._json_bytes(tampered))
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.get(legacy['task_id'])
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
+
+    def test_new_writes_naming_the_retired_gw_agent_id_are_refused(self):
+        task = self._codex_dispatch_task()
+        task['pm_assignment'] = dict(task['pm_assignment'], route=self._RETIRED_GW_AGENT)
+        with self.assertRaises(LLMToolError):
+            self.store.create(task)
+        self.assertFalse(self._path(task['task_id']).exists())
+
+        value = self._active_pm_record(route=self._RETIRED_GW_AGENT)
+        with self.assertRaises(LLMToolError):
+            self.store.create(value)
+
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        developer = self._developer_assignment(provider=self._RETIRED_GW_AGENT)
+        developer['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(
+                task['task_id'], expected={'developer': None}, developer=developer)
+        self.assertIsNone(self.store.get(task['task_id'])['developer'])
+
+        # _validate itself, strict or not, never accepts the retired id.
+        current, _legacy = self._legacy_gw_agent_task()
+        for strict in (True, False):
+            for field, key in (('developer', 'provider_profile'), ('pm_assignment', 'route')):
+                with self.subTest(strict=strict, field=field):
+                    candidate = dict(current, **{
+                        field: dict(current[field], **{key: self._RETIRED_GW_AGENT})})
+                    candidate['record_sha256'] = task_store_module._digest(candidate)
+                    with self.assertRaises(LLMToolError):
+                        task_store_module._validate(candidate, strict=strict)
+
     def test_active_codex_pm_session_binding_is_validated_and_round_trips(self):
         value = self._active_pm_record()
         native = str(uuid.uuid4())

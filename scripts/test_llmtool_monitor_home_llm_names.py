@@ -23,7 +23,7 @@ class HomeLlmNameTests(unittest.TestCase):
         self.assertIs(mon.WORKER_ROSTER[3][0], mon.HOME_GW_AGENT)
         self.assertIs(mon.GW_ROSTER["gw-agent developer"], mon.HOME_GW_AGENT)
         self.assertEqual([row[1] for row in mon.WORKER_ROSTER[2:]],
-                         ["company-gw", "company-gw-agent"])
+                         ["company-gw", "gw-agent"])
 
     def test_roster_rows_use_the_home_llm_names(self):
         # Owner #120 c6800664561: user-visible names say home LLM / gw-agent.

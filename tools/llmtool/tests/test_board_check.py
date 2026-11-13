@@ -723,6 +723,37 @@ class DispatchAuditBindingTests(BoardCheckCase):
         self.assertRow(self.check(record), 'task', board_check.RUNNING, '11:00:00Z')
 
 
+class DispatchAuditWorkerIdTests(unittest.TestCase):
+    """#1502 WP-E: a stored audit worker_key reads through stored_worker_id."""
+
+    def test_legacy_and_new_gw_agent_entries_are_launch_evidence(self):
+        for stored in ('company-gw-agent', 'gw-agent'):
+            with self.subTest(worker_key=stored):
+                record = dispatching(TASK_RUNNING, profile='gw-agent')
+                record['dispatch_audit'][0]['worker_key'] = stored
+                since = board_check._dispatched_at(record)
+                self.assertIsNotNone(since)
+                self.assertEqual(board_check._stamp(since[0]), '2026-11-07T11:00:00Z')
+
+    def test_latest_entry_of_either_id_wins(self):
+        record = dispatching(TASK_RUNNING, profile='gw-agent',
+                             audits=('2026-11-07T11:00:00Z', '2026-11-07T11:20:00Z'))
+        record['dispatch_audit'][1]['worker_key'] = 'company-gw-agent'
+        self.assertEqual(board_check._stamp(board_check._dispatched_at(record)[0]),
+                         '2026-11-07T11:20:00Z')
+
+    def test_entries_of_another_worker_are_not_launch_evidence(self):
+        for stored in ('company-gw', 'agy', 'opencode-developer', None):
+            with self.subTest(worker_key=stored):
+                record = dispatching(TASK_RUNNING, profile='gw-agent')
+                record['dispatch_audit'][0]['worker_key'] = stored
+                self.assertIsNone(board_check._dispatched_at(record))
+        # The alias maps only the retired gw Agent id: it never widens another route.
+        record = dispatching(TASK_RUNNING, profile='opencode')
+        record['dispatch_audit'][0]['worker_key'] = 'company-gw-agent'
+        self.assertIsNone(board_check._dispatched_at(record))
+
+
 class RepairLivenessTests(BoardCheckCase):
     """F5: a repair is live only by its own child Task, never by the parent's D6."""
 
