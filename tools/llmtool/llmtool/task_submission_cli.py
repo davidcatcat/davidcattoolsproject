@@ -1068,6 +1068,21 @@ def lineage_owner_notice(task_id, state, reason):
             'body': f'{OWNER_NOTICE_MARKER}\nTask {task_id} ended {state}: {reason}'}
 
 
+def _lineage_roll_up(store, lineage_id):
+    """End a PARKED ROOT once its child and REPLAN Tasks ended; never a notice (D4)."""
+    from . import repair_policy
+    from .task_store import record_lineage
+    line = store.get(lineage_id).get('lineage')
+    if type(line) is not dict or line.get('state') != 'PARKED':
+        return None
+    outcome = repair_policy.root_outcome(_lineage_members(store, lineage_id))
+    if outcome == 'OPEN':
+        return None
+    state = 'CLOSED' if outcome == 'CLOSED' else 'FAILED_FINAL'
+    record_lineage(store, lineage_id, dict(line, state=state, recorded_at=_timestamp()))
+    return {'task_id': lineage_id, 'state': state, 'owner_notice': None}
+
+
 def run_task_remote_test(args, *, store=None, stdout=None):
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,
