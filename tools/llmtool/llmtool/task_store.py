@@ -1176,23 +1176,21 @@ def _validate_lineage(record):
         _fail('TASK_LINEAGE_INVALID')
 
 
+def _check_lineage_transition(old, new):
+    """Refuse a non-forward lineage write; the store calls this on every write path."""
+    if old is None:
+        return
+    if (type(new) is not dict or
+            any(old.get(key) != new.get(key)
+                for key in ('lineage_id', 'kind', 'parent', 'replaces', 'base_sha')) or
+            old.get('state') in _LINEAGE_END_STATES or
+            (old.get('state') == 'PARKED' and new.get('state') == 'OPEN')):
+        _fail('TASK_LINEAGE_TRANSITION_INVALID')
+
+
 def record_lineage(store, task_id, lineage):
     """Write a Task's lineage; kind, lineage_id and parent are fixed once set."""
-    for _ in range(5):
-        current = store.get(task_id)
-        old = current.get('lineage')
-        if old is not None and (
-                any(old.get(key) != lineage.get(key)
-                    for key in ('lineage_id', 'kind', 'parent', 'replaces', 'base_sha')) or
-                old.get('state') in _LINEAGE_END_STATES or
-                (old.get('state') == 'PARKED' and lineage.get('state') == 'OPEN')):
-            _fail('TASK_LINEAGE_TRANSITION_INVALID')
-        try:
-            return store._update(task_id, expected={'record_sha256': current['record_sha256']},
-                                 changes={'lineage': dict(lineage)})
-        except TaskStoreConflict:
-            continue
-    _fail('TASK_STORE_BUSY')
+    return store.update(task_id, lineage=dict(lineage))
 
 
 def _validate(record, *, strict=True):
@@ -4298,6 +4296,9 @@ class TaskStore:
                         old_attempt.get('claimed_at') != new_attempt.get('claimed_at'))
                 if not valid:
                     _fail('TASK_MERGE_ATTEMPT_TRANSITION_INVALID')
+            if 'lineage' in changes:
+                # #1502 WP-D D9b: every lineage write is forward-only, under the task lock.
+                _check_lineage_transition(current.get('lineage'), changes['lineage'])
             if trusted_abandonment:
                 item = changes['abandonment']
                 if (current.get('pm_session_id') != abandonment_pm_session_id or

@@ -363,8 +363,16 @@ class TaskStoreTests(unittest.TestCase):
                                  'TASK_LINEAGE_INVALID')
         replan = dict(line, kind='replan', replaces=['b' * 32])
         self.store.update(child_id, lineage=replan)
-        dropped = dict(line, state='DROPPED', reason='original function unaffected')
+        dropped = dict(replan, state='DROPPED', reason='original function unaffected')
         self.store.update(child_id, lineage=dropped)
+        self.assertEqual(self.store.get(child_id)['lineage'], dropped)
+        # #1502 WP-D D9b: a plain update cannot reopen an end state or rewrite base_sha.
+        for bad in (dict(replan, state='OPEN'), dict(dropped, base_sha='c' * 40)):
+            with self.subTest(bypass=bad):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(child_id, lineage=bad)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_LINEAGE_TRANSITION_INVALID')
         self.assertEqual(self.store.get(child_id)['lineage'], dropped)
 
     def test_record_lineage_only_moves_forward(self):
