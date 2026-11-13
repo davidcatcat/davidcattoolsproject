@@ -38,9 +38,11 @@ _PYTEST_STATS = re.compile(
 # Disable IGNORECASE for this boundary class: otherwise its negated ASCII range
 # also excludes İ, ı, ſ, and K when used inside the credential patterns.
 _NON_ASCII_WORD = r'(?-i:[^\W\x00-\x7f])'
+# Both key boundaries are case-sensitive ASCII look-arounds, never \b or a bare
+# ASCII class: under IGNORECASE those treat İ, ı, ſ, K (or any non-ASCII word
+# character, for \b) as an ASCII word neighbour and would hide the key (#1138).
 _CLOUD_KEY = (
-    r'(?:(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}\b|'
-    r'(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]{16}(?=' + _NON_ASCII_WORD + r'))'
+    r'(?:(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]{16}(?!(?-i:[A-Za-z0-9_])))'
 )
 _SENSITIVE_PREFIX = (
     r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
