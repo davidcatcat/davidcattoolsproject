@@ -127,5 +127,26 @@ class LineageRollUpTests(LineageCase):
         self.assertIsNone(cli._lineage_roll_up(self.store, self.task()))
 
 
+class LineageEndTests(LineageCase):
+    def test_drop_needs_a_reason_and_a_child_and_notifies_the_owner(self):
+        root = self.parked_root()
+        first, second = self.member(root), self.member(root)
+        self.refused('DROP_REASON_REQUIRED', cli.lineage_end, first, 'DROPPED',
+                     pm_session=PM, reason=' ')
+        self.refused('DROP_NOT_CHILD', cli.lineage_end, root, 'DROPPED',
+                     pm_session=PM, reason='not needed')
+        self.refused('LINEAGE_STATE_INVALID', cli.lineage_end, first, 'CLOSED',
+                     pm_session=PM, reason='not needed')
+        result = cli.lineage_end(self.store, first, 'DROPPED', pm_session=PM,
+                                 reason='Original function is not affected.')
+        self.assertEqual(self.state(first), 'DROPPED')
+        self.assertEqual(result['owner_notice']['marker'], cli.OWNER_NOTICE_MARKER)
+        self.assertIsNone(result['root'])
+        self.assertEqual(self.state(root), 'PARKED')
+        self.refused('LINEAGE_NOT_OPEN', cli.lineage_end, first, 'STOPPED',
+                     pm_session=PM, reason='again')
+        self.assertEqual(self.state(second), 'OPEN')
+
+
 if __name__ == '__main__':
     unittest.main()

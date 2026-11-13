@@ -1087,6 +1087,30 @@ def _lineage_roll_up(store, lineage_id):
     return {'task_id': lineage_id, 'state': state, 'owner_notice': None}
 
 
+def lineage_end(store, task_id, state, *, pm_session, reason):
+    """End one OPEN Task: DROPPED (a child), STOPPED, or FAILED_FINAL (a REPLAN)."""
+    from .task_store import record_lineage
+    line = _lineage_of(_lineage_task(store, task_id, pm_session))
+    if state not in ('DROPPED', 'STOPPED', 'FAILED_FINAL'):
+        _lineage_refuse('LINEAGE_STATE_INVALID')
+    _lineage_reason(reason, 'DROP_REASON_REQUIRED' if state == 'DROPPED'
+                    else 'LINEAGE_REASON_INVALID')
+    if state == 'DROPPED' and line['kind'] != 'child':
+        _lineage_refuse('DROP_NOT_CHILD')
+    if state == 'FAILED_FINAL' and line['kind'] != 'replan':
+        _lineage_refuse('FAILED_FINAL_NOT_REPLAN')
+    if line['state'] != 'OPEN':
+        _lineage_refuse('LINEAGE_NOT_OPEN')
+    record_lineage(store, task_id, dict(line, state=state, reason=reason,
+                                        recorded_at=_timestamp()))
+    try:  # The end state is saved: its Owner notice must still be returned.
+        root = None if line['kind'] == 'root' else _lineage_roll_up(store, line['lineage_id'])
+    except LLMToolError:
+        root = {'code': 'LINEAGE_ROLL_UP_FAILED'}
+    return {'task_id': task_id, 'state': state, 'root': root,
+            'owner_notice': lineage_owner_notice(task_id, state, reason)}
+
+
 def run_task_remote_test(args, *, store=None, stdout=None):
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,
