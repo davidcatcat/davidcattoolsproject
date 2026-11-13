@@ -1045,6 +1045,29 @@ def _lineage_members(store, lineage_id):
     return members
 
 
+OWNER_NOTICE_MARKER = ('<!-- activity: type=pm_progress actor=PM target=Owner '
+                       'status=NOTICE -->')
+
+
+def _lineage_reason(reason, code):
+    from . import repair_policy
+    if (repair_policy.admit_drop(reason=reason) is not None or
+            not all(char.isprintable() for char in reason) or _emitted_sensitive(reason)):
+        _lineage_refuse(code)
+    return reason
+
+
+def lineage_owner_notice(task_id, state, reason):
+    """The D4 Owner notice for DROPPED, STOPPED or FAILED_FINAL; None otherwise."""
+    from . import repair_policy
+    if not repair_policy.owner_notice(state):
+        return None
+    # The reason reaches the Owner notice body: screen it here, not only at callers.
+    reason = _lineage_reason(reason, 'LINEAGE_REASON_INVALID')
+    return {'marker': OWNER_NOTICE_MARKER, 'task_id': task_id, 'state': state,
+            'body': f'{OWNER_NOTICE_MARKER}\nTask {task_id} ended {state}: {reason}'}
+
+
 def run_task_remote_test(args, *, store=None, stdout=None):
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,
