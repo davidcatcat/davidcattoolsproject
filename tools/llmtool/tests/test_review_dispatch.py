@@ -1479,6 +1479,46 @@ class VerdictPostTests(unittest.TestCase):
         self.assertEqual(self.posts, [])
         self.assertEqual(self.receipt()['comment_id'], 9)
 
+    def test_two_exact_matches_are_a_duplicate_conflict_and_never_posted(self):
+        self.comments = [self.comment(7, self.text), self.comment(8, self.text)]
+        with self.assertRaises(LLMToolError) as raised:
+            self.ensure()
+        self.assertEqual(raised.exception.review_verdict_post_code, 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_VERDICT_POST_FAILED')
+        self.assertEqual(self.posts, [])
+        receipt = self.receipt()
+        self.assertEqual(receipt['state'], 'FAILED')
+        self.assertEqual(receipt['code'], 'VERDICT_POST_DUPLICATE')
+        # A replay reports the same conflict and still posts nothing.
+        with self.assertRaises(LLMToolError) as again:
+            self.ensure()
+        self.assertEqual(again.exception.review_verdict_post_code, 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(self.posts, [])
+
+    def test_duplicate_after_a_posted_receipt_is_not_already_posted(self):
+        self.assertEqual(self.ensure(), {'state': 'POSTED', 'comment_id': 901})
+        self.comments = [self.comment(901, self.text), self.comment(902, self.text)]
+        with self.assertRaises(LLMToolError) as raised:
+            self.ensure()
+        self.assertEqual(raised.exception.review_verdict_post_code, 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(len(self.posts), 1)
+        # The POSTED receipt is kept, so the verdict is never posted again.
+        self.assertEqual(self.receipt()['state'], 'POSTED')
+        self.assertEqual(self.receipt()['comment_id'], 901)
+
+    def test_one_exact_match_is_already_posted(self):
+        self.comments = [self.comment(7, self.text)]
+        self.assertEqual(self.ensure(), {'state': 'ALREADY_POSTED', 'comment_id': 7})
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.receipt()['state'], 'POSTED')
+
+    def test_one_exact_match_plus_forged_author_copy_is_already_posted(self):
+        self.comments = [self.comment(6, self.text, login='someone-else'),
+                         self.comment(7, self.text)]
+        self.assertEqual(self.ensure(), {'state': 'ALREADY_POSTED', 'comment_id': 7})
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.receipt()['comment_id'], 7)
+
     def test_created_comment_with_normalized_body_is_reported_unverified(self):
         def normalizing_poster(_root, pr_number, body):
             self.posts.append((pr_number, body))

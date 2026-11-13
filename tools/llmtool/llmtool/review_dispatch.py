@@ -872,13 +872,14 @@ def _verdict_binding_line(task, task_id, claim, text):
 
 
 def _find_posted_verdict(comments, login, text, binding_line):
-    """Return (exact comment, conflict) from comments the expected login wrote.
+    """Return (exact comment, conflict, duplicate) from the expected login's comments.
 
     A body alone never counts: the author must be the posting login and the
     body must equal the stored text byte for byte, binding line included. A
     bound comment by that login whose body differs is a conflict, not a match.
+    More than one exact match is a duplicate, never an already-posted verdict.
     """
-    match, conflict = None, False
+    match, conflict, duplicate = None, False, False
     for comment in comments:
         if type(comment) is not dict:
             continue
@@ -887,10 +888,13 @@ def _find_posted_verdict(comments, login, text, binding_line):
                 type(body) is not str or binding_line not in body):
             continue
         if body == text and binding_line in body.splitlines():
-            match = comment if match is None else match
+            if match is None:
+                match = comment
+            else:
+                duplicate = True
         else:
             conflict = True
-    return match, conflict
+    return match, conflict, duplicate
 
 
 def _comment_id(comment):
@@ -969,8 +973,12 @@ def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_r
             comments = lister(claim.get('pr'))
         except Exception:
             comments = None
-        match = (_find_posted_verdict(comments, login, text, binding_line)[0]
-                 if type(comments) is list else None)
+        match, _conflict, duplicate = (
+            _find_posted_verdict(comments, login, text, binding_line)
+            if type(comments) is list else (None, False, False))
+        if duplicate:
+            # The POSTED receipt stays as the durable record; nothing is posted.
+            raise _verdict_post_failure('VERDICT_POST_DUPLICATE')
         if match is not None:
             return {'state': 'ALREADY_POSTED', 'comment_id': _comment_id(match)}
         output = {'state': 'POSTED_UNVERIFIED'}
@@ -1001,7 +1009,9 @@ def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_r
         comments = None
     if type(comments) is not list:
         raise failed('VERDICT_POST_LIST_FAILED')
-    match, conflict = _find_posted_verdict(comments, login, text, binding_line)
+    match, conflict, duplicate = _find_posted_verdict(comments, login, text, binding_line)
+    if duplicate:
+        raise failed('VERDICT_POST_DUPLICATE')
     if match is not None:
         output = {'state': 'ALREADY_POSTED', 'comment_id': _comment_id(match)}
         try:
