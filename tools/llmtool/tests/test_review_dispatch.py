@@ -1506,6 +1506,50 @@ class VerdictPostTests(unittest.TestCase):
         self.assertEqual(self.receipt()['state'], 'POSTED')
         self.assertEqual(self.receipt()['comment_id'], 901)
 
+    def test_posted_receipt_durably_records_a_duplicate_conflict(self):
+        self.assertEqual(self.ensure(), {'state': 'POSTED', 'comment_id': 901})
+        posted = self.receipt()
+        self.comments = [self.comment(901, self.text), self.comment(902, self.text)]
+        self.now += 5
+        with self.assertRaises(LLMToolError) as raised:
+            self.ensure()
+        self.assertEqual(raised.exception.review_verdict_post_code, 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_VERDICT_POST_FAILED')
+        self.assertFalse(hasattr(raised.exception, 'review_verdict_receipt'))
+        self.assertEqual(len(self.posts), 1)
+        # The reloaded receipt carries the conflict code and keeps every POSTED fact.
+        reloaded = self.receipt()
+        self.assertEqual(reloaded['code'], 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(reloaded['updated_at'], self.now)
+        for key in ('state', 'comment_id', 'verified', 'owner', 'attempt',
+                    'started_at', 'text_sha256'):
+            self.assertEqual(reloaded[key], posted[key])
+        self.assertEqual(reloaded['state'], 'POSTED')
+        self.assertEqual(reloaded['comment_id'], 901)
+        # A replay reports the same conflict and still never reposts.
+        with self.assertRaises(LLMToolError) as again:
+            self.ensure()
+        self.assertEqual(again.exception.review_verdict_post_code, 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.receipt()['code'], 'VERDICT_POST_DUPLICATE')
+
+    def test_posted_duplicate_whose_receipt_cannot_be_written_says_so(self):
+        self.assertEqual(self.ensure(), {'state': 'POSTED', 'comment_id': 901})
+        posted = self.receipt()
+        self.comments = [self.comment(901, self.text), self.comment(902, self.text)]
+
+        def refuse_write(*_args, **_kwargs):
+            raise review_dispatch._PostError('VERDICT_POST_RECEIPT_WRITE_FAILED')
+
+        with patch.object(review_dispatch, '_write_receipt', refuse_write):
+            with self.assertRaises(LLMToolError) as raised:
+                self.ensure()
+        self.assertEqual(raised.exception.review_verdict_post_code, 'VERDICT_POST_DUPLICATE')
+        self.assertEqual(raised.exception.review_verdict_receipt, 'WRITE_FAILED')
+        self.assertEqual(len(self.posts), 1)
+        # The earlier POSTED receipt is left as it was.
+        self.assertEqual(self.receipt(), posted)
+
     def test_one_exact_match_is_already_posted(self):
         self.comments = [self.comment(7, self.text)]
         self.assertEqual(self.ensure(), {'state': 'ALREADY_POSTED', 'comment_id': 7})

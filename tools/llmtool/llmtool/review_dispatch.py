@@ -977,7 +977,14 @@ def _post_under_lock(*, fd, directory, name, task, task_id, claim, text, login_r
             _find_posted_verdict(comments, login, text, binding_line)
             if type(comments) is list else (None, False, False))
         if duplicate:
-            # The POSTED receipt stays as the durable record; nothing is posted.
+            # Record the conflict durably on the receipt, keeping its POSTED
+            # facts (state, owner, attempt, comment id); nothing is posted.
+            try:
+                _write_receipt(directory, name, dict(
+                    receipt, code='VERDICT_POST_DUPLICATE', updated_at=clock()))
+            except _PostError:
+                raise _verdict_post_failure(
+                    'VERDICT_POST_DUPLICATE', receipt_failed=True) from None
             raise _verdict_post_failure('VERDICT_POST_DUPLICATE')
         if match is not None:
             return {'state': 'ALREADY_POSTED', 'comment_id': _comment_id(match)}
