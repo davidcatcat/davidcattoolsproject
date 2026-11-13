@@ -466,6 +466,104 @@ class PMCallerStoreTests(unittest.TestCase):
         self.assertEqual(result['step'], 'REPAIR_REVIEW')
         self.assertEqual(result['result'], {'state': 'REPAIR_DISPATCHED'})
 
+    def _delegate(self, task_id, *extra, claude='', returned=0):
+        argv = ['task', 'delegate', task_id, '--provider', 'claude',
+                '--selection-source', 'PM', '--executor-task', 'executor-1',
+                '--read-path', 'a.txt', '--write-path', 'a.txt',
+                '--acceptance', 'done', '--egress-basis', 'fixture', *extra]
+        args = parser_for_cli().parse_args(argv)
+        output = io.StringIO()
+        with _environment(claude=claude), \
+                patch('llmtool.task_submission_cli.run_task_delegate',
+                      return_value=returned) as run, \
+                redirect_stdout(output):
+            code = task_submission_cli.run_task_delegate_checked(args, store=self.store)
+        return code, output.getvalue(), run, args
+
+    def _assert_delegate_refused(self, task_id, code, output, run, expected):
+        run.assert_not_called()
+        self.assertEqual(code, 1)
+        lines = output.splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0]), {
+            'task_id': task_id, 'step': 'REFUSED', 'result': None, 'next': 'REFUSED',
+            'codes': [expected], 'acked': []})
+
+    def test_delegate_refuses_missing_identity(self):
+        task_id = self._task(OWNER)
+        code, output, run, _ = self._delegate(task_id)
+        self._assert_delegate_refused(task_id, code, output, run,
+                                      'PM_CALLER_SESSION_MISSING')
+
+    def test_delegate_refuses_non_owner(self):
+        task_id = self._task(OWNER)
+        for extra, claude in (((), OTHER), (('--pm-session', OTHER), '')):
+            with self.subTest(extra=extra, claude=claude):
+                code, output, run, _ = self._delegate(task_id, *extra, claude=claude)
+                self._assert_delegate_refused(task_id, code, output, run,
+                                              'PM_CALLER_NOT_TASK_OWNER')
+
+    def test_delegate_refuses_conflicting_explicit_session(self):
+        task_id = self._task(OWNER)
+        code, output, run, _ = self._delegate(task_id, '--pm-session', OWNER, claude=OTHER)
+        self._assert_delegate_refused(task_id, code, output, run,
+                                      'PM_CALLER_SESSION_CONFLICT')
+
+    def test_delegate_refuses_fenced_owner(self):
+        task_id = self._task(OWNER)
+        pm_runtime.write_session_fence(OWNER, 'pm-' + OTHER, '2026-11-12T00:00:00Z')
+        code, output, run, _ = self._delegate(task_id, claude=OWNER)
+        self._assert_delegate_refused(task_id, code, output, run,
+                                      'PM_CALLER_SESSION_FENCED')
+
+    def test_delegate_runs_for_owner(self):
+        task_id = self._task(OWNER)
+        for extra, claude in ((('--pm-session', OWNER), ''), ((), OWNER),
+                              (('--pm-session', 'pm-' + OWNER), OWNER)):
+            with self.subTest(extra=extra, claude=claude):
+                code, output, run, args = self._delegate(task_id, *extra, claude=claude,
+                                                         returned=7)
+                self.assertEqual(code, 7)
+                run.assert_called_once()
+                self.assertIs(run.call_args.args[0], args)
+                self.assertEqual(len(run.call_args.args), 1)
+                self.assertEqual(run.call_args.kwargs, {'store': self.store})
+                self.assertEqual(output, '')
+
+    def test_review_repair_internal_delegate_is_not_caller_checked(self):
+        from llmtool import review_repair
+        store = _MutableStore({'task_id': 'original', 'pm_session_id': 'pm-' + OTHER})
+        task = {'task_id': 't', 'pm_assignment': {'acceptance': ['done']}}
+        developer = {'provider_profile': 'claude', 'read_paths': ['a.txt'],
+                     'write_paths': ['a.txt'], 'egress_basis': 'fixture',
+                     'owner_assignment_ref': None, 'data_class': None}
+        registration = Mock(root=str(self.home))
+        with _environment(), \
+                patch.object(review_repair, '_registered_d6',
+                             return_value=(registration, None)), \
+                patch.object(pm_caller, 'check_caller',
+                             wraps=pm_caller.check_caller) as check, \
+                patch('llmtool.task_submission_cli.run_task_delegate_checked') as checked, \
+                patch('llmtool.task_submission_cli.run_task_delegate',
+                      return_value=0) as run, \
+                redirect_stdout(io.StringIO()):
+            result = review_repair._delegate_repair(
+                task=task, developer=developer, packet={'task': 'original'},
+                executor_task='executor-1', store=store)
+        check.assert_not_called()
+        checked.assert_not_called()
+        run.assert_called_once()
+        self.assertEqual(result, 0)
+        self.assertIs(run.call_args.kwargs['store'], store)
+        delegated = run.call_args.args[0]
+        self.assertEqual(delegated.task_id, 't')
+        self.assertEqual(delegated.executor_task, 'executor-1')
+        self.assertFalse(hasattr(delegated, 'pm_session'))
+
+    def test_cli_delegate_action_names_checked_adapter(self):
+        from llmtool.cli import TASK_ACTIONS
+        self.assertEqual(TASK_ACTIONS['delegate'], ('run_task_delegate_checked', True))
+
     def test_drive_adapter_refuses_non_owner_before_any_call(self):
         task_id = self._task(OWNER)
         args = parser_for_cli().parse_args(['task', 'drive', task_id, '--merge'])
