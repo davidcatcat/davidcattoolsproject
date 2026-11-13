@@ -198,5 +198,22 @@ class LineageMergedTests(LineageCase):
         self.assertIsNone(cli.lineage_close_merged(self.store, only))
 
 
+class LineageDropTests(LineageCase):
+    def test_drop_command_prints_the_result_or_only_a_code(self):
+        import io
+        import json
+        from types import SimpleNamespace
+        child = self.member(self.parked_root())
+        outputs = []
+        for reason, code in ((' ', 1), ('Original function is not affected.', 0)):
+            out = io.StringIO()
+            args = SimpleNamespace(task_id=child, state='DROPPED', reason=reason,
+                                   pm_session=PM)
+            self.assertEqual(cli.run_task_drop(args, store=self.store, stdout=out), code)
+            outputs.append(json.loads(out.getvalue()))
+        self.assertEqual(outputs[0], {'code': 'DROP_REASON_REQUIRED'})
+        self.assertEqual(outputs[1]['state'], 'DROPPED')
+
+
 if __name__ == '__main__':
     unittest.main()
