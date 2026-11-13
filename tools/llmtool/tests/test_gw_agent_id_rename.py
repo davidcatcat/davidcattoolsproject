@@ -7,10 +7,12 @@ refused with WORKER_ID_RETIRED_ALIAS. The company-gw direct route stays retired.
 """
 
 import argparse
+import ast
 import contextlib
 import io
 import json
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -190,6 +192,94 @@ class StoredRecordReadTests(_PolicyCase):
                 self.assertEqual(task_completion._reviewer_author_family(legacy), family)
                 self.assertEqual(task_completion._reviewer_author_family(legacy),
                                  task_completion._reviewer_author_family(current))
+
+
+_LLMTOOL_ROOT = Path(__file__).resolve().parent.parent     # tools/llmtool
+_REPO_ROOT = _LLMTOOL_ROOT.parent.parent
+_PACKAGE = _LLMTOOL_ROOT / 'llmtool'
+_MONITOR = _REPO_ROOT / 'scripts' / 'llmtool_monitor.py'
+_POLICY = _LLMTOOL_ROOT / 'worker-dispatch.json'
+
+
+def _assignments_to(name):
+    def find(tree):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            if any(isinstance(target, ast.Name) and target.id == name for target in targets):
+                yield node
+    return find
+
+
+def _delegate_provider_argument(tree):
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'add_argument'
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == 'delegate'
+                and node.args and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == '--provider'):
+            yield node
+
+
+# The only places the retired id may be written: the legacy alias tables.
+_ALIAS_TABLES = {
+    'worker_dispatch.py': _assignments_to('RETIRED_WORKER_ALIASES'),
+    'task_submission_cli.py': _delegate_provider_argument,
+}
+_MONITOR_TABLE = _assignments_to('RETIRED_WORKER_IDS')
+
+
+def _names_retired_id(node):
+    return any(isinstance(child, ast.Constant) and child.value == RETIRED
+               for child in ast.walk(node))
+
+
+def _stray_lines(text, find_table=None):
+    """Line numbers naming the retired id outside the one alias table.
+
+    With a table finder there must be exactly one table and it must itself
+    name the retired id, so the guard cannot pass because a table moved."""
+    allowed = set()
+    if find_table is not None:
+        tables = list(find_table(ast.parse(text)))
+        if len(tables) != 1 or not _names_retired_id(tables[0]):
+            raise AssertionError(f'expected one alias table naming {RETIRED}, '
+                                 f'found {len(tables)}')
+        allowed = set(range(tables[0].lineno, tables[0].end_lineno + 1))
+    return [number for number, line in enumerate(text.splitlines(), 1)
+            if RETIRED in line and number not in allowed]
+
+
+class RetiredIdGuardTests(unittest.TestCase):
+    """The retired id appears only in the legacy alias tables (#1502 WP-E)."""
+
+    def test_package_modules_name_the_retired_id_only_in_alias_tables(self):
+        modules = sorted(_PACKAGE.glob('*.py'))
+        self.assertTrue(modules)
+        for name in _ALIAS_TABLES:
+            self.assertTrue((_PACKAGE / name).is_file(), name)
+        for path in modules:
+            with self.subTest(module=path.name):
+                text = path.read_text(encoding='utf-8')
+                self.assertEqual(_stray_lines(text, _ALIAS_TABLES.get(path.name)), [])
+
+    def test_monitor_names_the_retired_id_only_in_its_alias_table(self):
+        self.assertEqual(_stray_lines(_MONITOR.read_text(encoding='utf-8'), _MONITOR_TABLE), [])
+
+    def test_dispatch_policy_never_names_the_retired_id(self):
+        self.assertEqual(_stray_lines(_POLICY.read_text(encoding='utf-8')), [])
+
+    def test_guard_reports_a_stray_use_and_a_missing_table(self):
+        source = ("RETIRED_WORKER_ALIASES = {\n    'company-gw-agent': 'gw-agent',\n}\n"
+                  "ROUTE = 'company-gw-agent'\n")
+        self.assertEqual(_stray_lines(source, _assignments_to('RETIRED_WORKER_ALIASES')), [4])
+        self.assertEqual(_stray_lines(source), [2, 4])
+        with self.assertRaisesRegex(AssertionError, 'expected one alias table'):
+            _stray_lines("ROUTE = 'gw-agent'\n", _assignments_to('RETIRED_WORKER_ALIASES'))
 
 
 if __name__ == '__main__':
