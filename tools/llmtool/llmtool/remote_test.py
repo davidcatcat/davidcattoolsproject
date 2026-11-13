@@ -541,7 +541,6 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
             return known
     if transport is None:
         transport = _ssh_transport
-    started = _now()
     try:
         result = transport(argv, _REMOTE_SCRIPT, _SSH_TIMEOUT)
     except subprocess.TimeoutExpired:

@@ -11,7 +11,7 @@ from dataclasses import fields
 from . import diagnostics as d
 from .diagnostics_settings import resolve_diagnostics_home
 from .diagnostics_store import persistence_supported, RESERVATION_MAX_BYTES, SCAN_LIMIT
-from .diagnostics_summary import (RunSummary, SUMMARY_MAX_BYTES, MAX_STORED_RUN_BYTES,
+from .diagnostics_summary import (SUMMARY_MAX_BYTES, MAX_STORED_RUN_BYTES,
                                   parse_run_summary, strict_object)
 from .errors import LLMToolError
 
