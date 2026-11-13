@@ -598,6 +598,59 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(len(self.store.get(TASK)['review_repair_claims']), 2)
         self.assertEqual(self.calls, [])
 
+    # #1502 WP-D (O2, D1, D3): the review repair counting gate.
+    def _second_fail(self, status=None, head='e' * 40):
+        """A repair claim on an earlier HEAD, then a FAIL on HEAD: valid FAIL 2."""
+        self._seed_repair_claims([self._stored_claim(attempt=1, repair_id='1' * 32,
+                                                     head=head, state='DISPATCHED')])
+        if status is not None:
+            record = self.store.get(TASK)
+            report = 'Root cause evidence.'
+            record['high_debug'] = [{
+                'family': f'pr-{PR}', 'status': status, 'examined_sha': HEAD,
+                'recorded_at': '2026-10-27T03:00:00Z', 'report': report,
+                'report_sha256': hashlib.sha256(report.encode()).hexdigest()}]
+            self.store = TempTaskStore(self.temp.name, record)
+
+    def test_second_valid_fail_without_debug_is_refused_debug_required(self):
+        self._second_fail()
+        self._assert_refused('REPAIR_DEBUG_REQUIRED')
+
+    def test_unconfirmed_debug_on_second_fail_escalates_to_split(self):
+        for status in ('RCA_UNCONFIRMED', 'BLOCKED'):
+            with self.subTest(status=status):
+                self._second_fail(status)
+                self._assert_refused('REPAIR_SPLIT_REQUIRED')
+
+    def test_confirmed_debug_binds_its_report_into_the_second_repair(self):
+        self._second_fail('RCA_CONFIRMED')
+        result = self.dispatch()
+        digest = hashlib.sha256(b'Root cause evidence.').hexdigest()
+        self.assertEqual(result['claim']['attempt'], 2)
+        self.assertEqual(result['claim']['high_debug_report_sha256'], digest)
+        packet = self.calls[0]['packet']
+        self.assertEqual(packet['high_debug_report_sha256'], digest)
+        self.assertEqual(packet['high_debug_report_untrusted_data'], 'Root cause evidence.')
+
+    def test_a_second_review_of_one_head_is_one_valid_fail(self):
+        # v1 and v2 FAIL on one HEAD count once: an unconfirmed Debug does not split.
+        version = self._repair_history(1, status='RCA_UNCONFIRMED')
+        self._assert_refused('REPAIR_DEBUG_REQUIRED', family='network',
+                             github_get=lambda _path: [_comment(version=version)])
+
+    def test_only_low_or_advisory_findings_are_not_a_valid_fail(self):
+        def low(_path):
+            comment = _comment()
+            comment['body'] = comment['body'].replace(
+                'Finding: address the reported issue\n',
+                'Finding: F1 [Low] a.py:1 style\nFinding: F2 [Advisory] a.py:2 note\n')
+            return [comment]
+        self._assert_refused('REPAIR_NO_BLOCKING_FINDING', github_get=low)
+
+    def test_repair_limit_comes_from_policy_json(self):
+        from llmtool import repair_policy
+        self.assertEqual(repair_policy.load_policy()['repair_max'], MAX)
+
     def test_legacy_claims_count_as_pr_family(self):
         self._repair_history(2)
         record = self.store.get(TASK)
