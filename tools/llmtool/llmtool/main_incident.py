@@ -19,6 +19,11 @@ Inputs (newest first unless ``newest_first=False``; one flag orders both):
   and optional ``changed`` (bool). ``changed`` is False only when the caller
   knows the commit cannot change test results; anything else is a change.
 
+Head state reads the newest recognized run of each check on a SHA, chosen
+before any status filter. When that newest run is queued or in progress the
+check is PENDING: it neither fails the head nor counts toward a trusted PASS,
+whatever older completed runs say.
+
 Classes: ENV needs positive environment evidence on every failing run and no
 test failure; FLAKY needs a newer pass of the same check on a SHA that follows
 the failing SHA in main history with no change in between; CODE needs independent reproduction of one test
@@ -40,6 +45,9 @@ ENV = 'ENV'
 FLAKY = 'FLAKY'
 CODE = 'CODE'
 UNKNOWN = 'UNKNOWN'
+PASS = 'PASS'
+FAIL = 'FAIL'
+PENDING = 'PENDING'
 ENV_CONCLUSIONS = frozenset({'cancelled', 'timed_out', 'startup_failure'})
 BAD = ENV_CONCLUSIONS | {'failure'}
 # A failed step is ENV evidence only when it is a known setup step, never a test step.
@@ -83,13 +91,17 @@ def _completed(run):
 
 
 def _passed(kind, run):
-    """Linux passes on success; FULL Mac only when every FULL job succeeded too."""
-    if run.get('conclusion') != 'success':
+    """A completed Linux run passes on success; FULL Mac only when every FULL job succeeded too."""
+    if not _completed(run) or run['conclusion'] != 'success':
         return False
     if kind == LINUX:
         return True
     done = {job.get('name'): job.get('conclusion') for job in run['jobs'] if isinstance(job, dict)}
     return all(done.get(name) == 'success' for name in mac_full_due.JOBS)
+
+
+def _failed(run):
+    return _completed(run) and run['conclusion'] in BAD
 
 
 def _runs_on(runs, sha, newest_first):
@@ -103,25 +115,52 @@ def _runs_on(runs, sha, newest_first):
 
 
 def newest_runs(runs, sha, newest_first=True):
-    """Return {kind: newest completed run} for sha."""
+    """Return {kind: newest recognized run} for sha, whatever its status.
+
+    The newest run is chosen before any status filter, so a queued or in-progress
+    rerun hides every older completed run of that check.
+    """
     newest = {}
-    for kind, run in _runs_on(runs, sha, newest_first):
-        newest.setdefault(kind, run)
+    for run in _ordered(runs, newest_first):
+        kind = run_kind(run)
+        if kind and run['head_sha'] == sha:
+            newest.setdefault(kind, run)
     return newest
 
 
+def check_state(kind, run):
+    """PENDING, PASS or FAIL for one run of kind; None for any other completed result."""
+    if not _completed(run):
+        return PENDING
+    if _passed(kind, run):
+        return PASS
+    if _failed(run):
+        return FAIL
+    return None
+
+
+def check_states(runs, sha, newest_first=True):
+    """Return {kind: state of the newest run} for sha; a kind with no run is absent."""
+    return {kind: check_state(kind, run)
+            for kind, run in newest_runs(runs, sha, newest_first).items()}
+
+
 def trusted_pass(runs, sha, newest_first=True):
-    """True only when the newest Linux check passed and the newest FULL Mac is trusted."""
+    """True only when the newest Linux run passed and the newest FULL Mac run is trusted.
+
+    A pending newest run of either check is never a trusted PASS.
+    """
     newest = newest_runs(runs, sha, newest_first)
     return all(kind in newest and _passed(kind, newest[kind]) for kind in KINDS)
 
 
 def head_failed(runs, sha, newest_first=True):
-    """True when the newest completed run of any required check on sha did not pass.
+    """True when the newest run of any required check on sha completed and did not pass.
 
-    A failed run followed by a green rerun on the same SHA is not failing.
+    A failed run followed by a green rerun on the same SHA is not failing, and a
+    failed run followed by a queued or in-progress rerun is PENDING, not failing.
     """
-    return any(run['conclusion'] in BAD for run in newest_runs(runs, sha, newest_first).values())
+    return any(_failed(run) for run in newest_runs(runs, sha, newest_first).values())
 
 
 def _commits(commits, newest_first):

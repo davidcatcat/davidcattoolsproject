@@ -37,6 +37,11 @@ def docs(run_id, sha, conclusion='success'):
             'conclusion': conclusion}
 
 
+def pending(run, status='queued'):
+    """A copy of run that has not completed yet (queued or in progress)."""
+    return dict(run, status=status, conclusion=None)
+
+
 def runs(*items):
     """Newest first: a higher id is a newer run."""
     return sorted(items, key=lambda run: run['id'], reverse=True)
@@ -114,6 +119,67 @@ class HeadStateTests(unittest.TestCase):
     def test_docs_or_pr_mac_failure_does_not_fail_a_head(self):
         self.assertFalse(mi.head_failed(runs(docs(1, A, 'failure'),
                                              full(2, A, 'failure', event='pull_request')), A))
+
+
+class PendingRerunTests(unittest.TestCase):
+    """Codex v2 F1 on PR #1716: the newest run is chosen before any status filter."""
+
+    def test_pending_rerun_after_failure_is_not_failing(self):
+        for status in ('queued', 'in_progress'):
+            with self.subTest(status=status):
+                data = runs(linux(1, A, 'failure'), pending(linux(2, A), status))
+                self.assertFalse(mi.head_failed(data, A))
+                self.assertEqual(mi.check_states(data, A), {mi.LINUX: mi.PENDING})
+                data = runs(linux(1, A), full(2, A, 'failure'), pending(full(3, A), status))
+                self.assertFalse(mi.head_failed(data, A))
+                self.assertEqual(mi.check_states(data, A),
+                                 {mi.LINUX: mi.PASS, mi.FULL_MAC: mi.PENDING})
+
+    def test_pending_rerun_after_success_is_not_a_trusted_pass(self):
+        for status in ('queued', 'in_progress'):
+            with self.subTest(status=status):
+                self.assertTrue(mi.trusted_pass(runs(linux(1, A), full(2, A)), A))
+                linux_rerun = runs(linux(1, A), full(2, A), pending(linux(3, A), status))
+                self.assertFalse(mi.trusted_pass(linux_rerun, A))
+                self.assertFalse(mi.head_failed(linux_rerun, A))
+                full_rerun = runs(linux(1, A), full(2, A), pending(full(3, A), status))
+                self.assertFalse(mi.trusted_pass(full_rerun, A))
+                self.assertFalse(mi.head_failed(full_rerun, A))
+                self.assertEqual(mi.check_states(full_rerun, A),
+                                 {mi.LINUX: mi.PASS, mi.FULL_MAC: mi.PENDING})
+
+    def test_pending_order_follows_newest_first_flag(self):
+        oldest_first = [linux(1, A, 'failure'), pending(linux(2, A))]
+        self.assertFalse(mi.head_failed(oldest_first, A, newest_first=False))
+        self.assertTrue(mi.head_failed(oldest_first[::-1], A, newest_first=False))
+        self.assertEqual(mi.newest_runs(oldest_first, A, newest_first=False)[mi.LINUX]['id'], 2)
+
+    def test_pass_and_fail_need_a_completed_status(self):
+        # A stale conclusion on a run that has not completed is never PASS or FAIL.
+        self.assertFalse(mi._passed(mi.LINUX, linux(1, A, status='in_progress')))
+        self.assertFalse(mi._passed(mi.FULL_MAC, full(2, A, status='queued')))
+        self.assertFalse(mi.head_failed(runs(linux(3, A, 'failure', status='in_progress')), A))
+        self.assertFalse(mi.trusted_pass(runs(linux(1, A, status='in_progress'), full(2, A)), A))
+        self.assertEqual(mi.check_state(mi.LINUX, linux(4, A, status='queued')), mi.PENDING)
+
+    def test_other_completed_result_has_no_state(self):
+        self.assertIsNone(mi.check_state(mi.LINUX, linux(1, A, 'neutral')))
+        self.assertEqual(mi.check_state(mi.LINUX, linux(2, A, 'cancelled')), mi.FAIL)
+
+    def test_pending_rerun_on_a_head_opens_no_incident(self):
+        history = commits(B, A)
+        data = runs(linux(1, A), full(2, A), linux(10, B), full(11, B, 'failure', failed_tests=[T]),
+                    pending(full(12, B), 'in_progress'))
+        self.assertEqual(mi.find_heads(history, data), (A, None))
+        result = mi.classify_incident(history, data)
+        self.assertFalse(result['incident'])
+        self.assertEqual(codes(result['evidence']), ['NO_FAILING_HEAD'])
+
+    def test_pending_rerun_on_the_pass_head_hides_that_pass(self):
+        history = commits(B, A)
+        data = runs(linux(1, A), full(2, A), pending(linux(3, A)),
+                    linux(10, B, 'failure', failed_tests=[T]))
+        self.assertEqual(mi.find_heads(history, data), (None, B))
 
 
 class HeadsAndRangeTests(unittest.TestCase):
