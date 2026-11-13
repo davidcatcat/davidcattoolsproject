@@ -641,8 +641,22 @@ class HighDebugTests(unittest.TestCase):
         self.assertEqual(len(store.entries), 1)
         self.assertEqual(store.entries[0]['status'], 'RCA_CONFIRMED')
         self.assertEqual(len(store.events), 1)
-        self.assertEqual(invoke(), None)
-        self.assertEqual(len(store.events), 1)
+        # #1502 WP-D (O2): a second Debug on the same ROOT Task is refused.
+        with self.assertRaises(LLMToolError) as caught:
+            invoke()
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_DEBUG_PARENT_USED')
+        self.assertEqual((len(store.entries), len(store.events)), (1, 1))
+
+    def test_a_failed_launch_does_not_use_up_the_parent_debug(self):
+        report = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS)
+        (_result, invoke, store) = self._run_case(report + 'RCA_UNCONFIRMED')
+        store.entries[0] = dict(store.entries[0], status='RUN_FAILED')
+        self.assertIsNone(invoke())
+        self.assertEqual([entry['status'] for entry in store.entries],
+                         ['RUN_FAILED', 'RCA_UNCONFIRMED'])
+        with self.assertRaises(LLMToolError) as caught:
+            invoke()
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_DEBUG_PARENT_USED')
 
     def test_prompt_requires_outcome_status_at_section_start(self):
         prompts = []

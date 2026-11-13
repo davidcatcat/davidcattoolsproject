@@ -1152,6 +1152,31 @@ def _require_screen_cleared(task_id, family):
                                    omitted=record['omitted']))
 
 
+# #1502 WP-D: Debug outcomes that use up a Debug; a launch that recorded
+# RUN_FAILED did not run one, so a fallback route may still run.
+_DEBUG_USED_STATUSES = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID')
+
+
+def _admit_debug(task, entries):
+    """O2, D3: one AI Debug per ROOT or REPLAN Task; children share one per lineage."""
+    from . import repair_policy
+    try:
+        policy = repair_policy.load_policy()
+    except LLMToolError:
+        _refuse('HIGH_DEBUG_POLICY_INVALID')
+    lineage = task.get('lineage')
+    kind = lineage.get('kind') if type(lineage) is dict else 'root'
+    used = sum(1 for entry in entries
+               if type(entry) is not dict or entry.get('status') in _DEBUG_USED_STATUSES)
+    try:
+        code = repair_policy.admit_debug(kind=kind, parent_debug_used=used,
+                                         group_debug_used=used, policy=policy)
+    except LLMToolError:
+        _refuse('HIGH_DEBUG_LINEAGE_INVALID')
+    if code is not None:
+        _refuse('HIGH_DEBUG_' + code)
+
+
 def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                    failed_corrections=None, early_reason=None, evidence=None,
                    runner=None, create_d6=None, repo_root=None,
@@ -1247,6 +1272,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     root = str(registration.root)
     entries = task.get('high_debug', [])
     if type(entries) is not list or len(entries) >= 8: _refuse('HIGH_DEBUG_LIMIT')
+    _admit_debug(task, entries)
     repo_root = repo_root or str(Path(registration.common_dir).parent)
     # Attempts are numbered by recorded entries; ids left behind by an earlier
     # failed create are skipped, so a broken create costs no entry.
