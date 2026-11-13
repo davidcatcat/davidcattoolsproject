@@ -3917,6 +3917,40 @@ class TaskAdvanceCodexVerdictTests(unittest.TestCase):
                 self.assertIn('REVIEW_VERDICT_COMMENT_FAILED', result['codes'])
                 self.assertEqual(result['result'], {'state': 'COMPLETED', 'verdict': 'FAIL'})
 
+    def test_verdict_post_state_decides_whether_advance_posts(self):
+        # #1705: advance posts only when dispatch_review handed the post to it.
+        review_text = 'Verdict: FAIL\n'
+        cases = (
+            ({'state': 'CALLER_POSTING'}, 1),
+            ({'state': 'RECEIPT_UNAVAILABLE', 'code': 'VERDICT_POST_LOCK_UNAVAILABLE'}, 1),
+            ({'state': 'POSTED', 'comment_id': 5}, 0),
+            ({'state': 'ALREADY_POSTED', 'comment_id': 5}, 0),
+            ({'state': 'POSTED_UNVERIFIED'}, 0),
+            ({'state': 'IN_PROGRESS'}, 0),
+            ({'state': 'WITHHELD'}, 0),
+            ({'state': 'SOMETHING_NEW'}, 0),
+            ({}, 0),
+            (None, 0),
+            ('CALLER_POSTING', 0),
+        )
+        for verdict_post, expected in cases:
+            with self.subTest(verdict_post=verdict_post):
+                calls = []
+
+                def runner(root, argv):
+                    calls.append(argv)
+                    return subprocess.CompletedProcess(argv, 0)
+
+                reply = {'state': 'COMPLETED', 'verdict': 'FAIL', 'review_text': review_text,
+                         'verdict_post': verdict_post}
+                result = self._advance_dispatch_result(reply, runner)
+                self.assertEqual(calls, [['pr', 'comment', '17', '--body', review_text]] *
+                                 expected)
+                self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+                self.assertNotIn('review_text', result['result'])
+                self.assertEqual(result['result']['verdict_post'], verdict_post)
+                self.assertNotIn('REVIEW_VERDICT_COMMENT_FAILED', result['codes'])
+
 
 TASK, RUN, DIGEST = '1' * 32, '2' * 32, 'd' * 64
 THREAD = '0123456789abcdef0123'
@@ -4099,6 +4133,93 @@ class CodexReviewFailureReasonTests(unittest.TestCase):
                                      review_dispatch_claim=[unusable_claim()])
             self.assertEqual(store.get(task_id)['review_dispatch_claim'][0]['failure_reason'],
                              'NO_FINAL_MESSAGE')
+
+
+class TaskAdvanceRepeatedVerdictPostTests(unittest.TestCase):
+    """#1705: repeated advances on one COMPLETED Codex review post one comment."""
+
+    LOGIN = 'reviewer-user'
+
+    def test_two_consecutive_advances_on_a_completed_review_post_one_comment(self):
+        text = '\n'.join((MARKER, STATUS, BINDING))
+        record = base_record(
+            record_sha256='f' * 64, task_binding={'contract_digest': DIGEST},
+            developer={'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'claude'})
+        store = ClaimStore(record)
+        executor = type('Executor', (), {'common_dir': '/repo/.git', 'root': '/repo/task'})()
+        reviewer = type('Reviewer', (), {'root': '/repo/reviewer'})()
+        policy = type('Policy', (), {'allowed': True, 'reason_code': None})()
+        role = {'source': 'roles', 'provider': 'codex', 'config_dir': None,
+                'model': None, 'effort': None}
+        now = [1000.0]
+        pr_comments, gh_calls, codex_runs, dispatch_posts = [], [], [], []
+
+        def gh_runner(_root, argv):
+            gh_calls.append(argv)
+            if argv[:2] == ['pr', 'comment']:
+                pr_comments.append({'id': 700 + len(pr_comments),
+                                    'user': {'login': self.LOGIN}, 'body': argv[-1]})
+            return subprocess.CompletedProcess(argv, 0)
+
+        def run_codex(**_kwargs):
+            codex_runs.append(1)
+            return {'thread_id': THREAD, 'review_text': text, 'verdict': 'FAIL'}
+
+        def dispatch(**kwargs):
+            # A concurrent advance chose the same version before the claim
+            # existed, so every later call replays the one COMPLETED claim.
+            return review_dispatch.dispatch_review(
+                **dict(kwargs, version=1), create_d6=lambda **_kwargs: None,
+                prompt_renderer=lambda *_args: 'prompt', codex_runner=run_codex,
+                bind_session=lambda **_kwargs: None,
+                comment_lister=lambda _pr: list(pr_comments),
+                comment_poster=lambda *args: dispatch_posts.append(args),
+                post_clock=lambda: now[0])
+
+        def advance():
+            return task_advance.advance(
+                task_id=TASK, store=store, pr_number=17, github_get=green_linux_ci,
+                dispatch_review_call=dispatch, publish_gh_runner=gh_runner)
+
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(review_dispatch, '_verdict_post_dir',
+                             lambda _store: review_dispatch._private_post_dir(
+                                 Path(temp).resolve() / 'posts')), \
+                patch.object(review_dispatch, '_preflight',
+                             return_value=(record, executor, HEAD, 'c' * 40,
+                                           'codex-reviewer')), \
+                patch.object(review_dispatch, '_policy', return_value=policy), \
+                patch.object(review_dispatch.role_config, 'resolve_role', return_value=role), \
+                patch('llmtool.codex_direct_developer.validate_profile'), \
+                patch.object(review_dispatch, '_resolve_github_login',
+                             return_value=self.LOGIN), \
+                patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                             return_value=reviewer), \
+                patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+                patch.object(task_advance, '_review_outcomes', return_value=[]), \
+                patch.object(task_advance, 'decide', return_value='DISPATCH_REVIEW'):
+            first = advance()
+            second = advance()
+            # After the caller window a replay re-reads the PR and verifies the
+            # caller's comment; advance must not post it again either.
+            now[0] += review_dispatch._VERDICT_POST_STALE_SECONDS + 1
+            third = advance()
+
+        self.assertEqual(codex_runs, [1])
+        self.assertEqual(gh_calls, [['pr', 'comment', '17', '--body', text]])
+        self.assertEqual(len(pr_comments), 1)
+        self.assertEqual(dispatch_posts, [])
+        self.assertEqual(first['result']['verdict_post'], {'state': 'CALLER_POSTING'})
+        self.assertEqual(second['result']['verdict_post'], {'state': 'IN_PROGRESS'})
+        self.assertEqual(third['result']['verdict_post'],
+                         {'state': 'ALREADY_POSTED', 'comment_id': 700})
+        for result in (first, second, third):
+            self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+            self.assertEqual(result['result']['state'], 'COMPLETED')
+            self.assertNotIn('review_text', result['result'])
+            self.assertNotIn('REVIEW_VERDICT_COMMENT_FAILED', result['codes'])
+        claims = store.record['review_dispatch_claim']
+        self.assertEqual([claim['state'] for claim in claims], ['COMPLETED'])
 
 
 class TaskAdvanceUnusableReviewTests(unittest.TestCase):
