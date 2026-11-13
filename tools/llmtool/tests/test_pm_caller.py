@@ -615,7 +615,7 @@ class PMCallerStoreTests(unittest.TestCase):
     def test_claude_bind_refuses_non_owner(self):
         task_id = self._task(OWNER)
         for extra, claude in (((), OTHER), (('--pm-session', OTHER), ''),
-                              (('--pm-session', 'pm-' + OTHER), ''))):
+                              (('--pm-session', 'pm-' + OTHER), '')):
             with self.subTest(extra=extra, claude=claude):
                 code, output, run, _, side = self._claude_bind(task_id, *extra,
                                                                claude=claude)
