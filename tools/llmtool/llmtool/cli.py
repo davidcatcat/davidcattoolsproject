@@ -544,6 +544,9 @@ def main(argv=None):
         if args.command == 'board-check':
             return run_board_check(args)
         if args.command == 'ci':
+            if args.action == 'main-incident':
+                from .main_incident_cli import run_main_incident
+                return run_main_incident(args)
             from .mac_full_due import run_ci
             return run_ci(args)
         if args.command == 'trust':
