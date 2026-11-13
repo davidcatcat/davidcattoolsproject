@@ -446,11 +446,14 @@ class TaskStoreTests(unittest.TestCase):
         self.store.create(task)
         task_id = task['task_id']
         self.assertNotIn('review_disputes', self.store.get(task_id))
-        other_repo = 'https://github.com/example/other/pull/42#issuecomment-1001'
+        dot_repo = 'https://github.com/example/../pull/42#issuecomment-1001'
+        not_github = 'https://example.com/example/other/pull/42#issuecomment-1001'
         for bad in (dict(self._dispute(), extra=1), self._dispute(finding_id='X1'),
                     self._dispute(finding_id='F0'), self._dispute(pr=0),
                     self._dispute(head_sha='x'), self._dispute(review_version=0),
-                    self._dispute(severity='Severe'), self._dispute(evidence_ref=other_repo),
+                    self._dispute(severity='Severe'), self._dispute(evidence_ref=dot_repo),
+                    self._dispute(evidence_ref=not_github),
+                    self._dispute(evidence_ref=self._DISPUTE_REF.split('#')[0]),
                     self._dispute(evidence_ref=self._DISPUTE_REF.replace('https', 'http')),
                     self._dispute(opened_at='2026-11-13'),
                     self._dispute(state='DEFERRED'), self._dispute(state='DEFERRED',
@@ -506,6 +509,48 @@ class TaskStoreTests(unittest.TestCase):
         self.store.update(task_id, review_disputes=[ruled, other])
         self.store.update(task_id, review_disputes=[ruled, dict(other, state='WITHDRAWN')])
         self.assertEqual(self.store.get(task_id)['review_disputes'][1]['state'], 'WITHDRAWN')
+
+    def test_review_dispute_evidence_of_one_task_stays_in_one_repository(self):
+        # The store holds no trusted repository: the dispute commands check the
+        # caller's trusted slug. The store checks the URL shape and that all
+        # dispute evidence of a Task names one repository.
+        other_ref = 'https://github.com/example/other/pull/42#issuecomment-1001'
+        other_ruling = 'https://github.com/example/other/pull/42#issuecomment-1002'
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        task_id = task['task_id']
+        opened = self._dispute()
+        self.store.update(task_id, review_disputes=[opened])
+        self._assert_store_code(
+            'REVIEW_DISPUTE_INVALID', task_id,
+            review_disputes=[dict(opened, state='RULED',
+                                  ruling=self._ruling(evidence_ref=other_ruling))])
+        self._assert_store_code(
+            'REVIEW_DISPUTE_INVALID', task_id,
+            review_disputes=[opened, self._dispute(finding_id='F3', severity='Medium',
+                                                   evidence_ref=other_ref)])
+        self.assertEqual(self.store.get(task_id)['review_disputes'], [opened])
+        # A Task whose disputes all name another repository is shaped correctly.
+        other_task = self._codex_dispatch_task()
+        self.store.create(other_task)
+        other = self._dispute(evidence_ref=other_ref)
+        self.store.update(other_task['task_id'], review_disputes=[other])
+        ruled = dict(other, state='RULED', ruling=self._ruling(evidence_ref=other_ruling))
+        self.store.update(other_task['task_id'], review_disputes=[ruled])
+        self.assertEqual(self.store.get(other_task['task_id'])['review_disputes'], [ruled])
+
+    def test_review_dispute_ref_parts_need_the_callers_repository(self):
+        repository = 'davidcatcat/davidcattoolsproject'
+        self.assertEqual(task_store_module.review_dispute_ref_parts(self._DISPUTE_REF,
+                                                                    repository), (42, 1001))
+        self.assertTrue(task_store_module.valid_review_dispute_ref(self._RULING_REF, repository))
+        for other in ('example/other', 'davidcatcat/other', None, '', 'no-slash',
+                      'a/b/c', 'example/..', repository + '/'):
+            with self.subTest(repository=other):
+                self.assertIsNone(task_store_module.review_dispute_ref_parts(
+                    self._DISPUTE_REF, other))
+                self.assertFalse(task_store_module.valid_review_dispute_ref(
+                    self._DISPUTE_REF, other))
 
     def test_create_refuses_a_record_that_carries_review_disputes(self):
         task = self._codex_dispatch_task()

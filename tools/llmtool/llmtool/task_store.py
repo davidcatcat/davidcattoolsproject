@@ -1210,25 +1210,47 @@ REVIEW_DISPUTE_DEFERRABLE = ('Low', 'Advisory')
 REVIEW_DISPUTE_OUTCOMES = ('UPHELD', 'WITHDRAWN')
 REVIEW_DISPUTE_REVIEWERS = ('claude-reviewer', 'codex-reviewer')
 MAX_REVIEW_DISPUTES = 64
-# Evidence and rulings are Issue or PR conversation comments of this repository.
+# Evidence and rulings are Issue or PR conversation comments of one repository.
+# The store has no trusted repository of its own, so it checks the URL shape and
+# that every evidence URL of a Task names the same repository. The dispute
+# commands pass the trusted repository slug in and refuse any other one; no
+# owner or repository name is written into this module (owner literal guard).
+_REVIEW_DISPUTE_REPOSITORY = (r'[A-Za-z0-9][A-Za-z0-9-]{0,38}/'
+                              r'(?!\.{1,2}(?:/|$))[A-Za-z0-9._-]{1,100}')
+REVIEW_DISPUTE_REPOSITORY = re.compile(_REVIEW_DISPUTE_REPOSITORY)
 _REVIEW_DISPUTE_REF = re.compile(
-    r'https://github\.com/davidcatcat/davidcattoolsproject/(?:issues|pull)/'
+    r'https://github\.com/(' + _REVIEW_DISPUTE_REPOSITORY + r')/(?:issues|pull)/'
     r'([1-9][0-9]{0,8})#issuecomment-([1-9][0-9]{0,19})')
 REVIEW_DISPUTE_FINDING_ID = re.compile(r'F[1-9][0-9]{0,3}')
 
 
-def valid_review_dispute_ref(value):
-    """A comment URL of this repository that passes the sensitive screen."""
-    return (type(value) is str and _REVIEW_DISPUTE_REF.fullmatch(value) is not None and
-            not _emitted_sensitive(value))
-
-
-def review_dispute_ref_parts(value):
-    """(issue_or_pr_number, comment_id) of a valid dispute comment URL, else None."""
-    if not valid_review_dispute_ref(value):
+def _review_dispute_ref_match(value):
+    """The URL match of a screened Issue or PR comment URL of any repository, else None."""
+    if type(value) is not str:
         return None
     match = _REVIEW_DISPUTE_REF.fullmatch(value)
-    return int(match.group(1)), int(match.group(2))
+    if match is None or _emitted_sensitive(value):
+        return None
+    return match
+
+
+def valid_review_dispute_ref(value, repository):
+    """A screened comment URL of exactly the caller's trusted repository slug.
+
+    repository is the trusted owner/name slug the caller read from its
+    trust source; a missing or malformed slug refuses every URL.
+    """
+    return review_dispute_ref_parts(value, repository) is not None
+
+
+def review_dispute_ref_parts(value, repository):
+    """(issue_or_pr_number, comment_id) of a valid URL of repository, else None."""
+    if type(repository) is not str or REVIEW_DISPUTE_REPOSITORY.fullmatch(repository) is None:
+        return None
+    match = _review_dispute_ref_match(value)
+    if match is None or match.group(1) != repository:
+        return None
+    return int(match.group(2)), int(match.group(3))
 
 
 def valid_review_dispute_session(value):
@@ -1246,7 +1268,7 @@ def _valid_review_dispute_ruling(item):
             ruling['reviewer'] in REVIEW_DISPUTE_REVIEWERS and
             _safe_identifier(ruling['reviewer_task'], D6_TASK_ID) and
             valid_review_dispute_session(ruling['reviewer_session']) and
-            valid_review_dispute_ref(ruling['evidence_ref']) and
+            _review_dispute_ref_match(ruling['evidence_ref']) is not None and
             ruling['evidence_ref'] != item['evidence_ref'] and
             _valid_utc_seconds(ruling['ruled_at']) and
             ruling['ruled_at'] >= item['opened_at'])
@@ -1256,7 +1278,7 @@ def _validate_review_disputes(record):
     items = record.get('review_disputes')
     if type(items) is not list or len(items) > MAX_REVIEW_DISPUTES:
         _fail('REVIEW_DISPUTE_INVALID')
-    ruled, live, open_keys = set(), set(), set()
+    ruled, live, open_keys, repositories = set(), set(), set(), set()
     for item in items:
         if (type(item) is not dict or
                 set(item) not in (_REVIEW_DISPUTE_FIELDS,
@@ -1270,12 +1292,18 @@ def _validate_review_disputes(record):
                 type(item['severity']) is not str or
                 item['severity'] not in REVIEW_DISPUTE_SEVERITIES or
                 type(item['state']) is not str or item['state'] not in REVIEW_DISPUTE_STATES or
-                not valid_review_dispute_ref(item['evidence_ref']) or
+                _review_dispute_ref_match(item['evidence_ref']) is None or
                 not _valid_utc_seconds(item['opened_at']) or
                 ('ruling' in item) != (item['state'] == 'RULED') or
                 (item['state'] == 'RULED' and not _valid_review_dispute_ruling(item)) or
                 (item['state'] == 'DEFERRED' and
                  item['severity'] not in REVIEW_DISPUTE_DEFERRABLE)):
+            _fail('REVIEW_DISPUTE_INVALID')
+        repositories.add(_review_dispute_ref_match(item['evidence_ref']).group(1))
+        if item['state'] == 'RULED':
+            repositories.add(_review_dispute_ref_match(item['ruling']['evidence_ref']).group(1))
+        # All dispute evidence of one Task is in one repository.
+        if len(repositories) != 1:
             _fail('REVIEW_DISPUTE_INVALID')
         key = (item['pr'], item['finding_id'])
         if item['state'] == 'RULED':

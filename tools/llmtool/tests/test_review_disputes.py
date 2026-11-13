@@ -29,9 +29,13 @@ import worker_policy_fixture
 
 TASK, HEAD, PR, EXECUTOR = trr.TASK, trr.HEAD, trr.PR, trr.EXECUTOR
 NEW_HEAD = 'd' * 40
-REF = 'https://github.com/davidcatcat/davidcattoolsproject/pull/42#issuecomment-1001'
-RULING_REF = 'https://github.com/davidcatcat/davidcattoolsproject/pull/42#issuecomment-1002'
-ISSUE_REF = 'https://github.com/davidcatcat/davidcattoolsproject/issues/1502#issuecomment-1003'
+# The trusted repository slug the dispute commands read from the trust source
+# (patched in _Case); production code holds no owner or repository literal.
+REPOSITORY = 'davidcatcat/davidcattoolsproject'
+OTHER_REPOSITORY = 'example/other'
+REF = f'https://github.com/{REPOSITORY}/pull/42#issuecomment-1001'
+RULING_REF = f'https://github.com/{REPOSITORY}/pull/42#issuecomment-1002'
+ISSUE_REF = f'https://github.com/{REPOSITORY}/issues/1502#issuecomment-1003'
 FINDINGS = ('Finding: F1 [High] a.py:1 the guard is missing\n'
             'Finding: F2 [Low] a.py:2 naming\n'
             'Finding: F3 [Medium] a.py:3 edge case\n'
@@ -64,15 +68,15 @@ def _ruling_body(finding_id='F1', outcome='WITHDRAWN', *, head=HEAD, actor='Code
 
 def _ruling_comment(finding_id='F1', outcome='WITHDRAWN', *, head=HEAD, actor='Codex',
                     pr=PR, issue=PR, comment_id=RULING_ID, login=REVIEW_LOGIN,
-                    created=None, edited=False, binding=True, extra='', body=None):
+                    created=None, edited=False, binding=True, extra='', body=None,
+                    repository=REPOSITORY):
     """The arbiter's ruling comment as GitHub returns it (security v91 F1)."""
     created = _now() if created is None else created
     if body is None:
         body = _ruling_body(finding_id, outcome, head=head, actor=actor, pr=pr,
                             binding=binding, extra=extra)
     return {'id': comment_id, 'body': body,
-            'issue_url': ('https://api.github.com/repos/davidcatcat/davidcattoolsproject/'
-                          f'issues/{issue}'),
+            'issue_url': f'https://api.github.com/repos/{repository}/issues/{issue}',
             'user': {'login': login}, 'created_at': created,
             'updated_at': '2099-01-01T00:00:00Z' if edited else created}
 
@@ -190,12 +194,20 @@ class _Case(unittest.TestCase):
                        f'issues/comments/{RULING_ID}': lambda: _ruling_comment()}
         self.d6 = {'arbiter-d6': _registration()}
         self.worktree_heads = {}
+        self.trusted = REPOSITORY
         for name, fake in (('_github_get', self._github_get),
                            ('read_d6_registration', self._read_d6),
-                           ('collect_git_snapshot', self._snapshot)):
+                           ('collect_git_snapshot', self._snapshot),
+                           ('_trusted_slug', self._trusted_slug)):
             patcher = patch.object(task_completion, name, side_effect=fake)
             patcher.start()
             self.addCleanup(patcher.stop)
+
+    def _trusted_slug(self, *_args, **_kwargs):
+        # The trust source's repository slug; an exception stands for an unreadable source.
+        if isinstance(self.trusted, Exception):
+            raise self.trusted
+        return self.trusted
 
     def _github_get(self, path):
         value = self.github.get(path)
@@ -601,7 +613,7 @@ class ArbiterAuthenticationTests(_Case):
         self.refused('DISPUTE_ARBITER_NOT_INDEPENDENT', self.rule)
 
     def test_an_unrelated_comment_url_is_refused(self):
-        base = 'https://github.com/davidcatcat/davidcattoolsproject/'
+        base = f'https://github.com/{REPOSITORY}/'
         for ref in (base + f'pull/{PR + 1}#issuecomment-{RULING_ID}',   # another PR
                     ISSUE_REF):                                         # an Issue thread
             with self.subTest(ref=ref):
@@ -943,12 +955,71 @@ class DisputeCliRouteTests(_Case):
 
 class DisputeRefPartsTests(unittest.TestCase):
     def test_only_a_valid_comment_url_has_parts(self):
-        self.assertEqual(task_store.review_dispute_ref_parts(RULING_REF), (PR, RULING_ID))
-        self.assertEqual(task_store.review_dispute_ref_parts(ISSUE_REF), (1502, 1003))
+        self.assertEqual(task_store.review_dispute_ref_parts(RULING_REF, REPOSITORY),
+                         (PR, RULING_ID))
+        self.assertEqual(task_store.review_dispute_ref_parts(ISSUE_REF, REPOSITORY), (1502, 1003))
         for value in (None, 42, 'see the PR', REF.split('#')[0],
-                      'https://github.com/example/other/pull/42#issuecomment-1001'):
+                      f'https://github.com/{OTHER_REPOSITORY}/pull/42#issuecomment-1001'):
             with self.subTest(value=value):
-                self.assertIsNone(task_store.review_dispute_ref_parts(value))
+                self.assertIsNone(task_store.review_dispute_ref_parts(value, REPOSITORY))
+
+    def test_the_repository_is_the_callers_not_the_modules(self):
+        # The same URL is valid only for the repository the caller passes in.
+        other = f'https://github.com/{OTHER_REPOSITORY}/pull/42#issuecomment-1001'
+        self.assertEqual(task_store.review_dispute_ref_parts(other, OTHER_REPOSITORY),
+                         (42, 1001))
+        self.assertIsNone(task_store.review_dispute_ref_parts(REF, OTHER_REPOSITORY))
+        for repository in (None, '', 'no-slash', 'a/b/c', 'example/..', REPOSITORY.upper()):
+            with self.subTest(repository=repository):
+                self.assertFalse(task_store.valid_review_dispute_ref(REF, repository))
+
+    def test_dispute_production_code_holds_no_repository_literal(self):
+        # PR #1775 Linux CI: the owner literal guard; the slug comes from the caller.
+        owner = REPOSITORY.split('/')[0]
+        for function in (task_store.valid_review_dispute_ref,
+                         task_store.review_dispute_ref_parts,
+                         task_submission_cli._dispute_arguments,
+                         task_submission_cli._dispute_ruling_comment):
+            with self.subTest(function=function.__name__):
+                self.assertNotIn(owner, inspect.getsource(function))
+        self.assertNotIn(owner, task_store._REVIEW_DISPUTE_REF.pattern)
+
+
+class TrustedRepositoryTests(_Case):
+    """PR #1775: evidence is checked against the trusted slug the commands read."""
+
+    OTHER_REF = f'https://github.com/{OTHER_REPOSITORY}/pull/42#issuecomment-1001'
+    OTHER_RULING_REF = f'https://github.com/{OTHER_REPOSITORY}/pull/42#issuecomment-1002'
+
+    def test_evidence_must_name_the_trusted_repository(self):
+        self.use(_task())
+        self.trusted = OTHER_REPOSITORY
+        self.refused('DISPUTE_EVIDENCE_REF_INVALID', self.open)          # REF names REPOSITORY
+        self.open(evidence_ref=self.OTHER_REF)
+        self.assertEqual(self.disputes()[0]['evidence_ref'], self.OTHER_REF)
+        self.refused('DISPUTE_EVIDENCE_REF_INVALID', self.rule)          # RULING_REF likewise
+        # The live comment's thread must be of the trusted repository too.
+        self.refused('DISPUTE_RULING_EVIDENCE_INVALID', self.rule,
+                     evidence_ref=self.OTHER_RULING_REF)
+        self.rule(evidence_ref=self.OTHER_RULING_REF,
+                  comment=lambda: _ruling_comment(repository=OTHER_REPOSITORY))
+        self.assertEqual(self.disputes()[0]['ruling']['evidence_ref'], self.OTHER_RULING_REF)
+
+    def test_an_unreadable_or_malformed_trusted_slug_refuses(self):
+        self.use(_task())
+        for trusted in (LLMToolError('trust source unreadable'), RuntimeError('broken'),
+                        None, '', 'no-slash', 'a/b/c', 'example/..', 42):
+            with self.subTest(trusted=trusted):
+                self.trusted = trusted
+                self.refused('DISPUTE_REPOSITORY_UNKNOWN', self.open)
+                self.refused('DISPUTE_REPOSITORY_UNKNOWN', self.defer, 'F2')
+        self.trusted = REPOSITORY
+        self.open()
+        for trusted in (LLMToolError('trust source unreadable'), None, 'a/b/c'):
+            with self.subTest(rule_trusted=trusted):
+                self.trusted = trusted
+                self.refused('DISPUTE_REPOSITORY_UNKNOWN', self.rule)
+        self.assertEqual(self.disputes()[0]['state'], 'OPEN')
 
 
 class ArbiterChooserTests(unittest.TestCase):

@@ -1911,13 +1911,32 @@ def _dispute_refuse(code):
     dispute_refuse(code)
 
 
+def _dispute_repository():
+    """The trusted owner/name slug from the trust source; unreadable refuses.
+
+    Evidence URLs are checked against this slug, never against an owner or
+    repository name written into the code (owner literal guard).
+    """
+    from .task_store import REVIEW_DISPUTE_REPOSITORY
+    try:
+        slug = task_completion._trusted_slug()
+    except Exception:
+        slug = None
+    if type(slug) is not str or REVIEW_DISPUTE_REPOSITORY.fullmatch(slug) is None:
+        _dispute_refuse('DISPUTE_REPOSITORY_UNKNOWN')
+    return slug
+
+
 def _dispute_arguments(pr, finding_id, evidence_ref):
+    """Check the arguments; return the trusted repository slug the evidence belongs to."""
     from .task_store import REVIEW_DISPUTE_FINDING_ID, valid_review_dispute_ref
     if (type(pr) is not int or not 1 <= pr <= 9999999 or type(finding_id) is not str or
             REVIEW_DISPUTE_FINDING_ID.fullmatch(finding_id) is None):
         _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
-    if not valid_review_dispute_ref(evidence_ref):
+    repository = _dispute_repository()
+    if not valid_review_dispute_ref(evidence_ref, repository):
         _dispute_refuse('DISPUTE_EVIDENCE_REF_INVALID')
+    return repository
 
 
 def _live_pr_head(_record, pr):
@@ -2007,7 +2026,6 @@ _RULING_HEADER = re.compile(
     r'HEAD: ([0-9a-f]{40})')
 _RULING_ANY_LINE = re.compile(r'^Ruling: ', re.M)
 _GITHUB_TIME = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
-_DISPUTE_ISSUE_API = 'https://api.github.com/repos/davidcatcat/davidcattoolsproject/issues/'
 
 
 def _is_ruling_claim(claim):
@@ -2075,7 +2093,7 @@ def _dispute_ruling_claim(record, entry, *, pr, head, arbiter, reviewer_task, re
 
 
 def _dispute_ruling_comment(record, entry, *, pr, head, finding_id, outcome, reviewer,
-                            review_text, evidence_ref, github_get):
+                            review_text, evidence_ref, repository, github_get):
     """Authenticate the ruling's evidence as the arbiter's own ruling comment (v91 F1).
 
     The comment is read live and must be an unedited comment on this PR,
@@ -2090,9 +2108,11 @@ def _dispute_ruling_comment(record, entry, *, pr, head, finding_id, outcome, rev
     The actor is the chosen arbiter's family and the comment carries no other
     Ruling line. The comment author's login is not identity: all agents share
     one login (#926), so the claim's review_text binds the comment instead.
+    The URL and the comment's thread must both be of the trusted repository
+    slug the caller read.
     """
     from .task_store import review_dispute_ref_parts
-    parts = review_dispute_ref_parts(evidence_ref)
+    parts = review_dispute_ref_parts(evidence_ref, repository)
     if parts is None or parts[0] != pr:
         _dispute_refuse('DISPUTE_EVIDENCE_REF_INVALID')
     comment_id = parts[1]
@@ -2117,7 +2137,8 @@ def _dispute_ruling_comment(record, entry, *, pr, head, finding_id, outcome, rev
     header = _RULING_HEADER.fullmatch(lines[1]) if len(lines) > 1 else None
     actor = {'claude-reviewer': 'Claude', 'codex-reviewer': 'Codex'}.get(reviewer)
     if (type(comment.get('id')) is not int or comment['id'] != comment_id or
-            comment.get('issue_url') != _DISPUTE_ISSUE_API + str(pr) or
+            comment.get('issue_url') !=
+            f'https://api.github.com/repos/{repository}/issues/{pr}' or
             type(body) is not str or type(review_text) is not str or
             body.encode('utf-8', 'surrogatepass') !=
             review_text.encode('utf-8', 'surrogatepass') or
@@ -2236,7 +2257,7 @@ def dispute_rule(store, task_id, *, pr, finding_id, outcome, reviewer, reviewer_
     """
     from .task_store import (D6_TASK_ID, REVIEW_DISPUTE_OUTCOMES, REVIEW_DISPUTE_REVIEWERS,
                              valid_review_dispute_session)
-    _dispute_arguments(pr, finding_id, evidence_ref)
+    repository = _dispute_arguments(pr, finding_id, evidence_ref)
     if (outcome not in REVIEW_DISPUTE_OUTCOMES or reviewer not in REVIEW_DISPUTE_REVIEWERS or
             type(reviewer_task) is not str or D6_TASK_ID.fullmatch(reviewer_task) is None or
             not valid_review_dispute_session(reviewer_session)):
@@ -2284,7 +2305,8 @@ def dispute_rule(store, task_id, *, pr, finding_id, outcome, reviewer, reviewer_
     _dispute_ruling_comment(record, entry, pr=pr, head=head, finding_id=finding_id,
                             outcome=outcome, reviewer=reviewer,
                             review_text=ruling_claim['review_result']['review_text'],
-                            evidence_ref=evidence_ref, github_get=github_get)
+                            evidence_ref=evidence_ref, repository=repository,
+                            github_get=github_get)
     ruling = {'outcome': outcome, 'head_sha': head, 'reviewer': reviewer,
               'reviewer_task': reviewer_task, 'reviewer_session': reviewer_session,
               'evidence_ref': evidence_ref, 'ruled_at': _timestamp()}
