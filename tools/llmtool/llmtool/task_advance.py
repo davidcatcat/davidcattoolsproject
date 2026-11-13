@@ -487,27 +487,44 @@ def _pr_files(number, github_get):
     return None, PR_FILES_TOO_MANY
 
 
-# #1502 WP-G gate 2: llmtool-linux-ci.yml runs only its 'ai-loop' job for a PR
-# that changes nothing but tools/ai-loop/ (the 'changes' job sets code=false,
-# so no shards and no 'check (Linux 3.14)'). Require the check that change
-# class produces, never one that cannot appear.
+# #1502 WP-G gate 2: llmtool-linux-ci.yml's 'changes' job sets independent
+# code, docs and ai_loop flags. A tools/ai-loop/ path sets ai_loop (and docs
+# too when it is Markdown) but never code, so an ai-loop-only PR gets no shards
+# and no 'check (Linux 3.14)'. Require exactly the checks the flags produce,
+# never one that cannot appear.
 _AI_LOOP_CHECK = 'ai-loop helper tests (Python 3.14)'
 _AI_LOOP_PREFIX = 'tools/ai-loop/'
+
+
+def _linux_ci_flags(paths):
+    """(code, docs, ai_loop) as the workflow's classify step sets them."""
+    code = docs = ai_loop = False
+    for path in paths:
+        is_docs = task_completion._docs_only_ci([path])
+        if type(path) is str and path.startswith(_AI_LOOP_PREFIX):
+            ai_loop = True
+            docs = docs or is_docs
+        elif is_docs:
+            docs = True
+        else:
+            code = True
+    return code, docs, ai_loop
 
 
 def _required_linux_checks(paths, old_paths=()):
     """The exact-head Linux workflow check names a PR with these paths needs.
 
-    CI diffs with --no-renames, so a rename's old path counts in every class
-    decision: a file moved from code or tools/ai-loop/ into docs/, or into
-    tools/ai-loop/ from elsewhere, keeps the stricter check set.
+    CI diffs with --no-renames, so a rename's old path is classified exactly
+    like a changed path: a file moved out of code keeps the code check, and a
+    file moved out of tools/ai-loop/ keeps the ai-loop check.
     """
-    every = list(paths) + list(old_paths)
-    if paths and task_completion._docs_only_ci(every):
-        return ['check (docs)']
-    if paths and all(path.startswith(_AI_LOOP_PREFIX) for path in every):
-        return [_AI_LOOP_CHECK]
-    return ['check (Linux 3.14)']
+    if not paths:
+        return ['check (Linux 3.14)']
+    code, docs, ai_loop = _linux_ci_flags(list(paths) + list(old_paths))
+    if code:
+        return ['check (Linux 3.14)']
+    return ((['check (docs)'] if docs else []) +
+            ([_AI_LOOP_CHECK] if ai_loop else []))
 
 
 def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False,
@@ -641,7 +658,7 @@ def _merge_main_gate(head, github_get, pr):
 
 
 def _review_ci_gate(number, head, github_get, latest_out=None):
-    """Require the newest exact-head Linux CI check to pass before review.
+    """Require every required exact-head Linux workflow check to pass before review.
 
     latest_out, when a dict, gets the newest completed non-success run so a
     CI_FAILED result can be routed (#1502 WP-D D11). A PR whose file list
@@ -672,28 +689,38 @@ def _review_ci_gate(number, head, github_get, latest_out=None):
             if type(old) is not str:
                 return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
             old_paths.append(old)
-    required_name = _required_linux_checks(paths, old_paths)[0]
     runs = checks['check_runs']
     if any(type(item) is not dict for item in runs):
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    candidates = [item for item in runs if item.get('head_sha') == head and
-                  item.get('name') == required_name]
-    for item in candidates:
-        if (type(item.get('id')) is not int or item['id'] < 1 or
-                type(item.get('status')) is not str):
+    # Every required check must pass (a docs + ai-loop PR needs both). A
+    # malformed run beats a failure, and a failure beats a pending check.
+    failed = None
+    pending = False
+    for required_name in _required_linux_checks(paths, old_paths):
+        candidates = [item for item in runs if item.get('head_sha') == head and
+                      item.get('name') == required_name]
+        for item in candidates:
+            if (type(item.get('id')) is not int or item['id'] < 1 or
+                    type(item.get('status')) is not str):
+                return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+        if not candidates:
+            pending = True
+            continue
+        latest = max(candidates, key=lambda item: item['id'])
+        if latest['status'] != 'completed':
+            pending = True
+            continue
+        if type(latest.get('conclusion')) is not str:
             return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    if not candidates:
+        if latest['conclusion'] != 'success' and failed is None:
+            failed = latest
+    if failed is not None:
+        if type(latest_out) is dict:
+            latest_out.update(failed)
+        return 'CI_FAILED', 'LINUX_CI_FAILED'
+    if pending:
         return 'WAITING_CI', 'LINUX_CI_PENDING'
-    latest = max(candidates, key=lambda item: item['id'])
-    if latest['status'] != 'completed':
-        return 'WAITING_CI', 'LINUX_CI_PENDING'
-    if type(latest.get('conclusion')) is not str:
-        return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    if latest['conclusion'] == 'success':
-        return None, None
-    if type(latest_out) is dict:
-        latest_out.update(latest)
-    return 'CI_FAILED', 'LINUX_CI_FAILED'
+    return None, None
 
 
 # #1502 WP-D D11: required exact-head CI checks a CI repair may answer.

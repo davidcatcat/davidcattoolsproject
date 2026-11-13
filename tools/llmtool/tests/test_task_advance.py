@@ -4898,13 +4898,20 @@ class PrFilesPaginationAndAiLoopTests(unittest.TestCase):
                                  (None, (None, None)))
 
     def test_rename_source_counts_in_every_change_class(self):
-        # CI diffs with --no-renames, so both sides of a rename are classified.
-        docs, stricter = ['check (docs)'], ['check (Linux 3.14)']
+        # CI diffs with --no-renames, so both sides of a rename are classified
+        # and the workflow's flags are the union of both: code wins; otherwise
+        # docs and ai-loop each add their own check.
+        docs, linux = ['check (docs)'], [self.LINUX]
+        docs_and_ai_loop = ['check (docs)', self.AI_LOOP]
         cases = (
-            ('code to docs', 'docs/module.md', 'src/module.py', stricter),
-            ('ai-loop to docs', 'docs/loop.md', 'tools/ai-loop/loop.py', stricter),
-            ('code to ai-loop', 'tools/ai-loop/loop.py', 'src/loop.py', stricter),
-            ('docs to code', 'src/guide.py', 'docs/guide.md', stricter),
+            ('code to docs', 'docs/module.md', 'src/module.py', linux),
+            ('ai-loop to docs', 'docs/loop.md', 'tools/ai-loop/loop.py', docs_and_ai_loop),
+            ('code to ai-loop', 'tools/ai-loop/loop.py', 'src/loop.py', linux),
+            ('docs to code', 'src/guide.py', 'docs/guide.md', linux),
+            ('docs to ai-loop', 'tools/ai-loop/loop.py', 'docs/loop.md', docs_and_ai_loop),
+            ('ai-loop Markdown to docs', 'docs/README.md', 'tools/ai-loop/README.md',
+             docs_and_ai_loop),
+            ('ai-loop to code', 'src/loop.py', 'tools/ai-loop/loop.py', linux),
             ('docs to docs', 'docs/new.md', 'docs/old.md', docs),
             ('ai-loop to ai-loop', 'tools/ai-loop/b.py', 'tools/ai-loop/a.py',
              [self.AI_LOOP]),
@@ -4913,15 +4920,65 @@ class PrFilesPaginationAndAiLoopTests(unittest.TestCase):
             with self.subTest(label):
                 self.assertEqual(task_advance._required_linux_checks([new], [old]), expected)
                 renamed = [{'filename': new, 'previous_filename': old}]
-                if expected == stricter:
-                    # Only the check the destination alone would pick: refused.
-                    alone = task_advance._required_linux_checks([new])
-                    if alone != stricter:
-                        self.assertEqual(
-                            self.gates(renamed, alone),
-                            ('MERGE_REQUIRED_CHECK_MISSING',
-                             ('WAITING_CI', 'LINUX_CI_PENDING')))
+                alone = task_advance._required_linux_checks([new])
+                if alone != expected:
+                    # Only the checks the destination alone would pick: refused.
+                    self.assertEqual(
+                        self.gates(renamed, alone),
+                        ('MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')))
                 self.assertEqual(self.gates(renamed, expected), (None, (None, None)))
+
+    def test_ai_loop_markdown_needs_docs_and_ai_loop_checks(self):
+        # The workflow sets docs=true and ai_loop=true for tools/ai-loop/*.md.
+        both = ['check (docs)', self.AI_LOOP]
+        for label, entries in (
+                ('ai-loop README', ['tools/ai-loop/README.md']),
+                ('ai-loop README and helper', ['tools/ai-loop/README.md',
+                                               'tools/ai-loop/loop.py']),
+                ('docs and ai-loop helper', ['docs/guide.md', 'tools/ai-loop/loop.py'])):
+            with self.subTest(label):
+                self.assertEqual(task_advance._required_linux_checks(entries), both)
+                self.assertEqual(
+                    self.gates(entries, ['check (docs)']),
+                    ('MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')))
+                self.assertEqual(
+                    self.gates(entries, [self.AI_LOOP]),
+                    ('MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')))
+                self.assertEqual(self.gates(entries, both), (None, (None, None)))
+        self.assertEqual(task_advance._required_linux_checks(['tools/ai-loop/loop.py']),
+                         [self.AI_LOOP])
+        self.assertEqual(task_advance._required_linux_checks(['docs/guide.md']),
+                         ['check (docs)'])
+        self.assertEqual(task_advance._required_linux_checks(
+            ['tools/ai-loop/README.md', 'src/module.py']), [self.LINUX])
+
+    def test_review_needs_every_required_check(self):
+        entries = ['tools/ai-loop/README.md']
+
+        def gate(runs):
+            def get(path):
+                if path.startswith('commits/'):
+                    return {'total_count': len(runs), 'check_runs': runs}
+                if path == self.FIRST_PAGE:
+                    return [{'filename': item} for item in entries]
+                raise AssertionError(path)
+            latest = {}
+            return task_advance._review_ci_gate(17, HEAD, get, latest), latest
+
+        docs_ok = check_run(1, name='check (docs)')
+        self.assertEqual(
+            gate([docs_ok, check_run(2, name=self.AI_LOOP, status='in_progress',
+                                     conclusion=None)])[0],
+            ('WAITING_CI', 'LINUX_CI_PENDING'))
+        failed = check_run(2, name=self.AI_LOOP, conclusion='failure')
+        result, latest = gate([docs_ok, failed])
+        self.assertEqual(result, ('CI_FAILED', 'LINUX_CI_FAILED'))
+        self.assertEqual(latest['name'], self.AI_LOOP)
+        # A failure is routed even while the other required check is pending.
+        result, latest = gate([failed])
+        self.assertEqual(result, ('CI_FAILED', 'LINUX_CI_FAILED'))
+        self.assertEqual(latest['id'], 2)
+        self.assertEqual(gate([docs_ok, check_run(2, name=self.AI_LOOP)])[0], (None, None))
 
     def test_llmtool_code_renamed_to_docs_needs_linux_and_mac(self):
         renamed = [{'filename': 'docs/advance.md',
