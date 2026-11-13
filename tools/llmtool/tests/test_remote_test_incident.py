@@ -763,6 +763,100 @@ class IncidentStoreRemoteTestTests(unittest.TestCase):
                 self.assertEqual(caught.exception.incident_code,
                                  incident_store.INCIDENT_RECORD_INVALID)
 
+    # read path: a stored receipt contradicting its result (#1706 R9) ---------
+
+    # (name, result of the appended consistent receipt, on-disk change)
+    CONTRADICTIONS = (
+        ('PASS with exit_code 1', 'PASS', {'exit_code': 1}),
+        ('PASS with exit_code 124', 'PASS', {'exit_code': incident_store.TIMEOUT_EXIT_CODE}),
+        ('PASS with exit_code 41', 'PASS',
+         {'exit_code': incident_store.SHA_MISMATCH_EXIT_CODE}),
+        ('FAIL with exit_code 0', 'FAIL', {'exit_code': 0}),
+    )
+
+    def record_path(self):
+        return self.root.parent / incident_store.DIRECTORY_NAME / (self.incident + '.json')
+
+    def contradicted_on_disk(self, base, result, changes):
+        """Append a consistent ``result`` receipt, then contradict it on disk.
+
+        ``base`` is the record text before any remote test. Both the receipt
+        and the record digest are recomputed, and every other receipt check
+        still passes, so the result invariant is the only reason to refuse.
+        Returns the tampered file text.
+        """
+        path = self.record_path()
+        path.write_text(base)
+        self.append(self.result_entry(result))
+        incident_store.get(self.incident, self.root)  # the consistent record reads
+        self.reseal_on_disk(
+            lambda data: data[incident_store.REMOTE_TESTS][0]['receipt'].update(changes))
+        text = path.read_text()
+        data = json.loads(text)
+        entry = data[incident_store.REMOTE_TESTS][0]
+        receipt = entry['receipt']
+        self.assertEqual((entry['result'], receipt['result']), (result, result))
+        self.assertEqual(receipt['receipt_digest'], incident_store.remote_test_digest(receipt))
+        self.assertEqual(data['record_sha256'], incident_store.record_digest(data))
+        self.assertTrue(incident_store._well_formed_receipt(receipt, entry, self.incident))
+        self.assertFalse(incident_store.receipt_consistent(receipt))
+        return text
+
+    def assert_invalid_code(self, caught):
+        self.assertEqual(caught.exception.incident_code, incident_store.INCIDENT_RECORD_INVALID)
+
+    def test_contradicting_receipt_on_disk_fails_every_read(self):
+        base = self.record_path().read_text()
+        for name, result, changes in self.CONTRADICTIONS:
+            with self.subTest(name):
+                self.contradicted_on_disk(base, result, changes)
+                for read in (lambda: incident_store.get(self.incident, self.root),
+                             lambda: incident_store.list_records(self.root),
+                             lambda: incident_store.find_open(self.root)):
+                    with self.assertRaises(LLMToolError) as caught:
+                        read()
+                    self.assert_invalid_code(caught)
+
+    def test_contradicting_receipt_on_disk_blocks_every_update(self):
+        base = self.record_path().read_text()
+        for name, result, changes in self.CONTRADICTIONS:
+            with self.subTest(name):
+                text = self.contradicted_on_disk(base, result, changes)
+                digest = json.loads(text)['record_sha256']
+                updates = {
+                    'append_remote_test': lambda: incident_store.append_remote_test(
+                        self.incident, digest, self.entry(), self.root),
+                    'append_observation': lambda: incident_store.append_observation(
+                        self.incident, digest,
+                        observation(TESTS, observed_at='2026-11-13T00:05:00Z'), self.root),
+                    'advance_outcome': lambda: incident_store.advance_outcome(
+                        self.incident, digest, incident_store.RESOLVED, at=STAMP,
+                        root=self.root),
+                }
+                for update_name, update in updates.items():
+                    with self.subTest(update_name):
+                        with self.assertRaises(LLMToolError) as caught:
+                            update()
+                        self.assert_invalid_code(caught)
+                        self.assertEqual(self.record_path().read_text(), text)
+
+    def test_contradicting_receipt_on_disk_refuses_incident_remote_test(self):
+        base = self.record_path().read_text()
+
+        def transport(*args):
+            self.fail('transport called')
+
+        for name, result, changes in self.CONTRADICTIONS:
+            with self.subTest(name):
+                text = self.contradicted_on_disk(base, result, changes)
+                denied = remote_test.run_incident_remote_test(
+                    self.incident, sha=HEAD, modules=('test_alpha',), root=self.root,
+                    config_path=None, transport=transport, now=NOW)
+                self.assertEqual((denied['result'], denied['code']),
+                                 ('ADMISSION_DENIED', remote_test.INCIDENT_UNREADABLE))
+                self.assertFalse(denied['persisted'])
+                self.assertEqual(self.record_path().read_text(), text)
+
     def test_tampered_entry_fails_read_even_with_a_resealed_record(self):
         self.append(self.entry())
         path = self.root.parent / incident_store.DIRECTORY_NAME / (self.incident + '.json')
