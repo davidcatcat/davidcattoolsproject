@@ -20,7 +20,7 @@ class CompanyGwRoutePausedTests(unittest.TestCase):
         self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
 
     def test_gw_agent_route_stays_allowed(self):
-        self.assertTrue(worker_dispatch.evaluate('company-gw-agent').allowed)
+        self.assertTrue(worker_dispatch.evaluate('gw-agent').allowed)
 
 
 if __name__ == '__main__':

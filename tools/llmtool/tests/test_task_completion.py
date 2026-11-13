@@ -2992,6 +2992,7 @@ class TaskCompletionTests(unittest.TestCase):
             'opencode': self._company_gw_task_record(provider_profile='opencode'),
             'codex': self._company_gw_task_record(provider_profile='codex'),
             'gw-agent': self._company_gw_task_record(provider_profile='gw-agent'),
+            # A stored record with the retired id reads as gw-agent (#1502 WP-E).
             'company-gw-agent': self._company_gw_task_record(
                 provider_profile='company-gw-agent'),
             'missing artifact_sha256': self._company_gw_task_record(artifact_sha256=None),
@@ -3299,6 +3300,7 @@ class TaskCompletionTests(unittest.TestCase):
         missing = object()
         deepseek = 'opencode/deepseek-v4.1-flash-free#high'
         cases = []
+        # company-gw-agent: a stored record with the retired id reads as gw-agent (#1502 WP-E).
         for profile in ('opencode', 'company-gw', 'company-gw-agent', 'gw-agent'):
             cases.extend((profile, model, family) for model, family in (
                 (deepseek, 'other'),

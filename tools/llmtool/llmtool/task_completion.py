@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from . import github_identity
 from . import source_freshness
 from . import trust
+from . import worker_dispatch
 from .errors import LLMToolError
 from .test_output_excerpts import select_test_excerpts
 
@@ -2109,7 +2110,8 @@ def _reviewer_author_family(developer):
     """
     if type(developer) is not dict:
         return None
-    profile = developer.get('provider_profile')
+    # A stored record may still carry the retired gw Agent id (#1502 WP-E).
+    profile = worker_dispatch.stored_worker_id(developer.get('provider_profile'))
     if profile == 'claude':
         if _recorded_model_family(developer.get('model')) == 'codex':
             return None
@@ -2127,7 +2129,7 @@ def _reviewer_author_family(developer):
         if type(model) is str and model.startswith('gpt-'):
             return 'codex'  # #1604: OpenAI models (gpt-oss-*) share the codex family
         return None
-    elif profile in ('opencode', 'company-gw', 'company-gw-agent', 'gw-agent'):
+    elif profile in ('opencode', 'company-gw', 'gw-agent'):
         return _recorded_model_family(developer.get('model')) or 'other'
     else:
         return None

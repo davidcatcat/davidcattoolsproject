@@ -182,7 +182,7 @@ def _update_claim_state(store, task_id, claim, state):
 
 
 def _worker_key(profile):
-    return {'company-gw': 'company-gw', 'gw-agent': 'company-gw-agent',
+    return {'company-gw': 'company-gw', 'gw-agent': 'gw-agent',
             'opencode': 'opencode-developer', 'claude': 'claude-developer',
             'agy': 'agy'}.get(profile)
 

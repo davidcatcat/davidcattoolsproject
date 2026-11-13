@@ -825,7 +825,10 @@ def add_task_submission_parsers(actions):
     delegate = actions.add_parser('delegate', help='Dispatch an explicitly selected Developer for an existing task')
     delegate.add_argument('task_id', help='existing durable Task ID')
     delegate.add_argument('--provider', required=True,
-                          choices=('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude'),
+                          # company-gw and the retired gw Agent id stay parseable only
+                          # so that the delegate refuses them with a stable code.
+                          choices=('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude',
+                                   'company-gw-agent'),
                           help='explicit Developer route')
     delegate.add_argument('--mode', choices=('proposal', 'direct'), default='proposal',
                           help='Codex: text proposal (default) or direct D6 development')
@@ -5845,7 +5848,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             return persist_failure('DEVELOPER_DISPATCH_PERSISTENCE_REJECTED')
         expected_developer = copy.deepcopy(developer)
     try:
-        worker_dispatch.authorize_dispatch(store, task['task_id'], 'company-gw-agent', 'DISPATCH')
+        worker_dispatch.authorize_dispatch(store, task['task_id'], 'gw-agent', 'DISPATCH')
         route = GwAgentRoute(route_config)
         route.validate_profile(model, effort)
     except worker_dispatch.WorkerDispatchDenied as exc:
@@ -5871,7 +5874,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     def route_gate():
         nonlocal owner_gate_denied
         validate_binding()
-        decision = worker_dispatch.evaluate('company-gw-agent', task_id=task['task_id'])
+        decision = worker_dispatch.evaluate('gw-agent', task_id=task['task_id'])
         if decision.allowed is True and decision.reason_code == 'OWNER_POLICY_ALLOWED':
             return decision
         owner_gate_denied = True
@@ -6990,6 +6993,11 @@ def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
     if getattr(args, 'provider', None) == 'company-gw':
         raise LLMToolError('COMPANY_GW_DIRECT_RETIRED: direct company-gw delegation is retired; use gw-agent (#120)')
+    retired = getattr(args, 'provider', None)
+    if type(retired) is str and retired in worker_dispatch.RETIRED_WORKER_ALIASES:
+        raise LLMToolError(
+            f'WORKER_ID_RETIRED_ALIAS: {retired} is a retired id; use '
+            f'{worker_dispatch.RETIRED_WORKER_ALIASES[retired]} (#1502 WP-E)')
     if getattr(args, 'background', False):
         provider = getattr(args, 'provider', None)
         if provider == 'codex' and getattr(args, 'mode', 'proposal') != 'direct':

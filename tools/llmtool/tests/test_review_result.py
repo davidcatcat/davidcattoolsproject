@@ -55,7 +55,6 @@ def _developer_record(family):
         'provider_profile': family,
         'provider_type': {'claude': None, 'codex': 'codex-cli',
                           'company-gw': 'openai-compatible',
-                          'company-gw-agent': 'openai-compatible',
                           'gw-agent': 'openai-compatible',
                           'opencode': 'opencode-cli', 'agy': 'agy-cli'}[family],
         'model': ('claude-sonnet-5-5-medium' if family == 'agy' else

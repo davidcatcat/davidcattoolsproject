@@ -23,7 +23,7 @@ class CommittedCarryGateTests(unittest.TestCase):
         root = Path(temp.name).resolve()
         workers = dict.fromkeys(wd.WORKERS, {'dispatch': 'ALLOWED', 'decided_by': 'Owner',
             'decided_at': '2026-11-12', 'reason': 'test', 'evidence': REF})
-        workers['company-gw-agent'] = {'dispatch': 'PAUSED', 'decided_by': 'PM', 'reason': 'test',
+        workers['gw-agent'] = {'dispatch': 'PAUSED', 'decided_by': 'PM', 'reason': 'test',
             'decided_at': '2026-11-12', 'evidence': wd._GW_AGENT_PAUSED_REF}
         (root / 'p.json').write_text(json.dumps({'schema_version': 1, 'workers': workers}))
         policy = patch.object(wd, '_POLICY_PATH', root / 'p.json')

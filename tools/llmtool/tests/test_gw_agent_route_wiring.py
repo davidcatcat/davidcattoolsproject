@@ -350,7 +350,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         store = Store()
         self.addCleanup(store._temp.cleanup)
         route = SimpleNamespace(validate_profile=lambda *_args: None)
-        decision = worker_dispatch.PolicyDecision('company-gw-agent', True,
+        decision = worker_dispatch.PolicyDecision('gw-agent', True,
                                                   'OWNER_POLICY_ALLOWED', 'f' * 64)
         seen_requests = []
         def fake_runner(_route, request, *, gate, **_kwargs):
@@ -481,7 +481,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                  'type': 'openai-compatible', 'model': 'authorized-model',
                  'base_url': 'https://authorized.example'}), \
              patch.object(worker_dispatch, 'evaluate', return_value=worker_dispatch.PolicyDecision(
-                 'company-gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)), \
+                 'gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)), \
              patch.object(worker_dispatch, 'authorize_dispatch',
                           side_effect=worker_dispatch.WorkerDispatchDenied('OWNER_PAUSED')), \
              patch.object(task_submission_cli, 'run_route') as runner, \
@@ -657,7 +657,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         task_store._validate(updated)
 
         decision = worker_dispatch.PolicyDecision(
-            'company-gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)
+            'gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)
         with patch.object(worker_dispatch, 'evaluate', return_value=decision):
             denial = worker_dispatch.authorize_task_store_change(
                 record, {'developer': dispatching}, {'developer': developer})
@@ -704,7 +704,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         store = Store()
         self.addCleanup(store._temp.cleanup)
         route = SimpleNamespace(validate_profile=lambda *_args: None)
-        decision = worker_dispatch.PolicyDecision('company-gw-agent', True,
+        decision = worker_dispatch.PolicyDecision('gw-agent', True,
                                                   'OWNER_POLICY_ALLOWED', 'f' * 64)
         def fail_runner(_route, _request, *, gate, **_kwargs):
             self.assertIs(gate(), decision)
@@ -817,7 +817,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             return record
 
         decision = worker_dispatch.PolicyDecision(
-            'company-gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)
+            'gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)
 
         def seed_dispatching_developer(store):
             current = store.get(task_id)
@@ -919,7 +919,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             'prompt_tokens': 1, 'completion_tokens': 2, 'total_tokens': 3},
             session_id='provider-session', exit_code=0, stdout_sha256='f' * 64,
             elapsed_ms=10, cleanup_status='CLEAN')
-        decision = worker_dispatch.PolicyDecision('company-gw-agent', True,
+        decision = worker_dispatch.PolicyDecision('gw-agent', True,
                                                   'OWNER_POLICY_ALLOWED', 'f' * 64)
         gateway_profile = dict(load_route_config()['routes']['gw-agent']['profile'])
         gateway_profile.pop('data_class_map', None)
@@ -1263,7 +1263,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
             # another served model, never a duplicate entry.
             real_config['routes']['gw-agent']['allowed_models'] = [
                 real_config['routes']['gw-agent']['default_model'], provider_model]
-        decision = worker_dispatch.PolicyDecision('company-gw-agent', True,
+        decision = worker_dispatch.PolicyDecision('gw-agent', True,
                                                   'OWNER_POLICY_ALLOWED', 'f' * 64)
         store = self.store
         if reject_responded:
@@ -1635,7 +1635,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
                     self._release_d6()
 
     def test_owner_pause_on_the_dispatching_write_is_persisted(self):
-        paused = worker_dispatch.PolicyDecision('company-gw-agent', False, 'OWNER_PAUSED',
+        paused = worker_dispatch.PolicyDecision('gw-agent', False, 'OWNER_PAUSED',
                                                 'f' * 64)
         code, task = self._delegate('gw-agent-paused.md', gate=paused,
                                     route_runner=self._unused_runner)
