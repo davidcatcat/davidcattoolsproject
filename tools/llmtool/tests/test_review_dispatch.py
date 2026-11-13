@@ -1875,19 +1875,105 @@ class CompletedVerdictPostTests(unittest.TestCase):
         self.assertEqual(self.dispatch()['verdict_post'], {'state': 'POSTED', 'codes': []})
         self.assertEqual(self.posts, [(42, self.text)])
 
-    def test_failed_fresh_post_keeps_claim_completed_and_withholds_text_from_caller(self):
+    def test_failed_fresh_post_keeps_claim_completed_and_hands_text_to_caller_once(self):
         def failing_post(*_args):
             raise RuntimeError('post refused')
 
         result = self.dispatch(post=failing_post)
         self.assertEqual(result['state'], 'COMPLETED')
-        self.assertEqual(result['verdict_post'],
-                         {'state': 'FAILED', 'codes': ['VERDICT_POST_FAILED']})
-        self.assertNotIn('review_text', result)
+        self.assertEqual(result['verdict_post'], {
+            'state': 'FAILED',
+            'codes': ['VERDICT_POST_FAILED', 'VERDICT_POST_RETURNED_TO_CALLER']})
+        # The caller keeps the text to post it itself, as before #1705.
+        self.assertEqual(result['review_text'], self.text)
         claim = self.store.get(self.task_id)['review_dispatch_claim'][0]
         self.assertEqual(claim['state'], 'COMPLETED')
         self.assertEqual(claim['review_result']['review_text'], self.text)
         self.assertEqual(self.runs, ['called'])
+        receipt = json.loads(self.attempt_path(1).read_text(encoding='utf-8'))
+        self.assertEqual((receipt['state'], receipt['code'], receipt['returned_to_caller']),
+                         ('POST_UNKNOWN', 'VERDICT_POST_FAILED', True))
+        # The caller posts the returned text; a concurrent replay must not.
+        self.post(42, result['review_text'], '/repo')
+        replay = self.dispatch()
+        self.assertEqual(replay['verdict_post'],
+                         {'state': 'UNKNOWN', 'codes': ['VERDICT_POST_OUTCOME_UNKNOWN']})
+        self.assertEqual(self.posts, [(42, self.text)])
+        # Once stale, a replay lists the PR first and finds the caller's post.
+        self.make_stale(1)
+        self.assertEqual(self.dispatch()['verdict_post'],
+                         {'state': 'ALREADY_POSTED', 'codes': []})
+        self.assertEqual(self.posts, [(42, self.text)])
+        self.assertEqual(self.runs, ['called'])
+
+    def test_fresh_listing_failure_returns_text_and_never_posts(self):
+        def no_listing(_pr_number):
+            raise RuntimeError('listing unavailable')
+
+        result = self.dispatch(lister=no_listing)
+        self.assertEqual(result['state'], 'COMPLETED')
+        self.assertEqual(result['verdict_post'], {
+            'state': 'FAILED',
+            'codes': ['VERDICT_COMMENTS_UNAVAILABLE', 'VERDICT_POST_RETURNED_TO_CALLER']})
+        self.assertEqual(result['review_text'], self.text)
+        self.assertEqual(self.posts, [])
+        # The caller did not post here, so a stale attempt is retried after listing.
+        self.assertEqual(self.dispatch()['verdict_post']['state'], 'UNKNOWN')
+        self.assertEqual(self.posts, [])
+        self.make_stale(1)
+        self.assertEqual(self.dispatch()['verdict_post'], {'state': 'POSTED', 'codes': []})
+        self.assertEqual(self.posts, [(42, self.text)])
+
+    def test_fresh_failure_with_unwritable_receipt_is_visible_and_blocks_replays(self):
+        def failing_post(*_args):
+            raise RuntimeError('post refused')
+
+        with patch.object(review_dispatch, '_replace_verdict_attempt',
+                          side_effect=OSError('disk full')):
+            result = self.dispatch(post=failing_post)
+        self.assertEqual(result['verdict_post'], {
+            'state': 'FAILED',
+            'codes': ['VERDICT_POST_FAILED', 'VERDICT_POST_RETURNED_TO_CALLER',
+                      'VERDICT_POST_RECEIPT_WRITE_FAILED']})
+        self.assertEqual(self.posts, [])
+        # The attempt still holds the claim, so no replay posts before it is stale.
+        self.assertEqual(self.dispatch()['verdict_post']['state'], 'IN_PROGRESS')
+        self.assertEqual(self.posts, [])
+
+    def test_reopened_completed_claim_already_posted_is_neither_redispatched_nor_reposted(self):
+        def must_not_post(*_args):
+            raise AssertionError('verdict posted again')
+
+        def must_not_list(_pr_number):
+            raise AssertionError('PR listed although a POSTED receipt exists')
+
+        # Posted under the new path: a POSTED receipt short-circuits a reopened store.
+        first = self.dispatch()
+        self.assertEqual(first['verdict_post'], {'state': 'POSTED', 'codes': []})
+        reopened = task_store.TaskStore(self.store_dir)
+        replay = self.dispatch(store=reopened, post=must_not_post, lister=must_not_list)
+        self.assertEqual(replay['state'], 'COMPLETED')
+        self.assertEqual(replay['verdict_post'], {'state': 'POSTED', 'codes': []})
+        self.assertEqual(self.posts, [(42, self.text)])
+        self.assertEqual(self.runs, ['called'])
+        self.assertEqual(reopened.get(self.task_id)['review_dispatch_claim'][0]['state'],
+                         'COMPLETED')
+
+    def test_reopened_claim_posted_before_receipts_existed_is_not_reposted(self):
+        def must_not_post(*_args):
+            raise AssertionError('verdict posted again')
+
+        # A caller posted the verdict before #1705, so no receipt exists yet.
+        self.complete_claim_without_posting()
+        self.comments.append(self.text)
+        reopened = task_store.TaskStore(self.store_dir)
+        replay = self.dispatch(store=reopened, post=must_not_post)
+        self.assertEqual(replay['state'], 'COMPLETED')
+        self.assertEqual(replay['verdict_post'], {'state': 'ALREADY_POSTED', 'codes': []})
+        again = self.dispatch(store=task_store.TaskStore(self.store_dir), post=must_not_post)
+        self.assertEqual(again['verdict_post'], {'state': 'POSTED', 'codes': []})
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.runs, [])
 
     def test_unknown_post_outcome_blocks_reposting_until_stale_then_lists_first(self):
         self.complete_claim_without_posting()

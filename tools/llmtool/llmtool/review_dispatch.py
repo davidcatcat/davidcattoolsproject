@@ -781,8 +781,11 @@ def _replace_verdict_attempt(path, record):
         raise
 
 
+_VERDICT_RETURNED_TO_CALLER = 'VERDICT_POST_RETURNED_TO_CALLER'
+
+
 def _ensure_verdict_posted(*, store, task_id, claim, text, repo_root,
-                           post_comment, list_comments):
+                           post_comment, list_comments, return_to_caller=False):
     """Post one COMPLETED Codex verdict at most once; never report a false success.
 
     Returns {'state': ..., 'codes': [...]} with fixed names only. States:
@@ -790,6 +793,11 @@ def _ensure_verdict_posted(*, store, task_id, claim, text, repo_root,
     means another caller holds the claim; UNKNOWN means a post may have
     happened; FAILED means nothing is known to be posted; UNAVAILABLE means
     no exclusive claim could be taken, so this call did not post.
+
+    With return_to_caller, a FAILED attempt hands the text back to the
+    caller (code VERDICT_POST_RETURNED_TO_CALLER), which may post it once
+    itself. The attempt is then stored as of unknown outcome, so no replay
+    posts before it is stale, and then only after listing the PR again.
     """
     pr_number, head, version = claim.get('pr'), claim.get('head_sha'), claim.get('version')
     if (type(task_id) is not str or re.fullmatch(r'[0-9A-Za-z_-]{1,64}', task_id) is None or
@@ -805,12 +813,14 @@ def _ensure_verdict_posted(*, store, task_id, claim, text, repo_root,
         return {'state': 'UNAVAILABLE', 'codes': ['VERDICT_POST_RECEIPT_UNAVAILABLE']}
     digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
 
-    def record(attempt, state, code=None):
+    def record(attempt, state, code=None, returned=False):
         value = {'task_id': task_id, 'pr': pr_number, 'head': head, 'version': version,
                  'reviewer_task': claim.get('reviewer_task'), 'attempt': attempt,
                  'state': state, 'review_text_sha256': digest, 'recorded_at': _now()}
         if code is not None:
             value['code'] = code
+        if returned:
+            value['returned_to_caller'] = True
         return value
 
     latest, attempt = None, 0
@@ -844,22 +854,29 @@ def _ensure_verdict_posted(*, store, task_id, claim, text, repo_root,
     except Exception:
         return {'state': 'UNAVAILABLE', 'codes': ['VERDICT_POST_RECEIPT_UNAVAILABLE']}
 
-    def finish(state, outcome, code, *codes):
+    def finish(state, outcome, code, *codes, returned=False):
         try:
-            _replace_verdict_attempt(path, record(attempt, outcome, code))
+            _replace_verdict_attempt(path, record(attempt, outcome, code, returned))
         except Exception:
             # The attempt stays POSTING, so no other caller posts before it
             # is stale; then the PR is listed again before any new post.
             codes = codes + ('VERDICT_POST_RECEIPT_WRITE_FAILED',)
         return {'state': state, 'codes': list(codes)}
 
+    def failed(code):
+        if return_to_caller:
+            # The caller may still post this text, so its outcome is unknown
+            # to every replay until the attempt is stale.
+            return finish('FAILED', 'POST_UNKNOWN', code, code,
+                          _VERDICT_RETURNED_TO_CALLER, returned=True)
+        return finish('FAILED', 'POST_FAILED', code, code)
+
     try:
         bodies = list_comments(pr_number)
         if type(bodies) is not list:
             raise RuntimeError('VERDICT_COMMENTS_UNAVAILABLE')
     except Exception:
-        return finish('FAILED', 'POST_FAILED', 'VERDICT_COMMENTS_UNAVAILABLE',
-                      'VERDICT_COMMENTS_UNAVAILABLE')
+        return failed('VERDICT_COMMENTS_UNAVAILABLE')
     if any(_same_comment_text(body, text) for body in bodies):
         return finish('ALREADY_POSTED', 'POSTED', None)
     try:
@@ -868,7 +885,7 @@ def _ensure_verdict_posted(*, store, task_id, claim, text, repo_root,
         return finish('UNKNOWN', 'POST_UNKNOWN', 'VERDICT_POST_OUTCOME_UNKNOWN',
                       'VERDICT_POST_OUTCOME_UNKNOWN')
     except Exception:
-        return finish('FAILED', 'POST_FAILED', 'VERDICT_POST_FAILED', 'VERDICT_POST_FAILED')
+        return failed('VERDICT_POST_FAILED')
     return finish('POSTED', 'POSTED', None)
 
 
@@ -892,12 +909,15 @@ def _completed_return(*, store, task_id, claim, repo_root, post_comment,
     status = _ensure_verdict_posted(
         store=store, task_id=task_id, claim=claim, text=stored, repo_root=repo_root,
         post_comment=post_comment or _post_pr_comment,
-        list_comments=list_comments or _list_pr_comment_bodies)
+        list_comments=list_comments or _list_pr_comment_bodies,
+        return_to_caller=fresh)
     output['verdict_post'] = status
-    if fresh and status['state'] != 'UNAVAILABLE':
+    if (fresh and status['state'] != 'UNAVAILABLE' and
+            _VERDICT_RETURNED_TO_CALLER not in status['codes']):
         # This call owned (or saw another owner of) the post, so the caller
-        # must not post the text again. Only when no exclusive claim could be
-        # taken does the caller keep the text, as before #1705.
+        # must not post the text again. The caller keeps the text, as before
+        # #1705, only when no exclusive claim could be taken or when this
+        # call's claimed attempt failed and was handed back to the caller.
         output.pop('review_text', None)
     return output
 
@@ -911,7 +931,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     A COMPLETED Codex claim, fresh or replayed, has its stored verdict text
     posted on the PR at most once (#1705); see ``verdict_post`` in the result.
     When a fresh call took part in posting, the result carries no review_text,
-    so a caller never posts the verdict a second time.
+    so a caller never posts the verdict a second time. A fresh call whose own
+    attempt failed returns the text (VERDICT_POST_RETURNED_TO_CALLER) and
+    stores that attempt as of unknown outcome, so replays do not post it too.
     """
     task = store.get(task_id)
     _, executor, head, _base, reviewer_key = _preflight(
