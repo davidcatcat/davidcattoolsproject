@@ -267,6 +267,25 @@ class ClassifyTests(unittest.TestCase):
     def test_not_flaky_when_the_pass_is_an_older_run(self):
         self.assertEqual(self.flaky_case(later=[full(5, C)])['class'], mi.UNKNOWN)
 
+    def test_not_flaky_from_a_newer_run_on_an_older_sha(self):
+        # Codex v1 F1 on PR #1716: B fails, then a newer FULL run passes on the older
+        # A. With B unchanged, reading history backwards would wrongly see FLAKY.
+        history = commits(C, B, A, changed={B: False, C: False})
+        data = runs(linux(10, B), full(11, B, 'failure', failed_tests=[T]), full(20, A))
+        result = mi.classify(B, history, data)
+        self.assertEqual(result[0], mi.UNKNOWN)
+        self.assertNotIn('LATER_PASS', codes(result[1]))
+
+    def test_later_sha_must_follow_the_failing_sha_in_history(self):
+        chain = commits(C, B, A, changed={B: False, C: False})[::-1]
+        self.assertTrue(mi._unchanged_after(chain, B, C))
+        self.assertTrue(mi._unchanged_after(chain, A, C))
+        self.assertFalse(mi._unchanged_after(chain, B, A))
+        self.assertFalse(mi._unchanged_after(chain, C, A))
+        self.assertFalse(mi._unchanged_after(chain, B, B))
+        self.assertFalse(mi._unchanged_after(chain, B, D))
+        self.assertFalse(mi._unchanged_after(chain, D, B))
+
     def test_not_flaky_when_only_another_check_passes(self):
         self.assertEqual(self.flaky_case(later=[linux(20, C)])['class'], mi.UNKNOWN)
 

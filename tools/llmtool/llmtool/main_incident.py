@@ -20,8 +20,8 @@ Inputs (newest first unless ``newest_first=False``; one flag orders both):
   knows the commit cannot change test results; anything else is a change.
 
 Classes: ENV needs positive environment evidence on every failing run and no
-test failure; FLAKY needs a newer pass of the same check on a different SHA
-with no change in between; CODE needs independent reproduction of one test
+test failure; FLAKY needs a newer pass of the same check on a SHA that follows
+the failing SHA in main history with no change in between; CODE needs independent reproduction of one test
 at the failing SHA (Linux and FULL Mac, or two FULL Mac runs). Anything else,
 including a missing or unparsable test ID, is UNKNOWN.
 """
@@ -162,13 +162,19 @@ def commit_range(commits, pass_sha, fail_sha, newest_first=True):
     return [_entry(commit) for commit in chain[start + 1:end + 1]]
 
 
-def _unchanged(chain, first, second):
-    """True only when two different SHAs are both known and no commit between them changed."""
+def _unchanged_after(chain, earlier, later):
+    """True only when later follows earlier in main history with no change in between.
+
+    chain is oldest first. A SHA that is unknown, equal to earlier or older than
+    earlier is never a later SHA, so history is read in one direction only.
+    """
     shas = [commit['sha'] for commit in chain]
-    if first == second or first not in shas or second not in shas:
+    if earlier not in shas or later not in shas:
         return False
-    low, high = sorted((shas.index(first), shas.index(second)))
-    return all(chain[index].get('changed') is False for index in range(low + 1, high + 1))
+    start, end = shas.index(earlier), shas.index(later)
+    if start >= end:
+        return False
+    return all(chain[index].get('changed') is False for index in range(start + 1, end + 1))
 
 
 def _test_ids(run):
@@ -237,7 +243,7 @@ def _later_passes(tested, runs, commits, fail_sha, newest_first):
         later = next((run for run in ordered[:newest_fail]
                       if run_kind(run) == kind and _completed(run) and _passed(kind, run) and
                       run['head_sha'] != fail_sha and
-                      _unchanged(chain, fail_sha, run['head_sha'])), None)
+                      _unchanged_after(chain, fail_sha, run['head_sha'])), None)
         if later is None:
             return None
         tests = set().union(*(ids for k, _, ids in tested if k == kind))
