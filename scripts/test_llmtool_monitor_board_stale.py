@@ -285,9 +285,18 @@ class RuleAlertColourTests(unittest.TestCase):
         colors = mon.init_colors(_FakeCurses())
         drawn = _paint(_monitor(), "office", colors, screen=_Screen(height=40, width=24))
         rule_attr = colors["rule"] | curses.A_BOLD
-        pieces = [text.strip() for row, (text, attr) in sorted(drawn.items()) if attr == rule_attr]
-        self.assertGreater(len(pieces), 1)
-        self.assertEqual("".join(pieces), "規則檔已變更：PR #1，1 個檔（看過後請 PM 清除）")
+        rule_text = "規則檔已變更：PR #1，1 個檔（看過後請 PM 清除）"
+        # office_view wraps top rows at (screen width - 1) - 2 columns and indents
+        # the continuation lines; _wrap drops the space at a break point.
+        wrapped = mon._wrap(rule_text, max(10, 24 - 1 - 2))
+        self.assertGreater(len(wrapped), 1)
+        expected = [wrapped[0], *("  " + piece for piece in wrapped[1:])]
+        styled = [text for _, (text, attr) in sorted(drawn.items()) if attr == rule_attr]
+        self.assertEqual(styled, expected)   # every wrapped line keeps the rule pair
+        self.assertEqual("".join(styled).replace(" ", ""), rule_text.replace(" ", ""))
+        unstyled = [text.strip() for text, attr in drawn.values() if attr != rule_attr]
+        for piece in wrapped:
+            self.assertNotIn(piece, unstyled)
 
     def test_without_colours_rule_rows_paint_like_before(self):
         self._record(1)
