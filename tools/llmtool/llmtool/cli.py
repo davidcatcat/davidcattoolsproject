@@ -52,6 +52,8 @@ TASK_ACTIONS = {
     'claude-result': ('run_task_claude_result', False),
     'complete': ('run_task_complete', False),
     'delegate': ('run_task_delegate_checked', True),
+    # #1502 WP-D D13 (security v91 F2): record and gate disputes; never runs a review.
+    'dispute': ('run_task_dispute', True),
     'drive': ('run_task_drive', True),
     'github-events': ('run_task_github_events', False),
     'high-debug': ('run_task_high_debug', True),

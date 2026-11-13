@@ -1213,7 +1213,7 @@ MAX_REVIEW_DISPUTES = 64
 # Evidence and rulings are Issue or PR conversation comments of this repository.
 _REVIEW_DISPUTE_REF = re.compile(
     r'https://github\.com/davidcatcat/davidcattoolsproject/(?:issues|pull)/'
-    r'[1-9][0-9]{0,8}#issuecomment-[1-9][0-9]{0,19}')
+    r'([1-9][0-9]{0,8})#issuecomment-([1-9][0-9]{0,19})')
 REVIEW_DISPUTE_FINDING_ID = re.compile(r'F[1-9][0-9]{0,3}')
 
 
@@ -1221,6 +1221,14 @@ def valid_review_dispute_ref(value):
     """A comment URL of this repository that passes the sensitive screen."""
     return (type(value) is str and _REVIEW_DISPUTE_REF.fullmatch(value) is not None and
             not _emitted_sensitive(value))
+
+
+def review_dispute_ref_parts(value):
+    """(issue_or_pr_number, comment_id) of a valid dispute comment URL, else None."""
+    if not valid_review_dispute_ref(value):
+        return None
+    match = _REVIEW_DISPUTE_REF.fullmatch(value)
+    return int(match.group(1)), int(match.group(2))
 
 
 def valid_review_dispute_session(value):
