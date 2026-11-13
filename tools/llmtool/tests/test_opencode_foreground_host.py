@@ -15,6 +15,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 import review_trust_fixture
 import test_opencode_worker as fixtures
+import worker_policy_fixture
 
 
 class CompositionTests(unittest.TestCase):
@@ -80,18 +81,8 @@ class CompositionTests(unittest.TestCase):
         import shutil
         self.addCleanup(lambda: shutil.rmtree(parent, ignore_errors=True))
         if with_developer:
-            import json
-            from unittest.mock import patch
-            from llmtool import worker_dispatch
-
-            policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
-            policy['workers']['company-gw']['dispatch'] = 'ALLOWED'
-            policy['workers']['company-gw']['reason'] = 'test fixture allows isolated route checks'
-            policy_path = parent / 'worker-dispatch.json'
-            policy_path.write_text(json.dumps(policy), encoding='utf-8')
-            policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', policy_path)
-            policy_patch.start()
-            self.addCleanup(policy_patch.stop)
+            # #1692: the shared all-ALLOWED test policy, never the live file.
+            worker_policy_fixture.install(self)
         store = TaskStore(root)
         store.create(record)
         return linked_job, store, record
