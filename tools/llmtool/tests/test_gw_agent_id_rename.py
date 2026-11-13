@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool import dispatch_check, review_dispatch, task_completion, task_submission_cli
-from llmtool import worker_dispatch
+from llmtool import task_store, worker_dispatch
 from llmtool.errors import LLMToolError
 import worker_policy_fixture
 
@@ -183,6 +183,37 @@ class StoredRecordReadTests(_PolicyCase):
         self.assertEqual([entry['worker_key'] for entry in current['dispatch_audit']],
                          [RETIRED, 'gw-agent'])
 
+    def test_task_store_read_maps_the_retired_profile_and_route(self):
+        # Codex v1 F1 on PR #1774: TaskStore reads stored Task JSON through the
+        # shared alias; test_task_store covers the full on-disk round trip.
+        stored = {'task_id': TASK, 'developer': {'provider_profile': RETIRED, 'state': 'S'},
+                  'pm_assignment': {'route': RETIRED, 'risk': 'LOW'}}
+        stored['record_sha256'] = task_store._digest(stored)
+        read = task_store._read_current_worker_ids(stored)
+        self.assertEqual(read['developer'], {'provider_profile': 'gw-agent', 'state': 'S'})
+        self.assertEqual(read['pm_assignment'], {'route': 'gw-agent', 'risk': 'LOW'})
+        self.assertEqual(read['record_sha256'], task_store._digest(read))
+        # The stored copy is not changed in place.
+        self.assertEqual(stored['developer']['provider_profile'], RETIRED)
+        self.assertEqual(stored['pm_assignment']['route'], RETIRED)
+
+        for current in ({'task_id': TASK, 'developer': None, 'pm_assignment': None},
+                        {'task_id': TASK, 'developer': {'provider_profile': 'gw-agent'},
+                         'pm_assignment': {'route': 'company-gw'}}):
+            with self.subTest(current=current):
+                self.assertIs(task_store._read_current_worker_ids(current), current)
+
+        tampered = dict(stored, task_id='e' * 32)
+        with self.assertRaises(LLMToolError):
+            task_store._read_current_worker_ids(tampered)
+
+    def test_task_store_reads_the_stored_pm_response_route_through_the_alias(self):
+        # New writes naming the retired id are refused in test_task_store.
+        response = {'route': RETIRED, 'risk': 'LOW'}
+        self.assertEqual(task_store._current_route(response), {'route': 'gw-agent', 'risk': 'LOW'})
+        self.assertEqual(response['route'], RETIRED)
+        self.assertEqual(task_store._current_route({'risk': 'LOW'}), {'risk': 'LOW'})
+
     def test_task_record_with_the_retired_profile_keeps_its_review_family(self):
         for model, family in (('claude-opus-5-5', 'claude'), ('gpt-6-luna', 'codex'),
                               ('served-model', 'other'), (None, 'other')):
@@ -231,6 +262,9 @@ _ALIAS_TABLES = {
     'task_submission_cli.py': _delegate_provider_argument,
 }
 _MONITOR_TABLE = _assignments_to('RETIRED_WORKER_IDS')
+# Modules that read stored records naming the retired id: they use the shared
+# alias (worker_dispatch.stored_worker_id) and keep no table of their own.
+_SHARED_ALIAS_READERS = ('task_store.py',)
 
 
 def _names_retired_id(node):
@@ -266,6 +300,17 @@ class RetiredIdGuardTests(unittest.TestCase):
             with self.subTest(module=path.name):
                 text = path.read_text(encoding='utf-8')
                 self.assertEqual(_stray_lines(text, _ALIAS_TABLES.get(path.name)), [])
+
+    def test_task_store_reads_through_the_shared_alias(self):
+        for name in _SHARED_ALIAS_READERS:
+            with self.subTest(module=name):
+                tree = ast.parse((_PACKAGE / name).read_text(encoding='utf-8'))
+                imported = {alias.name for node in ast.walk(tree)
+                            if isinstance(node, ast.ImportFrom) and node.module == 'worker_dispatch'
+                            for alias in node.names}
+                self.assertIn('stored_worker_id', imported)
+                for table in ('RETIRED_WORKER_ALIASES', 'RETIRED_WORKER_IDS'):
+                    self.assertEqual(list(_assignments_to(table)(tree)), [])
 
     def test_monitor_names_the_retired_id_only_in_its_alias_table(self):
         self.assertEqual(_stray_lines(_MONITOR.read_text(encoding='utf-8'), _MONITOR_TABLE), [])

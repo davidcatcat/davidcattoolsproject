@@ -1727,7 +1727,7 @@ def _validate(record, *, strict=True):
                     type(response_object['summary']) is not str or
                     _emitted_sensitive(response_object['summary']) or
                     type(response_assignment) is not dict or
-                    assignment != {'schema_version': 1, **response_assignment}):
+                    assignment != {'schema_version': 1, **_current_route(response_assignment)}):
                 _fail()
         elif record['backend_session_semantics'] == 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL':
             _fail()
@@ -2628,6 +2628,49 @@ def _validate(record, *, strict=True):
     return record
 
 
+def _current_route(response_assignment):
+    """The PM response's developer_assignment with its route read as current.
+
+    The stored PM response text is kept as written, so a record from before
+    #1502 WP-E may name the retired route id there while its pm_assignment,
+    read through _read_current_worker_ids, names the current one."""
+    from .worker_dispatch import stored_worker_id
+    if 'route' not in response_assignment:
+        return response_assignment
+    return dict(response_assignment, route=stored_worker_id(response_assignment['route']))
+
+
+def _read_current_worker_ids(record):
+    """Return a stored Task record with its retired worker ids read as current.
+
+    #1502 WP-E (E9), read path only. A record written before the rename may
+    name the gw Agent route by its retired id in developer.provider_profile or
+    pm_assignment.route; worker_dispatch.stored_worker_id (the one shared
+    alias) maps it. The stored digest must first bind the bytes as written; a
+    renamed copy gets a fresh digest so it validates, and a later update writes
+    it with the current id. _validate itself never accepts the retired id, so a
+    new create or update naming it stays refused.
+    """
+    if type(record) is not dict:
+        return record
+    from .worker_dispatch import stored_worker_id
+    developer = record.get('developer')
+    assignment = record.get('pm_assignment')
+    profile = developer.get('provider_profile') if type(developer) is dict else None
+    route = assignment.get('route') if type(assignment) is dict else None
+    if stored_worker_id(profile) == profile and stored_worker_id(route) == route:
+        return record
+    if record.get('record_sha256') != _digest(record):
+        _fail()
+    record = dict(record)
+    if stored_worker_id(profile) != profile:
+        record['developer'] = dict(developer, provider_profile=stored_worker_id(profile))
+    if stored_worker_id(route) != route:
+        record['pm_assignment'] = dict(assignment, route=stored_worker_id(route))
+    record['record_sha256'] = _digest(record)
+    return record
+
+
 def _identity(info):
     return (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
             info.st_gid, info.st_size, info.st_mtime_ns, info.st_nlink)
@@ -2741,7 +2784,9 @@ class TaskStore:
                                    parse_constant=lambda _: _fail())
                 if value.get('task_id') != task_id:
                     _fail()
-                return _validate(value, strict=False) if validate else value
+                if not validate:
+                    return value
+                return _validate(_read_current_worker_ids(value), strict=False)
             except LLMToolError:
                 raise
             except FileNotFoundError:
