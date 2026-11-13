@@ -45,7 +45,9 @@ _GIT_LIMIT = 2 * 1024 * 1024
 _PROPOSAL_FILE_LIMIT = 128
 _PROPOSAL_TREE_LIMIT = 8 * 1024 * 1024
 _TIMEOUT = 10
-_TEST_TIMEOUT = 300  # seconds; the gw-agent wiring module needs about 220-240 s on the Mac
+# seconds per registered test module. #1703: test_task_completion alone needs about
+# 310 s on the Mac (300 s caused TEST_RUNNER_TIMEOUT); the gw-agent wiring module ~240 s.
+_TEST_TIMEOUT = 600
 _TEST_OUTPUT_LIMIT = 256 * 1024
 # Legacy CI values, kept only for ``llmtool trust verify-legacy`` until #369
 # PR-10. The completion gate reads ``ci_trust`` from trust.json at use time
