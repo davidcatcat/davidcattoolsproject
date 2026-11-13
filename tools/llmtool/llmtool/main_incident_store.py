@@ -1,0 +1,700 @@
+"""Owner-only, forward-only main CI incident records (#1706 R3, design sections 5 and 9).
+
+One JSON record per incident lives in ``<TaskStore root parent>/main-incidents``,
+beside ``merge-trains``, with the same file pattern as ``merge_train_store``: a
+record is created once with an atomic hard link, read with schema and digest
+checks, and changed only by compare-and-update under an exclusive lock.
+
+Forward only. ``incident_id``, ``created_at``, ``pm_session_id`` (the PM
+session that owns the incident, set at scan time), ``signal`` and
+``last_good_head`` never change. ``observations`` (one per scan that saw new
+evidence: failing head and runs, class and evidence, range, candidate rows and
+attribution), ``confirmations`` (PM revert-scope confirmations) and
+``outcome_events`` only grow; earlier entries are never rewritten. ``outcome``
+starts as UNKNOWN_OPEN and only advances to RESOLVED or SUPERSEDED, which are
+final: a final record takes no further change. Every update is checked against
+the stored record before it is written.
+
+Every doubt fails closed with a typed code in ``error.incident_code``; error
+messages carry only the code and, when it is a safe identifier, the incident ID.
+"""
+
+import copy
+import fcntl
+import hashlib
+import json
+import os
+import re
+import stat
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+from . import main_incident
+from . import task_store
+from .errors import LLMToolError
+
+SCHEMA_VERSION = 1
+DIRECTORY_NAME = 'main-incidents'
+MAX_RECORD_BYTES = 1024 * 1024
+MAX_OBSERVATIONS = 100
+MAX_CONFIRMATIONS = 20
+MAX_REASON = 1000
+MAX_SESSION = 256
+MAX_PR = 9999999
+READ_ATTEMPTS = 50
+LOCK_TIMEOUT_SECONDS = 10.0
+POLL_SECONDS = 0.01
+
+INCIDENT_RECORD_INVALID = 'INCIDENT_RECORD_INVALID'
+INCIDENT_RECORD_UNAVAILABLE = 'INCIDENT_RECORD_UNAVAILABLE'
+INCIDENT_RECORD_EXISTS = 'INCIDENT_RECORD_EXISTS'
+INCIDENT_RECORD_CONFLICT = 'INCIDENT_RECORD_CONFLICT'
+INCIDENT_RECORD_IMMUTABLE = 'INCIDENT_RECORD_IMMUTABLE'
+INCIDENT_RECORD_BUSY = 'INCIDENT_RECORD_BUSY'
+INCIDENT_RECORD_FULL = 'INCIDENT_RECORD_FULL'
+INCIDENT_OUTCOME_INVALID = 'INCIDENT_OUTCOME_INVALID'
+INCIDENT_CLOSED = 'INCIDENT_CLOSED'
+
+OPEN = 'UNKNOWN_OPEN'
+RESOLVED = 'RESOLVED'
+SUPERSEDED = 'SUPERSEDED'
+OUTCOME_MOVES = {
+    OPEN: frozenset((RESOLVED, SUPERSEDED)),
+    RESOLVED: frozenset(),
+    SUPERSEDED: frozenset(),
+}
+CLASSES = frozenset((main_incident.ENV, main_incident.FLAKY, main_incident.CODE,
+                     main_incident.UNKNOWN))
+SIGNALS = frozenset(main_incident.KINDS)
+ATTRIBUTIONS = frozenset((main_incident.SINGLE, main_incident.BATCH))
+
+FIELDS = frozenset((
+    'schema_version', 'incident_id', 'created_at', 'pm_session_id', 'signal',
+    'last_good_head', 'observations', 'confirmations', 'outcome', 'outcome_events',
+    'record_sha256'))
+IMMUTABLE_FIELDS = ('schema_version', 'incident_id', 'created_at', 'pm_session_id', 'signal',
+                    'last_good_head')
+APPEND_FIELDS = ('observations', 'confirmations', 'outcome_events')
+OBSERVATION_FIELDS = frozenset((
+    'observed_at', 'signal', 'failing_head', 'failing_runs', 'class', 'evidence', 'range',
+    'candidate_rows', 'attribution', 'closure_available'))
+RUN_FIELDS = frozenset(('kind', 'id', 'conclusion'))
+CONFIRMATION_FIELDS = frozenset((
+    'pm_session_id', 'confirmed_at', 'scope', 'reason', 'observation_index',
+    'evidence_sha256'))
+EVENT_FIELDS = frozenset(('outcome', 'at', 'head'))
+
+INCIDENT_ID = re.compile(r'mi-x?[0-9a-f]{40}')
+_RECORD_NAME = re.compile(r'(mi-x?[0-9a-f]{40})\.json')
+_SHA40 = re.compile(r'[0-9a-f]{40}')
+_SHA256 = re.compile(r'[0-9a-f]{64}')
+
+
+def _safe_id(value):
+    return type(value) is str and INCIDENT_ID.fullmatch(value) is not None
+
+
+def _refuse(code, incident_id=None):
+    """Raise the typed refusal; the message is the code plus a safe incident ID only."""
+    message = code
+    if _safe_id(incident_id):
+        message = code + ': incident ' + incident_id
+    error = LLMToolError(message)
+    error.incident_code = code
+    raise error from None
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False,
+                      allow_nan=False).encode('utf-8')
+
+
+def record_digest(record):
+    """SHA-256 of the canonical JSON of ``record`` without ``record_sha256``."""
+    body = {key: item for key, item in record.items() if key != 'record_sha256'}
+    return hashlib.sha256(_canonical(body)).hexdigest()
+
+
+def observation_digest(observation):
+    """SHA-256 of the canonical JSON of one observation (the confirmed evidence)."""
+    return hashlib.sha256(_canonical(observation)).hexdigest()
+
+
+def utc_stamp(now=None):
+    """UTC ISO time in seconds, ``YYYY-MM-DDTHH:MM:SSZ``; now is an epoch or None."""
+    now = time.time() if now is None else now
+    return datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _sha40(value):
+    return type(value) is str and _SHA40.fullmatch(value) is not None
+
+
+def _pr(value):
+    return type(value) is int and 1 <= value <= MAX_PR
+
+
+def _optional_pr(value):
+    return value is None or _pr(value)
+
+
+def _text(value, limit):
+    return (type(value) is str and 0 < len(value) <= limit and
+            not any(ord(char) < 0x20 or 0x7f <= ord(char) <= 0x9f for char in value))
+
+
+def _session(value):
+    return _text(value, MAX_SESSION) and not any(char.isspace() for char in value)
+
+
+def _utc_iso(value):
+    if type(value) is not str or not 0 < len(value) <= 64 or not value.isascii():
+        return False
+    text = value[:-1] + '+00:00' if value.endswith('Z') else value
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() == timezone.utc.utcoffset(parsed)
+
+
+def incident_id(last_good_head, failing_head):
+    """The incident ID: ``mi-<last good head>``, or ``mi-x<failing head>`` with no last good."""
+    if last_good_head is not None:
+        if not _sha40(last_good_head):
+            _refuse(INCIDENT_RECORD_INVALID)
+        return 'mi-' + last_good_head
+    if not _sha40(failing_head):
+        _refuse(INCIDENT_RECORD_INVALID)
+    return 'mi-x' + failing_head
+
+
+def _signal(value):
+    return (type(value) is list and value and
+            all(type(item) is str and item in SIGNALS for item in value) and
+            value == sorted(set(value)))
+
+
+def _valid_run(run):
+    return (type(run) is dict and set(run) == RUN_FIELDS and
+            type(run['kind']) is str and run['kind'] in SIGNALS and
+            type(run['id']) is int and run['id'] >= 1 and
+            _text(run['conclusion'], 32))
+
+
+def _valid_range(value):
+    return value is None or (type(value) is list and all(
+        type(item) is dict and _sha40(item.get('sha')) and _optional_pr(item.get('pr'))
+        for item in value))
+
+
+def _valid_rows(rows):
+    return type(rows) is list and all(
+        type(row) is dict and _optional_pr(row.get('pr')) for row in rows)
+
+
+def _valid_attribution(value):
+    if type(value) is not dict or value.get('attribution') not in ATTRIBUTIONS:
+        return False
+    if value['attribution'] == main_incident.SINGLE:
+        return _optional_pr(value.get('pr')) and _valid_rows(value.get('rows'))
+    return _valid_rows(value.get('rows'))
+
+
+def _valid_observation(item):
+    return (type(item) is dict and set(item) == OBSERVATION_FIELDS and
+            _utc_iso(item['observed_at']) and
+            _signal(item['signal']) and
+            _sha40(item['failing_head']) and
+            type(item['failing_runs']) is list and
+            all(_valid_run(run) for run in item['failing_runs']) and
+            type(item['class']) is str and item['class'] in CLASSES and
+            type(item['evidence']) is list and
+            all(type(entry) is dict for entry in item['evidence']) and
+            _valid_range(item['range']) and
+            _valid_rows(item['candidate_rows']) and
+            _valid_attribution(item['attribution']) and
+            type(item['closure_available']) is bool)
+
+
+def valid_reason(value):
+    """A stripped, non-empty reason of at most MAX_REASON characters, no control characters."""
+    return _text(value, MAX_REASON) and value == value.strip()
+
+
+def _valid_confirmation(item, observations):
+    if (type(item) is not dict or set(item) != CONFIRMATION_FIELDS or
+            not _session(item['pm_session_id']) or
+            not _utc_iso(item['confirmed_at']) or
+            not valid_reason(item['reason']) or
+            type(item['evidence_sha256']) is not str or
+            _SHA256.fullmatch(item['evidence_sha256']) is None):
+        return False
+    scope = item['scope']
+    if (type(scope) is not list or not scope or not all(_pr(pr) for pr in scope) or
+            scope != sorted(set(scope))):
+        return False
+    index = item['observation_index']
+    if type(index) is not int or not 0 <= index < len(observations):
+        return False
+    # The confirmation is bound to the exact evidence it was made on.
+    return item['evidence_sha256'] == observation_digest(observations[index])
+
+
+def _valid_events(events, outcome):
+    if type(events) is not list:
+        return False
+    state = OPEN
+    for event in events:
+        if (type(event) is not dict or set(event) != EVENT_FIELDS or
+                type(event['outcome']) is not str or
+                event['outcome'] not in OUTCOME_MOVES[state] or
+                not _utc_iso(event['at']) or
+                not (event['head'] is None or _sha40(event['head']))):
+            return False
+        state = event['outcome']
+    return outcome == state
+
+
+def _valid_body(record):
+    """Check every field except ``record_sha256``; return False on any doubt."""
+    if type(record) is not dict or set(record) != FIELDS - {'record_sha256'}:
+        return False
+    if (type(record['schema_version']) is not int or
+            record['schema_version'] != SCHEMA_VERSION or
+            not _safe_id(record['incident_id']) or
+            not _utc_iso(record['created_at']) or
+            not _session(record['pm_session_id']) or
+            not _signal(record['signal']) or
+            not (record['last_good_head'] is None or _sha40(record['last_good_head'])) or
+            type(record['outcome']) is not str or record['outcome'] not in OUTCOME_MOVES):
+        return False
+    observations = record['observations']
+    if (type(observations) is not list or not 1 <= len(observations) <= MAX_OBSERVATIONS or
+            not all(_valid_observation(item) for item in observations)):
+        return False
+    if record['incident_id'] != _expected_id(record):
+        return False
+    confirmations = record['confirmations']
+    if (type(confirmations) is not list or len(confirmations) > MAX_CONFIRMATIONS or
+            not all(_valid_confirmation(item, observations) for item in confirmations)):
+        return False
+    return _valid_events(record['outcome_events'], record['outcome'])
+
+
+def _expected_id(record):
+    head = record['last_good_head']
+    return ('mi-' + head) if head is not None else 'mi-x' + record['observations'][0]['failing_head']
+
+
+def _validate(record, incident=None):
+    """Return ``record`` when its shape and digest are valid, else refuse INVALID."""
+    if (type(record) is not dict or set(record) != FIELDS or
+            type(record.get('record_sha256')) is not str or
+            _SHA256.fullmatch(record['record_sha256']) is None):
+        _refuse(INCIDENT_RECORD_INVALID, incident)
+    body = {key: item for key, item in record.items() if key != 'record_sha256'}
+    if not _valid_body(body):
+        _refuse(INCIDENT_RECORD_INVALID, incident)
+    try:
+        digest = record_digest(record)
+    except (TypeError, ValueError):
+        _refuse(INCIDENT_RECORD_INVALID, incident)
+    if digest != record['record_sha256']:
+        _refuse(INCIDENT_RECORD_INVALID, incident)
+    return record
+
+
+def _sealed(body, incident):
+    """Return a detached, validated record with ``record_sha256`` set."""
+    try:
+        # The JSON round trip detaches the body and turns tuples into lists.
+        plain = json.loads(_canonical(body).decode('utf-8'))
+    except (TypeError, ValueError, RecursionError):
+        _refuse(INCIDENT_RECORD_INVALID, incident)
+    if not _valid_body(plain):
+        _refuse(INCIDENT_RECORD_INVALID, incident)
+    plain['record_sha256'] = record_digest(plain)
+    return _validate(plain, incident)
+
+
+def new_record(*, pm_session_id, observation, last_good_head, created_at):
+    """Return the body of a new UNKNOWN_OPEN record; create() validates it."""
+    if type(observation) is not dict:
+        _refuse(INCIDENT_RECORD_INVALID)
+    return {
+        'schema_version': SCHEMA_VERSION,
+        'incident_id': incident_id(last_good_head, observation.get('failing_head')),
+        'created_at': created_at,
+        'pm_session_id': pm_session_id,
+        'signal': copy.deepcopy(observation.get('signal')),
+        'last_good_head': last_good_head,
+        'observations': [copy.deepcopy(observation)],
+        'confirmations': [],
+        'outcome': OPEN,
+        'outcome_events': [],
+    }
+
+
+def _directory_path(root):
+    base = Path(task_store.default_root() if root is None else root).absolute()
+    return base.parent / DIRECTORY_NAME
+
+
+def _open_directory(root):
+    """Create or open the owner-only record directory; a symlink is refused."""
+    if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_DIRECTORY'):
+        _refuse(INCIDENT_RECORD_UNAVAILABLE)
+    directory = _directory_path(root)
+    try:
+        directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        _refuse(INCIDENT_RECORD_UNAVAILABLE)
+    try:
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        _refuse(INCIDENT_RECORD_UNAVAILABLE)
+    try:
+        named = os.lstat(directory)
+    except OSError:
+        _refuse(INCIDENT_RECORD_UNAVAILABLE)
+    if (stat.S_ISLNK(named.st_mode) or not stat.S_ISDIR(named.st_mode) or
+            named.st_uid != os.getuid()):
+        _refuse(INCIDENT_RECORD_INVALID)
+    try:
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        _refuse(INCIDENT_RECORD_INVALID)
+    try:
+        opened = os.fstat(fd)
+        if (not stat.S_ISDIR(opened.st_mode) or opened.st_uid != os.getuid() or
+                (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+            _refuse(INCIDENT_RECORD_INVALID)
+        if stat.S_IMODE(opened.st_mode) != 0o700:
+            os.fchmod(fd, 0o700)
+            if stat.S_IMODE(os.fstat(fd).st_mode) != 0o700:
+                _refuse(INCIDENT_RECORD_UNAVAILABLE)
+    except LLMToolError:
+        os.close(fd)
+        raise
+    except OSError:
+        os.close(fd)
+        _refuse(INCIDENT_RECORD_UNAVAILABLE)
+    return fd
+
+
+def _record_name(incident):
+    if not _safe_id(incident):
+        _refuse(INCIDENT_RECORD_INVALID)
+    return incident + '.json'
+
+
+def _unique_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate key')
+        result[key] = value
+    return result
+
+
+def _reject_constant(_):
+    raise ValueError('non-finite number')
+
+
+def _read_at(directory, incident):
+    """Read and validate one record through the directory descriptor."""
+    name = _record_name(incident)
+    for _ in range(READ_ATTEMPTS):
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            _refuse(INCIDENT_RECORD_UNAVAILABLE, incident)
+        except OSError:
+            _refuse(INCIDENT_RECORD_INVALID, incident)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                    stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > MAX_RECORD_BYTES):
+                _refuse(INCIDENT_RECORD_INVALID, incident)
+            if info.st_nlink != 1:
+                # A replace unlinked this inode, or a create is between its
+                # link and temporary unlink; a planted extra link persists.
+                time.sleep(POLL_SECONDS)
+                continue
+            chunks, remaining = [], MAX_RECORD_BYTES + 1
+            while remaining:
+                chunk = os.read(fd, min(65536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        except LLMToolError:
+            raise
+        except OSError:
+            _refuse(INCIDENT_RECORD_INVALID, incident)
+        finally:
+            os.close(fd)
+        raw = b''.join(chunks)
+        if len(raw) > MAX_RECORD_BYTES:
+            _refuse(INCIDENT_RECORD_INVALID, incident)
+        try:
+            value = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_pairs,
+                               parse_constant=_reject_constant)
+        except (UnicodeError, ValueError, RecursionError):
+            _refuse(INCIDENT_RECORD_INVALID, incident)
+        _validate(value, incident)
+        if value['incident_id'] != incident:
+            _refuse(INCIDENT_RECORD_INVALID, incident)
+        return value
+    _refuse(INCIDENT_RECORD_INVALID, incident)
+
+
+def _write_temporary(directory, incident, record):
+    """Write the fsynced owner-only temporary; return its name."""
+    raw = _canonical(record) + b'\n'
+    if len(raw) > MAX_RECORD_BYTES:
+        _refuse(INCIDENT_RECORD_FULL, incident)
+    temporary = '.' + incident + '.' + uuid.uuid4().hex + '.tmp'
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                 dir_fd=directory)
+    try:
+        os.fchmod(fd, 0o600)
+        view = memoryview(raw)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return temporary
+
+
+def create(record, root=None):
+    """Validate and write one new UNKNOWN_OPEN record exactly once; return it."""
+    if type(record) is not dict:
+        _refuse(INCIDENT_RECORD_INVALID)
+    incident = record.get('incident_id')
+    body = {key: item for key, item in record.items() if key != 'record_sha256'}
+    sealed = _sealed(body, incident)
+    if (sealed['outcome'] != OPEN or sealed['outcome_events'] or sealed['confirmations'] or
+            len(sealed['observations']) != 1):
+        _refuse(INCIDENT_OUTCOME_INVALID, incident)
+    name = _record_name(sealed['incident_id'])
+    directory = _open_directory(root)
+    temporary = None
+    try:
+        temporary = _write_temporary(directory, incident, sealed)
+        # A hard link is atomic and fails when the name already exists.
+        os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory,
+                follow_symlinks=False)
+        os.unlink(temporary, dir_fd=directory)
+        temporary = None
+        os.fsync(directory)
+    except FileExistsError:
+        _refuse(INCIDENT_RECORD_EXISTS, incident)
+    except LLMToolError:
+        raise
+    except OSError:
+        _refuse(INCIDENT_RECORD_UNAVAILABLE, incident)
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except OSError:
+                pass
+        os.close(directory)
+    return copy.deepcopy(sealed)
+
+
+def get(incident, root=None):
+    """Return the validated record for ``incident``."""
+    _record_name(incident)
+    directory = _open_directory(root)
+    try:
+        return _read_at(directory, incident)
+    finally:
+        os.close(directory)
+
+
+def _acquire_lock(directory, incident):
+    lock = '.' + incident + '.lock'
+    try:
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600,
+                     dir_fd=directory)
+    except OSError:
+        _refuse(INCIDENT_RECORD_INVALID, incident)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                info.st_nlink != 1):
+            _refuse(INCIDENT_RECORD_INVALID, incident)
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            os.fchmod(fd, 0o600)
+        deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    _refuse(INCIDENT_RECORD_BUSY, incident)
+                time.sleep(POLL_SECONDS)
+    except LLMToolError:
+        os.close(fd)
+        raise
+    except OSError:
+        os.close(fd)
+        _refuse(INCIDENT_RECORD_UNAVAILABLE, incident)
+
+
+def _check_forward(old, new, incident):
+    """Refuse IMMUTABLE unless ``new`` only appends to and advances ``old``."""
+    if type(new) is not dict:
+        _refuse(INCIDENT_RECORD_IMMUTABLE, incident)
+    for key in IMMUTABLE_FIELDS:
+        if key not in new or new[key] != old[key]:
+            _refuse(INCIDENT_RECORD_IMMUTABLE, incident)
+    for key in APPEND_FIELDS:
+        value = new.get(key)
+        if type(value) is not list or value[:len(old[key])] != old[key]:
+            _refuse(INCIDENT_RECORD_IMMUTABLE, incident)
+    outcome = new.get('outcome')
+    if outcome != old['outcome'] and (type(outcome) is not str or
+                                      outcome not in OUTCOME_MOVES[old['outcome']]):
+        _refuse(INCIDENT_OUTCOME_INVALID, incident)
+
+
+def _commit(incident, expected_sha256, mutate, root=None):
+    """Apply ``mutate(body copy) -> new body`` when the stored digest is expected.
+
+    The new body must only append to and advance the stored record; a final
+    record (RESOLVED or SUPERSEDED) takes no change at all.
+    """
+    name = _record_name(incident)
+    directory = _open_directory(root)
+    try:
+        lock_fd = _acquire_lock(directory, incident)
+        try:
+            current = _read_at(directory, incident)
+            if (type(expected_sha256) is not str or
+                    current['record_sha256'] != expected_sha256):
+                _refuse(INCIDENT_RECORD_CONFLICT, incident)
+            if current['outcome'] != OPEN:
+                _refuse(INCIDENT_CLOSED, incident)
+            old = {key: item for key, item in current.items() if key != 'record_sha256'}
+            new = mutate(copy.deepcopy(old))
+            _check_forward(old, new, incident)
+            updated = _sealed(new, incident)
+            _check_forward(old, updated, incident)
+            temporary = None
+            try:
+                temporary = _write_temporary(directory, incident, updated)
+                os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+                temporary = None
+                os.fsync(directory)
+            except OSError:
+                _refuse(INCIDENT_RECORD_UNAVAILABLE, incident)
+            finally:
+                if temporary is not None:
+                    try:
+                        os.unlink(temporary, dir_fd=directory)
+                    except OSError:
+                        pass
+            return copy.deepcopy(updated)
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+    finally:
+        os.close(directory)
+
+
+def append_observation(incident, expected_sha256, observation, root=None):
+    """Append one observation to an open record; return the new record."""
+    def mutate(body):
+        if len(body['observations']) >= MAX_OBSERVATIONS:
+            _refuse(INCIDENT_RECORD_FULL, incident)
+        body['observations'].append(copy.deepcopy(observation))
+        return body
+    return _commit(incident, expected_sha256, mutate, root)
+
+
+def append_confirmation(incident, expected_sha256, confirmation, root=None):
+    """Append one PM confirmation to an open record; return the new record."""
+    def mutate(body):
+        if len(body['confirmations']) >= MAX_CONFIRMATIONS:
+            _refuse(INCIDENT_RECORD_FULL, incident)
+        body['confirmations'].append(copy.deepcopy(confirmation))
+        return body
+    return _commit(incident, expected_sha256, mutate, root)
+
+
+def advance_outcome(incident, expected_sha256, outcome, *, at, head=None, root=None):
+    """Advance UNKNOWN_OPEN to RESOLVED or SUPERSEDED; return the new record."""
+    def mutate(body):
+        if type(outcome) is not str or outcome not in OUTCOME_MOVES[body['outcome']]:
+            _refuse(INCIDENT_OUTCOME_INVALID, incident)
+        body['outcome_events'].append({'outcome': outcome, 'at': at, 'head': head})
+        body['outcome'] = outcome
+        return body
+    return _commit(incident, expected_sha256, mutate, root)
+
+
+def list_records(root=None):
+    """Return every record, validated as ``get`` does, sorted by incident ID.
+
+    Read-only: a missing directory returns [] and is not created. Any
+    unreadable or invalid record, or an unsafe directory, refuses INVALID.
+    """
+    if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_DIRECTORY'):
+        _refuse(INCIDENT_RECORD_UNAVAILABLE)
+    path = _directory_path(root)
+    try:
+        named = os.lstat(path)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        _refuse(INCIDENT_RECORD_UNAVAILABLE)
+    if (stat.S_ISLNK(named.st_mode) or not stat.S_ISDIR(named.st_mode) or
+            named.st_uid != os.getuid()):
+        _refuse(INCIDENT_RECORD_INVALID)
+    try:
+        directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        _refuse(INCIDENT_RECORD_INVALID)
+    try:
+        try:
+            opened = os.fstat(directory)
+            names = sorted(os.listdir(directory))
+        except OSError:
+            _refuse(INCIDENT_RECORD_UNAVAILABLE)
+        if (not stat.S_ISDIR(opened.st_mode) or opened.st_uid != os.getuid() or
+                (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) or
+                stat.S_IMODE(opened.st_mode) != 0o700):
+            _refuse(INCIDENT_RECORD_INVALID)
+        records = []
+        for name in names:
+            if name.startswith('.'):
+                continue  # lock files and in-flight temporaries
+            match = _RECORD_NAME.fullmatch(name)
+            if match is None:
+                _refuse(INCIDENT_RECORD_INVALID)
+            incident = match.group(1)
+            try:
+                records.append(_read_at(directory, incident))
+            except LLMToolError:
+                _refuse(INCIDENT_RECORD_INVALID, incident)
+        return sorted(records, key=lambda record: record['incident_id'])
+    finally:
+        os.close(directory)
+
+
+def find_open(root=None):
+    """Return every UNKNOWN_OPEN record, sorted by incident ID."""
+    return [record for record in list_records(root) if record['outcome'] == OPEN]
