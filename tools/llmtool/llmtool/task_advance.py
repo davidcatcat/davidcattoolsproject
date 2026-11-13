@@ -2544,6 +2544,31 @@ def _closed_train_member_head(record, task_id, store):
     return None
 
 
+def _lineage_after_merge(result, store, task_id, record, *, merged_now=False):
+    """#1502 WP-D D10f2: close a merged lineage Task once; the merge result never changes.
+
+    Runs only after the merge_attempt is MERGED: a merge this call made
+    (merged_now) or a stored MERGED attempt (replay). A Task without lineage
+    makes no call. lineage_close_merged closes an OPEN member with no Owner
+    notice and rolls up its PARKED ROOT; on a CLOSED member it only retries a
+    failed roll-up, so a replay never closes twice. Its result, None or
+    LINEAGE_CLOSE_FAILED, is reported under result['lineage'].
+    """
+    if type(record) is not dict or type(record.get('lineage')) is not dict:
+        return result
+    attempt = record.get('merge_attempt')
+    if not merged_now and (type(attempt) is not dict or attempt.get('state') != 'MERGED'):
+        return result
+    try:
+        closed = task_submission_cli.lineage_close_merged(store, task_id)
+    except Exception:
+        closed = {'code': 'LINEAGE_CLOSE_FAILED'}
+    result['lineage'] = closed
+    if type(closed) is dict and closed.get('code') == 'LINEAGE_CLOSE_FAILED':
+        result.setdefault('codes', []).append('LINEAGE_CLOSE_FAILED')
+    return result
+
+
 def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=False,
             reviewer_session_done=False, dispatch_review_call=None,
             record_review_result_call=None, repair_review_call=None, relay_verdict_call=None,
@@ -2575,7 +2600,11 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     if merge and type(lineage) is dict and lineage.get('state') != 'OPEN':
         # #1502 WP-D D10: refuse before any D6, PR, review or claim read.
         code = 'MERGE_ROOT_PARKED' if lineage['state'] == 'PARKED' else 'MERGE_LINEAGE_ENDED'
-        return dict(_merge_refusal(code), task_id=task_id, next='MERGE_REFUSED', acked=[])
+        refused = dict(_merge_refusal(code), task_id=task_id, next='MERGE_REFUSED', acked=[])
+        if lineage.get('state') == 'CLOSED':
+            # D10f2 replay: an already merged, CLOSED member retries a failed roll-up.
+            _lineage_after_merge(refused, store, task_id, record)
+        return refused
     if integration_pr is None:
         closed_head = _closed_train_member_head(record, task_id, store)
         if closed_head is not None:
@@ -2641,9 +2670,11 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         try:
             invoke(store, record, 'github-task-advance', event_id,
                    merge_number, None, 'merge', 'MERGED', merge_sha)
-            return _ack_consumed_events(
+            closed = _lineage_after_merge(
                 {'task_id': task_id, 'step': 'CLOSED', 'result': None,
-                 'next': 'CLOSED', 'codes': []}, record, store,
+                 'next': 'CLOSED', 'codes': []}, store, task_id, record)
+            return _ack_consumed_events(
+                closed, record, store,
                 d6.get('result_head') if type(d6) is dict else None)
         except Exception as exc:
             return _ack_consumed_events(
@@ -2693,6 +2724,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                 merge_result = {'step': routed[0], 'codes': list(routed[1]),
                                 'result': routed[2]}
         merge_result.update(task_id=task_id, next=merge_result['step'])
+        if merge_result.get('step') == 'MERGED':
+            _lineage_after_merge(merge_result, store, task_id, record, merged_now=True)
         return _ack_consumed_events(merge_result, record, store, d6['result_head'])
     if type(d6) is dict and d6.get('state') == 'D6_BINDING_UNAVAILABLE':
         code = d6.get('code') if type(d6.get('code')) is str else 'D6_BINDING_UNAVAILABLE'
