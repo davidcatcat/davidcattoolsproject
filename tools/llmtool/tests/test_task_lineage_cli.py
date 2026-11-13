@@ -47,6 +47,10 @@ class LineageReadTests(LineageCase):
         self.assertEqual((line['lineage_id'], line['kind'], line['state'], line['replaces']),
                          (plain, 'root', 'OPEN', []))
         self.refused('LINEAGE_X', lambda _store: cli._lineage_refuse('LINEAGE_X'))
+        # A present but malformed lineage fails closed instead of reading as a ROOT.
+        for bad in ('x', [], {'kind': 'root'}):
+            self.refused('TASK_LINEAGE_INVALID',
+                         lambda _store, bad=bad: cli._lineage_of({'task_id': plain, 'lineage': bad}))
 
 if __name__ == '__main__':
     unittest.main()
