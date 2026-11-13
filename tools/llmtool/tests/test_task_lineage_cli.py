@@ -52,5 +52,15 @@ class LineageReadTests(LineageCase):
             self.refused('TASK_LINEAGE_INVALID',
                          lambda _store, bad=bad: cli._lineage_of({'task_id': plain, 'lineage': bad}))
 
+
+class LineageNoneTests(LineageCase):
+    def test_an_explicit_none_lineage_fails_closed(self):
+        # PR #1698 security Low: a present None lineage is validated, not read as a ROOT.
+        plain = self.task()
+        self.refused('TASK_LINEAGE_INVALID',
+                     lambda _store: cli._lineage_of({'task_id': plain, 'lineage': None}))
+        self.assertEqual(cli._lineage_of({'task_id': plain})['kind'], 'root')
+
+
 if __name__ == '__main__':
     unittest.main()
