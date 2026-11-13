@@ -53,6 +53,7 @@ TASK_ACTIONS = {
     'complete': ('run_task_complete', False),
     'delegate': ('run_task_delegate_checked', True),
     'drive': ('run_task_drive', True),
+    'drop': ('run_task_drop', False),
     'github-events': ('run_task_github_events', False),
     'high-debug': ('run_task_high_debug', True),
     'inbox': ('run_task_inbox', False),
@@ -63,6 +64,7 @@ TASK_ACTIONS = {
     'review-prompt': ('run_task_review_prompt', False),
     'review-result': ('run_task_review_result', False),
     'show': ('run_task_show', False),
+    'split': ('run_task_split', False),
     'status': ('run_task_status', False),
     'submit': ('run_task_submit', False),
 }

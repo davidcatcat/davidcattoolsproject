@@ -717,7 +717,24 @@ def add_task_submission_parsers(actions):
     abandon.add_argument('--pm-session', required=True,
                          help='native PM session UUID (or stored pm- session ID)')
     abandon.add_argument('--reason', required=True, help='printable reason (1-500 characters)')
-    submit = actions.add_parser('submit', help='Submit a development request to an explicit PM provider profile')
+    # #1502 WP-D D10e2: lineage actions; each needs the owning PM session and a reason.
+    split = actions.add_parser(
+        'split', help='SPLIT a ROOT Task into child Tasks; the ROOT is PARKED')
+    split.add_argument('root_id', metavar='ROOT', help='existing durable ROOT Task ID')
+    split.add_argument('--child', required=True, action='extend', nargs='+', metavar='ID',
+                       help='existing durable Task ID that becomes a child (repeatable)')
+    split.add_argument('--pm-session', required=True,
+                       help='native PM session UUID (or stored pm- session ID)')
+    split.add_argument('--reason', required=True, help='printable reason (1-500 characters)')
+    drop = actions.add_parser(
+        'drop', help='End one OPEN lineage Task: DROPPED, STOPPED or FAILED_FINAL')
+    drop.add_argument('task_id', metavar='ID', help='existing durable Task ID')
+    drop.add_argument('--state', choices=('DROPPED', 'STOPPED', 'FAILED_FINAL'),
+                      default='DROPPED', help='end state (default DROPPED)')
+    drop.add_argument('--pm-session', required=True,
+                      help='native PM session UUID (or stored pm- session ID)')
+    drop.add_argument('--reason', required=True, help='printable reason (1-500 characters)')
+    submit =actions.add_parser('submit', help='Submit a development request to an explicit PM provider profile')
     submit.add_argument('--provider', required=True, help='configured PM provider profile; no implicit default')
     submit.add_argument('request', nargs='+', help='development request text')
     record_pm = actions.add_parser(
@@ -1208,6 +1225,14 @@ def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_read
     return {'task_id': root_id, 'state': 'PARKED', 'children': list(children),
             'base_sha': base_sha, 'owner_notice': None,
             'next': 'PM closes the ROOT PR with a comment; the ROOT is never merged'}
+
+
+def run_task_split(args, *, store=None, stdout=None, main_sha_reader=None):
+    """#1502 WP-D D10c3: `task split ROOT --child ID...`; a refusal prints only its code."""
+    return _lineage_cli(store, stdout, lambda store: lineage_split(
+        store, args.root_id, list(args.child), reason=args.reason,
+        pm_session=active_pm_inbox.pm_session_key(args.pm_session),
+        main_sha_reader=main_sha_reader))
 
 
 def run_task_remote_test(args, *, store=None, stdout=None):

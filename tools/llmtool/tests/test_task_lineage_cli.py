@@ -316,5 +316,118 @@ class LineageSplitTests(LineageCase):
         self.assertEqual(self.store.get(first)['lineage']['state'], 'OPEN')
 
 
+def run_command(function, args, **kwargs):
+    """Run one lineage adapter; return its exit code and the one printed JSON object."""
+    import io
+    import json
+    out = io.StringIO()
+    code = function(args, stdout=out, **kwargs)
+    return code, json.loads(out.getvalue())
+
+
+def parse(*argv):
+    from llmtool import cli as main_cli
+    return main_cli.parser_for_cli().parse_args(['task', *argv])
+
+
+class LineageSplitCommandTests(LineageCase):
+    def split_args(self, root, children, reason='Review FAIL 3.', session=PM):
+        from types import SimpleNamespace
+        return SimpleNamespace(root_id=root, child=list(children), reason=reason,
+                               pm_session=session)
+
+    def test_split_refusals_write_nothing_read_no_main_sha_and_print_only_the_code(self):
+        # D10c3: every refusal exits 1, prints only {'code': ...}, records no lineage
+        # on any Task and never reads the main SHA.
+        root, first, second, claimed = self.task(), self.task(), self.task(), self.task()
+        self.store.update(claimed, merge_attempt=CLAIM)
+        reads = []
+
+        def main_sha():
+            reads.append(True)
+            return MAIN
+        cases = (
+            ('SPLIT_REASON_REQUIRED', self.split_args(root, [first], reason=' ')),
+            ('LINEAGE_PM_SESSION_DENIED',
+             self.split_args(root, [first], session='pm-other')),
+            ('LINEAGE_MEMBER_INVALID', self.split_args(root, [root])),
+            ('LINEAGE_MEMBER_INVALID', self.split_args(root, [first, first])),
+            ('LINEAGE_MEMBER_INVALID', self.split_args(root, [first, claimed])),
+            ('SPLIT_ROOT_NOT_OPEN', self.split_args(claimed, [first])),
+        )
+        every = (root, first, second, claimed)
+        before = {task_id: self.store.get(task_id)['record_sha256'] for task_id in every}
+        for code, args in cases:
+            with self.subTest(code=code):
+                self.assertEqual(run_command(cli.run_task_split, args, store=self.store,
+                                             main_sha_reader=main_sha),
+                                 (1, {'code': code}))
+        self.assertEqual(reads, [])
+        for task_id in every:
+            record = self.store.get(task_id)
+            self.assertEqual(record['record_sha256'], before[task_id])
+            self.assertNotIn('lineage', record)
+
+    def test_a_parked_race_refusal_prints_only_the_code_and_records_no_child(self):
+        # The locked park refuses after the main SHA read: still only a code, no child.
+        root, first = self.task(), self.task()
+
+        def main_sha():
+            self.store.update(root, merge_attempt=CLAIM)
+            return MAIN
+        self.assertEqual(run_command(cli.run_task_split, self.split_args(root, [first]),
+                                     store=self.store, main_sha_reader=main_sha),
+                         (1, {'code': 'SPLIT_ROOT_MERGE_STARTED'}))
+        self.assertNotIn('lineage', self.store.get(root))
+        self.assertNotIn('lineage', self.store.get(first))
+
+    def test_split_through_the_real_parser_parks_the_root(self):
+        from llmtool import cli as main_cli
+        root, first, second = self.task(), self.task(), self.task()
+        args = parse('split', root, '--child', first, '--child', second,
+                     '--pm-session', PM, '--reason', 'Review FAIL 3.')
+        self.assertEqual((args.command, args.action, args.root_id, args.child),
+                         ('task', 'split', root, [first, second]))
+        self.assertEqual(parse('split', root, '--child', first, second, '--pm-session', PM,
+                               '--reason', 'x').child, [first, second])
+        self.assertEqual(main_cli.TASK_ACTIONS['split'], ('run_task_split', False))
+        function = getattr(cli, main_cli.TASK_ACTIONS[args.action][0])
+        code, result = run_command(function, args, store=self.store,
+                                   main_sha_reader=lambda: MAIN)
+        self.assertEqual(code, 0)
+        self.assertEqual((result['state'], result['children'], result['base_sha'],
+                          result['owner_notice']), ('PARKED', [first, second], MAIN, None))
+        self.assertEqual(self.state(root), 'PARKED')
+        self.assertEqual([self.state(first), self.state(second)], ['OPEN', 'OPEN'])
+
+
+class LineageCommandRegistrationTests(LineageCase):
+    def test_drop_through_the_real_parser_and_the_actions_stay_sorted(self):
+        import contextlib
+        import io
+        from llmtool import cli as main_cli
+        child = self.member(self.parked_root())
+        self.assertEqual(parse('drop', child, '--pm-session', PM, '--reason', 'x').state,
+                         'DROPPED')
+        args = parse('drop', child, '--state', 'STOPPED', '--pm-session', PM,
+                     '--reason', 'test failures used up')
+        self.assertEqual((args.action, args.task_id, args.state), ('drop', child, 'STOPPED'))
+        self.assertEqual(main_cli.TASK_ACTIONS['drop'], ('run_task_drop', False))
+        function = getattr(cli, main_cli.TASK_ACTIONS[args.action][0])
+        code, result = run_command(function, args, store=self.store)
+        self.assertEqual((code, result['state'], result['owner_notice']['state']),
+                         (0, 'STOPPED', 'STOPPED'))
+        self.assertEqual(self.state(child), 'STOPPED')
+        bad = (('drop', child, '--state', 'CLOSED', '--pm-session', PM, '--reason', 'x'),
+               ('drop', child, '--reason', 'x'),
+               ('split', child, '--pm-session', PM, '--reason', 'x'),
+               ('split', child, '--child', child, '--pm-session', PM))
+        for argv in bad:
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parse(*argv)
+        self.assertEqual(list(main_cli.TASK_ACTIONS), sorted(main_cli.TASK_ACTIONS))
+
+
 if __name__ == '__main__':
     unittest.main()
