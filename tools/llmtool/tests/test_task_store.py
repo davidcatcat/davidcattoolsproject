@@ -375,6 +375,23 @@ class TaskStoreTests(unittest.TestCase):
                                  'TASK_LINEAGE_TRANSITION_INVALID')
         self.assertEqual(self.store.get(child_id)['lineage'], dropped)
 
+    def test_create_refuses_a_record_that_carries_a_lineage(self):
+        # #1502 WP-D D10: lineage is written only by record_lineage, after create.
+        from llmtool.task_store import record_lineage
+        task = self._codex_dispatch_task()
+        line = {'lineage_id': task['task_id'], 'kind': 'root', 'parent': None,
+                'replaces': [], 'state': 'OPEN', 'reason': None, 'base_sha': None,
+                'recorded_at': '2026-11-13T00:00:00Z'}
+        for state in ('OPEN', 'PARKED', 'CLOSED'):
+            with self.subTest(state=state):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.create(dict(task, lineage=dict(line, state=state)))
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_LINEAGE_TRANSITION_INVALID')
+        self.store.create(task)
+        record_lineage(self.store, task['task_id'], line)
+        self.assertEqual(self.store.get(task['task_id'])['lineage'], line)
+
     def test_record_lineage_only_moves_forward(self):
         # #1502 WP-D: kind, lineage and parent never change; an end state is final.
         from llmtool.task_store import record_lineage

@@ -2790,6 +2790,9 @@ class TaskStore:
                 time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
 
     def create(self, record):
+        if type(record) is dict and 'lineage' in record:
+            # #1502 WP-D D10: a new Task is created first, then labelled by record_lineage.
+            _fail('TASK_LINEAGE_TRANSITION_INVALID')
         if type(record) is dict and 'abandonment' in record:
             _fail('TASK_ABANDONMENT_MUTATION_FORBIDDEN')
         if (type(record) is not dict or 'dispatch_audit' in record or
