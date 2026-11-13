@@ -1,10 +1,12 @@
 import hashlib
 import json
 import io
-from contextlib import redirect_stderr
+from contextlib import ExitStack, redirect_stderr
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,11 +28,39 @@ def _runtime_parts(*pieces):
 import review_trust_fixture
 
 
+_MODULE_PATCHES = []
+_MODULE_POSTS = []
+
+
+def _offline_comment_list(_pr_number):
+    raise AssertionError('a test reached the GitHub comment list')
+
+
+def _offline_comment_post(_root, _pr_number, _body):
+    raise AssertionError('a test reached the GitHub comment post')
+
+
 def setUpModule():
     review_trust_fixture.start_module()
+    # #1705: verdict-post receipts go to a module temp directory, and no test
+    # here may reach GitHub; tests that post inject their own list and post.
+    posts = tempfile.TemporaryDirectory()
+    _MODULE_POSTS.append(posts)
+    post_dir = Path(posts.name).resolve() / 'posts'
+    for name, value in (
+            ('_verdict_post_dir', lambda _store: review_dispatch._private_post_dir(post_dir)),
+            ('_list_issue_comments', _offline_comment_list),
+            ('_create_issue_comment', _offline_comment_post)):
+        patcher = patch.object(review_dispatch, name, value)
+        patcher.start()
+        _MODULE_PATCHES.append(patcher)
 
 
 def tearDownModule():
+    while _MODULE_PATCHES:
+        _MODULE_PATCHES.pop().stop()
+    while _MODULE_POSTS:
+        _MODULE_POSTS.pop().cleanup()
     review_trust_fixture.stop_module()
 
 
