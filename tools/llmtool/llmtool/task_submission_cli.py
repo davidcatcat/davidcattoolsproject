@@ -3496,7 +3496,8 @@ def _agy_developer_profile(route_config, *, owner_override=None, repository=None
         raise error
     model = _developer_role_value(role, 'model', route_config)
     effort = _developer_role_value(role, 'effort', route_config)
-    _require_developer_model('agy-developer', 'agy', route_config, model, role)
+    # The allowlist check runs after the route's own profile validation, so a
+    # malformed model or effort keeps its AGY_ROLE_PROFILE_INVALID refusal.
     try:
         model, effort = AgyRoute(route_config).validate_profile(model, effort)
     except RouteError:
@@ -4670,10 +4671,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     if (type(route_config) is not dict or gateway_data_class is None or
             gateway_data_class not in route_config.get('allowed_data_classes', [])):
         raise LLMToolError('gw-agent data class is not allowed by its profile')
-    # #1502 WP-E: the role resolver checks the route-level model against
-    # allowed_models and supplies the effort; the gateway profile below still
-    # supplies and binds the served model.
-    _route_model, role_effort = _gw_agent_developer_profile(route_config)
+    # The gateway block below replaces route_config with an edited copy; the
+    # role check uses this original repo route config.
+    role_route_config = route_config
     try:
         company_provider, generation = _gw_agent_endpoint()
         model = company_provider.get('model')
@@ -4717,6 +4717,10 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             route_config['profile']['http_allow_hosts'] = [host]
     except Exception:
         raise LLMToolError('gateway profile is unavailable or invalid') from None
+    # #1502 WP-E: after the gateway validation, the role resolver checks the
+    # route-level model against allowed_models and supplies the effort; the
+    # gateway profile above still supplies and binds the served model.
+    _route_model, role_effort = _gw_agent_developer_profile(role_route_config)
     effort = role_effort
     prompt_packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],

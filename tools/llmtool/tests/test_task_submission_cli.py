@@ -2163,6 +2163,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
     def test_agy_developer_role_model_effort_validation_and_account_refusal(self):
         route_config = {'executable': 'agy',
                         'default_model': 'gemini-default',
+                        'allowed_models': ['gemini-default', 'gemini-role'],
                         'default_effort': 'medium'}
         with patch.object(submission_cli.role_config, 'resolve_role', return_value={
                 'model': None, 'effort': None, 'account': None}):
