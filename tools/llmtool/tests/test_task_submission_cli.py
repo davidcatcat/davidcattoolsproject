@@ -80,13 +80,17 @@ def codex_developer_config():
 
 
 import review_trust_fixture
+import worker_policy_fixture
 
 
 def setUpModule():
     review_trust_fixture.start_module()
+    # #1692: every class in this module reads the shared test policy.
+    worker_policy_fixture.start_module()
 
 
 def tearDownModule():
+    worker_policy_fixture.stop_module()
     review_trust_fixture.stop_module()
 
 
@@ -111,19 +115,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name).resolve() / 'home'
         self.home.mkdir(mode=0o700)
-        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
-        policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
-        policy['workers']['opencode-developer']['reason'] = 'test fixture allows isolated route checks'
-        policy['workers']['company-gw']['dispatch'] = 'ALLOWED'
-        policy['workers']['company-gw']['reason'] = 'test fixture allows isolated route checks'
-        # #1502 WP-C: the real policy pauses codex-developer; these route tests keep it.
-        policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
-        policy['workers']['codex-developer']['reason'] = 'test fixture allows isolated route checks'
-        self.policy_path = Path(self.temp.name).resolve() / 'worker-dispatch.json'
-        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
-        policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
-        policy_patch.start()
-        self.addCleanup(policy_patch.stop)
+        # #1692: the shared all-ALLOWED test policy, never the live file.
+        self.policy_path = worker_policy_fixture.install(self, self.temp.name)
         self.args = Namespace(provider='selected', request=['Implement', 'a', 'health-check'])
         self.executor_root = Path(self.temp.name).resolve() / 'executor'
         self.executor_root.mkdir(mode=0o700)
@@ -1142,9 +1135,6 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(d6_collision.exception.task_store_error_code,
                              'TASK_D6_ALREADY_BOUND')
 
-        policy['workers']['codex-reviewer']['dispatch'] = 'ALLOWED'
-        policy['workers']['codex-reviewer']['reason'] = 'test fixture allows isolated route checks'
-        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
         denied_stdout = io.StringIO()
         submission_cli.run_task_remote_test(Namespace(
             task_id=task['task_id'], executor_task=d6_task_id,
@@ -4086,14 +4076,8 @@ class CodexChildLivenessTests(unittest.TestCase):
         task['developer'] = developer
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        # #1502 WP-C: the real policy pauses codex-developer; keep an ALLOWED fixture.
-        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
-        policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
-        policy_path = Path(tmp.name).resolve() / 'worker-dispatch.json'
-        policy_path.write_text(json.dumps(policy), encoding='utf-8')
-        policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', policy_path)
-        policy_patch.start()
-        self.addCleanup(policy_patch.stop)
+        # #1692: the shared all-ALLOWED test policy, never the live file.
+        worker_policy_fixture.install(self, tmp.name)
         store = TaskStore(Path(tmp.name).resolve() / 'tasks')
         store.create(task)
         with patch.object(submission_cli.worker_dispatch,

@@ -78,6 +78,7 @@ def remote_test_receipt(task, pm_session=None, **overrides):
 
 
 import review_trust_fixture
+import worker_policy_fixture
 
 
 def setUpModule():
@@ -94,14 +95,8 @@ class TaskStoreTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve() / 'tasks'
         self.store = TaskStore(self.root)
-        # #1502 WP-C: the real policy pauses codex-developer; these store tests keep it.
-        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
-        policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
-        policy_path = Path(self.temp.name).resolve() / 'worker-dispatch.json'
-        policy_path.write_text(json.dumps(policy), encoding='utf-8')
-        patcher = patch.object(worker_dispatch, '_POLICY_PATH', policy_path)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # #1692: the shared all-ALLOWED test policy, never the live file.
+        worker_policy_fixture.install(self, self.temp.name)
 
     def test_merge_attempt_unknown_can_be_reclaimed_for_same_pr_and_head(self):
         task = self._codex_dispatch_task()
@@ -1011,18 +1006,6 @@ class TaskStoreTests(unittest.TestCase):
                 task['task_id'], pm_session_id=task['pm_session_id'],
                 executor_task_id='executor-1', head_sha='a' * 40)
 
-    def _allow_codex_dispatch(self):
-        policy_path = Path(worker_dispatch._POLICY_PATH)
-        policy = json.loads(policy_path.read_text(encoding='utf-8'))
-        policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
-        policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
-        policy['workers']['company-gw']['dispatch'] = 'ALLOWED'
-        temporary_policy = Path(self.temp.name) / 'worker-dispatch.json'
-        temporary_policy.write_text(json.dumps(policy), encoding='utf-8')
-        patcher = patch.object(worker_dispatch, '_POLICY_PATH', temporary_policy)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def _allow_agy_assignment(self, task_id, owner_assignment_ref):
         policy_path = Path(worker_dispatch._POLICY_PATH)
         policy = json.loads(policy_path.read_text(encoding='utf-8'))
@@ -1089,30 +1072,10 @@ class TaskStoreTests(unittest.TestCase):
                 self.assertEqual(saved['developer'].get('execution'),
                                  developer.get('execution'))
 
-    def _allow_agy_by_fixture_policy(self):
-        """Self-contained v1 policy fixture with AGY ALLOWED; never the live file."""
-        evidence = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
-        workers = {
-            key: {'dispatch': 'PAUSED', 'decided_by': 'Owner', 'decided_at': '2026-11-08',
-                  'reason': 'test fixture', 'evidence': evidence}
-            for key in worker_dispatch.WORKERS
-        }
-        workers['company-gw-agent'] = {
-            'dispatch': 'PAUSED', 'decided_by': 'PM', 'decided_at': '2026-11-08',
-            'reason': 'test fixture', 'evidence': worker_dispatch._GW_AGENT_PAUSED_REF}
-        workers['agy']['dispatch'] = 'ALLOWED'
-        temporary_policy = Path(self.temp.name) / 'worker-dispatch-agy-allowed.json'
-        temporary_policy.write_text(
-            json.dumps({'schema_version': 1, 'workers': workers}), encoding='utf-8')
-        patcher = patch.object(worker_dispatch, '_POLICY_PATH', temporary_policy)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def test_agy_owner_assignment_ref_may_be_none_but_must_be_valid(self):
         # #785 M18: AGY dispatch is decided by the live gate, so the store
         # accepts an AGY record whose ref is None. A supplied ref must still
         # be valid and the key stays required for AGY. Claude: next test.
-        self._allow_agy_by_fixture_policy()
         artifact = ('diff --git a/src.py b/src.py\n'
                     '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
         task = self._codex_dispatch_task()
@@ -1170,8 +1133,7 @@ class TaskStoreTests(unittest.TestCase):
     def test_agy_exit_nonzero_keeps_a_screened_exit_diagnostic(self):
         # #1606: an AGY_EXIT_NONZERO block may keep a bounded, screened
         # exit diagnostic; other codes and unscreened text stay refused.
-        self._allow_agy_by_fixture_policy()
-        task = self._codex_dispatch_task()
+        task =self._codex_dispatch_task()
         self.store.create(task)
         reason = 'exit_code=3 stderr_tail=fatal: model run failed'
         developer = self._developer_assignment(provider='agy', max_tokens=None)
@@ -1200,7 +1162,6 @@ class TaskStoreTests(unittest.TestCase):
                     task_store_module._validate(malformed)
 
     def test_non_claude_d6_binding_refuses_second_live_task_for_each_route(self):
-        self._allow_codex_dispatch()
         store = TaskStore(Path(self.temp.name).resolve())
         routes = ('codex', 'company-gw', 'opencode', 'agy', 'gw-agent')
 
@@ -1266,7 +1227,6 @@ class TaskStoreTests(unittest.TestCase):
                                  'DEVELOPER_PENDING')
 
     def test_non_claude_d6_binding_allows_finished_and_abandoned_tasks(self):
-        self._allow_codex_dispatch()
         store = TaskStore(Path(self.temp.name).resolve())
         executor_task_id = 'executor-repair-1'
         finished = self._codex_dispatch_task()
@@ -1495,7 +1455,6 @@ class TaskStoreTests(unittest.TestCase):
                 self.assertEqual(caught.exception.task_store_error_code, code)
 
     def test_d6_binding_with_many_finished_tasks_does_not_hold_lock_over_full_scan(self):
-        self._allow_codex_dispatch()
         store = TaskStore(Path(self.temp.name).resolve())
         finished_ids = set()
         artifact = ('diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n'
@@ -2244,7 +2203,6 @@ class TaskStoreTests(unittest.TestCase):
                                       developer={**valid, 'reported': reported})
 
     def test_codex_cli_dispatch_and_response_allow_unknown_token_cap(self):
-        self._allow_codex_dispatch()
         task = self._codex_dispatch_task()
         self.store.create(task)
         pending = self._developer_assignment(provider='codex', max_tokens=None)
@@ -2282,7 +2240,6 @@ class TaskStoreTests(unittest.TestCase):
         self.assertRegex(refusal['policy_sha256'], r'^[0-9a-f]{64}$')
 
     def test_codex_child_identity_is_written_only_by_trusted_launch_path(self):
-        self._allow_codex_dispatch()
         task = self._codex_dispatch_task()
         self.store.create(task)
         pending = self._developer_assignment(provider='codex', max_tokens=None)
@@ -2306,7 +2263,6 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(saved['developer']['execution'], launch['execution'])
 
     def test_opencode_child_identity_is_profile_checked_and_trusted(self):
-        self._allow_codex_dispatch()
         task = self._codex_dispatch_task()
         task['pm_assignment']['route'] = 'opencode'
         store = TaskStore(Path(self.temp.name).resolve() / 'opencode-tasks')
@@ -2368,7 +2324,6 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(saved['developer']['usage']['total_tokens'], 21)
 
     def test_native_session_binding_rejected_for_opencode_and_invalid_values(self):
-        self._allow_codex_dispatch()  # also allows OpenCode; the live policy may pause it
         artifact = ('diff --git a/src.py b/src.py\n'
                     '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
         opencode_execution = {
@@ -2614,7 +2569,6 @@ class TaskStoreTests(unittest.TestCase):
             self.store.update(task['task_id'], developer=outcome)
 
     def test_codex_delegate_screens_blocked_reason_before_persisting(self):
-        self._allow_codex_dispatch()
         root = str(Path.cwd())
         snapshot = SimpleNamespace(root=root, common_dir='/registered/common',
                                    branch='task-branch', head='a' * 40)
@@ -2686,7 +2640,6 @@ class TaskStoreTests(unittest.TestCase):
                 self.assertEqual(saved.get('blocked_reason'), expected_reason)
 
     def test_codex_blocked_result_persistence_rejection_drops_blocked_reason(self):
-        self._allow_codex_dispatch()
         root = str(Path.cwd())
         snapshot = SimpleNamespace(root=root, common_dir='/registered/common',
                                    branch='task-branch', head='a' * 40)
@@ -2751,7 +2704,6 @@ class TaskStoreTests(unittest.TestCase):
         self.assertNotIn('blocked_reason', saved)
 
     def test_unknown_token_cap_is_rejected_for_other_routes_and_codex_cannot_claim_one(self):
-        self._allow_codex_dispatch()
         task = self._codex_dispatch_task()
         self.store.create(task)
         pending = self._developer_assignment(provider='company-gw', max_tokens=None)

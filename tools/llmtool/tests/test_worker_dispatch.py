@@ -142,6 +142,27 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertIsNone(evidence_ref.fullmatch(
             'https://github.com/example-org/repo.name/issues/289'))
 
+    _EXPECTED_BY_SWITCH = {
+        'ALLOWED': (True, 'OWNER_POLICY_ALLOWED'),
+        'PAUSED': (False, 'OWNER_PAUSED'),
+        'OWNER_ASSIGNMENT_ONLY': (False, 'OWNER_ASSIGNMENT_REQUIRED'),
+    }
+
+    def _evaluate_real_policy_copy(self, keys):
+        """Evaluate the real policy bytes through the real reader, parser and gate.
+
+        #1692: a byte-identical copy keeps these real-file tests independent of
+        any installed data-file copy; the layout check has its own test below.
+        """
+        raw = Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes()
+        copy = self.root / 'real-worker-dispatch-copy.json'
+        copy.write_bytes(raw)
+        with patch.object(worker_dispatch, '_POLICY_PATH', copy):
+            decisions = {key: worker_dispatch.evaluate(key) for key in keys}
+        for decision in decisions.values():
+            self.assertEqual(decision.policy_sha256, hashlib.sha256(raw).hexdigest())
+        return decisions
+
     def test_real_owner_policy_parses_and_validates(self):
         raw = Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes()
         policy = worker_dispatch._parse_policy(raw)
@@ -149,18 +170,56 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertNotIn('owner_assignments', policy['workers']['agy'])
         self.assertNotIn('owner_assignments', policy['workers']['company-gw-agent'])
         gw_agent_entry = policy['workers']['company-gw-agent']
-        self.assertEqual(gw_agent_entry['dispatch'], 'ALLOWED')
-        self.assertEqual(gw_agent_entry['decided_by'], 'Owner')
-        self.assertEqual(gw_agent_entry['decided_at'], '2026-11-10')
-        self.assertEqual(gw_agent_entry['evidence'], worker_dispatch._GW_AGENT_OWNER_REF)
-        with patch.object(worker_dispatch, '_POLICY_PATH',
-                          Path(worker_dispatch._DEFAULT_POLICY_PATH)):
-            decision = worker_dispatch.evaluate('agy')
-            gw_agent_decision = worker_dispatch.evaluate('company-gw-agent')
-        self.assertTrue(decision.allowed)
-        self.assertEqual(decision.reason_code, 'OWNER_POLICY_ALLOWED')
-        self.assertTrue(gw_agent_decision.allowed)
-        self.assertEqual(gw_agent_decision.reason_code, 'OWNER_POLICY_ALLOWED')
+        # The parser accepts only the exact Owner-allowed or PM-paused gw-agent row.
+        if gw_agent_entry['dispatch'] == 'ALLOWED':
+            self.assertEqual(gw_agent_entry['decided_by'], 'Owner')
+            self.assertEqual(gw_agent_entry['evidence'], worker_dispatch._GW_AGENT_OWNER_REF)
+        else:
+            self.assertEqual(gw_agent_entry['dispatch'], 'PAUSED')
+            self.assertEqual(gw_agent_entry['decided_by'], 'PM')
+            self.assertEqual(gw_agent_entry['evidence'], worker_dispatch._GW_AGENT_PAUSED_REF)
+        # #1692: every real row is read and decided by its own live switch; no
+        # live ALLOWED/PAUSED state is pinned here.
+        decisions = self._evaluate_real_policy_copy(sorted(policy['workers']))
+        for key, decision in decisions.items():
+            with self.subTest(worker=key):
+                self.assertEqual((decision.allowed, decision.reason_code),
+                                 self._EXPECTED_BY_SWITCH[policy['workers'][key]['dispatch']])
+
+    def test_shared_test_policy_fixture_is_schema_valid_and_all_allowed(self):
+        """#1692: the shared fixture goes through the real parser and gate."""
+        import worker_policy_fixture
+
+        keys = worker_dispatch.WORKERS | worker_dispatch.DEBUG_WORKERS
+        path = worker_policy_fixture.write_policy(self.root / 'shared-fixture.json')
+        self.assertIsInstance(worker_dispatch._parse_policy(path.read_bytes()), dict)
+        with patch.object(worker_dispatch, '_POLICY_PATH', path):
+            for key in sorted(keys):
+                with self.subTest(worker=key):
+                    decision = worker_dispatch.evaluate(key)
+                    self.assertTrue(decision.allowed)
+                    self.assertEqual(decision.reason_code, 'OWNER_POLICY_ALLOWED')
+        # A refusal test sets the restrictive switch explicitly.
+        for key in sorted(keys):
+            for state, (allowed, reason) in self._EXPECTED_BY_SWITCH.items():
+                if state == 'ALLOWED' or (key == 'company-gw-agent' and
+                                          state == 'OWNER_ASSIGNMENT_ONLY'):
+                    continue
+                with self.subTest(worker=key, state=state):
+                    worker_policy_fixture.write_policy(path, {key: state})
+                    with patch.object(worker_dispatch, '_POLICY_PATH', path):
+                        decision = worker_dispatch.evaluate(key)
+                        other = worker_dispatch.evaluate(
+                            'codex-reviewer' if key != 'codex-reviewer' else 'agy')
+                    self.assertEqual((decision.allowed, decision.reason_code),
+                                     (allowed, reason))
+                    self.assertTrue(other.allowed)
+        with self.assertRaises(ValueError):
+            worker_policy_fixture.policy_document({'company-gw-agent': 'OWNER_ASSIGNMENT_ONLY'})
+        with self.assertRaises(ValueError):
+            worker_policy_fixture.policy_document({'unknown-worker': 'PAUSED'})
+        with self.assertRaises(ValueError):
+            worker_policy_fixture.policy_document({'agy': 'paused'})
 
     def test_company_gw_agent_accepts_only_pending_pm_pause_or_exact_owner_allow(self):
         self.assertIn('company-gw-agent', worker_dispatch.WORKERS)
@@ -300,17 +359,17 @@ class WorkerDispatchTests(unittest.TestCase):
             worker_dispatch.evaluate('agy', None, task_id).reason_code,
             'OWNER_ASSIGNMENT_REQUIRED')
 
-    def test_real_claude_developer_policy_allows_pm_selected_work(self):
-        with patch.object(worker_dispatch, '_POLICY_PATH',
-                          Path(worker_dispatch._DEFAULT_POLICY_PATH)):
-            decision = worker_dispatch.evaluate('claude-developer')
-        self.assertTrue(decision.allowed)
-        self.assertEqual(decision.reason_code, 'OWNER_POLICY_ALLOWED')
+    def test_real_claude_developer_policy_needs_no_owner_assignment(self):
+        # #1502 WP-C: PM-selected Claude Developer work needs no Owner
+        # assignment row. #1692: the live ALLOWED/PAUSED switch is not pinned.
         real_policy = worker_dispatch._parse_policy(
             Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes())
         worker = real_policy['workers']['claude-developer']
-        self.assertEqual(worker['dispatch'], 'ALLOWED')
+        self.assertIn(worker['dispatch'], ('ALLOWED', 'PAUSED'))
         self.assertNotIn('owner_assignments', worker)
+        decision = self._evaluate_real_policy_copy(['claude-developer'])['claude-developer']
+        self.assertEqual((decision.allowed, decision.reason_code),
+                         self._EXPECTED_BY_SWITCH[worker['dispatch']])
 
     def test_owner_assignment_policy_rejects_duplicate_or_malformed_bindings(self):
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-9999999999'

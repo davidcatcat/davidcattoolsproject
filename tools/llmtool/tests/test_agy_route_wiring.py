@@ -19,6 +19,7 @@ from llmtool.task_store import TaskStore
 
 
 import review_trust_fixture
+import worker_policy_fixture
 
 
 _SKILL_MANIFEST = {'commit': 'd' * 40, 'role': 'developer', 'gate': 'develop',
@@ -29,9 +30,13 @@ _SKILL_FILES = [('AGENTS.md', 'AGENTS repository rules.\n'),
 
 def setUpModule():
     review_trust_fixture.start_module()
+    # #1692: tests that reach the real gate read the shared test policy;
+    # refusal tests below still write their own restrictive policy.
+    worker_policy_fixture.start_module()
 
 
 def tearDownModule():
+    worker_policy_fixture.stop_module()
     review_trust_fixture.stop_module()
 
 

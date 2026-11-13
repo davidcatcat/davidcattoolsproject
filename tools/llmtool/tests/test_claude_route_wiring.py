@@ -21,6 +21,7 @@ from llmtool.task_store import TaskStore
 
 
 import review_trust_fixture
+import worker_policy_fixture
 
 
 _SKILL_MANIFEST = {'commit': 'd' * 40, 'role': 'developer', 'gate': 'develop',
@@ -31,9 +32,12 @@ _SKILL_FILES = [('CLAUDE.md', 'Claude repository rules.\n'),
 
 def setUpModule():
     review_trust_fixture.start_module()
+    # #1692: tests that reach the real gate read the shared test policy.
+    worker_policy_fixture.start_module()
 
 
 def tearDownModule():
+    worker_policy_fixture.stop_module()
     review_trust_fixture.stop_module()
 
 

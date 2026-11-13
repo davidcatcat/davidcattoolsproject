@@ -34,6 +34,7 @@ from llmtool.task_submission_cli import (
     run_task_show)
 from review_trust_fixture import start_module as _start_trust_fixture
 from review_trust_fixture import stop_module as _stop_trust_fixture
+import worker_policy_fixture
 
 # Reuse the registered-D6 completion fixture without re-collecting its tests.
 import test_task_completion as completion_fixture
@@ -41,9 +42,13 @@ import test_task_completion as completion_fixture
 
 def setUpModule():
     _start_trust_fixture()
+    # #1692: the reused completion setUp copies _POLICY_PATH; point it at the
+    # shared test policy so no test here reads the live file.
+    worker_policy_fixture.start_module()
 
 
 def tearDownModule():
+    worker_policy_fixture.stop_module()
     _stop_trust_fixture()
 
 _RESPONSE = json.dumps({'schema_version': 1, 'summary': 'Active PM plan.',
@@ -77,14 +82,8 @@ class ActivePMInboxTests(unittest.TestCase):
                                       'HOME': str(self.base / 'home')})
         env.start()
         self.addCleanup(env.stop)
-        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
-        policy['workers']['company-gw']['dispatch'] = 'ALLOWED'
-        policy['workers']['company-gw']['reason'] = 'test fixture allows isolated route checks'
-        self.policy_path = (self.base / 'worker-dispatch.json').resolve()
-        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
-        policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
-        policy_patch.start()
-        self.addCleanup(policy_patch.stop)
+        # #1692: the shared all-ALLOWED test policy, never the live file.
+        self.policy_path = worker_policy_fixture.install(self, self.base)
         self.session = self._claude_session()
         self.store = TaskStore(self.base / 'tasks')
 
