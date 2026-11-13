@@ -75,6 +75,14 @@ def _private(info, directory=False):
         raise ReaderError('STORE_UNSAFE')
 
 
+def _ancestor(info):
+    # #137 R26: owned by root or this user; not group/other-writable unless sticky.
+    mode = stat.S_IMODE(info.st_mode)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
+            or (mode & 0o022 and not mode & stat.S_ISVTX)):
+        raise ReaderError('STORE_UNSAFE')
+
+
 def _identity(info):
     return info.st_dev, info.st_ino
 
@@ -130,6 +138,7 @@ def _home(path):
     try:
         fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         fds.append(fd)
+        _ancestor(os.fstat(fd))
         for index, name in enumerate(path.parts[1:], 1):
             try:
                 child = _directory(fd, name, private=index == len(path.parts) - 1)
@@ -138,6 +147,8 @@ def _home(path):
             links.append((fd, name, child, index == len(path.parts) - 1))
             fds.append(child)
             fd = child
+            if index < len(path.parts) - 1:
+                _ancestor(os.fstat(fd))
         yield fd
         for parent, name, child, private in links:
             current = os.stat(name, dir_fd=parent, follow_symlinks=False)

@@ -111,6 +111,34 @@ class StoreTests(unittest.TestCase):
             self.assertIsNone(store.start())
         self.assertEqual(store.warning.code, d.ErrorCode.DIAGNOSTICS_STORE_UNSAFE)
 
+    def test_shared_writable_ancestor_rejected_sticky_ancestor_allowed(self):
+        # #137 R26: nothing is created below a shared-writable, non-sticky ancestor.
+        shared = self.base / 'shared'
+        shared.mkdir(mode=0o700)
+        self.addCleanup(shared.chmod, 0o700)
+        self.home = shared / 'state'
+        for mode in (0o777, 0o770, 0o722):
+            with self.subTest(mode=oct(mode)):
+                shared.chmod(mode)
+                store = self.store()
+                self.assertIsNone(store.start())
+                self.assertEqual(store.warning.code, d.ErrorCode.DIAGNOSTICS_STORE_UNSAFE)
+                self.assertEqual(list(shared.iterdir()), [])
+        shared.chmod(0o1777)
+        self.start()
+        self.assertTrue((self.home / 'runs').is_dir())
+
+    def test_ancestor_owner_must_be_root_or_current_user(self):
+        from types import SimpleNamespace as N
+        from llmtool import diagnostics_reader as r, diagnostics_store as s
+        for check, error in ((s._ancestor, s._Unsafe), (r._ancestor, r.ReaderError)):
+            check(N(st_mode=stat.S_IFDIR | 0o755, st_uid=0))
+            check(N(st_mode=stat.S_IFDIR | 0o1777, st_uid=os.geteuid()))
+            for info in (N(st_mode=stat.S_IFDIR | 0o755, st_uid=os.geteuid() + 1),
+                         N(st_mode=stat.S_IFREG | 0o755, st_uid=0)):
+                with self.subTest(info=info), self.assertRaises(error):
+                    check(info)
+
     def test_symlink_components_runs_and_lock_rejected_without_target_mutation(self):
         target = self.base / 'target'
         target.mkdir(mode=0o700)

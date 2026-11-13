@@ -402,6 +402,20 @@ class ReaderTests(unittest.TestCase):
                 path.write_bytes(raw)
                 path.chmod(0o600)
 
+    def test_shared_writable_ancestor_rejected_without_reading(self):
+        # #137 R26: refused below a shared-writable, non-sticky ancestor.
+        self.completed()
+        self.addCleanup(self.base.chmod, stat.S_IMODE(self.base.stat().st_mode))
+        for mode in (0o777, 0o770):
+            with self.subTest(mode=oct(mode)):
+                self.base.chmod(mode)
+                before = snapshot(self.home)
+                self.assert_trace_failure()
+                self.assertEqual(snapshot(self.home), before)
+        self.base.chmod(0o1777)
+        status, out, err = self.invoke(['trace', RUN_ID])
+        self.assertEqual((status, err), (0, ''))
+
     def test_symlink_at_every_boundary_never_reads_target(self):
         directory = self.completed()
         victim = self.base / 'victim'
