@@ -416,6 +416,160 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.task_store_error_code,
                          'TASK_LINEAGE_TRANSITION_INVALID')
 
+    _DISPUTE_REF = 'https://github.com/davidcatcat/davidcattoolsproject/pull/42#issuecomment-1001'
+    _RULING_REF = 'https://github.com/davidcatcat/davidcattoolsproject/pull/42#issuecomment-1002'
+
+    @classmethod
+    def _dispute(cls, **changes):
+        entry = {'finding_id': 'F1', 'pr': 42, 'head_sha': 'a' * 40, 'review_version': 1,
+                 'severity': 'High', 'state': 'OPEN', 'evidence_ref': cls._DISPUTE_REF,
+                 'opened_at': '2026-11-13T00:00:00Z'}
+        entry.update(changes)
+        return entry
+
+    @classmethod
+    def _ruling(cls, **changes):
+        ruling = {'outcome': 'WITHDRAWN', 'head_sha': 'a' * 40, 'reviewer': 'codex-reviewer',
+                  'reviewer_task': 'arbiter-d6', 'reviewer_session': 'arbiter-session-2',
+                  'evidence_ref': cls._RULING_REF, 'ruled_at': '2026-11-13T01:00:00Z'}
+        ruling.update(changes)
+        return ruling
+
+    def _assert_store_code(self, code, task_id, **changes):
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.update(task_id, **changes)
+        self.assertEqual(caught.exception.task_store_error_code, code)
+
+    def test_review_disputes_are_optional_and_strictly_validated(self):
+        # #1502 WP-D D13: an old Task has no disputes; each entry is strictly shaped.
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        task_id = task['task_id']
+        self.assertNotIn('review_disputes', self.store.get(task_id))
+        dot_repo = 'https://github.com/example/../pull/42#issuecomment-1001'
+        not_github = 'https://example.com/example/other/pull/42#issuecomment-1001'
+        for bad in (dict(self._dispute(), extra=1), self._dispute(finding_id='X1'),
+                    self._dispute(finding_id='F0'), self._dispute(pr=0),
+                    self._dispute(head_sha='x'), self._dispute(review_version=0),
+                    self._dispute(severity='Severe'), self._dispute(evidence_ref=dot_repo),
+                    self._dispute(evidence_ref=not_github),
+                    self._dispute(evidence_ref=self._DISPUTE_REF.split('#')[0]),
+                    self._dispute(evidence_ref=self._DISPUTE_REF.replace('https', 'http')),
+                    self._dispute(opened_at='2026-11-13'),
+                    self._dispute(state='DEFERRED'), self._dispute(state='DEFERRED',
+                                                                   severity='Medium')):
+            with self.subTest(bad=bad):
+                self._assert_store_code('REVIEW_DISPUTE_INVALID', task_id,
+                                        review_disputes=[bad])
+        for bad in (self._dispute(state='RULED', ruling=self._ruling()),
+                    self._dispute(state='WITHDRAWN'), self._dispute(state='CLOSED'),
+                    dict(self._dispute(), ruling=self._ruling())):
+            with self.subTest(appended=bad):
+                self._assert_store_code('REVIEW_DISPUTE_TRANSITION_INVALID', task_id,
+                                        review_disputes=[bad])
+        self.assertNotIn('review_disputes', self.store.get(task_id))
+        deferred = self._dispute(finding_id='F2', severity='Advisory', state='DEFERRED')
+        self.store.update(task_id, review_disputes=[deferred])
+        self.assertEqual(self.store.get(task_id)['review_disputes'], [deferred])
+
+    def test_review_disputes_append_and_rule_once(self):
+        # #1502 WP-D D13: append-only; OPEN moves once; one ruling per (pr, finding_id).
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        task_id = task['task_id']
+        opened = self._dispute()
+        self.store.update(task_id, review_disputes=[opened])
+        self._assert_store_code('REVIEW_DISPUTE_INVALID', task_id,
+                                review_disputes=[opened, self._dispute()])
+        for bad_ruling in (self._ruling(head_sha='b' * 40), self._ruling(outcome='DENIED'),
+                           self._ruling(reviewer='pm'), self._ruling(reviewer_session=''),
+                           self._ruling(evidence_ref=self._DISPUTE_REF),
+                           self._ruling(ruled_at='2026-11-12T00:00:00Z'),
+                           dict(self._ruling(), extra=1)):
+            with self.subTest(ruling=bad_ruling):
+                self._assert_store_code(
+                    'REVIEW_DISPUTE_INVALID', task_id,
+                    review_disputes=[dict(opened, state='RULED', ruling=bad_ruling)])
+        self._assert_store_code(
+            'REVIEW_DISPUTE_TRANSITION_INVALID', task_id,
+            review_disputes=[dict(opened, state='RULED', ruling=self._ruling(),
+                                  severity='Low')])
+        ruled = dict(opened, state='RULED', ruling=self._ruling())
+        self.store.update(task_id, review_disputes=[ruled])
+        self.assertEqual(self.store.get(task_id)['review_disputes'], [ruled])
+        for bad in ([], [dict(ruled, ruling=self._ruling(outcome='UPHELD'))],
+                    [dict(ruled, state='WITHDRAWN')], [opened]):
+            with self.subTest(rewrite=bad):
+                self._assert_store_code('REVIEW_DISPUTE_TRANSITION_INVALID', task_id,
+                                        review_disputes=bad)
+        # A second dispute of a ruled finding, even on a new HEAD, can never be ruled.
+        self._assert_store_code('REVIEW_DISPUTE_INVALID', task_id,
+                                review_disputes=[ruled, self._dispute(head_sha='b' * 40)])
+        other = self._dispute(finding_id='F3', severity='Medium')
+        self.store.update(task_id, review_disputes=[ruled, other])
+        self.store.update(task_id, review_disputes=[ruled, dict(other, state='WITHDRAWN')])
+        self.assertEqual(self.store.get(task_id)['review_disputes'][1]['state'], 'WITHDRAWN')
+
+    def test_review_dispute_evidence_of_one_task_stays_in_one_repository(self):
+        # The store holds no trusted repository: the dispute commands check the
+        # caller's trusted slug. The store checks the URL shape and that all
+        # dispute evidence of a Task names one repository.
+        other_ref = 'https://github.com/example/other/pull/42#issuecomment-1001'
+        other_ruling = 'https://github.com/example/other/pull/42#issuecomment-1002'
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        task_id = task['task_id']
+        opened = self._dispute()
+        self.store.update(task_id, review_disputes=[opened])
+        self._assert_store_code(
+            'REVIEW_DISPUTE_INVALID', task_id,
+            review_disputes=[dict(opened, state='RULED',
+                                  ruling=self._ruling(evidence_ref=other_ruling))])
+        self._assert_store_code(
+            'REVIEW_DISPUTE_INVALID', task_id,
+            review_disputes=[opened, self._dispute(finding_id='F3', severity='Medium',
+                                                   evidence_ref=other_ref)])
+        self.assertEqual(self.store.get(task_id)['review_disputes'], [opened])
+        # A Task whose disputes all name another repository is shaped correctly.
+        other_task = self._codex_dispatch_task()
+        self.store.create(other_task)
+        other = self._dispute(evidence_ref=other_ref)
+        self.store.update(other_task['task_id'], review_disputes=[other])
+        ruled = dict(other, state='RULED', ruling=self._ruling(evidence_ref=other_ruling))
+        self.store.update(other_task['task_id'], review_disputes=[ruled])
+        self.assertEqual(self.store.get(other_task['task_id'])['review_disputes'], [ruled])
+
+    def test_review_dispute_ref_parts_need_the_callers_repository(self):
+        repository = 'davidcatcat/davidcattoolsproject'
+        self.assertEqual(task_store_module.review_dispute_ref_parts(self._DISPUTE_REF,
+                                                                    repository), (42, 1001))
+        self.assertTrue(task_store_module.valid_review_dispute_ref(self._RULING_REF, repository))
+        for other in ('example/other', 'davidcatcat/other', None, '', 'no-slash',
+                      'a/b/c', 'example/..', repository + '/'):
+            with self.subTest(repository=other):
+                self.assertIsNone(task_store_module.review_dispute_ref_parts(
+                    self._DISPUTE_REF, other))
+                self.assertFalse(task_store_module.valid_review_dispute_ref(
+                    self._DISPUTE_REF, other))
+
+    def test_create_refuses_a_record_that_carries_review_disputes(self):
+        task = self._codex_dispatch_task()
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.create(dict(task, review_disputes=[self._dispute()]))
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'REVIEW_DISPUTE_TRANSITION_INVALID')
+
+    def test_review_dispute_text_is_screened(self):
+        # The real screen decides; it is injected so no credential-shaped text is needed.
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        flagged = self._DISPUTE_REF
+        real_screen = task_store_module._emitted_sensitive
+        with patch.object(task_store_module, '_emitted_sensitive',
+                          side_effect=lambda value: value == flagged or real_screen(value)):
+            self._assert_store_code('REVIEW_DISPUTE_INVALID', task['task_id'],
+                                    review_disputes=[self._dispute()])
+        self.assertNotIn('review_disputes', self.store.get(task['task_id']))
     WAITING_RESUME = 'quota resets at 00:00 UTC'
 
     def _waiting(self, **overrides):
