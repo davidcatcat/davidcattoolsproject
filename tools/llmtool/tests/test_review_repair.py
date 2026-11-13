@@ -187,7 +187,7 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(captured[0].cwd, '/registered/d6')
 
     def test_gw_agent_repair_delegate_args(self):
-        self.assertEqual(review_repair._worker_key('gw-agent'), 'company-gw-agent')
+        self.assertEqual(review_repair._worker_key('gw-agent'), 'gw-agent')
         for data_class in ('SYNTHETIC', 'PUBLIC_REPO'):
             with self.subTest(data_class=data_class):
                 captured = []
@@ -884,7 +884,7 @@ class ReviewRepairTests(unittest.TestCase):
             with self.assertRaises(LLMToolError) as caught:
                 self.dispatch(decision=decision)
         self.assertEqual(caught.exception.review_repair_code, 'PAUSED')
-        self.assertEqual(evaluated, [('company-gw-agent', None, TASK)])
+        self.assertEqual(evaluated, [('gw-agent', None, TASK)])
         self.assertNotIn('review_repair_claims', self.store.get(TASK))
         self.assertEqual(self.calls, [])
 

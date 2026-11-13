@@ -11,6 +11,8 @@ stats = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(stats)
 
 
+# The default is the retired gw Agent id (#1502 WP-E): these fixtures are Task
+# records written before the rename, which gw_root_stats.py reads as they are.
 def task(task_id, request, at='2026-11-12T00:00:00Z', worker='company-gw-agent', **extra):
     audit = [{'action': 'DISPATCH', 'decision': 'ALLOWED', 'worker_key': worker, 'at': at}]
     return dict({'task_id': task_id, 'request': request, 'dispatch_audit': audit}, **extra)

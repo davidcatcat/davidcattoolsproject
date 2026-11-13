@@ -20,7 +20,7 @@ from unittest.mock import patch
 from llmtool import worker_dispatch
 
 EVIDENCE = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
-# company-gw-agent accepts only these two exact rows (worker_dispatch._parse_policy).
+# gw-agent accepts only these two exact rows (worker_dispatch._parse_policy).
 GW_AGENT_OWNER_EVIDENCE = ('https://github.com/davidcatcat/davidcattoolsproject/'
                            'issues/120#issuecomment-6760670167')
 GW_AGENT_PM_PAUSED_EVIDENCE = 'https://github.com/davidcatcat/davidcattoolsproject/issues/120'
@@ -34,13 +34,13 @@ def set_dispatch(value, worker, dispatch, *, owner_assignments=None):
         raise ValueError('unknown dispatch state')
     row = {'dispatch': dispatch, 'decided_by': 'Owner', 'decided_at': DECIDED_AT,
            'reason': REASON, 'evidence': EVIDENCE}
-    if worker == 'company-gw-agent':
+    if worker == 'gw-agent':
         if dispatch == 'ALLOWED':
             row['evidence'] = GW_AGENT_OWNER_EVIDENCE
         elif dispatch == 'PAUSED':
             row.update(decided_by='PM', evidence=GW_AGENT_PM_PAUSED_EVIDENCE)
         else:
-            raise ValueError('company-gw-agent has no schema-valid OWNER_ASSIGNMENT_ONLY row')
+            raise ValueError('gw-agent has no schema-valid OWNER_ASSIGNMENT_ONLY row')
     if owner_assignments is not None:
         row['owner_assignments'] = [dict(item) for item in owner_assignments]
     value['workers'][worker] = row

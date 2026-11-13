@@ -23,8 +23,24 @@ MAX_REPAIR_PER_ASSIGNMENT = 1
 MAX_RECOVERY_PER_ASSIGNMENT = 1
 WORKERS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
-    'company-gw', 'company-gw-agent', 'claude-reviewer', 'codex-reviewer',
+    'company-gw', 'gw-agent', 'claude-reviewer', 'codex-reviewer',
 ))
+# #1502 WP-E (E9): the gw Agent route's worker id is gw-agent. Its old id is a
+# retired alias. Stored Task records, ledgers, receipts and monitor inputs that
+# carry it still read as gw-agent through stored_worker_id(), the one place
+# that maps it; a new evaluation naming it is refused WORKER_ID_RETIRED_ALIAS.
+RETIRED_WORKER_ALIASES = {'company-gw-agent': 'gw-agent'}
+
+
+def stored_worker_id(value):
+    """Return the current worker id for one id read from a stored record.
+
+    Read path only: never use it to accept a retired id on a new dispatch.
+    Anything that is not a retired alias, including a non-string, is returned
+    unchanged so the caller's own validation still applies."""
+    if type(value) is str:
+        return RETIRED_WORKER_ALIASES.get(value, value)
+    return value
 # #1502 WP-B: the AI Debug routes have their own keys. A policy file written
 # before them (exactly WORKERS) still parses; a debug key it lacks is refused
 # with WORKER_POLICY_ENTRY_MISSING. A file with only one debug key is invalid.
@@ -150,7 +166,7 @@ def _parse_policy(raw, patterns=None):
                      'owner_assignments'},
                 ) or
                 (worker.get('decided_by') != 'Owner' and not (
-                    key == 'company-gw-agent' and worker.get('decided_by') == 'PM' and
+                    key == 'gw-agent' and worker.get('decided_by') == 'PM' and
                     worker.get('dispatch') == 'PAUSED' and
                     worker.get('evidence') ==
                     'https://github.com/davidcatcat/davidcattoolsproject/issues/120')) or
@@ -160,7 +176,7 @@ def _parse_policy(raw, patterns=None):
                 not worker['reason'] or len(worker['reason']) > 512 or
                 type(worker.get('evidence')) is not str or
                 (policy_evidence_ref.fullmatch(worker['evidence']) is None and not (
-                    key == 'company-gw-agent' and (
+                    key == 'gw-agent' and (
                         (worker.get('dispatch') == 'PAUSED' and
                          worker.get('decided_by') == 'PM' and
                          worker['evidence'] == _GW_AGENT_PAUSED_REF) or
@@ -178,7 +194,7 @@ def _parse_policy(raw, patterns=None):
                 len({(assignment['task_id'], assignment['owner_assignment_ref'])
                      for assignment in assignments}) != len(assignments)):
             raise ValueError('invalid worker policy')
-        if key == 'company-gw-agent':
+        if key == 'gw-agent':
             is_pm_paused = (worker.get('dispatch') == 'PAUSED' and
                             worker.get('decided_by') == 'PM' and
                             worker.get('evidence') == _GW_AGENT_PAUSED_REF)
@@ -234,6 +250,10 @@ def evaluate(worker_key, owner_assignment_ref=None, task_id=None):
     if type(worker_key) is not str or re.fullmatch(r'[a-z][a-z0-9-]{0,63}', worker_key) is None:
         key = 'unknown'
         return PolicyDecision(key, False, 'WORKER_KEY_INVALID', None)
+    if worker_key in RETIRED_WORKER_ALIASES:
+        # A retired id is never a new dispatch key, whatever the policy says;
+        # RETIRED_WORKER_ALIASES names its replacement (#1502 WP-E).
+        return PolicyDecision(worker_key, False, 'WORKER_ID_RETIRED_ALIAS', None)
     digest = None
     path = _POLICY_PATH
     try:
@@ -332,7 +352,7 @@ def _matches_assignment_binding(entry, binding):
 def _latest_transition_authorization(record, worker_key, action, binding):
     audit = record.get('dispatch_audit', []) if type(record) is dict else []
     for entry in reversed(audit):
-        if (type(entry) is dict and entry.get('worker_key') == worker_key and
+        if (type(entry) is dict and stored_worker_id(entry.get('worker_key')) == worker_key and
                 entry.get('action') == action and entry.get('decision') == 'ALLOWED' and
                 'authorization_id' not in entry and _matches_assignment_binding(entry, binding)):
             return entry.get('attempt_id')
@@ -349,17 +369,18 @@ def _adapter_authorization_block_reason(record, entry):
         return 'WORKER_DISPATCH_BINDING_MISMATCH'
     if entry.get('decision') != 'ALLOWED':
         return None
-    state_code = _adapter_state_code(record, entry['worker_key'])
+    worker_key = stored_worker_id(entry['worker_key'])
+    state_code = _adapter_state_code(record, worker_key)
     if state_code is not None:
         return state_code
     transition_id = _latest_transition_authorization(
-        record, entry['worker_key'], entry['action'], binding)
+        record, worker_key, entry['action'], binding)
     if transition_id != entry.get('authorization_id'):
         return 'WORKER_DISPATCH_TRANSITION_NOT_FOUND'
     audit = record.get('dispatch_audit', [])
     if any(type(previous) is dict and previous.get('decision') == 'ALLOWED' and
            previous.get('authorization_id') == transition_id and
-           previous.get('worker_key') == entry['worker_key'] and
+           stored_worker_id(previous.get('worker_key')) == worker_key and
            previous.get('action') == entry['action'] and
            _matches_assignment_binding(previous, binding)
            for previous in audit):
@@ -393,7 +414,8 @@ def authorize_dispatch(store, task_id, worker_key, action='DISPATCH'):
         state_code = 'WORKER_DISPATCH_TRANSITION_NOT_FOUND'
     elif state_code is None and any(type(entry) is dict and entry.get('decision') == 'ALLOWED' and
              entry.get('authorization_id') == authorization_id and
-             entry.get('worker_key') == worker_key and entry.get('action') == action and
+             stored_worker_id(entry.get('worker_key')) == worker_key and
+             entry.get('action') == action and
              _matches_assignment_binding(entry, binding)
              for entry in current.get('dispatch_audit', [])):
         state_code = 'WORKER_DISPATCH_AUTHORIZATION_CONSUMED'
@@ -634,7 +656,7 @@ def worker_key_for(provider_profile):
     if provider_profile == 'company-gw':
         return 'company-gw'
     if provider_profile == 'gw-agent':
-        return 'company-gw-agent'
+        return 'gw-agent'
     if provider_profile == 'opencode':
         return 'opencode-developer'
     if provider_profile == 'claude-reviewer':
@@ -706,7 +728,7 @@ def authorize_task_store_change(current, changes, expected=None):
                                           decision.policy_sha256)
             prior_attempts = sum(
                 1 for item in audit
-                if type(item) is dict and item.get('worker_key') == worker_key and
+                if type(item) is dict and stored_worker_id(item.get('worker_key')) == worker_key and
                 item.get('action') == action)
             if prior_attempts >= MAX_TIMEOUT_CONTINUATIONS_PER_TASK:
                 decision = PolicyDecision(worker_key, False,
@@ -739,9 +761,12 @@ def authorize_task_store_change(current, changes, expected=None):
                      'RECOVERY': MAX_RECOVERY_PER_ASSIGNMENT}.get(action)
             if limit is not None:
                 assignment_id = old_developer.get('assignment_id')
+                # An entry recorded under the retired id counts too (#1502 WP-E):
+                # the rename never resets a repair or recovery limit.
                 prior_attempts = sum(
                     1 for item in audit
-                    if type(item) is dict and item.get('worker_key') == worker_key and
+                    if type(item) is dict and
+                    stored_worker_id(item.get('worker_key')) == worker_key and
                     item.get('action') == action and
                     item.get('assignment_id') in (None, assignment_id))
                 if prior_attempts >= limit:

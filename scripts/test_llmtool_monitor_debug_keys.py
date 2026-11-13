@@ -21,7 +21,7 @@ GW_AGENT = {"dispatch": "PAUSED", "decided_by": "PM", "decided_at": "2026-11-03"
 def raw(keys):
     workers = {key: {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-11-12",
                      "reason": "test", "evidence": EVIDENCE} for key in sorted(keys)}
-    workers["company-gw-agent"] = dict(GW_AGENT)
+    workers["gw-agent"] = dict(GW_AGENT)
     return json.dumps({"schema_version": 1, "workers": workers}).encode("utf-8")
 
 

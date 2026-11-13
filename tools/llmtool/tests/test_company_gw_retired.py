@@ -69,7 +69,8 @@ class CompanyGwRetiredTests(unittest.TestCase):
             'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6773709231',
         )
 
-        gw_agent = policy['workers']['company-gw-agent']
+        gw_agent = policy['workers']['gw-agent']
+        self.assertNotIn('company-gw-agent', policy['workers'])   # #1502 WP-E
         self.assertEqual(gw_agent['dispatch'], 'ALLOWED')
         self.assertEqual(gw_agent['decided_by'], 'Owner')
 
@@ -80,7 +81,7 @@ class CompanyGwRetiredTests(unittest.TestCase):
         # Use the evaluate call shape from existing worker_dispatch tests.
         with patch.object(worker_dispatch, '_POLICY_PATH', policy_path):
             decision = worker_dispatch.evaluate('company-gw')
-            gw_agent_decision = worker_dispatch.evaluate('company-gw-agent')
+            gw_agent_decision = worker_dispatch.evaluate('gw-agent')
             claude_decision = worker_dispatch.evaluate('claude-developer')
 
         self.assertFalse(decision.allowed)

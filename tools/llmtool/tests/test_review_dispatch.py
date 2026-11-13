@@ -104,6 +104,8 @@ class ReviewDispatchTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_reviewer_family_and_policy_matrix(self):
+        # company-gw-agent: a stored record with the retired id reads as
+        # gw-agent (#1502 WP-E).
         families = ('codex', 'claude', 'opencode', 'agy', 'company-gw',
                     'company-gw-agent', 'gw-agent')
         for family in families:

@@ -146,8 +146,8 @@ class WorkerDispatchTests(unittest.TestCase):
         policy = worker_dispatch._parse_policy(raw)
         self.assertIsInstance(policy, dict)
         self.assertNotIn('owner_assignments', policy['workers']['agy'])
-        self.assertNotIn('owner_assignments', policy['workers']['company-gw-agent'])
-        gw_agent_entry = policy['workers']['company-gw-agent']
+        self.assertNotIn('owner_assignments', policy['workers']['gw-agent'])
+        gw_agent_entry = policy['workers']['gw-agent']
         self.assertEqual(gw_agent_entry['dispatch'], 'ALLOWED')
         self.assertEqual(gw_agent_entry['decided_by'], 'Owner')
         self.assertEqual(gw_agent_entry['decided_at'], '2026-11-10')
@@ -155,23 +155,24 @@ class WorkerDispatchTests(unittest.TestCase):
         with patch.object(worker_dispatch, '_POLICY_PATH',
                           Path(worker_dispatch._DEFAULT_POLICY_PATH)):
             decision = worker_dispatch.evaluate('agy')
-            gw_agent_decision = worker_dispatch.evaluate('company-gw-agent')
+            gw_agent_decision = worker_dispatch.evaluate('gw-agent')
         # #1692 PR 2: the Owner paused AGY on 2026-11-13.
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
         self.assertTrue(gw_agent_decision.allowed)
         self.assertEqual(gw_agent_decision.reason_code, 'OWNER_POLICY_ALLOWED')
 
-    def test_company_gw_agent_accepts_only_pending_pm_pause_or_exact_owner_allow(self):
-        self.assertIn('company-gw-agent', worker_dispatch.WORKERS)
-        self.assertEqual(worker_dispatch.worker_key_for('gw-agent'), 'company-gw-agent')
+    def test_gw_agent_accepts_only_pending_pm_pause_or_exact_owner_allow(self):
+        self.assertIn('gw-agent', worker_dispatch.WORKERS)
+        self.assertNotIn('company-gw-agent', worker_dispatch.WORKERS)   # #1502 WP-E
+        self.assertEqual(worker_dispatch.worker_key_for('gw-agent'), 'gw-agent')
         # A PM-paused row validates and evaluates to OWNER_PAUSED.
-        self._set_state('company-gw-agent', 'PAUSED')
-        decision = worker_dispatch.evaluate('company-gw-agent')
+        self._set_state('gw-agent', 'PAUSED')
+        decision = worker_dispatch.evaluate('gw-agent')
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
 
-        worker = self.policy['workers']['company-gw-agent']
+        worker = self.policy['workers']['gw-agent']
         owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
                      'issues/120#issuecomment-6760670167')
         old_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
@@ -181,16 +182,16 @@ class WorkerDispatchTests(unittest.TestCase):
         # The new row validates and evaluates to ALLOWED with no Owner assignment.
         worker.update(dispatch='ALLOWED', decided_by='Owner',
                       evidence=owner_ref)
-        self.policy['workers']['company-gw-agent'].pop('owner_assignments', None)
+        self.policy['workers']['gw-agent'].pop('owner_assignments', None)
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
-        new_row_decision = worker_dispatch.evaluate('company-gw-agent')
+        new_row_decision = worker_dispatch.evaluate('gw-agent')
         self.assertTrue(new_row_decision.allowed)
         self.assertEqual(new_row_decision.reason_code, 'OWNER_POLICY_ALLOWED')
 
         # A row with the old ref is refused.
         worker.update(dispatch='ALLOWED', decided_by='Owner', evidence=old_ref)
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
-        old_ref_decision = worker_dispatch.evaluate('company-gw-agent')
+        old_ref_decision = worker_dispatch.evaluate('gw-agent')
         self.assertFalse(old_ref_decision.allowed)
         self.assertEqual(old_ref_decision.reason_code, 'WORKER_POLICY_INVALID')
         with self.assertRaises(ValueError) as caught:
@@ -203,28 +204,28 @@ class WorkerDispatchTests(unittest.TestCase):
         # Other invalid variants fail closed.
         worker.update(decided_by='PM', evidence=owner_ref)
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
-        self.assertEqual(worker_dispatch.evaluate('company-gw-agent').reason_code,
+        self.assertEqual(worker_dispatch.evaluate('gw-agent').reason_code,
                          'WORKER_POLICY_INVALID')
 
         worker.update(decided_by='Owner', evidence=owner_ref + '0')
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
-        self.assertEqual(worker_dispatch.evaluate('company-gw-agent').reason_code,
+        self.assertEqual(worker_dispatch.evaluate('gw-agent').reason_code,
                          'WORKER_POLICY_INVALID')
 
         worker.update(dispatch='PAUSED', decided_by='Owner', evidence=owner_ref)
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
-        self.assertEqual(worker_dispatch.evaluate('company-gw-agent').reason_code,
+        self.assertEqual(worker_dispatch.evaluate('gw-agent').reason_code,
                          'WORKER_POLICY_INVALID')
 
         # A PM-paused row still validates.
         worker.update(dispatch='PAUSED', decided_by='PM',
                       evidence='https://github.com/davidcatcat/davidcattoolsproject/issues/120')
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
-        paused_decision = worker_dispatch.evaluate('company-gw-agent')
+        paused_decision = worker_dispatch.evaluate('gw-agent')
         self.assertFalse(paused_decision.allowed)
         self.assertEqual(paused_decision.reason_code, 'OWNER_PAUSED')
         parsed = worker_dispatch._parse_policy(json.dumps(self.policy).encode('utf-8'))
-        self.assertEqual(parsed['workers']['company-gw-agent']['dispatch'], 'PAUSED')
+        self.assertEqual(parsed['workers']['gw-agent']['dispatch'], 'PAUSED')
 
     def test_owner_policy_states_are_read_from_the_exact_schema(self):
         self._set_state('opencode-developer', 'PAUSED')
@@ -359,7 +360,7 @@ class WorkerDispatchTests(unittest.TestCase):
             {key: row['dispatch'] for key, row in policy['workers'].items()},
             {'codex-developer': 'PAUSED', 'claude-developer': 'ALLOWED',
              'opencode-developer': 'ALLOWED', 'agy': 'PAUSED',
-             'company-gw': 'PAUSED', 'company-gw-agent': 'ALLOWED',
+             'company-gw': 'PAUSED', 'gw-agent': 'ALLOWED',
              'claude-reviewer': 'ALLOWED', 'codex-reviewer': 'ALLOWED',
              'codex-debug': 'ALLOWED', 'claude-debug': 'ALLOWED'})
         with self._real_policy():

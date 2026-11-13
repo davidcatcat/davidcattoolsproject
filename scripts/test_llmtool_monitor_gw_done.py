@@ -48,7 +48,8 @@ class TestLlmtoolMonitorGwDone(unittest.TestCase):
         self.assertIn("已結束", row.detail)
         self.assertIn("輸入 10 · 輸出 5 · 合計 15 tokens", row.detail)
 
-    def test_finished_company_gw_agent_with_usage(self):
+    def test_finished_record_with_the_retired_gw_agent_id_with_usage(self):
+        # #1502 WP-E: a record written with the retired id still reads.
         task_id = "agent00123456789"
         dev = {
             "provider_profile": "company-gw-agent",
@@ -64,6 +65,33 @@ class TestLlmtoolMonitorGwDone(unittest.TestCase):
         self.assertEqual(row.state, mon.DONE)
         self.assertIn("已結束", row.detail)
         self.assertIn("輸入 10 · 輸出 5 · 合計 15 tokens", row.detail)
+
+    def test_current_gw_agent_record_keeps_its_own_rows(self):
+        # A current gw-agent run is shown by gw_rows; this view adds no row,
+        # as before the rename (#1502 WP-E keeps every existing behaviour).
+        dev = {"provider_profile": "gw-agent", "state": "DEVELOPER_COMPLETED",
+               "model": "gw-test-model"}
+        _write_record(self.root, "current123456789", dev)
+        self.assertEqual(mon.gw_task_rows(self.now, self.root), [])
+
+    def test_retired_gw_agent_id_reads_as_gw_agent_in_route_views(self):
+        # #1502 WP-E: the monitor's one alias map, the same as the gate's.
+        self.assertEqual(mon.RETIRED_WORKER_IDS, {"company-gw-agent": "gw-agent"})
+        self.assertEqual(mon.stored_worker_id("company-gw-agent"), "gw-agent")
+        for value in ("gw-agent", "company-gw", "agy", None, 7):
+            self.assertEqual(mon.stored_worker_id(value), value)
+        _write_record(self.root, "a1" * 16,
+                      {"provider_profile": "company-gw-agent", "state": "DEVELOPER_RESPONDED"})
+        _write_record(self.root, "b2" * 16, None,
+                      pm_assignment={"route": "company-gw-agent"}, state="PM_RESPONDED")
+        outcomes = mon.llmtool_route_outcomes(self.now, self.root)
+        self.assertEqual(set(outcomes), {"gw-agent"})
+        self.assertEqual(outcomes["gw-agent"][1:3], (1, 1))
+        lines = [line for _, line in mon.llmtool_task_records(self.now, self.root)]
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(any("派給 gw-agent" in line for line in lines), lines)
+        self.assertTrue(any("PM 建議 gw-agent" in line for line in lines), lines)
+        self.assertFalse(any("company-gw-agent" in line for line in lines), lines)
 
     def test_missing_usage(self):
         task_id = "nousage123456789"

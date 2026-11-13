@@ -6643,6 +6643,19 @@ def hosted_ci_rows(ci_runs: list | None, view: CiView | None, now: float) -> lis
 LLMTOOL_TASKS = os.path.expanduser("~/.local/state/llmtool/tasks")
 LLMTOOL_EVIDENCE_WINDOW = 7 * 86400
 PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}")
+# #1502 WP-E (E9): the gw Agent route's id is gw-agent. A record written with
+# the retired id still reads, as gw-agent; this is the monitor's one alias map,
+# the same as RETIRED_WORKER_ALIASES in the gate (worker_dispatch.py). The
+# dispatch file itself must use gw-agent, as the gate requires.
+RETIRED_WORKER_IDS = {"company-gw-agent": "gw-agent"}
+
+
+def stored_worker_id(value):
+    """The current id for a worker id or route read from a stored record;
+    anything else, including a non-string, unchanged."""
+    return RETIRED_WORKER_IDS.get(value, value) if type(value) is str else value
+
+
 DEVELOPER_RESULTS = {   # llmtool developer state / error code -> plain words
     "DEVELOPER_RESPONDED": "成功回應",
     "DEVELOPER_OUTPUT_INVALID_DIFF": "輸出被拒（diff 格式錯誤）",
@@ -6714,8 +6727,8 @@ def llmtool_route_outcomes(now: float, root: str | None = None) -> dict:
         developer = record.get("developer")
         if type(developer) is not dict:
             continue
-        profile, state, code = (developer.get("provider_profile"), developer.get("state"),
-                                developer.get("error_code"))
+        profile, state, code = (stored_worker_id(developer.get("provider_profile")),
+                                developer.get("state"), developer.get("error_code"))
         if type(profile) is not str or not PROFILE.fullmatch(profile):
             continue
         if type(state) is not str or not CODE_TEXT.fullmatch(state):
@@ -6734,8 +6747,10 @@ GW_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$")
 
 
 def gw_task_rows(now: float, root: str | None = None) -> list[OfficeRow]:
-    """Live and finished subagent rows for company-gw and company-gw-agent Tasks
-    changed within OFFICE_DONE_WINDOW. Only bounded developer route fields
+    """Live and finished subagent rows for company-gw Tasks and Tasks recorded
+    under the retired gw Agent id (RETIRED_WORKER_IDS), changed within
+    OFFICE_DONE_WINDOW. A current gw-agent run has its own rows (gw_rows), so
+    it gets none here. Only bounded developer route fields
     (profile, state, model, executor_task_id, usage, error_code) and task_id
     are read; request, response, diff, summary, acceptance and audit text are
     never touched."""
@@ -6756,7 +6771,7 @@ def gw_task_rows(now: float, root: str | None = None) -> list[OfficeRow]:
         if type(developer) is not dict:
             continue
         profile = developer.get("provider_profile")
-        if profile not in ("company-gw", "company-gw-agent"):
+        if profile != "company-gw" and profile not in RETIRED_WORKER_IDS:
             continue
         task_id = record.get("task_id")
         task_id = task_id if type(task_id) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task_id) else ""
@@ -6836,7 +6851,8 @@ def llmtool_task_records(now: float, root: str | None = None) -> list[tuple[floa
         name = name if type(name) is str and TASK_ID.fullmatch(name) else (
             str(record.get("task_id") or "")[:8] if re.fullmatch(r"[0-9a-f]{8,64}",
                                                              str(record.get("task_id") or "")) else "?")
-        route = next((value for value in (developer.get("provider_profile"), assignment.get("route"))
+        route = next((stored_worker_id(value) for value in (developer.get("provider_profile"),
+                                                            assignment.get("route"))
                       if type(value) is str and PROFILE.fullmatch(value)), "")
         dev_state, dev_code = code(developer.get("state")), code(developer.get("error_code"))
         if dev_state:
@@ -7655,7 +7671,7 @@ WORKER_ROSTER = (   # (display name, worker-dispatch.json key, sort order)
     ("opencode developer", "opencode-developer", 50),
     ("agy", "agy", 60),
     (HOME_GW, "company-gw", 70),
-    (HOME_GW_AGENT, "company-gw-agent", 75),
+    (HOME_GW_AGENT, "gw-agent", 75),
 )
 # #1502 WP-B: AI Debug switch rows; shown only when the dispatch file has the keys.
 DEBUG_ROSTER = (("codex debug", "codex-debug", 80), ("claude debug", "claude-debug", 85))
@@ -7671,7 +7687,7 @@ DISPATCH_VALUES = frozenset({"ALLOWED", "PAUSED", "OWNER_ASSIGNMENT_ONLY"})
 # Worker. The monitor applies the same rules so it never shows a switch the
 # gate would refuse; a test checks both agree.
 DISPATCH_WORKERS = frozenset({"codex-developer", "claude-developer", "opencode-developer", "agy",
-                              "company-gw", "company-gw-agent", "claude-reviewer",
+                              "company-gw", "gw-agent", "claude-reviewer",
                               "codex-reviewer"})
 # #1502 WP-B: the AI Debug keys are optional, as in the gate: a file without
 # them is valid, a file with only one of them is not.
@@ -7680,7 +7696,7 @@ DISPATCH_DEBUG_WORKERS = frozenset({"codex-debug", "claude-debug"})
 # does: PAUSED by the PM with the bare issue as evidence (WP3b), or ALLOWED by
 # the Owner with exactly the 2026-11-10 standing authorization comment (#120).
 # Anything else for this key fails closed. Every other key still needs Owner.
-DISPATCH_EXACT_ENTRIES = {"company-gw-agent": frozenset({
+DISPATCH_EXACT_ENTRIES = {"gw-agent": frozenset({
     ("PAUSED", "PM", "https://github.com/davidcatcat/davidcattoolsproject/issues/120"),
     ("ALLOWED", "Owner",
      "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167"),
