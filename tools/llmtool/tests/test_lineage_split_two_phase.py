@@ -601,5 +601,177 @@ class SplitVsStartedChildTests(TwoPhaseCase):
         self.refused('SPLIT_CHILD_STARTED', lambda: self.split(root, [child]))
 
 
+DISPUTE_REF = 'https://github.com/davidcatcat/davidcattoolsproject/pull/17#issuecomment-1001'
+RULING_REF = 'https://github.com/davidcatcat/davidcattoolsproject/pull/17#issuecomment-1002'
+
+
+def dispute(**changes):
+    entry = {'finding_id': 'F1', 'pr': 17, 'head_sha': 'a' * 40, 'review_version': 1,
+             'severity': 'High', 'state': 'OPEN', 'evidence_ref': DISPUTE_REF,
+             'opened_at': AT}
+    entry.update(changes)
+    return entry
+
+
+def ruling():
+    return {'outcome': 'WITHDRAWN', 'head_sha': 'a' * 40, 'reviewer': 'codex-reviewer',
+            'reviewer_task': 'arbiter-d6', 'reviewer_session': 'arbiter-session-2',
+            'evidence_ref': RULING_REF, 'ruled_at': '2026-11-13T01:00:00Z'}
+
+
+class SplitAndDisputeGatesTests(TwoPhaseCase):
+    """The merged TaskStore update path keeps both gates (merge of D10 and D13).
+
+    The D10 split checks (trusted-split guard, PENDING gate, lineage transition,
+    _check_split_write) and the D13 review_disputes transition check each hold
+    alone, and one update that carries both a lineage and a review_disputes
+    change passes only when both gates pass; otherwise it writes nothing.
+    """
+
+    def test_the_dispute_gate_holds_alone_on_split_tasks(self):
+        root, first, second = self.task(), self.task(), self.task()
+        self.split(root, [first, second])
+        for task_id in (root, first):
+            with self.subTest(task=task_id):
+                line = self.line(task_id)
+                opened = dispute()
+                ruled = dict(opened, state='RULED', ruling=ruling())
+                for bad in ([ruled], [dict(opened, state='WITHDRAWN')]):
+                    self.refused('REVIEW_DISPUTE_TRANSITION_INVALID',
+                                 lambda bad=bad: self.store.update(task_id,
+                                                                   review_disputes=bad))
+                self.store.update(task_id, review_disputes=[opened])
+                for bad in ([], [dict(opened, severity='Low')]):
+                    self.refused('REVIEW_DISPUTE_TRANSITION_INVALID',
+                                 lambda bad=bad: self.store.update(task_id,
+                                                                   review_disputes=bad))
+                self.store.update(task_id, review_disputes=[ruled])
+                self.refused('REVIEW_DISPUTE_TRANSITION_INVALID',
+                             lambda: self.store.update(task_id, review_disputes=[opened]))
+                self.assertEqual(self.store.get(task_id)['review_disputes'], [ruled])
+                self.assertEqual(self.line(task_id), line)  # the split lineage is untouched
+
+    def test_the_split_gate_holds_alone_beside_stored_disputes(self):
+        root = self.task()
+        opened = dispute()
+        self.store.update(root, review_disputes=[opened])
+        first = [self.task() for _ in range(self.child_max)]
+        self.split(root, first)
+        self.assertEqual(self.store.get(root)['review_disputes'], [opened])
+        # _check_split_write still counts committed children past child_max.
+        extra, op = self.task(), new_id()
+        task_store.reserve_split_child(self.store, extra, self.reservation(root, op),
+                                       expected_sha256=self.digests(extra)[extra])
+        before = self.digests(root)
+        self.refused('SPLIT_CHILD_LIMIT', lambda: task_store.commit_split_root(
+            self.store, root, self.root_commit(root, self.line(root), op, [extra]),
+            child_max=self.child_max, expected=None))
+        self.assert_unchanged(before)
+        self.assertEqual(self.store.get(root)['review_disputes'], [opened])
+        self.assertEqual(cli.lineage_split_recover(self.store),
+                         {'finalized': [], 'released': [extra]})
+
+    def test_a_trusted_split_write_never_carries_review_disputes(self):
+        root, child = self.task(), self.task()
+        before = self.digests(root, child)
+        op = new_id()
+        for task_id, action, line, child_max in (
+                (child, 'RESERVE', self.reservation(root, op), None),
+                (root, 'COMMIT', self.root_commit(root, None, op, [child]), self.child_max),
+                (child, 'FINALIZE', dict(self.reservation(root, op), state='OPEN'), None),
+                (child, 'RELEASE', None, None)):
+            with self.subTest(action=action):
+                self.refused('TASK_LINEAGE_TRANSITION_INVALID', lambda: self.store._update(
+                    task_id, expected=None,
+                    changes={'lineage': line, 'review_disputes': [dispute()]},
+                    trusted_split=action, split_child_max=child_max))
+        self.assert_unchanged(before)
+        self.assert_no_lineage(root, child)
+        for task_id in (root, child):
+            self.assertNotIn('review_disputes', self.store.get(task_id))
+
+    def test_a_pending_reservation_takes_no_dispute_write(self):
+        root, child = self.task(), self.task()
+        op = new_id()
+        task_store.reserve_split_child(self.store, child, self.reservation(root, op),
+                                       expected_sha256=self.digests(child)[child])
+        line = self.line(child)
+        before = self.digests(root, child)
+        for write in (
+                lambda: self.store.update(child, review_disputes=[dispute()]),
+                lambda: self.store.compare_and_update(
+                    child, expected={'record_sha256': before[child]},
+                    review_disputes=[dispute()]),
+                lambda: self.store.update(child, lineage=dict(line, state='OPEN'),
+                                          review_disputes=[dispute()])):
+            self.refused('TASK_LINEAGE_PENDING', write)
+        # Its own FINALIZE cannot carry a dispute either.
+        self.refused('TASK_LINEAGE_TRANSITION_INVALID', lambda: self.store._update(
+            child, expected={'lineage': line},
+            changes={'lineage': dict(line, state='OPEN'), 'review_disputes': [dispute()]},
+            trusted_split='FINALIZE'))
+        self.assert_unchanged(before)
+        self.assertNotIn('review_disputes', self.store.get(child))
+        # Once the uncommitted reservation is released, the Task takes a dispute.
+        task_store.release_split_child(self.store, child, op_id=op)
+        self.store.update(child, review_disputes=[dispute()])
+        self.assertEqual(self.store.get(child)['review_disputes'], [dispute()])
+        self.assert_no_lineage(child)
+
+    def test_one_combined_update_passes_both_gates_or_writes_nothing(self):
+        root, child = self.task(), self.task()
+        self.split(root, [child])
+        line = self.line(child)
+        before = self.digests(root, child)
+        opened = dispute()
+        stopped = dict(line, state='STOPPED', reason='Replaced.')
+        # Lineage valid, dispute invalid: the dispute gate refuses the whole write.
+        self.refused('REVIEW_DISPUTE_TRANSITION_INVALID', lambda: self.store.update(
+            child, lineage=stopped, review_disputes=[dict(opened, state='WITHDRAWN')]))
+        self.refused('REVIEW_DISPUTE_INVALID', lambda: self.store.update(
+            child, lineage=stopped, review_disputes=[dispute(finding_id='X1')]))
+        # Dispute valid, lineage invalid: the lineage gate refuses the whole write.
+        no_op = {key: value for key, value in line.items() if key != 'split_op'}
+        for bad in (dict(line, state='PENDING'), dict(line, parent=new_id()), no_op):
+            with self.subTest(lineage=bad):
+                self.refused('TASK_LINEAGE_TRANSITION_INVALID',
+                             lambda bad=bad: self.store.update(child, lineage=bad,
+                                                               review_disputes=[opened]))
+        self.assert_unchanged(before)
+        self.assertNotIn('review_disputes', self.store.get(child))
+        # Both valid: one write stores both.
+        self.store.update(child, lineage=stopped, review_disputes=[opened])
+        record = self.store.get(child)
+        self.assertEqual((record['lineage'], record['review_disputes']), (stopped, [opened]))
+        # An ended lineage stays ended, even beside a valid dispute move.
+        self.refused('TASK_LINEAGE_TRANSITION_INVALID', lambda: self.store.update(
+            child, lineage=dict(line, state='CLOSED'),
+            review_disputes=[dict(opened, state='WITHDRAWN')]))
+        record = self.store.get(child)
+        self.assertEqual((record['lineage'], record['review_disputes']), (stopped, [opened]))
+
+    def test_a_combined_update_cannot_split_or_claim_outside_the_split_gate(self):
+        root, child, extra = self.task(), self.task(), self.task()
+        self.split(root, [child])
+        line = self.line(root)
+        before = self.digests(root, extra)
+        op = new_id()
+        # Growing the ROOT's splits outside COMMIT, beside a valid dispute: refused.
+        self.refused('TASK_LINEAGE_TRANSITION_INVALID', lambda: self.store.update(
+            root, lineage=self.root_commit(root, line, op, [extra]),
+            review_disputes=[dispute()]))
+        # Reserving a child outside RESERVE, beside a valid dispute: refused.
+        self.refused('TASK_LINEAGE_TRANSITION_INVALID', lambda: self.store.update(
+            extra, lineage=self.reservation(root, op), review_disputes=[dispute()]))
+        # A merge claim on the PARKED ROOT, beside a valid dispute: refused.
+        self.refused('MERGE_ROOT_PARKED', lambda: self.store.update(
+            root, merge_attempt=CLAIM, review_disputes=[dispute()]))
+        self.assert_unchanged(before)
+        self.assert_no_lineage(extra)
+        self.assertEqual(self.line(root), line)
+        for task_id in (root, extra):
+            self.assertNotIn('review_disputes', self.store.get(task_id))
+
+
 if __name__ == '__main__':
     unittest.main()
