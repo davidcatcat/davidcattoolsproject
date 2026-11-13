@@ -429,6 +429,85 @@ class TaskDriveTests(unittest.TestCase):
         self.assertEqual(result['step'], 'MAX_STEPS')
         self.assertEqual(result['codes'], ['REQUIRED_CI_MISSING', 'REQUIRED_CI_PENDING'])
 
+    def test_ci_failed_with_dispatched_ci_repair_is_not_terminal(self):
+        # #1502 WP-D D11: a CI_FAILED step without codes has dispatched a CI
+        # repair; drive goes on and polls the repair like the EC2 path.
+        pauses = []
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'CI_FAILED', 'codes': [],
+             'result': {'attempt': 1}},
+            {'task_id': 't', 'step': 'WAITING_REPAIR', 'codes': ['WAITING_REPAIR']},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION',
+             'codes': ['WAITING_INTEGRATION']},
+        ])
+
+        result = task_drive.drive(task_id='t', max_steps=8, advance_call=advance,
+                                  quota_read=self.quota_ok, sleep=pauses.append)
+
+        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(pauses), 1)
+        self.assertNotIn('CI_FAILED', task_drive._TERMINAL)
+
+    def test_stopped_is_terminal(self):
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'STOPPED', 'codes': ['TEST_FAIL_LIMIT_REACHED']},
+            {'task_id': 't', 'step': 'MERGED', 'codes': []},
+        ])
+
+        result = task_drive.drive(task_id='t', merge=True, max_steps=8,
+                                  advance_call=advance, quota_read=self.quota_ok,
+                                  sleep=lambda _seconds: self.fail('STOPPED is not polled'))
+
+        self.assertEqual(result['step'], 'STOPPED')
+        self.assertEqual(result['codes'], ['TEST_FAIL_LIMIT_REACHED'])
+        self.assertEqual([call['merge'] for call in calls], [False])
+        self.assertIn('STOPPED', task_drive._TERMINAL)
+
+    def test_stopped_without_codes_still_stops(self):
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'STOPPED', 'codes': []},
+            {'task_id': 't', 'step': 'MERGED', 'codes': []},
+        ])
+
+        result = task_drive.drive(task_id='t', merge=True, max_steps=8,
+                                  advance_call=advance, quota_read=self.quota_ok,
+                                  sleep=lambda _seconds: self.fail('STOPPED is not polled'))
+
+        self.assertEqual(result['step'], 'STOPPED')
+        self.assertEqual(len(calls), 1)
+
+    def test_waiting_env_returns_at_once_without_polling(self):
+        for code in ('CI_ENV_CANCELLED', 'CI_ENV_TIMED_OUT', 'CI_ENV_STARTUP_FAILURE'):
+            with self.subTest(code=code):
+                advance, calls = self.adapter([
+                    {'task_id': 't', 'step': 'WAITING_ENV', 'codes': [code]},
+                    {'task_id': 't', 'step': 'MERGED', 'codes': []},
+                ])
+
+                result = task_drive.drive(
+                    task_id='t', merge=True, max_steps=8, advance_call=advance,
+                    quota_read=lambda: self.fail('WAITING_ENV is not a polled wait'),
+                    sleep=lambda _seconds: self.fail('WAITING_ENV is not polled'))
+
+                self.assertEqual(result['step'], 'WAITING_ENV')
+                self.assertEqual(result['codes'], [code])
+                self.assertEqual(result['steps'], 1)
+                self.assertEqual(len(calls), 1)
+
+    def test_waiting_env_without_codes_still_returns(self):
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'WAITING_ENV', 'codes': []},
+            {'task_id': 't', 'step': 'MERGED', 'codes': []},
+        ])
+
+        result = task_drive.drive(task_id='t', max_steps=8, advance_call=advance,
+                                  quota_read=self.quota_ok,
+                                  sleep=lambda _seconds: self.fail('WAITING_ENV is not polled'))
+
+        self.assertEqual(result['step'], 'WAITING_ENV')
+        self.assertEqual(len(calls), 1)
+
     def test_repeated_review_not_ready_stops_at_bounded_poll_attempts(self):
         pauses = []
         advance, calls = self.adapter([
