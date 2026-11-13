@@ -313,7 +313,8 @@ def record_remote_test_outcome_event(store, task_id, outcome, counter):
     payload = json.dumps(outcome, ensure_ascii=True, sort_keys=True,
                          separators=(',', ':')).encode('utf-8')
     payload_sha256 = hashlib.sha256(payload).hexdigest()
-    source_sha = outcome.get('sha') or hashlib.sha1(payload).hexdigest()
+    # #1230 A3 B4: SHA-1 only names the event here; it is not a security use.
+    source_sha = outcome.get('sha') or hashlib.sha1(payload, usedforsecurity=False).hexdigest()
     modules = outcome.get('modules', [])
     session_id = 'remote-test-' + (outcome.get('executor_task') or 'unknown')
     event_id = hashlib.sha256(_REMOTE_TEST_OUTCOME_EVENT_DOMAIN + b'\0' + b'\0'.join((
