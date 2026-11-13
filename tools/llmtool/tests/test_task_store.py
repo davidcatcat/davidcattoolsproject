@@ -363,9 +363,45 @@ class TaskStoreTests(unittest.TestCase):
                                  'TASK_LINEAGE_INVALID')
         replan = dict(line, kind='replan', replaces=['b' * 32])
         self.store.update(child_id, lineage=replan)
-        dropped = dict(line, state='DROPPED', reason='original function unaffected')
+        dropped = dict(replan, state='DROPPED', reason='original function unaffected')
         self.store.update(child_id, lineage=dropped)
         self.assertEqual(self.store.get(child_id)['lineage'], dropped)
+        # #1502 WP-D D9b: a plain update cannot reopen an end state or rewrite base_sha.
+        for bad in (dict(replan, state='OPEN'), dict(dropped, base_sha='c' * 40)):
+            with self.subTest(bypass=bad):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(child_id, lineage=bad)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_LINEAGE_TRANSITION_INVALID')
+        self.assertEqual(self.store.get(child_id)['lineage'], dropped)
+
+    def test_record_lineage_only_moves_forward(self):
+        # #1502 WP-D: kind, lineage and parent never change; an end state is final.
+        from llmtool.task_store import record_lineage
+        root = self._codex_dispatch_task()
+        self.store.create(root)
+        root_id = root['task_id']
+        base = {'lineage_id': root_id, 'kind': 'root', 'parent': None, 'replaces': [],
+                'state': 'OPEN', 'reason': None, 'base_sha': None,
+                'recorded_at': '2026-11-13T00:00:00Z'}
+        record_lineage(self.store, root_id, base)
+        record_lineage(self.store, root_id, dict(base, state='PARKED'))
+        record_lineage(self.store, root_id, dict(base, state='CLOSED'))
+        for bad in (dict(base, state='PARKED'), dict(base, state='CLOSED'),
+                    dict(base, kind='child')):
+            with self.assertRaises(LLMToolError) as caught:
+                record_lineage(self.store, root_id, bad)
+            self.assertEqual(caught.exception.task_store_error_code,
+                             'TASK_LINEAGE_TRANSITION_INVALID')
+        other = self._codex_dispatch_task()
+        self.store.create(other)
+        record_lineage(self.store, other['task_id'],
+                       dict(base, lineage_id=other['task_id'], state='PARKED'))
+        with self.assertRaises(LLMToolError) as caught:
+            record_lineage(self.store, other['task_id'],
+                           dict(base, lineage_id=other['task_id'], state='OPEN'))
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'TASK_LINEAGE_TRANSITION_INVALID')
 
     def test_retry_claim_transition_is_atomic_with_next_attempt(self):
         task = self._codex_dispatch_task()
