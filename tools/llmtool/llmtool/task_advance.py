@@ -498,12 +498,13 @@ _AI_LOOP_PREFIX = 'tools/ai-loop/'
 def _required_linux_checks(paths, old_paths=()):
     """The exact-head Linux workflow check names a PR with these paths needs.
 
-    CI diffs with --no-renames, so a rename's old path counts too: a file moved
-    into tools/ai-loop/ from elsewhere still makes a code PR.
+    CI diffs with --no-renames, so a rename's old path counts in every class
+    decision: a file moved from code or tools/ai-loop/ into docs/, or into
+    tools/ai-loop/ from elsewhere, keeps the stricter check set.
     """
-    if task_completion._docs_only_ci(paths):
-        return ['check (docs)']
     every = list(paths) + list(old_paths)
+    if paths and task_completion._docs_only_ci(every):
+        return ['check (docs)']
     if paths and all(path.startswith(_AI_LOOP_PREFIX) for path in every):
         return [_AI_LOOP_CHECK]
     return ['check (Linux 3.14)']

@@ -4897,6 +4897,42 @@ class PrFilesPaginationAndAiLoopTests(unittest.TestCase):
                 self.assertEqual(self.gates(entries, [self.AI_LOOP, self.LINUX]),
                                  (None, (None, None)))
 
+    def test_rename_source_counts_in_every_change_class(self):
+        # CI diffs with --no-renames, so both sides of a rename are classified.
+        docs, stricter = ['check (docs)'], ['check (Linux 3.14)']
+        cases = (
+            ('code to docs', 'docs/module.md', 'src/module.py', stricter),
+            ('ai-loop to docs', 'docs/loop.md', 'tools/ai-loop/loop.py', stricter),
+            ('code to ai-loop', 'tools/ai-loop/loop.py', 'src/loop.py', stricter),
+            ('docs to code', 'src/guide.py', 'docs/guide.md', stricter),
+            ('docs to docs', 'docs/new.md', 'docs/old.md', docs),
+            ('ai-loop to ai-loop', 'tools/ai-loop/b.py', 'tools/ai-loop/a.py',
+             [self.AI_LOOP]),
+        )
+        for label, new, old, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(task_advance._required_linux_checks([new], [old]), expected)
+                renamed = [{'filename': new, 'previous_filename': old}]
+                if expected == stricter:
+                    # Only the check the destination alone would pick: refused.
+                    alone = task_advance._required_linux_checks([new])
+                    if alone != stricter:
+                        self.assertEqual(
+                            self.gates(renamed, alone),
+                            ('MERGE_REQUIRED_CHECK_MISSING',
+                             ('WAITING_CI', 'LINUX_CI_PENDING')))
+                self.assertEqual(self.gates(renamed, expected), (None, (None, None)))
+
+    def test_llmtool_code_renamed_to_docs_needs_linux_and_mac(self):
+        renamed = [{'filename': 'docs/advance.md',
+                    'previous_filename': 'tools/llmtool/llmtool/advance_x.py'}]
+        self.assertEqual(self.gates(renamed, ['check (docs)']),
+                         ('MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')))
+        self.assertEqual(self.gates(renamed, ['check (docs)', self.LINUX])[0],
+                         'MERGE_REQUIRED_CHECK_MISSING')
+        self.assertEqual(self.gates(renamed, ['check (docs)', self.LINUX, self.MAC]),
+                         (None, (None, None)))
+
 
 class IntegrationDeltaRealGitTests(unittest.TestCase):
     """#1139: an integration head closes only when it adds clean merges of main."""
