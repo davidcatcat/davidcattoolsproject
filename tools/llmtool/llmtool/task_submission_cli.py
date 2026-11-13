@@ -1143,6 +1143,28 @@ def lineage_close_merged(store, task_id):
     return {'task_id': task_id, 'state': 'CLOSED', 'owner_notice': None, 'root': root}
 
 
+def _lineage_cli(store, stdout, call):
+    """Run one lineage action; a refusal prints only its code and exits 1."""
+    store = TaskStore() if store is None else store
+    try:
+        result = call(store)
+    except LLMToolError as exc:
+        code = (getattr(exc, 'task_store_error_code', None) or
+                getattr(exc, 'completion_code', None) or str(exc))
+        if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
+            code = 'LINEAGE_REFUSED'
+        _print({'code': code}, stdout=stdout)
+        return 1
+    _print(result, stdout=stdout)
+    return 0
+
+
+def run_task_drop(args, *, store=None, stdout=None):
+    return _lineage_cli(store, stdout, lambda store: lineage_end(
+        store, args.task_id, args.state, reason=args.reason,
+        pm_session=active_pm_inbox.pm_session_key(args.pm_session)))
+
+
 def run_task_remote_test(args, *, store=None, stdout=None):
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,

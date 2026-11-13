@@ -2675,6 +2675,31 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         self.assertEqual(saved[0][4], 17)
         self.assertEqual(saved[0][-2:], ('MERGED', 'd' * 40))
 
+    def test_merged_closure_replay_closes_a_merged_lineage_task_once(self):
+        # #1502 WP-D D10f2: advance on an llmtool-merged lineage Task retries its close.
+        line = {'lineage_id': '9' * 32, 'kind': 'child', 'state': 'OPEN'}
+        attempt = {'pr': 17, 'head_sha': HEAD, 'state': 'MERGED',
+                   'claimed_at': '2026-11-13T00:00:00.000000Z'}
+        closed = {'task_id': '1' * 32, 'state': 'CLOSED', 'owner_notice': None, 'root': None}
+        cases = (('merged member', {'lineage': line, 'merge_attempt': attempt}, 1),
+                 ('no lineage', {'merge_attempt': attempt}, 0),
+                 ('merge not recorded MERGED', {'lineage': line,
+                                                'merge_attempt': dict(attempt, state='UNKNOWN')}, 0),
+                 ('no merge attempt', {'lineage': line}, 0))
+        for name, changes, count in cases:
+            with self.subTest(name), patch.object(task_submission_cli, 'lineage_close_merged',
+                                                  return_value=closed) as close:
+                _, result, saved = self.advance(dict(self.ready(), **changes),
+                                                {17: self.MERGED_PR})
+            self.assertEqual(result['step'], 'CLOSED')
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(close.call_count, count)
+            if count:
+                self.assertEqual(result['lineage'], closed)
+                self.assertEqual(close.call_args.args[1], '1' * 32)
+            else:
+                self.assertNotIn('lineage', result)
+
     def test_train_merge_closes_with_invalid_registry(self):
         with patch.object(task_advance, '_integration_delta_verified',
                           return_value=True) as delta:
@@ -3699,6 +3724,62 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
                     store=store, record=record, number=17, head=HEAD, events=[],
                     pr={'number': 17, 'head': {'sha': HEAD}}, github_get=no_read,
                     gh_runner=no_read, root='/repo')['codes'], [code])
+
+    def lineage_merge(self, closure, **kwargs):
+        """Merge an OPEN lineage member; lineage_close_merged is replaced by closure."""
+        plain = base_record
+        line = {'lineage_id': '9' * 32, 'kind': 'child', 'parent': '9' * 32, 'replaces': [],
+                'state': 'OPEN', 'reason': None, 'base_sha': MAIN_SHA,
+                'recorded_at': '2026-11-13T00:00:00Z'}
+        with patch(f'{__name__}.base_record',
+                   lambda **changes: plain(lineage=dict(line), **changes)), \
+             patch.object(task_submission_cli, 'lineage_close_merged',
+                          side_effect=closure) as close:
+            return self.merge(**kwargs), close
+
+    def test_lineage_close_failure_keeps_the_merged_step(self):
+        # #1502 WP-D D10f2: the closure is reported and never changes the merge result.
+        failed = {'code': 'LINEAGE_CLOSE_FAILED'}
+        closed = {'task_id': '1' * 32, 'state': 'CLOSED', 'owner_notice': None, 'root': None}
+        cases = (('closed', lambda *_args: dict(closed), closed, []),
+                 ('failed', lambda *_args: dict(failed), failed, ['LINEAGE_CLOSE_FAILED']),
+                 ('raised', RuntimeError('store unavailable'), failed, ['LINEAGE_CLOSE_FAILED']),
+                 ('nothing to close', lambda *_args: None, None, []))
+        for name, closure, reported, codes in cases:
+            with self.subTest(name):
+                (result, _reads, calls, claims), close = self.lineage_merge(closure)
+                self.assertEqual((result['step'], result['next']), ('MERGED', 'MERGED'))
+                self.assertEqual(result['lineage'], reported)
+                self.assertEqual(result['codes'], codes)
+                self.assertEqual(result['result']['pr'], 17)
+                self.assertEqual(close.call_count, 1)
+                self.assertEqual(close.call_args.args[1], '1' * 32)
+                self.assertEqual(sum(call[1] == 'merge' for call in calls), 1)
+                self.assertEqual([claim['state'] for claim in claims], ['CLAIMED', 'MERGED'])
+
+    def test_no_lineage_or_no_merge_makes_no_lineage_call(self):
+        # #1502 WP-D D10f2: a Task without lineage is unchanged.
+        with patch.object(task_submission_cli, 'lineage_close_merged') as close:
+            result = self.merge()[0]
+        self.assertEqual((result['step'], result['codes']), ('MERGED', []))
+        self.assertNotIn('lineage', result)
+        close.assert_not_called()
+        # A lineage member whose advance stops before MERGED makes no call.
+        (waiting, _reads, _calls, claims), close = self.lineage_merge(
+            lambda *_args: None, check_runs=[self.LINUX], labels=())
+        self.assertEqual(waiting['step'], 'WAITING_CI')
+        self.assertNotIn('lineage', waiting)
+        self.assertEqual(claims, [])
+        close.assert_not_called()
+        # A CLOSED lineage with no MERGED attempt is refused as before, with no call.
+        record = base_record(lineage={'state': 'CLOSED'})
+        store = type('Store', (), {'get': lambda *_args: record})()
+        with patch.object(task_submission_cli, 'lineage_close_merged') as close:
+            ended = task_advance.advance(task_id='1' * 32, store=store, pr_number=17,
+                                         merge=True, github_get=lambda _path: {})
+        self.assertEqual((ended['step'], ended['codes']), ('MERGE_REFUSED', ['MERGE_LINEAGE_ENDED']))
+        self.assertNotIn('lineage', ended)
+        close.assert_not_called()
 
     def test_diverged_pr_with_clean_mergeable_state_merges(self):
         result, _reads, calls, claims = self.merge(
@@ -5113,6 +5194,160 @@ class TaskAdvanceReviewRefusalTests(unittest.TestCase):
             task_drive.drive(*drive_args, **drive_kwargs)
 
         self.assertEqual(len(dispatched), 1)
+
+
+class TaskAdvanceLineageCloseTests(unittest.TestCase):
+    """#1502 WP-D D10f2: a merge by task advance closes the lineage Task once, no notice."""
+
+    PM = 'pm-lineage-advance-test'
+    AT = '2026-11-13T00:00:00Z'
+    LINUX = {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+             'conclusion': 'success'}
+    MACOS = dict(LINUX, name='check (macOS 3.13)')
+
+    def setUp(self):
+        from llmtool.task_store import TaskStore
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.store = TaskStore(Path(temp.name).resolve() / 'tasks')
+        self.merges, self.closes = [], []
+
+    def task(self):
+        from llmtool.task_store import new_id
+        request = 'Bounded lineage advance test Task.'
+        task = task_submission_cli._record(
+            new_id(), new_id(), self.PM, 'pm-profile', request, state='PM_RESPONDED',
+            provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED',
+            request_sha=hashlib.sha256(request.encode()).hexdigest())
+        task.update(pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                                      'base_url': None}, response='PM reply.')
+        self.store.create(task)
+        return task['task_id']
+
+    def parked_root(self):
+        from llmtool.task_store import record_lineage
+        root = self.task()
+        record_lineage(self.store, root, {
+            'lineage_id': root, 'kind': 'root', 'parent': None, 'replaces': [],
+            'state': 'PARKED', 'reason': 'split', 'base_sha': None, 'recorded_at': self.AT})
+        return root
+
+    def member(self, root):
+        from llmtool.task_store import record_lineage
+        task_id = self.task()
+        record_lineage(self.store, task_id, {
+            'lineage_id': root, 'kind': 'child', 'parent': root, 'replaces': [],
+            'state': 'OPEN', 'reason': None, 'base_sha': MAIN_SHA, 'recorded_at': self.AT})
+        return task_id
+
+    def lineage(self, task_id):
+        return self.store.get(task_id)['lineage']
+
+    def advance(self, task_id):
+        """Run advance --merge with the PASS review evidence held in memory only."""
+        real_store, real_close = self.store, task_submission_cli.lineage_close_merged
+        reviewed = {
+            'completion': {'executor_task_id': 'executor-1', 'state': 'WAITING_REVIEW',
+                           'evidence': {'result': {'result_head': HEAD}}},
+            'review_dispatch_claim': [{'pr': 17, 'head_sha': HEAD, 'version': 1,
+                                       'state': 'COMPLETED',
+                                       'review_result': {'verdict': 'PASS'}}],
+            'completion_events': [{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                                   'outcome': 'REVIEW_PASS'}],
+            'review_repair_claims': []}
+
+        class ReviewedStore:
+            def get(self, wanted):
+                record = real_store.get(wanted)
+                return dict(record, **reviewed) if wanted == task_id else record
+
+            def __getattr__(self, name):
+                return getattr(real_store, name)
+
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
+              'mergeable': True, 'mergeable_state': 'clean', 'labels': [{'name': 'mac-ci'}]}
+
+        def github_get(path):
+            if path == 'branches/main':
+                return {'commit': {'sha': MAIN_SHA}}
+            if path.startswith('compare/'):
+                return {'status': 'ahead'}
+            if path.startswith('commits/'):
+                return {'total_count': 2, 'check_runs': [self.LINUX, self.MACOS]}
+            if path.endswith('/files?per_page=100'):
+                return [{'filename': 'tools/llmtool/llmtool/module.py'}]
+            if path == 'pulls/17':
+                return pr
+            return []
+
+        def gh_runner(_root, args):
+            if args[1] == 'merge':
+                self.merges.append(task_id)
+            return type('R', (), {'returncode': 0})()
+
+        def close(_store, wanted):
+            self.closes.append(wanted)
+            return real_close(real_store, wanted)
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(task_submission_cli, 'lineage_close_merged', side_effect=close):
+            return task_advance.advance(task_id=task_id, store=ReviewedStore(), pr_number=17,
+                                        merge=True, github_get=github_get,
+                                        merge_gh_runner=gh_runner)
+
+    def test_merged_member_closes_and_the_last_member_closes_its_parked_root(self):
+        root = self.parked_root()
+        first, second = self.member(root), self.member(root)
+        result = self.advance(first)
+        self.assertEqual((result['step'], result['codes']), ('MERGED', []))
+        self.assertEqual(result['lineage'], {'task_id': first, 'state': 'CLOSED',
+                                             'owner_notice': None, 'root': None})
+        self.assertEqual(self.lineage(first)['state'], 'CLOSED')
+        self.assertEqual(self.lineage(root)['state'], 'PARKED')
+        result = self.advance(second)
+        self.assertEqual((result['step'], result['codes']), ('MERGED', []))
+        self.assertEqual(result['lineage'], {
+            'task_id': second, 'state': 'CLOSED', 'owner_notice': None,
+            'root': {'task_id': root, 'state': 'CLOSED', 'owner_notice': None}})
+        self.assertEqual(self.lineage(second)['state'], 'CLOSED')
+        self.assertEqual(self.lineage(root)['state'], 'CLOSED')
+        self.assertEqual(self.store.get(second)['merge_attempt']['state'], 'MERGED')
+        self.assertEqual(self.merges, [first, second])
+        self.assertEqual(self.closes, [first, second])
+
+    def test_replay_retries_a_failed_roll_up_and_never_closes_twice(self):
+        root = self.parked_root()
+        only = self.member(root)
+
+        def failing(_store, _lineage_id):
+            raise LLMToolError('LINEAGE_ROLL_UP_FAILED')
+        with patch.object(task_submission_cli, '_lineage_roll_up', side_effect=failing):
+            first = self.advance(only)
+        self.assertEqual((first['step'], first['next']), ('MERGED', 'MERGED'))
+        self.assertEqual(first['lineage'], {'code': 'LINEAGE_CLOSE_FAILED'})
+        self.assertEqual(first['codes'], ['LINEAGE_CLOSE_FAILED'])
+        self.assertEqual(self.store.get(only)['merge_attempt']['state'], 'MERGED')
+        closed_line = self.lineage(only)
+        self.assertEqual(closed_line['state'], 'CLOSED')
+        self.assertEqual(self.lineage(root)['state'], 'PARKED')
+        # The replay merges nothing and retries only the roll-up.
+        replay = self.advance(only)
+        self.assertEqual(replay['codes'], ['MERGE_LINEAGE_ENDED'])
+        self.assertEqual(replay['lineage'], {
+            'task_id': only, 'state': 'CLOSED', 'owner_notice': None,
+            'root': {'task_id': root, 'state': 'CLOSED', 'owner_notice': None}})
+        self.assertEqual(self.lineage(root)['state'], 'CLOSED')
+        self.assertEqual(self.lineage(only), closed_line)
+        # Once rolled up, a further replay closes nothing.
+        again = self.advance(only)
+        self.assertEqual(again['codes'], ['MERGE_LINEAGE_ENDED'])
+        self.assertIsNone(again['lineage'])
+        self.assertEqual(self.lineage(only), closed_line)
+        self.assertEqual(self.lineage(root)['state'], 'CLOSED')
+        self.assertEqual(self.merges, [only])
+        self.assertEqual(self.closes, [only, only, only])
 
 
 if __name__ == '__main__':

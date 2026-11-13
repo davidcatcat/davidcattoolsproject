@@ -164,6 +164,8 @@ def add_ci_parser(sub):
     ci = sub.add_parser('ci', help='Deterministic CI helpers')
     actions = ci.add_subparsers(dest='action', required=True)
     actions.add_parser('full-mac-due', help='Dispatch the main FULL Mac suite only when due')
+    from .main_incident_cli import add_main_incident_parser  # #1706 R3
+    add_main_incident_parser(actions)
     return ci
 
 
