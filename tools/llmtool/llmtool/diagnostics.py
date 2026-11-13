@@ -17,7 +17,6 @@ from types import MappingProxyType
 from typing import Mapping, Optional
 
 from .terminal import contains_unsafe_controls
-from .test_output_excerpts import _CLOUD_KEY
 
 EVENT_MAX_BYTES = 16 * 1024
 DIAGNOSTIC_TEXT_MAX_BYTES = 2 * 1024
@@ -95,20 +94,32 @@ _CAUSE_CATEGORIES = frozenset((
 ))
 _PROVIDER_TYPES = frozenset(('openai', 'openai-compatible', 'claude-cli', 'codex-cli'))
 _RUN_STATUSES = frozenset(('success', 'error', 'interrupted', 'output_closed', 'incomplete'))
+# Boundaries are ASCII word characters only, matched case-sensitively (#1138).
+# \b treats CJK and other non-ASCII letters as word characters, so a letter
+# next to a credential would hide it. Under IGNORECASE a plain [A-Za-z0-9_]
+# also matches U+0130, U+0131, U+017F and U+212A, with the same effect.
+_ASCII_WORD = r'(?-i:[A-Za-z0-9_])'
+_START = r'(?<!' + _ASCII_WORD + r')'
+_END = r'(?!' + _ASCII_WORD + r')'
+# Diagnostics-local cloud key rule; test_output_excerpts._CLOUD_KEY is unchanged.
+_DIAGNOSTIC_CLOUD_KEY = _START + r'(?:AKIA|ASIA)[A-Z0-9]{16}' + _END
+_NON_ASCII = re.compile(r'[^\x00-\x7f]')
 # Recognizable credential values, not ordinary authorization/status vocabulary.
 _CREDENTIAL = re.compile(
     r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
-    + _CLOUD_KEY + r'|\bsk-[A-Za-z0-9_-]{12,}|'
-    r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
-    r'\bxox[abprs]-[A-Za-z0-9-]{20,}|'
-    r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b', re.IGNORECASE,
+    + _DIAGNOSTIC_CLOUD_KEY + r'|'
+    + _START + r'sk-[A-Za-z0-9_-]{12,}|'
+    + _START + r'(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
+    + _START + r'xox[abprs]-[A-Za-z0-9-]{20,}|'
+    + _START + r'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}' + _END,
+    re.IGNORECASE,
 )
 _AUTH_VALUE = re.compile(
-    r'\b(bearer|basic)\s+([A-Za-z0-9._~+/-]+={0,2})',
+    _START + r'(bearer|basic)\s+([A-Za-z0-9._~+/-]+={0,2})',
     re.IGNORECASE,
 )
 _CREDENTIAL_ASSIGNMENT = re.compile(
-    r'["\']?\b(?:api[_-]?key|password|token|secret|access[_-]?token|client[_-]?secret|'
+    r'["\']?' + _START + r'(?:api[_-]?key|password|token|secret|access[_-]?token|client[_-]?secret|'
     r'aws_secret_access_key)["\']?\s*[:=]\s*(<redacted>|\[redacted\]|"[^"\n]*"|\'[^\'\n]*\'|[^\s,;}\]]+)',
     re.IGNORECASE,
 )
@@ -135,8 +146,12 @@ def _contains_credential_value(value):
         scheme, token = match.groups()
         if len(token) >= 8 and token.lower() not in _CREDENTIAL_STATUSES:
             if scheme.lower() == 'basic':
+                # Under IGNORECASE the value class also takes U+0130, U+0131,
+                # U+017F and U+212A; decode only the ASCII part before them.
+                cut = _NON_ASCII.search(token)
+                encoded = token if cut is None else token[:cut.start()]
                 try:
-                    decoded = base64.b64decode(token, validate=True)
+                    decoded = base64.b64decode(encoded, validate=True)
                 except (ValueError, binascii.Error):
                     continue
                 if b':' not in decoded:
