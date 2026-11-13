@@ -1250,6 +1250,99 @@ def _live_pids(root):
     return sorted({pid for pid, cwd in cwds if cwd == str(root) or cwd.startswith(prefix)})
 
 
+LSOF_TIMEOUT_SECONDS = 60
+LSOF_PID_RE = re.compile(r"[0-9]+\Z")
+
+
+def _process_open_files():
+    """Every file lsof shows for every visible process, for the lease release.
+
+    Unlike the cwd-only retire read, this lists all descriptor kinds: cwd,
+    root directory, executable text (``txt``), memory-mapped files (``mem``,
+    ``mmap``) and numbered open descriptors. Returns ``(entries, None)`` with
+    ``(pid, fd, name)`` triples, or ``(None, code)`` when the answer is not
+    complete: ``LSOF_UNAVAILABLE``, ``LSOF_START_FAILED``, ``LSOF_TIMEOUT``,
+    ``LSOF_FAILED`` (non-zero exit) or ``LSOF_OUTPUT_INVALID``. An unknown
+    answer is never read as "no process".
+    """
+    lsof = _resolve_lsof()
+    if lsof is None:
+        return None, "LSOF_UNAVAILABLE"
+    try:
+        result = subprocess.run(
+            [lsof, "-n", "-P", "-w", "-Fpfn"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=LSOF_TIMEOUT_SECONDS, check=False)
+    except subprocess.TimeoutExpired:
+        return None, "LSOF_TIMEOUT"
+    except OSError:
+        return None, "LSOF_START_FAILED"
+    if result.returncode != 0:
+        return None, "LSOF_FAILED"
+    if type(result.stdout) is not bytes:
+        return None, "LSOF_OUTPUT_INVALID"
+    entries = []
+    pids = set()
+    pid = fd = None
+    for line in result.stdout.decode("utf-8", "surrogateescape").splitlines():
+        field, value = line[:1], line[1:]
+        if field == "p":
+            if not LSOF_PID_RE.fullmatch(value):
+                return None, "LSOF_OUTPUT_INVALID"
+            pid, fd = value, None
+            pids.add(value)
+        elif field == "f":
+            if pid is None:
+                return None, "LSOF_OUTPUT_INVALID"
+            fd = value
+        elif field == "n":
+            if pid is None or fd is None:
+                return None, "LSOF_OUTPUT_INVALID"
+            entries.append((pid, fd, value))
+        # Any other field letter, or a blank line, carries no path and is ignored.
+    # This process is always visible to itself, so a listing without it is
+    # partial or not lsof output at all.
+    if str(os.getpid()) not in pids:
+        return None, "LSOF_OUTPUT_INVALID"
+    return entries, None
+
+
+def _path_parts(path):
+    """Whole components of an absolute path (lexically normalised), or None."""
+    if type(path) is not str or not path.startswith("/"):
+        return None
+    return tuple(part for part in os.path.normpath(path).split("/") if part)
+
+
+def _worktree_holders(root):
+    """``(sorted PIDs, None)`` using the worktree, or ``(None, code)`` if unknown.
+
+    A process counts when any of its lsof entries (cwd, root directory,
+    executable, mapped file or open descriptor) names the worktree root or a
+    path inside it. The match is on whole components against both the given
+    root and its resolved form (lsof reports kernel paths, for example
+    ``/private/var`` for ``/var``), so a sibling such as ``<root>-foo`` never
+    counts. Non-path names (pipes, sockets) never match.
+    """
+    entries, error = _process_open_files()
+    if error is not None:
+        return None, error
+    roots = set()
+    for candidate in (str(root), os.path.realpath(str(root))):
+        parts = _path_parts(candidate)
+        if parts is None:
+            return None, "D6_WORKTREE_ROOT_UNRESOLVED"
+        roots.add(parts)
+    holders = set()
+    for pid, _fd, name in entries:
+        parts = _path_parts(name)
+        if parts is None:
+            continue
+        if any(parts[:len(prefix)] == prefix for prefix in roots):
+            holders.add(pid)
+    return sorted(holders, key=int), None
+
+
 def _retention_entries(paths):
     """Parse registered retention paths with ENV-2 semantics; None if invalid.
 
@@ -2342,7 +2435,8 @@ def release_expired_lease(*, canonical_root, task_id, pm_session, workspace_root
     """PM release of one expired D6 writer lease; the tree and commits stay.
 
     Releases only when the record is ACTIVE/REPAIR, its lease is expired and
-    no live process holds the worktree (the same check retire uses). The
+    no live process uses the worktree: not by cwd (the retire check) and not
+    by an open, executable or memory-mapped file under it either. The
     record moves to LEASE_RELEASED, so the old writer can no longer record a
     result or resume; nothing in Git or the worktree changes. Prints one JSON
     line and returns True only when the lease was released.
@@ -2397,8 +2491,13 @@ def release_expired_lease(*, canonical_root, task_id, pm_session, workspace_root
             if reasons:
                 result["identity_reasons"] = reasons
                 _stop("D6_LEASE_RELEASE_IDENTITY_MISMATCH")
-            live = _live_pids(root)
+            # Final liveness check, under the registry lock and followed only
+            # by the registry re-read and the record write: any process whose
+            # cwd, executable, mapped file or open file is in the worktree
+            # blocks, and an unknown answer never counts as "no process".
+            live, liveness_error = _worktree_holders(root)
             if live is None:
+                result["liveness_error"] = liveness_error
                 _stop("D6_LEASE_RELEASE_LIVENESS_UNKNOWN")
             if live:
                 result["live_pids"] = live

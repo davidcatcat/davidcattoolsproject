@@ -1116,21 +1116,65 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
             lifecycle._replace_record(record_path, current)
         return complete
 
-    def _lease_main(self, argv, cwds=()):
-        """Run the CLI with a stubbed process list; return (code, JSON lines, stub)."""
+    def _lease_main(self, argv, files=()):
+        """Run the CLI with a stubbed lsof file list; return (code, JSON lines, stub).
+
+        ``files`` holds ``(pid, fd, path)`` entries; None means lsof gave no answer.
+        """
         output = io.StringIO()
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
-                patch.object(lifecycle, "_process_cwds",
-                             return_value=None if cwds is None else
-                             [("1", "/")] + list(cwds)) as process_cwds, \
+                patch.object(lifecycle, "_process_open_files",
+                             return_value=(None, "LSOF_UNAVAILABLE") if files is None
+                             else ([("1", "cwd", "/")] + list(files), None)
+                             ) as process_files, \
                 contextlib.redirect_stdout(output):
             code = lifecycle._main(argv + ["--repo-root", str(self.source)])
         lines = [json.loads(line) for line in output.getvalue().splitlines()]
-        return code, lines, process_cwds
+        return code, lines, process_files
 
-    def _release(self, task_id, cwds=()):
+    def _release(self, task_id, files=()):
         return self._lease_main(["--release-expired-lease", task_id,
-                                 "--pm-session", "pm-lease-test"], cwds)
+                                 "--pm-session", "pm-lease-test"], files)
+
+    FAKE_LSOF = "/fixture/bin/lsof"
+
+    def _release_with_lsof(self, task_id, outcome):
+        """Release through the real lsof parser with only the lsof run faked.
+
+        ``outcome`` is an exception to raise, or ``(returncode, stdout bytes)``.
+        Every other subprocess call (Git) runs for real.
+        """
+        real_run = subprocess.run
+        calls = []
+
+        def run(argv, *args, **kwargs):
+            if argv and argv[0] == self.FAKE_LSOF:
+                calls.append(list(argv))
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return subprocess.CompletedProcess(argv, outcome[0], outcome[1], b"")
+            return real_run(argv, *args, **kwargs)
+
+        output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_resolve_lsof", return_value=self.FAKE_LSOF), \
+                patch.object(lifecycle.subprocess, "run", side_effect=run), \
+                contextlib.redirect_stdout(output):
+            code = lifecycle._main(["--release-expired-lease", task_id,
+                                    "--pm-session", "pm-lease-test",
+                                    "--repo-root", str(self.source)])
+        lines = [json.loads(line) for line in output.getvalue().splitlines()]
+        return code, lines, calls
+
+    @staticmethod
+    def _lsof_output(*processes):
+        """lsof -F p/f/n bytes; this test process always appears first."""
+        text = "p%d\nfcwd\nn/\n" % os.getpid()
+        for pid, entries in processes:
+            text += "p%s\n" % pid
+            for fd, name in entries:
+                text += "f%s\nn%s\n" % (fd, name)
+        return text.encode()
 
     def test_lease_expiry_is_computed_and_refreshed_on_recorded_result(self):
         self.assertEqual(lifecycle.LEASE_SECONDS, 24 * 60 * 60)
@@ -1176,10 +1220,11 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         # Reporting is read-only: an expired lease is never released by itself.
         self.assertEqual(lifecycle._read_registry_record(record_path), before)
 
-        code, (line,), process_cwds = self._release(
-            "lease-release", cwds=[("77", str(self.root / "elsewhere"))])
+        code, (line,), process_files = self._release(
+            "lease-release", files=[("77", "cwd", str(self.root / "elsewhere")),
+                                    ("77", "3", "pipe")])
         self.assertEqual(code, 0)
-        process_cwds.assert_called_once_with()
+        process_files.assert_called_once_with()
         self.assertEqual((line["result"], line["state"], line["worktree_kept"]),
                          ("LEASE_RELEASED", "LEASE_RELEASED", True))
         after = lifecycle._read_registry_record(record_path)
@@ -1218,26 +1263,134 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         root, record_path = self._registered_result_fixture("lease-live")
         before = self._set_lease(record_path, self.EXPIRED_LEASE)
         code, (line,), _ = self._release(
-            "lease-live", cwds=[("4242", str(root / "tools" / "llmtool"))])
+            "lease-live", files=[("4242", "cwd", str(root / "tools" / "llmtool"))])
         self.assertEqual(code, 1)
         self.assertEqual((line["result"], line["reason"], line["live_pids"]),
                          ("BLOCKED", "D6_LEASE_RELEASE_LIVE_PROCESS", ["4242"]))
         self.assertEqual(lifecycle._read_registry_record(record_path), before)
 
-        code, (line,), _ = self._release("lease-live", cwds=None)
-        self.assertEqual((code, line["reason"]), (1, "D6_LEASE_RELEASE_LIVENESS_UNKNOWN"))
+        code, (line,), _ = self._release("lease-live", files=None)
+        self.assertEqual((code, line["reason"], line["liveness_error"]),
+                         (1, "D6_LEASE_RELEASE_LIVENESS_UNKNOWN", "LSOF_UNAVAILABLE"))
         self.assertEqual(lifecycle._read_registry_record(record_path), before)
         self.assertTrue(root.is_dir())
+
+    def test_open_mapped_or_executable_file_under_worktree_refuses_release(self):
+        # Codex security v91 (CWE-362): a writer that changed directory but
+        # still uses worktree files by absolute path must block the release.
+        root, record_path = self._registered_result_fixture("lease-open-file")
+        before = self._set_lease(record_path, self.EXPIRED_LEASE)
+        elsewhere = str(self.root / "elsewhere")
+        inside = str(root / "tools" / "llmtool" / "result-fixture.txt")
+        for fd in ("7w", "12u", "txt", "mem", "mmap", "rtd"):
+            with self.subTest(fd=fd):
+                code, (line,), _ = self._release(
+                    "lease-open-file", files=[("4243", "cwd", elsewhere),
+                                              ("4243", fd, inside)])
+                self.assertEqual((code, line["result"], line["reason"],
+                                  line["live_pids"]),
+                                 (1, "BLOCKED", "D6_LEASE_RELEASE_LIVE_PROCESS",
+                                  ["4243"]))
+                self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+        # The real lsof parser reads the same holder from -F output.
+        code, (line,), calls = self._release_with_lsof("lease-open-file", (0, self._lsof_output(
+            ("4243", (("cwd", elsewhere), ("txt", "/usr/bin/true"), ("9r", inside))),
+            ("4244", (("cwd", elsewhere), ("txt", str(root / "bin" / "tool")))),
+            ("4245", (("cwd", elsewhere), ("mem", str(root / "lib" / "mod.so")))),
+            ("4246", (("cwd", elsewhere), ("4u", "->0x0123"))))))
+        self.assertEqual(calls, [[self.FAKE_LSOF, "-n", "-P", "-w", "-Fpfn"]])
+        self.assertEqual((code, line["reason"], line["live_pids"]),
+                         (1, "D6_LEASE_RELEASE_LIVE_PROCESS", ["4243", "4244", "4245"]))
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
+        self.assertTrue(root.is_dir())
+
+    def test_sibling_with_shared_string_prefix_does_not_block_release(self):
+        root, record_path = self._registered_result_fixture("lease-prefix")
+        self._set_lease(record_path, self.EXPIRED_LEASE)
+        sibling = str(root) + "-foo"
+        code, (line,), calls = self._release_with_lsof("lease-prefix", (0, self._lsof_output(
+            ("4247", (("cwd", sibling), ("5w", sibling + "/notes.txt"),
+                      ("txt", sibling + "/bin/tool"))))))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((code, line["result"]), (0, "LEASE_RELEASED"))
+        self.assertNotIn("live_pids", line)
+        self.assertEqual(lifecycle._read_registry_record(record_path)["state"],
+                         "LEASE_RELEASED")
+
+    def test_worktree_holder_match_is_component_based_and_symlink_safe(self):
+        real = self.root / "real-tasks"
+        (real / "t1").mkdir(parents=True)
+        alias = self.root / "alias-tasks"
+        alias.symlink_to(real, target_is_directory=True)
+        entries = [
+            ("10", "cwd", "/"),
+            ("11", "txt", str(real / "t1" / "bin" / "tool")),      # resolved form
+            ("12", "5r", str(alias / "t1" / "data")),              # given form
+            ("13", "cwd", str(real / "t1")),                       # the root itself
+            ("14", "6w", str(real / "t1-foo" / "data")),           # sibling prefix
+            ("15", "7u", str(real / "t10")),                       # sibling prefix
+            ("16", "8u", "pipe"),                                  # not a path
+            ("17", "9r", str(real / "t1" / ".." / "t1-foo" / "x")),  # leaves the root
+        ]
+        with patch.object(lifecycle, "_process_open_files", return_value=(entries, None)):
+            self.assertEqual(lifecycle._worktree_holders(alias / "t1"),
+                             (["11", "12", "13"], None))
+        with patch.object(lifecycle, "_process_open_files",
+                          return_value=(None, "LSOF_TIMEOUT")):
+            self.assertEqual(lifecycle._worktree_holders(alias / "t1"),
+                             (None, "LSOF_TIMEOUT"))
+
+    def test_lsof_failure_refuses_release_fail_closed(self):
+        root, record_path = self._registered_result_fixture("lease-lsof-fail")
+        before = self._set_lease(record_path, self.EXPIRED_LEASE)
+        good = self._lsof_output()
+        cases = (
+            (subprocess.TimeoutExpired(self.FAKE_LSOF, 60), "LSOF_TIMEOUT"),
+            (OSError("fixture: cannot start"), "LSOF_START_FAILED"),
+            ((1, good), "LSOF_FAILED"),
+            ((0, b""), "LSOF_OUTPUT_INVALID"),
+            # A listing that omits this very process is partial.
+            ((0, b"p4248\nfcwd\nn/\n"), "LSOF_OUTPUT_INVALID"),
+            ((0, b"n" + str(root).encode() + b"\n" + good), "LSOF_OUTPUT_INVALID"),
+            ((0, good + b"pnot-a-pid\nfcwd\nn/\n"), "LSOF_OUTPUT_INVALID"),
+            ((0, good + b"p4249\nn" + str(root).encode() + b"\n"), "LSOF_OUTPUT_INVALID"),
+        )
+        for outcome, error in cases:
+            with self.subTest(error=error, outcome=repr(outcome)[:60]):
+                code, (line,), calls = self._release_with_lsof("lease-lsof-fail", outcome)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual((code, line["result"], line["reason"],
+                                  line["liveness_error"]),
+                                 (1, "BLOCKED", "D6_LEASE_RELEASE_LIVENESS_UNKNOWN", error))
+                self.assertNotIn("live_pids", line)
+                self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+        output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_resolve_lsof", return_value=None), \
+                contextlib.redirect_stdout(output):
+            code = lifecycle._main(["--release-expired-lease", "lease-lsof-fail",
+                                    "--pm-session", "pm-lease-test",
+                                    "--repo-root", str(self.source)])
+        line = json.loads(output.getvalue())
+        self.assertEqual((code, line["reason"], line["liveness_error"]),
+                         (1, "D6_LEASE_RELEASE_LIVENESS_UNKNOWN", "LSOF_UNAVAILABLE"))
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+        # The same real parser with a clean listing releases the lease.
+        code, (line,), _ = self._release_with_lsof("lease-lsof-fail", (0, good))
+        self.assertEqual((code, line["result"]), (0, "LEASE_RELEASED"))
 
     def test_unexpired_or_invalid_lease_is_refused_before_liveness(self):
         root, record_path = self._registered_result_fixture("lease-active")
         for value, reason in ((self.FUTURE_LEASE, "D6_LEASE_RELEASE_NOT_EXPIRED"),
                               ("not-a-time", "D6_LEASE_RELEASE_LEASE_INVALID")):
             before = self._set_lease(record_path, value)
-            code, (line,), process_cwds = self._release("lease-active")
+            code, (line,), process_files = self._release("lease-active")
             self.assertEqual((code, line["result"], line["reason"]),
                              (1, "BLOCKED", reason))
-            process_cwds.assert_not_called()
+            process_files.assert_not_called()
             self.assertEqual(lifecycle._read_registry_record(record_path), before)
         self.assertTrue(root.is_dir())
 
@@ -1253,9 +1406,9 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
                          ("LEASE_UNSET", False))
         self.assertNotIn("lease_expires_at", status)
 
-        code, (line,), process_cwds = self._release("lease-legacy")
+        code, (line,), process_files = self._release("lease-legacy")
         self.assertEqual((code, line["reason"]), (1, "D6_LEASE_RELEASE_NOT_EXPIRED"))
-        process_cwds.assert_not_called()
+        process_files.assert_not_called()
         self.assertEqual(lifecycle._read_registry_record(record_path), before)
 
         # A legacy writer keeps recording results; no lease is added.
@@ -1285,14 +1438,14 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 error = io.StringIO()
                 with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
-                        patch.object(lifecycle, "_process_cwds") as process_cwds, \
+                        patch.object(lifecycle, "_process_open_files") as process_files, \
                         contextlib.redirect_stderr(error), \
                         contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(lifecycle._main(argv + ["--repo-root",
                                                              str(self.source)]), 1)
                 self.assertEqual(error.getvalue(),
                                  "STOP: D6 lifecycle rejected (D6_TASK_INPUT_INVALID)\n")
-                process_cwds.assert_not_called()
+                process_files.assert_not_called()
         code, (line,), _ = self._release("missing-lease-task")
         self.assertEqual((code, line["reason"]), (1, "D6_LEASE_RELEASE_UNKNOWN_TASK"))
 
