@@ -136,20 +136,36 @@ def _save_rule_alerts(path, state):
             pass
 
 
+class StyleKey(str):
+    """A row style equal to its base style (so plain output and callers that
+    compare styles see no change) that also names its own TUI colour."""
+
+    def __new__(cls, base: str, colour: str):
+        value = super().__new__(cls, base)
+        value.colour = colour
+        return value
+
+
+# Rule-file merge alerts (#1502 WP-G, E8) are drawn in their own colour pair,
+# distinct from every other alert and status colour.
+RULE_ALERT_STYLE = StyleKey("!", "rule")
+
+
 def rule_alert_lines(path=None) -> list[tuple[str, str]]:
     if path is None:
         path = RULE_ALERT_FILE
     try:
         state = _load_rule_alerts(path)
     except Exception:
-        return [("規則檔告警紀錄無法讀取", "!")]
+        return [("規則檔告警紀錄無法讀取", RULE_ALERT_STYLE)]
     if state is None or not state["alerts"]:
         return []
     alerts = list(reversed(state["alerts"]))
-    lines = [(f"規則檔已變更：PR #{alert['pr']}，{len(alert['paths'])} 個檔（看過後請 PM 清除）", "!")
+    lines = [(f"規則檔已變更：PR #{alert['pr']}，{len(alert['paths'])} 個檔（看過後請 PM 清除）",
+              RULE_ALERT_STYLE)
              for alert in alerts[:5]]
     if len(alerts) > 5:
-        lines.append((f"另有 {len(alerts) - 5} 件規則檔告警", "!"))
+        lines.append((f"另有 {len(alerts) - 5} 件規則檔告警", RULE_ALERT_STYLE))
     return lines
 
 
@@ -967,6 +983,7 @@ class Monitor:
         self.office_due = 0.0   # monotonic time of the next office rebuild
         self.pm_board = PmBoard("missing", None, [], [], [])
         self.pm_board_due = 0.0
+        self.pm_board_stamp: float | None = None   # board updated_at (or mtime); None when absent
         self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
         self.records: list = []   # llmtool task-record lines, refreshed with the office view
         self.opencode_route = None
@@ -1029,6 +1046,10 @@ class Monitor:
                 self.pm_board = read_pm_board(time.time())
             except Exception:
                 pass
+            try:
+                self.pm_board_stamp = pm_board_stamp(time.time())
+            except Exception:
+                self.pm_board_stamp = None
         stamp = datetime.now().strftime("%H:%M:%S")
         try:
             result = collect(self.remembered)
@@ -4580,6 +4601,65 @@ def read_pm_board(now, path=None) -> PmBoard:
         lists[name] = valid
     return PmBoard("stale" if age > PM_BOARD_STALE else "ok", age,
                    lists["running"], lists["queue"], lists["blocked"], skipped)
+
+
+# #1502 WP-H (E4): the PM rewrites the board every sweep; three missed sweeps
+# raise a warning at the top of every view.
+PM_SWEEP_INTERVAL = 300   # seconds between PM sweeps
+PM_BOARD_WARN_AGE = 3 * PM_SWEEP_INTERVAL   # 15 minutes
+PM_BOARD_STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+
+
+def pm_board_stamp(now, path=None) -> float | None:
+    """When the PM board was last written: its updated_at, or the file mtime
+    when updated_at is absent, invalid or in the future. None when the board
+    is missing (a fresh setup) or is not a readable regular file."""
+    path = PM_BOARD if path is None else path
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if nofollow is None or nonblock is None:
+        return None
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY | nofollow | nonblock)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        raw = os.read(fd, PM_BOARD_LIMIT + 1)
+    except (OSError, ValueError, TypeError):
+        return None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    stamp = None
+    if len(raw) <= PM_BOARD_LIMIT:
+        try:
+            value = json.loads(raw)
+        except (ValueError, RecursionError, UnicodeDecodeError):
+            value = None
+        text = value.get("updated_at") if type(value) is dict else None
+        if type(text) is str and PM_BOARD_STAMP.fullmatch(text):
+            try:
+                stamp = datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc).timestamp()
+            except (ValueError, OverflowError):
+                stamp = None
+    if stamp is None or stamp > float(now):
+        return float(info.st_mtime)
+    return stamp
+
+
+def pm_board_stale_line(stamp, now) -> str:
+    """The top warning when the board is older than PM_BOARD_WARN_AGE, else ""."""
+    if stamp is None:
+        return ""
+    age = float(now) - float(stamp)
+    if age <= PM_BOARD_WARN_AGE:
+        return ""
+    return f"⚠ PM board stale {int(age // 60)} min"
 
 
 def board_pulls(pulls, repo: str) -> list[BoardPull]:
@@ -9618,6 +9698,9 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     behind = behind_line(mon)
     if behind:
         print(behind)
+    board = pm_board_stale_line(getattr(mon, "pm_board_stamp", None), time.time())
+    if board:
+        print(board)
     alert = disk_alert(mon.disk_usage)
     if alert:
         print(alert)
@@ -9663,6 +9746,30 @@ def run_plain(interval: float, mon: "Monitor") -> int:
         return 0
 
 
+def init_colors(curses) -> dict:
+    """Set up the colour pairs; {style key: attribute}. The curses module is
+    passed in so a test can check the pairs without a terminal."""
+    colors = {}
+    for n, (key, fg) in enumerate((("title", curses.COLOR_CYAN), ("!", curses.COLOR_YELLOW),
+                                   ("+", curses.COLOR_GREEN), ("-", curses.COLOR_MAGENTA),
+                                   ("?", curses.COLOR_RED), ("ok", curses.COLOR_GREEN),
+                                   ("▶", curses.COLOR_CYAN), ("→", curses.COLOR_BLUE),
+                                   ("■", curses.COLOR_GREEN)), start=1):
+        curses.init_pair(n, fg, -1)
+        colors[key] = curses.color_pair(n)
+    if curses.COLOR_PAIRS > 10:   # CI references on runner rows (#763), drawn with A_BOLD
+        curses.init_pair(10, 15 if curses.COLORS >= 16 else curses.COLOR_WHITE, -1)
+        colors["ref"] = curses.color_pair(10)
+    # Rule-file merge alerts (#1502 WP-G, E8): white on red, the only pair with
+    # a background, so they never look like another alert or status row.
+    if curses.COLOR_PAIRS > 11:
+        curses.init_pair(11, curses.COLOR_WHITE, curses.COLOR_RED)
+        colors["rule"] = curses.color_pair(11)
+    else:   # too few pairs: red reversed is still unlike every other row
+        colors["rule"] = colors["?"] | curses.A_REVERSE
+    return colors
+
+
 def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None:
     import curses
     curses.curs_set(0)
@@ -9671,16 +9778,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
     colors = {}
     if use_color and curses.has_colors():
         curses.use_default_colors()
-        for n, (key, fg) in enumerate((("title", curses.COLOR_CYAN), ("!", curses.COLOR_YELLOW),
-                                       ("+", curses.COLOR_GREEN), ("-", curses.COLOR_MAGENTA),
-                                       ("?", curses.COLOR_RED), ("ok", curses.COLOR_GREEN),
-                                       ("▶", curses.COLOR_CYAN), ("→", curses.COLOR_BLUE),
-                                       ("■", curses.COLOR_GREEN)), start=1):
-            curses.init_pair(n, fg, -1)
-            colors[key] = curses.color_pair(n)
-        if curses.COLOR_PAIRS > 10:   # CI references on runner rows (#763), drawn with A_BOLD
-            curses.init_pair(10, 15 if curses.COLORS >= 16 else curses.COLOR_WHITE, -1)
-            colors["ref"] = curses.color_pair(10)
+        colors = init_colors(curses)
     view, offset, next_poll = "office", 0, 0.0
     expanded = False   # office view: gray rows folded (default) or listed (key a)
     noise = False      # Activity view: feed noise hidden (default) or shown (key a)
@@ -9772,8 +9870,9 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
     stale = (f"⚠ 監控程式已更新，這個畫面還是舊版（{mon.version}），請按 q 後重開"
              if mon.stale else "")
     behind = behind_line(mon)
-    if alert or stale or behind:
-        put(2, "  ·  ".join(item for item in (stale, behind, alert) if item),
+    board = pm_board_stale_line(getattr(mon, "pm_board_stamp", None), time.time())
+    if alert or stale or behind or board:
+        put(2, "  ·  ".join(item for item in (stale, behind, board, alert) if item),
             colors.get("!", 0) | curses.A_BOLD)
     if view == "log":
         entries = list(mon.log)
@@ -9838,7 +9937,11 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
                   "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
         ref = colors.get("ref")   # None without colors: the rows stay as they were
         for row, (line, style) in enumerate(lines[offset:offset + body]):
-            put(3 + row, line, styles.get(style, 0))
+            colour = getattr(style, "colour", "")
+            if colour and colour in colors:   # rule-file alerts: their own pair (E8)
+                put(3 + row, line, colors[colour] | curses.A_BOLD)
+            else:
+                put(3 + row, line, styles.get(style, 0))
             # The CI reference is drawn again over the row, bright white and bold.
             x = 0
             for text, lit in parts.get(offset + row, []) if ref is not None else []:
