@@ -15,6 +15,14 @@ starts as UNKNOWN_OPEN and only advances to RESOLVED or SUPERSEDED, which are
 final: a final record takes no further change. Every update is checked against
 the stored record before it is written.
 
+#1706 R9 adds the optional, append-only ``remote_tests`` list: one entry per
+EC2 remote test run for the incident (``remote_test.run_incident_remote_test``).
+A record without the field is valid, so records written before R9 still read;
+``create`` never writes it. Each entry is checked against the record it lives
+in: its SHA must be recorded in the incident (``admitted_shas``), its modules
+must be recorded as failing (``failing_modules``) and a stored receipt must
+match its own ``receipt_digest``.
+
 Every doubt fails closed with a typed code in ``error.incident_code``; error
 messages carry only the code and, when it is a safe identifier, the incident ID.
 """
@@ -85,11 +93,25 @@ CONFIRMATION_FIELDS = frozenset((
     'pm_session_id', 'confirmed_at', 'scope', 'reason', 'observation_index',
     'evidence_sha256'))
 EVENT_FIELDS = frozenset(('outcome', 'at', 'head'))
+REMOTE_TESTS = 'remote_tests'
+OPTIONAL_FIELDS = frozenset((REMOTE_TESTS,))
+MAX_REMOTE_TESTS = 50
+MAX_REMOTE_MODULES = 8
+REMOTE_TEST_WHERE = 'EC2'
+REMOTE_TEST_FIELDS = frozenset((
+    'sha', 'modules', 'result', 'code', 'receipt', 'where', 'recorded_at'))
+# A validated EC2 receipt carries one of these results and no outcome code; a
+# run without a valid receipt carries one of the outcome results and its code.
+REMOTE_RECEIPT_RESULTS = frozenset(('PASS', 'FAIL', 'TIMEOUT', 'SHA_MISMATCH'))
+REMOTE_OUTCOME_RESULTS = frozenset(('TIMEOUT', 'UNAVAILABLE', 'UNKNOWN'))
 
 INCIDENT_ID = re.compile(r'mi-x?[0-9a-f]{40}')
 _RECORD_NAME = re.compile(r'(mi-x?[0-9a-f]{40})\.json')
 _SHA40 = re.compile(r'[0-9a-f]{40}')
 _SHA256 = re.compile(r'[0-9a-f]{64}')
+_TEST_MODULE = re.compile(r'test_[a-z0-9_]{1,80}')
+_TEST_PATH = re.compile(r'tools/llmtool/tests/(test_[a-z0-9_]{1,80})\.py')
+_REMOTE_CODE = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
 
 
 def _safe_id(value):
@@ -258,9 +280,120 @@ def _valid_events(events, outcome):
     return outcome == state
 
 
+def failing_test_module(test):
+    """The unittest module of one failing test ID or test file path, or None.
+
+    ``tools/llmtool/tests/test_x.py`` gives ``test_x``. A dotted test ID gives
+    its first ``test_*`` part, but never its last part when it has several:
+    in ``__main__.Case.test_y`` the ``test_y`` part is a method, not a module.
+    """
+    if type(test) is not str or not test:
+        return None
+    match = _TEST_PATH.fullmatch(test)
+    if match is not None:
+        return match.group(1)
+    if '/' in test:
+        return None
+    parts = test.split('.')
+    for index, part in enumerate(parts):
+        if _TEST_MODULE.fullmatch(part):
+            return part if index < len(parts) - 1 or len(parts) == 1 else None
+    return None
+
+
+def failing_modules(record):
+    """Modules of every TEST_FAILURE test recorded in any observation of ``record``."""
+    modules = set()
+    observations = record.get('observations') if type(record) is dict else None
+    for observation in observations if type(observations) is list else []:
+        evidence = observation.get('evidence') if type(observation) is dict else None
+        for entry in evidence if type(evidence) is list else []:
+            if type(entry) is not dict or entry.get('code') != 'TEST_FAILURE':
+                continue
+            tests = entry.get('tests')
+            for test in tests if type(tests) is list else []:
+                module = failing_test_module(test)
+                if module is not None:
+                    modules.add(module)
+    return frozenset(modules)
+
+
+def admitted_shas(record):
+    """SHAs recorded in ``record``: last-good head, failing heads and range SHAs."""
+    shas = set()
+    if type(record) is not dict:
+        return frozenset()
+    if _sha40(record.get('last_good_head')):
+        shas.add(record['last_good_head'])
+    observations = record.get('observations')
+    for observation in observations if type(observations) is list else []:
+        if type(observation) is not dict:
+            continue
+        if _sha40(observation.get('failing_head')):
+            shas.add(observation['failing_head'])
+        merges = observation.get('range')
+        for item in merges if type(merges) is list else []:
+            if type(item) is dict and _sha40(item.get('sha')):
+                shas.add(item['sha'])
+    return frozenset(shas)
+
+
+def remote_test_digest(receipt):
+    """SHA-256 of the canonical JSON of a stored receipt without ``receipt_digest``."""
+    body = {key: item for key, item in receipt.items() if key != 'receipt_digest'}
+    return hashlib.sha256(_canonical(body)).hexdigest()
+
+
+def _remote_modules(value, failing):
+    return (type(value) is list and 1 <= len(value) <= MAX_REMOTE_MODULES and
+            all(type(item) is str and _TEST_MODULE.fullmatch(item) for item in value) and
+            value == sorted(set(value)) and set(value) <= failing)
+
+
+def _valid_receipt(receipt, item, incident):
+    if (type(receipt) is not dict or receipt.get('result') != item['result'] or
+            receipt.get('source_sha') != item['sha'] or
+            receipt.get('modules') != item['modules'] or
+            receipt.get('incident_id') != incident or
+            type(receipt.get('receipt_digest')) is not str):
+        return False
+    try:
+        return receipt['receipt_digest'] == remote_test_digest(receipt)
+    except (TypeError, ValueError):
+        return False
+
+
+def _valid_remote_test(item, incident, shas, failing):
+    """One remote-test entry, bound to the SHAs and failing modules of its record."""
+    if (type(item) is not dict or set(item) != REMOTE_TEST_FIELDS or
+            not _sha40(item['sha']) or item['sha'] not in shas or
+            not _remote_modules(item['modules'], failing) or
+            item['where'] != REMOTE_TEST_WHERE or
+            not _utc_iso(item['recorded_at']) or type(item['result']) is not str):
+        return False
+    if item['receipt'] is None:
+        return (item['result'] in REMOTE_OUTCOME_RESULTS and type(item['code']) is str and
+                _REMOTE_CODE.fullmatch(item['code']) is not None)
+    return (item['code'] is None and item['result'] in REMOTE_RECEIPT_RESULTS and
+            _valid_receipt(item['receipt'], item, incident))
+
+
+def _valid_remote_tests(record):
+    if REMOTE_TESTS not in record:
+        return True
+    items = record[REMOTE_TESTS]
+    if type(items) is not list or len(items) > MAX_REMOTE_TESTS:
+        return False
+    shas, failing = admitted_shas(record), failing_modules(record)
+    return all(_valid_remote_test(item, record['incident_id'], shas, failing)
+               for item in items)
+
+
 def _valid_body(record):
     """Check every field except ``record_sha256``; return False on any doubt."""
-    if type(record) is not dict or set(record) != FIELDS - {'record_sha256'}:
+    body_fields = FIELDS - {'record_sha256'}
+    if type(record) is not dict or set(record) not in (body_fields,
+                                                       body_fields | OPTIONAL_FIELDS):
         return False
     if (type(record['schema_version']) is not int or
             record['schema_version'] != SCHEMA_VERSION or
@@ -281,6 +414,8 @@ def _valid_body(record):
     if (type(confirmations) is not list or len(confirmations) > MAX_CONFIRMATIONS or
             not all(_valid_confirmation(item, observations) for item in confirmations)):
         return False
+    if not _valid_remote_tests(record):
+        return False
     return _valid_events(record['outcome_events'], record['outcome'])
 
 
@@ -291,7 +426,8 @@ def _expected_id(record):
 
 def _validate(record, incident=None):
     """Return ``record`` when its shape and digest are valid, else refuse INVALID."""
-    if (type(record) is not dict or set(record) != FIELDS or
+    if (type(record) is not dict or
+            set(record) not in (FIELDS, FIELDS | OPTIONAL_FIELDS) or
             type(record.get('record_sha256')) is not str or
             _SHA256.fullmatch(record['record_sha256']) is None):
         _refuse(INCIDENT_RECORD_INVALID, incident)
@@ -482,7 +618,7 @@ def create(record, root=None):
     body = {key: item for key, item in record.items() if key != 'record_sha256'}
     sealed = _sealed(body, incident)
     if (sealed['outcome'] != OPEN or sealed['outcome_events'] or sealed['confirmations'] or
-            len(sealed['observations']) != 1):
+            len(sealed['observations']) != 1 or REMOTE_TESTS in sealed):
         _refuse(INCIDENT_OUTCOME_INVALID, incident)
     name = _record_name(sealed['incident_id'])
     directory = _open_directory(root)
@@ -563,6 +699,13 @@ def _check_forward(old, new, incident):
         value = new.get(key)
         if type(value) is not list or value[:len(old[key])] != old[key]:
             _refuse(INCIDENT_RECORD_IMMUTABLE, incident)
+    # The optional remote-test list: absent reads as empty; once written it stays.
+    if REMOTE_TESTS in old and REMOTE_TESTS not in new:
+        _refuse(INCIDENT_RECORD_IMMUTABLE, incident)
+    earlier = old.get(REMOTE_TESTS, [])
+    value = new.get(REMOTE_TESTS, [])
+    if type(value) is not list or value[:len(earlier)] != earlier:
+        _refuse(INCIDENT_RECORD_IMMUTABLE, incident)
     outcome = new.get('outcome')
     if outcome != old['outcome'] and (type(outcome) is not str or
                                       outcome not in OUTCOME_MOVES[old['outcome']]):
@@ -631,6 +774,22 @@ def append_confirmation(incident, expected_sha256, confirmation, root=None):
         if len(body['confirmations']) >= MAX_CONFIRMATIONS:
             _refuse(INCIDENT_RECORD_FULL, incident)
         body['confirmations'].append(copy.deepcopy(confirmation))
+        return body
+    return _commit(incident, expected_sha256, mutate, root)
+
+
+def append_remote_test(incident, expected_sha256, entry, root=None):
+    """Append one EC2 remote-test entry to an open record; return the new record.
+
+    The sealed record is validated whole, so an entry whose SHA is not recorded
+    in the incident, whose modules are not recorded as failing, or whose
+    receipt does not match its digest refuses INCIDENT_RECORD_INVALID.
+    """
+    def mutate(body):
+        entries = body.setdefault(REMOTE_TESTS, [])
+        if len(entries) >= MAX_REMOTE_TESTS:
+            _refuse(INCIDENT_RECORD_FULL, incident)
+        entries.append(copy.deepcopy(entry))
         return body
     return _commit(incident, expected_sha256, mutate, root)
 
