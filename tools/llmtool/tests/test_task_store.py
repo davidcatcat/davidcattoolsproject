@@ -416,6 +416,64 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.task_store_error_code,
                          'TASK_LINEAGE_TRANSITION_INVALID')
 
+    def test_park_and_merge_claim_exclude_each_other_under_the_task_lock(self):
+        # #1502 D10c2 (security v91, CWE-362): parking a ROOT and claiming its merge
+        # are each checked against the other inside the same locked write.
+        from llmtool.task_store import park_lineage_root, record_lineage
+        claim = {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+                 'claimed_at': '2026-11-13T00:00:00.000000Z'}
+
+        def root_line(task_id, state):
+            return {'lineage_id': task_id, 'kind': 'root', 'parent': None, 'replaces': [],
+                    'state': state, 'reason': 'split', 'base_sha': None,
+                    'recorded_at': '2026-11-13T00:00:00Z'}
+
+        def refused(code, call):
+            with self.assertRaises(LLMToolError) as caught:
+                call()
+            self.assertEqual(caught.exception.task_store_error_code, code)
+
+        def new_task():
+            task = self._codex_dispatch_task()
+            self.store.create(task)
+            return task['task_id']
+
+        # Merge claimed first: the park is refused and the lineage is not written.
+        claimed = new_task()
+        self.store.update(claimed, merge_attempt=claim)
+        refused('SPLIT_ROOT_MERGE_STARTED',
+                lambda: park_lineage_root(self.store, claimed, root_line(claimed, 'PARKED')))
+        refused('SPLIT_ROOT_MERGE_STARTED',
+                lambda: record_lineage(self.store, claimed, root_line(claimed, 'PARKED')))
+        self.assertNotIn('lineage', self.store.get(claimed))
+        # Parked first: a merge claim is refused even with a stale record digest.
+        parked = new_task()
+        stale = self.store.get(parked)['record_sha256']
+        park_lineage_root(self.store, parked, root_line(parked, 'PARKED'))
+        park_lineage_root(self.store, parked, root_line(parked, 'PARKED'))  # a later split
+        refused('MERGE_ROOT_PARKED', lambda: self.store.compare_and_update(
+            parked, expected={'record_sha256': stale}, merge_attempt=claim))
+        refused('MERGE_ROOT_PARKED', lambda: self.store.update(parked, merge_attempt=claim))
+        self.assertNotIn('merge_attempt', self.store.get(parked))
+        # An ended ROOT is neither parked nor merged.
+        ended = new_task()
+        record_lineage(self.store, ended, root_line(ended, 'FAILED_FINAL'))
+        refused('SPLIT_ROOT_NOT_OPEN',
+                lambda: park_lineage_root(self.store, ended, root_line(ended, 'PARKED')))
+        refused('MERGE_LINEAGE_ENDED', lambda: self.store.update(ended, merge_attempt=claim))
+        self.assertEqual(self.store.get(ended)['lineage']['state'], 'FAILED_FINAL')
+        # park_lineage_root writes only a PARKED ROOT lineage of that Task.
+        plain = new_task()
+        for bad in (root_line(plain, 'OPEN'), dict(root_line(plain, 'PARKED'), kind='child'),
+                    root_line(ended, 'PARKED'), None):
+            refused('TASK_LINEAGE_INVALID', lambda bad=bad: park_lineage_root(
+                self.store, plain, bad))
+        # An OPEN lineage Task still claims and records its merge.
+        record_lineage(self.store, plain, root_line(plain, 'OPEN'))
+        self.store.update(plain, merge_attempt=claim)
+        self.store.update(plain, merge_attempt=dict(claim, state='MERGED'))
+        self.assertEqual(self.store.get(plain)['merge_attempt']['state'], 'MERGED')
+
     def test_retry_claim_transition_is_atomic_with_next_attempt(self):
         task = self._codex_dispatch_task()
         self.store.create(task)

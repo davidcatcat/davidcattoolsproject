@@ -1301,8 +1301,12 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         if prior is not None:
             expected['merge_attempt'] = prior
         store.compare_and_update(record['task_id'], expected=expected, merge_attempt=claim)
-    except Exception:
-        return _merge_refusal('MERGE_CLAIM_CONFLICT')
+    except Exception as exc:
+        # #1502 D10c2 (security v91): the store re-reads the lineage under the Task
+        # lock in this same write; a ROOT parked since `record` was read is refused.
+        code = getattr(exc, 'task_store_error_code', None)
+        return _merge_refusal(code if code in ('MERGE_ROOT_PARKED', 'MERGE_LINEAGE_ENDED')
+                              else 'MERGE_CLAIM_CONFLICT')
     args = ['pr', 'merge', str(number), '--squash', '--match-head-commit', head]
     try:
         result = gh_runner(root, args)
