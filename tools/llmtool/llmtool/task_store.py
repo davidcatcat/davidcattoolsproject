@@ -99,7 +99,7 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'review_dispatch_claim', 'review_repair_claims', 'high_debug',
     'abandonment', 'pm_session_adoptions', 'pm_provenance', 'merge_attempt',
     'published_pr', 'repair_cap_override', 'publish_operations',
-    'review_exception'))
+    'review_exception', 'lineage'))
 # Owner-exception merge evidence (#1253, #1519). Only this one exception type
 # is persisted; its evidence is the exact owner_exception.verify() result.
 _REVIEW_EXCEPTION_TYPE = 'OWNER_EXCEPTION_DETERMINISTIC_REDACTION'
@@ -1140,6 +1140,42 @@ def _validate_review_exception(item):
         _fail('TASK_REVIEW_EXCEPTION_INVALID')
 
 
+# #1502 WP-D (spec 3-2, 3-3, 7): a Task's place in its lineage. A Task without
+# this field is the ROOT of its own lineage. kind, lineage_id and parent never
+# change; state only moves forward to an end state.
+_LINEAGE_FIELDS = frozenset(('lineage_id', 'kind', 'parent', 'replaces', 'state',
+                             'reason', 'base_sha', 'recorded_at'))
+_LINEAGE_END_STATES = ('CLOSED', 'DROPPED', 'STOPPED', 'FAILED_FINAL')
+_LINEAGE_STATES = ('OPEN', 'PARKED') + _LINEAGE_END_STATES
+
+
+def _validate_lineage(record):
+    item = record.get('lineage')
+    hex32 = lambda value: type(value) is str and re.fullmatch(r'[0-9a-f]{32}', value)
+    if (type(item) is not dict or set(item) != _LINEAGE_FIELDS or
+            item.get('kind') not in ('root', 'child', 'replan') or
+            not hex32(item.get('lineage_id')) or item.get('state') not in _LINEAGE_STATES or
+            type(item.get('replaces')) is not list or len(item['replaces']) > 3 or
+            not all(hex32(value) for value in item['replaces']) or
+            (item.get('reason') is not None and
+             (type(item['reason']) is not str or not 1 <= len(item['reason']) <= 500)) or
+            (item['state'] == 'DROPPED' and item.get('reason') is None) or
+            (item.get('base_sha') is not None and
+             (type(item['base_sha']) is not str or
+              re.fullmatch(r'[0-9a-f]{40}', item['base_sha']) is None)) or
+            not _valid_utc_seconds(item.get('recorded_at'))):
+        _fail('TASK_LINEAGE_INVALID')
+    if item['kind'] == 'root':
+        valid = (item['lineage_id'] == record.get('task_id') and item['parent'] is None and
+                 not item['replaces'])
+    else:
+        valid = (item['parent'] == item['lineage_id'] != record.get('task_id') and
+                 item['state'] != 'PARKED' and
+                 (item['kind'] == 'replan') == bool(item['replaces']))
+    if not valid:
+        _fail('TASK_LINEAGE_INVALID')
+
+
 def _validate(record, *, strict=True):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
@@ -1148,6 +1184,9 @@ def _validate(record, *, strict=True):
     keys.discard('published_pr')
     keys.discard('publish_operations')
     keys.discard('review_exception')
+    if 'lineage' in keys:
+        keys.discard('lineage')
+        _validate_lineage(record)
     if type(record) is dict and 'pm_session_adoptions' in record:
         keys.discard('pm_session_adoptions')
     if (type(record) is not dict or

@@ -337,6 +337,36 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(updated['review_repair_claims'][1]['high_debug_report_sha256'],
                          entry['report_sha256'])
 
+    def test_lineage_is_optional_and_strictly_validated(self):
+        # #1502 WP-D (spec 3-2, 7): an old Task has no lineage and is its own ROOT.
+        root = self._codex_dispatch_task()
+        self.store.create(root)
+        root_id = root['task_id']
+        self.assertNotIn('lineage', self.store.get(root_id))
+        base = {'lineage_id': root_id, 'kind': 'root', 'parent': None, 'replaces': [],
+                'state': 'PARKED', 'reason': None, 'base_sha': None,
+                'recorded_at': '2026-11-13T00:00:00Z'}
+        self.store.update(root_id, lineage=base)
+        self.assertEqual(self.store.get(root_id)['lineage'], base)
+        child = self._codex_dispatch_task()
+        self.store.create(child)
+        child_id = child['task_id']
+        line = dict(base, kind='child', parent=root_id, state='OPEN', base_sha='a' * 40)
+        for bad in (dict(line, parent=None), dict(line, state='DROPPED'),
+                    dict(line, kind='replan'), dict(line, lineage_id=child_id, parent=child_id),
+                    dict(line, state='PARKED'), dict(line, extra=1), dict(line, base_sha='x'),
+                    dict(line, kind='replan', replaces=['b' * 32] * 4)):
+            with self.subTest(bad=bad):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(child_id, lineage=bad)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_LINEAGE_INVALID')
+        replan = dict(line, kind='replan', replaces=['b' * 32])
+        self.store.update(child_id, lineage=replan)
+        dropped = dict(line, state='DROPPED', reason='original function unaffected')
+        self.store.update(child_id, lineage=dropped)
+        self.assertEqual(self.store.get(child_id)['lineage'], dropped)
+
     def test_retry_claim_transition_is_atomic_with_next_attempt(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
