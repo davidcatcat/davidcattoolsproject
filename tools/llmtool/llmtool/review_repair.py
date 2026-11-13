@@ -384,14 +384,23 @@ def _review_gate(task, attempts, packet, family, policy):
     current FAIL adds its own HEAD, so a re-review of one HEAD never counts twice.
     A FAIL whose IDs show no blocking finding is not valid. The second repair needs
     an RCA_CONFIRMED Debug of this family on the failed HEAD; that entry is returned.
+
+    D14 (spec section 7): the policy decides before the repair limit. A Task whose
+    repair_max repairs are used escalates by kind at its next valid FAIL (ROOT
+    SPLIT, child PM_DECIDE, REPLAN FAILED_FINAL); a re-review of a HEAD already
+    counted adds no valid FAIL and is refused REPAIR_LIMIT_REACHED.
     """
     from . import repair_policy
     if review_result.blocking_findings(packet['reviewer_text_excerpt_untrusted_data']) == []:
         _refuse('REPAIR_NO_BLOCKING_FINDING')
-    if len(attempts) >= policy['repair_max']:
-        _refuse('REPAIR_LIMIT_REACHED')
+    spent = len(attempts) >= policy['repair_max']
     heads = {claim.get('head_sha'): 'FAIL' for claim in attempts}
+    new_fail = packet['failed_head'] not in heads
     heads[packet['failed_head']] = 'FAIL'
+    fail_count = repair_policy.review_fail_count(heads)
+    if spent and new_fail and type(fail_count) is int:
+        # No repair is left, so this new valid FAIL is at least the escalation FAIL.
+        fail_count = max(fail_count, policy['review_fail_max'])
     entries = [entry for entry in task.get('high_debug') or []
                if type(entry) is dict and entry.get('family') == family and
                entry.get('examined_sha') == packet['failed_head'] and
@@ -401,10 +410,12 @@ def _review_gate(task, attempts, packet, family, policy):
     try:
         action = repair_policy.review_action(
             kind=lineage.get('kind') if type(lineage) is dict else 'root',
-            fail_count=repair_policy.review_fail_count(heads),
+            fail_count=fail_count,
             debug_status=entry['status'] if entry else None, policy=policy)
     except LLMToolError:
         _refuse('REPAIR_LINEAGE_INVALID')
+    if spent and action in ('REPAIR', 'DEBUG'):
+        _refuse('REPAIR_LIMIT_REACHED')
     if action == 'DEBUG':
         _refuse('REPAIR_DEBUG_REQUIRED')
     if action != 'REPAIR':
