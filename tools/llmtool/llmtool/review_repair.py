@@ -290,6 +290,54 @@ def ec2_claim_kind(claim):
     return 'NEW' if claim['family'].endswith(EC2_FAMILY_SUFFIX) else 'LEGACY'
 
 
+def _policy():
+    from . import repair_policy
+    try:
+        return repair_policy.load_policy()
+    except LLMToolError:
+        _refuse('REPAIR_POLICY_INVALID')
+
+
+def _review_gate(task, attempts, packet, family, policy):
+    """#1502 WP-D (O2, D1, D3): admit one review repair from the valid FAILs per HEAD.
+
+    Each earlier review repair claim stands for a valid FAIL on its HEAD and the
+    current FAIL adds its own HEAD, so a re-review of one HEAD never counts twice.
+    A FAIL whose IDs show no blocking finding is not valid. The second repair needs
+    an RCA_CONFIRMED Debug of this family on the failed HEAD; that entry is returned.
+    """
+    from . import repair_policy
+    if review_result.blocking_findings(packet['reviewer_text_excerpt_untrusted_data']) == []:
+        _refuse('REPAIR_NO_BLOCKING_FINDING')
+    if len(attempts) >= policy['repair_max']:
+        _refuse('REPAIR_LIMIT_REACHED')
+    heads = {claim.get('head_sha'): 'FAIL' for claim in attempts}
+    heads[packet['failed_head']] = 'FAIL'
+    entries = [entry for entry in task.get('high_debug') or []
+               if type(entry) is dict and entry.get('family') == family and
+               entry.get('examined_sha') == packet['failed_head'] and
+               entry.get('status') in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED')]
+    entry = entries[-1] if entries else None
+    lineage = task.get('lineage')
+    try:
+        action = repair_policy.review_action(
+            kind=lineage.get('kind') if type(lineage) is dict else 'root',
+            fail_count=repair_policy.review_fail_count(heads),
+            debug_status=entry['status'] if entry else None, policy=policy)
+    except LLMToolError:
+        _refuse('REPAIR_LINEAGE_INVALID')
+    if action == 'DEBUG':
+        _refuse('REPAIR_DEBUG_REQUIRED')
+    if action != 'REPAIR':
+        _refuse(f'REPAIR_{action}_REQUIRED')
+    confirmed = entry is not None and entry['status'] == 'RCA_CONFIRMED'
+    code = repair_policy.admit_repair(repair_count=len(attempts), rca_confirmed=confirmed,
+                                      policy=policy)
+    if code is not None:
+        _refuse(code)
+    return entry if attempts else None
+
+
 def repair_review(*, store, task_id, executor_task, pr_number, family=None, github_get=None,
                   dispatch_adapter=None, current_head=None, auto_review=False,
                   review_dispatcher=None, delegate_callable=None,
@@ -415,8 +463,15 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                 'replayed': dispatched,
                 'next_action': (f"review-dispatch --version {packet_version + 1}"
                                 if dispatched else f"task delegate {task_id_for_repair}")}
-    if len(attempts) >= MAX_REPAIR_ATTEMPTS:
-        # Stop after two failed corrections; continue through High Debug or reassignment.
+    # #1502 WP-D: limits from policy.json; review repairs pass the counting gate.
+    rca_entry = None
+    if remote_test_receipt is None:
+        rca_entry = _review_gate(task, attempts, packet, family, _policy())
+        if rca_entry is not None:
+            packet = dict(packet,
+                          high_debug_report_untrusted_data=rca_entry['report'][:6000],
+                          high_debug_report_sha256=rca_entry['report_sha256'])
+    elif len(attempts) >= _policy()['test_fail_max']:
         _refuse('REPAIR_LIMIT_REACHED')
     # The store numbers attempts within the stored family only.
     attempt = len(stored) + 1
@@ -437,6 +492,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         'packet_sha256': packet_sha,
         'claimed_at': _now(),
     }
+    if rca_entry is not None:
+        claim['high_debug_report_sha256'] = rca_entry['report_sha256']
     next_claims = list(claims)
     if retry_claim is not None:
         retry_index = next((index for index, item in enumerate(next_claims)
