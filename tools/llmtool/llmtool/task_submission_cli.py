@@ -1006,6 +1006,22 @@ def run_task_abandon(args, *, store=None, stdout=None):
     return 0
 
 
+# #1502 WP-D D10 (spec 3-2, D4): lineage helpers for task split, replan and drop.
+
+
+def _lineage_refuse(code):
+    raise LLMToolError(code) from None
+
+
+def _lineage_of(record):
+    """A Task's lineage; a Task without one is the OPEN ROOT of its own lineage."""
+    if type(record.get('lineage')) is dict:
+        return dict(record['lineage'])
+    return {'lineage_id': record['task_id'], 'kind': 'root', 'parent': None,
+            'replaces': [], 'state': 'OPEN', 'reason': None, 'base_sha': None,
+            'recorded_at': _timestamp()}
+
+
 def run_task_remote_test(args, *, store=None, stdout=None):
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,
