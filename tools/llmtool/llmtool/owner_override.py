@@ -61,8 +61,13 @@ def validate_owner_override(override, route, *, repository, fetch_comment):
         ref_match = pattern.fullmatch(ref)
     if ref_match is None:
         _fail('OWNER_OVERRIDE_REF_INVALID')
-    issue_number = int(ref_match.group(1))
-    comment_id = int(ref_match.group(2))
+    try:
+        issue_number = int(ref_match.group(1))
+        comment_id = int(ref_match.group(2))
+    except ValueError:
+        # A digit run longer than the interpreter's int-string conversion
+        # limit is still a malformed reference, not an escaping crash.
+        _fail('OWNER_OVERRIDE_REF_INVALID')
 
     try:
         result = fetch_comment(comment_id)

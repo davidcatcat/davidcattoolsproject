@@ -1,5 +1,6 @@
 """Tests for #1502 WP-E owner model override validation."""
 
+import sys
 import unittest
 
 from llmtool.owner_override import OwnerOverrideError, validate_owner_override
@@ -113,6 +114,30 @@ class OwnerOverrideTest(unittest.TestCase):
         override = valid_override()
         override['ref'] = REF.replace('/issues/12', '/issues/012')
         self.assert_refused('OWNER_OVERRIDE_REF_INVALID', override=override)
+
+    def test_over_limit_issue_id_is_invalid(self):
+        limit = getattr(sys, 'get_int_max_str_digits', None)
+        if limit is None:
+            self.skipTest('interpreter has no int-string digit limit')
+        digits = '9' * (limit() + 1)
+        override = valid_override()
+        override['ref'] = REF.replace('/issues/12', '/issues/' + digits)
+        fetch = FakeFetch(make_comment(MARKER + '\n' + OVERRIDE_LINE))
+        self.assert_refused('OWNER_OVERRIDE_REF_INVALID',
+                            override=override, fetch=fetch)
+        self.assertEqual(fetch.calls, [])
+
+    def test_over_limit_comment_id_is_invalid(self):
+        limit = getattr(sys, 'get_int_max_str_digits', None)
+        if limit is None:
+            self.skipTest('interpreter has no int-string digit limit')
+        digits = '9' * (limit() + 1)
+        override = valid_override()
+        override['ref'] = REF.replace('issuecomment-345', 'issuecomment-' + digits)
+        fetch = FakeFetch(make_comment(MARKER + '\n' + OVERRIDE_LINE))
+        self.assert_refused('OWNER_OVERRIDE_REF_INVALID',
+                            override=override, fetch=fetch)
+        self.assertEqual(fetch.calls, [])
 
     def test_trailing_text_after_ref_is_invalid(self):
         override = valid_override()
