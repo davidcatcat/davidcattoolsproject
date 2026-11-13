@@ -10487,8 +10487,13 @@ class WaitingTaskTests(unittest.TestCase):
 
         # Codex v1 F2: a credential-shaped condition, hidden by the real, unpatched
         # screens. Assembled at runtime from parts, as test_task_store does, so no
-        # literal credential-shaped string is in this file (Owner #763 A).
-        shaped = "".join(("api", "_", "key", "=", "secret"))
+        # literal credential-shaped string is in this file (Owner #763 A). A short
+        # placeholder value may be ignored by TaskStore's screen, so the value is a
+        # full token shape (prefix plus 36 alphanumerics) that both screens flag.
+        body = "".join(chr(ord("a") + (index * 7) % 26) + str(index % 10)
+                       for index in range(18))
+        token = "".join(("gh", "p", "_", body))
+        shaped = "".join(("api", "_", "key", "=", token))
         resume = f"resume after {shaped} is rotated"
         record = self.task()
         record["waiting"]["resume_condition"] = resume
@@ -10497,6 +10502,8 @@ class WaitingTaskTests(unittest.TestCase):
         entry, text = shown(record)
         self.assertEqual(entry, hidden)
         self.assertNotIn(shaped, text)
+        self.assertNotIn(token, text)
+        self.assertNotIn(body, text)
         self.assertNotIn("api", text)
         self.assertNotIn("rotated", text)
         self.assertNotIn("QUOTA", text)
