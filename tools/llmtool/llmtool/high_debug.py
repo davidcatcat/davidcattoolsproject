@@ -1269,6 +1269,11 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
     if not isinstance(head, str) or _HEX40.fullmatch(head) is None or snap.head != head:
         _refuse('HIGH_DEBUG_HEAD_MISMATCH')
+    # #1502 WP-D D13: no AI Debug while a dispute on this PR head is OPEN. The
+    # refusal records no entry, so it uses no Debug.
+    from .review_repair import dispute_open_on
+    if dispute_open_on(task, pr_number, head):
+        _refuse('DEBUG_DISPUTE_OPEN')
     root = str(registration.root)
     entries = task.get('high_debug', [])
     if type(entries) is not list or len(entries) >= 8: _refuse('HIGH_DEBUG_LIMIT')

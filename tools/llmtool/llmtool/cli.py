@@ -53,6 +53,10 @@ TASK_ACTIONS = {
     'claude-result': ('run_task_claude_result', False),
     'complete': ('run_task_complete', False),
     'delegate': ('run_task_delegate_checked', True),
+    # #1502 WP-D D13 (security v91 F2): record and gate disputes; never runs a review.
+    # It only records a PM decision and never runs a Developer, so it does not
+    # need a fresh source (keeps the test_cli freshness set unchanged).
+    'dispute': ('run_task_dispute', False),
     'drive': ('run_task_drive', True),
     'drop': ('run_task_drop', False),
     'github-events': ('run_task_github_events', False),
