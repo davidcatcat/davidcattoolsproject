@@ -230,6 +230,7 @@ _REPO_ROOT = _LLMTOOL_ROOT.parent.parent
 _PACKAGE = _LLMTOOL_ROOT / 'llmtool'
 _MONITOR = _REPO_ROOT / 'scripts' / 'llmtool_monitor.py'
 _POLICY = _LLMTOOL_ROOT / 'worker-dispatch.json'
+_GW_ROOT_STATS = _LLMTOOL_ROOT / 'scripts' / 'gw_root_stats.py'
 
 
 def _assignments_to(name):
@@ -324,6 +325,26 @@ class RetiredIdGuardTests(unittest.TestCase):
                  and [arg.value for arg in node.args if isinstance(arg, ast.Constant)]
                  == ['worker_dispatch', 'stored_worker_id']]
         self.assertTrue(loads)
+
+    def test_audit_readers_use_the_shared_alias_and_keep_no_table(self):
+        # High Debug #1780: gw_root_stats and board_check read dispatch audits
+        # through worker_dispatch.stored_worker_id, never a table of their own.
+        stats_text = _GW_ROOT_STATS.read_text(encoding='utf-8')
+        self.assertEqual(_stray_lines(stats_text), [])
+        stats_tree = ast.parse(stats_text)
+        imported = {alias.name for node in ast.walk(stats_tree)
+                    if isinstance(node, ast.ImportFrom)
+                    and node.module == 'llmtool.worker_dispatch'
+                    for alias in node.names}
+        self.assertIn('stored_worker_id', imported)
+        board_tree = ast.parse((_PACKAGE / 'board_check.py').read_text(encoding='utf-8'))
+        self.assertTrue([node for node in ast.walk(board_tree)
+                         if isinstance(node, ast.Attribute) and node.attr == 'stored_worker_id'
+                         and isinstance(node.value, ast.Name)
+                         and node.value.id == 'worker_dispatch'])
+        for tree in (stats_tree, board_tree):
+            for table in ('RETIRED_WORKER_ALIASES', 'RETIRED_WORKER_IDS'):
+                self.assertEqual(list(_assignments_to(table)(tree)), [])
 
     def test_dispatch_policy_never_names_the_retired_id(self):
         self.assertEqual(_stray_lines(_POLICY.read_text(encoding='utf-8')), [])

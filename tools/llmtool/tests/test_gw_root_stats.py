@@ -12,7 +12,8 @@ SPEC.loader.exec_module(stats)
 
 
 # The default is the retired gw Agent id (#1502 WP-E): these fixtures are Task
-# records written before the rename, which gw_root_stats.py reads as they are.
+# records written before the rename, which gw_root_stats.py reads as gw-agent
+# through worker_dispatch.stored_worker_id (WorkerIdTests covers both ids).
 def task(task_id, request, at='2026-11-12T00:00:00Z', worker='company-gw-agent', **extra):
     audit = [{'action': 'DISPATCH', 'decision': 'ALLOWED', 'worker_key': worker, 'at': at}]
     return dict({'task_id': task_id, 'request': request, 'dispatch_audit': audit}, **extra)
@@ -31,6 +32,35 @@ class GroupRootsTests(unittest.TestCase):
         self.assertIsNone(roots['t3'][0])
         self.assertIsNone(stats.root_tag({'request': 'ROOT='}))
         self.assertEqual(stats.root_tag({'request': 'ROOT=r2. piece'}), 'r2')
+
+
+class WorkerIdTests(unittest.TestCase):
+    """#1502 WP-E: audits under the retired id and under gw-agent both count."""
+
+    def test_current_worker_id_is_gw_agent(self):
+        self.assertEqual(stats.GW_WORKER, 'gw-agent')
+
+    def test_legacy_and_new_ids_both_count_as_gw_dispatches(self):
+        for worker in ('company-gw-agent', 'gw-agent'):
+            with self.subTest(worker=worker):
+                item = task('t1', 'no tag', worker=worker)
+                self.assertEqual(stats.first_gw_dispatch(item), '2026-11-12T00:00:00Z')
+                self.assertEqual(sorted(stats.group_roots([], [item])), ['t1'])
+
+    def test_other_ids_do_not_count(self):
+        for worker in ('company-gw', 'agy', 'claude-developer', None, 7):
+            with self.subTest(worker=worker):
+                self.assertIsNone(stats.first_gw_dispatch(task('t1', 'no tag', worker=worker)))
+
+    def test_mixed_audit_uses_the_earliest_entry_of_either_id(self):
+        item = task('t1', 'no tag', at='2026-11-12T05:00:00Z', worker='gw-agent')
+        item['dispatch_audit'].append({'action': 'DISPATCH', 'decision': 'ALLOWED',
+                                       'worker_key': 'company-gw-agent',
+                                       'at': '2026-11-12T01:00:00Z'})
+        self.assertEqual(stats.first_gw_dispatch(item), '2026-11-12T01:00:00Z')
+        row = stats.root_row('t1', None, [item], {})
+        self.assertEqual((row['kind'], row['first_dispatch']),
+                         ('UNTAGGED', '2026-11-12T01:00:00Z'))
 
 
 class RootRowTests(unittest.TestCase):

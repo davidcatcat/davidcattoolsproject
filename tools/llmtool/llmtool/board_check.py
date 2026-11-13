@@ -800,6 +800,8 @@ def _dispatched_at(record):
 
     Legacy entries carry no assignment_id. They stay readable as audit history,
     but nothing binds them to this attempt, so they are not launch evidence.
+    A stored worker_key reads through worker_dispatch.stored_worker_id, so an
+    entry written under a retired worker id alias still matches (#1502 WP-E).
     """
     developer = record.get('developer')
     if type(developer) is not dict:
@@ -812,7 +814,7 @@ def _dispatched_at(record):
     audit = record.get('dispatch_audit')
     for entry in audit if type(audit) is list else []:
         if (type(entry) is not dict or entry.get('decision') != 'ALLOWED' or
-                entry.get('worker_key') != worker or
+                worker_dispatch.stored_worker_id(entry.get('worker_key')) != worker or
                 entry.get('action') not in _DISPATCH_ACTIONS or
                 entry.get('assignment_id') != assignment):
             continue

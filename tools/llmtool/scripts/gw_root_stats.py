@@ -7,11 +7,21 @@ changes no dispatch, review, CI or merge gate (#1517 lock, section 14).
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
+
+# Sibling-script bootstrap: make the llmtool package beside scripts/ importable.
+_PACKAGE_ROOT = str(Path(__file__).resolve().parents[1])
+if _PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, _PACKAGE_ROOT)
+
+from llmtool.worker_dispatch import stored_worker_id  # noqa: E402
 
 T0 = '2026-11-11T16:03:28Z'
 UNKNOWN = 'UNKNOWN'
-GW_WORKER = 'company-gw-agent'
+# #1502 WP-E: audits written before the rename carry the retired alias; they
+# read as this id through worker_dispatch.stored_worker_id.
+GW_WORKER = 'gw-agent'
 
 
 def load_jsonl(path):
@@ -45,7 +55,8 @@ def load_tasks(task_dir):
 def first_gw_dispatch(task):
     times = [entry.get('at') for entry in task.get('dispatch_audit') or []
              if isinstance(entry, dict) and entry.get('action') == 'DISPATCH'
-             and entry.get('decision') == 'ALLOWED' and entry.get('worker_key') == GW_WORKER
+             and entry.get('decision') == 'ALLOWED'
+             and stored_worker_id(entry.get('worker_key')) == GW_WORKER
              and isinstance(entry.get('at'), str)]
     return min(times) if times else None
 
