@@ -336,7 +336,19 @@ def _publish_created_pr(gh_runner, root, branch, task_id, expected_head, title, 
             f'inspect PR #{number}; it is still open and a later publish treats it as existing'))
         raise _PublishRefusal('PUBLISH_MOVED_PR_OPEN', operation)
     operation['close_attempted'] = True
-    if _gh_succeeded(gh_runner, root, ['pr', 'close', str(number), '--repo', repository]):
+    try:
+        # PR #1789 codex-reviewer v1 F1 (I4): the recovery close is an external
+        # mutation; under advance the runner re-checks the Task right before it.
+        closed = _gh_succeeded(gh_runner, root,
+                               ['pr', 'close', str(number), '--repo', repository])
+    except _ExternalActionRefused as refused:
+        # The Task became PENDING, split-reserved or ended: leave the PR open, post
+        # nothing more, and return the refusal with this call's operation record.
+        operation.update(close_attempted=False, outcome='CLOSE_REFUSED_LEFT_OPEN',
+                         next_action=(f'inspect PR #{number}; it is still open because the '
+                                      f'Task took no further external action ({refused.code})'))
+        raise _PublishRefusal(refused.code, operation) from None
+    if closed:
         code = 'PUBLISH_HEAD_MOVED'
         operation.update(outcome='CLOSED', next_action=(
             'publish again; the branch stays pushed and a later publish may open a new PR'))
@@ -2589,13 +2601,16 @@ def _advance_refused(task_id, code):
 # advance step re-reads the Task under its update lock right before it runs
 # (TaskStore.check_external_action) and is refused for a PENDING split
 # reservation, and (PR #1789 v91 F1) for an ended lineage: TASK_LINEAGE_ENDED.
-# Reads, and the cleanup or record of an action this call already took, are
-# never refused, so a refusal never leaves a half-done action behind. A lineage
-# end takes the advance lease exclusively (task_store.end_lineage), so no end
-# lands while an advance holding that lease runs.
+# Reads, and the record comment of an action this call already took, are never
+# refused, so a refusal never leaves a half-done action unrecorded. Every other
+# GitHub mutation is re-checked, including the publish-recovery `pr close`
+# (PR #1789 codex-reviewer v1 F1): a refused close leaves the PR open and returns
+# the refusal (_publish_created_pr). A lineage end takes the advance lease
+# exclusively (task_store.end_lineage), so no end lands while an advance
+# holding that lease runs.
 _ENDED_NOT_MERGED = frozenset(('DROPPED', 'STOPPED', 'FAILED_FINAL'))
 _EXTERNAL_GIT = frozenset(('add', 'commit', 'merge', 'push'))
-_READ_OR_CLEANUP_GH = (['pr', 'list'], ['pr', 'view'], ['pr', 'close'], ['api', 'user'],
+_READ_OR_CLEANUP_GH = (['pr', 'list'], ['pr', 'view'], ['api', 'user'],
                        # The merge claim, a locked compare-and-set that the store
                        # refuses for a PENDING or ended Task, is the re-check of
                        # the merge.

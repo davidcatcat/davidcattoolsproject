@@ -5561,6 +5561,105 @@ class SplitVsAdvanceTests(unittest.TestCase):
                 github_get=lambda path: self.fail(f'unexpected read: {path}'))
         return result, log, opened, store
 
+    MOVED_URL, STALE = 'https://github.com/owner/repo/pull/41', 'f' * 40
+
+    def run_moved_publish(self, case, *, inject_at=None, inject=None):
+        """Publish whose created PR #41 never reaches the tip: the recovery close runs.
+
+        Returns (result, log, closed PR numbers, posted comments).
+        """
+        log, closed, comments, sent = [], [], [], {}
+        overlay = {'developer': {'state': 'DEVELOPER_RESPONDED',
+                                 'write_paths': list(self.WRITE_PATHS)},
+                   'completion': {'executor_task_id': self.EXEC, 'state': 'WAITING_REVIEW',
+                                  'evidence': {}},
+                   'review_dispatch_claim': [], 'review_repair_claims': [],
+                   'completion_events': [], 'remote_test_outcomes': [],
+                   'remote_test_receipts': []}
+        store = SplitAdvanceStore(self.real, case['child'], overlay, log,
+                                  inject_at=inject_at, inject=inject)
+
+        def head():
+            return case['git'](['rev-parse', 'HEAD']).strip()
+
+        def git_runner(root, args):
+            log.append(('git', args[0]))
+            return subprocess.run(['git', *args], cwd=root, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  check=False)
+
+        def gh(_root, args):
+            args = list(args)
+            log.append(('gh', ' '.join(args[:2])))
+            reply = {'pr list': (json.dumps([{'number': 41, 'headRefOid': self.STALE}]
+                                            if sent else [])),
+                     'repo view': json.dumps({'nameWithOwner': 'owner/repo'}),
+                     'api user': json.dumps({'login': 'ai-bot'})}.get(' '.join(args[:2]), '')
+            if args[:2] == ['pr', 'create']:
+                sent.update(title=args[args.index('--title') + 1],
+                            body=args[args.index('--body') + 1])
+                reply = self.MOVED_URL + '\n'
+            elif args[:2] == ['pr', 'view']:
+                reply = json.dumps({
+                    'number': 41, 'url': self.MOVED_URL, 'headRefName': self.BRANCH,
+                    'headRefOid': self.STALE, 'isCrossRepository': False, 'state': 'OPEN',
+                    'author': {'login': 'ai-bot'}, 'title': sent['title'],
+                    'body': sent['body']})
+            elif args[:2] == ['pr', 'close']:
+                closed.append(int(args[2]))
+            elif args[:2] == ['pr', 'comment']:
+                comments.append(args)
+            return subprocess.CompletedProcess(['gh', *args], 0, reply.encode(), b'')
+
+        def remote_test(args, *, store):
+            log.append(('ec2', 'remote-test'))
+            overlay['remote_test_receipts'].append(remote_receipt(
+                store.get(case['child']), source_sha=args.sha, executor_task=self.EXEC))
+            return 0
+
+        binding = {'root': case['repo'], 'task_id': self.EXEC, 'branch': self.BRANCH,
+                   'common_dir': os.path.join(case['base'], 'canonical', '.git'),
+                   'result_head': head(), 'recorded_result_head': None,
+                   'dirty': True, 'state': 'DIRTY'}
+        with patch.object(task_advance, '_d6_snapshot', return_value=binding), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(task_advance, '_publish_pause'), \
+             patch.object(task_submission_cli, 'run_task_remote_test', side_effect=remote_test):
+            result = task_advance.advance(
+                task_id=case['child'], store=store, publish_git_runner=git_runner,
+                publish_gh_runner=gh, record_result_call=lambda **_kwargs: head(),
+                github_get=lambda path: self.fail(f'unexpected read: {path}'))
+        return result, log, closed, comments
+
+    def moved_baseline(self, case):
+        """Run the moved publish once; return the re-check number guarding the close."""
+        result, log, closed, comments = self.run_moved_publish(case)
+        self.assertEqual(result['codes'], ['PUBLISH_HEAD_MOVED'])
+        self.assertEqual(result['publish_operation']['outcome'], 'CLOSED')
+        self.assertEqual((closed, len(comments)), ([41], 1))
+        close = log.index(('gh', 'pr close'))
+        self.assertEqual(log[close - 1][0], 'check')  # the close is a guarded action
+        self.assertNotEqual(log[log.index(('gh', 'pr comment')) - 1][0], 'check')
+        return log[close - 1][1]
+
+    def test_a_reservation_right_before_the_recovery_close_is_refused(self):
+        # PR #1789 codex-reviewer v1 F1: the publish-recovery `gh pr close` is an
+        # external mutation and is re-checked under the Task lock right before it.
+        at = self.moved_baseline(self.publish_case())
+        case = self.publish_case()
+        result, log, closed, comments = self.run_moved_publish(
+            case, inject_at=at, inject=self.reservation_past_lease(case['root'], case['child']))
+        # The PENDING Task takes no store write either, so its record also refuses.
+        self.assertEqual(result['codes'],
+                         ['TASK_LINEAGE_PENDING', 'PUBLISH_OPERATION_RECORD_FAILED'])
+        self.assertEqual(log[-1], ('check', at))
+        self.assertEqual((closed, comments), ([], []))
+        operation = result['publish_operation']
+        self.assertEqual((operation['pr'], operation['close_attempted'],
+                          operation['outcome'], operation['record_comment']),
+                         (41, False, 'CLOSE_REFUSED_LEFT_OPEN', 'NOT_POSTED'))
+        self.assert_reserved(case['child'])
+
     def test_a_split_at_each_publish_step_is_refused(self):
         baseline, log, opened, store = self.run_publish(self.publish_case())
         self.assertEqual((baseline['codes'], baseline['pr']), ([], 23))
@@ -5749,6 +5848,9 @@ class EndVsAdvanceTests(unittest.TestCase):
     run_review = SplitVsAdvanceTests.run_review
     run_merge = SplitVsAdvanceTests.run_merge
     guarded = staticmethod(SplitVsAdvanceTests.guarded)
+    MOVED_URL, STALE = SplitVsAdvanceTests.MOVED_URL, SplitVsAdvanceTests.STALE
+    run_moved_publish = SplitVsAdvanceTests.run_moved_publish
+    moved_baseline = SplitVsAdvanceTests.moved_baseline
 
     def split(self, root, child):
         task_submission_cli.lineage_split(
@@ -5817,6 +5919,37 @@ class EndVsAdvanceTests(unittest.TestCase):
                 self.assertEqual(refused_log, log[:log.index(('check', at)) + 1])
                 self.assertEqual(refused_opened, [])
                 self.assertEqual(self.state(case['child']), 'DROPPED')
+
+    def test_an_end_right_before_the_recovery_close_is_refused(self):
+        # PR #1789 codex-reviewer v1 F1: the publish-recovery `gh pr close` goes
+        # through the same per-action re-check as every other external step.
+        at = self.moved_baseline(self.ended_publish_case())
+        with self.subTest(injection='end'):
+            case, seen = self.ended_publish_case(), []
+            result, _log, closed, comments = self.run_moved_publish(
+                case, inject_at=at, inject=self.real_end(case['child'], seen))
+            self.assertEqual(seen, ['LINEAGE_TASK_ADVANCING'])  # the lease keeps it out
+            self.assertEqual(result['codes'], ['PUBLISH_HEAD_MOVED'])
+            self.assertEqual((closed, len(comments)), ([41], 1))
+            self.assertEqual(self.state(case['child']), 'OPEN')
+        with self.subTest(injection='end past lease'):
+            case = self.ended_publish_case()
+            result, log, closed, comments = self.run_moved_publish(
+                case, inject_at=at, inject=self.end_past_lease(case['child']))
+            self.assertEqual(result['codes'], ['TASK_LINEAGE_ENDED'])
+            self.assertNotIn('open_pr', result)
+            # The PR stays open: no close and no record comment were sent.
+            self.assertEqual(log[-1], ('check', at))
+            self.assertEqual((closed, comments), ([], []))
+            operation = result['publish_operation']
+            self.assertEqual((operation['pr'], operation['recheck'],
+                              operation['close_attempted'], operation['outcome'],
+                              operation['record_comment']),
+                             (41, 'PASS', False, 'CLOSE_REFUSED_LEFT_OPEN', 'NOT_POSTED'))
+            self.assertIn('TASK_LINEAGE_ENDED', operation['next_action'])
+            # The refusal is recorded on the Task.
+            self.assertEqual(self.real.get(case['child'])['publish_operations'], [operation])
+            self.assertEqual(self.state(case['child']), 'DROPPED')
 
     def test_an_end_at_review_or_repair_dispatch_is_refused(self):
         for step, changes, action in self.REVIEW_STEPS:
