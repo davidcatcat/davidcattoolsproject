@@ -19,7 +19,8 @@ from llmtool import task_review as r
 from llmtool.errors import LLMToolError
 from llmtool.providers.claude_cli import decode_review_envelope
 from test_review_authority import (
-    FAKE_SCRIPT, FixtureObserver, LOAD_TOLERANT_TIMEOUT_SECONDS, WorkerHarness)
+    FAKE_SCRIPT, FixtureObserver, LOAD_TOLERANT_TIMEOUT_SECONDS, REVIEW_MODEL,
+    WorkerHarness)
 from llmtool import task_completion
 from llmtool import worker_dispatch
 import review_trust_fixture
@@ -302,10 +303,13 @@ class ReviewHandoffTests(unittest.TestCase):
         self.assertEqual(receipt.runtime_session_id, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')
         self.assertEqual(receipt.identity_source, 'CLI_REPORTED_RUNTIME_ID')
         argv = json.loads(h.argv_file.read_text())
+        # #1502 WP-E R1: the launched model is exactly the route model the
+        # fixture requested, which the registry admits; never a substitute.
+        self.assertEqual(h.policy.model, REVIEW_MODEL)
         self.assertEqual(
             argv,
             ['--print', '--output-format', 'json', '--no-session-persistence',
-             '--safe-mode', '--tools', 'WebSearch,WebFetch', '--model', 'fake-model'],
+             '--safe-mode', '--tools', 'WebSearch,WebFetch', '--model', REVIEW_MODEL],
         )
         tools = argv[argv.index('--tools') + 1].split(',')
         self.assertFalse({'Read', 'Write', 'Edit', 'Bash'}.intersection(tools))
