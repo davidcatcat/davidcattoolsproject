@@ -10569,13 +10569,13 @@ class WaitingTaskTests(unittest.TestCase):
         self.assertIn("已等 0 分鐘", mon.waiting_lines([ahead], self.NOW)[0][0])
         # Codex v1 F1: one row per WAITING Task, never a cap with an aggregate count.
         many = [replace(record, task=f"{index:08x}") for index in range(12)]
-        rows = mon.waiting_lines(many, self.NOW, problem="只讀最近 32 筆 task，較舊的未確認")
+        rows = mon.waiting_lines(many, self.NOW, problem=mon.REMOTE_TEST_OVER_BUDGET)
         self.assertEqual(len(rows), len(many) + 1)
         self.assertEqual(rows[:-1], [
             (f"WAITING：task {index:08x}（QUOTA，已等 3 小時）恢復條件：{self.RESUME}", "")
             for index in range(12)])
         self.assertFalse(any("另有" in line for line, _ in rows))
-        self.assertEqual(rows[-1], ("WAITING 清單可能不完整：只讀最近 32 筆 task，較舊的未確認", ""))
+        self.assertEqual(rows[-1], (f"WAITING 清單可能不完整：{mon.REMOTE_TEST_OVER_BUDGET}", ""))
         # Every row also reaches the office view, which wraps rows but drops none.
         view = mon.office_view([], top=mon.office_top(None, [], self.NOW, waiting=rows))
         for index in range(12):
@@ -10599,15 +10599,79 @@ class WaitingTaskTests(unittest.TestCase):
             with patch.object(mon, "LLMTOOL_TASKS", root):
                 self.assertEqual(mon.waiting_records(), (records, ""))
 
+    def _write_tasks(self, root, payloads):
+        """Write Task files oldest first, one second apart, in the given order."""
+        for index, (task_id, payload) in enumerate(payloads):
+            path = Path(root) / f"{task_id}.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            os.chmod(path, 0o600)
+            os.utime(path, (self.NOW - 1000 + index, self.NOW - 1000 + index))
+
+    def test_waiting_records_include_a_task_older_than_the_newest_window(self):
+        """Codex v1 F1 on PR #1744: no newest-32 window drops a WAITING Task."""
+        newer = [(f"{index + 1:032x}", {"task_id": f"{index + 1:032x}"})
+                 for index in range(mon.REMOTE_TEST_FILES + 8)]
+        with tempfile.TemporaryDirectory() as root:
+            # The WAITING Task is the oldest file, outside the newest 32.
+            self._write_tasks(root, [(self.TASK, self.task())] + newer)
+            self.assertNotIn(os.path.join(root, f"{self.TASK}.json"),
+                             mon._remote_test_paths(root)[0])
+            records, problem = mon.waiting_records(root)
+            self.assertEqual(records, [mon._waiting_entry(self.task())])
+            self.assertEqual(problem, "")
+            # Several old WAITING Tasks each keep their own record.
+            many = [(f"{index:x}" * 32, self.task(task=f"{index:x}" * 32))
+                    for index in range(10, 16)]
+        with tempfile.TemporaryDirectory() as root:
+            self._write_tasks(root, many + newer)
+            records, problem = mon.waiting_records(root)
+            self.assertEqual(sorted(record.task for record in records),
+                             [f"{index:x}" * 8 for index in range(10, 16)])
+            self.assertEqual(problem, "")
+
+    def test_waiting_records_fill_in_over_later_reads_and_name_the_shortfall(self):
+        plain = [(f"{index + 1:032x}", {"task_id": f"{index + 1:032x}"}) for index in range(40)]
+        with tempfile.TemporaryDirectory() as root:
+            self._write_tasks(root, [(self.TASK, self.task())] + plain)
+            waiting_size = (Path(root) / f"{self.TASK}.json").stat().st_size
+            # A budget that fits the WAITING file only when nothing newer needs reading.
+            with patch.object(mon, "WAITING_BUDGET", waiting_size):
+                first = mon.waiting_records(root)
+                self.assertEqual(first, ([], mon.REMOTE_TEST_OVER_BUDGET))
+                results = [first]
+                for _ in range(60):
+                    results.append(mon.waiting_records(root))
+                    if results[-1][1] == "":
+                        break
+            self.assertEqual(results[-1], ([mon._waiting_entry(self.task())], ""))
+            # Every short read named the shortfall; none claimed a complete list.
+            self.assertTrue(all(problem == mon.REMOTE_TEST_OVER_BUDGET
+                                for _, problem in results[:-1]))
+            self.assertGreater(len(results), 2)
+
     def test_waiting_records_name_an_incomplete_listing(self):
-        with patch.object(mon, "_bounded_task_entries", return_value=([], "")), \
-                patch.object(mon, "_remote_test_paths",
-                             return_value=(["p"] * mon.REMOTE_TEST_FILES, False)):
-            self.assertEqual(mon.waiting_records("root"),
-                             ([], f"只讀最近 {mon.REMOTE_TEST_FILES} 筆 task，較舊的未確認"))
+        with patch.object(mon, "_task_paths_all", return_value=([], True)):
+            self.assertEqual(mon.waiting_records("root"), ([], mon.REMOTE_TEST_CAPPED))
         with patch.object(mon, "_bounded_task_entries",
                           return_value=([], mon.REMOTE_TEST_OVER_BUDGET)):
             self.assertEqual(mon.waiting_records("root"), ([], mon.REMOTE_TEST_OVER_BUDGET))
+        # A full folder no longer counts as incomplete by itself.
+        with patch.object(mon, "_bounded_task_entries", return_value=([], "")), \
+                patch.object(mon, "_remote_test_paths",
+                             return_value=(["p"] * mon.REMOTE_TEST_FILES, False)):
+            self.assertEqual(mon.waiting_records("root"), ([], ""))
+
+    def test_task_paths_all_lists_every_file_newest_first(self):
+        with tempfile.TemporaryDirectory() as root:
+            payloads = [(f"{index + 1:032x}", {"task_id": f"{index + 1:032x}"})
+                        for index in range(mon.REMOTE_TEST_FILES + 5)]
+            self._write_tasks(root, payloads)
+            paths, capped = mon._task_paths_all(root)
+            self.assertFalse(capped)
+            self.assertEqual(paths, [os.path.join(root, f"{task_id}.json")
+                                     for task_id, _ in reversed(payloads)])
+            newest, _ = mon._remote_test_paths(root)
+            self.assertEqual(newest, paths[:mon.REMOTE_TEST_FILES])
 
     def test_monitor_lines_and_office_top_placement(self):
         from types import SimpleNamespace

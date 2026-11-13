@@ -6874,6 +6874,7 @@ EC2_HEAD_BUDGET = 4 << 20
 REMOTE_TEST_CAPPED = "task 目錄超過上限，結果可能不是最新"
 REMOTE_TEST_OVER_BUDGET = "task 紀錄超過讀取上限，結果可能不是最新"
 _remote_test_listing: dict = {}   # root -> (folder mtime_ns, listed at, newest paths, capped)
+_task_all_listing: dict = {}      # the same, but every path the listing saw
 _remote_test_parsed: dict = {}    # root -> {path: ((st_ino, st_mtime_ns, st_size), entries)}
 _ec2_parsed: dict = {}
 STUCK_REVIEW = 3600
@@ -7029,15 +7030,16 @@ def _waiting_entry(record) -> WaitingRecord | None:
 
 
 def waiting_records(root: str | None = None) -> tuple[list[WaitingRecord], str]:
-    """Read bounded cached WAITING records; the second value names any shortfall."""
+    """Read bounded cached WAITING records; the second value names any shortfall.
+
+    Every Task file in the folder is considered, not only the newest
+    REMOTE_TEST_FILES (Codex v1 F1 on PR #1744), so an old WAITING Task still
+    gets its row. The byte budget bounds new reads per call; unchanged files
+    come from the cache, so a short first read is completed on later calls and
+    is named as a shortfall until then."""
     root = LLMTOOL_TASKS if root is None else root
-    entries, problem = _bounded_task_entries(root, _waiting_parsed, WAITING_BUDGET,
-                                             _waiting_entry)
-    if not problem:
-        paths, _ = _remote_test_paths(root)
-        if len(paths) >= REMOTE_TEST_FILES:
-            problem = f"只讀最近 {REMOTE_TEST_FILES} 筆 task，較舊的未確認"
-    return entries, problem
+    return _bounded_task_entries(root, _waiting_parsed, WAITING_BUDGET, _waiting_entry,
+                                 listing=_task_paths_all, files=None)
 
 
 def waiting_notice_due(reason, since, now, hours=WAITING_NOTIFY_HOURS) -> bool:
@@ -7191,11 +7193,24 @@ def _remote_test_paths(root: str) -> tuple[list, bool]:
     stopped at REMOTE_TEST_SCAN entries). The folder is listed again only when
     its mtime changes (TaskStore writes by rename, which changes it) or after
     REMOTE_TEST_RELIST seconds; otherwise only the kept paths are looked at again."""
+    return _task_listing(root, REMOTE_TEST_FILES, _remote_test_listing)
+
+
+def _task_paths_all(root: str) -> tuple[list, bool]:
+    """Like _remote_test_paths, but every *.json path the listing saw, newest
+    first, not only the newest REMOTE_TEST_FILES (Codex v1 F1 on PR #1744: a
+    WAITING Task must get its row however old its file is)."""
+    return _task_listing(root, None, _task_all_listing)
+
+
+def _task_listing(root: str, limit, cache: dict) -> tuple[list, bool]:
+    """(the newest `limit` *.json paths in root, or all of them when limit is
+    None, newest first; whether the listing stopped at REMOTE_TEST_SCAN)."""
     try:
         folder = os.stat(root).st_mtime_ns
     except OSError:
         return [], False
-    kept = _remote_test_listing.get(root)
+    kept = cache.get(root)
     if kept and kept[0] == folder and time.monotonic() - kept[1] < REMOTE_TEST_RELIST:
         return kept[2], kept[3]
     stamped, seen, capped = [], 0, False
@@ -7216,10 +7231,12 @@ def _remote_test_paths(root: str) -> tuple[list, bool]:
                     continue
     except OSError:
         return [], False
-    paths = [path for _, path in heapq.nlargest(REMOTE_TEST_FILES, stamped)]
-    if len(_remote_test_listing) >= 8:
-        _remote_test_listing.clear()   # one root in use; tests pass many
-    _remote_test_listing[root] = (folder, time.monotonic(), paths, capped)
+    newest = (sorted(stamped, reverse=True) if limit is None
+              else heapq.nlargest(limit, stamped))
+    paths = [path for _, path in newest]
+    if len(cache) >= 8:
+        cache.clear()   # one root in use; tests pass many
+    cache[root] = (folder, time.monotonic(), paths, capped)
     return paths, capped
 
 
@@ -7331,9 +7348,15 @@ def _task_load(path: str, budget: int):
     return key, _remote_test_json(raw) if raw else None, len(raw or b"")
 
 
-def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
-    """Read bounded, unchanged-cached Task records through a field extractor."""
-    paths, capped = _remote_test_paths(root)
+def _bounded_task_entries(root: str, cache: dict, budget: int, extract,
+                          listing=None, files=REMOTE_TEST_FILES):
+    """Read bounded, unchanged-cached Task records through a field extractor.
+
+    By default only the newest REMOTE_TEST_FILES files; `listing` and `files`
+    (None: no count limit) widen that. `budget` bounds the bytes newly read per
+    call, newest first; an unchanged file is served from the cache for free, so
+    a wide listing that runs short now is filled in on later calls."""
+    paths, capped = (_remote_test_paths if listing is None else listing)(root)
     stamped = []
     for path in paths:
         try:
@@ -7345,7 +7368,7 @@ def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
                             (info.st_ino, info.st_mtime_ns, info.st_size), info.st_nlink))
     short, kept, entries = False, {}, []
     parsed = cache.get(root, {})
-    for _, path, key, link_count in sorted(stamped, reverse=True)[:REMOTE_TEST_FILES]:
+    for _, path, key, link_count in sorted(stamped, reverse=True)[:files]:
         if link_count != 1:
             continue
         if key[2] > REMOTE_TEST_READ:
