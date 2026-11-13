@@ -9,12 +9,19 @@ may truncate the ledger while recovering an interrupted append; check() may
 also write .head. record() can raise after its line persists,
 so callers must treat that result as outcome unknown. The ledger is limited to
 16 MiB and uses an untimed exclusive flock.
+
+Role-card delivery (#1502 WP-F design 3.7): record_card_delivery() appends a
+CONTROLLER_DELIVERED receipt that also binds route, base commit and per-card
+sha256; check() verifies it like any other receipt. record_not_delivered()
+appends a NOT_DELIVERED event with a fixed reason code; it is never verified
+evidence, check() ignores it and task_summary() reads it as UNVERIFIED.
 """
 
 import fcntl
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 from datetime import datetime, timedelta, timezone
@@ -29,6 +36,21 @@ _BINDING_FIELDS = ('task_id', 'run_id', 'session_id', 'agent_id', 'role',
                    'provider', 'model', 'repo', 'head', 'manifest_sha256')
 _GENESIS = '0' * 64
 _MAX_BYTES = 16 * 1024 * 1024
+
+CONTROLLER_DELIVERED = 'CONTROLLER_DELIVERED'
+NOT_DELIVERED = 'NOT_DELIVERED'
+# Fixed reason codes for a route run that did not receive its role cards.
+NOT_DELIVERED_REASONS = frozenset((
+    'ROUTE_NOT_SUPPORTED',  # the route has no rule-delivery field yet (gw-agent)
+    'ROUTE_UNKNOWN',        # no role-card table entry for the route
+    'CARD_READ_FAILED',     # a card could not be read from the base commit
+    'PREFIX_TOO_LARGE',     # the Developer prefix exceeds its size budget
+))
+_MAX_CARDS = 16
+_MAX_CARD_PATH = 512
+_ROUTE_RE = re.compile(r'[a-z0-9][a-z0-9-]{0,63}')
+_COMMIT_RE = re.compile(r'[0-9a-fA-F]{40}')
+_SHA256_RE = re.compile(r'[0-9a-f]{64}')
 
 
 class SkillLedgerError(LLMToolError):
@@ -383,8 +405,8 @@ def _append_locked(path, records, entry):
         _fail('LEDGER_UNREADABLE')
 
 
-def record(entry, *, ttl_seconds=86400):
-    """Append an observed delivery record; evidence level must be explicit."""
+def _binding_value(entry, ttl_seconds):
+    """Validate a receipt entry and return its binding fields and level."""
     if type(entry) is not dict or type(ttl_seconds) is not int or ttl_seconds <= 0:
         _fail('INVALID_ENTRY')
     evidence_level = entry.get('evidence_level')
@@ -392,13 +414,18 @@ def record(entry, *, ttl_seconds=86400):
         _fail('INVALID_EVIDENCE_LEVEL')
     if any(type(entry.get(key)) is not str or not entry[key] for key in _BINDING_FIELDS):
         _fail('INVALID_ENTRY')
+    value = {key: entry[key] for key in _BINDING_FIELDS}
+    value['evidence_level'] = evidence_level
+    return value
+
+
+def _stamped(value, ttl_seconds):
+    """Add receipt metadata and prove the value encodes canonically."""
     try:
         created = datetime.now(timezone.utc)
-        value = {key: entry[key] for key in _BINDING_FIELDS}
         value.update({
             'schema_version': SCHEMA_VERSION,
             'receipt_id': secrets.token_hex(16),
-            'evidence_level': entry['evidence_level'],
             'status': 'ACTIVE',
             'created_at': created.isoformat(timespec='seconds').replace('+00:00', 'Z'),
             'expires_at': (created + timedelta(seconds=ttl_seconds)).isoformat(
@@ -409,6 +436,93 @@ def record(entry, *, ttl_seconds=86400):
         _canonical(value)
     except (TypeError, ValueError, UnicodeError, OverflowError):
         _fail('INVALID_ENTRY')
+    return value
+
+
+def _valid_route(route):
+    return type(route) is str and _ROUTE_RE.fullmatch(route) is not None
+
+
+def _card_digests(cards):
+    """Return a copy of [{path, sha256}] card digests, or fail INVALID_ENTRY."""
+    if type(cards) is not list or not 1 <= len(cards) <= _MAX_CARDS:
+        _fail('INVALID_ENTRY')
+    result = []
+    seen = set()
+    for card in cards:
+        if type(card) is not dict or set(card) != {'path', 'sha256'}:
+            _fail('INVALID_ENTRY')
+        path = card['path']
+        digest = card['sha256']
+        if (type(path) is not str or not path or len(path) > _MAX_CARD_PATH or
+                path in seen or type(digest) is not str or
+                _SHA256_RE.fullmatch(digest) is None):
+            _fail('INVALID_ENTRY')
+        seen.add(path)
+        result.append({'path': path, 'sha256': digest})
+    return result
+
+
+def record(entry, *, ttl_seconds=86400):
+    """Append an observed delivery record; evidence level must be explicit."""
+    value = _stamped(_binding_value(entry, ttl_seconds), ttl_seconds)
+    return _append_new(value)
+
+
+def record_card_delivery(entry, *, ttl_seconds=86400):
+    """Append a CONTROLLER_DELIVERED receipt bound to role-card digests.
+
+    ``entry`` holds every binding field plus ``route``, ``base_commit`` (the
+    40-hex commit the cards were read from) and ``cards`` (a list of
+    ``{'path', 'sha256'}``). ``evidence_level`` may be omitted; any value
+    other than CONTROLLER_DELIVERED is refused.
+    """
+    if type(entry) is not dict:
+        _fail('INVALID_ENTRY')
+    level = entry.get('evidence_level', CONTROLLER_DELIVERED)
+    if level != CONTROLLER_DELIVERED:
+        _fail('INVALID_EVIDENCE_LEVEL')
+    value = _binding_value({**entry, 'evidence_level': level}, ttl_seconds)
+    route = entry.get('route')
+    base_commit = entry.get('base_commit')
+    if (not _valid_route(route) or type(base_commit) is not str or
+            _COMMIT_RE.fullmatch(base_commit) is None):
+        _fail('INVALID_ENTRY')
+    value.update(route=route, base_commit=base_commit.lower(),
+                 cards=_card_digests(entry.get('cards')))
+    return _append_new(_stamped(value, ttl_seconds))
+
+
+def record_not_delivered(entry, *, ttl_seconds=86400):
+    """Append a NOT_DELIVERED event for one route run with a fixed reason.
+
+    ``entry`` holds ``task_id``, ``run_id``, ``role``, ``route`` and
+    ``reason_code`` (one of NOT_DELIVERED_REASONS). The event is stored with
+    evidence level UNVERIFIED and never verifies.
+    """
+    if type(entry) is not dict or type(ttl_seconds) is not int or ttl_seconds <= 0:
+        _fail('INVALID_ENTRY')
+    if any(type(entry.get(key)) is not str or not entry[key]
+           for key in ('task_id', 'run_id', 'role')):
+        _fail('INVALID_ENTRY')
+    if not _valid_route(entry.get('route')):
+        _fail('INVALID_ENTRY')
+    reason = entry.get('reason_code')
+    if type(reason) is not str or reason not in NOT_DELIVERED_REASONS:
+        _fail('INVALID_REASON')
+    value = {
+        'entry_type': NOT_DELIVERED,
+        'task_id': entry['task_id'],
+        'run_id': entry['run_id'],
+        'role': entry['role'],
+        'route': entry['route'],
+        'reason_code': reason,
+        'evidence_level': 'UNVERIFIED',
+    }
+    return _append_new(_stamped(value, ttl_seconds))
+
+
+def _append_new(value):
     path = _path()
     lock_fd = _locked(path)
     try:
@@ -449,8 +563,10 @@ def check(task_id, run_id, session_id, agent_id, role, provider, model, repo,
             return {'status': 'UNVERIFIED', 'reason': 'LEDGER_UNREADABLE'}
         if not recovered:
             return {'status': 'UNVERIFIED', 'reason': 'CHAIN_BROKEN'}
+        # NOT_DELIVERED events are never receipts, so they never verify and
+        # never steer the mismatch reason.
         by_id = [item for item in records if item.get('receipt_id') and
-                 item.get('entry_type') != 'REVOCATION']
+                 item.get('entry_type') not in ('REVOCATION', NOT_DELIVERED)]
         supplied = (task_id, run_id, session_id, agent_id, role, provider,
                     model, repo, head, manifest_sha256)
         fields = _BINDING_FIELDS

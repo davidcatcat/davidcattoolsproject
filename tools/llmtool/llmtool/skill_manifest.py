@@ -22,9 +22,26 @@ SKILL_MANIFEST_NOT_UTF8 = 'SKILL_MANIFEST_NOT_UTF8'
 SKILL_MANIFEST_TOO_LARGE = 'SKILL_MANIFEST_TOO_LARGE'
 SKILL_MANIFEST_ROLE_INVALID = 'SKILL_MANIFEST_ROLE_INVALID'
 SKILL_MANIFEST_GATE_INVALID = 'SKILL_MANIFEST_GATE_INVALID'
+SKILL_MANIFEST_ROUTE_INVALID = 'SKILL_MANIFEST_ROUTE_INVALID'
+SKILL_MANIFEST_PREFIX_TOO_LARGE = 'SKILL_MANIFEST_PREFIX_TOO_LARGE'
 
 MAX_SKILL_FILE_SIZE = 1024 * 1024
+# WP-F design 3.7: the whole Developer rule prefix (common core + card) stays
+# within 14 KiB so at least 50 KiB of a 64 KiB prompt is left for the Task.
+MAX_DEVELOPER_PREFIX_SIZE = 14 * 1024
 GIT_READ_TIMEOUT_SECONDS = 10
+
+DEVELOPER_CARD_PATH = 'skills/role-cards/developer.md'
+# Role-card table (WP-F design 3.7, #1502): common core first, then the
+# Developer card, in prompt order. The common core stays in the route's own
+# entrypoint file until the WP-H slimming (design section 4). The card file
+# holds every route appendix, so all Developer routes share one card.
+_ROLE_CARD_TABLE = {
+    'agy': ('AGENTS.md', DEVELOPER_CARD_PATH),
+    'claude-developer': ('CLAUDE.md', DEVELOPER_CARD_PATH),
+    'gw-agent': ('AGENTS.md', DEVELOPER_CARD_PATH),
+    'opencode-developer': ('AGENTS.md', DEVELOPER_CARD_PATH),
+}
 
 _BASE_PATHS = (
     'AGENTS.md',
@@ -212,6 +229,33 @@ def build_manifest(repo_root, commit, role, gate, git_runner=subprocess.run,
         task_paths = tuple(path for path in paths if path not in _BASE_PATHS)
         paths = tuple(sorted(_CLAUDE_BASE_PATHS + task_paths))
 
+    _verify_commit_object(git_runner, repo_root, commit)
+
+    entries = []
+    for path in paths:
+        content = _read_blob(git_runner, repo_root, commit, path)
+        entries.append({
+            'path': path,
+            'sha256': hashlib.sha256(content).hexdigest(),
+            'size': len(content),
+        })
+
+    manifest = {
+        'schema_version': 1,
+        'commit': commit.lower(),
+        'role': role,
+        'gate': gate,
+        'entries': entries,
+    }
+    canonical = json.dumps(
+        manifest, sort_keys=True, separators=(',', ':'), ensure_ascii=True,
+    ).encode('utf-8')
+    manifest['manifest_sha256'] = hashlib.sha256(canonical).hexdigest()
+    return manifest
+
+
+def _verify_commit_object(git_runner, repo_root, commit):
+    """Refuse unless repo_root is the top level and commit names a commit."""
     top = _run_git(
         git_runner, repo_root,
         ['rev-parse', '--show-toplevel'],
@@ -236,27 +280,65 @@ def build_manifest(repo_root, commit, role, gate, git_runner=subprocess.run,
             != commit.lower().encode('ascii')):
         _raise(SKILL_MANIFEST_COMMIT_INVALID)
 
-    entries = []
-    for path in paths:
+
+def role_card_routes():
+    """Return the sorted Developer routes that have a role-card entry."""
+    return tuple(sorted(_ROLE_CARD_TABLE))
+
+
+def build_role_cards(repo_root, base_commit, route, git_runner=subprocess.run):
+    """Return common core + Developer card text for one Developer route.
+
+    Every card is read from Git objects at ``base_commit``, never from the
+    working tree. Callers pass the dispatch base commit on ``main``, never a
+    D6 or PR head. Refuses an unknown route (SKILL_MANIFEST_ROUTE_INVALID)
+    and a prefix whose total card bytes exceed MAX_DEVELOPER_PREFIX_SIZE
+    (SKILL_MANIFEST_PREFIX_TOO_LARGE). ``cards_sha256`` covers the commit,
+    route and each card's path, sha256 and size, not the text itself.
+    """
+    if type(route) is not str or route not in _ROLE_CARD_TABLE:
+        _raise(SKILL_MANIFEST_ROUTE_INVALID)
+    if type(base_commit) is not str or _COMMIT_RE.fullmatch(base_commit) is None:
+        _raise(SKILL_MANIFEST_COMMIT_INVALID)
+    _verify_commit_object(git_runner, repo_root, base_commit)
+
+    commit = base_commit.lower()
+    cards = []
+    total = 0
+    for path in _ROLE_CARD_TABLE[route]:
         content = _read_blob(git_runner, repo_root, commit, path)
-        entries.append({
+        total += len(content)
+        if total > MAX_DEVELOPER_PREFIX_SIZE:
+            _raise(SKILL_MANIFEST_PREFIX_TOO_LARGE)
+        cards.append({
             'path': path,
             'sha256': hashlib.sha256(content).hexdigest(),
             'size': len(content),
+            'text': content.decode('utf-8'),
         })
 
-    manifest = {
+    digest_input = {
         'schema_version': 1,
-        'commit': commit.lower(),
-        'role': role,
-        'gate': gate,
-        'entries': entries,
+        'commit': commit,
+        'role': 'developer',
+        'route': route,
+        'cards': [
+            {key: card[key] for key in ('path', 'sha256', 'size')}
+            for card in cards
+        ],
     }
     canonical = json.dumps(
-        manifest, sort_keys=True, separators=(',', ':'), ensure_ascii=True,
+        digest_input, sort_keys=True, separators=(',', ':'), ensure_ascii=True,
     ).encode('utf-8')
-    manifest['manifest_sha256'] = hashlib.sha256(canonical).hexdigest()
-    return manifest
+    return {
+        'schema_version': 1,
+        'commit': commit,
+        'role': 'developer',
+        'route': route,
+        'cards': cards,
+        'prefix_size': total,
+        'cards_sha256': hashlib.sha256(canonical).hexdigest(),
+    }
 
 
 def read_manifest_files(repo_root, manifest, git_runner=subprocess.run):

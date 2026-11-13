@@ -788,6 +788,143 @@ class SkillLedgerTests(unittest.TestCase):
         summary = ledger.task_summary('task-a', ['Developer'])
         self.assertEqual(summary, {'Developer': 'OBSERVED_READ'})
 
+    # Role-card delivery (#1502 WP-F design 3.7, piece 1).
+
+    def card_entry(self, **changes):
+        value = dict(self.entry)
+        del value['evidence_level']
+        value.update({
+            'route': 'claude-developer',
+            'base_commit': 'A' * 40,
+            'cards': [{'path': 'CLAUDE.md', 'sha256': '1' * 64},
+                      {'path': 'skills/role-cards/developer.md', 'sha256': '2' * 64}],
+        })
+        value.update(changes)
+        return value
+
+    def not_delivered_entry(self, **changes):
+        value = {'task_id': 'task-a', 'run_id': 'run-n', 'role': 'Developer',
+                 'route': 'gw-agent', 'reason_code': 'ROUTE_NOT_SUPPORTED'}
+        value.update(changes)
+        return value
+
+    def test_card_delivery_records_controller_delivered_with_digests(self):
+        receipt = ledger.record_card_delivery(self.card_entry())
+        row = json.loads(self.path.read_text().strip())
+        self.assertEqual(row['receipt_id'], receipt)
+        self.assertEqual(row['evidence_level'], 'CONTROLLER_DELIVERED')
+        self.assertEqual(row['route'], 'claude-developer')
+        self.assertEqual(row['base_commit'], 'a' * 40)
+        self.assertEqual(row['cards'], self.card_entry()['cards'])
+        self.assertNotIn('entry_type', row)
+        result = self.check()
+        self.assertEqual(result['status'], 'VERIFIED')
+        self.assertEqual(result['evidence_level'], 'CONTROLLER_DELIVERED')
+        self.assertEqual(ledger.verify_chain(), (True, None))
+        self.assertEqual(ledger.task_summary('task-a', ['Developer']),
+                         {'Developer': 'CONTROLLER_DELIVERED'})
+
+    def test_card_delivery_explicit_level_must_be_controller_delivered(self):
+        self.assertTrue(ledger.record_card_delivery(
+            self.card_entry(evidence_level='CONTROLLER_DELIVERED')))
+        for level in ('OBSERVED_READ', 'UNVERIFIED', None, []):
+            with self.subTest(level=level):
+                with self.assertRaises(ledger.SkillLedgerError) as caught:
+                    ledger.record_card_delivery(self.card_entry(evidence_level=level))
+                self.assertEqual(caught.exception.skill_ledger_code,
+                                 'INVALID_EVIDENCE_LEVEL')
+
+    def test_invalid_card_delivery_is_refused_before_filesystem_access(self):
+        good_card = {'path': 'AGENTS.md', 'sha256': '3' * 64}
+        cases = (
+            {'route': ''}, {'route': None}, {'route': 'Claude Developer'},
+            {'base_commit': 'short'}, {'base_commit': None}, {'base_commit': 'g' * 40},
+            {'cards': []}, {'cards': None}, {'cards': [good_card] * 2},
+            {'cards': [{'path': 'AGENTS.md'}]},
+            {'cards': [{'path': 'AGENTS.md', 'sha256': 'F' * 64}]},
+            {'cards': [{'path': '', 'sha256': '3' * 64}]},
+            {'cards': [dict(good_card, text='inline')]},
+            {'cards': [{'path': 'p' + str(i), 'sha256': '3' * 64} for i in range(17)]},
+            {'cards': [{'path': '\ud800', 'sha256': '3' * 64}]},
+            {'head': ''}, {'session_id': None},
+        )
+        with mock.patch.object(ledger, '_path', side_effect=AssertionError(
+                'filesystem path accessed')):
+            for changes in cases:
+                with self.subTest(changes=repr(changes)):
+                    with self.assertRaises(ledger.SkillLedgerError) as caught:
+                        ledger.record_card_delivery(self.card_entry(**changes))
+                    self.assertEqual(caught.exception.skill_ledger_code, 'INVALID_ENTRY')
+            with self.assertRaises(ledger.SkillLedgerError) as caught:
+                ledger.record_card_delivery('not a dict')
+            self.assertEqual(caught.exception.skill_ledger_code, 'INVALID_ENTRY')
+
+    def test_not_delivered_records_route_and_fixed_reason(self):
+        for reason in sorted(ledger.NOT_DELIVERED_REASONS):
+            with self.subTest(reason=reason):
+                receipt = ledger.record_not_delivered(
+                    self.not_delivered_entry(reason_code=reason))
+                row = json.loads(self.path.read_text().splitlines()[-1])
+                self.assertEqual(row['receipt_id'], receipt)
+                self.assertEqual(row['entry_type'], 'NOT_DELIVERED')
+                self.assertEqual(row['route'], 'gw-agent')
+                self.assertEqual(row['reason_code'], reason)
+                self.assertEqual(row['evidence_level'], 'UNVERIFIED')
+                self.assertEqual(row['status'], 'ACTIVE')
+        self.assertEqual(ledger.verify_chain(), (True, None))
+
+    def test_not_delivered_refuses_unknown_reason_and_bad_fields(self):
+        with mock.patch.object(ledger, '_path', side_effect=AssertionError(
+                'filesystem path accessed')):
+            for reason in ('OTHER', '', None, 'route_not_supported'):
+                with self.subTest(reason=reason):
+                    with self.assertRaises(ledger.SkillLedgerError) as caught:
+                        ledger.record_not_delivered(
+                            self.not_delivered_entry(reason_code=reason))
+                    self.assertEqual(caught.exception.skill_ledger_code, 'INVALID_REASON')
+            for changes in ({'task_id': ''}, {'run_id': None}, {'role': ''},
+                            {'route': ''}, {'route': 'bad route'}):
+                with self.subTest(changes=repr(changes)):
+                    with self.assertRaises(ledger.SkillLedgerError) as caught:
+                        ledger.record_not_delivered(self.not_delivered_entry(**changes))
+                    self.assertEqual(caught.exception.skill_ledger_code, 'INVALID_ENTRY')
+            for ttl in (0, True):
+                with self.assertRaises(ledger.SkillLedgerError) as caught:
+                    ledger.record_not_delivered(self.not_delivered_entry(), ttl_seconds=ttl)
+                self.assertEqual(caught.exception.skill_ledger_code, 'INVALID_ENTRY')
+
+    def test_not_delivered_never_verifies_or_steers_check(self):
+        ledger.record_not_delivered(self.not_delivered_entry(run_id='run-a'))
+        self.assertEqual(self.check(), {'status': 'UNVERIFIED', 'reason': 'NOT_FOUND'})
+        self.assertEqual(ledger.task_summary('task-a', ['Developer']),
+                         {'Developer': 'UNVERIFIED'})
+
+        # An existing receipt keeps verifying with a later NOT_DELIVERED event,
+        # and its mismatch reasons are unchanged.
+        self.record()
+        ledger.record_not_delivered(self.not_delivered_entry(run_id='run-z'))
+        self.assertEqual(self.check()['status'], 'VERIFIED')
+        self.assertEqual(self.check(head='other')['reason'], 'WRONG_HEAD')
+        self.assertEqual(self.check(run_id='run-z')['reason'], 'WRONG_RUN')
+        # The newest event for the role is NOT_DELIVERED, so the summary is honest.
+        self.assertEqual(ledger.task_summary('task-a', ['Developer']),
+                         {'Developer': 'UNVERIFIED'})
+
+    def test_existing_entries_and_new_entries_share_one_chain(self):
+        older = self.record()
+        ledger.record_card_delivery(self.card_entry(run_id='run-card'))
+        ledger.record_not_delivered(self.not_delivered_entry())
+        self.assertEqual(ledger.verify_chain(), (True, None))
+        self.assertEqual(self.check()['status'], 'VERIFIED')
+        self.assertEqual(self.check(run_id='run-card')['status'], 'VERIFIED')
+        ledger.revoke(older, 'withdrawn')
+        self.assertEqual(self.check()['reason'], 'REVOKED')
+        self.assertEqual(self.check(run_id='run-card')['status'], 'VERIFIED')
+        rows = [json.loads(line) for line in self.path.read_text().splitlines()]
+        self.assertNotIn('cards', rows[0])
+        self.assertNotIn('route', rows[0])
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(ledger.verify_chain(), (True, None))
 
 
 if __name__ == '__main__':
