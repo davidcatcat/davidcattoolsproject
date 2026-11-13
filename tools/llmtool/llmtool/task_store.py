@@ -1317,6 +1317,7 @@ def _check_review_disputes_transition(old, new):
                 for key in _REVIEW_DISPUTE_FIELDS - {'state'})):
         _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
 
+
 # #1502 WP-D D12 (spec 3-4, E5): a Task that cannot go on until something outside
 # it changes (login, quota, a route, a Reviewer, ...) is WAITING. A Task without
 # this field, or with it cleared to None, is not WAITING. Waiting for an Owner
@@ -1394,6 +1395,7 @@ def clear_waiting(store, task_id):
     if old is None:
         return current
     return store.compare_and_update(task_id, expected={'waiting': old}, waiting=None)
+
 
 def _check_lineage_merge_claim(current, changes):
     """#1502 D10c2 (security v91): no new merge claim on a PARKED or ended Task.
