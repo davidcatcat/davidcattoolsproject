@@ -91,6 +91,10 @@ NO_PROMPT_MARKER = "send a prompt to start"
 CLI_TIMEOUT = 30
 OUTPUT_LIMIT = 4 * 1024 * 1024
 PROMPT_LIMIT = 64 * 1024
+# #1019 row 4: a Claude Reviewer session starts without file-editing tools.
+# Bash stays, because the Reviewer posts its verdict with gh; this is an accident
+# guard, not a containment boundary.
+REVIEWER_DISALLOWED_TOOLS_ARG = "--disallowedTools=Edit,Write,NotebookEdit"
 # There is no backward clock tolerance: the launch time is taken before
 # `claude` runs, so every event of this dispatch is stamped at or after it,
 # and anything earlier (e.g. resumed history) could be mistaken for a receipt.
@@ -425,7 +429,8 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
         "launched_at": None, "receipt_at": None, "status": None, "state": None,
         "first_action": None, "stop": {"attempted": False}, "warnings": [],
     }
-    argv = ([claude, "--bg"] + session_args +
+    tool_limit = [REVIEWER_DISALLOWED_TOOLS_ARG] if role == "claude-reviewer" else []
+    argv = ([claude, "--bg"] + session_args + tool_limit +
             # `--add-dir` is variadic: `--` ends it so the prompt stays the prompt.
             ["-n", role, "--add-dir", registration.root, "--", prompt])
     launch_ms = _now_ms()
