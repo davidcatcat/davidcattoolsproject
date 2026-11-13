@@ -841,7 +841,13 @@ class TaskStoreTests(unittest.TestCase):
                 task_id = new_task()
                 record_lineage(self.store, task_id, line(task_id, state))
                 self.assertFalse(lineage_ended(self.store.get(task_id)))
-                self.assertEqual(self.store.check_external_action(task_id)['task_id'], task_id)
+                if state == 'OPEN':
+                    self.assertEqual(self.store.check_external_action(task_id)['task_id'],
+                                     task_id)
+                else:
+                    # PR #1794 v91 F1: I4 is an allowlist; a PARKED ROOT is refused.
+                    refused('TASK_LINEAGE_PARKED',
+                            lambda: self.store.check_external_action(task_id))
         for state in ('CLOSED', 'DROPPED', 'STOPPED', 'FAILED_FINAL'):
             with self.subTest(state=state):
                 task_id = new_task()
@@ -884,6 +890,78 @@ class TaskStoreTests(unittest.TestCase):
             refused('SPLIT_CHILD_ADVANCING',
                     lambda: self.store._take_advance_lease_exclusive(other))
         self.assertEqual(self.store.get(other)['lineage']['state'], 'OPEN')
+
+    def test_external_actions_are_an_allowlist_and_a_park_honours_the_root_lease(self):
+        # PR #1794 v91 F1 (CWE-362): only a Task with no lineage or with its own
+        # lineage OPEN takes an external action; every other state, an unknown one
+        # included, is refused. A ROOT park takes the ROOT's advance lease.
+        from llmtool.task_store import external_action_refusal, park_lineage_root
+
+        def line(task_id, state):
+            return {'lineage_id': task_id, 'kind': 'root', 'parent': None, 'replaces': [],
+                    'state': state, 'reason': 'split', 'base_sha': None,
+                    'recorded_at': '2026-11-13T00:00:00Z'}
+
+        def refused(code, call):
+            with self.assertRaises(LLMToolError) as caught:
+                call()
+            self.assertEqual(caught.exception.task_store_error_code, code)
+
+        def new_task():
+            task = self._codex_dispatch_task()
+            self.store.create(task)
+            return task['task_id']
+
+        task_id = 'a' * 32
+        self.assertIsNone(external_action_refusal({'task_id': task_id}))
+        self.assertIsNone(external_action_refusal({'lineage': line(task_id, 'OPEN')}))
+        expected = {'PENDING': 'TASK_LINEAGE_PENDING', 'PARKED': 'TASK_LINEAGE_PARKED',
+                    'CLOSED': 'TASK_LINEAGE_ENDED', 'DROPPED': 'TASK_LINEAGE_ENDED',
+                    'STOPPED': 'TASK_LINEAGE_ENDED', 'FAILED_FINAL': 'TASK_LINEAGE_ENDED',
+                    'MYSTERY': 'TASK_LINEAGE_UNKNOWN', 'open': 'TASK_LINEAGE_UNKNOWN',
+                    None: 'TASK_LINEAGE_UNKNOWN'}
+        for state, code in expected.items():
+            with self.subTest(state=state):
+                self.assertEqual(external_action_refusal({'lineage': line(task_id, state)}),
+                                 code)
+        for bad in (None, 'OPEN', [], {}, {'kind': 'root'}):
+            with self.subTest(lineage=bad):
+                self.assertEqual(external_action_refusal({'lineage': bad}),
+                                 'TASK_LINEAGE_UNKNOWN')
+        for record in (None, 'record', []):
+            self.assertEqual(external_action_refusal(record), 'TASK_LINEAGE_UNKNOWN')
+        # The store's locked re-check refuses an unknown state it reads.
+        unknown = new_task()
+        real_read = self.store._read_at
+
+        def read(directory, wanted, **kwargs):
+            record = real_read(directory, wanted, **kwargs)
+            return dict(record, lineage={'state': 'MYSTERY'}) if wanted == unknown else record
+        with patch.object(self.store, '_read_at', side_effect=read):
+            refused('TASK_LINEAGE_UNKNOWN', lambda: self.store.check_external_action(unknown))
+        # A park while an advance of the ROOT holds its lease refuses, writes nothing.
+        root = new_task()
+        before = self.store.get(root)
+        with self.store.advance_lease(root):
+            refused('SPLIT_ROOT_ADVANCING',
+                    lambda: park_lineage_root(self.store, root, line(root, 'PARKED')))
+        self.assertEqual(self.store.get(root), before)
+        self.assertEqual(self.store.check_external_action(root)['task_id'], root)
+        # The park holds the lease across its write: no advance starts meanwhile.
+        seen = []
+        real_update = self.store.update
+
+        def update_under_park(wanted, **changes):
+            refused('SPLIT_CHILD_ADVANCING',
+                    lambda: self.store._take_advance_lease_exclusive(wanted))
+            seen.append(wanted)
+            return real_update(wanted, **changes)
+        with patch.object(self.store, 'update', side_effect=update_under_park):
+            park_lineage_root(self.store, root, line(root, 'PARKED'))
+        self.assertEqual(seen, [root])
+        refused('TASK_LINEAGE_PARKED', lambda: self.store.check_external_action(root))
+        with self.store.advance_lease(root):  # released after the park
+            pass
 
     def test_one_write_never_carries_park_and_merge_claim_together(self):
         # PR #1758 security v91 (CWE-841): the guards check the proposed combined

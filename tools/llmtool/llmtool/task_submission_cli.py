@@ -1514,6 +1514,9 @@ def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_read
             # Commit: under the ROOT lock the store re-checks OPEN/PARKED, no
             # merge_attempt, every listed child still reserved for this op and
             # child_max over all committed children (security v91, Owner B).
+            # PR #1794 v91 F1: the commit holds the ROOT's advance lease, so it
+            # refuses SPLIT_ROOT_ADVANCING while an advance of the ROOT runs; the
+            # reservations are then removed and the ROOT is left unchanged.
             stage = 'COMMIT'
             splits = list(line.get('splits') or []) + [
                 {'op_id': op_id, 'children': list(children)}]

@@ -21,7 +21,13 @@ from . import github_identity, review_result, sensitive_paths, task_completion
 from . import mac_full_suite, repair_policy, review_transcript, task_submission_cli
 from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
-from .task_store import TaskStore, _json_bytes
+from .task_store import TaskStore, _json_bytes, external_action_refusal
+
+# PR #1794 v91 F1 (I4 allowlist): the merge refusal for each lineage refusal.
+_MERGE_LINEAGE_CODES = {'TASK_LINEAGE_PENDING': 'TASK_LINEAGE_PENDING',
+                        'TASK_LINEAGE_PARKED': 'MERGE_ROOT_PARKED',
+                        'TASK_LINEAGE_ENDED': 'MERGE_LINEAGE_ENDED',
+                        'TASK_LINEAGE_UNKNOWN': 'MERGE_LINEAGE_UNKNOWN'}
 
 # Outcomes that remote_test.py records as UNAVAILABLE: nothing ran on EC2, so
 # the next advance step may retry the same head. A hosted run is read back by
@@ -342,7 +348,8 @@ def _publish_created_pr(gh_runner, root, branch, task_id, expected_head, title, 
         closed = _gh_succeeded(gh_runner, root,
                                ['pr', 'close', str(number), '--repo', repository])
     except _ExternalActionRefused as refused:
-        # The Task became PENDING, split-reserved or ended: leave the PR open, post
+        # The Task's lineage is no longer absent or OPEN (PENDING, PARKED, ended or
+        # unknown; PR #1794 I4 allowlist): leave the PR open, post
         # nothing more, and return the refusal with this call's operation record.
         operation.update(close_attempted=False, outcome='CLOSE_REFUSED_LEFT_OPEN',
                          next_action=(f'inspect PR #{number}; it is still open because the '
@@ -1167,11 +1174,12 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     pr_head = pr.get('head') if type(pr) is dict else None
     if type(pr_head) is not dict or pr_head.get('sha') != head:
         return _merge_refusal('MERGE_STALE_HEAD')
-    lineage = record.get('lineage')
-    if type(lineage) is dict and lineage.get('state') != 'OPEN':
-        # #1502 WP-D D10: a split (PARKED) ROOT is never merged, nor is an ended Task.
-        return _merge_refusal('MERGE_ROOT_PARKED' if lineage.get('state') == 'PARKED'
-                              else 'MERGE_LINEAGE_ENDED')
+    lineage_refusal = external_action_refusal(record)
+    if lineage_refusal is not None:
+        # #1502 WP-D D10: a split (PARKED) ROOT is never merged, nor is an ended
+        # Task. PR #1794 v91 F1: only no lineage or OPEN merges (I4 allowlist).
+        return _merge_refusal(_MERGE_LINEAGE_CODES.get(lineage_refusal,
+                                                       'MERGE_LINEAGE_UNKNOWN'))
     if any(type(claim) is dict and claim.get('head_sha') == head and
            claim.get('pr') != number for claim in _claims(record)):
         return _merge_refusal('MERGE_CONFLICTING_PR')
@@ -2599,16 +2607,18 @@ def _advance_refused(task_id, code):
 
 # #1781 (security v91, I4): split vs advance. Every external action of one
 # advance step re-reads the Task under its update lock right before it runs
-# (TaskStore.check_external_action) and is refused for a PENDING split
-# reservation, and (PR #1789 v91 F1) for an ended lineage: TASK_LINEAGE_ENDED.
-# Reads, and the record comment of an action this call already took, are never
+# (TaskStore.check_external_action). PR #1794 v91 F1 (CWE-362): the check is an
+# allowlist (task_store.external_action_refusal): only a Task with no lineage or
+# with its own lineage OPEN passes; PENDING, PARKED, ended and unknown states are
+# refused. A split's ROOT PARKED commit takes the ROOT's advance lease
+# (task_store.commit_split_root), so no park lands while an advance of the ROOT
+# runs, and an advance started after it refuses before any action. Reads, and the record comment of an action this call already took, are never
 # refused, so a refusal never leaves a half-done action unrecorded. Every other
 # GitHub mutation is re-checked, including the publish-recovery `pr close`
 # (PR #1789 codex-reviewer v1 F1): a refused close leaves the PR open and returns
 # the refusal (_publish_created_pr). A lineage end takes the advance lease
 # exclusively (task_store.end_lineage), so no end lands while an advance
 # holding that lease runs.
-_ENDED_NOT_MERGED = frozenset(('DROPPED', 'STOPPED', 'FAILED_FINAL'))
 _EXTERNAL_GIT = frozenset(('add', 'commit', 'merge', 'push'))
 _READ_OR_CLEANUP_GH = (['pr', 'list'], ['pr', 'view'], ['api', 'user'],
                        # The merge claim, a locked compare-and-set that the store
@@ -2744,28 +2754,32 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         record = store.get(task_id)
     except Exception:
         return _advance_refused(task_id, 'TASK_RECORD_UNAVAILABLE')
-    lineage = record.get('lineage')
-    if type(lineage) is dict and lineage.get('state') == 'PENDING':
+    lineage = record.get('lineage') if isinstance(record, dict) else None
+    lineage_refusal = external_action_refusal(record)
+    if lineage_refusal == 'TASK_LINEAGE_PENDING':
         # #1781 (I4): a split reservation made before this advance took its lease;
         # refuse before any D6, PR, review, claim or GitHub read.
         if merge:
             return dict(_merge_refusal('TASK_LINEAGE_PENDING'), task_id=task_id,
                         next='MERGE_REFUSED', acked=[])
         return _advance_refused(task_id, 'TASK_LINEAGE_PENDING')
-    if merge and type(lineage) is dict and lineage.get('state') != 'OPEN':
+    if merge and lineage_refusal is not None:
         # #1502 WP-D D10: refuse before any D6, PR, review or claim read.
-        code = 'MERGE_ROOT_PARKED' if lineage['state'] == 'PARKED' else 'MERGE_LINEAGE_ENDED'
+        code = _MERGE_LINEAGE_CODES.get(lineage_refusal, 'MERGE_LINEAGE_UNKNOWN')
         refused = dict(_merge_refusal(code), task_id=task_id, next='MERGE_REFUSED', acked=[])
-        if lineage.get('state') == 'CLOSED':
+        if type(lineage) is dict and lineage.get('state') == 'CLOSED':
             # D10f2 replay: an already merged, CLOSED member retries a failed roll-up.
             _lineage_after_merge(refused, store, task_id, record)
         return refused
-    if type(lineage) is dict and lineage.get('state') in _ENDED_NOT_MERGED:
+    if lineage_refusal is not None and not (
+            type(lineage) is dict and lineage.get('state') == 'CLOSED'):
         # PR #1789 v91 F1 (CWE-841): a DROPPED, STOPPED or FAILED_FINAL Task takes
-        # no further step; refuse before any D6, PR, review or GitHub read. A
-        # CLOSED Task keeps its read-only record path; the per-action guard
-        # refuses any external action of every ended Task.
-        return _advance_refused(task_id, 'TASK_LINEAGE_ENDED')
+        # no further step; PR #1794 v91 F1 (I4 allowlist): nor does a PARKED ROOT
+        # (TASK_LINEAGE_PARKED) or a Task in any unknown lineage state
+        # (TASK_LINEAGE_UNKNOWN). Refused before any D6, PR, review or GitHub
+        # read. A CLOSED Task keeps its read-only record path; the per-action
+        # guard refuses its every external action.
+        return _advance_refused(task_id, lineage_refusal)
     if integration_pr is None:
         closed_head = _closed_train_member_head(record, task_id, store)
         if closed_head is not None:

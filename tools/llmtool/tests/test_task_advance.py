@@ -5353,14 +5353,20 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
         # #1502 D10c2 (security v91, CWE-362): advance read the ROOT OPEN and passed
         # the D10f1 gate; the split parks it just before the merge claim. The claim
         # re-reads the lineage under the Task lock and refuses; nothing is merged.
+        # PR #1794 v91 F1: a real split now refuses SPLIT_ROOT_ADVANCING while the
+        # advance holds the ROOT lease (SplitRootVsAdvanceTests); this park lands
+        # anyway, with only the lease step skipped (defence in depth).
+        from llmtool import task_store
         root, child = self.task(), self.task()
         real_gate = task_advance._merge_main_gate
         splits = []
 
         def split_then_gate(*args, **kwargs):
-            splits.append(task_submission_cli.lineage_split(
-                self.store, root, [child], pm_session=self.PM, reason='Review FAIL 3.',
-                main_sha_reader=lambda: MAIN_SHA))
+            with patch.object(task_store, '_with_root_advance_lease',
+                              lambda _store, _task_id, write: write()):
+                splits.append(task_submission_cli.lineage_split(
+                    self.store, root, [child], pm_session=self.PM, reason='Review FAIL 3.',
+                    main_sha_reader=lambda: MAIN_SHA))
             return real_gate(*args, **kwargs)
         with patch.object(task_advance, '_merge_main_gate', side_effect=split_then_gate):
             result = self.advance(root)
@@ -6080,6 +6086,276 @@ class EndVsAdvanceTests(unittest.TestCase):
         self.assertEqual((result['step'], result['codes']),
                          ('MERGE_REFUSED', ['TASK_LINEAGE_ENDED']))
         self.assertEqual(calls, [])
+
+
+class SplitRootVsAdvanceTests(unittest.TestCase):
+    """PR #1794 v91 F1 (CWE-362, I4 allowlist): a split of the advanced Task as ROOT.
+
+    The advanced Task (the harness's case['child']) becomes the ROOT of a split
+    onto one fresh Task. Two injections right before each external step:
+    - a real `lineage_split`. The advance holds the ROOT's advance lease, so the
+      ROOT PARKED commit refuses SPLIT_ROOT_ADVANCING, the fresh Task's
+      reservation is removed, nothing is written, and the advance runs exactly as
+      it does with no split;
+    - a split that commits anyway: the real split with only the ROOT lease step
+      skipped (defence in depth). The re-check under the Task lock refuses
+      TASK_LINEAGE_PARKED (the merge claim refuses MERGE_ROOT_PARKED in its own
+      locked write), and neither that action nor any later one runs.
+    An advance of a PARKED ROOT, or of a Task in an unknown lineage state, is
+    refused before any read or action.
+    The harness is SplitVsAdvanceTests' own (same store wrapper and runners).
+    """
+
+    PM, AT, EXEC = SplitVsAdvanceTests.PM, SplitVsAdvanceTests.AT, SplitVsAdvanceTests.EXEC
+    BRANCH, WRITE_PATHS = SplitVsAdvanceTests.BRANCH, SplitVsAdvanceTests.WRITE_PATHS
+    REVIEW_STEPS = SplitVsAdvanceTests.REVIEW_STEPS
+    REFUSED = dict(SplitVsAdvanceTests.REFUSED, codes=['TASK_LINEAGE_PARKED'])
+    REASON = 'Review FAIL 3.'
+    setUp = SplitVsAdvanceTests.setUp
+    task = SplitVsAdvanceTests.task
+    publish_case = SplitVsAdvanceTests.publish_case
+    run_publish = SplitVsAdvanceTests.run_publish
+    run_review = SplitVsAdvanceTests.run_review
+    run_merge = SplitVsAdvanceTests.run_merge
+    guarded = staticmethod(SplitVsAdvanceTests.guarded)
+    MOVED_URL, STALE = SplitVsAdvanceTests.MOVED_URL, SplitVsAdvanceTests.STALE
+    run_moved_publish = SplitVsAdvanceTests.run_moved_publish
+    moved_baseline = SplitVsAdvanceTests.moved_baseline
+
+    def split(self, root, fresh):
+        return task_submission_cli.lineage_split(
+            self.real, root, [fresh], pm_session=self.PM, reason=self.REASON,
+            main_sha_reader=lambda: MAIN_SHA)
+
+    def real_split(self, root, seen):
+        """A real split of root onto a fresh Task; returns (inject, fresh)."""
+        fresh = self.task()
+
+        def inject():
+            try:
+                self.split(root, fresh)
+            except LLMToolError as exc:
+                seen.append(getattr(exc, 'task_store_error_code', None) or str(exc))
+            else:
+                seen.append('SPLIT_WROTE')
+        return inject, fresh
+
+    def split_past_lease(self, root):
+        """The real split with only the ROOT lease step skipped; returns (inject, fresh)."""
+        from llmtool import task_store
+        fresh = self.task()
+
+        def inject():
+            with patch.object(task_store, '_with_root_advance_lease',
+                              lambda _store, _task_id, write: write()):
+                self.split(root, fresh)
+        return inject, fresh
+
+    def assert_untouched(self, *task_ids):
+        for task_id in task_ids:
+            self.assertNotIn('lineage', self.real.get(task_id))
+
+    def assert_parked(self, root, fresh):
+        self.assertEqual(self.real.get(root)['lineage']['state'], 'PARKED')
+        self.assertEqual(self.real.get(fresh)['lineage']['state'], 'OPEN')
+
+    # Publish: git add, git commit, git push, the pre-PR EC2 run, gh pr create.
+
+    def test_a_root_split_at_each_publish_step_is_refused(self):
+        baseline, log, opened, store = self.run_publish(self.publish_case())
+        self.assertEqual((baseline['codes'], baseline['pr']), ([], 23))
+        self.assertEqual(len(opened), 1)
+        steps = self.guarded(log)
+        self.assertEqual(steps, [('git', 'add'), ('git', 'commit'), ('git', 'push'),
+                                 ('ec2', 'remote-test'), ('gh', 'pr create')])
+        self.assertEqual(store.checks, len(steps))
+        for at, step in enumerate(steps, start=1):
+            with self.subTest(step=step, injection='split'):
+                case, seen = self.publish_case(), []
+                inject, fresh = self.real_split(case['child'], seen)
+                result, split_log, split_opened, _ = self.run_publish(
+                    case, inject_at=at, inject=inject)
+                self.assertEqual(seen, ['SPLIT_ROOT_ADVANCING'])
+                self.assertEqual((result['codes'], result['pr']), ([], 23))
+                self.assertEqual(split_log, log)
+                self.assertEqual(len(split_opened), 1)
+                self.assert_untouched(case['child'], fresh)
+            with self.subTest(step=step, injection='split past lease'):
+                case = self.publish_case()
+                inject, fresh = self.split_past_lease(case['child'])
+                result, refused_log, refused_opened, _ = self.run_publish(
+                    case, inject_at=at, inject=inject)
+                self.assertEqual(result, dict(self.REFUSED, task_id=case['child']))
+                # The guarded action and every later one never ran.
+                self.assertEqual(refused_log, log[:log.index(('check', at)) + 1])
+                self.assertEqual(refused_opened, [])
+                self.assert_parked(case['child'], fresh)
+
+    def test_a_root_split_right_before_the_recovery_close_is_refused(self):
+        at = self.moved_baseline(self.publish_case())
+        with self.subTest(injection='split'):
+            case, seen = self.publish_case(), []
+            inject, fresh = self.real_split(case['child'], seen)
+            result, _log, closed, comments = self.run_moved_publish(
+                case, inject_at=at, inject=inject)
+            self.assertEqual(seen, ['SPLIT_ROOT_ADVANCING'])  # the lease keeps it out
+            self.assertEqual(result['codes'], ['PUBLISH_HEAD_MOVED'])
+            self.assertEqual((closed, len(comments)), ([41], 1))
+            self.assert_untouched(case['child'], fresh)
+        with self.subTest(injection='split past lease'):
+            case = self.publish_case()
+            inject, fresh = self.split_past_lease(case['child'])
+            result, log, closed, comments = self.run_moved_publish(
+                case, inject_at=at, inject=inject)
+            self.assertEqual(result['codes'], ['TASK_LINEAGE_PARKED'])
+            self.assertNotIn('open_pr', result)
+            # The PR stays open: no close and no record comment were sent.
+            self.assertEqual(log[-1], ('check', at))
+            self.assertEqual((closed, comments), ([], []))
+            operation = result['publish_operation']
+            self.assertEqual((operation['pr'], operation['close_attempted'],
+                              operation['outcome'], operation['record_comment']),
+                             (41, False, 'CLOSE_REFUSED_LEFT_OPEN', 'NOT_POSTED'))
+            self.assertIn('TASK_LINEAGE_PARKED', operation['next_action'])
+            # The refusal is recorded on the Task.
+            self.assertEqual(self.real.get(case['child'])['publish_operations'], [operation])
+            self.assert_parked(case['child'], fresh)
+
+    def test_a_root_split_at_review_or_repair_dispatch_is_refused(self):
+        for step, changes, action in self.REVIEW_STEPS:
+            with self.subTest(step=step):
+                baseline, log = self.run_review(self.task(), changes)
+                self.assertEqual(baseline['step'], step)
+                self.assertEqual(self.guarded(log), [action])
+                root, seen = self.task(), []
+                inject, fresh = self.real_split(root, seen)
+                result, split_log = self.run_review(root, changes, inject_at=1, inject=inject)
+                self.assertEqual(seen, ['SPLIT_ROOT_ADVANCING'])
+                self.assertEqual(result['step'], step)
+                self.assertEqual(split_log, log)
+                self.assert_untouched(root, fresh)
+                root = self.task()
+                inject, fresh = self.split_past_lease(root)
+                result, refused_log = self.run_review(root, changes, inject_at=1, inject=inject)
+                self.assertEqual(result, dict(self.REFUSED, task_id=root))
+                self.assertEqual(refused_log, [('check', 1)])
+                self.assert_parked(root, fresh)
+
+    def test_a_root_split_at_the_merge_claim_is_refused(self):
+        baseline, log = self.run_merge(self.task())
+        self.assertEqual((baseline['step'], baseline['codes']), ('MERGED', []))
+        self.assertIn(('gh', 'pr merge'), log)
+
+        root, seen = self.task(), []
+        inject, fresh = self.real_split(root, seen)
+        result, split_log = self.run_merge(root, at_gate=inject)
+        self.assertEqual(seen, ['SPLIT_ROOT_ADVANCING'])
+        self.assertEqual((result['step'], result['codes']), ('MERGED', []))
+        self.assertEqual(split_log, log)
+        self.assert_untouched(root, fresh)
+        self.assertEqual(self.real.get(root)['merge_attempt']['state'], 'MERGED')
+
+        root = self.task()
+        inject, fresh = self.split_past_lease(root)
+        result, refused_log = self.run_merge(root, at_gate=inject)
+        self.assertEqual((result['step'], result['codes']),
+                         ('MERGE_REFUSED', ['MERGE_ROOT_PARKED']))
+        self.assertNotIn(('gh', 'pr merge'), refused_log)
+        self.assertNotIn('merge_attempt', self.real.get(root))
+        self.assert_parked(root, fresh)
+
+    # A PARKED ROOT, and an unknown lineage state.
+
+    def parked(self):
+        root = self.task()
+        self.split(root, self.task())
+        self.assertEqual(self.real.get(root)['lineage']['state'], 'PARKED')
+        return root
+
+    def test_an_advance_of_a_parked_root_is_refused_before_any_read_or_action(self):
+        with self.subTest(step='publish'):
+            case = self.publish_case()
+            case['child'] = self.parked()
+            result, log, opened, store = self.run_publish(case)
+            self.assertEqual(result, dict(self.REFUSED, task_id=case['child']))
+            self.assertEqual((log, opened, store.checks), ([], [], 0))
+        for step, changes, _action in self.REVIEW_STEPS:
+            with self.subTest(step=step):
+                root = self.parked()
+                result, log = self.run_review(root, changes)
+                self.assertEqual(result, dict(self.REFUSED, task_id=root))
+                self.assertEqual(log, [])
+        with self.subTest(step='merge'):
+            root = self.parked()
+            result, log = self.run_merge(root)
+            self.assertEqual((result['step'], result['codes']),
+                             ('MERGE_REFUSED', ['MERGE_ROOT_PARKED']))
+            self.assertEqual(log, [])  # refused before the merge gate or any claim
+            self.assertNotIn('merge_attempt', self.real.get(root))
+        with self.subTest(step='mac-ci label'):
+            # task drive calls the label helper outside advance; it re-checks too.
+            root, calls = self.parked(), []
+            pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
+                  'mergeable': True, 'labels': []}
+            record = dict(self.real.get(root), completion={'executor_task_id': 'executor-1'})
+            store = type('Store', (), {
+                'get': lambda _self, _task_id: record,
+                'check_external_action': lambda _self, wanted: self.real.check_external_action(
+                    wanted)})()
+            with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+                 patch.object(task_advance, '_merge_checks',
+                              return_value='MERGE_MACOS_CHECK_SKIPPED'):
+                result = task_advance.label_mac_ci_for_skipped_check(
+                    task_id=root, store=store, pr_number=17,
+                    github_get=lambda _path: dict(pr),
+                    merge_gh_runner=lambda _root, args: calls.append(args))
+            self.assertEqual((result['step'], result['codes']),
+                             ('MERGE_REFUSED', ['TASK_LINEAGE_PARKED']))
+            self.assertEqual(calls, [])
+
+    UNKNOWN_LINEAGES = ({'state': 'MYSTERY'}, {'kind': 'root'}, {'state': None},
+                        'OPEN', None, [])
+
+    def test_an_unknown_lineage_state_is_refused_before_any_read_or_action(self):
+        def no_read(*_args, **_kwargs):
+            raise AssertionError('read before the lineage gate')
+        for line in self.UNKNOWN_LINEAGES:
+            record = base_record(lineage=line)
+            store = type('Store', (), {'get': lambda _self, _task_id, record=record: record})()
+            for merge, step, code in ((False, 'REFUSED', 'TASK_LINEAGE_UNKNOWN'),
+                                      (True, 'MERGE_REFUSED', 'MERGE_LINEAGE_UNKNOWN')):
+                with self.subTest(lineage=line, merge=merge), \
+                     patch.object(task_advance, '_review_outcomes', no_read), \
+                     patch.object(task_advance, '_d6_snapshot', no_read):
+                    result = task_advance.advance(task_id='1' * 32, store=store, pr_number=17,
+                                                  merge=merge, github_get=no_read)
+                    self.assertEqual((result['step'], result['codes']), (step, [code]))
+
+    def test_an_unknown_lineage_state_at_the_recheck_refuses_the_action(self):
+        # The advance read the Task with no lineage; the locked re-check right before
+        # the review dispatch reads an unknown lineage state and refuses it.
+        for step, changes, action in self.REVIEW_STEPS:
+            with self.subTest(step=step):
+                task_id = self.task()
+                real_read = self.real._read_at
+
+                def read(directory, wanted, *, task_id=task_id, real_read=real_read,
+                         **kwargs):
+                    record = real_read(directory, wanted, **kwargs)
+                    return (dict(record, lineage={'state': 'MYSTERY'}) if wanted == task_id
+                            else record)
+
+                def inject(read=read):
+                    self.real._read_at = read
+                try:
+                    result, log = self.run_review(task_id, changes, inject_at=1, inject=inject)
+                finally:
+                    self.real.__dict__.pop('_read_at', None)
+                self.assertEqual(result, dict(self.REFUSED, task_id=task_id,
+                                              codes=['TASK_LINEAGE_UNKNOWN']))
+                self.assertEqual(log, [('check', 1)])
+                self.assertNotIn(action, log)
+                self.assertNotIn('lineage', self.real.get(task_id))
 
 
 if __name__ == '__main__':

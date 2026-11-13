@@ -1532,12 +1532,15 @@ def park_lineage_root(store, task_id, lineage):
     Under the task lock the store refuses unless the ROOT's lineage is OPEN or
     PARKED (an end state fails SPLIT_ROOT_NOT_OPEN) and it has no merge_attempt
     (SPLIT_ROOT_MERGE_STARTED). The caller records child Tasks only after this.
+    PR #1794 v91 F1: the park honours the ROOT's advance lease
+    (SPLIT_ROOT_ADVANCING).
     """
     if (type(lineage) is not dict or lineage.get('kind') != 'root' or
             lineage.get('state') != 'PARKED' or lineage.get('lineage_id') != task_id):
         _fail('TASK_LINEAGE_INVALID')
     try:
-        return store.update(task_id, lineage=dict(lineage))
+        return _with_root_advance_lease(
+            store, task_id, lambda: store.update(task_id, lineage=dict(lineage)))
     except LLMToolError as exc:
         if getattr(exc, 'task_store_error_code', None) == 'TASK_LINEAGE_TRANSITION_INVALID':
             _fail('SPLIT_ROOT_NOT_OPEN')
@@ -1560,6 +1563,51 @@ def lineage_ended(record):
     """True for a Task whose lineage ended (DROPPED, STOPPED, FAILED_FINAL, CLOSED)."""
     line = record.get('lineage') if type(record) is dict else None
     return type(line) is dict and line.get('state') in _LINEAGE_END_STATES
+
+
+def external_action_refusal(record):
+    """I4 as an allowlist (PR #1794 v91 F1, CWE-362): None, or the refusal code.
+
+    Only a Task with no lineage, or whose own lineage is OPEN, may take an
+    external action (publish, commit, push, PR, review dispatch, merge, recovery
+    close). Every other state is refused: PENDING (TASK_LINEAGE_PENDING), PARKED
+    (TASK_LINEAGE_PARKED), an end state (TASK_LINEAGE_ENDED) and anything else,
+    a malformed lineage or an unknown state included (TASK_LINEAGE_UNKNOWN).
+    """
+    if not isinstance(record, dict):
+        return 'TASK_LINEAGE_UNKNOWN'
+    if 'lineage' not in record:
+        return None
+    line = record['lineage']
+    state = line.get('state') if type(line) is dict else None
+    if state == 'OPEN':
+        return None
+    if state == 'PENDING':
+        return 'TASK_LINEAGE_PENDING'
+    if state == 'PARKED':
+        return 'TASK_LINEAGE_PARKED'
+    if state in _LINEAGE_END_STATES:
+        return 'TASK_LINEAGE_ENDED'
+    return 'TASK_LINEAGE_UNKNOWN'
+
+
+def _with_root_advance_lease(store, task_id, write):
+    """PR #1794 v91 F1: run one ROOT PARKED write under the ROOT's advance lease.
+
+    The lease is taken exclusively without waiting: an advance or drive of the
+    ROOT holds it shared for its whole run, so the park refuses
+    SPLIT_ROOT_ADVANCING and writes nothing. It is kept across the locked write,
+    so no advance of the ROOT starts while the park lands; one that starts after
+    reads PARKED and refuses every external action (TASK_LINEAGE_PARKED).
+    """
+    take = getattr(store, '_take_advance_lease_exclusive', None)
+    if not callable(take):
+        _fail('TASK_ADVANCE_LEASE_UNAVAILABLE')  # fail closed: no lease, no park
+    lease = take(task_id, busy_code='SPLIT_ROOT_ADVANCING')
+    try:
+        return write()
+    finally:
+        store._unlock_sidecar(lease)
 
 
 def end_lineage(store, task_id, lineage):
@@ -1636,6 +1684,11 @@ def commit_split_root(store, task_id, lineage, *, child_max, expected):
     op and its full child list. Under the ROOT lock the store re-checks the ROOT
     (OPEN or PARKED, no merge_attempt), that every listed child is still PENDING
     for this op, and child_max over every committed child of the ROOT.
+
+    PR #1794 v91 F1 (CWE-362): the commit first takes the ROOT's advance lease
+    exclusively without waiting and keeps it across the locked write
+    (_with_root_advance_lease), so a split never commits PARKED while an advance
+    or drive of the ROOT runs (SPLIT_ROOT_ADVANCING, nothing written to the ROOT).
     """
     if (type(lineage) is not dict or lineage.get('kind') != 'root' or
             lineage.get('state') != 'PARKED' or lineage.get('lineage_id') != task_id or
@@ -1643,8 +1696,9 @@ def commit_split_root(store, task_id, lineage, *, child_max, expected):
             type(child_max) is not int or child_max < 0):
         _fail('TASK_LINEAGE_INVALID')
     try:
-        return store._update(task_id, expected=expected, changes={'lineage': dict(lineage)},
-                             trusted_split='COMMIT', split_child_max=child_max)
+        return _with_root_advance_lease(store, task_id, lambda: store._update(
+            task_id, expected=expected, changes={'lineage': dict(lineage)},
+            trusted_split='COMMIT', split_child_max=child_max))
     except LLMToolError as exc:
         if getattr(exc, 'task_store_error_code', None) == 'TASK_LINEAGE_TRANSITION_INVALID':
             _fail('SPLIT_ROOT_NOT_OPEN')
@@ -4356,10 +4410,11 @@ class TaskStore:
 
         A held lease means an advance or drive of this Task is running: refuse
         busy_code (SPLIT_CHILD_ADVANCING for a split reservation,
-        LINEAGE_TASK_ADVANCING for a lineage end). The caller releases it with
-        _unlock_sidecar.
+        LINEAGE_TASK_ADVANCING for a lineage end, SPLIT_ROOT_ADVANCING for a
+        ROOT PARKED commit). The caller releases it with _unlock_sidecar.
         """
-        if busy_code not in ('SPLIT_CHILD_ADVANCING', 'LINEAGE_TASK_ADVANCING'):
+        if busy_code not in ('SPLIT_CHILD_ADVANCING', 'LINEAGE_TASK_ADVANCING',
+                             'SPLIT_ROOT_ADVANCING'):
             _fail('TASK_ADVANCE_LEASE_INVALID')
         name = self._advance_lease_name(task_id)
         directory = self._dirfd()
@@ -4391,10 +4446,11 @@ class TaskStore:
     def check_external_action(self, task_id):
         """Re-read a Task under its update lock right before an external action.
 
-        #1781 (I4): a PENDING split reservation takes no external action
-        (TASK_LINEAGE_PENDING). PR #1789 v91 F1 (CWE-841): nor does a Task whose
-        lineage ended DROPPED, STOPPED, FAILED_FINAL or CLOSED
-        (TASK_LINEAGE_ENDED). Read-only; returns the record read under the lock.
+        I4 is an allowlist (PR #1794 v91 F1, CWE-362; external_action_refusal):
+        only a Task with no lineage or with its own lineage OPEN passes. PENDING
+        (TASK_LINEAGE_PENDING, #1781), PARKED (TASK_LINEAGE_PARKED), an end state
+        (TASK_LINEAGE_ENDED, PR #1789) and any other state (TASK_LINEAGE_UNKNOWN)
+        are refused. Read-only; returns the record read under the lock.
         """
         directory = self._dirfd()
         try:
@@ -4406,10 +4462,9 @@ class TaskStore:
                 self._unlock_sidecar(lock_fd)
         finally:
             os.close(directory)
-        if split_reserved(record):
-            _fail('TASK_LINEAGE_PENDING')
-        if lineage_ended(record):
-            _fail('TASK_LINEAGE_ENDED')
+        code = external_action_refusal(record)
+        if code is not None:
+            _fail(code)
         return record
 
     @staticmethod

@@ -242,6 +242,36 @@ class CrashAfterRootCommitTests(TwoPhaseCase):
         self.assertEqual((result['state'], result['pending']), ('PARKED', []))
         self.assertEqual((self.state(root), self.state(first)), ('PARKED', 'OPEN'))
 
+    def test_a_root_commit_while_the_root_is_advanced_leaves_nothing_usable(self):
+        # PR #1794 v91 F1 (CWE-362): the ROOT PARKED commit takes the ROOT's advance
+        # lease. While an advance of the ROOT holds it, the commit refuses
+        # SPLIT_ROOT_ADVANCING after the reservations: they are removed (I1) and
+        # the ROOT is unchanged; once the advance ends the same split commits.
+        root, first, second = self.task(), self.task(), self.task()
+        before = self.digests(root)
+        reserved = []
+        store = FaultStore(self.store, lambda action, task_id, phase: reserved.append(
+            task_id) if (action, phase) == ('RESERVE', 'after') else None)
+        with self.store.advance_lease(root):
+            self.refused('SPLIT_ROOT_ADVANCING', lambda: self.split(root, [first, second], store))
+        self.assertEqual(reserved, [first, second])  # the commit came after both
+        self.assert_unchanged(before)
+        self.assert_no_lineage(root, first, second)
+        # Store level: the commit refuses before its locked write, nothing is written.
+        op = new_id()
+        task_store.reserve_split_child(self.store, first, self.reservation(root, op),
+                                       expected_sha256=self.digests(first)[first])
+        with self.store.advance_lease(root):
+            self.refused('SPLIT_ROOT_ADVANCING', lambda: task_store.commit_split_root(
+                self.store, root, self.root_commit(root, None, op, [first]),
+                child_max=self.child_max, expected={'lineage': None}))
+        self.assert_unchanged(before)
+        self.assertEqual(cli.lineage_split_recover(self.store),
+                         {'finalized': [], 'released': [first]})
+        result = self.split(root, [first, second])
+        self.assertEqual((result['state'], self.state(root)), ('PARKED', 'PARKED'))
+        self.assertEqual([self.state(first), self.state(second)], ['OPEN', 'OPEN'])
+
 
 class ConcurrentSplitTests(TwoPhaseCase):
     def test_two_interleaved_reservations_never_commit_past_child_max(self):

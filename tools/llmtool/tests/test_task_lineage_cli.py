@@ -800,7 +800,8 @@ class LineageEndVsAdvanceTests(LineageCase):
                          ('DROPPED', {'code': 'LINEAGE_ROLL_UP_FAILED'}))
         self.assertEqual(result['owner_notice']['state'], 'DROPPED')
         self.assertEqual(self.state(root), 'PARKED')
-        self.assertEqual(self.store.check_external_action(root)['task_id'], root)
+        # PR #1794 v91 F1: I4 is an allowlist, so the PARKED ROOT takes no action either.
+        self.refused('TASK_LINEAGE_PARKED', lambda store: store.check_external_action(root))
         # Without the advance the roll-up ends the ROOT, which then takes no action.
         self.assertEqual(cli._lineage_roll_up(self.store, root)['state'], 'FAILED_FINAL')
         self.refused('TASK_LINEAGE_ENDED', lambda store: store.check_external_action(root))
@@ -813,6 +814,55 @@ class LineageEndVsAdvanceTests(LineageCase):
                              {'code': 'LINEAGE_CLOSE_FAILED'})
         self.assertEqual([self.state(member), self.state(other)], ['CLOSED', 'PARKED'])
         self.assertEqual(cli.lineage_close_merged(self.store, member)['root']['state'], 'CLOSED')
+
+
+class LineageSplitVsRootAdvanceTests(LineageCase):
+    """PR #1794 v91 F1 (CWE-362): a split honours the ROOT's advance lease.
+
+    task advance and task drive hold the advanced Task's lease shared for their
+    whole run (held here directly). A split of that Task as ROOT commits PARKED
+    only under the ROOT lease, taken exclusively without waiting, so it refuses
+    SPLIT_ROOT_ADVANCING and leaves no lineage on the ROOT or any child. Once
+    the advance ends the same split runs, and the PARKED ROOT then takes no
+    external action (I4 allowlist).
+    """
+
+    def split_args(self, root, children):
+        from types import SimpleNamespace
+        return SimpleNamespace(root_id=root, child=list(children), reason='Review FAIL 3.',
+                               pm_session=PM)
+
+    def test_a_split_of_a_root_being_advanced_is_refused_and_writes_nothing(self):
+        root, first, second = self.task(), self.task(), self.task()
+        before = self.store.get(root)['record_sha256']
+        with self.store.advance_lease(root):
+            self.refused('SPLIT_ROOT_ADVANCING', cli.lineage_split, root, [first, second],
+                         pm_session=PM, reason='Review FAIL 3.', main_sha_reader=lambda: MAIN)
+            # The adapter prints only the refusal code.
+            self.assertEqual(run_command(cli.run_task_split, self.split_args(root, [first]),
+                                         store=self.store, main_sha_reader=lambda: MAIN),
+                             (1, {'code': 'SPLIT_ROOT_ADVANCING'}))
+        # The children's reservations were removed (I1); the ROOT is untouched.
+        for task_id in (root, first, second):
+            self.assertNotIn('lineage', self.store.get(task_id))
+        self.assertEqual(self.store.get(root)['record_sha256'], before)
+        self.assertEqual(self.store.check_external_action(root)['task_id'], root)
+        # After the advance the same split runs; the PARKED ROOT takes no action,
+        # its OPEN children do.
+        code, result = run_command(cli.run_task_split, self.split_args(root, [first]),
+                                   store=self.store, main_sha_reader=lambda: MAIN)
+        self.assertEqual((code, result['state']), (0, 'PARKED'))
+        self.refused('TASK_LINEAGE_PARKED', lambda store: store.check_external_action(root))
+        self.assertEqual(self.store.check_external_action(first)['task_id'], first)
+        # A later split of the PARKED ROOT honours the lease the same way.
+        parked = self.store.get(root)['lineage']
+        with self.store.advance_lease(root):
+            self.refused('SPLIT_ROOT_ADVANCING', cli.lineage_split, root, [second],
+                         pm_session=PM, reason='Review FAIL 3.', main_sha_reader=lambda: MAIN)
+        self.assertEqual(self.store.get(root)['lineage'], parked)
+        self.assertNotIn('lineage', self.store.get(second))
+        self.assertEqual([item['id'] for item in cli._lineage_members(self.store, root)],
+                         [first])
 
 
 if __name__ == '__main__':
