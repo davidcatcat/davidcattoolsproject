@@ -148,5 +148,55 @@ class LineageEndTests(LineageCase):
         self.assertEqual(self.state(second), 'OPEN')
 
 
+def merged(store, task_id):
+    """Record a merge claim and its MERGED outcome, as task advance does."""
+    claim = {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+             'claimed_at': '2026-11-13T00:00:00.000000Z'}
+    store.update(task_id, merge_attempt=claim)
+    store.update(task_id, merge_attempt=dict(claim, state='MERGED'))
+
+
+class LineageMergedTests(LineageCase):
+    def test_merged_tasks_close_without_notice_and_close_the_root(self):
+        root = self.parked_root()
+        first, second = self.member(root), self.member(root)
+        self.assertIsNone(cli.lineage_close_merged(self.store, first))
+        self.assertIsNone(cli.lineage_owner_notice(first, 'CLOSED', 'merged'))
+        merged(self.store, first)
+        self.assertEqual(cli.lineage_close_merged(self.store, first),
+                         {'task_id': first, 'state': 'CLOSED', 'owner_notice': None,
+                          'root': None})
+        merged(self.store, second)
+        closed = cli.lineage_close_merged(self.store, second)
+        self.assertEqual(closed['root'], {'task_id': root, 'state': 'CLOSED',
+                                          'owner_notice': None})
+        self.assertEqual(self.state(root), 'CLOSED')
+        self.assertIsNone(cli.lineage_close_merged(self.store, second))
+        plain = self.task()
+        merged(self.store, plain)
+        self.assertIsNone(cli.lineage_close_merged(self.store, plain))
+
+    def test_a_failed_roll_up_after_close_is_retried(self):
+        root = self.parked_root()
+        only = self.member(root)
+        merged(self.store, only)
+        real = cli._lineage_roll_up
+
+        def failing(store, lineage_id):
+            raise LLMToolError('LINEAGE_ROLL_UP_FAILED')
+        cli._lineage_roll_up = failing
+        try:
+            self.assertEqual(cli.lineage_close_merged(self.store, only),
+                             {'code': 'LINEAGE_CLOSE_FAILED'})
+        finally:
+            cli._lineage_roll_up = real
+        self.assertEqual(self.state(only), 'CLOSED')
+        self.assertEqual(self.state(root), 'PARKED')
+        retried = cli.lineage_close_merged(self.store, only)
+        self.assertEqual(retried['root']['state'], 'CLOSED')
+        self.assertEqual(self.state(root), 'CLOSED')
+        self.assertIsNone(cli.lineage_close_merged(self.store, only))
+
+
 if __name__ == '__main__':
     unittest.main()
