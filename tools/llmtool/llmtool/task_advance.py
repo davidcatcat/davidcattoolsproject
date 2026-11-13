@@ -1138,6 +1138,11 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     pr_head = pr.get('head') if type(pr) is dict else None
     if type(pr_head) is not dict or pr_head.get('sha') != head:
         return _merge_refusal('MERGE_STALE_HEAD')
+    lineage = record.get('lineage')
+    if type(lineage) is dict and lineage.get('state') != 'OPEN':
+        # #1502 WP-D D10: a split (PARKED) ROOT is never merged, nor is an ended Task.
+        return _merge_refusal('MERGE_ROOT_PARKED' if lineage.get('state') == 'PARKED'
+                              else 'MERGE_LINEAGE_ENDED')
     if any(type(claim) is dict and claim.get('head_sha') == head and
            claim.get('pr') != number for claim in _claims(record)):
         return _merge_refusal('MERGE_CONFLICTING_PR')
@@ -2549,6 +2554,11 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     except Exception:
         return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
                 'next': 'REFUSED', 'codes': ['TASK_RECORD_UNAVAILABLE'], 'acked': []}
+    lineage = record.get('lineage')
+    if merge and type(lineage) is dict and lineage.get('state') != 'OPEN':
+        # #1502 WP-D D10: refuse before any D6, PR, review or claim read.
+        code = 'MERGE_ROOT_PARKED' if lineage['state'] == 'PARKED' else 'MERGE_LINEAGE_ENDED'
+        return dict(_merge_refusal(code), task_id=task_id, next='MERGE_REFUSED', acked=[])
     if integration_pr is None:
         closed_head = _closed_train_member_head(record, task_id, store)
         if closed_head is not None:

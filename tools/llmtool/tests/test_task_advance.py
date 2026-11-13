@@ -3666,6 +3666,40 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
         self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
         self.assertEqual(claims, [])
 
+    def test_lineage_parked_root_or_ended_task_refuses_merge(self):
+        # #1502 WP-D D10: a PARKED ROOT is never merged, nor is an ended Task.
+        plain = base_record
+        line = {'lineage_id': '1' * 32, 'kind': 'root', 'parent': None, 'replaces': [],
+                'state': 'OPEN', 'reason': None, 'base_sha': None,
+                'recorded_at': '2026-11-13T00:00:00Z'}
+        for state, code in (('PARKED', 'MERGE_ROOT_PARKED'), ('DROPPED', 'MERGE_LINEAGE_ENDED')):
+            with self.subTest(state=state), patch(f'{__name__}.base_record', lambda **changes:
+                    plain(lineage=dict(line, state=state), **changes)):
+                self.assert_refused(self.merge(), code)
+
+    def test_lineage_refusal_reads_no_review_comment_and_no_claim(self):
+        # #1502 WP-D D10 (security v91): the lineage gate runs before any review read.
+        class Record(dict):
+            def get(self, key, default=None):
+                assert key not in ('review_dispatch_claim', 'completion_events'), key
+                return super().get(key, default)
+
+        def no_read(*_args, **_kwargs):
+            raise AssertionError('read before the lineage gate')
+        for state, code in (('PARKED', 'MERGE_ROOT_PARKED'), ('DROPPED', 'MERGE_LINEAGE_ENDED')):
+            record = Record(base_record(lineage={'state': state}))
+            store = type('Store', (), {'get': lambda *_args: record})()
+            with self.subTest(state=state), \
+                 patch.object(task_advance, '_review_outcomes', no_read), \
+                 patch.object(task_advance, '_d6_snapshot', no_read):
+                result = task_advance.advance(task_id='1' * 32, store=store, pr_number=17,
+                                              merge=True, github_get=no_read)
+                self.assertEqual((result['step'], result['codes']), ('MERGE_REFUSED', [code]))
+                self.assertEqual(task_advance._merge_once(
+                    store=store, record=record, number=17, head=HEAD, events=[],
+                    pr={'number': 17, 'head': {'sha': HEAD}}, github_get=no_read,
+                    gh_runner=no_read, root='/repo')['codes'], [code])
+
     def test_diverged_pr_with_clean_mergeable_state_merges(self):
         result, _reads, calls, claims = self.merge(
             compare_reply={'status': 'diverged', 'ahead_by': 5, 'behind_by': 3},
