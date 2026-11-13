@@ -1199,13 +1199,21 @@ def _check_lineage_merge_claim(current, changes):
     Runs under the task lock with the lineage write gate in _update_record, so a
     split that parks the ROOT and a task advance that claims its merge cannot
     both succeed: whichever commits first makes the other one refuse.
+
+    PR #1758 v91 (CWE-841): both the persisted lineage and the lineage this
+    same update proposes are checked, so one write that carries a merge claim
+    together with a PARKED (or ended) lineage is refused as a whole.
     """
     proposed = changes.get('merge_attempt')
-    line = current.get('lineage')
-    if (type(proposed) is dict and proposed.get('state') == 'CLAIMED' and
-            line is not None and (type(line) is not dict or line.get('state') != 'OPEN')):
-        _fail('MERGE_ROOT_PARKED' if type(line) is dict and line.get('state') == 'PARKED'
-              else 'MERGE_LINEAGE_ENDED')
+    if type(proposed) is not dict or proposed.get('state') != 'CLAIMED':
+        return
+    lines = [current.get('lineage')]
+    if 'lineage' in changes:
+        lines.append(changes['lineage'])
+    for line in lines:
+        if line is not None and (type(line) is not dict or line.get('state') != 'OPEN'):
+            _fail('MERGE_ROOT_PARKED' if type(line) is dict and line.get('state') == 'PARKED'
+                  else 'MERGE_LINEAGE_ENDED')
 
 
 def park_lineage_root(store, task_id, lineage):
@@ -4324,8 +4332,11 @@ class TaskStore:
                 _check_lineage_transition(current.get('lineage'), changes['lineage'])
                 new_line = changes['lineage']
                 if (type(new_line) is dict and new_line.get('state') == 'PARKED' and
-                        current.get('merge_attempt') is not None):
-                    # #1502 D10c2 (security v91): a Task whose merge started is never PARKED.
+                        (current.get('merge_attempt') is not None or
+                         changes.get('merge_attempt') is not None)):
+                    # #1502 D10c2 (security v91): a Task whose merge started is never
+                    # PARKED, whether the merge_attempt is persisted or arrives in this
+                    # same update (PR #1758 v91, CWE-841).
                     _fail('SPLIT_ROOT_MERGE_STARTED')
             if trusted_abandonment:
                 item = changes['abandonment']

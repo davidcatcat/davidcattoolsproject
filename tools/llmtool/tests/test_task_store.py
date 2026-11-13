@@ -474,6 +474,72 @@ class TaskStoreTests(unittest.TestCase):
         self.store.update(plain, merge_attempt=dict(claim, state='MERGED'))
         self.assertEqual(self.store.get(plain)['merge_attempt']['state'], 'MERGED')
 
+    def test_one_write_never_carries_park_and_merge_claim_together(self):
+        # PR #1758 security v91 (CWE-841): the guards check the proposed combined
+        # state, so a single update or compare_and_update that sets a PARKED lineage
+        # and a CLAIMED merge_attempt together is refused whole, in either order.
+        from llmtool.task_store import record_lineage
+        claim = {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+                 'claimed_at': '2026-11-13T00:00:00.000000Z'}
+
+        def root_line(task_id, state):
+            return {'lineage_id': task_id, 'kind': 'root', 'parent': None, 'replaces': [],
+                    'state': state, 'reason': 'split', 'base_sha': None,
+                    'recorded_at': '2026-11-13T00:00:00Z'}
+
+        def combined(task_id, state, park_first):
+            line = root_line(task_id, state)
+            return ({'lineage': line, 'merge_attempt': dict(claim)} if park_first else
+                    {'merge_attempt': dict(claim), 'lineage': line})
+
+        def refused(task_id, code, call):
+            before = self.store.get(task_id)
+            with self.assertRaises(LLMToolError) as caught:
+                call()
+            self.assertEqual(caught.exception.task_store_error_code, code)
+            self.assertEqual(self.store.get(task_id), before)
+            self.assertNotIn('merge_attempt', self.store.get(task_id))
+
+        for with_open_lineage in (False, True):
+            for park_first in (True, False):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                task_id = task['task_id']
+                if with_open_lineage:
+                    record_lineage(self.store, task_id, root_line(task_id, 'OPEN'))
+                with self.subTest(open_lineage=with_open_lineage, park_first=park_first):
+                    refused(task_id, 'MERGE_ROOT_PARKED', lambda: self.store.update(
+                        task_id, **combined(task_id, 'PARKED', park_first)))
+                    digest = self.store.get(task_id)['record_sha256']
+                    refused(task_id, 'MERGE_ROOT_PARKED', lambda: self.store.compare_and_update(
+                        task_id, expected={'record_sha256': digest},
+                        **combined(task_id, 'PARKED', park_first)))
+                    # An ended lineage in the same write is refused the same way.
+                    refused(task_id, 'MERGE_LINEAGE_ENDED', lambda: self.store.update(
+                        task_id, **combined(task_id, 'FAILED_FINAL', park_first)))
+                    if with_open_lineage:
+                        self.assertEqual(self.store.get(task_id)['lineage']['state'], 'OPEN')
+                    else:
+                        self.assertNotIn('lineage', self.store.get(task_id))
+                    # Each field alone still behaves as before: the claim on an OPEN
+                    # Task succeeds, and parking it afterwards is then refused.
+                    self.store.update(task_id, merge_attempt=dict(claim))
+                    refused_park = root_line(task_id, 'PARKED')
+                    with self.assertRaises(LLMToolError) as caught:
+                        self.store.update(task_id, lineage=refused_park)
+                    self.assertEqual(caught.exception.task_store_error_code,
+                                     'SPLIT_ROOT_MERGE_STARTED')
+                    self.assertEqual(self.store.get(task_id)['merge_attempt']['state'],
+                                     'CLAIMED')
+        # A combined OPEN lineage with a merge claim stays allowed.
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        self.store.update(task['task_id'], lineage=root_line(task['task_id'], 'OPEN'),
+                          merge_attempt=dict(claim))
+        stored = self.store.get(task['task_id'])
+        self.assertEqual((stored['lineage']['state'], stored['merge_attempt']['state']),
+                         ('OPEN', 'CLAIMED'))
+
     def test_retry_claim_transition_is_atomic_with_next_attempt(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
