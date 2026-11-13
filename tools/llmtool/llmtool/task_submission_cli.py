@@ -1307,7 +1307,7 @@ def _split_op_id(root_id, children):
     return hashlib.sha256(text.encode('utf-8')).hexdigest()[:32]
 
 
-def _split_pending(store, task_id):
+def _split_pending_line(store, task_id):
     """The PENDING split reservation of one Task, or None."""
     line = store.get(task_id).get('lineage')
     return line if type(line) is dict and line.get('state') == 'PENDING' else None
@@ -1327,7 +1327,7 @@ def _split_recover(store, task_ids=None):
     scan = task_ids is None
     for task_id in (store.task_ids() if scan else task_ids):
         try:
-            line = _split_pending(store, task_id)
+            line = _split_pending_line(store, task_id)
         except LLMToolError:
             if not scan:
                 raise
@@ -1373,7 +1373,7 @@ def _split_resume(store, root_id, children, op_id, *, pm_session):
         # Only this op's reservations: another op's leftover stays for recovery.
         found = []
         for child_id in children:
-            line = _split_pending(store, child_id)
+            line = _split_pending_line(store, child_id)
             if line is not None and line.get('split_op') == op_id:
                 found.append(child_id)
         return found
