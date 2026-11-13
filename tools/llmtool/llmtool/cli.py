@@ -60,6 +60,7 @@ TASK_ACTIONS = {
     'record-pm': ('run_task_record_pm', False),
     'remote-test': ('run_task_remote_test_checked', True),
     'repair': ('run_task_repair', True),
+    'replan': ('run_task_replan', False),
     'review-dispatch': ('run_task_review_dispatch', True),
     'review-prompt': ('run_task_review_prompt', False),
     'review-result': ('run_task_review_result', False),

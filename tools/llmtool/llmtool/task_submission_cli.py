@@ -726,6 +726,16 @@ def add_task_submission_parsers(actions):
     split.add_argument('--pm-session', required=True,
                        help='native PM session UUID (or stored pm- session ID)')
     split.add_argument('--reason', required=True, help='printable reason (1-500 characters)')
+    replan = actions.add_parser(
+        'replan', help="Record the lineage's one REPLAN from an OPEN child at PM_DECIDE")
+    replan.add_argument('child_id', metavar='CHILD', help='OPEN child Task at PM_DECIDE')
+    replan.add_argument('--replan-task', required=True, metavar='ID',
+                        help='existing durable Task ID that becomes the REPLAN')
+    replan.add_argument('--replaces', required=True, action='extend', nargs='+', metavar='ID',
+                        help='child Task IDs the REPLAN replaces; must include CHILD')
+    replan.add_argument('--pm-session', required=True,
+                        help='native PM session UUID (or stored pm- session ID)')
+    replan.add_argument('--reason', required=True, help='printable reason (1-500 characters)')
     drop = actions.add_parser(
         'drop', help='End one OPEN lineage Task: DROPPED, STOPPED or FAILED_FINAL')
     drop.add_argument('task_id', metavar='ID', help='existing durable Task ID')
@@ -1284,14 +1294,155 @@ def _split_checks(store, root_id, children, *, pm_session, reason, preflight):
     return line, digests
 
 
+_SPLIT_NEXT = 'PM closes the ROOT PR with a comment; the ROOT is never merged'
+
+
+def _split_op_id(root_id, children):
+    """The split op id: fixed by the ROOT and its ordered child list, so a re-run of
+    the same split names the same op (Owner B idempotence). None for bad input."""
+    if (type(root_id) is not str or type(children) is not list or not children or
+            any(type(child) is not str for child in children)):
+        return None
+    text = 'split\n' + root_id + '\n' + '\n'.join(children)
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()[:32]
+
+
+def _split_pending(store, task_id):
+    """The PENDING split reservation of one Task, or None."""
+    line = store.get(task_id).get('lineage')
+    return line if type(line) is dict and line.get('state') == 'PENDING' else None
+
+
+def _split_recover(store, task_ids=None):
+    """Owner B restart recovery; the caller holds the lineage lock.
+
+    A PENDING child whose ROOT commit lists it (committed) becomes OPEN; an
+    uncommitted one is removed, leaving no lineage. A committed child is never
+    removed: the store repeats that check under the ROOT lock. A ROOT that cannot
+    be read is an unknown commit state and fails closed (SPLIT_COMMIT_UNKNOWN)
+    with nothing changed. Holding the lineage lock means no split is in flight.
+    """
+    from .task_store import finalize_split_child, release_split_child, split_op_committed
+    result = {'finalized': [], 'released': []}
+    scan = task_ids is None
+    for task_id in (store.task_ids() if scan else task_ids):
+        try:
+            line = _split_pending(store, task_id)
+        except LLMToolError:
+            if not scan:
+                raise
+            # A full scan cannot tell whether an unreadable record is a reservation.
+            _lineage_refuse('SPLIT_COMMIT_UNKNOWN')
+        if line is None:
+            continue
+        try:
+            root_line = store.get(line['lineage_id']).get('lineage')
+        except LLMToolError:
+            _lineage_refuse('SPLIT_COMMIT_UNKNOWN')
+        if split_op_committed(root_line, task_id, line['split_op']):
+            finalize_split_child(store, task_id)
+            result['finalized'].append(task_id)
+        else:
+            release_split_child(store, task_id, op_id=line['split_op'])
+            result['released'].append(task_id)
+    return result
+
+
+def lineage_split_recover(store):
+    """Owner B restart recovery over the whole store, under the lineage lock."""
+    with _lineage_lock(store):
+        return _split_recover(store)
+
+
+def _split_result(root_id, children, base_sha, op_id, pending):
+    return {'task_id': root_id, 'state': 'PARKED', 'children': list(children),
+            'base_sha': base_sha, 'owner_notice': None, 'op_id': op_id,
+            'pending': list(pending), 'next': _SPLIT_NEXT}
+
+
+def _split_resume(store, root_id, children, op_id, *, pm_session):
+    """Owner B re-run of one split op; None when the split must run (again).
+
+    A committed op finalizes its children and returns the same result, with no
+    main SHA read and no new write to the ROOT. Uncommitted leftovers of this op
+    are removed first, so the split then runs as new.
+    """
+    from .task_store import split_op_children
+
+    def own_leftovers():
+        # Only this op's reservations: another op's leftover stays for recovery.
+        found = []
+        for child_id in children:
+            line = _split_pending(store, child_id)
+            if line is not None and line.get('split_op') == op_id:
+                found.append(child_id)
+        return found
+    root = _lineage_task(store, root_id, pm_session)
+    if split_op_children(root.get('lineage'), op_id) is None and not own_leftovers():
+        return None
+    with _lineage_lock(store):
+        root = _lineage_task(store, root_id, pm_session)
+        committed = split_op_children(root.get('lineage'), op_id)
+        if committed is not None and committed != list(children):
+            _lineage_refuse('SPLIT_OP_INVALID')
+        _split_recover(store, own_leftovers())
+        if committed is None:
+            return None
+        lines = [store.get(child_id).get('lineage') for child_id in children]
+        pending = [child_id for child_id, line in zip(children, lines)
+                   if type(line) is not dict or line.get('state') == 'PENDING']
+        base_sha = lines[0].get('base_sha') if type(lines[0]) is dict else None
+    return _split_result(root_id, children, base_sha, op_id, pending)
+
+
+def _split_abort(store, root_id, reserved, op_id, error, stage):
+    """After a failed reserve or commit: proceed only if the ROOT commit is stored.
+
+    Re-reads the ROOT. Committed: return (the children are finalized next).
+    Unreadable: SPLIT_COMMIT_UNKNOWN, fail closed; the reservations stay PENDING
+    behind the central gate until recovery decides. Not committed: remove this
+    op's reservations (a removal that fails leaves a PENDING record that no entry
+    point can use and that recovery removes) and refuse with the original code.
+    """
+    from .task_store import release_split_child, split_op_children
+    try:
+        root_line = store.get(root_id).get('lineage')
+    except LLMToolError:
+        _lineage_refuse('SPLIT_COMMIT_UNKNOWN')
+    if split_op_children(root_line, op_id) is not None:
+        return
+    for child_id in reserved:
+        try:
+            release_split_child(store, child_id, op_id=op_id)
+        except LLMToolError:
+            pass
+    if isinstance(error, TaskStoreConflict):
+        _lineage_refuse('SPLIT_CHILD_CHANGED' if stage == 'RESERVE' else 'SPLIT_ROOT_CHANGED')
+    raise error
+
+
 def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_reader=None):
-    """SPLIT a ROOT into child Tasks that start from the latest main; the ROOT is PARKED."""
-    from .task_store import park_lineage_root, record_lineage
+    """SPLIT a ROOT into child Tasks that start from the latest main; the ROOT is PARKED.
+
+    Owner B prepare/commit (#1502 c6860817605): each child is first reserved
+    PENDING, bound to this split's op id; the ROOT PARKED write that records the
+    op and its full child list is the single commit point; only then do the
+    children become OPEN. A PENDING child takes no other write (the central gate
+    in TaskStore) and counts in no lineage until the ROOT commit lists it.
+    """
+    from . import task_store
+    op_id = _split_op_id(root_id, children)
+    if op_id is not None:
+        resumed = _split_resume(store, root_id, children, op_id, pm_session=pm_session)
+        if resumed is not None:
+            return resumed
     # Preflight: early refusals that write nothing and read no main SHA.
     _line, digests = _split_checks(store, root_id, children, pm_session=pm_session,
                                    reason=reason, preflight=True)
+    if op_id is None:
+        _lineage_refuse('SPLIT_CHILDREN_INVALID')
     base_sha = (main_sha_reader or task_completion.read_authenticated_main_sha)()
-    # PR #1768 v91 (CWE-362): admission and child reservation are one step under
+    # PR #1768 v91 (CWE-362): admission and the split writes are one step under
     # the store-wide lineage lock. Every check is repeated on fresh reads there:
     # the child count (so two interleaved splits of one ROOT never exceed the
     # limit) and membership. A child whose record changed since the preflight
@@ -1301,30 +1452,144 @@ def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_read
             _lineage_refuse('SPLIT_CHILD_CHANGED')
         line, _digests = _split_checks(store, root_id, children, pm_session=pm_session,
                                        reason=reason, preflight=False)
+        root = store.get(root_id)
+        # Early refusals before any reservation; the locked ROOT commit repeats both.
+        if root.get('merge_attempt') is not None:
+            _lineage_refuse('SPLIT_ROOT_MERGE_STARTED')
+        if line['state'] not in ('OPEN', 'PARKED'):
+            _lineage_refuse('SPLIT_ROOT_NOT_OPEN')
+        child_max = repair_policy.load_policy()['child_max']
         now = _timestamp()
-        # Security v91: parking is one compare-and-set under the Task lock that
-        # repeats the OPEN/PARKED and no-merge_attempt checks (SPLIT_ROOT_NOT_OPEN /
-        # SPLIT_ROOT_MERGE_STARTED), and the store refuses any later merge claim on
-        # the PARKED ROOT (MERGE_ROOT_PARKED). It is the only write that can still
-        # be refused, so it comes first: no child is recorded unless the ROOT was
-        # parked. A child write after it meets no refusing check: the child has no
-        # lineage, and every lineage writer in this module holds this lock. Only a
-        # store I/O failure (UNAVAILABLE or BUSY) can still stop a child write.
-        park_lineage_root(store, root_id, dict(line, state='PARKED', reason=reason,
-                                               recorded_at=now))
+        reserved, error, stage = [], None, 'RESERVE'
+        try:
+            # Prepare: each reservation is a locked compare-and-set on the child's
+            # preflight digest; it leaves the child unusable until the commit.
+            for child_id, digest in zip(children, digests):
+                task_store.reserve_split_child(store, child_id, {
+                    'lineage_id': root_id, 'kind': 'child', 'parent': root_id,
+                    'replaces': [], 'state': 'PENDING', 'reason': None,
+                    'base_sha': base_sha, 'recorded_at': now, 'split_op': op_id},
+                    expected_sha256=digest)
+                reserved.append(child_id)
+            # Commit: under the ROOT lock the store re-checks OPEN/PARKED, no
+            # merge_attempt, every listed child still reserved for this op and
+            # child_max over all committed children (security v91, Owner B).
+            stage = 'COMMIT'
+            splits = list(line.get('splits') or []) + [
+                {'op_id': op_id, 'children': list(children)}]
+            task_store.commit_split_root(
+                store, root_id, dict(line, state='PARKED', reason=reason, recorded_at=now,
+                                     splits=splits),
+                child_max=child_max, expected={'lineage': root.get('lineage')})
+        except LLMToolError as exc:
+            error = exc
+        if error is not None:
+            _split_abort(store, root_id, reserved, op_id, error, stage)
+        # Committed: make the children OPEN. A child left PENDING here is still a
+        # committed child; recovery or a re-run of this split finalizes it.
+        pending = []
         for child_id in children:
-            record_lineage(store, child_id, {
-                'lineage_id': root_id, 'kind': 'child', 'parent': root_id, 'replaces': [],
-                'state': 'OPEN', 'reason': None, 'base_sha': base_sha, 'recorded_at': now})
-    return {'task_id': root_id, 'state': 'PARKED', 'children': list(children),
-            'base_sha': base_sha, 'owner_notice': None,
-            'next': 'PM closes the ROOT PR with a comment; the ROOT is never merged'}
+            try:
+                task_store.finalize_split_child(store, child_id)
+            except LLMToolError:
+                pending.append(child_id)
+    return _split_result(root_id, children, base_sha, op_id, pending)
 
 
 def run_task_split(args, *, store=None, stdout=None, main_sha_reader=None):
     """#1502 WP-D D10c3: `task split ROOT --child ID...`; a refusal prints only its code."""
     return _lineage_cli(store, stdout, lambda store: lineage_split(
         store, args.root_id, list(args.child), reason=args.reason,
+        pm_session=active_pm_inbox.pm_session_key(args.pm_session),
+        main_sha_reader=main_sha_reader))
+
+
+def _replan_checks(store, child_id, replan_id, replaces, *, pm_session, reason):
+    """The REPLAN admission checks; return the root id and the digests to bind.
+
+    The named child is an OPEN child of a PARKED ROOT, owned by this PM; the
+    lineage has not used its REPLAN (repair_policy.admit_replan); replaces names
+    that child and only other non-CLOSED children of the same lineage, each owned
+    by this PM; the REPLAN Task is new to every lineage.
+    """
+    child = _lineage_task(store, child_id, pm_session)
+    line = _lineage_of(child)
+    _lineage_reason(reason, 'REPLAN_REASON_REQUIRED')
+    root_id = line['lineage_id']
+    members = _lineage_members(store, root_id) if line['kind'] != 'root' else []
+    code = repair_policy.admit_replan(
+        kind=line['kind'], replan_used=sum(item['kind'] == 'replan' for item in members),
+        replaces=replaces, policy=repair_policy.load_policy())
+    if code is not None:
+        _lineage_refuse(code)
+    if line['state'] != 'OPEN':
+        _lineage_refuse('REPLAN_CHILD_NOT_OPEN')
+    root_line = store.get(root_id).get('lineage')
+    if type(root_line) is not dict or root_line.get('state') != 'PARKED':
+        _lineage_refuse('REPLAN_ROOT_NOT_PARKED')
+    by_id = {item['id']: item for item in members}
+    if (len(replaces) > 3 or child_id not in replaces or
+            any(by_id.get(task_id, {}).get('kind') != 'child' or
+                by_id[task_id]['state'] in ('CLOSED', 'PENDING') for task_id in replaces)):
+        _lineage_refuse('REPLAN_REPLACES_INVALID')
+    digests = {task_id: _lineage_task(store, task_id, pm_session).get('record_sha256')
+               for task_id in replaces}
+    record = _lineage_new_member(store, replan_id, pm_session, {root_id, *replaces})
+    digests[replan_id] = record.get('record_sha256')
+    return root_id, digests
+
+
+def lineage_replan(store, child_id, replan_id, replaces, *, pm_session, reason,
+                   main_sha_reader=None):
+    """#1502 D10d1: record the lineage's one REPLAN, chosen by the PM at PM_DECIDE.
+
+    The REPLAN Task starts from the latest main SHA and takes over the replaced
+    children's obligation; each replaced child that is still OPEN ends STOPPED
+    with an Owner notice (D4). Refusals write nothing and read no main SHA.
+    """
+    from .task_store import record_lineage
+    replaces = list(replaces) if type(replaces) in (list, tuple) else replaces
+    _root_id, digests = _replan_checks(store, child_id, replan_id, replaces,
+                                       pm_session=pm_session, reason=reason)
+    base_sha = (main_sha_reader or task_completion.read_authenticated_main_sha)()
+    with _lineage_lock(store):
+        if {task_id: store.get(task_id).get('record_sha256') for task_id in digests} != digests:
+            _lineage_refuse('REPLAN_TASK_CHANGED')
+        root_id, digests = _replan_checks(store, child_id, replan_id, replaces,
+                                          pm_session=pm_session, reason=reason)
+        now = _timestamp()
+        try:
+            # The REPLAN comes first: a replaced child is stopped only once its
+            # replacement is recorded, so no obligation is left uncovered.
+            store.compare_and_update(replan_id, expected={
+                'record_sha256': digests[replan_id]}, lineage={
+                'lineage_id': root_id, 'kind': 'replan', 'parent': root_id,
+                'replaces': list(replaces), 'state': 'OPEN', 'reason': reason,
+                'base_sha': base_sha, 'recorded_at': now})
+        except TaskStoreConflict:
+            _lineage_refuse('REPLAN_TASK_CHANGED')
+        stopped, notices, failed = [], [], []
+        for task_id in replaces:
+            line = store.get(task_id).get('lineage')
+            if type(line) is not dict or line.get('state') != 'OPEN':
+                continue  # already ended (not CLOSED): the REPLAN covers it as is
+            try:
+                record_lineage(store, task_id, dict(line, state='STOPPED', reason=reason,
+                                                    recorded_at=now))
+            except LLMToolError:
+                failed.append(task_id)  # still OPEN: the PM ends it with task drop
+                continue
+            stopped.append(task_id)
+            notices.append(lineage_owner_notice(task_id, 'STOPPED', reason))
+    return {'task_id': replan_id, 'kind': 'replan', 'state': 'OPEN', 'lineage_id': root_id,
+            'replaces': list(replaces), 'base_sha': base_sha, 'stopped': stopped,
+            'stop_failed': failed, 'owner_notices': notices}
+
+
+def run_task_replan(args, *, store=None, stdout=None, main_sha_reader=None):
+    """#1502 WP-D D10d2: `task replan CHILD --replan-task ID --replaces ID...`."""
+    return _lineage_cli(store, stdout, lambda store: lineage_replan(
+        store, args.child_id, args.replan_task, list(args.replaces), reason=args.reason,
         pm_session=active_pm_inbox.pm_session_key(args.pm_session),
         main_sha_reader=main_sha_reader))
 
