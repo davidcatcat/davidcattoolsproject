@@ -107,6 +107,45 @@ class NonAsciiBoundaryTests(unittest.TestCase):
                     self.assertEqual(d.safe_diagnostic_text(text), text)
                     self.assertEqual(json.loads(d.diagnostic_json({'message': text}))['message'], text)
 
+    def test_cloud_key_rule_is_case_sensitive(self):
+        # Lowercase or mixed-case prefixes and lowercase bodies are not
+        # cloud keys, and neither are non-ASCII lookalikes that IGNORECASE
+        # would fold to ASCII uppercase (U+0130, U+0131, U+017F, U+212A).
+        body = 'Q' * 16
+        values = (
+            _cat('ak', 'ia', body),
+            _cat('as', 'ia', body),
+            _cat('Ak', 'ia', body),
+            _cat('AK', 'IA', 'q' * 16),
+            _cat('AS', 'IA', 'Q' * 15, 'q'),
+            _cat('A', 'K', 'IA', body),
+            _cat('AK', 'ı', 'A', body),
+            _cat('AK', 'İ', 'A', body),
+            _cat('A', 'ſ', 'IA', body),
+            _cat('AK', 'IA', 'Q' * 15, 'K'),
+            _cat('AK', 'IA', 'ſ' * 16),
+        )
+        for value in values:
+            for text in (value, _cat('中', value, '中'), _cat('note ', value)):
+                with self.subTest(length=len(text), first=hex(ord(text[0]))):
+                    self.assertIsNone(d._CREDENTIAL.search(text))
+                    self.assertFalse(d._contains_credential_value(text))
+                    self.assertEqual(d.safe_diagnostic_text(text), text)
+
+    def test_uppercase_cloud_keys_still_refused(self):
+        for value in (_cat('AK', 'IA', 'Q' * 8, '7' * 8),
+                      _cat('AS', 'IA', '0' * 16),
+                      _cat('AK', 'IA', 'Z' * 16)):
+            for text in (value, _cat('note ', value, ' end'),
+                         _cat('ı', value, 'K')):
+                with self.subTest(length=len(text)):
+                    self.assert_refused(text)
+
+    def test_cloud_key_rule_is_a_case_sensitive_group(self):
+        self.assertTrue(d._DIAGNOSTIC_CLOUD_KEY.startswith('(?-i:'))
+        self.assertTrue(d._DIAGNOSTIC_CLOUD_KEY.endswith(')'))
+        self.assertTrue(d._CREDENTIAL.flags & re.IGNORECASE)
+
     def test_patterns_use_ascii_look_arounds_and_local_cloud_rule(self):
         for pattern in (d._CREDENTIAL, d._AUTH_VALUE, d._CREDENTIAL_ASSIGNMENT):
             with self.subTest(pattern=pattern.pattern[:24]):

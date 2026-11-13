@@ -102,7 +102,12 @@ _ASCII_WORD = r'(?-i:[A-Za-z0-9_])'
 _START = r'(?<!' + _ASCII_WORD + r')'
 _END = r'(?!' + _ASCII_WORD + r')'
 # Diagnostics-local cloud key rule; test_output_excerpts._CLOUD_KEY is unchanged.
-_DIAGNOSTIC_CLOUD_KEY = _START + r'(?:AKIA|ASIA)[A-Z0-9]{16}' + _END
+# The whole rule is case-sensitive even inside the IGNORECASE _CREDENTIAL:
+# AKIA/ASIA and [A-Z0-9] match only ASCII uppercase letters and digits, never
+# lowercase letters or lookalikes such as U+0131 or U+212A.
+_DIAGNOSTIC_CLOUD_KEY = (
+    r'(?-i:' + _START + r'(?:AKIA|ASIA)[A-Z0-9]{16}' + _END + r')'
+)
 _NON_ASCII = re.compile(r'[^\x00-\x7f]')
 # Recognizable credential values, not ordinary authorization/status vocabulary.
 _CREDENTIAL = re.compile(
