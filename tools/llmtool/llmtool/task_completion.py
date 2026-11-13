@@ -2191,6 +2191,24 @@ def _review_binding_line(task_id, run_id, contract_digest, result_sha):
             f'contract={contract_digest} head={result_sha}')
 
 
+def _canonical_verdict_body(text):
+    """Return the one canonical form used to match a PASS comment to its claim.
+
+    A Codex PASS comment is accepted only when its body equals the bound
+    claim's ``review_text`` after this single normalization of both texts:
+
+    1. CRLF and lone CR line endings become LF;
+    2. trailing whitespace and newlines at the end of the whole body are
+       removed (nothing else: interior blank lines, leading text and
+       per-line whitespace are kept and must match exactly).
+
+    Return None for a non-string, so it never equals a real body.
+    """
+    if type(text) is not str:
+        return None
+    return text.replace('\r\n', '\n').replace('\r', '\n').rstrip()
+
+
 def is_formal_claude_pass(body, *, task_id, run_id, contract_digest, result_sha):
     """Return whether a comment is the exact task-bound formal Claude PASS."""
     if type(body) is not str:
@@ -2649,11 +2667,10 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                                        claim['review_result'].get('head') == result_sha and
                                        claim['review_result'].get('verdict') == 'PASS'
                                        ] if type(claims) is list else []
-                    comment_lines = [line for line in body.splitlines() if line.strip()]
-                    claim_lines = ([line for line in matching_claims[0]['review_result']['review_text'].splitlines()
-                                    if line.strip()]
-                                   if len(matching_claims) == 1 and
-                                   type(matching_claims[0]['review_result'].get('review_text')) is str else None)
+                    comment_body = _canonical_verdict_body(body)
+                    claim_body = (_canonical_verdict_body(
+                                      matching_claims[0]['review_result'].get('review_text'))
+                                  if len(matching_claims) == 1 else None)
                     accepted_codex = (
                         type(codex_task_record) is dict and
                         codex_task_record.get('task_id') == task_id and
@@ -2662,8 +2679,8 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                         classified[2] == 'REVIEW_PASS' and
                         _review_family_compatible(
                             codex_task_record.get('developer'), reviewer.trusted_agent_id) and
-                        len(matching_claims) == 1 and claim_lines and
-                        claim_lines == comment_lines)
+                        len(matching_claims) == 1 and bool(claim_body) and
+                        claim_body == comment_body)
                 except (LLMToolError, KeyError, TypeError, ValueError, IndexError):
                     accepted_codex = False
             if not accepted_codex:
