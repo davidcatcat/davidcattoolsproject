@@ -1098,12 +1098,24 @@ def _lineage_task(store, task_id, pm_session):
 
 
 def _lineage_members(store, lineage_id):
-    """The other Tasks of one lineage, each as its lineage plus its id."""
-    members = []
+    """The other Tasks of one lineage, each as its lineage plus its id.
+
+    Owner B visibility gate: a PENDING split reservation is a member only once
+    the ROOT's PARKED commit lists it; an uncommitted one is never counted. An
+    unreadable ROOT fails closed (the read raises).
+    """
+    from .task_store import split_op_committed
+    members, root = [], None
     for task_id in store.task_ids():
         line = None if task_id == lineage_id else store.get(task_id).get('lineage')
-        if type(line) is dict and line.get('lineage_id') == lineage_id:
-            members.append(dict(line, id=task_id))
+        if type(line) is not dict or line.get('lineage_id') != lineage_id:
+            continue
+        if line.get('state') == 'PENDING':
+            if root is None:
+                root = {'lineage': store.get(lineage_id).get('lineage')}
+            if not split_op_committed(root['lineage'], task_id, line.get('split_op')):
+                continue
+        members.append(dict(line, id=task_id))
     return members
 
 
@@ -1155,6 +1167,9 @@ def lineage_end(store, task_id, state, *, pm_session, reason):
 
 def _lineage_end_locked(store, task_id, state, *, pm_session, reason):
     from .task_store import record_lineage
+    # Owner B: a child left PENDING after its ROOT commit becomes OPEN first; an
+    # uncommitted one is removed. Either way no end is recorded on a reservation.
+    _split_recover(store, [task_id])
     line = _lineage_of(_lineage_task(store, task_id, pm_session))
     if state not in ('DROPPED', 'STOPPED', 'FAILED_FINAL'):
         _lineage_refuse('LINEAGE_STATE_INVALID')

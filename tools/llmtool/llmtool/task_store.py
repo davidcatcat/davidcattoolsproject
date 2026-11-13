@@ -1146,13 +1146,47 @@ def _validate_review_exception(item):
 _LINEAGE_FIELDS = frozenset(('lineage_id', 'kind', 'parent', 'replaces', 'state',
                              'reason', 'base_sha', 'recorded_at'))
 _LINEAGE_END_STATES = ('CLOSED', 'DROPPED', 'STOPPED', 'FAILED_FINAL')
-_LINEAGE_STATES = ('OPEN', 'PARKED') + _LINEAGE_END_STATES
+# Owner B (#1502, PR #1768): a split child is first written PENDING, bound to its
+# split op ('split_op'); it becomes OPEN only after the ROOT PARKED commit records
+# that op with the full child list ('splits'). Both keys are optional, so a
+# lineage written before Owner B keeps its exact shape.
+_LINEAGE_STATES = ('OPEN', 'PARKED', 'PENDING') + _LINEAGE_END_STATES
+_LINEAGE_SPLIT_FIELDS = frozenset(('split_op', 'splits'))
+_SPLIT_ENTRY_FIELDS = frozenset(('op_id', 'children'))
+MAX_SPLIT_CHILDREN = 64
+SPLIT_ACTIONS = ('RESERVE', 'COMMIT', 'FINALIZE', 'RELEASE')
+
+
+def _hex32(value):
+    return type(value) is str and re.fullmatch(r'[0-9a-f]{32}', value) is not None
+
+
+def _valid_splits(item):
+    """A ROOT's committed splits: unique op ids, each with 1+ distinct children."""
+    splits = item.get('splits')
+    if type(splits) is not list or not 1 <= len(splits) <= MAX_SPLIT_CHILDREN:
+        return False
+    ops, children = set(), set()
+    for entry in splits:
+        if (type(entry) is not dict or set(entry) != _SPLIT_ENTRY_FIELDS or
+                not _hex32(entry['op_id']) or entry['op_id'] in ops or
+                type(entry['children']) is not list or not entry['children']):
+            return False
+        ops.add(entry['op_id'])
+        for child in entry['children']:
+            if not _hex32(child) or child in children or child == item.get('lineage_id'):
+                return False
+            children.add(child)
+    return len(children) <= MAX_SPLIT_CHILDREN
 
 
 def _validate_lineage(record):
     item = record.get('lineage')
     hex32 = lambda value: type(value) is str and re.fullmatch(r'[0-9a-f]{32}', value)
-    if (type(item) is not dict or set(item) != _LINEAGE_FIELDS or
+    if (type(item) is not dict or not _LINEAGE_FIELDS <= set(item) or
+            set(item) - _LINEAGE_FIELDS - _LINEAGE_SPLIT_FIELDS or
+            ('split_op' in item and not hex32(item['split_op'])) or
+            ('splits' in item and not _valid_splits(item)) or
             item.get('kind') not in ('root', 'child', 'replan') or
             not hex32(item.get('lineage_id')) or item.get('state') not in _LINEAGE_STATES or
             type(item.get('replaces')) is not list or len(item['replaces']) > 3 or
@@ -1166,26 +1200,67 @@ def _validate_lineage(record):
             not _valid_utc_seconds(item.get('recorded_at'))):
         _fail('TASK_LINEAGE_INVALID')
     if item['kind'] == 'root':
+        # Only a split ROOT (never OPEN again) records committed splits.
         valid = (item['lineage_id'] == record.get('task_id') and item['parent'] is None and
-                 not item['replaces'])
+                 not item['replaces'] and item['state'] != 'PENDING' and
+                 'split_op' not in item and
+                 ('splits' not in item or item['state'] != 'OPEN'))
     else:
         valid = (item['parent'] == item['lineage_id'] != record.get('task_id') and
-                 item['state'] != 'PARKED' and
+                 item['state'] != 'PARKED' and 'splits' not in item and
+                 ('split_op' not in item or item['kind'] == 'child') and
+                 (item['state'] != 'PENDING' or 'split_op' in item) and
                  (item['kind'] == 'replan') == bool(item['replaces']))
     if not valid:
         _fail('TASK_LINEAGE_INVALID')
 
 
-def _check_lineage_transition(old, new):
-    """Refuse a non-forward lineage write; the store calls this on every write path."""
+def _check_lineage_transition(old, new, split_action=None):
+    """Refuse a non-forward lineage write; the store calls this on every write path.
+
+    Owner B: a PENDING split reservation is written only by RESERVE onto a Task
+    without lineage, leaves PENDING only by FINALIZE (to OPEN) or RELEASE, and a
+    ROOT's committed splits only grow by one op, through COMMIT.
+    """
     if old is None:
+        # A malformed new lineage is left to the validator (TASK_LINEAGE_INVALID).
+        if type(new) is dict and (
+                (new.get('state') == 'PENDING' or 'split_op' in new) !=
+                (split_action == 'RESERVE') or
+                ('splits' in new) != (split_action == 'COMMIT')):
+            _fail('TASK_LINEAGE_TRANSITION_INVALID')
+        if type(new) is not dict and split_action is not None:
+            _fail('TASK_LINEAGE_TRANSITION_INVALID')
         return
-    if (type(new) is not dict or
-            any(old.get(key) != new.get(key)
-                for key in ('lineage_id', 'kind', 'parent', 'replaces', 'base_sha')) or
-            old.get('state') in _LINEAGE_END_STATES or
-            (old.get('state') == 'PARKED' and new.get('state') == 'OPEN')):
+    if type(new) is not dict:
         _fail('TASK_LINEAGE_TRANSITION_INVALID')
+    old_splits, new_splits = old.get('splits', []), new.get('splits', [])
+    grown = (type(new_splits) is list and len(new_splits) == len(old_splits) + 1 and
+             new_splits[:-1] == old_splits)
+    if (any(old.get(key) != new.get(key)
+            for key in ('lineage_id', 'kind', 'parent', 'replaces', 'base_sha', 'split_op')) or
+            old.get('state') in _LINEAGE_END_STATES or
+            (old.get('state') == 'PARKED' and new.get('state') == 'OPEN') or
+            new.get('state') == 'PENDING' or
+            (old.get('state') == 'PENDING') != (split_action == 'FINALIZE') or
+            not (grown if split_action == 'COMMIT' else new_splits == old_splits)):
+        _fail('TASK_LINEAGE_TRANSITION_INVALID')
+
+
+def split_op_children(root_lineage, op_id):
+    """The children a ROOT lineage committed for op_id, or None (Owner B)."""
+    if type(root_lineage) is not dict or type(root_lineage.get('splits')) is not list:
+        return None
+    for entry in root_lineage['splits']:
+        if type(entry) is dict and entry.get('op_id') == op_id:
+            return list(entry.get('children') or ())
+    return None
+
+
+def split_op_committed(root_lineage, child_id, op_id):
+    """True only when the ROOT's PARKED commit bound op_id and listed child_id."""
+    children = split_op_children(root_lineage, op_id)
+    return children is not None and child_id in children
 
 
 def record_lineage(store, task_id, lineage):
@@ -1232,6 +1307,82 @@ def park_lineage_root(store, task_id, lineage):
         if getattr(exc, 'task_store_error_code', None) == 'TASK_LINEAGE_TRANSITION_INVALID':
             _fail('SPLIT_ROOT_NOT_OPEN')
         raise
+
+
+# Owner B prepare/commit (#1502 c6860817605, PR #1768). The four trusted split
+# writes below are the only way into or out of a PENDING split reservation. The
+# central gate in TaskStore._update_record refuses every other write to a
+# PENDING Task (TASK_LINEAGE_PENDING), so dispatch, repair, review, merge,
+# abandonment and lineage ends can never use an uncommitted child.
+
+def reserve_split_child(store, task_id, lineage, *, expected_sha256):
+    """Prepare: write one child PENDING, bound to its split op.
+
+    Under the child's lock the store refuses unless the record still has the
+    digest the caller checked, no lineage, no merge_attempt and no abandonment.
+    """
+    if (type(lineage) is not dict or lineage.get('kind') != 'child' or
+            lineage.get('state') != 'PENDING' or not _hex32(lineage.get('split_op'))):
+        _fail('TASK_LINEAGE_INVALID')
+    return store._update(task_id, expected={'record_sha256': expected_sha256},
+                         changes={'lineage': dict(lineage)}, trusted_split='RESERVE')
+
+
+def commit_split_root(store, task_id, lineage, *, child_max, expected):
+    """Commit: PARK the ROOT in one locked compare-and-update bound to the op.
+
+    lineage is the ROOT's PARKED lineage whose last 'splits' entry is the new
+    op and its full child list. Under the ROOT lock the store re-checks the ROOT
+    (OPEN or PARKED, no merge_attempt), that every listed child is still PENDING
+    for this op, and child_max over every committed child of the ROOT.
+    """
+    if (type(lineage) is not dict or lineage.get('kind') != 'root' or
+            lineage.get('state') != 'PARKED' or lineage.get('lineage_id') != task_id or
+            type(lineage.get('splits')) is not list or not lineage['splits'] or
+            type(child_max) is not int or child_max < 0):
+        _fail('TASK_LINEAGE_INVALID')
+    try:
+        return store._update(task_id, expected=expected, changes={'lineage': dict(lineage)},
+                             trusted_split='COMMIT', split_child_max=child_max)
+    except LLMToolError as exc:
+        if getattr(exc, 'task_store_error_code', None) == 'TASK_LINEAGE_TRANSITION_INVALID':
+            _fail('SPLIT_ROOT_NOT_OPEN')
+        raise
+
+
+def finalize_split_child(store, task_id):
+    """Make a committed PENDING child OPEN; the store re-reads the ROOT commit."""
+    current = store.get(task_id)
+    line = current.get('lineage')
+    if type(line) is not dict or line.get('state') != 'PENDING':
+        _fail('SPLIT_RESERVATION_INVALID')
+    return store._update(task_id, expected={'lineage': line},
+                         changes={'lineage': dict(line, state='OPEN')},
+                         trusted_split='FINALIZE')
+
+
+def release_split_child(store, task_id, *, op_id):
+    """Remove an uncommitted PENDING reservation of op_id; never a committed child.
+
+    The ROOT's own task lock is held across the child write, so the ROOT commit
+    (which takes that lock) cannot land between the check and the removal.
+    """
+    current = store.get(task_id)
+    line = current.get('lineage')
+    if (type(line) is not dict or line.get('state') != 'PENDING' or
+            line.get('split_op') != op_id or not _hex32(line.get('lineage_id'))):
+        _fail('SPLIT_RESERVATION_INVALID')
+    directory = store._dirfd()
+    try:
+        root_lock = store._lock_sidecar(directory, '.' + store._name(line['lineage_id']) +
+                                        '.lock', exclusive=True, code='TASK_STORE')
+    finally:
+        os.close(directory)
+    try:
+        return store._update(task_id, expected={'lineage': line},
+                             changes={'lineage': None}, trusted_split='RELEASE')
+    finally:
+        store._unlock_sidecar(root_lock)
 
 
 def _validate(record, *, strict=True):
@@ -4178,6 +4329,74 @@ class TaskStore:
                 continue
         _fail('TASK_STORE_BUSY')
 
+    def _split_root_lineage(self, directory, root_id):
+        """The stored ROOT lineage; an unreadable ROOT fails closed (unknown commit)."""
+        try:
+            return self._read_at(directory, root_id).get('lineage')
+        except LLMToolError:
+            _fail('SPLIT_COMMIT_UNKNOWN')
+
+    def _check_split_write(self, directory, task_id, current, new_line, action, child_max):
+        """Owner B: the RESERVE, COMMIT and FINALIZE checks, under this Task's lock."""
+        old_line = current.get('lineage')
+        if action == 'RESERVE':
+            if (old_line is not None or current.get('merge_attempt') is not None or
+                    current.get('abandonment') is not None):
+                _fail('LINEAGE_MEMBER_INVALID')
+            return
+        if action == 'FINALIZE':
+            if (type(old_line) is not dict or new_line != dict(old_line, state='OPEN') or
+                    not split_op_committed(self._split_root_lineage(
+                        directory, old_line['lineage_id']), task_id, old_line['split_op'])):
+                _fail('SPLIT_NOT_COMMITTED')
+            return
+        # COMMIT, under the ROOT lock: the new op and its full child list.
+        splits = new_line.get('splits')
+        if (new_line.get('kind') != 'root' or new_line.get('state') != 'PARKED' or
+                new_line.get('lineage_id') != task_id or type(splits) is not list or
+                not splits):
+            _fail('TASK_LINEAGE_INVALID')
+        entry = splits[-1]
+        if (type(entry) is not dict or not _hex32(entry.get('op_id')) or
+                split_op_children(old_line, entry['op_id']) is not None or
+                type(entry.get('children')) is not list or not entry['children']):
+            _fail('SPLIT_OP_INVALID')
+        children = entry['children']
+        committed = {child for item in (old_line or {}).get('splits', [])
+                     for child in item['children']}
+        reserved = set()
+        for other_id in self.task_ids():
+            if other_id == task_id:
+                continue
+            try:
+                line = self._read_at(directory, other_id).get('lineage')
+            except _TaskNotFound:
+                continue
+            except LLMToolError:
+                _fail('SPLIT_COMMIT_UNKNOWN')  # cannot count the ROOT's children
+            if type(line) is not dict or line.get('lineage_id') != task_id:
+                continue
+            if (line.get('state') == 'PENDING' and line.get('kind') == 'child' and
+                    line.get('split_op') == entry['op_id']):
+                reserved.add(other_id)
+            elif line.get('kind') == 'child' and line.get('state') != 'PENDING':
+                committed.add(other_id)  # also counts a child written before Owner B
+        # Every listed child is still this op's reservation; a RELEASE takes this
+        # ROOT lock first, so no reservation can vanish while the commit runs.
+        if set(children) != reserved:
+            _fail('SPLIT_RESERVATION_INVALID')
+        if len(committed) + len(children) > child_max:
+            _fail('SPLIT_CHILD_LIMIT')
+
+    def _check_split_release(self, directory, current):
+        """RELEASE only an uncommitted reservation; the caller holds the ROOT lock."""
+        line = current.get('lineage')
+        if type(line) is not dict or line.get('state') != 'PENDING':
+            _fail('SPLIT_RESERVATION_INVALID')
+        if split_op_committed(self._split_root_lineage(directory, line['lineage_id']),
+                              current['task_id'], line['split_op']):
+            _fail('SPLIT_COMMITTED')
+
     def _update(self, task_id, *, expected, changes, d6_claims=None, **trusted):
         """Commit one change; a commit gaining a live D6 goes through ``_d6_commit``."""
         if d6_claims is not None:
@@ -4198,11 +4417,17 @@ class TaskStore:
                        trusted_dispatch_audit=False,
                        trusted_completion_events=False, trusted_abandonment=False,
                        abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
-                       trusted_codex_launch=False, trusted_opencode_launch=False):
+                       trusted_codex_launch=False, trusted_opencode_launch=False,
+                       trusted_split=None, split_child_max=None):
         # Refused here, not by the writable-field check: the dispatch gate
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
             _fail()
+        if (trusted_split is not None or split_child_max is not None) and (
+                trusted_split not in SPLIT_ACTIONS or set(changes) != {'lineage'} or
+                (split_child_max is not None) != (trusted_split == 'COMMIT') or
+                ((changes['lineage'] is None) != (trusted_split == 'RELEASE'))):
+            _fail('TASK_LINEAGE_TRANSITION_INVALID')
         if ('developer' in changes and type(changes['developer']) is dict and
                 'execution' in changes['developer'] and
                 type(changes['developer'].get('execution')) is dict and
@@ -4289,6 +4514,13 @@ class TaskStore:
                         _fail('TASK_STORE_BUSY')
                     time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
             current = self._read_at(directory, task_id)
+            current_line = current.get('lineage')
+            if (type(current_line) is dict and current_line.get('state') == 'PENDING' and
+                    trusted_split not in ('FINALIZE', 'RELEASE')):
+                # Owner B central visibility gate: a PENDING split reservation takes
+                # no write but its own FINALIZE or RELEASE, so no dispatch, repair,
+                # review, merge claim, abandonment or lineage end can use it.
+                _fail('TASK_LINEAGE_PENDING')
             _check_lineage_merge_claim(current, changes)
             if expected is not None and any(current.get(key) != value
                                             for key, value in expected.items()):
@@ -4327,9 +4559,12 @@ class TaskStore:
                         old_attempt.get('claimed_at') != new_attempt.get('claimed_at'))
                 if not valid:
                     _fail('TASK_MERGE_ATTEMPT_TRANSITION_INVALID')
-            if 'lineage' in changes:
+            if trusted_split == 'RELEASE':
+                self._check_split_release(directory, current)
+            elif 'lineage' in changes:
                 # #1502 WP-D D9b: every lineage write is forward-only, under the task lock.
-                _check_lineage_transition(current.get('lineage'), changes['lineage'])
+                _check_lineage_transition(current.get('lineage'), changes['lineage'],
+                                          split_action=trusted_split)
                 new_line = changes['lineage']
                 if (type(new_line) is dict and new_line.get('state') == 'PARKED' and
                         (current.get('merge_attempt') is not None or
@@ -4338,6 +4573,9 @@ class TaskStore:
                     # PARKED, whether the merge_attempt is persisted or arrives in this
                     # same update (PR #1758 v91, CWE-841).
                     _fail('SPLIT_ROOT_MERGE_STARTED')
+                if trusted_split is not None:
+                    self._check_split_write(directory, task_id, current, new_line,
+                                            trusted_split, split_child_max)
             if trusted_abandonment:
                 item = changes['abandonment']
                 if (current.get('pm_session_id') != abandonment_pm_session_id or
@@ -4530,6 +4768,9 @@ class TaskStore:
                 if not gained <= d6_claims:
                     raise _D6ClaimRequired(gained)
             current.update(changes)
+            if trusted_split == 'RELEASE':
+                # An uncommitted reservation leaves no lineage at all behind.
+                del current['lineage']
             current['updated_at'] = datetime.now(timezone.utc).replace(
                 microsecond=0).isoformat().replace('+00:00', 'Z')
             current['record_sha256'] = _digest(current)
