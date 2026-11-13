@@ -10452,12 +10452,91 @@ class WaitingTaskTests(unittest.TestCase):
                 self.assertIsNone(mon._waiting_entry(record))
         self.assertIsNotNone(mon._waiting_entry({**good, "lineage": {"state": "OPEN"}}))
         self.assertIsNotNone(mon._waiting_entry({**good, "lineage": {"state": ["x"]}}))
-        messy = {**good, "waiting": {**good["waiting"],
-                                     "resume_condition": "line one\n\tline\x1b two  " + "z" * 80}}
-        shown = mon._waiting_entry(messy).resume
+        long = {**good, "waiting": {**good["waiting"],
+                                    "resume_condition": "line one  line two " * 6}}
+        shown = mon._waiting_entry(long).resume
         self.assertEqual(len(shown), mon.WAITING_RESUME_SHOWN)
-        self.assertTrue(shown.startswith("line one line two zz"))
+        self.assertTrue(shown.startswith("line one line two line one"))
         self.assertTrue(shown.endswith("…"))
+        # Control characters fail the TaskStore rule: never cleaned up and shown.
+        messy = {**good, "waiting": {**good["waiting"],
+                                     "resume_condition": "line one\n\tline\x1b two"}}
+        self.assertEqual(mon._waiting_entry(messy),
+                         mon.WaitingRecord("a" * 8, mon.WAITING_HIDDEN,
+                                           mon._dispatch_time(self.stamp(3 * 3600)),
+                                           mon.WAITING_HIDDEN))
+
+    def test_waiting_row_shows_only_a_record_the_task_store_validator_accepts(self):
+        """Security repair (PR #1740): the Task file is untrusted display input."""
+        import re
+        module = mon._store_waiting_module()
+        self.assertIsNotNone(module)
+        self.assertEqual(module.valid_waiting.__module__, module.__name__)
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "tools", "llmtool")
+        self.assertTrue(os.path.realpath(module.__file__).startswith(os.path.realpath(root) + os.sep))
+        since = mon._dispatch_time(self.stamp(3 * 3600))
+        hidden = mon.WaitingRecord("a" * 8, mon.WAITING_HIDDEN, since, mon.WAITING_HIDDEN)
+        # A valid record still renders in full.
+        self.assertEqual(mon.waiting_lines([mon._waiting_entry(self.task())], self.NOW),
+                         [(f"WAITING：task aaaaaaaa（QUOTA，已等 3 小時）恢復條件：{self.RESUME}", "")])
+
+        def shown(record):
+            entry = mon._waiting_entry(record)
+            return entry, "\n".join(line for line, _ in mon.waiting_lines([entry], self.NOW))
+
+        # A credential-shaped condition: TaskStore's real screen is called, and the
+        # injected screen flags this text (Owner #763 A: no credential-shaped data here).
+        flagged = "condition the injected screen flags"
+        calls = []
+
+        def screen(value):
+            calls.append(value)
+            return value == flagged
+        record = self.task()
+        record["waiting"]["resume_condition"] = flagged
+        with patch.object(module, "_emitted_sensitive", side_effect=screen):
+            entry, text = shown(record)
+            self.assertEqual(entry, hidden)
+            self.assertNotIn(flagged, text)
+            self.assertIn(flagged, calls)
+            self.assertIn(mon.WAITING_HIDDEN, text)
+            # A hidden reason is unknown, so the notice is due at once.
+            self.assertIn("★ 該通知 Owner", text)
+            self.assertEqual(mon._waiting_entry(self.task()).resume, self.RESUME)
+        # The monitor's own SECRETISH screen also hides the reason and the condition.
+        record = self.task()
+        record["waiting"]["resume_condition"] = "monitor screen marker here"
+        with patch.object(mon, "SECRETISH", re.compile(r"monitor screen marker")):
+            entry, text = shown(record)
+            self.assertEqual(entry, hidden)
+            self.assertNotIn("monitor screen marker", text)
+            self.assertNotIn("QUOTA", text)
+        with patch.object(mon, "SECRETISH", re.compile(r"QUOTA")):
+            entry, text = shown(self.task())
+            self.assertEqual(entry, hidden)
+            self.assertNotIn("QUOTA", text)
+            self.assertNotIn(self.RESUME, text)
+        # Invalid records the old cleanup would have shown are never shown raw.
+        for label, value in (("control characters", "resume \x1b[31m now"),
+                             ("NUL only", "\x00"),
+                             ("over the store limit", ("runner back " * 50)[:501])):
+            record = self.task()
+            record["waiting"]["resume_condition"] = value
+            entry, text = shown(record)
+            with self.subTest(label=label):
+                self.assertEqual(entry, hidden)
+                self.assertNotIn("resume", text)
+                self.assertNotIn("runner back", text)
+                self.assertNotIn("\x00", text)
+        # No validator (cannot load) or a failing one: fail closed, nothing shown.
+        with patch.object(mon, "_store_waiting_module", return_value=None):
+            self.assertEqual(mon._waiting_entry(self.task()), hidden)
+        with patch.object(module, "valid_waiting", side_effect=RuntimeError("boom")):
+            self.assertEqual(mon._waiting_entry(self.task()), hidden)
+        with patch.object(module, "valid_waiting", return_value="yes"):
+            self.assertEqual(mon._waiting_entry(self.task()), hidden)
+        self.assertTrue(mon.waiting_notice_due(mon.WAITING_HIDDEN, self.NOW, self.NOW))
 
     def test_rows_show_reason_age_condition_and_mark_due_notices_first(self):
         record = mon._waiting_entry(self.task())

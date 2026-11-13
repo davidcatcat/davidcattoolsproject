@@ -6945,7 +6945,10 @@ WAITING_RESUME_SHOWN = 60
 WAITING_POLICY_READ = 4096
 WAITING_REASON = re.compile(r"^[A-Z0-9_]{1,64}$")
 WAITING_END_STATES = ("CLOSED", "DROPPED", "STOPPED", "FAILED_FINAL")
+WAITING_HIDDEN = "(hidden)"    # shown instead of an invalid or screened value
 _waiting_parsed: dict = {}
+_store_waiting_lock = threading.Lock()
+_store_waiting_loaded: list = []    # [task_store module or None] once tried
 
 
 @dataclass(frozen=True)
@@ -6954,6 +6957,44 @@ class WaitingRecord:
     reason: str
     since: float
     resume: str
+
+
+def _store_waiting_module():
+    """llmtool.task_store from this checkout, or None when it cannot be loaded.
+
+    Loaded once, like the agreement tests do: never some other installed llmtool."""
+    with _store_waiting_lock:
+        if not _store_waiting_loaded:
+            module = None
+            root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "tools", "llmtool")
+            added = root not in sys.path
+            try:
+                if added:
+                    sys.path.insert(0, root)
+                try:
+                    module = importlib.import_module("llmtool.task_store")
+                finally:
+                    if added and root in sys.path:
+                        sys.path.remove(root)
+                if (not os.path.realpath(module.__file__).startswith(os.path.realpath(root) + os.sep)
+                        or not callable(getattr(module, "valid_waiting", None))):
+                    module = None
+            except Exception:
+                module = None
+            _store_waiting_loaded.append(module)
+        return _store_waiting_loaded[0]
+
+
+def _store_waiting_valid(waiting) -> bool:
+    """TaskStore's own WAITING validator; False when it fails or is unavailable."""
+    module = _store_waiting_module()
+    if module is None:
+        return False
+    try:
+        return module.valid_waiting(waiting) is True
+    except Exception:
+        return False
 
 
 def _waiting_entry(record) -> WaitingRecord | None:
@@ -6974,9 +7015,15 @@ def _waiting_entry(record) -> WaitingRecord | None:
     if (type(reason) is not str or not WAITING_REASON.fullmatch(reason) or "OWNER" in reason
             or type(resume) is not str or since <= 0):
         return None
-    text = " ".join("".join(char if char.isprintable() else " " for char in resume).split())
-    if not text:
+    if not resume.strip():
         return None
+    # The Task file is untrusted here: only a record that passes TaskStore's own
+    # validator (sensitive screen included) and the monitor's SECRETISH screen
+    # is shown. Anything else, or no validator, shows a fixed placeholder.
+    if (not _store_waiting_valid(waiting) or SECRETISH.search(reason)
+            or SECRETISH.search(resume)):
+        return WaitingRecord(task[:8], WAITING_HIDDEN, since, WAITING_HIDDEN)
+    text = " ".join(resume.split())
     if len(text) > WAITING_RESUME_SHOWN:
         text = text[:WAITING_RESUME_SHOWN - 1] + "…"
     return WaitingRecord(task[:8], reason, since, text)
@@ -6999,9 +7046,10 @@ def waiting_notice_due(reason, since, now, hours=WAITING_NOTIFY_HOURS) -> bool:
 
     AUTH (a login only the Owner can fix) is due at once; any other reason once
     it has waited `hours` hours (since and now are epoch seconds). Pure: it
-    never sends anything. An unknown time or hours count as due.
+    never sends anything. An unknown time, hours or reason (for example a
+    hidden one from an invalid record) counts as due.
     """
-    if reason == "AUTH":
+    if reason == "AUTH" or type(reason) is not str or not WAITING_REASON.fullmatch(reason):
         return True
     if (type(since) not in (int, float) or not math.isfinite(since) or since <= 0
             or type(now) not in (int, float) or not math.isfinite(now)

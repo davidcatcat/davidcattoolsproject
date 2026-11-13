@@ -496,6 +496,34 @@ class TaskStoreTests(unittest.TestCase):
         self.assertIn(self.WAITING_RESUME, calls)
         self.assertEqual(self.store.get(task['task_id'])['waiting'], self._waiting())
 
+    def test_valid_waiting_is_the_store_rule_without_raising(self):
+        # The monitor shows a Task file's WAITING record only when this says True.
+        from llmtool.task_store import valid_waiting
+        for good in (self._waiting(), self._waiting(reason='AUTH')):
+            with self.subTest(good=good):
+                self.assertIs(valid_waiting(good), True)
+        for bad in (None, 'QUOTA', [], {}, self._waiting(extra=1),
+                    self._waiting(waiting_since='2026-11-13 00:00:00'),
+                    self._waiting(reason='quota'), self._waiting(reason='WAITING_OWNER'),
+                    self._waiting(resume_condition='   '),
+                    self._waiting(resume_condition='first\x1bline'),
+                    self._waiting(resume_condition='x' * 501),
+                    self._waiting(resume_condition=None)):
+            with self.subTest(bad=bad):
+                self.assertIs(valid_waiting(bad), False)
+        # The sensitive screen is injected (Owner #763 A) and still decides.
+        flagged = 'condition the injected screen flags'
+        calls = []
+
+        def screen(value):
+            calls.append(value)
+            return value == flagged
+        with patch.object(task_store_module, '_emitted_sensitive', side_effect=screen):
+            self.assertIs(valid_waiting(self._waiting(resume_condition=flagged)), False)
+            self.assertIs(valid_waiting(self._waiting()), True)
+        self.assertIn(flagged, calls)
+        self.assertIn(self.WAITING_RESUME, calls)
+
     def test_enter_and_clear_waiting_restart_the_clock_only_on_progress(self):
         from llmtool.task_store import clear_waiting, enter_waiting, is_waiting
         task = self._codex_dispatch_task()

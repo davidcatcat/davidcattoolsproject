@@ -1218,6 +1218,22 @@ def _validate_waiting(item):
         _fail('TASK_WAITING_INVALID')
 
 
+def valid_waiting(item):
+    """True only for a WAITING record TaskStore would store; it never raises.
+
+    Readers that show a Task file's WAITING record (the monitor) use this same
+    rule, including the sensitive-content screen, before showing any of it.
+    None (not WAITING) is not a WAITING record, so it is False here.
+    """
+    if item is None:
+        return False
+    try:
+        _validate_waiting(item)
+    except LLMToolError:
+        return False
+    return True
+
+
 def _check_waiting_transition(old, new):
     """While a Task stays WAITING its clock never moves; only a clear restarts it."""
     if (type(old) is dict and type(new) is dict and
