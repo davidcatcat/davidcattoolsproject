@@ -522,7 +522,8 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(result['claim']['attempt'], 2)
         self.assertEqual([claim['state'] for claim in claims], ['FAILED', 'DISPATCHED'])
 
-    def test_third_attempt_without_report_is_refused_at_limit(self):
+    def test_third_attempt_on_a_new_head_at_limit_is_directed_to_split(self):
+        # D14 (spec section 7): repairs used up, a new valid FAIL escalates a ROOT.
         result = self.dispatch()
         record = self.store.get(TASK)
         second = dict(record['review_repair_claims'][0], head_sha='a' * 40,
@@ -544,7 +545,9 @@ class ReviewRepairTests(unittest.TestCase):
                 comment_id=10, head='b' * 40, version=3)],
                 current_head=lambda _task, _executor: 'b' * 40)
         self.assertEqual(getattr(raised.exception, 'review_repair_code'),
-                         'REPAIR_LIMIT_REACHED')
+                         'REPAIR_SPLIT_REQUIRED')
+        self.assertEqual(len(self.store.get(TASK)['review_repair_claims']), 2)
+        self.assertEqual(len(self.calls), 1)
 
     def _repair_history(self, count, *, status=None, examined_sha=HEAD):
         record = self.store.get(TASK)
@@ -738,8 +741,9 @@ class ReviewRepairTests(unittest.TestCase):
         self._seed_repair_claims([legacy] + [
             self._stored_claim(attempt=n, repair_id=f'{n:032x}')
             for n in range(2, MAX + 1)])
-        # Review count: the legacy claim plus the review claims reach the cap.
-        self._assert_refused('REPAIR_LIMIT_REACHED')
+        # Review count: the legacy claim plus the review claims reach the cap,
+        # so the new valid FAIL on HEAD escalates the ROOT (D14).
+        self._assert_refused('REPAIR_SPLIT_REQUIRED')
         # EC2 count: the legacy claim uses one EC2 repair; the store numbers
         # the new '-ec2' claims from 1.
         for expected in range(1, MAX):
@@ -755,7 +759,7 @@ class ReviewRepairTests(unittest.TestCase):
                                 repair_id='1' * 32)] +
             [self._stored_claim(attempt=n, comment_id=9, repair_id=f'{n:032x}')
              for n in range(2, MAX + 1)])
-        self._assert_refused('REPAIR_LIMIT_REACHED')
+        self._assert_refused('REPAIR_SPLIT_REQUIRED')
         result = self.dispatch(remote_test_receipt=_receipt())
         self.assertEqual((result['claim']['family'], result['claim']['attempt']),
                          (EC2_FAMILY, 1))
@@ -1328,14 +1332,14 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(result['repair_task_id'], child_id)
         self.assertEqual(len(self.calls), 0)
 
-        # Root refuses at cap with child record present
+        # Root at cap with child record present: a new valid FAIL splits (D14)
         capped_record = _record()
         capped_record['review_repair_claims'] = [
             self._stored_claim(attempt=n, repair_id=f'{n:032x}')
             for n in range(1, MAX + 1)
         ]
         self.store = TempTaskStore(self.temp.name, [capped_record, child_record])
-        self._assert_refused('REPAIR_LIMIT_REACHED')
+        self._assert_refused('REPAIR_SPLIT_REQUIRED')
 
     def test_scan_task_ids_failure_gives_repair_count_unavailable_with_no_write(self):
         before = self.store.get(TASK).get('review_repair_claims')
@@ -1446,8 +1450,9 @@ class ReviewRepairTests(unittest.TestCase):
     def test_d14_claims_in_unknown_or_missing_state_still_count(self):
         policy = repair_policy.load_policy()
         for label, state in (('UNKNOWN', 'UNKNOWN'), ('none', None), ('missing', _MISSING)):
-            for ec2, limit, receipt in ((False, policy['repair_max'], None),
-                                        (True, policy['test_fail_max'], _receipt())):
+            for ec2, limit, receipt, code in (
+                    (False, policy['repair_max'], None, 'REPAIR_SPLIT_REQUIRED'),
+                    (True, policy['test_fail_max'], _receipt(), 'REPAIR_LIMIT_REACHED')):
                 claims = self._claims_on_new_heads(limit, ec2=ec2)
                 for claim in claims:
                     if state is _MISSING:
@@ -1456,7 +1461,7 @@ class ReviewRepairTests(unittest.TestCase):
                         claim['state'] = state
                 with self.subTest(state=label, test_failure=ec2):
                     self._legacy_record(claims)
-                    self._assert_refused('REPAIR_LIMIT_REACHED', remote_test_receipt=receipt)
+                    self._assert_refused(code, remote_test_receipt=receipt)
         self.assertEqual(self.calls, [])
 
     def test_d14_unreadable_policy_gives_no_repair(self):
@@ -1471,7 +1476,7 @@ class ReviewRepairTests(unittest.TestCase):
         policy = repair_policy.load_policy()
         self._legacy_record(self._claims_on_new_heads(policy['repair_max']), overrides=True)
         self._confirm_rca()
-        self._assert_refused('REPAIR_LIMIT_REACHED')
+        self._assert_refused('REPAIR_SPLIT_REQUIRED')
         self._legacy_record(self._claims_on_new_heads(policy['test_fail_max'], ec2=True),
                             overrides=True)
         self._assert_refused('REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
@@ -1490,10 +1495,14 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
 
     def test_d14_task_over_the_new_limits_gets_no_further_repair(self):
-        # Current behaviour, pinned: no claim, no recorded Task, no provider call.
+        # No claim, no recorded Task, no provider call: the next valid FAIL
+        # escalates by kind instead of repairing.
         policy = repair_policy.load_policy()
         for extra in (0, 1):
-            for kind in (None, 'child'):
+            for kind, code in ((None, 'REPAIR_SPLIT_REQUIRED'),
+                               ('root', 'REPAIR_SPLIT_REQUIRED'),
+                               ('child', 'REPAIR_PM_DECIDE_REQUIRED'),
+                               ('replan', 'REPAIR_FAILED_FINAL_REQUIRED')):
                 for rca in (False, True):
                     with self.subTest(extra=extra, kind=kind, rca=rca):
                         self._legacy_record(
@@ -1502,8 +1511,7 @@ class ReviewRepairTests(unittest.TestCase):
                             self._confirm_rca()
                         recorded = []
                         self._assert_refused(
-                            'REPAIR_LIMIT_REACHED',
-                            repair_task_recorder=self._recording_recorder(recorded))
+                            code, repair_task_recorder=self._recording_recorder(recorded))
                         self.assertEqual(recorded, [])
             with self.subTest(extra=extra, test_failure=True):
                 self._legacy_record(
@@ -1511,24 +1519,39 @@ class ReviewRepairTests(unittest.TestCase):
                 self._assert_refused('REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
         self.assertEqual(self.calls, [])
 
-    # D14 (3) gap, reported and not fixed here (tests-only Task): _review_gate
-    # refuses REPAIR_LIMIT_REACHED (review_repair.py:391-392) before
-    # review_action runs, so a Task already at or over repair_max is not
-    # directed to SPLIT or PM_DECIDE at its next valid FAIL. Remove the
-    # expectedFailure marks once the product names the escalation.
+    # D14 (3): _review_gate lets repair_policy.review_action decide before the
+    # repair limit, so a Task already at or over repair_max is directed to its
+    # escalation at its next valid FAIL.
     def _over_the_new_repair_limit(self, kind):
         self._legacy_record(
             self._claims_on_new_heads(repair_policy.load_policy()['repair_max']), kind=kind)
 
-    @unittest.expectedFailure
     def test_d14_root_over_the_new_limits_is_directed_to_split(self):
         self._over_the_new_repair_limit('root')
         self._assert_refused('REPAIR_SPLIT_REQUIRED')
 
-    @unittest.expectedFailure
     def test_d14_child_over_the_new_limits_is_directed_to_pm_decide(self):
         self._over_the_new_repair_limit('child')
         self._assert_refused('REPAIR_PM_DECIDE_REQUIRED')
+
+    def test_d14_replan_over_the_new_limits_is_failed_final(self):
+        self._over_the_new_repair_limit('replan')
+        self._assert_refused('REPAIR_FAILED_FINAL_REQUIRED')
+
+    def test_d14_at_limit_rereview_of_a_counted_head_is_limit_reached(self):
+        # A re-review of a HEAD that already holds a repair claim adds no valid
+        # FAIL (spec section 3-3): no escalation, no repair, for every kind.
+        policy = repair_policy.load_policy()
+        for kind in (None, 'root', 'child', 'replan'):
+            for rca in (False, True):
+                with self.subTest(kind=kind, rca=rca):
+                    claims = self._claims_on_new_heads(policy['repair_max'])
+                    claims[-1]['head_sha'] = HEAD
+                    self._legacy_record(claims, kind=kind)
+                    if rca:
+                        self._confirm_rca()
+                    self._assert_refused('REPAIR_LIMIT_REACHED')
+        self.assertEqual(self.calls, [])
 
 
 # Counts a legacy record may hold that are not a known non-negative int.
