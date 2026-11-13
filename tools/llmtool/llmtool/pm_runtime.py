@@ -293,13 +293,18 @@ def _tool_description(name, tool_input, cwd=None):
     return screened if screened != '[withheld]' else None
 
 
+# #1138: an ASCII-only, case-sensitive left boundary, as for cloud keys. \b treats
+# CJK and other non-ASCII letters as word characters, so a value right after them
+# was never held.
 _STREAM_SECRET_START = re.compile(
     r'-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----|'
     + _CLOUD_KEY + r'|'
-    r'(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]*|\bsk-[A-Za-z0-9_-]*|'
-    r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]*|'
-    r'\bxox[abprs]-[A-Za-z0-9-]*|\b(?:bearer|basic)\s+\S*|'
-    r'\beyJ[A-Za-z0-9_.-]*', re.IGNORECASE)
+    r'(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]*|'
+    r'(?<!(?-i:[A-Za-z0-9_]))sk-[A-Za-z0-9_-]*|'
+    r'(?<!(?-i:[A-Za-z0-9_]))(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]*|'
+    r'(?<!(?-i:[A-Za-z0-9_]))xox[abprs]-[A-Za-z0-9-]*|'
+    r'(?<!(?-i:[A-Za-z0-9_]))(?:bearer|basic)\s+\S*|'
+    r'(?<!(?-i:[A-Za-z0-9_]))eyJ[A-Za-z0-9_.-]*', re.IGNORECASE)
 _STREAM_URL_SCHEME = re.compile(r'[a-z][a-z0-9+.-]*', re.IGNORECASE)
 
 
