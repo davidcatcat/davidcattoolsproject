@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from llmtool import review_authority as a, task_review as r, authorization_ledger as l
 from llmtool import authorization_policy as p
+from llmtool.developer_routes import load_route_config
 from llmtool.task_review_collector import LocalFacts
 from test_task_review import fixture, FakeHost, NOW
 import review_trust_fixture
@@ -23,6 +24,12 @@ def tearDownModule(): review_trust_fixture.stop_module()
 
 REF='https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6130032828'
 LOAD_TOLERANT_TIMEOUT_SECONDS=15
+# #1502 WP-E R1: both claude-cli reviewer roles launch only a model the shared
+# registry check admits for claude-reviewer, so the fixture route uses it.
+_ROLES=load_route_config()['roles']
+REVIEW_MODEL=_ROLES['claude-reviewer']['allowed_models'][0]
+CROSS_FAMILY_MODEL=_ROLES['codex-reviewer']['allowed_models'][0]
+UNLISTED_MODEL='claude-unlisted-model'
 FAKE_SCRIPT='''#!INTERPRETER -IB
 import json,sys
 v=json.loads(sys.stdin.read().split('\\n\\nUSER:\\n',1)[1])
@@ -67,7 +74,7 @@ class FixtureLauncher(a.ProductionReviewerLauncher):
 
 
 class Harness:
-    def __init__(self,*,cap=2,provider_layout=1):
+    def __init__(self,*,cap=2,provider_layout=1,model=REVIEW_MODEL):
         self.tmp=tempfile.TemporaryDirectory(prefix='b1-authority-',dir=str(Path(tempfile.gettempdir()).resolve()))
         self.root=Path(self.tmp.name)
         self.author=self.root/'author';self.common=self.root/'common/.git'
@@ -83,7 +90,7 @@ class Harness:
                           for e in events)
         self.fake=FakeHost(self.ready,self.final,self.expect,self.events)
         self.clock=self.fake.clock
-        self.policy=a.ProviderRoutePolicy('host-route',1,'claude-cli','fake-profile','fake-model',
+        self.policy=a.ProviderRoutePolicy('host-route',1,'claude-cli','fake-profile',model,
             ('DIFF','REVIEW_METADATA','SOURCE'),256*1024,2,180,1,0,0,1,cap,True,
             '2026-10-13T00:00:00Z','2026-10-14T00:10:00Z',REF,'llmtool-review/claude-cli')
         self.fake.data['route']=self.policy.policy_id
@@ -409,8 +416,8 @@ class WorkerRoleTests(unittest.TestCase):
 
 
 class WorkerHarness(Harness):
-    def __init__(self, *, mode='success', timeout=2):
-        super().__init__()
+    def __init__(self, *, mode='success', timeout=2, model=REVIEW_MODEL):
+        super().__init__(model=model)
         # Same accepted synthetic fixture authority; new role/runtime policy is
         # independently host-pinned, never a model/CLI flag or old Session grant.
         self.argv_file=self.hostdir/'argv.json'
@@ -546,7 +553,7 @@ class WorkerJobIntegrationTests(unittest.TestCase):
         self.assertNotEqual(e['runtime_session_id'],h.expect.agents[1].session_id)
         argv=json.loads(h.argv_file.read_text())
         self.assertEqual(argv,['--print','--output-format','json','--no-session-persistence',
-                               '--safe-mode','--tools','WebSearch,WebFetch','--model','fake-model'])
+                               '--safe-mode','--tools','WebSearch,WebFetch','--model',REVIEW_MODEL])
         allowed_tools=argv[argv.index('--tools')+1].split(',')
         for tool in ('Read','Write','Edit','Bash'):
             self.assertNotIn(tool,allowed_tools)
@@ -771,6 +778,88 @@ class WorkerJobIntegrationTests(unittest.TestCase):
         with patch('time.monotonic',side_effect=(0,2)):
             with self.assertRaises(Exception) as caught:a.verify_worker_executable(reg,1)
         self.assertEqual(caught.exception.review_code,'REVIEW_TIMEOUT')
+
+
+def _policy_with_model(policy,model):
+    """The policy with model swapped in after construction (no safe_id gate).
+
+    Lets a launch test reach the launcher's own registry check with a model
+    the Host route constructor would refuse for other reasons.
+    """
+    changed=replace(policy)
+    object.__setattr__(changed,'model',model)
+    return changed
+
+
+class RegistryModelTests(unittest.TestCase):
+    """#1502 WP-E R1: policy and both launcher branches admit only the listed model."""
+
+    def assert_model_refused(self,caught):
+        self.assertEqual(caught.exception.review_code,'ROLE_MODEL_NOT_ALLOWED')
+
+    def test_policy_refuses_unlisted_and_cross_family_route_model(self):
+        for model in (UNLISTED_MODEL,'gpt-unlisted-model'):
+            with self.subTest(model=model):
+                h=Harness(model=model);self.addCleanup(h.close)
+                with self.assertRaises(Exception) as caught:h.issuer.policy(h.policy.digest)
+                self.assert_model_refused(caught)
+                self.assertFalse(h.issuer.vouches_for(h.policy.digest))
+                with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
+                    result=h.run()
+                self.assertEqual(result['provider_calls'],0,result)
+                self.assertFalse(result['authorized'])
+                self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
+
+    def test_policy_admits_the_listed_route_model(self):
+        h=Harness();self.addCleanup(h.close)
+        self.assertEqual(h.issuer.policy(h.policy.digest).model,REVIEW_MODEL)
+        self.assertEqual(a.admit_reviewer_model(REVIEW_MODEL),REVIEW_MODEL)
+        for model in (UNLISTED_MODEL,CROSS_FAMILY_MODEL,'anthropic/'+REVIEW_MODEL,
+                      REVIEW_MODEL.upper(),None):
+            with self.subTest(model=model),self.assertRaises(Exception) as caught:
+                a.admit_reviewer_model(model)
+            self.assert_model_refused(caught)
+
+    def test_review_launch_refuses_unlisted_and_cross_family_model_before_spawn(self):
+        for model in (UNLISTED_MODEL,CROSS_FAMILY_MODEL):
+            with self.subTest(model=model):
+                h=Harness();self.addCleanup(h.close)
+                b,packet=h.binding();ad=h.authority.admit(b)
+                self.assertTrue(ad.admitted)
+                token=h.authority.consume(ad);self.assertTrue(token.committed)
+                with patch.object(h.issuer,'policy',return_value=_policy_with_model(h.policy,model)), \
+                        patch('subprocess.Popen',side_effect=AssertionError('spawn')) as spawn:
+                    with self.assertRaises(Exception) as caught:h.launcher.launch(packet.data,token)
+                self.assert_model_refused(caught)
+                spawn.assert_not_called()
+
+    def test_worker_launch_refuses_unlisted_and_cross_family_model_before_spawn(self):
+        import time
+        for model in (UNLISTED_MODEL,CROSS_FAMILY_MODEL):
+            with self.subTest(model=model):
+                h=WorkerHarness(timeout=30);self.addCleanup(h.close)
+                b,packet=h.binding();ad=h.authority.admit(b)
+                self.assertTrue(ad.admitted)
+                token=h.authority.consume(ad);self.assertTrue(token.committed)
+                with patch.object(h.issuer,'policy',return_value=_policy_with_model(h.policy,model)), \
+                        patch.object(h.issuer,'matches',return_value=True), \
+                        patch('subprocess.Popen',side_effect=AssertionError('spawn')) as spawn:
+                    with self.assertRaises(Exception) as caught:
+                        h.launcher.launch(packet.data,token,deadline=time.monotonic()+30)
+                self.assert_model_refused(caught)
+                spawn.assert_not_called()
+                self.assertFalse(h.argv_file.exists())
+
+    def test_foreground_worker_refuses_unlisted_route_model_before_effect(self):
+        for model in (UNLISTED_MODEL,'gpt-unlisted-model'):
+            with self.subTest(model=model):
+                h=WorkerHarness(model=model);self.addCleanup(h.close)
+                with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
+                    with self.assertRaises(Exception) as caught:
+                        a.run_foreground_review(h.issuer,h.ledger,budget=h.fake.budget)
+                self.assert_model_refused(caught)
+                self.assertFalse(h.argv_file.exists())
+                self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
 
 
 class ForegroundEntryTests(unittest.TestCase):

@@ -32,6 +32,20 @@ def _reference(value):
         reject('REVIEW_HOST_POLICY_INVALID')
 
 
+def admit_reviewer_model(model):
+    """#1502 WP-E R1: both claude-cli reviewer roles run as claude-reviewer.
+
+    Returns model only when the shared registry check admits it; otherwise
+    rejects with ROLE_MODEL_NOT_ALLOWED (no retry or fallback route).
+    """
+    from . import role_config
+    from .errors import LLMToolError
+    try:
+        return role_config.check_registry_model('claude-reviewer',model)
+    except LLMToolError:
+        reject('ROLE_MODEL_NOT_ALLOWED')
+
+
 def _keys(value,expected):
     if type(value) is not dict or set(value) != set(expected):
         reject('REVIEW_HOST_POLICY_INVALID')
@@ -382,6 +396,7 @@ class ProductionReviewIssuer(HostIssuer):
         p=reg.route(route_digest);now=self.clock.utc()
         if not int(utc_time(p.not_before).timestamp()) <= now < int(utc_time(p.not_after).timestamp()):
             reject('REVIEW_ROUTE_NOT_AUTHORIZED')
+        admit_reviewer_model(p.model)
         return p
 
     def vouches_for(self,policy_digest):
@@ -527,6 +542,7 @@ class ProductionReviewerLauncher:
             self._attempted.add(token.grant_ref)
         if c.reviewer_role == REVIEWER_ROLES[1]:
             return self._worker_launch(packet,c,p,reg,deadline)
+        model=admit_reviewer_model(p.model)
         # Use the existing provider argv, pipe limits and owned-child lifecycle.
         from .providers.claude_cli import ClaudeCLIProvider
         class TrackedProvider(ClaudeCLIProvider):
@@ -542,7 +558,7 @@ class ProductionReviewerLauncher:
                     'owned_pgid':os.getpgid(process.pid),'host_pid':os.getpid(),'started':time.monotonic(),
                     'executable':reg.reviewer_executable},'llmtool.review-owned-child.v1')
                 return super()._collect(process,input_bytes,lifecycle)
-        provider=TrackedProvider({'model':p.model,'timeout_seconds':p.call_timeout_seconds},None)
+        provider=TrackedProvider({'model':model,'timeout_seconds':p.call_timeout_seconds},None)
         content,elapsed=provider._invoke(reg.reviewer_executable,provider._prompt(ReviewPacket(packet).messages()))
         if provider.provenance is None: reject('REVIEW_LAUNCH_NOT_ATTESTED')
         return LaunchResult(content,canonical({'elapsed_seconds':elapsed}),c.reviewer_launch_nonce,
@@ -565,7 +581,7 @@ class ProductionReviewerLauncher:
                 not self.authority.issuer.matches(c,self.authority._observed(c))):
             reject('REVIEW_GRANT_NOT_AUTHORIZED')
         verify_worker_executable(reg,deadline)
-        provider=ClaudeCLIProvider({'model':p.model},None)
+        provider=ClaudeCLIProvider({'model':admit_reviewer_model(p.model)},None)
         # Keep pending ownership reachable even when provider raises/BaseException.
         self.pending_job=None
         try:

@@ -27,12 +27,15 @@ _SESSION_READ_LIMIT = 2 * 1024 * 1024
 _REPORT_LIMIT = 16384
 _EVIDENCE_LIMIT = 8192
 _RECORD_TOKEN = re.compile(r'[A-Za-z0-9._-]{1,64}\Z')
+# #1502 WP-E R1: both equal the roles registry's listed models; every launch
+# admits its model through the shared registry check first.
 _CLAUDE_MODEL = 'claude-opus-5-5'
+_CODEX_MODEL = 'gpt-6.1-sol'
 _CLAUDE_EFFORT = 'medium'
 _REFUSAL_CODES = frozenset((
     'HIGH_DEBUG_RUN_FAILED', 'HIGH_DEBUG_WROTE_FILES',
     'HIGH_DEBUG_REPORT_INVALID', 'HIGH_DEBUG_QUOTA_EXHAUSTED',
-    'HIGH_DEBUG_MODEL_UNVERIFIED', 'HIGH_DEBUG_AUTH_FAILED'))
+    'HIGH_DEBUG_MODEL_UNVERIFIED', 'HIGH_DEBUG_AUTH_FAILED', 'ROLE_MODEL_NOT_ALLOWED'))
 _SCREEN_HIT_LIMIT = 32
 _SCREEN_RULES = (
     ('private_key', re.compile(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----', re.I)),
@@ -963,10 +966,39 @@ def _codex_failure_code(stdout, stderr):
     return 'HIGH_DEBUG_RUN_FAILED'
 
 
-def _run_codex(*, prompt, cwd, output_path):
+def _admit_debug_model(role, model):
+    """#1502 WP-E R1: return model only when the shared registry check admits it.
+
+    The refusal ROLE_MODEL_NOT_ALLOWED is not a DEBUG_FALLBACK_CODES member,
+    so it never switches routes.
+    """
+    try:
+        return role_config.check_registry_model(role, model)
+    except LLMToolError:
+        _refuse('ROLE_MODEL_NOT_ALLOWED')
+
+
+def _resolve_debug_role(role):
+    """Resolve role; a resolver model refusal keeps the code ROLE_MODEL_NOT_ALLOWED.
+
+    #1502 WP-E R1: the resolver already applied the shared registry check
+    after precedence. Its refusal is re-raised as the High Debug code, which is
+    outside DEBUG_FALLBACK_CODES and _CLAUDE_DEBUG_UNAVAILABLE, so it never
+    switches routes. Other resolver errors propagate unchanged.
+    """
+    try:
+        return role_config.resolve_role(role)
+    except LLMToolError as error:
+        if getattr(error, 'role_config_code', None) == role_config.ROLE_MODEL_NOT_ALLOWED:
+            _refuse('ROLE_MODEL_NOT_ALLOWED')
+        raise
+
+
+def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
     from . import codex_direct_developer
+    model = _admit_debug_model('codex-debug', model)
     argv = ['codex', 'exec', '--ignore-user-config', '--ignore-rules',
-            '-m', 'gpt-6.1-sol']
+            '-m', model]
     for setting in _CODEX_SETTINGS + (
             'shell_environment_policy.set.PATH=' +
             json.dumps(codex_direct_developer._command_path(cwd)),):
@@ -978,11 +1010,12 @@ def _run_codex(*, prompt, cwd, output_path):
             stderr=subprocess.PIPE, check=False, timeout=1800)
 
 
-def _run_claude(*, prompt, cwd, output_path, config_dir):
+def _run_claude(*, prompt, cwd, output_path, config_dir, model=_CLAUDE_MODEL):
     from .developer_routes.claude import ClaudeRoute
+    model = _admit_debug_model('claude-debug', model)
     route = ClaudeRoute({'executable': 'claude', 'config_dir': config_dir})
     argv = [
-        'claude', '-p', '--output-format', 'json', '--model', _CLAUDE_MODEL,
+        'claude', '-p', '--output-format', 'json', '--model', model,
         '--effort', _CLAUDE_EFFORT, '--no-session-persistence', '--restricted',
         '--tools', 'Read,Glob,Grep', '--permission-mode', 'default',
         '--permission-prompts', 'none', '--strict-mcp-config', '--', prompt,
@@ -1245,16 +1278,26 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     config_dir = None
     if route == 'claude':
         # #1502 WP-B: the claude-debug role uses the Claude Reviewer account until
-        # the Owner configures it separately.
-        role_settings = role_config.resolve_role('claude-debug')
-        if role_settings.get('source') == 'builtin':
-            role_settings = role_config.resolve_role('reviewer')
-        if (role_settings.get('source') == 'builtin' or
-                role_settings.get('config_dir') is None or
-                role_settings.get('account') is None):
+        # the Owner configures it separately. #1502 WP-E: that fallback depends
+        # only on whether claude-debug names an account (explicit account
+        # configuration state), never on the resolver's source label; the
+        # model always comes from claude-debug itself.
+        role_settings = _resolve_debug_role('claude-debug')
+        debug_model = role_settings.get('model') or _CLAUDE_MODEL
+        account_settings = role_settings
+        if (role_settings.get('account') is None and
+                role_settings.get('config_dir') is None):
+            account_settings = _resolve_debug_role('reviewer')
+        if (account_settings.get('config_dir') is None or
+                account_settings.get('account') is None):
             _refuse('HIGH_DEBUG_ACCOUNT_UNCONFIGURED')
-        account = role_settings['account']
-        config_dir = role_settings['config_dir']
+        account = account_settings['account']
+        config_dir = account_settings['config_dir']
+    else:
+        debug_model = _CODEX_MODEL
+    # #1502 WP-E R1: admitted before any D6 or entry exists, so a refusal uses
+    # no Debug and never triggers the quota/auth fallback.
+    debug_model = _admit_debug_model(worker_key, debug_model)
     completion = task.get('completion')
     ev = completion.get('evidence') if type(completion) is dict else None
     if type(ev) is not dict or completion.get('executor_task_id') != executor_task or type(ev.get('common_dir')) is not str:
@@ -1288,7 +1331,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     else:
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
-    model_requested = _CLAUDE_MODEL if route == 'claude' else 'gpt-6.1-sol'
+    model_requested = debug_model
 
     def failed(code, observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN', report=None,
                detail=None, screen_hits=None):
@@ -1344,9 +1387,10 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         if runner is not None:
             actual_runner = runner
         elif route == 'claude':
-            actual_runner = functools.partial(_run_claude, config_dir=config_dir)
+            actual_runner = functools.partial(_run_claude, config_dir=config_dir,
+                                              model=debug_model)
         else:
-            actual_runner = _run_codex
+            actual_runner = functools.partial(_run_codex, model=debug_model)
         result = actual_runner(prompt=prompt, cwd=diagnosis_root or d6, output_path=output_path)
         if route == 'codex':
             if result.returncode != 0:
@@ -1380,13 +1424,13 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
             raw_result = raw_obj.get('result')
             if type(raw_result) is not str:
                 raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
-            observed_raw = claude_route.verified_model('', _CLAUDE_MODEL)
-            if observed_raw != _CLAUDE_MODEL:
+            observed_raw = claude_route.verified_model('', debug_model)
+            if observed_raw != debug_model:
                 observed = observed_raw if type(observed_raw) is str and _RECORD_TOKEN.fullmatch(observed_raw) else 'UNKNOWN'
                 effort = 'UNKNOWN'
                 usage = _claude_usage(raw_obj.get('usage'))
                 raise _AttemptFailed('HIGH_DEBUG_MODEL_UNVERIFIED')
-            observed = _CLAUDE_MODEL
+            observed = debug_model
             effort = 'UNKNOWN'
             usage = _claude_usage(raw_obj.get('usage'))
             report = raw_result
@@ -1397,6 +1441,11 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         if status_result.returncode != 0 or status_result.stdout:
             raise _AttemptFailed('HIGH_DEBUG_WROTE_FILES')
     except _AttemptFailed as error: failure = error.code
+    except LLMToolError as error:
+        # A launch-time model refusal keeps its own code (never a fallback code).
+        failure = ('ROLE_MODEL_NOT_ALLOWED'
+                   if getattr(error, 'high_debug_code', None) == 'ROLE_MODEL_NOT_ALLOWED'
+                   else 'HIGH_DEBUG_RUN_FAILED')
     except Exception: failure = 'HIGH_DEBUG_RUN_FAILED'
     finally:
         try: os.unlink(output_path)
