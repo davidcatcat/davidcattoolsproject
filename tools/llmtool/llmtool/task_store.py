@@ -1556,6 +1556,34 @@ def split_reserved(record):
     return type(line) is dict and line.get('state') == 'PENDING'
 
 
+def lineage_ended(record):
+    """True for a Task whose lineage ended (DROPPED, STOPPED, FAILED_FINAL, CLOSED)."""
+    line = record.get('lineage') if type(record) is dict else None
+    return type(line) is dict and line.get('state') in _LINEAGE_END_STATES
+
+
+def end_lineage(store, task_id, lineage):
+    """PR #1789 v91 F1 (CWE-841): record a lineage end under the Task's advance lease.
+
+    The lease is taken exclusively without waiting, as a split reservation does:
+    an advance or drive of the Task holds it shared for its whole run, so the end
+    refuses LINEAGE_TASK_ADVANCING and writes nothing. The lease is kept across
+    the locked write, so no advance starts while it lands; an advance that starts
+    after it reads the end and refuses (TASK_LINEAGE_ENDED). A merge's own CLOSED
+    write runs inside that advance and uses record_lineage, not this.
+    """
+    if type(lineage) is not dict or lineage.get('state') not in _LINEAGE_END_STATES:
+        _fail('TASK_LINEAGE_INVALID')
+    take = getattr(store, '_take_advance_lease_exclusive', None)
+    if not callable(take):
+        _fail('TASK_ADVANCE_LEASE_UNAVAILABLE')  # fail closed: no lease, no end
+    lease = take(task_id, busy_code='LINEAGE_TASK_ADVANCING')
+    try:
+        return record_lineage(store, task_id, lineage)
+    finally:
+        store._unlock_sidecar(lease)
+
+
 # #1781 (security v91): a split child must not have started. These Developer
 # states mean a provider was launched or answered; a completion, a published PR
 # or a merge claim means the Task already left the Developer step.
@@ -4323,12 +4351,16 @@ class TaskStore:
         finally:
             self._unlock_sidecar(lock_fd)
 
-    def _take_advance_lease_exclusive(self, task_id):
+    def _take_advance_lease_exclusive(self, task_id, *, busy_code='SPLIT_CHILD_ADVANCING'):
         """Take the advance lease exclusively without waiting; return its fd.
 
         A held lease means an advance or drive of this Task is running: refuse
-        SPLIT_CHILD_ADVANCING. The caller releases it with _unlock_sidecar.
+        busy_code (SPLIT_CHILD_ADVANCING for a split reservation,
+        LINEAGE_TASK_ADVANCING for a lineage end). The caller releases it with
+        _unlock_sidecar.
         """
+        if busy_code not in ('SPLIT_CHILD_ADVANCING', 'LINEAGE_TASK_ADVANCING'):
+            _fail('TASK_ADVANCE_LEASE_INVALID')
         name = self._advance_lease_name(task_id)
         directory = self._dirfd()
         lock_fd = None
@@ -4345,9 +4377,9 @@ class TaskStore:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                _fail('SPLIT_CHILD_ADVANCING')
+                _fail(busy_code)
             except OSError as exc:
-                _fail('SPLIT_CHILD_ADVANCING' if _is_contention_error(exc)
+                _fail(busy_code if _is_contention_error(exc)
                       else 'TASK_ADVANCE_LEASE_UNAVAILABLE')
             held, lock_fd = lock_fd, None
             return held
@@ -4360,7 +4392,9 @@ class TaskStore:
         """Re-read a Task under its update lock right before an external action.
 
         #1781 (I4): a PENDING split reservation takes no external action
-        (TASK_LINEAGE_PENDING). Read-only; returns the record read under the lock.
+        (TASK_LINEAGE_PENDING). PR #1789 v91 F1 (CWE-841): nor does a Task whose
+        lineage ended DROPPED, STOPPED, FAILED_FINAL or CLOSED
+        (TASK_LINEAGE_ENDED). Read-only; returns the record read under the lock.
         """
         directory = self._dirfd()
         try:
@@ -4374,6 +4408,8 @@ class TaskStore:
             os.close(directory)
         if split_reserved(record):
             _fail('TASK_LINEAGE_PENDING')
+        if lineage_ended(record):
+            _fail('TASK_LINEAGE_ENDED')
         return record
 
     @staticmethod

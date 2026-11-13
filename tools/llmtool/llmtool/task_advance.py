@@ -2588,12 +2588,17 @@ def _advance_refused(task_id, code):
 # #1781 (security v91, I4): split vs advance. Every external action of one
 # advance step re-reads the Task under its update lock right before it runs
 # (TaskStore.check_external_action) and is refused for a PENDING split
-# reservation. Reads, and the cleanup or record of an action this call already
-# took, are never refused, so a refusal never leaves a half-done action behind.
+# reservation, and (PR #1789 v91 F1) for an ended lineage: TASK_LINEAGE_ENDED.
+# Reads, and the cleanup or record of an action this call already took, are
+# never refused, so a refusal never leaves a half-done action behind. A lineage
+# end takes the advance lease exclusively (task_store.end_lineage), so no end
+# lands while an advance holding that lease runs.
+_ENDED_NOT_MERGED = frozenset(('DROPPED', 'STOPPED', 'FAILED_FINAL'))
 _EXTERNAL_GIT = frozenset(('add', 'commit', 'merge', 'push'))
 _READ_OR_CLEANUP_GH = (['pr', 'list'], ['pr', 'view'], ['pr', 'close'], ['api', 'user'],
                        # The merge claim, a locked compare-and-set that the store
-                       # refuses for a PENDING Task, is the re-check of the merge.
+                       # refuses for a PENDING or ended Task, is the re-check of
+                       # the merge.
                        ['pr', 'merge'])
 _RECORD_COMMENT_PREFIXES = (_ACTIVITY_MARKER + '\n',
                             'llmtool task advance merge provenance: ')
@@ -2740,6 +2745,12 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             # D10f2 replay: an already merged, CLOSED member retries a failed roll-up.
             _lineage_after_merge(refused, store, task_id, record)
         return refused
+    if type(lineage) is dict and lineage.get('state') in _ENDED_NOT_MERGED:
+        # PR #1789 v91 F1 (CWE-841): a DROPPED, STOPPED or FAILED_FINAL Task takes
+        # no further step; refuse before any D6, PR, review or GitHub read. A
+        # CLOSED Task keeps its read-only record path; the per-action guard
+        # refuses any external action of every ended Task.
+        return _advance_refused(task_id, 'TASK_LINEAGE_ENDED')
     if integration_pr is None:
         closed_head = _closed_train_member_head(record, task_id, store)
         if closed_head is not None:

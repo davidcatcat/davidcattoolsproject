@@ -1181,9 +1181,14 @@ def lineage_owner_notice(task_id, state, reason):
 
 
 def _lineage_roll_up(store, lineage_id):
-    """End a PARKED ROOT once its child and REPLAN Tasks ended; never a notice (D4)."""
+    """End a PARKED ROOT once its child and REPLAN Tasks ended; never a notice (D4).
+
+    PR #1789 v91 F1: the ROOT's end honours the ROOT's advance lease
+    (end_lineage); a running advance of the ROOT refuses LINEAGE_TASK_ADVANCING,
+    the ROOT stays PARKED and the callers report the failed roll-up.
+    """
     from . import repair_policy
-    from .task_store import record_lineage
+    from .task_store import end_lineage
     line = store.get(lineage_id).get('lineage')
     if type(line) is not dict or line.get('state') != 'PARKED':
         return None
@@ -1191,7 +1196,7 @@ def _lineage_roll_up(store, lineage_id):
     if outcome == 'OPEN':
         return None
     state = 'CLOSED' if outcome == 'CLOSED' else 'FAILED_FINAL'
-    record_lineage(store, lineage_id, dict(line, state=state, recorded_at=_timestamp()))
+    end_lineage(store, lineage_id, dict(line, state=state, recorded_at=_timestamp()))
     return {'task_id': lineage_id, 'state': state, 'owner_notice': None}
 
 
@@ -1204,7 +1209,7 @@ def lineage_end(store, task_id, state, *, pm_session, reason):
 
 
 def _lineage_end_locked(store, task_id, state, *, pm_session, reason):
-    from .task_store import record_lineage
+    from .task_store import end_lineage
     # Owner B: a child left PENDING after its ROOT commit becomes OPEN first; an
     # uncommitted one is removed. Either way no end is recorded on a reservation.
     _split_recover(store, [task_id])
@@ -1219,8 +1224,10 @@ def _lineage_end_locked(store, task_id, state, *, pm_session, reason):
         _lineage_refuse('FAILED_FINAL_NOT_REPLAN')
     if line['state'] != 'OPEN':
         _lineage_refuse('LINEAGE_NOT_OPEN')
-    record_lineage(store, task_id, dict(line, state=state, reason=reason,
-                                        recorded_at=_timestamp()))
+    # PR #1789 v91 F1 (CWE-841): the end takes the Task's advance lease, so it never
+    # interleaves with an advance or drive of it (LINEAGE_TASK_ADVANCING).
+    end_lineage(store, task_id, dict(line, state=state, reason=reason,
+                                     recorded_at=_timestamp()))
     try:  # The end state is saved: its Owner notice must still be returned.
         root = None if line['kind'] == 'root' else _lineage_roll_up(store, line['lineage_id'])
     except LLMToolError:
@@ -1580,7 +1587,7 @@ def lineage_replan(store, child_id, replan_id, replaces, *, pm_session, reason,
     children's obligation; each replaced child that is still OPEN ends STOPPED
     with an Owner notice (D4). Refusals write nothing and read no main SHA.
     """
-    from .task_store import record_lineage
+    from .task_store import end_lineage
     replaces = list(replaces) if type(replaces) in (list, tuple) else replaces
     _root_id, digests = _replan_checks(store, child_id, replan_id, replaces,
                                        pm_session=pm_session, reason=reason)
@@ -1607,8 +1614,10 @@ def lineage_replan(store, child_id, replan_id, replaces, *, pm_session, reason,
             if type(line) is not dict or line.get('state') != 'OPEN':
                 continue  # already ended (not CLOSED): the REPLAN covers it as is
             try:
-                record_lineage(store, task_id, dict(line, state='STOPPED', reason=reason,
-                                                    recorded_at=now))
+                # PR #1789 v91 F1: a replaced child being advanced is not stopped
+                # under that advance (LINEAGE_TASK_ADVANCING).
+                end_lineage(store, task_id, dict(line, state='STOPPED', reason=reason,
+                                                 recorded_at=now))
             except LLMToolError:
                 failed.append(task_id)  # still OPEN: the PM ends it with task drop
                 continue

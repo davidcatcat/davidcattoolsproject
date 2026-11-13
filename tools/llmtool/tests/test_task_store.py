@@ -813,6 +813,78 @@ class TaskStoreTests(unittest.TestCase):
         self.store.update(plain, merge_attempt=dict(claim, state='MERGED'))
         self.assertEqual(self.store.get(plain)['merge_attempt']['state'], 'MERGED')
 
+    def test_an_ended_lineage_takes_no_external_action_and_ends_honour_the_lease(self):
+        # PR #1789 v91 F1 (CWE-841): check_external_action refuses every ended
+        # lineage state, and end_lineage takes the advance lease exclusively, so an
+        # end never lands while an advance or drive of that Task holds it.
+        from llmtool.task_store import end_lineage, lineage_ended, record_lineage
+
+        def line(task_id, state, kind='root'):
+            return {'lineage_id': task_id, 'kind': kind, 'parent': None, 'replaces': [],
+                    'state': state, 'reason': 'ended', 'base_sha': None,
+                    'recorded_at': '2026-11-13T00:00:00Z'}
+
+        def refused(code, call):
+            with self.assertRaises(LLMToolError) as caught:
+                call()
+            self.assertEqual(caught.exception.task_store_error_code, code)
+
+        def new_task():
+            task = self._codex_dispatch_task()
+            self.store.create(task)
+            return task['task_id']
+
+        plain = new_task()
+        self.assertEqual(self.store.check_external_action(plain)['task_id'], plain)
+        for state in ('OPEN', 'PARKED'):
+            with self.subTest(state=state):
+                task_id = new_task()
+                record_lineage(self.store, task_id, line(task_id, state))
+                self.assertFalse(lineage_ended(self.store.get(task_id)))
+                self.assertEqual(self.store.check_external_action(task_id)['task_id'], task_id)
+        for state in ('CLOSED', 'DROPPED', 'STOPPED', 'FAILED_FINAL'):
+            with self.subTest(state=state):
+                task_id = new_task()
+                record_lineage(self.store, task_id, line(task_id, 'OPEN'))
+                end_lineage(self.store, task_id, line(task_id, state))
+                self.assertTrue(lineage_ended(self.store.get(task_id)))
+                refused('TASK_LINEAGE_ENDED', lambda: self.store.check_external_action(task_id))
+        # A running advance holds the lease: the end refuses and writes nothing.
+        busy = new_task()
+        record_lineage(self.store, busy, line(busy, 'OPEN'))
+        before = self.store.get(busy)
+        with self.store.advance_lease(busy):
+            refused('LINEAGE_TASK_ADVANCING',
+                    lambda: end_lineage(self.store, busy, line(busy, 'STOPPED')))
+            self.assertEqual(self.store.get(busy), before)
+            self.assertEqual(self.store.check_external_action(busy)['task_id'], busy)
+        # The end holds the lease while it writes: an advance cannot start then.
+        seen = []
+        real_record = self.store.update
+
+        def update_under_end(task_id, **changes):
+            refused('SPLIT_CHILD_ADVANCING',
+                    lambda: self.store._take_advance_lease_exclusive(task_id))
+            seen.append(task_id)
+            return real_record(task_id, **changes)
+        with patch.object(self.store, 'update', side_effect=update_under_end):
+            end_lineage(self.store, busy, line(busy, 'STOPPED'))
+        self.assertEqual(seen, [busy])
+        self.assertEqual(self.store.get(busy)['lineage']['state'], 'STOPPED')
+        with self.store.advance_lease(busy):  # released after the end
+            pass
+        # end_lineage writes only an end state; a split keeps its own refusal code.
+        other = new_task()
+        record_lineage(self.store, other, line(other, 'OPEN'))
+        for bad in (line(other, 'OPEN'), line(other, 'PARKED'), None):
+            refused('TASK_LINEAGE_INVALID', lambda bad=bad: end_lineage(self.store, other, bad))
+        refused('TASK_ADVANCE_LEASE_INVALID', lambda: self.store._take_advance_lease_exclusive(
+            other, busy_code='OTHER'))
+        with self.store.advance_lease(other):
+            refused('SPLIT_CHILD_ADVANCING',
+                    lambda: self.store._take_advance_lease_exclusive(other))
+        self.assertEqual(self.store.get(other)['lineage']['state'], 'OPEN')
+
     def test_one_write_never_carries_park_and_merge_claim_together(self):
         # PR #1758 security v91 (CWE-841): the guards check the proposed combined
         # state, so a single update or compare_and_update that sets a PARKED lineage

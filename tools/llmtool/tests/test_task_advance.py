@@ -5719,5 +5719,235 @@ class SplitVsAdvanceTests(unittest.TestCase):
         self.assert_reserved(child)
 
 
+class EndVsAdvanceTests(unittest.TestCase):
+    """PR #1789 v91 F1 (CWE-841): a lineage end injected at each external advance step.
+
+    The advanced Task is an OPEN child of a real split. Two injections at each
+    step, right before its external action:
+    - a real `lineage_end` (task drop). The advance holds the Task's advance
+      lease, so the end refuses LINEAGE_TASK_ADVANCING, writes nothing, and the
+      advance runs exactly as it does with no end;
+    - an end that lands anyway: the store's own lineage write with every store
+      check, only the lease step skipped (defence in depth). The re-check under
+      the Task lock refuses TASK_LINEAGE_ENDED (the merge claim refuses
+      MERGE_LINEAGE_ENDED in its own locked write), and neither that action nor
+      any later one runs.
+    An already-ended Task is refused before any action (DROPPED, STOPPED,
+    FAILED_FINAL) or at its first external action (CLOSED).
+    The harness is SplitVsAdvanceTests' own (same store wrapper and runners).
+    """
+
+    PM, AT, EXEC = SplitVsAdvanceTests.PM, SplitVsAdvanceTests.AT, SplitVsAdvanceTests.EXEC
+    BRANCH, WRITE_PATHS = SplitVsAdvanceTests.BRANCH, SplitVsAdvanceTests.WRITE_PATHS
+    REVIEW_STEPS = SplitVsAdvanceTests.REVIEW_STEPS
+    REFUSED = dict(SplitVsAdvanceTests.REFUSED, codes=['TASK_LINEAGE_ENDED'])
+    REASON = 'Not needed after review.'
+    setUp = SplitVsAdvanceTests.setUp
+    task = SplitVsAdvanceTests.task
+    publish_case = SplitVsAdvanceTests.publish_case
+    run_publish = SplitVsAdvanceTests.run_publish
+    run_review = SplitVsAdvanceTests.run_review
+    run_merge = SplitVsAdvanceTests.run_merge
+    guarded = staticmethod(SplitVsAdvanceTests.guarded)
+
+    def split(self, root, child):
+        task_submission_cli.lineage_split(
+            self.real, root, [child], pm_session=self.PM, reason='Review FAIL 3.',
+            main_sha_reader=lambda: MAIN_SHA)
+        self.assertEqual(self.state(child), 'OPEN')
+
+    def member(self):
+        root, child = self.task(), self.task()
+        self.split(root, child)
+        return root, child
+
+    def state(self, task_id):
+        return self.real.get(task_id)['lineage']['state']
+
+    def real_end(self, child, seen):
+        def inject():
+            try:
+                task_submission_cli.lineage_end(self.real, child, 'DROPPED',
+                                                pm_session=self.PM, reason=self.REASON)
+            except LLMToolError as exc:
+                seen.append(getattr(exc, 'task_store_error_code', None) or str(exc))
+            else:
+                seen.append('END_WROTE')
+        return inject
+
+    def end_past_lease(self, child, state='DROPPED'):
+        from llmtool.task_store import record_lineage
+
+        def inject():
+            line = self.real.get(child)['lineage']
+            record_lineage(self.real, child, dict(line, state=state, reason=self.REASON))
+        return inject
+
+    # Publish: git add, git commit, git push, the pre-PR EC2 run, gh pr create.
+
+    def ended_publish_case(self):
+        case = self.publish_case()
+        self.split(case['root'], case['child'])
+        return case
+
+    def test_an_end_at_each_publish_step_is_refused(self):
+        baseline, log, opened, store = self.run_publish(self.ended_publish_case())
+        self.assertEqual((baseline['codes'], baseline['pr']), ([], 23))
+        self.assertEqual(len(opened), 1)
+        steps = self.guarded(log)
+        self.assertEqual(steps, [('git', 'add'), ('git', 'commit'), ('git', 'push'),
+                                 ('ec2', 'remote-test'), ('gh', 'pr create')])
+        self.assertEqual(store.checks, len(steps))
+        for at, step in enumerate(steps, start=1):
+            with self.subTest(step=step, injection='end'):
+                case, seen = self.ended_publish_case(), []
+                result, end_log, end_opened, _ = self.run_publish(
+                    case, inject_at=at, inject=self.real_end(case['child'], seen))
+                self.assertEqual(seen, ['LINEAGE_TASK_ADVANCING'])
+                self.assertEqual((result['codes'], result['pr']), ([], 23))
+                self.assertEqual(end_log, log)
+                self.assertEqual(len(end_opened), 1)
+                self.assertEqual(self.state(case['child']), 'OPEN')
+            with self.subTest(step=step, injection='end past lease'):
+                case = self.ended_publish_case()
+                result, refused_log, refused_opened, _ = self.run_publish(
+                    case, inject_at=at, inject=self.end_past_lease(case['child']))
+                self.assertEqual(result, dict(self.REFUSED, task_id=case['child']))
+                # The guarded action and every later one never ran.
+                self.assertEqual(refused_log, log[:log.index(('check', at)) + 1])
+                self.assertEqual(refused_opened, [])
+                self.assertEqual(self.state(case['child']), 'DROPPED')
+
+    def test_an_end_at_review_or_repair_dispatch_is_refused(self):
+        for step, changes, action in self.REVIEW_STEPS:
+            with self.subTest(step=step):
+                baseline, log = self.run_review(self.member()[1], changes)
+                self.assertEqual(baseline['step'], step)
+                self.assertEqual(self.guarded(log), [action])
+                child, seen = self.member()[1], []
+                result, end_log = self.run_review(
+                    child, changes, inject_at=1, inject=self.real_end(child, seen))
+                self.assertEqual(seen, ['LINEAGE_TASK_ADVANCING'])
+                self.assertEqual(result['step'], step)
+                self.assertEqual(end_log, log)
+                self.assertEqual(self.state(child), 'OPEN')
+                child = self.member()[1]
+                result, refused_log = self.run_review(
+                    child, changes, inject_at=1, inject=self.end_past_lease(child))
+                self.assertEqual(result, dict(self.REFUSED, task_id=child))
+                self.assertEqual(refused_log, [('check', 1)])
+                self.assertEqual(self.state(child), 'DROPPED')
+
+    def test_an_end_at_the_merge_claim_is_refused(self):
+        root, child = self.member()
+        baseline, log = self.run_merge(child)
+        self.assertEqual((baseline['step'], baseline['codes']), ('MERGED', []))
+        self.assertIn(('gh', 'pr merge'), log)
+        self.assertEqual([self.state(child), self.state(root)], ['CLOSED', 'CLOSED'])
+
+        root, child = self.member()
+        seen = []
+        result, end_log = self.run_merge(child, at_gate=self.real_end(child, seen))
+        self.assertEqual(seen, ['LINEAGE_TASK_ADVANCING'])
+        self.assertEqual((result['step'], result['codes']), ('MERGED', []))
+        self.assertEqual(end_log, log)
+        self.assertEqual([self.state(child), self.state(root)], ['CLOSED', 'CLOSED'])
+
+        root, child = self.member()
+        result, refused_log = self.run_merge(child, at_gate=self.end_past_lease(child))
+        self.assertEqual((result['step'], result['codes']),
+                         ('MERGE_REFUSED', ['MERGE_LINEAGE_ENDED']))
+        self.assertNotIn(('gh', 'pr merge'), refused_log)
+        self.assertNotIn('merge_attempt', self.real.get(child))
+        self.assertEqual(self.state(child), 'DROPPED')
+
+    # An already-ended Task.
+
+    def ended(self, state):
+        """An ended lineage Task, ended the way the PM or a merge ends it."""
+        root, child = self.member()
+        if state in ('DROPPED', 'STOPPED'):
+            task_submission_cli.lineage_end(self.real, child, state, pm_session=self.PM,
+                                            reason=self.REASON)
+            return child
+        if state == 'CLOSED':
+            self.end_past_lease(child, 'CLOSED')()  # as lineage_close_merged writes it
+            return child
+        replan = self.task()
+        task_submission_cli.lineage_replan(self.real, child, replan, [child],
+                                           pm_session=self.PM, reason=self.REASON,
+                                           main_sha_reader=lambda: MAIN_SHA)
+        task_submission_cli.lineage_end(self.real, replan, 'FAILED_FINAL',
+                                        pm_session=self.PM, reason=self.REASON)
+        return replan
+
+    def test_an_ended_task_is_refused_before_any_action_or_read(self):
+        for state in ('DROPPED', 'STOPPED', 'FAILED_FINAL'):
+            with self.subTest(state=state, step='publish'):
+                case = self.publish_case()
+                case['child'] = self.ended(state)
+                result, log, opened, store = self.run_publish(case)
+                self.assertEqual(result, dict(self.REFUSED, task_id=case['child']))
+                self.assertEqual((log, opened, store.checks), ([], [], 0))
+                self.assertEqual(self.state(case['child']), state)
+            for step, changes, _action in self.REVIEW_STEPS:
+                with self.subTest(state=state, step=step):
+                    task_id = self.ended(state)
+                    result, log = self.run_review(task_id, changes)
+                    self.assertEqual(result, dict(self.REFUSED, task_id=task_id))
+                    self.assertEqual(log, [])
+            with self.subTest(state=state, step='merge'):
+                task_id = self.ended(state)
+                result, log = self.run_merge(task_id)
+                self.assertEqual((result['step'], result['codes']),
+                                 ('MERGE_REFUSED', ['MERGE_LINEAGE_ENDED']))
+                self.assertEqual(log, [])  # refused before the merge gate or any claim
+                self.assertNotIn('merge_attempt', self.real.get(task_id))
+
+    def test_a_closed_task_takes_no_external_action(self):
+        with self.subTest(step='publish'):
+            case = self.publish_case()
+            case['child'] = self.ended('CLOSED')
+            result, log, opened, store = self.run_publish(case)
+            self.assertEqual(result, dict(self.REFUSED, task_id=case['child']))
+            # Reads may come first; the first re-check (before git add) stops it.
+            self.assertEqual((log[-1], store.checks, opened), (('check', 1), 1, []))
+            self.assertNotIn(('git', 'add'), log)
+        for step, changes, _action in self.REVIEW_STEPS:
+            with self.subTest(step=step):
+                task_id = self.ended('CLOSED')
+                result, log = self.run_review(task_id, changes)
+                self.assertEqual(result, dict(self.REFUSED, task_id=task_id))
+                self.assertEqual(log, [('check', 1)])
+        with self.subTest(step='merge'):
+            task_id = self.ended('CLOSED')
+            result, log = self.run_merge(task_id)
+            self.assertEqual((result['step'], result['codes']),
+                             ('MERGE_REFUSED', ['MERGE_LINEAGE_ENDED']))
+            self.assertEqual(log, [])
+            self.assertNotIn('merge_attempt', self.real.get(task_id))
+
+    def test_the_mac_ci_label_is_refused_for_an_ended_task(self):
+        # task drive calls the label helper outside advance; it re-checks the Task too.
+        task_id = self.ended('DROPPED')
+        calls = []
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
+              'mergeable': True, 'labels': []}
+        record = dict(self.real.get(task_id), completion={'executor_task_id': 'executor-1'})
+        store = type('Store', (), {
+            'get': lambda _self, _task_id: record,
+            'check_external_action': lambda _self, wanted: self.real.check_external_action(
+                wanted)})()
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_merge_checks', return_value='MERGE_MACOS_CHECK_SKIPPED'):
+            result = task_advance.label_mac_ci_for_skipped_check(
+                task_id=task_id, store=store, pr_number=17,
+                github_get=lambda _path: dict(pr),
+                merge_gh_runner=lambda _root, args: calls.append(args))
+        self.assertEqual((result['step'], result['codes']),
+                         ('MERGE_REFUSED', ['TASK_LINEAGE_ENDED']))
+        self.assertEqual(calls, [])
+
+
 if __name__ == '__main__':
     unittest.main()

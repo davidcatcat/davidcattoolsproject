@@ -731,5 +731,89 @@ class LineageCommandRegistrationTests(LineageCase):
         self.assertEqual(list(main_cli.TASK_ACTIONS), sorted(main_cli.TASK_ACTIONS))
 
 
+class LineageEndVsAdvanceTests(LineageCase):
+    """PR #1789 v91 F1 (CWE-841): a lineage end honours the Task's advance lease.
+
+    task advance and task drive hold the lease shared for their whole run (the
+    lease is held here directly, as SplitVsStartedChildTests does for a split).
+    Every end path (task drop, a REPLAN's STOP, the ROOT roll-up) takes it
+    exclusively without waiting, so it refuses LINEAGE_TASK_ADVANCING and writes
+    nothing while an advance runs; once the advance ends, the same end runs.
+    """
+
+    def digests(self, *task_ids):
+        return {task_id: self.store.get(task_id)['record_sha256'] for task_id in task_ids}
+
+    def test_drop_stop_and_failed_final_refuse_while_the_task_is_advanced(self):
+        root = self.parked_root()
+        child = self.member(root)
+        replan = self.member(root, kind='replan', replaces=[child])
+        for task_id, state in ((child, 'DROPPED'), (child, 'STOPPED'),
+                               (replan, 'FAILED_FINAL')):
+            with self.subTest(state=state):
+                before = self.digests(root, child, replan)
+                with self.store.advance_lease(task_id):
+                    self.refused('LINEAGE_TASK_ADVANCING', cli.lineage_end, task_id, state,
+                                 pm_session=PM, reason='Original function is not affected.')
+                self.assertEqual(self.digests(root, child, replan), before)
+        self.assertEqual([self.state(child), self.state(replan), self.state(root)],
+                         ['OPEN', 'OPEN', 'PARKED'])
+        # The adapter prints only the refusal code.
+        from types import SimpleNamespace
+        args = SimpleNamespace(task_id=child, state='STOPPED', pm_session=PM,
+                               reason='test failures used up')
+        with self.store.advance_lease(child):
+            self.assertEqual(run_command(cli.run_task_drop, args, store=self.store),
+                             (1, {'code': 'LINEAGE_TASK_ADVANCING'}))
+        self.assertEqual(self.state(child), 'OPEN')
+        # After the advance, the same end runs and an advance then sees it ended.
+        code, result = run_command(cli.run_task_drop, args, store=self.store)
+        self.assertEqual((code, result['state'], result['owner_notice']['state']),
+                         (0, 'STOPPED', 'STOPPED'))
+        self.refused('TASK_LINEAGE_ENDED', lambda store: store.check_external_action(child))
+
+    def test_a_replan_never_stops_a_replaced_child_that_is_being_advanced(self):
+        root, first, second = self.task(), self.task(), self.task()
+        cli.lineage_split(self.store, root, [first, second], pm_session=PM,
+                          reason='Review FAIL 3.', main_sha_reader=lambda: MAIN)
+        replan = self.task()
+        with self.store.advance_lease(second):
+            result = cli.lineage_replan(self.store, first, replan, [first, second],
+                                        pm_session=PM, reason='Review route used up.',
+                                        main_sha_reader=lambda: MAIN)
+        self.assertEqual((result['stopped'], result['stop_failed']), ([first], [second]))
+        self.assertEqual([notice['task_id'] for notice in result['owner_notices']], [first])
+        self.assertEqual([self.state(first), self.state(second), self.state(replan)],
+                         ['STOPPED', 'OPEN', 'OPEN'])
+        # The PM ends the child with task drop once its advance has ended.
+        self.assertEqual(cli.lineage_end(self.store, second, 'STOPPED', pm_session=PM,
+                                         reason='Replaced by the REPLAN.')['state'], 'STOPPED')
+
+    def test_the_root_roll_up_waits_for_an_advance_of_the_root(self):
+        root = self.parked_root()
+        only = self.member(root)
+        with self.store.advance_lease(root):
+            result = cli.lineage_end(self.store, only, 'DROPPED', pm_session=PM,
+                                     reason='Original function is not affected.')
+        # The child's end is saved and notified; the ROOT stays PARKED (fail closed).
+        self.assertEqual((result['state'], result['root']),
+                         ('DROPPED', {'code': 'LINEAGE_ROLL_UP_FAILED'}))
+        self.assertEqual(result['owner_notice']['state'], 'DROPPED')
+        self.assertEqual(self.state(root), 'PARKED')
+        self.assertEqual(self.store.check_external_action(root)['task_id'], root)
+        # Without the advance the roll-up ends the ROOT, which then takes no action.
+        self.assertEqual(cli._lineage_roll_up(self.store, root)['state'], 'FAILED_FINAL')
+        self.refused('TASK_LINEAGE_ENDED', lambda store: store.check_external_action(root))
+        # A merged member's roll-up refuses the same way and is retried by the replay.
+        other = self.parked_root()
+        member = self.member(other)
+        merged(self.store, member)
+        with self.store.advance_lease(other):
+            self.assertEqual(cli.lineage_close_merged(self.store, member),
+                             {'code': 'LINEAGE_CLOSE_FAILED'})
+        self.assertEqual([self.state(member), self.state(other)], ['CLOSED', 'PARKED'])
+        self.assertEqual(cli.lineage_close_merged(self.store, member)['root']['state'], 'CLOSED')
+
+
 if __name__ == '__main__':
     unittest.main()
