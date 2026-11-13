@@ -401,6 +401,151 @@ class LineageSplitCommandTests(LineageCase):
         self.assertEqual([self.state(first), self.state(second)], ['OPEN', 'OPEN'])
 
 
+class LineageSplitRaceTests(LineageCase):
+    """PR #1768 v91 (CWE-362): split admission and child reservation are atomic per ROOT.
+
+    Interleavings are driven by injected hooks: the main SHA reader runs between the
+    preflight and the lineage lock, and a wrapped park runs while the lock is held.
+    A rival that meets the held lock gets a zero lock wait, so no test sleeps.
+    """
+
+    def split(self, root, children, main_sha=lambda: MAIN, store=None):
+        return cli.lineage_split(self.store if store is None else store, root,
+                                 list(children), pm_session=PM, reason='Review FAIL 3.',
+                                 main_sha_reader=main_sha)
+
+    def split_args(self, root, children):
+        from types import SimpleNamespace
+        return SimpleNamespace(root_id=root, child=list(children), reason='Review FAIL 3.',
+                               pm_session=PM)
+
+    def member_ids(self, root):
+        return sorted(item['id'] for item in cli._lineage_members(self.store, root))
+
+    def assert_untouched(self, digests):
+        for task_id, digest in digests.items():
+            record = self.store.get(task_id)
+            self.assertEqual(record['record_sha256'], digest)
+            self.assertNotIn('lineage', record)
+
+    def over_the_limit_code(self):
+        """Two plus two children exceed the child limit; two alone do not."""
+        from llmtool import repair_policy
+        policy = repair_policy.load_policy()
+        self.assertIsNone(repair_policy.admit_split(kind='root', child_count=0,
+                                                    new_children=2, policy=policy))
+        code = repair_policy.admit_split(kind='root', child_count=2, new_children=2,
+                                         policy=policy)
+        self.assertIsNotNone(code)
+        return code
+
+    def holding_the_lock(self, rival):
+        """Patch the park so rival() runs inside a split that holds the lineage lock."""
+        from unittest import mock
+        from llmtool import task_store
+        real_park = task_store.park_lineage_root
+
+        def park(store, task_id, lineage):
+            with mock.patch.object(task_store, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 0):
+                rival()
+            return real_park(store, task_id, lineage)
+        return mock.patch.object(task_store, 'park_lineage_root', new=park)
+
+    def test_a_split_that_ran_after_the_preflight_is_counted_and_the_limit_holds(self):
+        # Interleaving 1: split B runs whole after split A's preflight, before A's lock.
+        over = self.over_the_limit_code()
+        root = self.task()
+        first, second = [self.task(), self.task()], [self.task(), self.task()]
+        untouched = {task_id: self.store.get(task_id)['record_sha256'] for task_id in first}
+
+        def rival_then_main():
+            self.split(root, second)
+            return MAIN
+        self.refused(over, lambda _store: self.split(root, first, main_sha=rival_then_main))
+        self.assertEqual(self.state(root), 'PARKED')
+        self.assertEqual(self.member_ids(root), sorted(second))
+        self.assert_untouched(untouched)
+
+    def test_a_split_started_while_another_holds_the_lock_writes_nothing(self):
+        # Interleaving 2: split B passes its preflight while split A holds the lock.
+        root = self.task()
+        first, second = [self.task(), self.task()], [self.task(), self.task()]
+        untouched = {task_id: self.store.get(task_id)['record_sha256'] for task_id in second}
+        seen = []
+        with self.holding_the_lock(lambda: seen.append(run_command(
+                cli.run_task_split, self.split_args(root, second), store=self.store,
+                main_sha_reader=lambda: MAIN))):
+            result = self.split(root, first)
+        self.assertEqual(seen, [(1, {'code': 'LINEAGE_LOCK_BUSY'})])
+        self.assertEqual((result['state'], result['children']), ('PARKED', first))
+        self.assertEqual(self.member_ids(root), sorted(first))
+        self.assert_untouched(untouched)
+
+    def test_a_child_that_changed_after_the_preflight_refuses_with_nothing_written(self):
+        changes = (
+            ('merge claimed', lambda child: self.store.update(child, merge_attempt=CLAIM)),
+            ('joined another split', lambda child: self.split(self.task(), [child])),
+        )
+        for name, change in changes:
+            with self.subTest(name):
+                root, child, other = self.task(), self.task(), self.task()
+                untouched = {task_id: self.store.get(task_id)['record_sha256']
+                             for task_id in (root, other)}
+
+                def change_then_main(child=child, change=change):
+                    change(child)
+                    return MAIN
+                self.assertEqual(
+                    run_command(cli.run_task_split, self.split_args(root, [child, other]),
+                                store=self.store, main_sha_reader=change_then_main),
+                    (1, {'code': 'SPLIT_CHILD_CHANGED'}))
+                self.assert_untouched(untouched)
+                self.assertEqual(self.member_ids(root), [])
+                # The child keeps only its own change: the claim or the other lineage.
+                record = self.store.get(child)
+                if 'lineage' in record:
+                    self.assertNotEqual(record['lineage']['lineage_id'], root)
+                else:
+                    self.assertEqual(record['merge_attempt'], CLAIM)
+
+    def test_end_and_close_wait_for_a_split_that_holds_the_lineage_lock(self):
+        parked = self.parked_root()
+        child, done = self.member(parked), self.member(parked)
+        merged(self.store, done)
+        root, first = self.task(), self.task()
+        closes = []
+
+        def rivals():
+            self.refused('LINEAGE_LOCK_BUSY', cli.lineage_end, child, 'STOPPED',
+                         pm_session=PM, reason='test failures used up')
+            closes.append(cli.lineage_close_merged(self.store, done))
+        with self.holding_the_lock(rivals):
+            self.split(root, [first])
+        self.assertEqual(closes, [{'code': 'LINEAGE_CLOSE_FAILED'}])
+        self.assertEqual([self.state(child), self.state(done), self.state(parked)],
+                         ['OPEN', 'OPEN', 'PARKED'])
+        # Once the split released the lock, both run.
+        self.assertEqual(cli.lineage_close_merged(self.store, done)['state'], 'CLOSED')
+        self.assertEqual(cli.lineage_end(self.store, child, 'STOPPED', pm_session=PM,
+                                         reason='test failures used up')['state'], 'STOPPED')
+        self.assertEqual([self.state(child), self.state(done)], ['STOPPED', 'CLOSED'])
+
+    def test_a_store_without_the_lineage_lock_refuses_before_any_write(self):
+        real = self.store
+
+        class Unlocked:
+            def __getattr__(self, name):
+                if name in ('_dirfd', '_lock_sidecar', '_unlock_sidecar'):
+                    raise AttributeError(name)
+                return getattr(real, name)
+        root, first = self.task(), self.task()
+        untouched = {task_id: self.store.get(task_id)['record_sha256']
+                     for task_id in (root, first)}
+        self.refused('LINEAGE_LOCK_UNAVAILABLE',
+                     lambda _store: self.split(root, [first], store=Unlocked()))
+        self.assert_untouched(untouched)
+
+
 class LineageCommandRegistrationTests(LineageCase):
     def test_drop_through_the_real_parser_and_the_actions_stay_sorted(self):
         import contextlib

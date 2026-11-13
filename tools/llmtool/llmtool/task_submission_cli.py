@@ -1046,6 +1046,35 @@ def _lineage_refuse(code):
     raise LLMToolError(code) from None
 
 
+LINEAGE_LOCK_NAME = '.lineage.lock'
+
+
+@contextlib.contextmanager
+def _lineage_lock(store):
+    """Hold the store-wide lineage lock (PR #1768 v91, CWE-362).
+
+    A split's final checks and writes, and every lineage end, close and roll-up,
+    run under this one exclusive flock, so two of them never interleave: two
+    splits of one ROOT cannot both pass the child limit, and a child cannot join
+    two lineages. It is a sidecar in the store root, distinct from each Task's
+    update lock, so the store writes made while it is held never wait on it.
+    It is not re-entrant. A store without the lock primitives refuses.
+    """
+    if not all(callable(getattr(store, name, None))
+               for name in ('_dirfd', '_lock_sidecar', '_unlock_sidecar')):
+        _lineage_refuse('LINEAGE_LOCK_UNAVAILABLE')
+    directory = store._dirfd()
+    try:
+        lock_fd = store._lock_sidecar(directory, LINEAGE_LOCK_NAME, exclusive=True,
+                                      code='LINEAGE_LOCK')
+    finally:
+        os.close(directory)
+    try:
+        yield
+    finally:
+        store._unlock_sidecar(lock_fd)
+
+
 def _lineage_of(record):
     """A Task's lineage; a Task without one is the OPEN ROOT of its own lineage."""
     if 'lineage' in record:
@@ -1118,6 +1147,13 @@ def _lineage_roll_up(store, lineage_id):
 
 def lineage_end(store, task_id, state, *, pm_session, reason):
     """End one OPEN Task: DROPPED (a child), STOPPED, or FAILED_FINAL (a REPLAN)."""
+    # PR #1768 v91 (CWE-362): the end and its roll-up never interleave with a split.
+    with _lineage_lock(store):
+        return _lineage_end_locked(store, task_id, state, pm_session=pm_session,
+                                   reason=reason)
+
+
+def _lineage_end_locked(store, task_id, state, *, pm_session, reason):
     from .task_store import record_lineage
     line = _lineage_of(_lineage_task(store, task_id, pm_session))
     if state not in ('DROPPED', 'STOPPED', 'FAILED_FINAL'):
@@ -1140,21 +1176,35 @@ def lineage_end(store, task_id, state, *, pm_session, reason):
             'owner_notice': lineage_owner_notice(task_id, state, reason)}
 
 
+def _lineage_close_due(record):
+    """The lineage of a merged OPEN or CLOSED lineage Task; None when nothing is due."""
+    line, attempt = record.get('lineage'), record.get('merge_attempt')
+    if (type(line) is not dict or line.get('state') not in ('OPEN', 'CLOSED') or
+            type(attempt) is not dict or attempt.get('state') != 'MERGED'):
+        return None
+    return line
+
+
 def lineage_close_merged(store, task_id):
     """After llmtool merged a lineage Task: CLOSED, no Owner notice, then the roll-up."""
     from .task_store import record_lineage
     try:
-        record = store.get(task_id)
-        line, attempt = record.get('lineage'), record.get('merge_attempt')
-        if (type(line) is not dict or line.get('state') not in ('OPEN', 'CLOSED') or
-                type(attempt) is not dict or attempt.get('state') != 'MERGED'):
-            return None
-        retry = line['state'] == 'CLOSED'  # saved CLOSED whose roll-up failed: retry the roll-up
-        if not retry:
-            record_lineage(store, task_id, dict(line, state='CLOSED', recorded_at=_timestamp()))
-        root = None if line['kind'] == 'root' else _lineage_roll_up(store, line['lineage_id'])
-        if retry and root is None:
-            return None
+        if _lineage_close_due(store.get(task_id)) is None:
+            return None  # A Task with nothing to close never takes the lineage lock.
+        # PR #1768 v91 (CWE-362): re-read under the lineage lock, so a split that adds
+        # children to the PARKED ROOT never interleaves with this roll-up.
+        with _lineage_lock(store):
+            line = _lineage_close_due(store.get(task_id))
+            if line is None:
+                return None
+            retry = line['state'] == 'CLOSED'  # saved CLOSED, failed roll-up: retry it
+            if not retry:
+                record_lineage(store, task_id,
+                               dict(line, state='CLOSED', recorded_at=_timestamp()))
+            root = (None if line['kind'] == 'root'
+                    else _lineage_roll_up(store, line['lineage_id']))
+            if retry and root is None:
+                return None
     except LLMToolError:
         return {'code': 'LINEAGE_CLOSE_FAILED'}
     return {'task_id': task_id, 'state': 'CLOSED', 'owner_notice': None, 'root': root}
@@ -1191,10 +1241,14 @@ def _lineage_new_member(store, task_id, pm_session, taken):
     return record
 
 
-def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_reader=None):
-    """SPLIT a ROOT into child Tasks that start from the latest main; the ROOT is PARKED."""
+def _split_checks(store, root_id, children, *, pm_session, reason, preflight):
+    """The split admission checks; return the ROOT lineage and each child's record digest.
+
+    The preflight also refuses a ROOT that is not OPEN or PARKED, or whose merge
+    started (SPLIT_ROOT_NOT_OPEN). The locked pass leaves those two to the locked
+    park, which repeats them with its own codes, as in #1758.
+    """
     from . import repair_policy
-    from .task_store import park_lineage_root, record_lineage
     root = _lineage_task(store, root_id, pm_session)
     line = _lineage_of(root)
     _lineage_reason(reason, 'SPLIT_REASON_REQUIRED')
@@ -1205,23 +1259,48 @@ def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_read
         policy=repair_policy.load_policy())
     if code is not None:
         _lineage_refuse(code)
-    if line['state'] not in ('OPEN', 'PARKED') or root.get('merge_attempt') is not None:
+    if preflight and (line['state'] not in ('OPEN', 'PARKED') or
+                      root.get('merge_attempt') is not None):
         _lineage_refuse('SPLIT_ROOT_NOT_OPEN')
+    digests = []
     for index, child_id in enumerate(children):
-        _lineage_new_member(store, child_id, pm_session, {root_id, *children[:index]})
+        record = _lineage_new_member(store, child_id, pm_session, {root_id, *children[:index]})
+        digests.append(record.get('record_sha256'))
+    return line, digests
+
+
+def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_reader=None):
+    """SPLIT a ROOT into child Tasks that start from the latest main; the ROOT is PARKED."""
+    from .task_store import park_lineage_root, record_lineage
+    # Preflight: early refusals that write nothing and read no main SHA.
+    _line, digests = _split_checks(store, root_id, children, pm_session=pm_session,
+                                   reason=reason, preflight=True)
     base_sha = (main_sha_reader or task_completion.read_authenticated_main_sha)()
-    now = _timestamp()
-    # Security v91: the OPEN/PARKED and no-merge_attempt checks above are early
-    # refusals only. Parking is one compare-and-set under the Task lock that
-    # repeats them (SPLIT_ROOT_NOT_OPEN / SPLIT_ROOT_MERGE_STARTED), and the
-    # store refuses any later merge claim on the PARKED ROOT (MERGE_ROOT_PARKED).
-    # No child is recorded unless the ROOT was parked.
-    park_lineage_root(store, root_id, dict(line, state='PARKED', reason=reason,
-                                           recorded_at=now))
-    for child_id in children:
-        record_lineage(store, child_id, {
-            'lineage_id': root_id, 'kind': 'child', 'parent': root_id, 'replaces': [],
-            'state': 'OPEN', 'reason': None, 'base_sha': base_sha, 'recorded_at': now})
+    # PR #1768 v91 (CWE-362): admission and child reservation are one step under
+    # the store-wide lineage lock. Every check is repeated on fresh reads there:
+    # the child count (so two interleaved splits of one ROOT never exceed the
+    # limit) and membership. A child whose record changed since the preflight
+    # refuses SPLIT_CHILD_CHANGED. All of this runs before the first write.
+    with _lineage_lock(store):
+        if [store.get(child_id).get('record_sha256') for child_id in children] != digests:
+            _lineage_refuse('SPLIT_CHILD_CHANGED')
+        line, _digests = _split_checks(store, root_id, children, pm_session=pm_session,
+                                       reason=reason, preflight=False)
+        now = _timestamp()
+        # Security v91: parking is one compare-and-set under the Task lock that
+        # repeats the OPEN/PARKED and no-merge_attempt checks (SPLIT_ROOT_NOT_OPEN /
+        # SPLIT_ROOT_MERGE_STARTED), and the store refuses any later merge claim on
+        # the PARKED ROOT (MERGE_ROOT_PARKED). It is the only write that can still
+        # be refused, so it comes first: no child is recorded unless the ROOT was
+        # parked. A child write after it meets no refusing check: the child has no
+        # lineage, and every lineage writer in this module holds this lock. Only a
+        # store I/O failure (UNAVAILABLE or BUSY) can still stop a child write.
+        park_lineage_root(store, root_id, dict(line, state='PARKED', reason=reason,
+                                               recorded_at=now))
+        for child_id in children:
+            record_lineage(store, child_id, {
+                'lineage_id': root_id, 'kind': 'child', 'parent': root_id, 'replaces': [],
+                'state': 'OPEN', 'reason': None, 'base_sha': base_sha, 'recorded_at': now})
     return {'task_id': root_id, 'state': 'PARKED', 'children': list(children),
             'base_sha': base_sha, 'owner_notice': None,
             'next': 'PM closes the ROOT PR with a comment; the ROOT is never merged'}
