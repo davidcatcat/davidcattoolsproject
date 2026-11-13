@@ -1176,6 +1176,25 @@ def _validate_lineage(record):
         _fail('TASK_LINEAGE_INVALID')
 
 
+def record_lineage(store, task_id, lineage):
+    """Write a Task's lineage; kind, lineage_id and parent are fixed once set."""
+    for _ in range(5):
+        current = store.get(task_id)
+        old = current.get('lineage')
+        if old is not None and (
+                any(old.get(key) != lineage.get(key)
+                    for key in ('lineage_id', 'kind', 'parent', 'replaces', 'base_sha')) or
+                old.get('state') in _LINEAGE_END_STATES or
+                (old.get('state') == 'PARKED' and lineage.get('state') == 'OPEN')):
+            _fail('TASK_LINEAGE_TRANSITION_INVALID')
+        try:
+            return store._update(task_id, expected={'record_sha256': current['record_sha256']},
+                                 changes={'lineage': dict(lineage)})
+        except TaskStoreConflict:
+            continue
+    _fail('TASK_STORE_BUSY')
+
+
 def _validate(record, *, strict=True):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
