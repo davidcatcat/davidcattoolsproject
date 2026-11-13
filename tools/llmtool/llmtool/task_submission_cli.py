@@ -1062,6 +1062,8 @@ def lineage_owner_notice(task_id, state, reason):
     from . import repair_policy
     if not repair_policy.owner_notice(state):
         return None
+    # The reason reaches the Owner notice body: screen it here, not only at callers.
+    reason = _lineage_reason(reason, 'LINEAGE_REASON_INVALID')
     return {'marker': OWNER_NOTICE_MARKER, 'task_id': task_id, 'state': state,
             'body': f'{OWNER_NOTICE_MARKER}\nTask {task_id} ended {state}: {reason}'}
 

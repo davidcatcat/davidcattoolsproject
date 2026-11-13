@@ -95,6 +95,9 @@ class LineageNoticeTests(LineageCase):
                          ('DROPPED', cli.OWNER_NOTICE_MARKER))
         for state in ('CLOSED', 'OPEN', 'PARKED'):
             self.assertIsNone(cli.lineage_owner_notice('a' * 32, state, 'merged'))
+        for bad in ('', 'x' * 501, 'line\nbreak', None):
+            self.refused('LINEAGE_REASON_INVALID',
+                         lambda _store, value: cli.lineage_owner_notice('a' * 32, 'STOPPED', value), bad)
         self.assertEqual(cli._lineage_reason('Original function unaffected.', 'R'),
                          'Original function unaffected.')
         for reason in ('', 'x' * 501, 'line\nbreak', None):
