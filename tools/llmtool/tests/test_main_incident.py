@@ -182,6 +182,105 @@ class PendingRerunTests(unittest.TestCase):
         self.assertEqual(mi.find_heads(history, data), (None, B))
 
 
+class SharedNewestRuleTests(unittest.TestCase):
+    """Codex v3 F1 on PR #1716: every read of runs takes the newest run per SHA and check."""
+
+    @staticmethod
+    def full_data(*later):
+        """B fails FULL Mac test T; later runs follow."""
+        return runs(linux(1, A), full(2, A), linux(10, B),
+                    full(11, B, 'failure', failed_tests=[T]), *later)
+
+    @staticmethod
+    def linux_data(*later):
+        """B fails Linux test T; later runs follow."""
+        return runs(linux(1, A), full(2, A), linux(10, B, 'failure', failed_tests=[T]),
+                    full(11, B), *later)
+
+    def full_flaky(self, *later, history=None):
+        history = history or commits(C, B, A, changed={C: False})
+        return mi.classify_incident(history, self.full_data(*later))
+
+    def linux_flaky(self, *later):
+        return mi.classify_incident(commits(C, B, A, changed={C: False}),
+                                    self.linux_data(*later))
+
+    def test_newest_state_reads_the_newest_run_then_its_status(self):
+        data = runs(linux(1, A), pending(linux(2, A)), full(3, A))
+        run, state = mi.newest_state(data, A, mi.LINUX)
+        self.assertEqual((run['id'], state), (2, mi.PENDING))
+        self.assertEqual(mi.newest_state(data, A, mi.FULL_MAC)[1], mi.PASS)
+        self.assertEqual(mi.newest_state(data, B, mi.LINUX), (None, None))
+
+    def test_full_pending_newer_run_after_a_later_success_is_not_flaky(self):
+        self.assertEqual(self.full_flaky(full(20, C))['class'], mi.FLAKY)
+        for status in ('queued', 'in_progress'):
+            with self.subTest(status=status):
+                result = self.full_flaky(full(20, C), pending(full(21, C), status))
+                self.assertEqual(result['class'], mi.UNKNOWN)
+                self.assertNotIn('LATER_PASS', codes(result['evidence']))
+
+    def test_linux_pending_newer_run_after_a_later_success_is_not_flaky(self):
+        result = self.linux_flaky(linux(20, C))
+        self.assertEqual((result['fail_sha'], result['class']), (B, mi.FLAKY))
+        self.assertIn({'code': 'LATER_PASS', 'kind': mi.LINUX, 'run': 20, 'sha': C,
+                       'tests': [T]}, result['evidence'])
+        for status in ('queued', 'in_progress'):
+            with self.subTest(status=status):
+                result = self.linux_flaky(linux(20, C), pending(linux(21, C), status))
+                self.assertEqual(result['class'], mi.UNKNOWN)
+                self.assertNotIn('LATER_PASS', codes(result['evidence']))
+
+    def test_pending_later_run_follows_the_newest_first_flag(self):
+        history = commits(C, B, A, changed={C: False})
+        data = runs(linux(1, A), full(2, A), linux(10, B, 'failure', failed_tests=[T]),
+                    full(11, B), linux(20, C), pending(linux(21, C)))
+        expected = mi.classify_incident(history, data)
+        self.assertEqual(expected['class'], mi.UNKNOWN)
+        self.assertEqual(mi.classify_incident(history[::-1], data[::-1], newest_first=False),
+                         expected)
+
+    def test_later_success_hidden_by_a_newer_failure_on_that_sha_is_not_flaky(self):
+        # Classify B directly: C's newest run failed, so its older success is no pass.
+        history = commits(C, B, A, changed={C: False})
+        for data in (self.full_data(full(20, C), full(21, C, 'failure', failed_tests=[U])),
+                     self.linux_data(linux(20, C), linux(21, C, 'failure', failed_tests=[U]))):
+            with self.subTest(kind=mi.run_kind(data[0])):
+                result = mi.classify(B, history, data)
+                self.assertEqual(result[0], mi.UNKNOWN)
+                self.assertNotIn('LATER_PASS', codes(result[1]))
+                self.assertEqual(mi.classify(B, history, data[1:])[0], mi.FLAKY)
+
+    def test_pending_sha_is_skipped_but_a_later_clean_sha_still_counts(self):
+        history = commits(D, C, B, A, changed={C: False, D: False})
+        result = self.full_flaky(full(20, C), pending(full(21, C)), full(22, D), history=history)
+        self.assertEqual(result['class'], mi.FLAKY)
+        self.assertIn({'code': 'LATER_PASS', 'kind': mi.FULL_MAC, 'run': 22, 'sha': D,
+                       'tests': [T]}, result['evidence'])
+
+    def test_pending_rerun_on_the_failing_sha_supplies_no_failing_runs(self):
+        history = commits(B, A)
+        failing = [linux(10, B, 'failure', failed_tests=[T]),
+                   full(11, B, 'failure', failed_tests=[T])]
+        self.assertEqual(mi.classify_incident(history, runs(linux(1, A), full(2, A),
+                                                            *failing))['class'], mi.CODE)
+        for status in ('queued', 'in_progress'):
+            with self.subTest(status=status):
+                # The FULL check is PENDING, so its older failure is no reproduction.
+                data = runs(linux(1, A), full(2, A), *failing, pending(full(12, B), status))
+                result = mi.classify_incident(history, data)
+                self.assertEqual((result['fail_sha'], result['class']), (B, mi.UNKNOWN))
+                self.assertNotIn('REPRODUCED', codes(result['evidence']))
+                tested = [item['kind'] for item in result['evidence']
+                          if item['code'] == 'TEST_FAILURE']
+                self.assertEqual(tested, [mi.LINUX])
+
+    def test_classify_on_a_sha_whose_only_failure_is_pending_has_no_failing_run(self):
+        data = runs(linux(10, B, 'failure', failed_tests=[T]), pending(linux(11, B)))
+        self.assertEqual(mi.classify(B, commits(B, A), data),
+                         (mi.UNKNOWN, [{'code': 'NO_FAILING_RUN', 'sha': B}]))
+
+
 class HeadsAndRangeTests(unittest.TestCase):
     def test_finds_last_trusted_pass_and_failing_head_and_range(self):
         history = commits(D, C, B, A)
