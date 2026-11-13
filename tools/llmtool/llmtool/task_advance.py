@@ -825,6 +825,23 @@ def _post_review_verdict_comment(gh_runner, root, number, review_text):
         raise _PublishRefusal('REVIEW_VERDICT_COMMENT_FAILED')
 
 
+# #1705: dispatch_review hands the verdict to this caller to post only in these
+# states. Every other verdict_post state means dispatch_review already posted
+# or verified the comment, another poster holds the claim, or the text is
+# withheld, so posting here would create a second claim-bound comment.
+_CALLER_VERDICT_POST_STATES = frozenset(('CALLER_POSTING', 'RECEIPT_UNAVAILABLE'))
+
+
+def _caller_posts_verdict(result):
+    """True only when this caller, not dispatch_review, must post the verdict."""
+    if 'verdict_post' not in result:
+        # A result without verdict_post predates the #1705 post receipt.
+        return True
+    verdict_post = result.get('verdict_post')
+    return (type(verdict_post) is dict and
+            verdict_post.get('state') in _CALLER_VERDICT_POST_STATES)
+
+
 def _merge_pass_claim(record, number, head, events):
     candidates = []
     for claim in _claims(record):
@@ -2765,7 +2782,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         if type(result) is dict:
             review_text = result.get('review_text')
             if (result.get('state') == 'COMPLETED' and
-                    type(review_text) is str and review_text):
+                    type(review_text) is str and review_text and
+                    _caller_posts_verdict(result)):
                 try:
                     _post_review_verdict_comment(
                         _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
