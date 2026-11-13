@@ -215,5 +215,35 @@ class LineageDropTests(LineageCase):
         self.assertEqual(outputs[1]['state'], 'DROPPED')
 
 
+class LineageNewMemberTests(LineageCase):
+    def test_only_a_new_unmerged_task_of_the_same_pm_joins_a_lineage(self):
+        root = self.parked_root()
+        child, fresh = self.member(root), self.task()
+        self.assertEqual(cli._lineage_new_member(self.store, fresh, PM, {root})['task_id'],
+                         fresh)
+        for task_id, taken in ((child, set()), (root, set()), (fresh, {fresh})):
+            self.refused('LINEAGE_MEMBER_INVALID', cli._lineage_new_member, task_id, PM, taken)
+        merged(self.store, fresh)
+        self.refused('LINEAGE_MEMBER_INVALID', cli._lineage_new_member, fresh, PM, set())
+
+    def test_stopped_and_failed_final_notify_and_the_root_rolls_up_once(self):
+        root = self.parked_root()
+        child = self.member(root)
+        replan = self.member(root, kind='replan', replaces=[child])
+        self.refused('FAILED_FINAL_NOT_REPLAN', cli.lineage_end, child, 'FAILED_FINAL',
+                     pm_session=PM, reason='review route used up')
+        stopped = cli.lineage_end(self.store, child, 'STOPPED', pm_session=PM,
+                                  reason='test failures used up')
+        self.assertEqual(stopped['owner_notice']['state'], 'STOPPED')
+        self.assertIsNone(stopped['root'])
+        final = cli.lineage_end(self.store, replan, 'FAILED_FINAL', pm_session=PM,
+                                reason='review route used up')
+        self.assertEqual(final['owner_notice']['state'], 'FAILED_FINAL')
+        self.assertEqual(final['root'], {'task_id': root, 'state': 'FAILED_FINAL',
+                                         'owner_notice': None})
+        self.assertEqual(self.state(root), 'FAILED_FINAL')
+        self.assertIsNone(cli._lineage_roll_up(self.store, root))
+
+
 if __name__ == '__main__':
     unittest.main()

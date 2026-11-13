@@ -1165,6 +1165,15 @@ def run_task_drop(args, *, store=None, stdout=None):
         pm_session=active_pm_inbox.pm_session_key(args.pm_session)))
 
 
+def _lineage_new_member(store, task_id, pm_session, taken):
+    """A Task joining a lineage: owned, distinct, without a lineage or members."""
+    record = _lineage_task(store, task_id, pm_session)
+    if (task_id in taken or 'lineage' in record or
+            record.get('merge_attempt') is not None or _lineage_members(store, task_id)):
+        _lineage_refuse('LINEAGE_MEMBER_INVALID')
+    return record
+
+
 def run_task_remote_test(args, *, store=None, stdout=None):
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,
