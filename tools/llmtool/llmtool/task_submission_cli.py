@@ -1015,8 +1015,8 @@ def _lineage_refuse(code):
 
 def _lineage_of(record):
     """A Task's lineage; a Task without one is the OPEN ROOT of its own lineage."""
-    if record.get('lineage') is not None:
-        # Fail closed: a present lineage must pass the TaskStore validator.
+    if 'lineage' in record:
+        # Fail closed: a present lineage, even None, must pass the TaskStore validator.
         from .task_store import _validate_lineage
         _validate_lineage(record)
         return dict(record['lineage'])
