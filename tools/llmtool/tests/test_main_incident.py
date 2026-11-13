@@ -1,12 +1,17 @@
-"""#1706 R1: pure main CI incident classification (no network, no GitHub writes)."""
+"""#1706 R1 and R2: pure main CI incident classification and candidate evidence.
+
+No network, no Git, no GitHub writes.
+"""
 
 from __future__ import annotations
 
 import copy
+import math
 import unittest
 
 from llmtool import mac_full_due
 from llmtool import main_incident as mi
+from llmtool import main_incident_graph as graph
 
 
 A, B, C, D = 'a' * 40, 'b' * 40, 'c' * 40, 'd' * 40
@@ -505,6 +510,435 @@ class ClassifyTests(unittest.TestCase):
     def test_classify_with_no_failing_run_is_unknown(self):
         self.assertEqual(mi.classify(B, commits(B, A), runs(linux(1, B))),
                          (mi.UNKNOWN, [{'code': 'NO_FAILING_RUN', 'sha': B}]))
+
+
+# #1706 R2: candidate rows, attribution, bisect plan and later-merge dependency check.
+
+LL = 'tools/llmtool/'
+FAILING = 'tests.test_alpha.AlphaCase.test_one'
+FAILING_MODULE = 'tests.test_alpha'
+M1, M2, M3, M4, M5 = ('1' * 40, '2' * 40, '3' * 40, '4' * 40, '5' * 40)
+CLOSURE = {'files': [LL + 'llmtool/__init__.py', LL + 'llmtool/alpha.py',
+                     LL + 'tests/test_alpha.py']}
+
+
+def merged(number, sha, files, task=True, **extra):
+    item = {'pr': number, 'merge_sha': sha, 'files': list(files)}
+    if task:
+        item['task_id'] = 'task-%d' % number
+    item.update(extra)
+    return item
+
+
+def own(signal, state, module=FAILING_MODULE):
+    return {'signal': signal, 'modules': {module: state}}
+
+
+def three_prs():
+    """Design acceptance 5: three merges, only 102 touches the import closure."""
+    return [merged(101, M1, ['docs/notes.md']),
+            merged(102, M2, [LL + 'llmtool/alpha.py', LL + 'tests/test_alpha.py']),
+            merged(103, M3, ['.github/workflows/ci.yml', LL + 'requirements-dev.txt'], task=False)]
+
+
+def three_rows():
+    return mi.candidate_rows(three_prs(), CLOSURE, [FAILING],
+                             {101: own(mi.FULL_MAC, mi.PASS), 102: own(mi.FULL_MAC, mi.NOT_RUN)})
+
+
+class CandidateRowTests(unittest.TestCase):
+    def test_one_row_per_pr_with_flags_in_merge_order(self):
+        rows = three_rows()
+        self.assertEqual([(row['pr'], row['merge_sha']) for row in rows],
+                         [(101, M1), (102, M2), (103, M3)])
+        first, second, third = rows
+        self.assertEqual((first['task_id'], first['touches_import_closure'],
+                          first['touches_test_file'], first['touches_ci_or_env']),
+                         ('task-101', False, False, False))
+        self.assertEqual((first['own_ci'], first['own_ci_signal']), (mi.PASS, mi.FULL_MAC))
+        self.assertTrue(second['touches_import_closure'])
+        self.assertEqual(second['closure_files'],
+                         [LL + 'llmtool/alpha.py', LL + 'tests/test_alpha.py'])
+        self.assertEqual((second['touches_test_file'], second['test_files']),
+                         (True, [LL + 'tests/test_alpha.py']))
+        self.assertEqual((second['touches_ci_or_env'], second['own_ci']), (False, mi.NOT_RUN))
+        self.assertEqual(second['own_ci_tests'], {FAILING: mi.NOT_RUN})
+        self.assertEqual((third['task_id'], third['touches_ci_or_env']), (mi.UNKNOWN, True))
+        self.assertEqual(third['ci_env_files'],
+                         ['.github/workflows/ci.yml', LL + 'requirements-dev.txt'])
+        self.assertEqual((third['own_ci'], third['own_ci_signal']), (mi.UNKNOWN, mi.UNKNOWN))
+        self.assertEqual([row['train'] for row in rows], [False, False, False])
+
+    def test_ci_or_env_paths(self):
+        for path in ('.github/workflows/llmtool-mac-ci.yml', LL + 'requirements.txt',
+                     'requirements-dev.in', 'Makefile', LL + 'Makefile',
+                     LL + 'llmtool/worktree_env.py', LL + 'tests/test_worktree_env.py'):
+            with self.subTest(path=path):
+                self.assertTrue(mi._ci_or_env(path))
+        for path in ('docs/workflows/notes.md', LL + 'llmtool/alpha.py', 'README.md',
+                     LL + 'llmtool/requirements_check.py'):
+            with self.subTest(path=path):
+                self.assertFalse(mi._ci_or_env(path))
+
+    def test_merge_train_pr_is_one_row_listing_its_member_tasks(self):
+        train = merged(110, M1, [LL + 'llmtool/alpha.py'],
+                       members=['task-a', {'pr': 98, 'task_id': 'task-b'}, {'pr': 'x'}])
+        rows = mi.candidate_rows([train], CLOSURE, [FAILING], {})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['pr'], rows[0]['train']), (110, True))
+        self.assertEqual(rows[0]['members'], [{'pr': None, 'task_id': 'task-a'},
+                                              {'pr': 98, 'task_id': 'task-b'},
+                                              {'pr': None, 'task_id': mi.UNKNOWN}])
+
+    def test_own_ci_reads_the_most_specific_module_and_keeps_three_states(self):
+        other = 'tests.test_beta.BetaCase.test_two'
+        modules = {'tests': mi.NOT_RUN, FAILING_MODULE: mi.PASS, 'tests.test_gamma': 'FAIL'}
+        cases = (([FAILING], mi.PASS), ([FAILING, other], mi.NOT_RUN),
+                 (['tests.test_gamma.Case.test_x'], mi.UNKNOWN), ([], mi.UNKNOWN))
+        for tests, expected in cases:
+            with self.subTest(tests=tests):
+                row = mi.candidate_rows([merged(1, M1, [])], [], tests,
+                                        {1: {'signal': mi.LINUX, 'modules': modules}})[0]
+                self.assertEqual((row['own_ci'], row['own_ci_signal']), (expected, mi.LINUX))
+        row = mi.candidate_rows([merged(1, M1, [])], [], [FAILING],
+                                {1: {'signal': 'mac', 'modules': {FAILING_MODULE: mi.PASS}}})[0]
+        self.assertEqual((row['own_ci'], row['own_ci_signal']), (mi.UNKNOWN, mi.UNKNOWN))
+        missing = mi.candidate_rows([merged(1, M1, [])], [], [FAILING], {2: own(mi.LINUX, mi.PASS)})
+        self.assertEqual(missing[0]['own_ci_tests'], {FAILING: mi.UNKNOWN})
+
+    def test_own_ci_counts_only_for_an_exact_linux_or_full_mac_signal(self):
+        # Codex v1 F1: a PASS or NOT_RUN module state is not own CI evidence for
+        # the failing signal unless that signal is exactly LINUX or FULL_MAC.
+        class Text(str):
+            pass
+
+        for state in (mi.PASS, mi.NOT_RUN):
+            for signal in (mi.LINUX, mi.FULL_MAC):
+                with self.subTest(state=state, signal=signal):
+                    row = mi.candidate_rows([merged(1, M1, [])], [], [FAILING],
+                                            {1: own(signal, state)})[0]
+                    self.assertEqual((row['own_ci'], row['own_ci_signal'], row['own_ci_tests']),
+                                     (state, signal, {FAILING: state}))
+            unknown = ('mac', 'linux', 'Linux 3.14', 'FULL', '', mi.UNKNOWN, ' LINUX',
+                       None, 3, True, [mi.LINUX], (mi.FULL_MAC,), {mi.LINUX: 1},
+                       Text(mi.LINUX))
+            for signal in unknown:
+                with self.subTest(state=state, signal=signal):
+                    row = mi.candidate_rows([merged(1, M1, [])], [], [FAILING],
+                                            {1: own(signal, state)})[0]
+                    self.assertEqual((row['own_ci'], row['own_ci_signal'], row['own_ci_tests']),
+                                     (mi.UNKNOWN, mi.UNKNOWN, {FAILING: mi.UNKNOWN}))
+            with self.subTest(state=state, signal='missing'):
+                row = mi.candidate_rows([merged(1, M1, [])], [], [FAILING],
+                                        {1: {'modules': {FAILING_MODULE: state}}})[0]
+                self.assertEqual((row['own_ci'], row['own_ci_signal'], row['own_ci_tests']),
+                                 (mi.UNKNOWN, mi.UNKNOWN, {FAILING: mi.UNKNOWN}))
+
+    def test_unknown_changed_files_give_unknown_flags(self):
+        for files in (None, 'alpha.py', [LL + 'llmtool/alpha.py', 3]):
+            with self.subTest(files=files):
+                row = mi.candidate_rows([{'pr': 5, 'merge_sha': M1, 'files': files}],
+                                        CLOSURE, [FAILING], {})[0]
+                self.assertIsNone(row['files'])
+                self.assertEqual((row['touches_import_closure'], row['touches_test_file'],
+                                  row['touches_ci_or_env']), (None, None, None))
+
+    def test_test_package_init_is_not_the_failing_test_file(self):
+        rows = mi.candidate_rows([merged(1, M1, [LL + 'tests/__init__.py']),
+                                  merged(2, M2, [LL + 'tests/test_alphabet.py']),
+                                  merged(3, M3, ['some/path.txt'])],
+                                 [], [FAILING, 'some/path.txt'], {})
+        self.assertEqual([row['touches_test_file'] for row in rows], [False, False, True])
+
+    def test_closure_from_import_closure_flags_an_indirect_import(self):
+        files = {LL + 'llmtool/__init__.py': '', LL + 'llmtool/alpha.py': 'from . import beta\n',
+                 LL + 'llmtool/beta.py': 'VALUE = 1\n', LL + 'llmtool/other.py': 'VALUE = 2\n',
+                 LL + 'tests/test_alpha.py': 'from llmtool import alpha\n'}
+        closure = graph.import_closure(FAILING, files)
+        rows = mi.candidate_rows([merged(1, M1, [LL + 'llmtool/beta.py']),
+                                  merged(2, M2, [LL + 'llmtool/other.py'])],
+                                 [closure], [FAILING], {})
+        self.assertEqual([row['touches_import_closure'] for row in rows], [True, False])
+
+    def test_closure_built_from_tool_relative_paths_matches_repository_paths(self):
+        # import_closure keeps the path form of its map; Git reports repository paths.
+        files = {'llmtool/__init__.py': '', './llmtool/alpha.py': 'from . import beta\n',
+                 'llmtool/beta.py': 'VALUE = 1\n',
+                 'tests/test_alpha.py': 'from llmtool import alpha\n'}
+        closure = graph.import_closure(FAILING, files)
+        self.assertIn('llmtool/beta.py', closure['files'])
+        rows = mi.candidate_rows([merged(1, M1, [LL + 'llmtool/beta.py']),
+                                  merged(2, M2, [LL + 'llmtool/alpha.py']),
+                                  merged(3, M3, ['llmtool/beta.py'])],
+                                 closure, [FAILING], {})
+        self.assertEqual([row['touches_import_closure'] for row in rows], [True, True, False])
+
+    def test_non_list_inputs_and_no_mutation(self):
+        self.assertEqual(mi.candidate_rows(None, CLOSURE, [FAILING], {}), [])
+        self.assertEqual(mi.candidate_rows([None, 'x'], CLOSURE, [FAILING], {}), [])
+        prs, closure, owned = three_prs(), copy.deepcopy(CLOSURE), {102: own(mi.LINUX, mi.PASS)}
+        before = copy.deepcopy((prs, closure, owned))
+        rows = mi.candidate_rows(prs, closure, [FAILING], owned)
+        rows[1]['files'].append('extra')
+        rows[1]['own_ci_tests'][FAILING] = 'changed'
+        self.assertEqual((prs, closure, owned), before)
+
+
+def bisect_shas(count):
+    return ['%040x' % (index + 1) for index in range(count)]
+
+
+def run_bisect(shas, first):
+    """Answer each next probe as if the merge at index first is the first failing one."""
+    results = {}
+    while True:
+        plan = mi.bisect_plan(shas, results)
+        pending = [sha for sha in plan if sha not in results]
+        if not pending:
+            return plan, results
+        assert len(pending) == 1 and pending[0] == plan[-1]
+        results[pending[0]] = mi.FAIL if shas.index(pending[0]) >= first else mi.PASS
+
+
+class AttributionTests(unittest.TestCase):
+    def test_three_pr_batch_with_one_closure_hit(self):
+        result = mi.attribute(three_rows())
+        self.assertEqual((result['attribution'], result['basis'], result['candidates']),
+                         (mi.BATCH, 'MULTIPLE_CANDIDATES', 3))
+        self.assertEqual([row['pr'] for row in result['rows']], [102, 103, 101])
+        self.assertEqual([row['pr'] for row in result['rows'] if row['touches_import_closure']],
+                         [102])
+        # No BATCH field names one PR.
+        self.assertEqual(set(result), {'attribution', 'basis', 'candidates', 'rows'})
+
+    def test_one_pr_single(self):
+        result = mi.attribute(three_rows()[1:2])
+        self.assertEqual((result['attribution'], result['basis'], result['pr'],
+                          result['merge_sha'], result['task_id'], result['evidence']),
+                         (mi.SINGLE, 'ONLY_CANDIDATE', 102, M2, 'task-102', None))
+        self.assertEqual([row['pr'] for row in result['rows']], [102])
+
+    def test_bisect_single_names_the_first_failing_merge_with_evidence(self):
+        shas = [M1, M2, M3]
+        _, results = run_bisect(shas, 2)
+        first = mi.bisect_first_failing(shas, results)
+        self.assertEqual(first, M3)
+        result = mi.attribute(three_rows(), {'first_failing_sha': first,
+                                             'evidence': 'bisect probe record 77'})
+        self.assertEqual((result['attribution'], result['basis'], result['pr'], result['evidence']),
+                         (mi.SINGLE, 'BISECT', 103, 'bisect probe record 77'))
+
+    def test_bisect_that_names_no_single_row_gives_batch(self):
+        rows = three_rows()
+        for bisect in ({'first_failing_sha': M4, 'evidence': 'record'},
+                       {'first_failing_sha': M2},
+                       {'first_failing_sha': M2, 'evidence': '  '},
+                       {'first_failing_sha': 'short', 'evidence': 'record'},
+                       {}, 'M2'):
+            with self.subTest(bisect=bisect):
+                result = mi.attribute(rows, bisect)
+                self.assertEqual((result['attribution'], result['basis']),
+                                 (mi.BATCH, 'BISECT_UNMATCHED'))
+                self.assertNotIn('pr', result)
+        one = mi.attribute(rows[:1], {'first_failing_sha': M4, 'evidence': 'record'})
+        self.assertEqual(one['attribution'], mi.BATCH)
+        twice = rows + [dict(rows[0], pr=104)]
+        self.assertEqual(mi.attribute(twice, {'first_failing_sha': M1,
+                                              'evidence': 'record'})['attribution'], mi.BATCH)
+
+    def test_full_mac_failure_with_more_than_one_candidate_defaults_to_batch(self):
+        owned = {101: own(mi.FULL_MAC, mi.NOT_RUN), 102: own(mi.FULL_MAC, mi.NOT_RUN)}
+        rows = mi.candidate_rows(three_prs()[:2], CLOSURE, [FAILING], owned)
+        self.assertEqual({row['own_ci_signal'] for row in rows}, {mi.FULL_MAC})
+        result = mi.attribute(rows)
+        self.assertEqual(result['attribution'], mi.BATCH)
+        self.assertNotIn('pr', result)
+
+    def test_unknown_files_rank_with_flagged_rows(self):
+        rows = mi.candidate_rows([merged(1, M1, ['docs/notes.md']),
+                                  {'pr': 2, 'merge_sha': M2, 'files': None}],
+                                 CLOSURE, [FAILING], {})
+        self.assertEqual([row['pr'] for row in mi.attribute(rows)['rows']], [2, 1])
+
+    def test_no_candidates_is_batch(self):
+        for rows in ([], None, 'rows', [None]):
+            with self.subTest(rows=rows):
+                result = mi.attribute(rows)
+                self.assertEqual((result['attribution'], result['basis'], result['rows']),
+                                 (mi.BATCH, 'NO_CANDIDATE', []))
+
+    def test_attribute_does_not_mutate_or_alias_rows(self):
+        rows = three_rows()
+        before = copy.deepcopy(rows)
+        result = mi.attribute(rows)
+        result['rows'][0]['files'].append('extra')
+        single = mi.attribute(rows[:1])
+        single['rows'][0]['pr'] = 999
+        self.assertEqual(rows, before)
+
+
+class BisectPlanTests(unittest.TestCase):
+    def test_limit_is_ceil_log2_plus_one(self):
+        for count, limit in ((0, 0), (1, 1), (2, 2), (3, 3), (4, 3), (5, 4), (16, 5), (17, 6)):
+            with self.subTest(count=count):
+                self.assertEqual(mi.bisect_limit(count), limit)
+
+    def test_plan_stays_within_the_limit_and_finds_the_first_failing_merge(self):
+        for count in range(1, 34):
+            shas = bisect_shas(count)
+            for first in range(count):
+                with self.subTest(count=count, first=first):
+                    plan, results = run_bisect(shas, first)
+                    self.assertLessEqual(len(plan), math.ceil(math.log2(count)) + 1)
+                    self.assertEqual(plan[0], shas[-1])
+                    self.assertEqual(len(set(plan)), len(plan))
+                    self.assertEqual(mi.bisect_first_failing(shas, results), shas[first])
+
+    def test_plan_without_results_starts_with_the_failing_head(self):
+        shas = bisect_shas(5)
+        self.assertEqual(mi.bisect_plan(shas), [shas[-1]])
+        self.assertIsNone(mi.bisect_first_failing(shas, {}))
+
+    def test_head_that_does_not_reproduce_stops_the_search(self):
+        shas = bisect_shas(5)
+        self.assertEqual(mi.bisect_plan(shas, {shas[-1]: mi.PASS}), [shas[-1]])
+        self.assertIsNone(mi.bisect_first_failing(shas, {shas[-1]: mi.PASS}))
+
+    def test_probe_without_a_result_is_the_next_probe(self):
+        shas = bisect_shas(5)
+        results = {shas[-1]: mi.FAIL, shas[2]: mi.PENDING}
+        self.assertEqual(mi.bisect_plan(shas, results), [shas[-1], shas[2]])
+        self.assertIsNone(mi.bisect_first_failing(shas, results))
+
+    def test_invalid_input_gives_an_empty_plan(self):
+        for value in (None, 'shas', [], [M1, M1], [M1, 'short'], [M1, None]):
+            with self.subTest(value=value):
+                self.assertEqual(mi.bisect_plan(value), [])
+                self.assertIsNone(mi.bisect_first_failing(value, {}))
+
+    def test_inputs_are_not_mutated(self):
+        shas = bisect_shas(6)
+        results = {shas[-1]: mi.FAIL}
+        before = copy.deepcopy((shas, results))
+        plan = mi.bisect_plan(shas, results)
+        plan.append('extra')
+        self.assertEqual((shas, results), before)
+
+
+ALPHA = LL + 'llmtool/alpha.py'
+NEW = LL + 'llmtool/newmod.py'
+OLD = LL + 'llmtool/oldmod.py'
+USER = LL + 'llmtool/user.py'
+
+
+def scope():
+    return {'files': {
+        ALPHA: {'before': 'def run():\n    return 1\n',
+                'after': 'def run():\n    return 1\n\n\ndef added():\n    return 2\n'},
+        NEW: {'before': None, 'after': 'VALUE = 1\n'},
+        OLD: {'before': 'VALUE = 0\n', 'after': None},
+        'docs/notes.md': {'before': 'old', 'after': 'new'},
+    }}
+
+
+def later(number, sha, files):
+    return {'pr': number, 'merge_sha': sha, 'files': files}
+
+
+class DependencyCheckTests(unittest.TestCase):
+    def check_one(self, files):
+        return mi.dependency_check(scope(), [later(201, M1, files)])
+
+    def test_later_merge_editing_a_scope_file(self):
+        for path in (ALPHA, 'docs/notes.md'):
+            with self.subTest(path=path):
+                result = self.check_one({path: 'VALUE = 3\n' if path == ALPHA else 'text'})
+                self.assertEqual(result['code'], mi.REVERT_DEPENDENT)
+                self.assertEqual(result['dependents'],
+                                 [{'pr': 201, 'merge_sha': M1, 'kinds': [mi.EDITS_SCOPE_FILE],
+                                   'files': [path], 'modules': [], 'names': []}])
+
+    def test_later_merge_importing_a_module_the_revert_deletes(self):
+        result = self.check_one({USER: 'from . import newmod\n'})
+        self.assertEqual(result['code'], mi.REVERT_DEPENDENT)
+        dependent = result['dependents'][0]
+        self.assertEqual((dependent['kinds'], dependent['modules']),
+                         ([mi.IMPORTS_DELETED_MODULE], ['llmtool.newmod']))
+
+    def test_later_merge_importing_a_module_the_scope_deletes(self):
+        result = self.check_one({USER: 'import llmtool.oldmod\n'})
+        dependent = result['dependents'][0]
+        self.assertEqual((dependent['kinds'], dependent['modules']),
+                         ([mi.IMPORTS_DELETED_MODULE], ['llmtool.oldmod']))
+
+    def test_later_merge_using_a_name_the_scope_adds(self):
+        for text in ('from llmtool.alpha import added\n',
+                     'from llmtool import alpha as al\n\nal.added()\n',
+                     'from .alpha import *\n'):
+            with self.subTest(text=text):
+                result = self.check_one({USER: text})
+                self.assertEqual(result['code'], mi.REVERT_DEPENDENT)
+                dependent = result['dependents'][0]
+                self.assertEqual((dependent['kinds'], dependent['names']),
+                                 ([mi.USES_ADDED_NAME], ['llmtool.alpha.added']))
+
+    def test_later_merge_using_a_name_the_scope_binds_with_with(self):
+        data = {'files': {ALPHA: {'before': 'def run():\n    return 1\n',
+                                  'after': ('def run():\n    return 1\n\n\n'
+                                            'with open("a") as added:\n    pass\n')}}}
+        result = mi.dependency_check(data, [later(201, M1,
+                                                  {USER: 'from llmtool.alpha import added\n'})])
+        self.assertEqual(result['code'], mi.REVERT_DEPENDENT)
+        dependent = result['dependents'][0]
+        self.assertEqual((dependent['kinds'], dependent['names']),
+                         ([mi.USES_ADDED_NAME], ['llmtool.alpha.added']))
+
+    def test_unrelated_later_merge_is_no_dependency(self):
+        result = self.check_one({USER: 'from llmtool.alpha import run\n', 'README.md': 'text',
+                                 LL + 'llmtool/gone.py': None})
+        self.assertEqual((result['code'], result['dependents'], result['unparsable']),
+                         (mi.NO_DEPENDENT, [], []))
+
+    def test_each_dependent_is_listed_in_merge_order(self):
+        merges = [later(301, M1, {USER: 'from llmtool.alpha import run\n'}),
+                  later(302, M2, {ALPHA: 'def run():\n    return 4\n',
+                                  USER: 'from llmtool import newmod\nnewmod.VALUE\n'}),
+                  later(303, M3, {USER: 'from llmtool.alpha import added\n'})]
+        result = mi.dependency_check(scope(), merges)
+        self.assertEqual(result['code'], mi.REVERT_DEPENDENT)
+        self.assertEqual([(item['pr'], item['kinds']) for item in result['dependents']],
+                         [(302, [mi.EDITS_SCOPE_FILE, mi.IMPORTS_DELETED_MODULE,
+                                 mi.USES_ADDED_NAME]),
+                          (303, [mi.USES_ADDED_NAME])])
+        self.assertEqual(result['dependents'][0]['names'], ['llmtool.newmod.VALUE'])
+
+    def test_unparsable_text_is_reported_and_never_clears_the_check(self):
+        result = self.check_one({USER: 'def broken(:\n'})
+        self.assertEqual(result['code'], mi.DEPENDENCY_UNKNOWN)
+        self.assertEqual(result['unparsable'], [{'source': 'later', 'pr': 201, 'path': USER}])
+        broken = scope()
+        broken['files'][ALPHA]['after'] = 'def broken(:\n'
+        result = mi.dependency_check(broken, [later(202, M2, {USER: 'import json\n'})])
+        self.assertEqual(result['code'], mi.DEPENDENCY_UNKNOWN)
+        self.assertEqual(result['unparsable'], [{'source': 'scope', 'pr': None, 'path': ALPHA}])
+        dependent = mi.dependency_check(broken, [later(203, M3, {ALPHA: 'VALUE = 1\n'})])
+        self.assertEqual(dependent['code'], mi.REVERT_DEPENDENT)
+
+    def test_empty_or_invalid_scope_is_unknown(self):
+        for value in (None, {}, {'files': 'x'}, {'files': {}}):
+            with self.subTest(scope=value):
+                result = mi.dependency_check(value, [later(201, M1, {USER: 'import json\n'})])
+                self.assertEqual((result['code'], result['dependents']),
+                                 (mi.DEPENDENCY_UNKNOWN, []))
+        self.assertEqual(mi.dependency_check(scope(), None)['code'], mi.NO_DEPENDENT)
+
+    def test_inputs_are_not_mutated(self):
+        merges = [later(301, M1, {ALPHA: 'VALUE = 1\n', USER: 'from .alpha import added\n'})]
+        data = scope()
+        before = copy.deepcopy((data, merges))
+        result = mi.dependency_check(data, merges)
+        result['dependents'][0]['files'].append('extra')
+        self.assertEqual((data, merges), before)
 
 
 if __name__ == '__main__':

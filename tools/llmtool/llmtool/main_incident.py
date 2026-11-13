@@ -33,13 +33,22 @@ the failing SHA in main history with no change in between, where that pass is
 the newest run of the check on its SHA; CODE needs independent reproduction of
 one test at the failing SHA (Linux and FULL Mac, or two FULL Mac runs).
 Anything else, including a missing or unparsable test ID, is UNKNOWN.
+
+#1706 R2 (design sections 4 and 5) adds candidate evidence on the same terms:
+``candidate_rows`` (one row per merged PR with flags), ``attribute`` (SINGLE or
+BATCH), ``bisect_plan`` / ``bisect_first_failing`` and ``dependency_check``.
+The import closure comes from ``main_incident_graph``; callers read every file
+text and diff with ``git show`` themselves and pass them in.
 """
 
 from __future__ import annotations
 
+import copy
+import math
 import re
 
 from . import mac_full_due
+from . import main_incident_graph as graph
 
 LINUX_CHECK = 'check (Linux 3.14)'
 LINUX = 'LINUX'
@@ -382,3 +391,377 @@ def classify_incident(commits, runs, newest_first=True):
                          'prs': [item['pr'] for item in result['range'] if item['pr'] is not None]})
     result['evidence'] = evidence
     return result
+
+
+# #1706 R2: candidate evidence (design sections 4 and 5). Pure, like R1 above.
+
+SINGLE = 'SINGLE'
+BATCH = 'BATCH'
+NOT_RUN = 'NOT_RUN'
+REVERT_DEPENDENT = 'REVERT_DEPENDENT_LATER_MERGE'
+NO_DEPENDENT = 'NO_DEPENDENT_LATER_MERGE'
+DEPENDENCY_UNKNOWN = 'REVERT_DEPENDENCY_UNKNOWN'
+EDITS_SCOPE_FILE = 'EDITS_SCOPE_FILE'
+IMPORTS_DELETED_MODULE = 'IMPORTS_DELETED_MODULE'
+USES_ADDED_NAME = 'USES_ADDED_NAME'
+_OWN_STATES = (PASS, NOT_RUN)
+_OWN_RANK = {NOT_RUN: 0, UNKNOWN: 1, PASS: 2}
+_REQUIREMENTS = re.compile(r'requirements[\w.-]*\.(?:txt|in)\Z')
+_MAKEFILES = frozenset({'Makefile', 'makefile', 'GNUmakefile'})
+
+
+def _task(value):
+    return value if isinstance(value, str) and value.strip() else UNKNOWN
+
+
+def _paths(value):
+    """Sorted unique non-empty path strings, or None when value is not a list of them."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    if not all(isinstance(item, str) and item for item in value):
+        return None
+    return sorted(set(value))
+
+
+def _repo_path(path):
+    """Repository-relative form of an import_closure path; those always lie in tools/llmtool."""
+    path = path[2:] if path.startswith('./') else path
+    return path if path.startswith(graph.PREFIX) else graph.PREFIX + path
+
+
+def _closure_paths(closure):
+    """Paths of an import_closure result, a list of results, or a list of paths.
+
+    import_closure keeps the path form of its input map, which may be relative
+    to tools/llmtool; its paths are made repository relative here so they match
+    changed files from Git. A plain list of paths is taken as given.
+    """
+    items = [closure] if isinstance(closure, dict) else closure
+    paths = set()
+    if not isinstance(items, (list, tuple, set, frozenset)):
+        return paths
+    for item in items:
+        if isinstance(item, str):
+            paths.add(item)
+        elif isinstance(item, dict) and isinstance(item.get('files'), list):
+            paths.update(_repo_path(path) for path in item['files'] if isinstance(path, str))
+    return paths
+
+
+def _ci_or_env(path):
+    """A workflow, requirements file, Makefile or worktree_env change."""
+    base = path.rsplit('/', 1)[-1]
+    return (path.startswith('.github/workflows/') or base in _MAKEFILES or
+            bool(_REQUIREMENTS.match(base)) or 'worktree_env' in base)
+
+
+def _test_file(path, tests):
+    """True when path is the file of a failing test (given as test ID or as path)."""
+    if path in tests:
+        return True
+    name = graph.module_name(path)
+    if name is None or graph.is_package(path):
+        return False
+    return any(test == name or test.startswith(name + '.') for test in tests)
+
+
+def _members(value):
+    """Member Tasks of a merge-train integration PR, each {'pr', 'task_id'}."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    out = []
+    for item in value:
+        if isinstance(item, dict):
+            pr = item.get('pr')
+            out.append({'pr': pr if type(pr) is int else None, 'task_id': _task(item.get('task_id'))})
+        else:
+            out.append({'pr': None, 'task_id': _task(item)})
+    return out
+
+
+def _own_ci(own_ci, pr, tests):
+    """(summary, signal, {test: state}) of the PR's own CI for the failing tests.
+
+    own_ci[pr] is {'signal': LINUX or FULL_MAC, 'modules': {test module: state}}
+    for the failing signal; the most specific module that is a dotted prefix of
+    the test ID gives its state. Only PASS and NOT_RUN are kept; anything else,
+    a missing entry or a missing module is UNKNOWN. A module state only counts
+    for a signal that is exactly LINUX or FULL_MAC: with any other signal (unknown,
+    misspelt or not a string) every state and the summary are UNKNOWN.
+    """
+    entry = own_ci.get(pr) if isinstance(own_ci, dict) and pr is not None else None
+    entry = entry if isinstance(entry, dict) else {}
+    signal = entry.get('signal')
+    signal = signal if type(signal) is str and signal in KINDS else UNKNOWN
+    modules = entry.get('modules') if signal != UNKNOWN else None
+    modules = modules if isinstance(modules, dict) else {}
+    per_test = {}
+    for test in tests:
+        keys = [key for key in modules if isinstance(key, str) and key and
+                (test == key or test.startswith(key + '.'))]
+        state = modules[max(keys, key=len)] if keys else None
+        per_test[test] = state if isinstance(state, str) and state in _OWN_STATES else UNKNOWN
+    states = set(per_test.values())
+    if not states or UNKNOWN in states:
+        summary = UNKNOWN
+    elif NOT_RUN in states:
+        summary = NOT_RUN
+    else:
+        summary = PASS
+    return summary, signal, per_test
+
+
+def _row(item, closure, tests, own_ci):
+    pr = item.get('pr')
+    pr = pr if type(pr) is int else None
+    files = _paths(item.get('files'))
+    members = _members(item.get('members'))
+    row = {'pr': pr, 'merge_sha': _sha(item.get('merge_sha', item.get('sha'))),
+           'task_id': _task(item.get('task_id')), 'train': bool(members), 'members': members,
+           'files': files}
+    if files is None:
+        # Unknown changed files: every flag is unknown (None), never False.
+        row.update(touches_import_closure=None, closure_files=[], touches_test_file=None,
+                   test_files=[], touches_ci_or_env=None, ci_env_files=[])
+    else:
+        hits = [path for path in files if path in closure]
+        test_files = [path for path in files if _test_file(path, tests)]
+        ci_env = [path for path in files if _ci_or_env(path)]
+        row.update(touches_import_closure=bool(hits), closure_files=hits,
+                   touches_test_file=bool(test_files), test_files=test_files,
+                   touches_ci_or_env=bool(ci_env), ci_env_files=ci_env)
+    row['own_ci'], row['own_ci_signal'], row['own_ci_tests'] = _own_ci(own_ci, pr, tests)
+    return row
+
+
+def candidate_rows(range_prs, closure, failing_tests, own_ci):
+    """Return one new row per merged PR in the incident range, in the given order.
+
+    range_prs items: ``pr`` (int), ``merge_sha`` (or ``sha``), ``task_id``,
+    ``files`` (changed paths, repository relative as Git reports them) and,
+    for a merge-train integration PR, ``members`` (Task IDs or {'pr', 'task_id'}):
+    such a PR stays one row that lists its member Tasks. closure is an
+    ``import_closure`` result, a list of them, or a list of paths. failing_tests
+    are test IDs (or test file paths). own_ci is described in ``_own_ci``.
+    A row whose changed files are unknown has every file flag None.
+    """
+    paths = _closure_paths(closure)
+    tests = failing_tests if isinstance(failing_tests, (list, tuple)) else []
+    tests = sorted({test for test in tests if isinstance(test, str) and test.strip()})
+    items = range_prs if isinstance(range_prs, (list, tuple)) else []
+    return [_row(item, paths, tests, own_ci) for item in items if isinstance(item, dict)]
+
+
+def _flag_rank(value):
+    return 1 if value is False else 0  # True and unknown (None) rank first
+
+
+def _rank(row):
+    return (_flag_rank(row.get('touches_import_closure')), _flag_rank(row.get('touches_test_file')),
+            _flag_rank(row.get('touches_ci_or_env')), _OWN_RANK.get(row.get('own_ci'), 1))
+
+
+def _bisect_row(rows, bisect):
+    """(row, evidence reference) when bisect names exactly one row's merge SHA, else None."""
+    if not isinstance(bisect, dict):
+        return None
+    sha, ref = _sha(bisect.get('first_failing_sha')), bisect.get('evidence')
+    if sha is None or not isinstance(ref, str) or not ref.strip():
+        return None
+    hits = [row for row in rows if row.get('merge_sha') == sha]
+    return (hits[0], ref) if len(hits) == 1 else None
+
+
+def _single(row, basis, evidence):
+    return {'attribution': SINGLE, 'basis': basis, 'pr': row.get('pr'),
+            'merge_sha': row.get('merge_sha'), 'task_id': row.get('task_id'),
+            'evidence': evidence, 'rows': [row]}
+
+
+def attribute(rows, bisect=None):
+    """Return SINGLE or BATCH attribution for candidate rows; a new dict.
+
+    SINGLE only when there is exactly one candidate, or a recorded bisect
+    ({'first_failing_sha': sha, 'evidence': reference}) names the merge SHA of
+    exactly one row. Otherwise BATCH with every row, ordered by flags (closure,
+    test file, CI/env, then own CI NOT_RUN before UNKNOWN before PASS; ties keep
+    merge order); no BATCH field names one PR. A bisect that is given but does
+    not validly name one row also gives BATCH, even with one candidate. A FULL
+    Mac failure with more than one candidate is therefore BATCH by default.
+    """
+    items = rows if isinstance(rows, (list, tuple)) else []
+    rows = [copy.deepcopy(row) for row in items if isinstance(row, dict)]
+    found = _bisect_row(rows, bisect)
+    if found is not None:
+        return _single(found[0], 'BISECT', found[1])
+    if bisect is None and len(rows) == 1:
+        return _single(rows[0], 'ONLY_CANDIDATE', None)
+    if bisect is not None:
+        basis = 'BISECT_UNMATCHED'
+    else:
+        basis = 'MULTIPLE_CANDIDATES' if rows else 'NO_CANDIDATE'
+    return {'attribution': BATCH, 'basis': basis, 'candidates': len(rows),
+            'rows': sorted(rows, key=_rank)}
+
+
+def bisect_limit(count):
+    """Most probes a bisect over count merges may take: ceil(log2 count) + 1."""
+    return 0 if count < 1 else math.ceil(math.log2(count)) + 1
+
+
+def _merge_shas(merge_shas):
+    if not isinstance(merge_shas, (list, tuple)):
+        return None
+    shas = [_sha(value) for value in merge_shas]
+    if None in shas or len(set(shas)) != len(shas):
+        return None
+    return shas
+
+
+def _bisect(shas, results):
+    """(ordered probes, first failing sha or None) of a binary search over shas."""
+    if not shas:
+        return [], None
+    # Probe 1 reruns the failing head with the probe method: if it does not
+    # reproduce there, PASS results elsewhere mean nothing and the search stops.
+    head = shas[-1]
+    probes = [head]
+    if results.get(head) != FAIL:
+        return probes, None
+    low, high = 0, len(shas) - 1  # the merge before shas[0] is the trusted PASS
+    while low < high:
+        mid = (low + high) // 2
+        probes.append(shas[mid])
+        state = results.get(shas[mid])
+        if state == FAIL:
+            high = mid
+        elif state == PASS:
+            low = mid + 1
+        else:
+            return probes, None
+    return probes, shas[high]
+
+
+def bisect_plan(merge_shas, results=None):
+    """Return the ordered probe SHAs of a bisect; a new list, at most bisect_limit(n) long.
+
+    merge_shas are the merges after the last trusted PASS through the failing
+    head, oldest first. results maps probed SHAs to PASS or FAIL. The plan holds
+    every probe whose result decides the search so far, then the next probe to
+    run (the last entry without a result), if any. Invalid or duplicate SHAs
+    give an empty plan.
+    """
+    shas = _merge_shas(merge_shas)
+    if shas is None:
+        return []
+    return _bisect(shas, results if isinstance(results, dict) else {})[0]
+
+
+def bisect_first_failing(merge_shas, results):
+    """Return the first failing merge SHA once the recorded results decide it, else None."""
+    shas = _merge_shas(merge_shas)
+    if shas is None or not isinstance(results, dict):
+        return None
+    return _bisect(shas, results)[1]
+
+
+def _names(text):
+    """Module-level names of a text; set() for an absent file (None); None if unparsable."""
+    return set() if text is None else graph.defined_names(text)
+
+
+def _scope_changes(files):
+    """(deleted modules {module: path}, added names {module: names}, unparsable records)."""
+    deleted, added, unparsable = {}, {}, []
+    for path in sorted(files):
+        before, after = files[path]
+        module = graph.module_name(path)
+        if module is None:
+            continue
+        if (before is None) != (after is None):
+            # One side has no file: the scope or its revert deletes this module.
+            deleted[module] = path
+        if after is None:
+            continue
+        new, old = _names(after), _names(before)
+        if new is None or old is None:
+            unparsable.append({'source': 'scope', 'pr': None, 'path': path})
+            continue
+        if new - old:
+            added[module] = new - old
+    return deleted, added, unparsable
+
+
+def _scope_files(scope):
+    files = scope.get('files') if isinstance(scope, dict) else None
+    out = {}
+    if isinstance(files, dict):
+        for path, change in files.items():
+            if isinstance(path, str) and path:
+                change = change if isinstance(change, dict) else {}
+                out[path] = (change.get('before'), change.get('after'))
+    return out
+
+
+def _dependent(merge, scope_files, deleted, added, unparsable):
+    """The dependency record of one later merge, or None; appends unparsable records."""
+    pr = merge.get('pr')
+    pr = pr if type(pr) is int else None
+    files = merge.get('files') if isinstance(merge.get('files'), dict) else {}
+    edits, modules, names = set(), set(), set()
+    for path in sorted(path for path in files if isinstance(path, str) and path):
+        text = files[path]
+        if path in scope_files:
+            edits.add(path)
+        if text is None or not path.endswith('.py'):
+            continue
+        imported, used = graph.imports(path, text), graph.used_names(path, text)
+        if imported is None or used is None:
+            unparsable.append({'source': 'later', 'pr': pr, 'path': path})
+            continue
+        modules.update(name for name in imported if name in deleted)
+        for module, name in used:
+            new = added.get(module, set())
+            if name == '*':
+                names.update(module + '.' + item for item in new)
+            elif name in new:
+                names.add(module + '.' + name)
+    kinds = [kind for kind, hit in ((EDITS_SCOPE_FILE, edits), (IMPORTS_DELETED_MODULE, modules),
+                                    (USES_ADDED_NAME, names)) if hit]
+    if not kinds:
+        return None
+    return {'pr': pr, 'merge_sha': _sha(merge.get('merge_sha', merge.get('sha'))), 'kinds': kinds,
+            'files': sorted(edits), 'modules': sorted(modules), 'names': sorted(names)}
+
+
+def dependency_check(scope, later_merges):
+    """Would reverting scope break a later merge? Pure; returns a new dict.
+
+    scope is {'files': {path: {'before': text or None, 'after': text or None}}}:
+    each file the scope changed, before and after the scope (None: no file).
+    later_merges are the merges after the scope, each {'pr', 'merge_sha',
+    'files': {path: text after that merge, or None when it deleted the file}}.
+
+    A later merge depends on the scope when it edits a file in the scope
+    (EDITS_SCOPE_FILE), imports a module that one side of the scope lacks, so
+    the scope or its revert deletes it (IMPORTS_DELETED_MODULE), or uses a
+    module-level name the scope adds (USES_ADDED_NAME). Any dependent gives
+    REVERT_DEPENDENT_LATER_MERGE listing each such merge. With none, an empty
+    scope or a text that does not parse gives REVERT_DEPENDENCY_UNKNOWN.
+    """
+    scope_files = _scope_files(scope)
+    deleted, added, unparsable = _scope_changes(scope_files)
+    dependents = []
+    merges = later_merges if isinstance(later_merges, (list, tuple)) else []
+    for merge in merges:
+        if isinstance(merge, dict):
+            found = _dependent(merge, scope_files, deleted, added, unparsable)
+            if found is not None:
+                dependents.append(found)
+    if dependents:
+        code = REVERT_DEPENDENT
+    elif unparsable or not scope_files:
+        code = DEPENDENCY_UNKNOWN
+    else:
+        code = NO_DEPENDENT
+    return {'code': code, 'dependents': dependents, 'unparsable': unparsable}
