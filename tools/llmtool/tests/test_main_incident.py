@@ -632,6 +632,19 @@ class CandidateRowTests(unittest.TestCase):
                                  [closure], [FAILING], {})
         self.assertEqual([row['touches_import_closure'] for row in rows], [True, False])
 
+    def test_closure_built_from_tool_relative_paths_matches_repository_paths(self):
+        # import_closure keeps the path form of its map; Git reports repository paths.
+        files = {'llmtool/__init__.py': '', './llmtool/alpha.py': 'from . import beta\n',
+                 'llmtool/beta.py': 'VALUE = 1\n',
+                 'tests/test_alpha.py': 'from llmtool import alpha\n'}
+        closure = graph.import_closure(FAILING, files)
+        self.assertIn('llmtool/beta.py', closure['files'])
+        rows = mi.candidate_rows([merged(1, M1, [LL + 'llmtool/beta.py']),
+                                  merged(2, M2, [LL + 'llmtool/alpha.py']),
+                                  merged(3, M3, ['llmtool/beta.py'])],
+                                 closure, [FAILING], {})
+        self.assertEqual([row['touches_import_closure'] for row in rows], [True, True, False])
+
     def test_non_list_inputs_and_no_mutation(self):
         self.assertEqual(mi.candidate_rows(None, CLOSURE, [FAILING], {}), [])
         self.assertEqual(mi.candidate_rows([None, 'x'], CLOSURE, [FAILING], {}), [])

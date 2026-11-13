@@ -423,8 +423,19 @@ def _paths(value):
     return sorted(set(value))
 
 
+def _repo_path(path):
+    """Repository-relative form of an import_closure path; those always lie in tools/llmtool."""
+    path = path[2:] if path.startswith('./') else path
+    return path if path.startswith(graph.PREFIX) else graph.PREFIX + path
+
+
 def _closure_paths(closure):
-    """Paths of an import_closure result, a list of results, or a list of paths."""
+    """Paths of an import_closure result, a list of results, or a list of paths.
+
+    import_closure keeps the path form of its input map, which may be relative
+    to tools/llmtool; its paths are made repository relative here so they match
+    changed files from Git. A plain list of paths is taken as given.
+    """
     items = [closure] if isinstance(closure, dict) else closure
     paths = set()
     if not isinstance(items, (list, tuple, set, frozenset)):
@@ -433,7 +444,7 @@ def _closure_paths(closure):
         if isinstance(item, str):
             paths.add(item)
         elif isinstance(item, dict) and isinstance(item.get('files'), list):
-            paths.update(path for path in item['files'] if isinstance(path, str))
+            paths.update(_repo_path(path) for path in item['files'] if isinstance(path, str))
     return paths
 
 
@@ -525,7 +536,7 @@ def candidate_rows(range_prs, closure, failing_tests, own_ci):
     """Return one new row per merged PR in the incident range, in the given order.
 
     range_prs items: ``pr`` (int), ``merge_sha`` (or ``sha``), ``task_id``,
-    ``files`` (changed paths, repository relative like the closure paths) and,
+    ``files`` (changed paths, repository relative as Git reports them) and,
     for a merge-train integration PR, ``members`` (Task IDs or {'pr', 'task_id'}):
     such a PR stays one row that lists its member Tasks. closure is an
     ``import_closure`` result, a list of them, or a list of paths. failing_tests
