@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -1095,6 +1096,206 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "D6_RECORD_RESULT_NON_DESCENDANT")
         self.assertEqual(lifecycle._read_registry_record(record_path), before)
 
+    # --- #1019 A11 row 43: D6 writer-lease expiry -------------------------
+
+    EXPIRED_LEASE = "2026-01-01T00:00:00Z"
+    FUTURE_LEASE = "2999-01-01T00:00:00Z"
+
+    def _set_lease(self, record_path, value):
+        record = lifecycle._read_registry_record(record_path)
+        record["lease_expires_at"] = value
+        lifecycle._replace_record(record_path, record)
+        return record
+
+    def _complete_bootstrap(self, record_path, head):
+        def complete(_root, _task_id):
+            current = lifecycle._read_registry_record(record_path)
+            current["env2_pass_marker"] = dict(current["env2_pass_marker"],
+                                               submitted_head_sha=head,
+                                               current_head_sha=head)
+            lifecycle._replace_record(record_path, current)
+        return complete
+
+    def _lease_main(self, argv, cwds=()):
+        """Run the CLI with a stubbed process list; return (code, JSON lines, stub)."""
+        output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_process_cwds",
+                             return_value=None if cwds is None else
+                             [("1", "/")] + list(cwds)) as process_cwds, \
+                contextlib.redirect_stdout(output):
+            code = lifecycle._main(argv + ["--repo-root", str(self.source)])
+        lines = [json.loads(line) for line in output.getvalue().splitlines()]
+        return code, lines, process_cwds
+
+    def _release(self, task_id, cwds=()):
+        return self._lease_main(["--release-expired-lease", task_id,
+                                 "--pm-session", "pm-lease-test"], cwds)
+
+    def test_lease_expiry_is_computed_and_refreshed_on_recorded_result(self):
+        self.assertEqual(lifecycle.LEASE_SECONDS, 24 * 60 * 60)
+        self.assertEqual(lifecycle._lease_expiry(1_000_000),
+                         time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                       time.gmtime(1_000_000 + 24 * 60 * 60)))
+        self.assertEqual(lifecycle._parse_utc(lifecycle._lease_expiry(1_000_000)),
+                         1_000_000 + 24 * 60 * 60)
+        record = {"state": "ACTIVE", "lease_expires_at": lifecycle._lease_expiry(1_000_000)}
+        self.assertEqual(lifecycle.lease_status(record, now=1_000_000 + 86_399),
+                         "LEASE_ACTIVE")
+        self.assertEqual(lifecycle.lease_status(record, now=1_000_000 + 86_400),
+                         "LEASE_EXPIRED")
+        for invalid in ("not-a-time", None, 0, "2026-13-01T00:00:00Z",
+                        "2026-01-01 00:00:00Z"):
+            self.assertEqual(lifecycle.lease_status(
+                {"state": "ACTIVE", "lease_expires_at": invalid}), "LEASE_INVALID")
+
+        root, record_path = self._registered_result_fixture("lease-refresh")
+        self._set_lease(record_path, self.EXPIRED_LEASE)
+        head = self._commit_file(root, "result\n", "developer result")
+        started = int(time.time())
+        with patch.object(lifecycle, "_bootstrap",
+                          side_effect=self._complete_bootstrap(record_path, head)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self._record_result("lease-refresh", root), head)
+        finished = time.time()
+        after = lifecycle._read_registry_record(record_path)
+        expires = lifecycle._parse_utc(after["lease_expires_at"])
+        self.assertGreaterEqual(expires, started + lifecycle.LEASE_SECONDS)
+        self.assertLessEqual(expires, finished + lifecycle.LEASE_SECONDS)
+        self.assertEqual(lifecycle.lease_status(after), "LEASE_ACTIVE")
+
+    def test_expired_lease_without_live_process_releases_and_keeps_worktree(self):
+        root, record_path = self._registered_result_fixture("lease-release")
+        head = self._commit_file(root, "kept\n", "developer work to keep")
+        before = self._set_lease(record_path, self.EXPIRED_LEASE)
+
+        code, (status,), _ = self._lease_main(["--lease-status-task-id", "lease-release"])
+        self.assertEqual(code, 0)
+        self.assertEqual((status["lease_status"], status["lease_expired"]),
+                         ("LEASE_EXPIRED", True))
+        # Reporting is read-only: an expired lease is never released by itself.
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+        code, (line,), process_cwds = self._release(
+            "lease-release", cwds=[("77", str(self.root / "elsewhere"))])
+        self.assertEqual(code, 0)
+        process_cwds.assert_called_once_with()
+        self.assertEqual((line["result"], line["state"], line["worktree_kept"]),
+                         ("LEASE_RELEASED", "LEASE_RELEASED", True))
+        after = lifecycle._read_registry_record(record_path)
+        self.assertEqual(after["state"], "LEASE_RELEASED")
+        self.assertEqual(after["lease_released_by"], "pm-lease-test")
+        self.assertEqual(after["lease_released_from_state"], "ACTIVE")
+        self.assertIn("released by PM", after["evidence_refs"][-1])
+        self.assertEqual({key: value for key, value in after.items() if key not in (
+            "state", "last_verified_at", "lease_released_at", "lease_released_by",
+            "lease_released_from_state", "evidence_refs")},
+            {key: value for key, value in before.items() if key not in (
+                "state", "last_verified_at", "evidence_refs")})
+        self.assertEqual(lifecycle.lease_status(after), "LEASE_RELEASED")
+
+        # The worktree, its lock, its branch and its commits are untouched.
+        self.assertTrue((root / "tools" / "llmtool" / "result-fixture.txt").is_file())
+        self.assertEqual(self._git(root, "rev-parse", "HEAD"), head)
+        self.assertEqual(self._git(self.source, "rev-parse",
+                                   "refs/heads/test/lease-release"), head)
+        listing = lifecycle._worktree_listing(self.source, root)
+        self.assertIsNotNone(listing)
+        self.assertIn("locked", listing)
+
+        # The old writer can no longer record a result, and a second release refuses.
+        with patch.object(lifecycle, "_bootstrap") as bootstrap, \
+                self.assertRaises(lifecycle.LifecycleError) as raised:
+            self._record_result("lease-release", root)
+        self.assertEqual(raised.exception.code, "D6_RECORD_RESULT_STATE_REFUSED")
+        bootstrap.assert_not_called()
+        code, (line,), _ = self._release("lease-release")
+        self.assertEqual((code, line["reason"]), (1, "D6_LEASE_RELEASE_STATE_REFUSED"))
+        self.assertEqual(lifecycle._read_registry_record(record_path), after)
+        self.assertIn("LEASE_RELEASED", lifecycle.RETIRE_STATES)
+
+    def test_expired_lease_with_live_or_unknown_process_is_refused(self):
+        root, record_path = self._registered_result_fixture("lease-live")
+        before = self._set_lease(record_path, self.EXPIRED_LEASE)
+        code, (line,), _ = self._release(
+            "lease-live", cwds=[("4242", str(root / "tools" / "llmtool"))])
+        self.assertEqual(code, 1)
+        self.assertEqual((line["result"], line["reason"], line["live_pids"]),
+                         ("BLOCKED", "D6_LEASE_RELEASE_LIVE_PROCESS", ["4242"]))
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+        code, (line,), _ = self._release("lease-live", cwds=None)
+        self.assertEqual((code, line["reason"]), (1, "D6_LEASE_RELEASE_LIVENESS_UNKNOWN"))
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
+        self.assertTrue(root.is_dir())
+
+    def test_unexpired_or_invalid_lease_is_refused_before_liveness(self):
+        root, record_path = self._registered_result_fixture("lease-active")
+        for value, reason in ((self.FUTURE_LEASE, "D6_LEASE_RELEASE_NOT_EXPIRED"),
+                              ("not-a-time", "D6_LEASE_RELEASE_LEASE_INVALID")):
+            before = self._set_lease(record_path, value)
+            code, (line,), process_cwds = self._release("lease-active")
+            self.assertEqual((code, line["result"], line["reason"]),
+                             (1, "BLOCKED", reason))
+            process_cwds.assert_not_called()
+            self.assertEqual(lifecycle._read_registry_record(record_path), before)
+        self.assertTrue(root.is_dir())
+
+    def test_legacy_record_without_lease_reads_unexpired_and_stays_unchanged(self):
+        root, record_path = self._registered_result_fixture("lease-legacy")
+        before = lifecycle._read_registry_record(record_path)
+        self.assertNotIn("lease_expires_at", before)
+        self.assertEqual(lifecycle.lease_status(before), "LEASE_UNSET")
+
+        code, (status,), _ = self._lease_main(["--lease-status-task-id", "lease-legacy"])
+        self.assertEqual(code, 0)
+        self.assertEqual((status["lease_status"], status["lease_expired"]),
+                         ("LEASE_UNSET", False))
+        self.assertNotIn("lease_expires_at", status)
+
+        code, (line,), process_cwds = self._release("lease-legacy")
+        self.assertEqual((code, line["reason"]), (1, "D6_LEASE_RELEASE_NOT_EXPIRED"))
+        process_cwds.assert_not_called()
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+        # A legacy writer keeps recording results; no lease is added.
+        head = self._commit_file(root, "legacy\n", "legacy writer result")
+        with patch.object(lifecycle, "_bootstrap",
+                          side_effect=self._complete_bootstrap(record_path, head)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self._record_result("lease-legacy", root), head)
+        after = lifecycle._read_registry_record(record_path)
+        self.assertEqual(after["head_sha"], head)
+        self.assertNotIn("lease_expires_at", after)
+
+    def test_lease_cli_options_are_exclusive_and_release_needs_pm_session(self):
+        self._registered_result_fixture("lease-cli")
+        cases = (
+            ["--release-expired-lease", "lease-cli"],
+            ["--pm-session", "pm-lease-test"],
+            ["--lease-status-task-id", "lease-cli", "--pm-session", "pm-lease-test"],
+            ["--release-expired-lease", "lease-cli", "--pm-session", "pm-lease-test",
+             "--lease-status-task-id", "lease-cli"],
+            ["--release-expired-lease", "lease-cli", "--pm-session", "pm-lease-test",
+             "--retire-task-id", "lease-cli"],
+            ["--release-expired-lease", "lease-cli", "--pm-session", "bad\nsession"],
+            ["--release-expired-lease", "Bad/Task", "--pm-session", "pm-lease-test"],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv):
+                error = io.StringIO()
+                with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                        patch.object(lifecycle, "_process_cwds") as process_cwds, \
+                        contextlib.redirect_stderr(error), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(lifecycle._main(argv + ["--repo-root",
+                                                             str(self.source)]), 1)
+                self.assertEqual(error.getvalue(),
+                                 "STOP: D6 lifecycle rejected (D6_TASK_INPUT_INVALID)\n")
+                process_cwds.assert_not_called()
+        code, (line,), _ = self._release("missing-lease-task")
+        self.assertEqual((code, line["reason"]), (1, "D6_LEASE_RELEASE_UNKNOWN_TASK"))
+
     def test_atomic_record_publishes_complete_private_file_without_overwrite(self):
         registry = self.source / ".git" / "llmtool-worktrees"
         record_path = registry / "atomic-record.json"
@@ -1140,6 +1341,12 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(record["head_sha"], self.base)
         self.assertEqual(record["branch"], "test/d6-integration-test")
         self.assertEqual(record["root_realpath"], str(root))
+        # A new registration carries a writer lease about 24 h from creation.
+        expires = lifecycle._parse_utc(record["lease_expires_at"])
+        self.assertIsNotNone(expires)
+        self.assertLessEqual(expires - time.time(), lifecycle.LEASE_SECONDS)
+        self.assertGreater(expires - time.time(), lifecycle.LEASE_SECONDS - 600)
+        self.assertEqual(lifecycle.lease_status(record), "LEASE_ACTIVE")
         trust = lifecycle._load_trust()
         self.assertEqual(record["trust_sha256"], trust["sha256"])
         self.assertEqual(record["trust_binding_sha256"], trust["binding_sha256"])

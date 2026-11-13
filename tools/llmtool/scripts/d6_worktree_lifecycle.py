@@ -11,6 +11,7 @@ requires ENV-2 bootstrap to pass before returning the usable root.
 from __future__ import annotations
 
 import argparse
+import calendar
 import fcntl
 import hashlib
 import json
@@ -50,6 +51,13 @@ RETENTION_PATHS = [
     sys.implementation.cache_tag + ".pyc",
     "tools/llmtool/build/",
 ]
+# Writer lease (#1019 A11 row 43): a registration's lease runs this long from
+# the writer's last recorded activity (creation or a recorded result). An
+# expired lease is only reported; a PM releases it explicitly.
+LEASE_SECONDS = 24 * 60 * 60
+LEASE_TIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
+LEASE_RELEASED_STATE = "LEASE_RELEASED"
+LEASE_RELEASE_STATES = frozenset(("ACTIVE", "REPAIR"))
 
 
 class LifecycleError(Exception):
@@ -789,6 +797,7 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
                 "head_sha": head,
                 "state": "REPAIR",
                 "last_verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "lease_expires_at": _lease_expiry(),
                 "evidence_refs": ["Created by d6_worktree_lifecycle.py; ENV-2 bootstrap required before Worker start"],
                 "retention_paths": RETENTION_PATHS,
                 "lock_state": "UNLOCKED",
@@ -811,6 +820,7 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
             record["lock_state"] = "LOCKED"
             record["last_verified_at"] = time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            record["lease_expires_at"] = _lease_expiry()
             _replace_record(record_path, record)
             active_record = dict(record)
             # Bootstrap updates the D6 record with its ENV-2 pass marker under
@@ -1014,6 +1024,10 @@ def record_result(*, task_id, canonical_root, root=None, workspace_root=None):
                     current["env2_pass_marker"].get("current_head_sha") != head):
                 _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
             current["last_verified_at"] = _now()
+            if "lease_expires_at" in current:
+                # Recording a result is writer activity: the lease runs again
+                # from now. A legacy record without a lease stays unchanged.
+                current["lease_expires_at"] = _lease_expiry()
             _replace_record(record_path, current)
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -1119,8 +1133,10 @@ def bind_native_session(*, task_id, native_session_id, canonical_root,
 
 
 # Retire accepts only records the PM can still act on; REVIEW_PENDING,
-# RETAIN_BLOCKED, REMOVED and hand-written states are kept for a human.
-RETIRE_STATES = frozenset(("ACTIVE", "REPAIR", "RETIRE_READY", "INTEGRATED"))
+# RETAIN_BLOCKED, REMOVED and hand-written states are kept for a human. A
+# PM-released expired lease (LEASE_RELEASED) still passes every retire gate.
+RETIRE_STATES = frozenset(("ACTIVE", "REPAIR", "RETIRE_READY", "INTEGRATED",
+                           LEASE_RELEASED_STATE))
 # Dry runs show at most this many unknown paths; evidence may cover no more,
 # so the PM never accepts a path the output did not show.
 UNKNOWN_DISPLAY_CAP = 50
@@ -1136,6 +1152,40 @@ SHA40_RE = re.compile(r"[0-9a-f]{40}\Z")
 
 def _now():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _lease_expiry(now=None):
+    """UTC lease expiry LEASE_SECONDS after ``now`` (epoch seconds, default now)."""
+    now = time.time() if now is None else now
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(now) + LEASE_SECONDS))
+
+
+def _parse_utc(text):
+    """Epoch seconds of a strict ``YYYY-MM-DDTHH:MM:SSZ`` value, or None."""
+    if type(text) is not str or not LEASE_TIME_RE.fullmatch(text):
+        return None
+    try:
+        return calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, OverflowError):
+        return None
+
+
+def lease_status(record, now=None):
+    """Read-only writer-lease status of one D6 record; never changes it.
+
+    ``LEASE_RELEASED`` (a PM released it), ``LEASE_UNSET`` (a record written
+    before leases existed; it never expires), ``LEASE_INVALID`` (unparsable
+    value; never treated as expired), ``LEASE_EXPIRED`` or ``LEASE_ACTIVE``.
+    """
+    if record.get("state") == LEASE_RELEASED_STATE:
+        return "LEASE_RELEASED"
+    if "lease_expires_at" not in record:
+        return "LEASE_UNSET"
+    expires = _parse_utc(record["lease_expires_at"])
+    if expires is None:
+        return "LEASE_INVALID"
+    now = time.time() if now is None else now
+    return "LEASE_EXPIRED" if now >= expires else "LEASE_ACTIVE"
 
 
 def _task_git(cwd, *args, check=True, timeout=GIT_TIMEOUT_SECONDS):
@@ -2234,6 +2284,149 @@ def reconcile_registry(*, canonical_root, execute=False, workspace_root=None):
             os.close(lock_fd)
 
 
+def _lease_registry(canonical_root, trust):
+    """Validated canonical root, common dir and owner-only registry directory."""
+    canonical_root = Path(canonical_root).resolve(strict=True)
+    if _task_git(canonical_root, "rev-parse", "--show-toplevel").stdout.strip() != str(canonical_root):
+        _stop("D6_REPOSITORY_INVALID")
+    common_dir = Path(_task_git(canonical_root, "rev-parse", "--path-format=absolute",
+                                "--git-common-dir").stdout.strip())
+    if (not common_dir.is_absolute() or common_dir.name != ".git" or
+            Path(os.path.realpath(common_dir)) != common_dir or
+            _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in trust["origins"]):
+        _stop("D6_COMMON_DIR_INVALID")
+    registry = common_dir / "llmtool-worktrees"
+    _safe_dir(registry, mode=0o700, uid=os.getuid())
+    return canonical_root, common_dir, registry
+
+
+def lease_status_report(*, canonical_root, task_ids):
+    """Print each task's writer-lease status as one JSON line; read-only.
+
+    Returns True when every record was read. An expired lease is only
+    reported here; nothing is released or written.
+    """
+    trust = _load_trust()
+    if (not task_ids or len(task_ids) != len(set(task_ids)) or
+            any(not TASK_ID_RE.fullmatch(task_id or "") for task_id in task_ids)):
+        _stop("D6_TASK_INPUT_INVALID")
+    _canonical, _common, registry = _lease_registry(canonical_root, trust)
+    all_ok = True
+    for task_id in task_ids:
+        result = {"task_id": task_id, "mode": "lease-status"}
+        record_path = registry / (task_id + ".json")
+        try:
+            if not os.path.lexists(record_path):
+                _stop("D6_LEASE_UNKNOWN_TASK")
+            record = _read_registry_record(record_path)
+            if record.get("task_id") != task_id:
+                _stop("D6_LEASE_UNKNOWN_TASK")
+            status = lease_status(record)
+            result.update(state=record.get("state"), lease_status=status,
+                          lease_expired=status == "LEASE_EXPIRED")
+            if type(record.get("lease_expires_at")) is str:
+                result["lease_expires_at"] = record["lease_expires_at"]
+        except LifecycleError as exc:
+            all_ok = False
+            result["reason"] = exc.code
+        print(json.dumps(result, sort_keys=True))
+    return all_ok
+
+
+def _valid_pm_session(value):
+    return (type(value) is str and bool(value) and len(value) <= 256 and
+            not any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value))
+
+
+def release_expired_lease(*, canonical_root, task_id, pm_session, workspace_root=None):
+    """PM release of one expired D6 writer lease; the tree and commits stay.
+
+    Releases only when the record is ACTIVE/REPAIR, its lease is expired and
+    no live process holds the worktree (the same check retire uses). The
+    record moves to LEASE_RELEASED, so the old writer can no longer record a
+    result or resume; nothing in Git or the worktree changes. Prints one JSON
+    line and returns True only when the lease was released.
+    """
+    trust = _load_trust()
+    if not TASK_ID_RE.fullmatch(task_id or "") or not _valid_pm_session(pm_session):
+        _stop("D6_TASK_INPUT_INVALID")
+    workspace_root = Path(trust["tasks_root"] if workspace_root is None else workspace_root)
+    if workspace_root != Path(trust["tasks_root"]) and not os.environ.get("LLMTOOL_D6_TESTING"):
+        _stop("D6_WORKSPACE_ROOT_INVALID")
+    workspace_root = Path(os.path.realpath(workspace_root))
+    canonical_root, common_dir, registry = _lease_registry(canonical_root, trust)
+    try:
+        lock_fd = os.open(registry / ".lifecycle.lock",
+                          os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        lock_info = os.fstat(lock_fd)
+        if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid() or
+                stat.S_IMODE(lock_info.st_mode) != 0o600 or lock_info.st_nlink != 1):
+            os.close(lock_fd)
+            _stop("D6_REGISTRY_LOCK_INVALID")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    except LifecycleError:
+        raise
+    except OSError:
+        _stop("D6_REGISTRY_LOCK_UNAVAILABLE")
+    try:
+        trust = _recheck_trust_after_lock(trust)
+        record_path = registry / (task_id + ".json")
+        result = {"task_id": task_id, "mode": "release-expired-lease", "result": "BLOCKED"}
+        try:
+            if not os.path.lexists(record_path):
+                _stop("D6_LEASE_RELEASE_UNKNOWN_TASK")
+            record = _read_registry_record(record_path)
+            if record.get("schema_version") != 1 or record.get("task_id") != task_id:
+                _stop("D6_LEASE_RELEASE_UNKNOWN_TASK")
+            status = lease_status(record)
+            result.update(state=record.get("state"), lease_status=status)
+            if type(record.get("lease_expires_at")) is str:
+                result["lease_expires_at"] = record["lease_expires_at"]
+            if record.get("state") not in LEASE_RELEASE_STATES:
+                _stop("D6_LEASE_RELEASE_STATE_REFUSED")
+            _require_trust_binding(record, trust)
+            if status == "LEASE_INVALID":
+                _stop("D6_LEASE_RELEASE_LEASE_INVALID")
+            if status != "LEASE_EXPIRED":
+                # Includes LEASE_UNSET: a record written before leases existed
+                # never expires and is never released here.
+                _stop("D6_LEASE_RELEASE_NOT_EXPIRED")
+            root = workspace_root / task_id
+            reasons = _identity_reasons(root, record, canonical_root, common_dir,
+                                        workspace_root)
+            if reasons:
+                result["identity_reasons"] = reasons
+                _stop("D6_LEASE_RELEASE_IDENTITY_MISMATCH")
+            live = _live_pids(root)
+            if live is None:
+                _stop("D6_LEASE_RELEASE_LIVENESS_UNKNOWN")
+            if live:
+                result["live_pids"] = live
+                _stop("D6_LEASE_RELEASE_LIVE_PROCESS")
+            if _read_registry_record(record_path) != record:
+                _stop("D6_REGISTRY_CHANGED")
+            now = _now()
+            updated = dict(record)
+            updated.update(
+                state=LEASE_RELEASED_STATE, last_verified_at=now,
+                lease_released_at=now, lease_released_by=pm_session,
+                lease_released_from_state=record["state"],
+                evidence_refs=list(record.get("evidence_refs") or []) + [
+                    "Expired writer lease (" + record["lease_expires_at"] +
+                    ") released by PM " + now + "; no live process; worktree, "
+                    "branch and commits kept"])
+            _replace_record(record_path, updated)
+            result.update(result="LEASE_RELEASED", state=LEASE_RELEASED_STATE,
+                          lease_released_at=now, worktree_kept=True)
+        except LifecycleError as exc:
+            result["reason"] = exc.code
+        print(json.dumps(result, sort_keys=True))
+        return result["result"] == "LEASE_RELEASED"
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 # Legacy-only (#369): --release-retain now builds its pattern from trust.json
 # (repository.slug and approval_refs.retain_release_issues, see
 # _retain_release_re). This pre-trust value stays until PR-10 only so
@@ -2574,6 +2767,15 @@ def _main(argv=None):
                              "printed (also needed to retire a RETAIN_BLOCKED record)")
     parser.add_argument("--execute-approved-retire", action="store_true",
                         help="actually discard approved files and remove the worktrees")
+    parser.add_argument("--lease-status-task-id", action="append", metavar="TASK_ID",
+                        help="read-only: report this task's writer lease, including "
+                             "LEASE_EXPIRED (repeatable)")
+    parser.add_argument("--release-expired-lease", metavar="TASK_ID",
+                        help="PM: release this task's expired writer lease when no live "
+                             "process holds the worktree; needs --pm-session; the "
+                             "worktree and commits are kept")
+    parser.add_argument("--pm-session",
+                        help="the PM session releasing an expired lease (recorded)")
     parser.add_argument("--repo-root", default=None)
     parser.add_argument("--trust-sha256")
     args = parser.parse_args(argv)
@@ -2586,6 +2788,32 @@ def _main(argv=None):
         create_values = (args.task_id, args.agent_id, args.session_ref,
                          args.lease_ref, args.branch, args.base_sha)
         create_options = (args.github_login, args.native_session_id)
+        if (args.lease_status_task_id is not None or
+                args.release_expired_lease is not None or args.pm_session is not None):
+            other_options = (
+                any(value is not None for value in create_values + create_options) or
+                args.resume_task_id is not None or args.resume_root is not None or
+                args.record_result_task_id is not None or
+                args.bind_native_session_task_id is not None or
+                args.execute_approved_lifecycle or args.retire_task_id is not None or
+                args.rebind_device_task_id is not None or args.execute_approved_rebind or
+                args.squash_evidence or args.train_evidence or
+                args.reviewed_pr_evidence or args.reconcile_registry or
+                args.execute_approved_reconcile or args.release_retain or
+                args.owner_approved_retain_release or args.discard_uncommitted or
+                args.retain_blocked_evidence or args.execute_approved_retire)
+            if args.release_expired_lease is not None:
+                if (other_options or args.lease_status_task_id is not None or
+                        args.pm_session is None):
+                    _stop("D6_TASK_INPUT_INVALID")
+                return 0 if release_expired_lease(
+                    canonical_root=args.repo_root, task_id=args.release_expired_lease,
+                    pm_session=args.pm_session) else 1
+            if other_options or args.pm_session is not None:
+                _stop("D6_TASK_INPUT_INVALID")
+            return 0 if lease_status_report(
+                canonical_root=args.repo_root,
+                task_ids=args.lease_status_task_id) else 1
         if args.rebind_device_task_id is not None:
             if (any(value is not None for value in create_values + create_options) or
                     args.resume_task_id is not None or args.resume_root is not None or
