@@ -2,6 +2,7 @@
 
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
+import hashlib
 import io
 import json
 import math
@@ -97,16 +98,21 @@ def _select_reviewer(task, requested=None):
     return reviewer_key
 
 
+def _gh_env():
+    """Return the minimal AI-account environment for one gh call."""
+    home = os.environ.get('HOME') or os.path.expanduser('~')
+    return {'PATH': task_completion._GH_PATH, 'HOME': home,
+            'LC_ALL': 'C', 'GH_PROMPT_DISABLED': '1',
+            'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1',
+            'GH_CONFIG_DIR': github_identity.ai_gh_config_dir(home)}
+
+
 def _resolve_github_login():
     """Resolve the authenticated GitHub account without exposing credentials."""
     gh = shutil.which('gh', path=task_completion._GH_PATH)
     if gh is None:
         _refuse('REVIEWER_GITHUB_LOGIN_UNAVAILABLE')
-    home = os.environ.get('HOME') or os.path.expanduser('~')
-    env = {'PATH': task_completion._GH_PATH, 'HOME': home,
-           'LC_ALL': 'C', 'GH_PROMPT_DISABLED': '1',
-           'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1',
-           'GH_CONFIG_DIR': github_identity.ai_gh_config_dir(home)}
+    env = _gh_env()
     try:
         result = subprocess.run(
             [gh, 'api', 'user', '--jq', '.login'], env=env,
@@ -620,10 +626,180 @@ def _write_refusal_receipt(*, store, task_id, pr_number, head, version,
     return receipt_path
 
 
+# #1705: a COMPLETED Codex claim's verdict comment is posted here, once. The
+# claim schema is fixed by the task store, so the posting state is kept in a
+# private receipt next to the review-refusal receipts. It never holds review text.
+_VERDICT_COMMENTS_DIR = 'review-verdict-comments'
+_VERDICT_COMMENT_STATES = frozenset(('POSTING', 'POSTED', 'POST_FAILED', 'UNVERIFIED'))
+_COMMENT_PAGE_SIZE = 100
+_COMMENT_PAGE_LIMIT = 50
+_VERDICT_POST_TIMEOUT = 30
+
+
+def _same_comment_body(body, text):
+    """Match a posted comment to the claim text; GitHub may change line ends."""
+    if type(body) is not str:
+        return False
+    return body.replace('\r\n', '\n').strip() == text.replace('\r\n', '\n').strip()
+
+
+def _list_pr_comment_bodies(pr_number):
+    """Return every PR comment body, or None when a complete read is not proven."""
+    bodies = []
+    for page in range(1, _COMMENT_PAGE_LIMIT + 1):
+        try:
+            comments = task_completion._github_get(
+                f'issues/{pr_number}/comments?per_page={_COMMENT_PAGE_SIZE}&page={page}')
+        except Exception:
+            return None
+        if type(comments) is not list:
+            return None
+        for comment in comments:
+            if type(comment) is not dict:
+                return None
+            bodies.append(comment.get('body'))
+        if len(comments) < _COMMENT_PAGE_SIZE:
+            return bodies
+    return None
+
+
+def _post_pr_comment(*, pr_number, body, repo_root):
+    """Post one PR comment as the AI account; the body is read verbatim from stdin."""
+    gh = shutil.which('gh', path=task_completion._GH_PATH)
+    if gh is None:
+        raise LLMToolError('gh is unavailable')
+    _resolve_github_login()
+    result = subprocess.run(
+        [gh, 'pr', 'comment', str(pr_number), '--body-file', '-'],
+        cwd=str(repo_root), env=_gh_env(), input=body.encode('utf-8'),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        timeout=_VERDICT_POST_TIMEOUT)
+    if result.returncode:
+        raise LLMToolError('gh pr comment failed')
+
+
+def _write_verdict_comment_receipt(*, store, task_id, claim, state, code, text):
+    """Atomically record the verdict comment state; return the path or None."""
+    root = getattr(store, 'root', None)
+    if not isinstance(root, Path) or state not in _VERDICT_COMMENT_STATES:
+        return None
+    directory = root.parent / _VERDICT_COMMENTS_DIR
+    if directory.is_symlink():
+        return None
+    from . import high_debug
+    high_debug._private_directory(directory)
+    path = directory / f"{task_id}-{claim.get('head_sha')}-{claim.get('version')}.json"
+    if _RECEIPT_NAME_RE.fullmatch(path.name) is None or path.is_symlink():
+        return None
+    record = {
+        'task_id': task_id, 'pr': claim.get('pr'), 'head': claim.get('head_sha'),
+        'version': claim.get('version'), 'reviewer_task': claim.get('reviewer_task'),
+        'state': state, 'code': code,
+        'review_text_sha256': hashlib.sha256(text.encode('utf-8')).hexdigest(),
+        'recorded_at': _now(),
+    }
+    data = (json.dumps(record, sort_keys=True) + '\n').encode('utf-8')
+    temp = directory / f'.{path.name}.tmp.{os.urandom(8).hex()}'
+    fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                 getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+    finally:
+        os.close(fd)
+    try:
+        os.replace(str(temp), str(path))
+    finally:
+        if temp.exists():
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+    _prune_receipts(directory, _RECEIPT_PRUNE_LIMIT)
+    return path
+
+
+def _post_verdict_once(*, store, task_id, claim, text, repo_root, post_comment=None,
+                       list_comments=None):
+    """Post the claim's review text unless an identical comment already exists.
+
+    Returns POSTED or ALREADY_POSTED. Any other outcome raises a fixed visible
+    code and leaves a durable receipt; a rerun of the same claim retries safely
+    because it first re-reads the PR comments.
+    """
+    lister = list_comments or _list_pr_comment_bodies
+    poster = post_comment or _post_pr_comment
+    pr_number = claim.get('pr')
+
+    def record(state, code=None):
+        try:
+            return _write_verdict_comment_receipt(
+                store=store, task_id=task_id, claim=claim, state=state,
+                code=code, text=text)
+        except Exception:
+            return None
+
+    def fail(state, code):
+        receipt = record(state, code)
+        error = LLMToolError(
+            f'{code}: the COMPLETED review claim for PR {pr_number} version '
+            f"{claim.get('version')} is kept but its verdict comment is not "
+            'confirmed; rerun review-dispatch with the same version to post it once.')
+        error.review_dispatch_code = code
+        error.review_verdict_comment = {'state': state, 'code': code,
+                                        'receipt_path': receipt}
+        raise error from None
+
+    try:
+        bodies = lister(pr_number)
+    except Exception:
+        bodies = None
+    if type(bodies) is not list:
+        # Absence is not proven, so posting now could duplicate the verdict.
+        fail('UNVERIFIED', 'REVIEW_VERDICT_COMMENT_UNVERIFIED')
+    if any(_same_comment_body(body, text) for body in bodies):
+        record('POSTED')
+        return 'ALREADY_POSTED'
+    # Recorded first so an interrupted post is visible; the rerun re-reads.
+    record('POSTING')
+    try:
+        poster(pr_number=pr_number, body=text, repo_root=repo_root)
+    except Exception:
+        fail('POST_FAILED', 'REVIEW_VERDICT_COMMENT_FAILED')
+    record('POSTED')
+    return 'POSTED'
+
+
+def _completed_return(claim, result, *, store, task_id, repo_root, post_comment=None,
+                      list_comments=None):
+    """Return a COMPLETED Codex verdict after its one PR comment is ensured.
+
+    The returned dict carries no review_text, so no caller posts it a second time.
+    """
+    output = _review_return(claim, result)
+    if output.get('review_dispatch_code') == 'REVIEW_TEXT_WITHHELD':
+        # Withheld text is never posted; the BLOCKED code is the visible state.
+        return output
+    stored = claim.get('review_result')
+    text = stored.get('review_text') if type(stored) is dict else None
+    if type(text) is not str or not text.strip():
+        _refuse('REVIEW_VERDICT_TEXT_MISSING')
+    output.pop('review_text', None)
+    output['verdict_comment'] = _post_verdict_once(
+        store=store, task_id=task_id, claim=claim, text=text, repo_root=repo_root,
+        post_comment=post_comment, list_comments=list_comments)
+    return output
+
+
 def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     create_d6=None, dispatch_session=None, bind_session=None,
-                    prompt_renderer=None, codex_runner=None, reviewer=None):
-    """Claim once, create a read-only Reviewer D6 and bind its dispatched session."""
+                    prompt_renderer=None, codex_runner=None, reviewer=None,
+                    post_comment=None, list_comments=None):
+    """Claim once, create a read-only Reviewer D6 and bind its dispatched session.
+
+    A COMPLETED Codex claim also gets exactly one verbatim PR verdict comment.
+    """
     task = store.get(task_id)
     _, executor, head, _base, reviewer_key = _preflight(
         store, task_id, executor_task, pr_number, version, task=task,
@@ -643,8 +819,12 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         if prior.get('executor_task') != executor_task:
             _refuse('REVIEW_DISPATCH_CLAIM_MISMATCH')
         if prior.get('state') == 'COMPLETED':
+            # #1705: a replay ensures the verdict comment instead of dropping it.
             result = prior.get('review_result')
-            return _review_return(prior, result)
+            return _completed_return(
+                prior, result, store=store, task_id=task_id,
+                repo_root=str(Path(executor.common_dir).parent),
+                post_comment=post_comment, list_comments=list_comments)
         if prior['state'] == 'CLAIMED':
             unknown = dict(prior, state='UNKNOWN', updated_at=_now())
             updated_claims = [unknown if claim is prior else claim for claim in claims]
@@ -803,9 +983,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         updated_claims = [dispatched if item is claim else item for item in claims + [claim]]
         store.compare_and_update(task_id, expected={'review_dispatch_claim': claims + [claim]},
                                  review_dispatch_claim=updated_claims)
-        if reviewer_key == 'codex-reviewer':
-            return _review_return(dispatched, codex_result)
-        return dispatched
+        if reviewer_key != 'codex-reviewer':
+            return dispatched
     except Exception as exc:
         unknown = dict(claim, state='UNKNOWN', updated_at=_now())
         if session_id is not None:
@@ -860,3 +1039,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         if hasattr(exc, 'review_refusal'):
             outcome_error.review_refusal = exc.review_refusal
         raise outcome_error from None
+    # Only a stored COMPLETED Codex claim reaches here. Posting runs after the
+    # claim update so a post failure never turns that claim UNKNOWN (#1705).
+    return _completed_return(
+        dispatched, codex_result, store=store, task_id=task_id, repo_root=repo_root,
+        post_comment=post_comment, list_comments=list_comments)
