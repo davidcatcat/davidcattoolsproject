@@ -6946,10 +6946,13 @@ WAITING_POLICY_READ = 4096
 WAITING_REASON = re.compile(r"^[A-Z0-9_]{1,64}$")
 WAITING_END_STATES = ("CLOSED", "DROPPED", "STOPPED", "FAILED_FINAL")
 WAITING_HIDDEN = "(hidden)"    # shown instead of an invalid or screened value
-WAITING_SCAN = 4096            # Task files looked at (lstat) per call; the rest on later calls
+# Work units per call: directory entries taken from the scan (any name, not only
+# *.json), the one deferred read and gone names retired. The rest go to later calls.
+WAITING_SCAN = 4096
 WAITING_UNSEEN = "task 檔案尚未全部讀過，WAITING 可能不完整"
-_waiting_parsed: dict = {}     # root -> {name: (file key or None, entries, read ok)}
-_waiting_cursor: dict = {}     # root -> last name of the previous page; the next page follows it
+WAITING_ROOTS = 8              # roots with a retained scan; tests pass many
+_waiting_scans: dict = {}      # root -> _WaitingScan, kept in memory between calls
+_waiting_lock = threading.Lock()
 _store_waiting_lock = threading.Lock()
 _store_waiting_loaded: list = []    # [task_store module or None] once tried
 
@@ -7032,114 +7035,227 @@ def _waiting_entry(record) -> WaitingRecord | None:
     return WaitingRecord(task[:8], reason, since, text)
 
 
-def _waiting_task_names(root: str) -> list[str]:
-    """Sorted names of every *.json entry in root, with no cap.
-
-    Names only: nothing is stat'ed, opened or followed here, so the listing
-    costs one directory read. Raises FileNotFoundError when root is absent and
-    OSError when it cannot be listed."""
-    with os.scandir(root) as entries:
-        return sorted(entry.name for entry in entries if entry.name.endswith(".json"))
+def _waiting_open(root: str):
+    """An os.scandir iterator over root; it stays open between calls."""
+    return os.scandir(root)
 
 
-def _waiting_page(root: str, names: list[str], parsed: dict) -> list[str]:
-    """The names looked at on this call, at most WAITING_SCAN of them.
+class _WaitingScan:
+    """One root's WAITING scan, kept in memory between monitor refreshes.
 
-    Names never looked at yet come first, so a new Task file shows at once.
-    The rest of the page continues after the previous page's last name and
-    wraps round, so every file is looked at again within
-    ceil(len(names) / WAITING_SCAN) calls (Codex v1 F1, PR #1751)."""
-    limit = max(1, WAITING_SCAN)
-    if len(names) <= limit:
-        return list(names)
-    page = [name for name in names if name not in parsed][:limit]
-    picked = set(page)
-    cursor = _waiting_cursor.get(root, "")
-    start = next((index for index, name in enumerate(names) if name > cursor), 0)
-    last = None
-    for name in names[start:] + names[:start]:
-        if len(page) >= limit:
-            break
-        if name not in picked:
-            page.append(name)
-            picked.add(name)
-            last = name
-    if last is not None:
-        _waiting_cursor[root] = last
-    return page
+    Codex v2 F1 (PR #1751): no call lists, copies or sorts the whole folder.
+    One os.scandir iterator is kept open and advanced at most WAITING_SCAN
+    entries a call, in directory order, until it ends; then names gone since
+    the last pass are retired a few at a time, and the next call starts a new
+    pass. Each pass covers every Task file present for the whole pass; a file
+    added during a pass may wait for the next one (os.scandir's contract).
+
+    Per Task file it keeps only (file key or None, entries, read ok) in two
+    generations: `current` holds names seen in this pass, `previous` those of
+    the last pass not seen yet. The shown WAITING rows and the failed names are
+    kept apart and updated one name at a time, so a refresh never walks the
+    metadata of non-WAITING Tasks."""
+
+    def __init__(self, identity):
+        self.identity = identity   # (st_dev, st_ino) of root; another folder starts afresh
+        self.it = None             # the open scandir iterator, or None between passes
+        self.current: dict = {}
+        self.previous: dict = {}
+        self.retiring = None       # names of the last pass not seen in this one, after EOF
+        self.rows: dict = {}       # name -> (mtime_ns, entries): WAITING Tasks only
+        self.failed: set = set()   # names not read: unreadable, oversized or over budget
+        self.deferred = None       # at most one name that did not fit the byte budget
+        self.covered = False       # one whole pass and its cleanup are done
+
+    def close(self) -> None:
+        it, self.it = self.it, None
+        if it is not None:
+            try:
+                it.close()
+            except OSError:
+                pass
+
+    def _store(self, gen: dict, name: str, value) -> None:
+        gen[name] = value
+        key, entries, ok = value
+        if entries:
+            old = self.rows.get(name)
+            self.rows[name] = (key[1] if key else old[0] if old else 0, entries)
+        else:
+            self.rows.pop(name, None)
+        if ok:
+            self.failed.discard(name)
+        else:
+            self.failed.add(name)
+
+    def _forget(self, name: str) -> None:
+        self.current.pop(name, None)
+        self.previous.pop(name, None)
+        self.rows.pop(name, None)
+        self.failed.discard(name)
+
+    @staticmethod
+    def _look(root: str, name: str, cached, budget: int):
+        """(value, bytes read) for one Task file. The value is None when the
+        file is gone and False when it does not fit the remaining budget.
+
+        A link or a hard-linked file is never read; a file over REMOTE_TEST_READ
+        is never read and stays a shortfall; an unchanged file (same inode,
+        mtime and size) is served from the cache; an unreadable one keeps its
+        earlier rows and stays a shortfall."""
+        path = os.path.join(root, name)
+        kept = cached[1] if cached else ()
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return None, 0
+        except OSError:
+            return (None, kept, False), 0
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return (None, (), True), 0   # never read; not a Task file to show
+        key = (info.st_ino, info.st_mtime_ns, info.st_size)
+        if info.st_size > REMOTE_TEST_READ:
+            return (key, (), False), 0
+        if cached and cached[0] == key and cached[2]:
+            return cached, 0
+        opened = _remote_test_open(path, budget)
+        if opened is None:
+            return (None, kept, False), 0
+        key, raw = opened
+        if raw is False:
+            return False, 0
+        if raw is None:   # refused on the open descriptor: link, special file or too big
+            return (key, (), key[2] <= REMOTE_TEST_READ), 0
+        entry = _waiting_entry(_remote_test_json(raw) if raw else None)
+        return (key, (entry,) if entry is not None else (), True), len(raw)
+
+    def step(self, root: str) -> None:
+        """Advance the scan by at most WAITING_SCAN work units and at most one
+        whole pass. Raises OSError when the folder cannot be read."""
+        work = max(1, WAITING_SCAN)
+        budget = WAITING_BUDGET
+        if self.deferred is not None:
+            # The deferred read goes first, with this call's whole budget, so a
+            # file that keeps changing earlier in the folder cannot starve it.
+            name, self.deferred = self.deferred, None
+            work -= 1
+            gen = (self.current if name in self.current
+                   else self.previous if name in self.previous else None)
+            if gen is not None:
+                value, used = self._look(root, name, gen[name], budget)
+                budget -= used
+                if value is None:
+                    self._forget(name)
+                elif value is False:   # over a whole budget: a shortfall, move on
+                    self._store(gen, name, (None, gen[name][1], False))
+                else:
+                    self._store(gen, name, value)
+        while work > 0:
+            if self.retiring is not None:
+                if not self.retiring:
+                    self.retiring = None
+                    self.covered = True
+                    break   # at most one whole pass per call
+                name, _ = self.retiring.popitem()
+                work -= 1
+                if name not in self.current and name not in self.previous:
+                    self.rows.pop(name, None)
+                    self.failed.discard(name)
+                continue
+            if self.it is None:
+                self.it = _waiting_open(root)
+            try:
+                entry = next(self.it)
+            except StopIteration:
+                self.close()
+                self.retiring, self.previous, self.current = self.previous, self.current, {}
+                continue
+            work -= 1
+            name = entry.name
+            if not name.endswith(".json"):
+                continue
+            cached = self.previous.pop(name, None) or self.current.get(name)
+            value, used = self._look(root, name, cached, budget)
+            budget -= used
+            if value is None:
+                self._forget(name)
+            elif value is False:
+                self._store(self.current, name, (None, cached[1] if cached else (), False))
+                self.deferred = name
+                break   # only one deferred read; the scan goes on next call
+            else:
+                self._store(self.current, name, value)
+
+    def result(self) -> tuple[list, str]:
+        """The WAITING rows, newest file first, and any shortfall."""
+        ordered = sorted(((mtime, name, entries) for name, (mtime, entries) in self.rows.items()),
+                         reverse=True)
+        problem = (WAITING_UNSEEN if not self.covered
+                   else REMOTE_TEST_OVER_BUDGET if self.failed or self.deferred is not None
+                   else "")
+        return [entry for _, _, found in ordered for entry in found], problem
+
+
+def _waiting_drop(root: str) -> None:
+    scan = _waiting_scans.pop(root, None)
+    if scan is not None:
+        scan.close()
+
+
+def waiting_scan_reset() -> None:
+    """Close every retained WAITING scan; the next call starts a new, incomplete one."""
+    with _waiting_lock:
+        for scan in _waiting_scans.values():
+            scan.close()
+        _waiting_scans.clear()
 
 
 def waiting_records(root: str | None = None) -> tuple[list[WaitingRecord], str]:
     """Every WAITING Task in root; the second value names any shortfall.
 
-    Codex v1 F1 (PR #1744, PR #1751): unlike the newest-32 readers, this covers
-    every Task file, so an old WAITING Task still gets its row. The listing has
-    no cap; the work per call is bounded instead. At most WAITING_SCAN files
-    are looked at (lstat) per call, a page at a time, never-seen files first;
-    the others keep their last result until their page comes round again. A
-    link or a hard-linked file is never read; a file over REMOTE_TEST_READ is
-    never read; an unchanged file (same inode, mtime and size) is served from
-    the cache. New or changed files are read newest first up to WAITING_BUDGET
-    bytes per call; the rest are read on later calls. Any file not yet covered
-    names a shortfall, so a WAITING Task is never dropped silently."""
+    Codex v1 F1 (PR #1744, PR #1751) and v2 F1 (PR #1751): unlike the
+    newest-32 readers this covers every Task file, so an old WAITING Task still
+    gets its row, and every part of a call is bounded: at most WAITING_SCAN
+    directory entries, deferred reads and retired names, WAITING_BUDGET bytes
+    read, and sorting only of the WAITING rows themselves (see _WaitingScan).
+    Rows found so far stay shown while a pass goes on. Until the first whole
+    pass and its cleanup are done the result names WAITING_UNSEEN, even with no
+    rows; afterwards a file that could not be read names a shortfall. So a
+    WAITING Task is never dropped silently. A folder that cannot be read
+    returns WAITING_UNREADABLE and the next call starts a new scan."""
     root = LLMTOOL_TASKS if root is None else root
-    try:
-        names = _waiting_task_names(root)
-    except FileNotFoundError:
-        names = []
-    except OSError:
-        return [], WAITING_UNREADABLE
-    parsed = _waiting_parsed.get(root, {})
-    page = _waiting_page(root, names, parsed)
-    on_page = set(page)
-    stamped, kept = [], {}
-    for name in page:
+    with _waiting_lock:
         try:
-            info = os.lstat(os.path.join(root, name))
+            info = os.stat(root)
+        except FileNotFoundError:
+            _waiting_drop(root)
+            return [], ""   # no Task folder yet: nothing to show and nothing missing
         except OSError:
-            continue   # gone since the listing
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            kept[name] = (None, (), True)   # never read; not a Task file to show
-            continue
-        stamped.append((info.st_mtime_ns, name, (info.st_ino, info.st_mtime_ns, info.st_size)))
-    budget = WAITING_BUDGET
-    for _, name, key in sorted(stamped, reverse=True):
-        if key[2] > REMOTE_TEST_READ:
-            kept[name] = (key, (), False)   # never read; named as a shortfall
-            continue
-        cached = parsed.get(name)
-        if cached and cached[0] == key and cached[2]:
-            kept[name] = cached
-            continue
-        loaded = _task_load(os.path.join(root, name), budget)
-        if loaded is None:
-            # Unreadable now, or over this call's budget: keep any earlier rows,
-            # name the shortfall and read it again when its page comes round.
-            kept[name] = (None, cached[1] if cached else (), False)
-            continue
-        key, record, used = loaded
-        budget -= used
-        entry = _waiting_entry(record)
-        kept[name] = (key, (entry,) if entry is not None else (), True)
-    unseen = False
-    for name in names:
-        if name in on_page:
-            continue
-        if name in parsed:
-            kept[name] = parsed[name]   # looked at on an earlier page
-        else:
-            unseen = True
-    short = any(not value[2] for value in kept.values())
-    if root not in _waiting_parsed and len(_waiting_parsed) >= 8:
-        _waiting_parsed.clear()   # one root in use; tests pass many
-        _waiting_cursor.clear()
-    _waiting_parsed[root] = kept
-    entries = []
-    for _, _, value in sorted(((value[0][1] if value[0] else 0, name, value)
-                               for name, value in kept.items()), reverse=True):
-        entries.extend(value[1])
-    problem = WAITING_UNSEEN if unseen else REMOTE_TEST_OVER_BUDGET if short else ""
-    return entries, problem
+            _waiting_drop(root)
+            return [], WAITING_UNREADABLE
+        identity = (info.st_dev, info.st_ino)
+        scan = _waiting_scans.get(root)
+        if scan is not None and scan.identity != identity:
+            _waiting_drop(root)   # the folder was replaced: start again, incomplete
+            scan = None
+        if scan is None:
+            if len(_waiting_scans) >= WAITING_ROOTS:
+                for old in _waiting_scans.values():
+                    old.close()
+                _waiting_scans.clear()
+            scan = _waiting_scans[root] = _WaitingScan(identity)
+        try:
+            scan.step(root)
+        except FileNotFoundError:
+            _waiting_drop(root)
+            return [], ""
+        except OSError:
+            _waiting_drop(root)
+            return [], WAITING_UNREADABLE
+        except BaseException:
+            _waiting_drop(root)   # never leave a half-advanced scan or an open folder
+            raise
+        return scan.result()
 
 
 def waiting_notice_due(reason, since, now, hours=WAITING_NOTIFY_HOURS) -> bool:
@@ -10116,22 +10232,26 @@ def main(argv: list[str] | None = None) -> int:
     if github is not None:
         github.want_main = True
         github.want_hosted_ci = True
-    if args.once:
-        return run_once(github)
-    mon = Monitor(min_age=max(0.0, args.min_age), show_all=args.all)
-    mon.agents = ClaudeAgents()
-    mon.github = github
-    interactive = sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "dumb") != "dumb"
-    if args.plain or not interactive:
-        return run_plain(args.interval, mon)
-    import curses
-    use_color = not args.no_color and not os.environ.get("NO_COLOR")
     try:
-        curses.wrapper(run_curses, args.interval, use_color, mon)
-    except KeyboardInterrupt:
-        pass
-    print("Monitor stopped; no worker was signalled or modified.")
-    return 0
+        if args.once:
+            return run_once(github)
+        mon = Monitor(min_age=max(0.0, args.min_age), show_all=args.all)
+        mon.agents = ClaudeAgents()
+        mon.github = github
+        interactive = (sys.stdin.isatty() and sys.stdout.isatty()
+                       and os.environ.get("TERM", "dumb") != "dumb")
+        if args.plain or not interactive:
+            return run_plain(args.interval, mon)
+        import curses
+        use_color = not args.no_color and not os.environ.get("NO_COLOR")
+        try:
+            curses.wrapper(run_curses, args.interval, use_color, mon)
+        except KeyboardInterrupt:
+            pass
+        print("Monitor stopped; no worker was signalled or modified.")
+        return 0
+    finally:
+        waiting_scan_reset()   # close the retained WAITING folder scan
 
 
 if __name__ == "__main__":

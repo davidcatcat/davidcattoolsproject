@@ -10359,11 +10359,43 @@ class StuckAlertTests(unittest.TestCase):
         self.assertNotIn(mon.BEHIND_WARNING, "\n".join(drawn.values()))
 
 
+class _CountingScandir:
+    """os.scandir that counts every raw entry it yields, whether or not it is a
+    Task file, and records whether it was closed. Setting fail makes the next
+    step raise, as a folder that turns unreadable mid-scan would."""
+
+    def __init__(self, root, log):
+        self.inner = os.scandir(root)
+        self.log = log
+        self.closed = False
+        self.fail = False
+        log["open"].append(self)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.fail:
+            raise PermissionError("denied")
+        entry = next(self.inner)
+        self.log["yielded"] += 1
+        return entry
+
+    def close(self):
+        self.closed = True
+        self.inner.close()
+
+
 class WaitingTaskTests(unittest.TestCase):
     """#1502 WP-D D12 (E5): WAITING Task rows and the Owner notice rule."""
     NOW = 1_800_000_000.0
     TASK = "a" * 32
     RESUME = "quota resets at 00:00 UTC"
+
+    def setUp(self):
+        # Every test starts and ends with no retained WAITING folder scan.
+        mon.waiting_scan_reset()
+        self.addCleanup(mon.waiting_scan_reset)
 
     def stamp(self, age):
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.NOW - age))
@@ -10617,6 +10649,16 @@ class WaitingTaskTests(unittest.TestCase):
             paths.append(path)
         return paths
 
+    def counting(self):
+        """(log, patch) that makes the WAITING scan open _CountingScandir."""
+        log = {"yielded": 0, "open": []}
+        return log, patch.object(mon, "_waiting_open",
+                                 side_effect=lambda root: _CountingScandir(root, log))
+
+    def calls(self, root, count):
+        """The results of `count` consecutive WAITING refreshes of root."""
+        return [mon.waiting_records(root) for _ in range(count)]
+
     def test_waiting_records_find_the_oldest_of_forty_task_files(self):
         """Codex v1 F1 (PR #1744): an old WAITING Task is not cut off at 32 files."""
         self.assertLess(mon.REMOTE_TEST_FILES, 40)
@@ -10636,7 +10678,7 @@ class WaitingTaskTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertIn("task 00000000（QUOTA", rows[0][0])
             # Unchanged files come from the cache: nothing is read again.
-            with patch.object(mon, "_task_load", side_effect=AssertionError("read")):
+            with patch.object(mon, "_remote_test_open", side_effect=AssertionError("read")):
                 self.assertEqual(mon.waiting_records(root), (records, ""))
             # A changed file is read again: clearing WAITING removes the row.
             paths[0].write_text(json.dumps({"task_id": "0" * 32, "waiting": None}),
@@ -10645,75 +10687,274 @@ class WaitingTaskTests(unittest.TestCase):
             self.assertEqual(mon.waiting_records(root), ([], ""))
 
     def test_waiting_records_page_through_every_task_file(self):
-        """Codex v1 F1 (PR #1751): no scan prefix hides a WAITING Task for good.
+        """Codex v1 F1 and v2 F1 (PR #1751): every Task file is covered, but no
+        call takes more than WAITING_SCAN entries from the folder.
 
-        40 Task files, 16 looked at per call: the WAITING Task is the oldest and
-        sorts last by name, so it is on neither the first page nor the newest 32."""
+        40 Task files, 16 entries per call: one pass takes three calls, in the
+        folder's own order, and the WAITING Task is found wherever it is."""
         self.assertLess(mon.REMOTE_TEST_FILES, 40)
         waiting = self.task(task="f" * 32)
+        entry = mon._waiting_entry(waiting)
         others = [{"task_id": f"{index:032x}"} for index in range(1, 40)]
-        with tempfile.TemporaryDirectory() as root, patch.object(mon, "WAITING_SCAN", 16):
+        unseen = (f"WAITING 清單可能不完整：{mon.WAITING_UNSEEN}", "")
+        log, opener = self.counting()
+        with tempfile.TemporaryDirectory() as root, patch.object(mon, "WAITING_SCAN", 16), \
+                opener:
             paths = self.write_tasks(root, [waiting] + others)
             self.assertEqual(len(os.listdir(root)), 40)
-            looked = []
-            real_lstat = os.lstat
-
-            def counting_lstat(path, *args, **kwargs):
-                looked.append(path)
-                return real_lstat(path, *args, **kwargs)
-
-            # Pages 1 and 2 hold no WAITING Task: the shortfall row still shows.
-            for _ in range(2):
-                looked.clear()
-                with patch.object(mon.os, "lstat", side_effect=counting_lstat):
-                    records, problem = mon.waiting_records(root)
-                self.assertLessEqual(len(looked), 16)   # bounded work per call
-                self.assertEqual((records, problem), ([], mon.WAITING_UNSEEN))
-                self.assertEqual(mon.waiting_lines(records, self.NOW, problem=problem),
-                                 [(f"WAITING 清單可能不完整：{mon.WAITING_UNSEEN}", "")])
-            # Page 3 reaches the last file: one row, nothing missing.
-            records, problem = mon.waiting_records(root)
-            self.assertEqual(records, [mon._waiting_entry(waiting)])
-            self.assertEqual(problem, "")
-            rows = mon.waiting_lines(records, self.NOW)
+            results, per_call = [], []
+            for _ in range(3):
+                before = log["yielded"]
+                results.append(mon.waiting_records(root))
+                per_call.append(log["yielded"] - before)
+            self.assertEqual(per_call, [16, 16, 8])   # bounded folder work per call
+            # Until the pass ends the list says it may be incomplete, rows or not.
+            for records, problem in results[:2]:
+                self.assertIn(records, ([], [entry]))
+                self.assertEqual(problem, mon.WAITING_UNSEEN)
+                self.assertEqual(mon.waiting_lines(records, self.NOW, problem=problem)[-1],
+                                 unseen)
+            self.assertEqual(results[2], ([entry], ""))
+            self.assertEqual(len(log["open"]), 1)
+            self.assertTrue(log["open"][0].closed)
+            rows = mon.waiting_lines(results[2][0], self.NOW)
             self.assertEqual(len(rows), 1)
             self.assertIn("task ffffffff（QUOTA", rows[0][0])
-            # Unchanged files come from the cache and the row stays on every page.
-            with patch.object(mon, "_task_load", side_effect=AssertionError("read")):
-                for _ in range(3):
-                    self.assertEqual(mon.waiting_records(root), (records, ""))
-            # Pages keep rotating: a later change to that file is seen within
-            # ceil(40 / 16) = 3 calls, and clearing WAITING removes the row.
+            # Unchanged files come from the cache and the row stays on every call.
+            with patch.object(mon, "_remote_test_open", side_effect=AssertionError("read")):
+                for result in self.calls(root, 3):
+                    self.assertEqual(result, ([entry], ""))
+            # A later change is seen within one pass (three calls); clearing
+            # WAITING removes the row.
             paths[0].write_text(json.dumps({"task_id": "f" * 32, "waiting": None}),
                                 encoding="utf-8")
             os.utime(paths[0], ns=(1, 1))
-            results = [mon.waiting_records(root) for _ in range(3)]
-            self.assertEqual(results[-1], ([], ""))
-            # A new WAITING Task file is looked at on the very next call.
+            self.assertEqual(self.calls(root, 3)[-1], ([], ""))
+            # A new WAITING Task file is found by the next pass: 41 files, three calls.
             added = self.task(task="e" * 32)
             self.write_tasks(root, [added])
-            self.assertEqual(mon.waiting_records(root), ([mon._waiting_entry(added)], ""))
-            # A removed file drops out of the result.
+            self.assertEqual(self.calls(root, 3)[-1], ([mon._waiting_entry(added)], ""))
+            # A removed file drops out once the pass that misses it ends.
             os.remove(Path(root) / f"{'e' * 32}.json")
-            self.assertEqual(mon.waiting_records(root), ([], ""))
+            self.assertEqual(self.calls(root, 3)[-1], ([], ""))
+            self.assertTrue(all(scan.closed for scan in log["open"]))
+
+    def test_waiting_scan_counts_every_folder_entry(self):
+        """Codex v2 F1 (PR #1751): the bound counts raw folder entries, Task
+        files or not, for an empty, an exactly-full and an over-full folder."""
+        one, three = self.task(task="1" * 32), self.task(task="3" * 32)
+        with patch.object(mon, "WAITING_SCAN", 4):
+            with tempfile.TemporaryDirectory() as root:
+                log, opener = self.counting()
+                with opener:
+                    self.assertEqual(mon.waiting_records(root), ([], ""))
+                self.assertEqual(log["yielded"], 0)
+                self.assertTrue(log["open"][0].closed)
+            with tempfile.TemporaryDirectory() as root:
+                # Four entries, two of them not Task files: exactly one call's work,
+                # so the end of the folder is seen on the next call.
+                self.write_tasks(root, [one, {"task_id": "2" * 32}])
+                (Path(root) / "notes.txt").write_text("x", encoding="utf-8")
+                (Path(root) / "sub").mkdir()
+                log, opener = self.counting()
+                with opener:
+                    self.assertEqual(mon.waiting_records(root),
+                                     ([mon._waiting_entry(one)], mon.WAITING_UNSEEN))
+                    self.assertEqual(log["yielded"], 4)
+                    self.assertEqual(mon.waiting_records(root), ([mon._waiting_entry(one)], ""))
+                    self.assertEqual(log["yielded"], 4)
+            with tempfile.TemporaryDirectory() as root:
+                for index in range(10):
+                    (Path(root) / f"note-{index}.txt").write_text("x", encoding="utf-8")
+                self.write_tasks(root, [three])
+                log, opener = self.counting()
+                per_call, results = [], []
+                with opener:
+                    for _ in range(3):
+                        before = log["yielded"]
+                        results.append(mon.waiting_records(root))
+                        per_call.append(log["yielded"] - before)
+                self.assertEqual(per_call, [4, 4, 3])
+                self.assertEqual([problem for _, problem in results[:2]],
+                                 [mon.WAITING_UNSEEN] * 2)
+                self.assertEqual(results[2], ([mon._waiting_entry(three)], ""))
+
+    def test_waiting_refresh_never_sorts_every_cached_task(self):
+        """Codex v2 F1 (PR #1751): a warm refresh sorts only the WAITING rows,
+        never the cached records of every non-WAITING Task."""
+        waiting = self.task(task="0" * 32)
+        entry = mon._waiting_entry(waiting)
+        others = [{"task_id": f"{index:032x}"} for index in range(1, 30)]
+        with tempfile.TemporaryDirectory() as root, patch.object(mon, "WAITING_SCAN", 8):
+            self.write_tasks(root, [waiting] + others)
+            self.assertEqual(self.calls(root, 4)[-1], ([entry], ""))   # 8 + 8 + 8 + 6
+            sizes = []
+            real_sorted = sorted
+
+            def recording(items, *args, **kwargs):
+                items = list(items)
+                sizes.append(len(items))
+                return real_sorted(items, *args, **kwargs)
+
+            with patch.object(mon, "sorted", create=True, side_effect=recording), \
+                    patch.object(mon, "_remote_test_open", side_effect=AssertionError("read")):
+                for result in self.calls(root, 4):
+                    self.assertEqual(result, ([entry], ""))
+            self.assertTrue(sizes)
+            self.assertLessEqual(max(sizes), 1)
+            self.assertEqual(len(mon._waiting_scans[root].rows), 1)
+
+    def test_waiting_reads_are_fair_when_files_keep_changing(self):
+        """Codex v2 F1 (PR #1751): a file that changes on every refresh cannot
+        use up every byte budget and leave a later file unread."""
+        tasks = [self.task(task=letter * 32) for letter in "abc"]
+        with tempfile.TemporaryDirectory() as root:
+            paths = self.write_tasks(root, tasks)
+            size = max(path.stat().st_size for path in paths)
+            real_open = mon._remote_test_open
+            read = []
+
+            def counting_open(path, budget):
+                opened = real_open(path, budget)
+                if opened and opened[1]:
+                    read[-1] += len(opened[1])
+                return opened
+
+            seen = set()
+            with patch.object(mon, "WAITING_BUDGET", size), \
+                    patch.object(mon, "_remote_test_open", side_effect=counting_open):
+                for turn in range(1, 5):
+                    # Every file read so far changes again (same size) before each refresh.
+                    for path in paths:
+                        if path.name[0] in seen:
+                            changed = self.task(task=path.name[0] * 32)
+                            resume = f"quota resets at {turn:02d}:00 UTC"
+                            changed["waiting"]["resume_condition"] = resume
+                            path.write_text(json.dumps(changed), encoding="utf-8")
+                            stamp = (int(self.NOW) + 100 + turn) * 1_000_000_000
+                            os.utime(path, ns=(stamp, stamp))
+                    read.append(0)
+                    records, problem = mon.waiting_records(root)
+                    self.assertLessEqual(read[-1], size)   # never over the byte budget
+                    seen |= {record.task[0] for record in records}
+            self.assertEqual(seen, {"a", "b", "c"})
+            self.assertEqual(len(records), 3)
+
+    def test_waiting_rows_follow_task_changes(self):
+        tasks = [self.task(task=letter * 32) for letter in "abc"]
+        with tempfile.TemporaryDirectory() as root:
+            paths = self.write_tasks(root, tasks)
+            self.assertEqual(len(mon.waiting_records(root)[0]), 3)
+            # Abandoned and terminal Tasks are not WAITING.
+            paths[0].write_text(json.dumps(self.task(task="a" * 32, abandonment={"by": "PM"})),
+                                encoding="utf-8")
+            paths[1].write_text(json.dumps(self.task(task="b" * 32, lineage={"state": "CLOSED"})),
+                                encoding="utf-8")
+            # A file replaced by rename (a new inode) is read again.
+            fresh = Path(root) / "replacement.tmp"
+            fresh.write_text(json.dumps(self.task(task="c" * 32, reason="AUTH")), encoding="utf-8")
+            os.chmod(fresh, 0o600)
+            os.replace(fresh, paths[2])
+            records, problem = mon.waiting_records(root)
+            self.assertEqual([(record.task[0], record.reason) for record in records], [("c", "AUTH")])
+            self.assertEqual(problem, "")
+
+    def test_waiting_shortfall_stays_until_the_file_is_read(self):
+        tasks = [self.task(task=letter * 32) for letter in "ab"]
+        with tempfile.TemporaryDirectory() as root:
+            self.write_tasks(root, tasks)
+            real_open = mon._remote_test_open
+
+            def failing(path, budget):
+                if os.path.basename(path).startswith("a"):
+                    return None   # unreadable
+                return real_open(path, budget)
+
+            with patch.object(mon, "_remote_test_open", side_effect=failing):
+                for records, problem in self.calls(root, 3):
+                    self.assertEqual([record.task[0] for record in records], ["b"])
+                    self.assertEqual(problem, mon.REMOTE_TEST_OVER_BUDGET)
+            records, problem = mon.waiting_records(root)
+            self.assertEqual([record.task[0] for record in records], ["b", "a"])
+            self.assertEqual(problem, "")
+
+    def test_waiting_scan_closes_its_folder_and_restarts_incomplete(self):
+        tasks = [self.task(task=f"{index:032x}") for index in range(6)]
+        log, opener = self.counting()
+        with tempfile.TemporaryDirectory() as root, patch.object(mon, "WAITING_SCAN", 2), \
+                opener:
+            self.write_tasks(root, tasks)
+            # Mid-scan the folder stays open between calls ...
+            self.assertEqual(mon.waiting_records(root)[1], mon.WAITING_UNSEEN)
+            self.assertEqual([scan.closed for scan in log["open"]], [False])
+            # ... a reset (as at monitor exit) closes it, and the next call starts
+            # a new scan that says it is incomplete.
+            mon.waiting_scan_reset()
+            self.assertEqual([scan.closed for scan in log["open"]], [True])
+            self.assertEqual(mon.waiting_records(root)[1], mon.WAITING_UNSEEN)
+            # Completing a pass closes the folder too: 6 files, 2 a call, then the end.
+            records, problem = self.calls(root, 3)[-1]
+            self.assertEqual((len(records), problem), (6, ""))
+            self.assertEqual([scan.closed for scan in log["open"]], [True, True])
+            # A folder that fails mid-scan is closed, named unreadable, and the next
+            # call starts again, incomplete.
+            self.assertEqual(mon.waiting_records(root), (records, ""))
+            log["open"][-1].fail = True
+            self.assertEqual(mon.waiting_records(root), ([], mon.WAITING_UNREADABLE))
+            self.assertTrue(log["open"][-1].closed)
+            self.assertEqual(mon.waiting_records(root)[1], mon.WAITING_UNSEEN)
+
+    def test_waiting_scan_closes_on_eviction_and_folder_replacement(self):
+        log, opener = self.counting()
+        tasks = [self.task(task=letter * 32) for letter in "abc"]
+        with tempfile.TemporaryDirectory() as parent, patch.object(mon, "WAITING_SCAN", 2), \
+                opener:
+            roots = []
+            for index in range(mon.WAITING_ROOTS + 1):
+                root = Path(parent) / f"tasks-{index}"
+                root.mkdir()
+                self.write_tasks(root, tasks)
+                roots.append(str(root))
+            for root in roots[:-1]:
+                self.assertEqual(mon.waiting_records(root)[1], mon.WAITING_UNSEEN)
+            self.assertFalse(any(scan.closed for scan in log["open"]))
+            # One root too many: every retained scan is closed first.
+            mon.waiting_records(roots[-1])
+            self.assertTrue(all(scan.closed for scan in log["open"][:-1]))
+            self.assertEqual(list(mon._waiting_scans), [roots[-1]])
+            # The folder is replaced mid-scan: the old scan is closed and a new one
+            # covers only the new folder.
+            first = log["open"][-1]
+            os.rename(roots[-1], Path(parent) / "old")
+            os.mkdir(roots[-1])
+            added = self.task(task="d" * 32)
+            self.write_tasks(roots[-1], [added])
+            self.assertEqual(mon.waiting_records(roots[-1]), ([mon._waiting_entry(added)], ""))
+            self.assertTrue(first.closed)
+
+    def test_monitor_exit_closes_the_waiting_scan(self):
+        # main() sets the GitHub config variables; patch.dict restores them.
+        with patch.dict(os.environ), patch.object(mon, "run_once", return_value=0), \
+                patch.object(mon, "waiting_scan_reset") as reset:
+            self.assertEqual(mon.main(["--once", "--no-github"]), 0)
+        reset.assert_called_once_with()
 
     def test_waiting_records_stay_bounded_and_name_any_shortfall(self):
         tasks = [self.task(task=letter * 32) for letter in "abc"]
         with tempfile.TemporaryDirectory() as root:
             paths = self.write_tasks(root, tasks)
             size = max(path.stat().st_size for path in paths)
-            # A small budget reads newest first and finishes on later calls.
+            # A small budget reads one file a call: the over-budget file waits for
+            # the next call, where it is read first, and the pass finishes later.
             with patch.object(mon, "WAITING_BUDGET", size):
-                seen = []
-                for expected in (["c"], ["c", "b"], ["c", "b", "a"]):
-                    records, problem = mon.waiting_records(root)
-                    seen.append(problem)
-                    self.assertEqual([record.task[0] for record in records], expected)
-                self.assertEqual(seen, [mon.REMOTE_TEST_OVER_BUDGET,
-                                        mon.REMOTE_TEST_OVER_BUDGET, ""])
+                results = self.calls(root, 3)
+            self.assertEqual([len(records) for records, _ in results], [1, 2, 3])
+            self.assertEqual([problem for _, problem in results],
+                             [mon.WAITING_UNSEEN, mon.WAITING_UNSEEN, ""])
+            self.assertEqual([record.task[0] for record in results[-1][0]], ["c", "b", "a"])
         with tempfile.TemporaryDirectory() as root:
             self.write_tasks(root, tasks)
-            # A page smaller than the folder says so, then the next page covers the rest.
+            # A call smaller than the folder says so, then the next call covers the rest.
             with patch.object(mon, "WAITING_SCAN", 2):
                 records, problem = mon.waiting_records(root)
                 self.assertEqual(len(records), 2)
@@ -10739,11 +10980,13 @@ class WaitingTaskTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             self.assertEqual(mon.waiting_records(os.path.join(root, "absent")), ([], ""))
         # A folder that cannot be listed is named, not shown as empty.
-        with patch.object(mon, "_waiting_task_names", side_effect=PermissionError("denied")):
-            self.assertEqual(mon.waiting_records("root"), ([], mon.WAITING_UNREADABLE))
-            records, problem = mon.waiting_records("root")
+        with tempfile.TemporaryDirectory() as root, \
+                patch.object(mon, "_waiting_open", side_effect=PermissionError("denied")):
+            self.assertEqual(mon.waiting_records(root), ([], mon.WAITING_UNREADABLE))
+            records, problem = mon.waiting_records(root)
             self.assertEqual(mon.waiting_lines(records, self.NOW, problem=problem),
                              [(f"WAITING 清單可能不完整：{mon.WAITING_UNREADABLE}", "")])
+            self.assertEqual(mon._waiting_scans, {})
 
     def test_monitor_lines_and_office_top_placement(self):
         from types import SimpleNamespace
