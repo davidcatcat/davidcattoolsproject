@@ -22,9 +22,10 @@ Refusal codes:
   another session's.
 
 An empty environment variable counts as unset. Only the ``task advance``,
-``task drive``, ``task remote-test``, ``task review-dispatch``, ``task repair``
-and ``task delegate`` CLI adapters use this check (#1230 A1). Worker result
-callbacks (``task complete``, ``claude-result``), ``abandon``, ``bind``, the
+``task drive``, ``task remote-test``, ``task review-dispatch``, ``task repair``,
+``task delegate`` and ``task claude-bind`` CLI adapters use this check (#1230
+A1). Worker result callbacks (``task complete``, ``claude-result``),
+``abandon``, ``bind``, direct callers of ``run_task_claude_bind``, the
 internal calls that ``advance`` makes, including its remote test, its review
 dispatch and its repair, and the internal delegate that ``review_repair``
 makes are not checked here.
