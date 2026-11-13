@@ -258,5 +258,59 @@ class LineageSplitTests(LineageCase):
                              ('child', root, 'OPEN', MAIN))
 
 
+class LineageSplitRaceTests(LineageCase):
+    """Security v91 on PR #1749 (CWE-362): parking the ROOT is one locked step."""
+
+    CLAIM = {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+             'claimed_at': '2026-11-13T00:00:00.000000Z'}
+
+    def split_with(self, root, children, during):
+        """Split, running ``during`` after split read the ROOT and before it parks it."""
+        def reader():
+            during()
+            return MAIN
+        return cli.lineage_split(self.store, root, children, pm_session=PM,
+                                 reason='Review FAIL 3.', main_sha_reader=reader)
+
+    def assert_untouched(self, root, children):
+        self.assertNotIn('lineage', self.store.get(root))
+        for child in children:
+            self.assertNotIn('lineage', self.store.get(child))
+
+    def test_a_merge_claimed_before_the_park_refuses_the_split_and_records_no_child(self):
+        root, first, second = self.task(), self.task(), self.task()
+        with self.assertRaises(LLMToolError) as caught:
+            self.split_with(root, [first, second],
+                            lambda: self.store.update(root, merge_attempt=dict(self.CLAIM)))
+        self.assertEqual(caught.exception.task_store_error_code, 'SPLIT_ROOT_MERGE_STARTED')
+        self.assert_untouched(root, [first, second])
+        self.assertEqual(self.store.get(root)['merge_attempt'], self.CLAIM)
+        # A claim already stored when split reads the ROOT is refused by the first check.
+        self.refused('SPLIT_ROOT_NOT_OPEN', cli.lineage_split, root, [first], pm_session=PM,
+                     reason='Review FAIL 3.', main_sha_reader=lambda: MAIN)
+        self.assert_untouched(root, [first])
+
+    def test_a_root_ended_before_the_park_refuses_the_split_and_records_no_child(self):
+        root, child = self.task(), self.task()
+        ended = {'lineage_id': root, 'kind': 'root', 'parent': None, 'replaces': [],
+                 'state': 'STOPPED', 'reason': 'stopped', 'base_sha': None, 'recorded_at': AT}
+        with self.assertRaises(LLMToolError) as caught:
+            self.split_with(root, [child], lambda: record_lineage(self.store, root, ended))
+        self.assertEqual(caught.exception.task_store_error_code, 'SPLIT_ROOT_NOT_OPEN')
+        self.assertEqual(self.store.get(root)['lineage'], ended)
+        self.assertNotIn('lineage', self.store.get(child))
+
+    def test_after_the_park_a_merge_claim_is_refused_under_the_task_lock(self):
+        root, child = self.task(), self.task()
+        cli.lineage_split(self.store, root, [child], pm_session=PM, reason='Review FAIL 3.',
+                          main_sha_reader=lambda: MAIN)
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.update(root, merge_attempt=dict(self.CLAIM))
+        self.assertEqual(caught.exception.task_store_error_code, 'MERGE_ROOT_PARKED')
+        self.assertIsNone(self.store.get(root).get('merge_attempt'))
+        self.assertEqual(self.state(root), 'PARKED')
+        self.assertEqual(self.state(child), 'OPEN')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1193,6 +1193,31 @@ def record_lineage(store, task_id, lineage):
     return store.update(task_id, lineage=dict(lineage))
 
 
+def park_lineage_root(store, root_id, lineage, *, observed):
+    """#1502 WP-D D10c2 (security v91, CWE-362): PARK a ROOT in one locked step.
+
+    ``observed`` is the stored ROOT lineage the caller checked (None when the
+    ROOT has none yet). The write commits only if, under the Task lock, the ROOT
+    still has no merge_attempt and that same OPEN or PARKED lineage. Otherwise
+    nothing is written and it fails closed: SPLIT_ROOT_MERGE_STARTED once a
+    merge claim exists, else SPLIT_ROOT_NOT_OPEN.
+    """
+    if (type(lineage) is not dict or lineage.get('kind') != 'root' or
+            lineage.get('state') != 'PARKED' or
+            (observed is not None and (type(observed) is not dict or
+                                       observed.get('state') not in ('OPEN', 'PARKED')))):
+        _fail('SPLIT_ROOT_NOT_OPEN')
+    try:
+        return store.compare_and_update(
+            root_id, expected={'merge_attempt': None, 'lineage': observed},
+            lineage=dict(lineage))
+    except TaskStoreConflict:
+        pass
+    current = store.get(root_id)
+    _fail('SPLIT_ROOT_MERGE_STARTED' if current.get('merge_attempt') is not None
+          else 'SPLIT_ROOT_NOT_OPEN')
+
+
 def _validate(record, *, strict=True):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
@@ -4285,6 +4310,13 @@ class TaskStore:
                         old_attempt.get('claimed_at') != new_attempt.get('claimed_at'))
                 if not valid:
                     _fail('TASK_MERGE_ATTEMPT_TRANSITION_INVALID')
+                # #1502 WP-D D10c2 (security v91): a new merge claim re-reads the
+                # lineage under this lock, so a ROOT parked by a split is never claimed.
+                line = current.get('lineage')
+                if (new_attempt.get('state') == 'CLAIMED' and type(line) is dict and
+                        line.get('state') != 'OPEN'):
+                    _fail('MERGE_ROOT_PARKED' if line.get('state') == 'PARKED'
+                          else 'MERGE_LINEAGE_ENDED')
             if 'lineage' in changes:
                 # #1502 WP-D D9b: every lineage write is forward-only, under the task lock.
                 _check_lineage_transition(current.get('lineage'), changes['lineage'])

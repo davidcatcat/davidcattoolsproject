@@ -416,6 +416,62 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.task_store_error_code,
                          'TASK_LINEAGE_TRANSITION_INVALID')
 
+    def test_park_and_merge_claim_exclude_each_other_under_the_task_lock(self):
+        # #1502 WP-D D10c2, security v91 on PR #1749 (CWE-362).
+        from llmtool.task_store import park_lineage_root, record_lineage
+        claim = {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+                 'claimed_at': '2026-11-13T00:00:00.000000Z'}
+
+        def root():
+            task = self._codex_dispatch_task()
+            self.store.create(task)
+            task_id = task['task_id']
+            return task_id, {'lineage_id': task_id, 'kind': 'root', 'parent': None,
+                             'replaces': [], 'state': 'PARKED', 'reason': 'split',
+                             'base_sha': None, 'recorded_at': '2026-11-13T00:00:00Z'}
+
+        def refused(code, call):
+            with self.assertRaises(LLMToolError) as caught:
+                call()
+            self.assertEqual(caught.exception.task_store_error_code, code)
+
+        # Merge claimed after the split read the ROOT: the park writes nothing.
+        task_id, parked = root()
+        observed = self.store.get(task_id).get('lineage')
+        self.store.update(task_id, merge_attempt=dict(claim))
+        refused('SPLIT_ROOT_MERGE_STARTED',
+                lambda: park_lineage_root(self.store, task_id, parked, observed=observed))
+        self.assertNotIn('lineage', self.store.get(task_id))
+        # ROOT ended after the split read it: refused, the end state is kept.
+        task_id, parked = root()
+        record_lineage(self.store, task_id, dict(parked, state='OPEN'))
+        observed = self.store.get(task_id)['lineage']
+        record_lineage(self.store, task_id, dict(parked, state='STOPPED'))
+        refused('SPLIT_ROOT_NOT_OPEN',
+                lambda: park_lineage_root(self.store, task_id, parked, observed=observed))
+        self.assertEqual(self.store.get(task_id)['lineage']['state'], 'STOPPED')
+        # An ended observed lineage or a non-PARK write is refused before any write.
+        for bad_observed, bad_lineage in ((dict(parked, state='CLOSED'), parked),
+                                          (None, dict(parked, state='OPEN'))):
+            refused('SPLIT_ROOT_NOT_OPEN', lambda: park_lineage_root(
+                self.store, task_id, bad_lineage, observed=bad_observed))
+        self.assertEqual(self.store.get(task_id)['lineage']['state'], 'STOPPED')
+        # Park first: a new merge claim re-reads the lineage under the lock and is refused.
+        task_id, parked = root()
+        park_lineage_root(self.store, task_id, parked, observed=None)
+        self.assertEqual(self.store.get(task_id)['lineage'], parked)
+        refused('MERGE_ROOT_PARKED', lambda: self.store.compare_and_update(
+            task_id, expected={'record_sha256': self.store.get(task_id)['record_sha256']},
+            merge_attempt=dict(claim)))
+        self.assertIsNone(self.store.get(task_id).get('merge_attempt'))
+        # A PARKED ROOT parks again (a later split) while no merge claim exists.
+        park_lineage_root(self.store, task_id, dict(parked, reason='again'), observed=parked)
+        self.assertEqual(self.store.get(task_id)['lineage']['reason'], 'again')
+        # An ended Task is never claimed either.
+        record_lineage(self.store, task_id, dict(parked, state='CLOSED'))
+        refused('MERGE_LINEAGE_ENDED',
+                lambda: self.store.update(task_id, merge_attempt=dict(claim)))
+
     def test_retry_claim_transition_is_atomic_with_next_attempt(self):
         task = self._codex_dispatch_task()
         self.store.create(task)

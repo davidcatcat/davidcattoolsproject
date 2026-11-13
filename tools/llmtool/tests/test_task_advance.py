@@ -5244,8 +5244,12 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
     def lineage(self, task_id):
         return self.store.get(task_id)['lineage']
 
-    def advance(self, task_id):
-        """Run advance --merge with the PASS review evidence held in memory only."""
+    def advance(self, task_id, during=None):
+        """Run advance --merge with the PASS review evidence held in memory only.
+
+        ``during`` runs once, at the first GitHub read: after advance read the
+        record and passed its lineage gate, before the merge claim.
+        """
         real_store, real_close = self.store, task_submission_cli.lineage_close_merged
         reviewed = {
             'completion': {'executor_task_id': 'executor-1', 'state': 'WAITING_REVIEW',
@@ -5268,7 +5272,11 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
         pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
               'mergeable': True, 'mergeable_state': 'clean', 'labels': [{'name': 'mac-ci'}]}
 
+        pending = [during] if during is not None else []
+
         def github_get(path):
+            while pending:
+                pending.pop()()
             if path == 'branches/main':
                 return {'commit': {'sha': MAIN_SHA}}
             if path.startswith('compare/'):
@@ -5348,6 +5356,32 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
         self.assertEqual(self.lineage(root)['state'], 'CLOSED')
         self.assertEqual(self.merges, [only])
         self.assertEqual(self.closes, [only, only, only])
+
+    def park(self, root):
+        """Park a ROOT the way task split does: one compare-and-set under the Task lock."""
+        from llmtool.task_store import park_lineage_root
+        park_lineage_root(self.store, root, {
+            'lineage_id': root, 'kind': 'root', 'parent': None, 'replaces': [],
+            'state': 'PARKED', 'reason': 'split', 'base_sha': None, 'recorded_at': self.AT},
+            observed=None)
+
+    def test_a_root_parked_after_the_lineage_gate_is_never_claimed_or_merged(self):
+        # Security v91 on PR #1749 (CWE-362): advance read the ROOT OPEN, then a split
+        # parked it before the claim. The claim re-reads under the lock and refuses.
+        root = self.task()
+        result = self.advance(root, during=lambda: self.park(root))
+        self.assertEqual((result['step'], result['codes']),
+                         ('MERGE_REFUSED', ['MERGE_ROOT_PARKED']))
+        self.assertEqual(self.merges, [])
+        self.assertIsNone(self.store.get(root).get('merge_attempt'))
+        self.assertEqual(self.lineage(root)['state'], 'PARKED')
+        # Parked first: the lineage gate refuses before any GitHub read or claim.
+        reads = []
+        again = self.advance(root, during=lambda: reads.append('read'))
+        self.assertEqual((again['step'], again['codes']),
+                         ('MERGE_REFUSED', ['MERGE_ROOT_PARKED']))
+        self.assertEqual((reads, self.merges, self.closes), ([], [], []))
+        self.assertIsNone(self.store.get(root).get('merge_attempt'))
 
 
 if __name__ == '__main__':

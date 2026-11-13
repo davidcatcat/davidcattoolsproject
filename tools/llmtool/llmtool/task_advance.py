@@ -1144,6 +1144,29 @@ def _owner_acceptance_code(url, number, head, github_get, *, carry_out=None):
                                   carry_out)
 
 
+def _merge_claim_refusal(store, task_id, exc):
+    """#1502 WP-D D10c2 (security v91): name a lost merge claim; fail closed.
+
+    The claim is a compare-and-set on the record read before the lineage gate,
+    and the store re-reads the lineage under the Task lock. A ROOT parked by a
+    concurrent split is refused MERGE_ROOT_PARKED (an ended Task
+    MERGE_LINEAGE_ENDED); any other lost claim stays MERGE_CLAIM_CONFLICT.
+    """
+    from .task_store import TaskStoreConflict
+    code = getattr(exc, 'task_store_error_code', None)
+    if code in ('MERGE_ROOT_PARKED', 'MERGE_LINEAGE_ENDED'):
+        return code
+    if not isinstance(exc, TaskStoreConflict):
+        return 'MERGE_CLAIM_CONFLICT'
+    try:
+        line = store.get(task_id).get('lineage')
+    except Exception:
+        return 'MERGE_CLAIM_CONFLICT'
+    if type(line) is dict and line.get('state') != 'OPEN':
+        return 'MERGE_ROOT_PARKED' if line.get('state') == 'PARKED' else 'MERGE_LINEAGE_ENDED'
+    return 'MERGE_CLAIM_CONFLICT'
+
+
 def _merge_once(*, store, record, number, head, pr, events, github_get,
                 gh_runner, root, owner_acceptance=None, owner_exception=None,
                 sleep_fn=None, sleep=None):
@@ -1301,8 +1324,8 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         if prior is not None:
             expected['merge_attempt'] = prior
         store.compare_and_update(record['task_id'], expected=expected, merge_attempt=claim)
-    except Exception:
-        return _merge_refusal('MERGE_CLAIM_CONFLICT')
+    except Exception as exc:
+        return _merge_refusal(_merge_claim_refusal(store, record['task_id'], exc))
     args = ['pr', 'merge', str(number), '--squash', '--match-head-commit', head]
     try:
         result = gh_runner(root, args)

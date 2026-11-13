@@ -1177,7 +1177,7 @@ def _lineage_new_member(store, task_id, pm_session, taken):
 def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_reader=None):
     """SPLIT a ROOT into child Tasks that start from the latest main; the ROOT is PARKED."""
     from . import repair_policy
-    from .task_store import record_lineage
+    from .task_store import park_lineage_root, record_lineage
     root = _lineage_task(store, root_id, pm_session)
     line = _lineage_of(root)
     _lineage_reason(reason, 'SPLIT_REASON_REQUIRED')
@@ -1194,13 +1194,15 @@ def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_read
         _lineage_new_member(store, child_id, pm_session, {root_id, *children[:index]})
     base_sha = (main_sha_reader or task_completion.read_authenticated_main_sha)()
     now = _timestamp()
-    record_lineage(store, root_id, dict(line, state='PARKED', reason=reason, recorded_at=now))
+    # Security v91 (CWE-362): "no merge_attempt and the checked OPEN/PARKED lineage"
+    # and "set PARKED" are one compare-and-set under the ROOT's Task lock, and a
+    # merge claim re-reads the lineage under that lock; children follow only after.
+    park_lineage_root(store, root_id, dict(line, state='PARKED', reason=reason,
+                                           recorded_at=now), observed=root.get('lineage'))
     for child_id in children:
         record_lineage(store, child_id, {
             'lineage_id': root_id, 'kind': 'child', 'parent': root_id, 'replaces': [],
             'state': 'OPEN', 'reason': None, 'base_sha': base_sha, 'recorded_at': now})
-    if store.get(root_id).get('merge_attempt') is not None:
-        _lineage_refuse('SPLIT_ROOT_MERGE_STARTED')
     return {'task_id': root_id, 'state': 'PARKED', 'children': list(children),
             'base_sha': base_sha, 'owner_notice': None,
             'next': 'PM closes the ROOT PR with a comment; the ROOT is never merged'}
