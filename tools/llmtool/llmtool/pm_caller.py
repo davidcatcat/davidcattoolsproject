@@ -22,11 +22,11 @@ Refusal codes:
   another session's.
 
 An empty environment variable counts as unset. Only the ``task advance``,
-``task drive``, ``task remote-test`` and ``task review-dispatch`` CLI adapters
-use this check (#1230 A1). Worker result callbacks (``task complete``,
-``claude-result``), ``abandon``, ``delegate``, ``bind``, ``repair`` and the
-internal calls that ``advance`` makes, including its remote test and its
-review dispatch, are not checked here.
+``task drive``, ``task remote-test``, ``task review-dispatch`` and
+``task repair`` CLI adapters use this check (#1230 A1). Worker result callbacks
+(``task complete``, ``claude-result``), ``abandon``, ``delegate``, ``bind`` and
+the internal calls that ``advance`` makes, including its remote test, its
+review dispatch and its repair, are not checked here.
 
 Known limit: fenced sessions are now refused, but the check is still not taken
 under the adoption lock, so a Task adopted between the check and the call is
