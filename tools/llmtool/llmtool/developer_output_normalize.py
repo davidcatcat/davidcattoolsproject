@@ -227,7 +227,6 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
                 body.append(section[i])
                 i += 1
             old_side = [line[1:] for line in body if line.startswith((' ', '-'))]
-            new_side = [line[1:] for line in body if line.startswith((' ', '+'))]
             if not old_side or not any(line.startswith(('+', '-')) for line in body):
                 return result(None, (), False)
             matches = [index for index in range(len(source) - len(old_side) + 1)
@@ -251,8 +250,6 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
                     target.append(line[1:])
                 else:
                     return result(None, (), False)
-            old_count = sum(1 for line in body if line.startswith((' ', '-')))
-            old_end = start + old_count
             edits.append((start, cursor, target))
         if not edits:
             return result(None, (), False)

@@ -19,7 +19,7 @@ import threading
 from typing import Optional
 import weakref
 
-from .action_contract import ContractValue, _hex, _identifier, _integer, _typed
+from .action_contract import ContractValue, _hex, _integer
 from .authorization_ledger import ReceiptLedger
 from .errors import LLMToolError
 from . import worker_dispatch
@@ -27,7 +27,6 @@ from .review_authority import (
     HostPin,
     ProductionReviewIssuer,
     ReviewContext,
-    load_host_registration,
     run_foreground_review,
 )
 from .run_budget import RunBudget
