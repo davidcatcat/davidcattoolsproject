@@ -181,9 +181,14 @@ class DeveloperOutputSensitiveRefusalGateTests(unittest.TestCase):
                 (task_id + '-developer-output.json'))
 
     def _dispatch(self):
-        current = self._task()
+        # Every call re-dispatches the same Task, as a rerun after a refused
+        # delegate does. The gate skips the Task being dispatched, so a second
+        # call does not count an earlier call as a prior Developer run and
+        # these tests reach only the screen gate, never the repair cap (D7).
+        if getattr(self, '_current', None) not in self.store.records:
+            self._current = self._task()
         return submission_cli._check_delegate_repair_cap(
-            Namespace(task_id=current, executor_task=self.executor), self.store)
+            Namespace(task_id=self._current, executor_task=self.executor), self.store)
 
     def _dispose(self, task_id, hits):
         high_debug.record_screen_disposition(

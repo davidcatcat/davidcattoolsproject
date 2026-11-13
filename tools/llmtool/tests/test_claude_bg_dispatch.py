@@ -689,6 +689,27 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual(receipt['actual_session_id'], new_id)
         self.assertEqual(os.path.realpath(launch['cwd']), self.root)
 
+    def test_reviewer_launch_has_no_file_editing_tools_and_developer_launch_is_unchanged(self):
+        self.assertEqual(dispatch_tool.REVIEWER_DISALLOWED_TOOLS_ARG,
+                         '--disallowedTools=Edit,Write,NotebookEdit')
+        for name, expected in (('claude-reviewer', [dispatch_tool.REVIEWER_DISALLOWED_TOOLS_ARG]),
+                               ('claude-developer', [])):
+            with self.subTest(name=name):
+                self.reset()
+                self.scenario(after=[[row('NEW-SESSION', name=name, cwd=self.root)]],
+                              transcripts=[{'session': 'NEW-SESSION', 'new_action': True}])
+                code, receipt = self.run_tool('dispatch', '--new', '--name', name,
+                                              '--task-id', 'executor-task', '--prompt', 'work')
+                self.assertEqual(code, 0, receipt)
+                [launch] = self.launches()
+                argv = launch['argv']
+                self.assertEqual([arg for arg in argv if arg.startswith('--disallowedTools')],
+                                 expected)
+                if expected:
+                    self.assertLess(argv.index(expected[0]), argv.index('-n'))
+                self.assertEqual(argv[-2:], ['--', 'work'])
+                self.assertEqual(self.parsed(), [{'add_dirs': [self.root], 'prompt': 'work'}])
+
     def test_watch_returns_on_report_and_stops_a_blocked_session(self):
         report = self.home / 'report.md'
         self.scenario(after=[[row(TARGET)]])

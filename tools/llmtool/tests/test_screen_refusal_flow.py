@@ -95,8 +95,10 @@ class RefusalFlowTests(unittest.TestCase):
         return task_id
 
     def _dispatch(self):
+        # The next Task is not stored, so a gate call adds no counted run on
+        # the D6; only the refused run counts and the next run is repair #1.
         return submission_cli._check_delegate_repair_cap(
-            Namespace(task_id=self._task(), executor_task=_EXECUTOR), self.store)
+            Namespace(task_id=new_id(), executor_task=_EXECUTOR), self.store)
 
     def test_plain_diff_passes_the_real_screen(self):
         self.assertIsNone(
@@ -175,9 +177,6 @@ class _RouteStore:
 
     def create(self, *args, **kwargs):
         return self._write('create', *args, **kwargs)
-
-    def record_repair_cap_override(self, *args, **kwargs):
-        return self._write('record_repair_cap_override', *args, **kwargs)
 
 
 class RefusedTaskRerunTests(unittest.TestCase):

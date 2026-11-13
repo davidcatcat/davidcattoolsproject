@@ -35,7 +35,7 @@ from . import opencode_direct_developer
 from . import codex_direct_developer
 from . import worker_dispatch
 from . import gateway_profiles
-from .run_budget import MAX_REPAIR_ATTEMPTS
+from . import repair_policy
 from .developer_output_normalize import _HUNK
 from . import role_config
 from . import skill_ledger
@@ -810,7 +810,8 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--owner-ref', help=('Owner assignment comment URL: optional for '
                                 'Claude and AGY direct Tasks, validated when given'))
     delegate.add_argument('--high-debug-ref',
-                          help='trusted GitHub comment URL authorizing a repair-cap override')
+                          help='trusted GitHub Issue comment URL of the confirmed High Debug '
+                               'diagnosis that review repair #2 needs')
     delegate.add_argument('--high-debug-task',
                           help='32-character Task ID containing the confirmed High Debug diagnosis')
     delegate.add_argument('--high-debug-family',
@@ -5411,15 +5412,60 @@ def _require_bound_high_debug_run(diagnosis_task, high_debug_task, entry,
         raise ValueError
 
 
+def _check_repair_packet_rca(packet, store, executor_task):
+    """Accept the confirmed root cause a review repair packet carries (#1502 D7).
+
+    review_repair adds high_debug_report_sha256 to the packet of repair #2.
+    The packet's Task, on this D6, must hold an RCA_CONFIRMED High Debug
+    entry examined at the packet's failed HEAD whose report digest is the
+    packet's digest. Anything else refuses DELEGATE_HIGH_DEBUG_TASK_INVALID.
+    """
+    try:
+        report_sha256 = packet.get('high_debug_report_sha256')
+        failed_head = packet.get('failed_head')
+        task_id = packet.get('task')
+        if (type(report_sha256) is not str or
+                re.fullmatch(r'[0-9a-f]{64}', report_sha256) is None or
+                type(failed_head) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', failed_head) is None or
+                type(task_id) is not str or
+                packet.get('executor_task') != executor_task):
+            raise ValueError
+        record = store.get(task_id)
+        completion = record.get('completion') if type(record) is dict else None
+        entries = record.get('high_debug') if type(record) is dict else None
+        if (record.get('task_id') != task_id or type(completion) is not dict or
+                completion.get('executor_task_id') != executor_task or
+                type(entries) is not list or
+                not any(type(entry) is dict and
+                        entry.get('status') == 'RCA_CONFIRMED' and
+                        entry.get('examined_sha') == failed_head and
+                        entry.get('report_sha256') == report_sha256
+                        for entry in entries)):
+            raise ValueError
+    except Exception:
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
+
+
 def _check_delegate_repair_cap(args, store, d6_binding=None):
     """Fail closed before dispatch when this D6 has exhausted its repair rounds.
 
     Review rounds and EC2 remote-test repair rounds are counted separately.
     A Task that a stored EC2 claim names as its repair Task takes the EC2
-    limit; every other Task takes the review limit.
+    limit; every other Task takes the review limit. The limits come from
+    policy.json (#1502 WP-D D7): at most 1 + repair_max review runs and
+    test_fail_max EC2 repair runs per D6. At or over a limit the delegate
+    always refuses. Every review repair after the first (repair #2 under
+    policy.json) needs a confirmed root cause, bound by the High Debug
+    arguments or by the repair packet. This check never changes a Task.
     """
     executor_task = getattr(args, 'executor_task', None)
     current_task_id = getattr(args, 'task_id', None)
+    try:
+        policy = repair_policy.load_policy()
+    except Exception:
+        raise LLMToolError(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
     try:
         task_ids = store.completion_d6_task_ids(executor_task)
     except Exception:
@@ -5503,16 +5549,25 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             counted.append(task_id)
             newest_assignment = max(newest_assignment, stamp) if newest_assignment else stamp
     if current_task_id in new_ec2_ids or current_task_id in legacy_ec2_ids:
-        # Prior EC2 repair runs on this D6, new and legacy.
+        # Prior EC2 repair runs on this D6, new and legacy. EC2 repairs
+        # never take the High Debug path.
         count = sum(1 for task_id in counted
                     if task_id in new_ec2_ids or task_id in legacy_ec2_ids)
-        limit = MAX_REPAIR_ATTEMPTS
-    else:
-        # Review rounds: every counted run except new EC2 repair runs; a
-        # legacy EC2 run still counts here.
-        count = sum(1 for task_id in counted if task_id not in new_ec2_ids)
-        limit = 1 + MAX_REPAIR_ATTEMPTS
-    if count < limit:
+        if count >= policy['test_fail_max']:
+            raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
+        return
+    # Review rounds: every counted run except new EC2 repair runs; a
+    # legacy EC2 run still counts here. The first run is the original
+    # Developer run, so a prior count of N makes this repair #N.
+    count = sum(1 for task_id in counted if task_id not in new_ec2_ids)
+    if count >= 1 + policy['repair_max']:
+        raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
+    if count < 2:
+        # The original run and repair #1 need no root cause (D1).
+        return
+    packet = getattr(args, 'repair_packet', None)
+    if type(packet) is dict and 'high_debug_report_sha256' in packet:
+        _check_repair_packet_rca(packet, store, executor_task)
         return
     ref = getattr(args, 'high_debug_ref', None)
     try:
@@ -5525,11 +5580,11 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
                  r'/issues/[1-9][0-9]*(?:/comments/[1-9][0-9]*|#issuecomment-[1-9][0-9]*)',
                  ref) is not None)
     if not valid:
-        if ref is not None:
+        if ref is not None or high_debug_task is not None:
             raise LLMToolError(
                 'DELEGATE_HIGH_DEBUG_REF_INVALID: an Issue comment link on this repository '
                 'whose path ends in /issues/N#issuecomment-M or /issues/N/comments/M')
-        raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_REQUIRED')
     if high_debug_task is None:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_REQUIRED')
     if (type(high_debug_task) is not str or
@@ -5593,12 +5648,6 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
         raise LLMToolError(
             f'DELEGATE_HIGH_DEBUG_HEAD_MOVED: a new High Debug must be taken on '
             f'the current D6 head {head_prefix}; examined SHA {examined_prefix}')
-    try:
-        store.record_repair_cap_override(
-            current_task_id, ref=ref, rounds=max(3, count + 1))
-    except Exception:
-        raise LLMToolError(
-            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
 
 
 def run_task_delegate(args, *, store=None):
