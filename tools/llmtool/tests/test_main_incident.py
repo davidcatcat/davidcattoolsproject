@@ -602,9 +602,37 @@ class CandidateRowTests(unittest.TestCase):
                 self.assertEqual((row['own_ci'], row['own_ci_signal']), (expected, mi.LINUX))
         row = mi.candidate_rows([merged(1, M1, [])], [], [FAILING],
                                 {1: {'signal': 'mac', 'modules': {FAILING_MODULE: mi.PASS}}})[0]
-        self.assertEqual((row['own_ci'], row['own_ci_signal']), (mi.PASS, mi.UNKNOWN))
+        self.assertEqual((row['own_ci'], row['own_ci_signal']), (mi.UNKNOWN, mi.UNKNOWN))
         missing = mi.candidate_rows([merged(1, M1, [])], [], [FAILING], {2: own(mi.LINUX, mi.PASS)})
         self.assertEqual(missing[0]['own_ci_tests'], {FAILING: mi.UNKNOWN})
+
+    def test_own_ci_counts_only_for_an_exact_linux_or_full_mac_signal(self):
+        # Codex v1 F1: a PASS or NOT_RUN module state is not own CI evidence for
+        # the failing signal unless that signal is exactly LINUX or FULL_MAC.
+        class Text(str):
+            pass
+
+        for state in (mi.PASS, mi.NOT_RUN):
+            for signal in (mi.LINUX, mi.FULL_MAC):
+                with self.subTest(state=state, signal=signal):
+                    row = mi.candidate_rows([merged(1, M1, [])], [], [FAILING],
+                                            {1: own(signal, state)})[0]
+                    self.assertEqual((row['own_ci'], row['own_ci_signal'], row['own_ci_tests']),
+                                     (state, signal, {FAILING: state}))
+            unknown = ('mac', 'linux', 'Linux 3.14', 'FULL', '', mi.UNKNOWN, ' LINUX',
+                       None, 3, True, [mi.LINUX], (mi.FULL_MAC,), {mi.LINUX: 1},
+                       Text(mi.LINUX))
+            for signal in unknown:
+                with self.subTest(state=state, signal=signal):
+                    row = mi.candidate_rows([merged(1, M1, [])], [], [FAILING],
+                                            {1: own(signal, state)})[0]
+                    self.assertEqual((row['own_ci'], row['own_ci_signal'], row['own_ci_tests']),
+                                     (mi.UNKNOWN, mi.UNKNOWN, {FAILING: mi.UNKNOWN}))
+            with self.subTest(state=state, signal='missing'):
+                row = mi.candidate_rows([merged(1, M1, [])], [], [FAILING],
+                                        {1: {'modules': {FAILING_MODULE: state}}})[0]
+                self.assertEqual((row['own_ci'], row['own_ci_signal'], row['own_ci_tests']),
+                                 (mi.UNKNOWN, mi.UNKNOWN, {FAILING: mi.UNKNOWN}))
 
     def test_unknown_changed_files_give_unknown_flags(self):
         for files in (None, 'alpha.py', [LL + 'llmtool/alpha.py', 3]):

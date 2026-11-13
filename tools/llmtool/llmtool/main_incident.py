@@ -485,13 +485,15 @@ def _own_ci(own_ci, pr, tests):
     own_ci[pr] is {'signal': LINUX or FULL_MAC, 'modules': {test module: state}}
     for the failing signal; the most specific module that is a dotted prefix of
     the test ID gives its state. Only PASS and NOT_RUN are kept; anything else,
-    a missing entry or a missing module is UNKNOWN.
+    a missing entry or a missing module is UNKNOWN. A module state only counts
+    for a signal that is exactly LINUX or FULL_MAC: with any other signal (unknown,
+    misspelt or not a string) every state and the summary are UNKNOWN.
     """
     entry = own_ci.get(pr) if isinstance(own_ci, dict) and pr is not None else None
     entry = entry if isinstance(entry, dict) else {}
     signal = entry.get('signal')
-    signal = signal if isinstance(signal, str) and signal in KINDS else UNKNOWN
-    modules = entry.get('modules')
+    signal = signal if type(signal) is str and signal in KINDS else UNKNOWN
+    modules = entry.get('modules') if signal != UNKNOWN else None
     modules = modules if isinstance(modules, dict) else {}
     per_test = {}
     for test in tests:
