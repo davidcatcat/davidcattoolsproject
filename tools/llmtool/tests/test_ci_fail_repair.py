@@ -168,6 +168,43 @@ class CiFailRepairTests(unittest.TestCase):
         self.assertEqual(families, [EC2_FAMILY, EC2_FAMILY])
         self.assertNotIn(f'pr-{PR}', families)
 
+    def test_final_recheck_refusal_preserves_ci_claims_and_shared_count(self):
+        # #1502 WP-D D11 repair 1: a refusal after the repair Task is recorded
+        # commits no claim, so the shared EC2/CI test-failure count is unchanged.
+        self.assertEqual(review_repair._policy()['test_fail_max'], 2)
+        self.dispatch(remote_test_receipt=_receipt())
+        self._fail_last_claim()
+        before = self._claims()
+        self.assertEqual([(claim['family'], claim['attempt']) for claim in before],
+                         [(EC2_FAMILY, 1)])
+        decisions = iter([type('D', (), {'allowed': True})(),
+                          type('D', (), {'allowed': False, 'reason_code': 'PAUSED'})()])
+        with patch.object(review_repair.worker_dispatch, 'evaluate',
+                          side_effect=lambda *_args, **_kwargs: next(decisions)):
+            with self.assertRaises(LLMToolError) as caught:
+                self.dispatch(ci_failure=_ci(check_run_id=8))
+        self.assertEqual(caught.exception.review_repair_code, 'PAUSED')
+        self.assertRegex(caught.exception.review_repair_unclaimed_task_id, r'^[0-9a-f]{32}$')
+        self.assertEqual(self._claims(), before)
+        self.assertEqual(len(self.calls), 1)
+        # A later authorization dispatches the same CI failure exactly once,
+        # as the second and last test-failure repair.
+        result = self.dispatch(ci_failure=_ci(check_run_id=8))
+        self.assertFalse(result['replayed'])
+        self.assertEqual((result['claim']['family'], result['claim']['attempt']),
+                         (EC2_FAMILY, 2))
+        self.assertNotEqual(result['repair_task_id'],
+                            caught.exception.review_repair_unclaimed_task_id)
+        self.assertEqual(len(self.calls), 2)
+        replay = self.dispatch(ci_failure=_ci(check_run_id=8))
+        self.assertTrue(replay['replayed'])
+        self.assertEqual(len(self.calls), 2)
+        self._fail_last_claim()
+        self._assert_refused('REPAIR_LIMIT_REACHED', ci_failure=_ci(check_run_id=9))
+        self._assert_refused('REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
+        self.assertEqual(len(self._claims()), 2)
+        self.assertEqual(review_repair._policy()['test_fail_max'], 2)
+
     def test_replay_of_same_head_and_check_run_reuses_claim(self):
         first = self.dispatch(ci_failure=_ci())
         before = self._claims()

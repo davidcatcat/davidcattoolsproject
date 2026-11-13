@@ -23,6 +23,19 @@ def _refuse(code):
     raise error from None
 
 
+def _refuse_unclaimed(code, repair_task_id):
+    """Refuse after a repair Task may have been recorded but before any claim.
+
+    No claim is committed, so no count is used. A Task recorded under
+    repair_task_id is never dispatched or reported as a repair; the caller
+    surfaces it for PM reconciliation.
+    """
+    error = LLMToolError('Review repair refused; details omitted')
+    error.review_repair_code = code
+    error.review_repair_unclaimed_task_id = repair_task_id
+    raise error from None
+
+
 def _now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
@@ -582,32 +595,43 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             _refuse('REPAIR_CLAIM_UNAVAILABLE')
         next_claims[retry_index] = dict(next_claims[retry_index], state='FAILED')
     next_claims.append(claim)
+
+    # #1502 WP-D D11 repair 1: no counted claim exists until the repair Task is
+    # recorded and validated and the final authority recheck passes. Every
+    # refusal from here to the CAS leaves the claims, and so the counts,
+    # unchanged; a Task it may have left is surfaced for PM reconciliation.
+    recorder = repair_task_recorder
+    try:
+        if recorder is None:
+            repair_task = _record_repair_task(
+                task=task, developer=developer, packet=packet,
+                attempt=attempt, store=store, repair_task_id=repair_task_id)
+        else:
+            repair_task = recorder(task=task, developer=developer, packet=packet,
+                                   attempt=attempt, store=store,
+                                   repair_task_id=repair_task_id)
+    except LLMToolError as error:
+        error.review_repair_unclaimed_task_id = repair_task_id
+        raise
+    except Exception:
+        _refuse_unclaimed('REPAIR_TASK_RECORD_UNAVAILABLE', repair_task_id)
+    if (type(repair_task) is not dict or
+            repair_task.get('task_id') != repair_task_id):
+        _refuse_unclaimed('REPAIR_TASK_RECORD_UNAVAILABLE', repair_task_id)
+
+    # Re-read the Owner switch immediately before the claim and the provider side effect.
+    decision = worker_dispatch.evaluate(
+        worker, developer.get('owner_assignment_ref'), policy_task)
+    if not decision.allowed:
+        _refuse_unclaimed(decision.reason_code, repair_task_id)
     try:
         store.compare_and_update(
             task_id, expected={'record_sha256': task['record_sha256']},
             review_repair_claims=next_claims)
     except Exception:
-        _refuse('REPAIR_CLAIM_UNAVAILABLE')
+        _refuse_unclaimed('REPAIR_CLAIM_UNAVAILABLE', repair_task_id)
 
-    recorder = repair_task_recorder
-    if recorder is None:
-        repair_task = _record_repair_task(
-            task=task, developer=developer, packet=packet,
-            attempt=attempt, store=store, repair_task_id=repair_task_id)
-    else:
-        repair_task = recorder(task=task, developer=developer, packet=packet,
-                               attempt=attempt, store=store,
-                               repair_task_id=repair_task_id)
-    if (type(repair_task) is not dict or
-            repair_task.get('task_id') != repair_task_id):
-        _refuse('REPAIR_TASK_RECORD_UNAVAILABLE')
-
-    # Re-read the Owner switch immediately before the provider side effect.
-    policy_task = executor_task if claude_cli else task_id
-    decision = worker_dispatch.evaluate(
-        worker, developer.get('owner_assignment_ref'), policy_task)
-    if not decision.allowed:
-        _refuse(decision.reason_code)
+    # The provider is called only after the claim CAS succeeded.
     adapter = dispatch_adapter
     if adapter is None:
         adapter = lambda **request: _delegate_repair(
