@@ -326,6 +326,126 @@ class RoleRegistryTests(unittest.TestCase):
                 self.assert_invalid(mutate)
 
 
+class RoleModelFamilyAllowlistTests(unittest.TestCase):
+    """Security repair (PR #1782 CWE-693): role families are an allowlist.
+
+    The check runs on the full identifier: provider prefixes are never
+    stripped, so prefixed and mixed-case forms of another family (and of the
+    role's own family) are refused.
+    """
+
+    CODEX_ROLES = ('codex-reviewer', 'codex-debug')
+    CLAUDE_ROLES = ('claude-reviewer', 'claude-debug')
+    # Claude-family identifiers in prefixed, dotted and mixed-case forms.
+    CLAUDE_FORMS = (
+        'claude-opus-5-5', 'claude-example-b', 'Claude-opus-5-5', 'CLAUDE-OPUS-5-5',
+        'cLaUdE-opus-5-5', 'anthropic/claude-opus-5-5', 'Anthropic/Claude-Opus-5-5',
+        'ANTHROPIC/CLAUDE-OPUS-5-5', 'bedrock/anthropic.claude-opus-5-5',
+        'us.anthropic.claude-opus-5-5', 'vertex_ai/claude-opus-5-5',
+        'openrouter:claude-opus-5-5', 'openai/claude-opus-5-5', 'x/y/claude-opus-5-5',
+        'gpt-claude-opus-5-5', 'codex-claude-b', 'gpt-6.1-anthropic',
+    )
+    # Codex/GPT-family identifiers in prefixed, dotted and mixed-case forms.
+    CODEX_FORMS = (
+        'gpt-6.1-sol', 'codex-example-b', 'GPT-6.1-sol', 'Gpt-6.1-Sol', 'CODEX-example-b',
+        'openai/gpt-6.1-sol', 'OpenAI/GPT-6.1-SOL', 'azure/gpt-6.1-sol',
+        'openrouter:gpt-6.1-sol', 'anthropic/gpt-6.1-sol', 'claude-gpt-6',
+        'claude-codex-b', 'claude-openai-b',
+    )
+    # Neither family: refused for every role.
+    OTHER_FORMS = ('gemini-3.8-flash-medium', 'example-model-b',
+                   'opencode/deepseek-v4.1-flash-free', 'gw-agent-default',
+                   'gpt-', 'codex-', 'claude-', 'gpt', 'gpt_6', 'gpt-6 sol')
+    # Prefixed or mixed-case forms of a role's own family are also refused
+    # (the prefix is part of the full identifier).
+    CODEX_OWN_FAMILY_REFUSED = ('GPT-6.1-sol', 'Gpt-6.1-Sol', 'CODEX-example-b',
+                                'openai/gpt-6.1-sol', 'OpenAI/GPT-6.1-SOL',
+                                'azure/gpt-6.1-sol', 'openrouter:gpt-6.1-sol')
+    CLAUDE_OWN_FAMILY_REFUSED = ('Claude-opus-5-5', 'CLAUDE-OPUS-5-5', 'cLaUdE-opus-5-5',
+                                 'anthropic/claude-opus-5-5',
+                                 'Anthropic/Claude-Opus-5-5',
+                                 'us.anthropic.claude-opus-5-5',
+                                 'vertex_ai/claude-opus-5-5')
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / 'developer-routes.json'
+        self.shipped = json.loads(ROUTES_FILE.read_text(encoding='utf-8'))
+
+    def load_role(self, role, model):
+        data = copy.deepcopy(self.shipped)
+        data['roles'][role] = {'allowed_models': [model]}
+        self.path.write_text(json.dumps(data), encoding='utf-8')
+        return load_route_config(self.path)
+
+    def assert_refused(self, role, model):
+        with self.assertRaises(RouteError) as caught:
+            self.load_role(role, model)
+        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+
+    def test_codex_roles_accept_only_lowercase_unprefixed_codex_family(self):
+        for role in self.CODEX_ROLES:
+            for model in ('gpt-6.1-sol', 'codex-example-b', 'gpt-example-b'):
+                with self.subTest(role=role, model=model):
+                    config = self.load_role(role, model)
+                    self.assertEqual(config['roles'][role], {'allowed_models': [model]})
+
+    def test_claude_roles_accept_only_lowercase_unprefixed_claude_family(self):
+        for role in self.CLAUDE_ROLES:
+            for model in ('claude-opus-5-5', 'claude-example-b'):
+                with self.subTest(role=role, model=model):
+                    config = self.load_role(role, model)
+                    self.assertEqual(config['roles'][role], {'allowed_models': [model]})
+
+    def test_claude_family_in_any_form_is_refused_for_codex_roles(self):
+        for role in self.CODEX_ROLES:
+            for model in self.CLAUDE_FORMS:
+                with self.subTest(role=role, model=model):
+                    self.assert_refused(role, model)
+
+    def test_codex_family_in_any_form_is_refused_for_claude_roles(self):
+        for role in self.CLAUDE_ROLES:
+            for model in self.CODEX_FORMS:
+                with self.subTest(role=role, model=model):
+                    self.assert_refused(role, model)
+
+    def test_other_families_are_refused_for_every_role(self):
+        # The former denylist accepted any well-formed non-'claude' prefix.
+        for role in self.CODEX_ROLES + self.CLAUDE_ROLES:
+            for model in self.OTHER_FORMS:
+                with self.subTest(role=role, model=model):
+                    self.assert_refused(role, model)
+
+    def test_prefixed_or_mixed_case_own_family_is_refused(self):
+        for role in self.CODEX_ROLES:
+            for model in self.CODEX_OWN_FAMILY_REFUSED:
+                with self.subTest(role=role, model=model):
+                    self.assert_refused(role, model)
+        for role in self.CLAUDE_ROLES:
+            for model in self.CLAUDE_OWN_FAMILY_REFUSED:
+                with self.subTest(role=role, model=model):
+                    self.assert_refused(role, model)
+
+    def test_role_checks_are_family_allowlists(self):
+        checks = developer_routes._ROLE_MODEL_CHECKS
+        self.assertEqual(set(checks), set(self.CODEX_ROLES + self.CLAUDE_ROLES))
+        for role in self.CODEX_ROLES:
+            with self.subTest(role=role):
+                self.assertTrue(checks[role]('gpt-6.1-sol'))
+                for model in self.CLAUDE_FORMS + self.OTHER_FORMS:
+                    self.assertFalse(checks[role](model), model)
+        for role in self.CLAUDE_ROLES:
+            with self.subTest(role=role):
+                self.assertTrue(checks[role]('claude-opus-5-5'))
+                for model in self.CODEX_FORMS + self.OTHER_FORMS:
+                    self.assertFalse(checks[role](model), model)
+        for value in (None, 7, True, ['gpt-6.1-sol'], {'claude-opus-5-5': 1}):
+            for role, check in checks.items():
+                with self.subTest(role=role, value=value):
+                    self.assertFalse(check(value))
+
+
 class CheckRouteModelTests(unittest.TestCase):
     def setUp(self):
         self.config = load_route_config()

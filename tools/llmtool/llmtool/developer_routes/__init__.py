@@ -46,19 +46,46 @@ def _opencode_model_ok(value):
     return type(value) is str and re.fullmatch(_OPENCODE_MODEL_PATTERN, value) is not None
 
 
-def _codex_model_ok(value):
-    """A Codex role model: well formed and never a Claude model (cross-family)."""
-    return _generic_model_ok(value) and not value.lower().startswith('claude')
+# Security repair (PR #1782 CWE-693): each review/debug role accepts only
+# identifiers of its own model family, checked by allowlist on the full
+# identifier. Provider prefixes are part of the full identifier and are never
+# stripped, so a prefixed form (for example 'vendor/<model>') never matches a
+# family pattern. Only lower case is accepted.
+_CODEX_FAMILY_PATTERN = r'(?:gpt|codex)-[a-z0-9][a-z0-9.-]{0,120}'
+_CLAUDE_FAMILY_PATTERN = _CLAUDE_MODEL_PATTERN
+# Family names that must never appear anywhere in another family's identifier
+# (defence in depth on top of the allowlist).
+_CODEX_FAMILY_MARKERS = ('gpt', 'codex', 'openai')
+_CLAUDE_FAMILY_MARKERS = ('claude', 'anthropic')
+
+
+def _family_model_ok(value, pattern, foreign_markers):
+    import re
+
+    if type(value) is not str or re.fullmatch(pattern, value) is None:
+        return False
+    folded = value.casefold()
+    return not any(marker in folded for marker in foreign_markers)
+
+
+def _codex_role_model_ok(value):
+    """A Codex role model: a Codex/GPT family identifier, never another family."""
+    return _family_model_ok(value, _CODEX_FAMILY_PATTERN, _CLAUDE_FAMILY_MARKERS)
+
+
+def _claude_role_model_ok(value):
+    """A Claude role model: a Claude family identifier, never another family."""
+    return _family_model_ok(value, _CLAUDE_FAMILY_PATTERN, _CODEX_FAMILY_MARKERS)
 
 
 # #1502 WP-E: allowed models for the review and AI Debug roles. Each role
 # lists exactly the one model in use until the Owner decides to allow more
 # (same rule as PR #1759 F1 for routes).
 _ROLE_MODEL_CHECKS = {
-    'codex-reviewer': _codex_model_ok,
-    'claude-reviewer': _claude_model_ok,
-    'codex-debug': _codex_model_ok,
-    'claude-debug': _claude_model_ok,
+    'codex-reviewer': _codex_role_model_ok,
+    'claude-reviewer': _claude_role_model_ok,
+    'codex-debug': _codex_role_model_ok,
+    'claude-debug': _claude_role_model_ok,
 }
 
 
