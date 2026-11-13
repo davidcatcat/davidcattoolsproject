@@ -245,5 +245,18 @@ class LineageNewMemberTests(LineageCase):
         self.assertIsNone(cli._lineage_roll_up(self.store, root))
 
 
+class LineageSplitTests(LineageCase):
+    def test_split_parks_the_root_and_children_start_from_main(self):
+        root, first, second = self.task(), self.task(), self.task()
+        result = cli.lineage_split(self.store, root, [first, second], pm_session=PM,
+                                   reason='Review FAIL 3.', main_sha_reader=lambda: MAIN)
+        self.assertEqual((result['state'], result['base_sha']), ('PARKED', MAIN))
+        self.assertEqual(self.state(root), 'PARKED')
+        for child in (first, second):
+            line = self.store.get(child)['lineage']
+            self.assertEqual((line['kind'], line['parent'], line['state'], line['base_sha']),
+                             ('child', root, 'OPEN', MAIN))
+
+
 if __name__ == '__main__':
     unittest.main()

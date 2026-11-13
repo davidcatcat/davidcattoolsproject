@@ -1174,6 +1174,38 @@ def _lineage_new_member(store, task_id, pm_session, taken):
     return record
 
 
+def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_reader=None):
+    """SPLIT a ROOT into child Tasks that start from the latest main; the ROOT is PARKED."""
+    from . import repair_policy
+    from .task_store import record_lineage
+    root = _lineage_task(store, root_id, pm_session)
+    line = _lineage_of(root)
+    _lineage_reason(reason, 'SPLIT_REASON_REQUIRED')
+    members = _lineage_members(store, root_id)
+    code = repair_policy.admit_split(
+        kind=line['kind'], child_count=sum(item['kind'] == 'child' for item in members),
+        new_children=len(children) if type(children) is list else 0,
+        policy=repair_policy.load_policy())
+    if code is not None:
+        _lineage_refuse(code)
+    if line['state'] not in ('OPEN', 'PARKED') or root.get('merge_attempt') is not None:
+        _lineage_refuse('SPLIT_ROOT_NOT_OPEN')
+    for index, child_id in enumerate(children):
+        _lineage_new_member(store, child_id, pm_session, {root_id, *children[:index]})
+    base_sha = (main_sha_reader or task_completion.read_authenticated_main_sha)()
+    now = _timestamp()
+    record_lineage(store, root_id, dict(line, state='PARKED', reason=reason, recorded_at=now))
+    for child_id in children:
+        record_lineage(store, child_id, {
+            'lineage_id': root_id, 'kind': 'child', 'parent': root_id, 'replaces': [],
+            'state': 'OPEN', 'reason': None, 'base_sha': base_sha, 'recorded_at': now})
+    if store.get(root_id).get('merge_attempt') is not None:
+        _lineage_refuse('SPLIT_ROOT_MERGE_STARTED')
+    return {'task_id': root_id, 'state': 'PARKED', 'children': list(children),
+            'base_sha': base_sha, 'owner_notice': None,
+            'next': 'PM closes the ROOT PR with a comment; the ROOT is never merged'}
+
+
 def run_task_remote_test(args, *, store=None, stdout=None):
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,
