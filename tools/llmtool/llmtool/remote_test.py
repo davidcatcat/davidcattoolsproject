@@ -583,7 +583,35 @@ INCIDENT_SHA_NOT_RECORDED = 'INCIDENT_SHA_NOT_RECORDED'
 INCIDENT_MODULE_NOT_FAILING = 'INCIDENT_MODULE_NOT_FAILING'
 INCIDENT_MODULE_CAP = 'INCIDENT_MODULE_CAP'
 INCIDENT_CONFIG_INVALID = 'CONFIG_INVALID'
+INCIDENT_RECEIPT_SENSITIVE = 'RECEIPT_SENSITIVE'
 _INCIDENT_RECORD_ATTEMPTS = 3
+# A recorded final line is a unittest summary line or the remote NO_FINAL marker;
+# any other output-derived line is replaced by FINAL_REDACTED before recording.
+_SUMMARY_COUNT = (r'(?:failures|errors|skipped|expected failures|unexpected successes)'
+                  r'=[0-9]{1,6}')
+_FINAL_SUMMARY = re.compile(r'(?:OK|FAILED)(?: \(%s(?:, %s){0,4}\))?|NO_FINAL'
+                            % (_SUMMARY_COUNT, _SUMMARY_COUNT))
+FINAL_REDACTED = 'REDACTED_NOT_SUMMARY'
+
+
+def _screen_incident_receipt(parsed):
+    """Screen every output-derived field of a validated receipt (PR #1763, CWE-532).
+
+    ``final`` lines and ``failure_excerpt`` are the only receipt strings taken
+    from test output. Each goes through the sensitive-content screen; any hit
+    refuses the whole receipt (None). A final line that passes the screen but
+    is not in the unittest summary grammar is redacted to ``FINAL_REDACTED``.
+    The Task remote-test path does not use this function.
+    """
+    finals = parsed['final']
+    excerpt = parsed.get('failure_excerpt')
+    values = list(finals) + ([excerpt] if excerpt is not None else [])
+    if any(_emitted_sensitive(value) for value in values):
+        return None
+    screened = dict(parsed)
+    screened['final'] = [line if _FINAL_SUMMARY.fullmatch(line) else FINAL_REDACTED
+                         for line in finals]
+    return screened
 
 
 def _incident_denied(code, incident_id):
@@ -629,7 +657,11 @@ def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
 
     The run is the Task remote-test session: the same fixed remote program,
     module cap, SSH timeout, receipt validation and output screening, and the
-    remote program's own workspace and log cleanup. The SHA itself is the
+    remote program's own workspace and log cleanup. Before recording, every
+    output-derived receipt field (``final`` and ``failure_excerpt``) is
+    screened again (``_screen_incident_receipt``): a sensitive hit records
+    UNKNOWN/RECEIPT_SENSITIVE without the receipt, and a final line outside the
+    unittest summary grammar is stored as ``FINAL_REDACTED``. The SHA itself is the
     fetched ref, so the remote checks FETCH_HEAD against it; nothing pushes,
     resets or updates a ref, and no CI job is triggered or rerun.
 
@@ -689,7 +721,10 @@ def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
     parsed = _validate_remote_receipt(stdout, sha=sha, modules=selected)
     if parsed is None:
         return finish('UNKNOWN', 'RECEIPT_INVALID')
-    receipt = dict(parsed, incident_id=incident_id, command_digest=command_digest)
+    screened = _screen_incident_receipt(parsed)
+    if screened is None:
+        return finish('UNKNOWN', INCIDENT_RECEIPT_SENSITIVE)
+    receipt = dict(screened, incident_id=incident_id, command_digest=command_digest)
     receipt['receipt_digest'] = incident_store.remote_test_digest(receipt)
     return finish(parsed['result'], None, receipt)
 

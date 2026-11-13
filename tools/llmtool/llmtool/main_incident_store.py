@@ -21,7 +21,9 @@ A record without the field is valid, so records written before R9 still read;
 ``create`` never writes it. Each entry is checked against the record it lives
 in: its SHA must be recorded in the incident (``admitted_shas``), its modules
 must be recorded as failing (``failing_modules``) and a stored receipt must
-match its own ``receipt_digest``.
+match its own ``receipt_digest``. Its output-derived strings (``final`` lines
+and ``failure_excerpt``) must pass the sensitive-content screen, else the
+record is INCIDENT_RECORD_INVALID (PR #1763, CWE-532).
 
 Every doubt fails closed with a typed code in ``error.incident_code``; error
 messages carry only the code and, when it is a safe identifier, the incident ID.
@@ -350,12 +352,26 @@ def _remote_modules(value, failing):
             value == sorted(set(value)) and set(value) <= failing)
 
 
+def _screened_output(receipt):
+    """Output-derived receipt strings (``final``, ``failure_excerpt``) pass the screen."""
+    values = []
+    if 'final' in receipt:
+        if type(receipt['final']) is not list:
+            return False
+        values.extend(receipt['final'])
+    if 'failure_excerpt' in receipt:
+        values.append(receipt['failure_excerpt'])
+    return all(type(value) is str and not task_store._emitted_sensitive(value)
+               for value in values)
+
+
 def _valid_receipt(receipt, item, incident):
     if (type(receipt) is not dict or receipt.get('result') != item['result'] or
             receipt.get('source_sha') != item['sha'] or
             receipt.get('modules') != item['modules'] or
             receipt.get('incident_id') != incident or
-            type(receipt.get('receipt_digest')) is not str):
+            type(receipt.get('receipt_digest')) is not str or
+            not _screened_output(receipt)):
         return False
     try:
         return receipt['receipt_digest'] == remote_test_digest(receipt)
