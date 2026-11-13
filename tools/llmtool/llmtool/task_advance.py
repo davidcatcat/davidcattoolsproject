@@ -453,6 +453,62 @@ def _mac_ci_runs(paths):
     return any(hit(path) for path in paths)
 
 
+# #1502 WP-G gate 1: GitHub lists a PR's files 100 per page and at most 3000
+# in total. Every page is read; a short page ends the list. A full last page
+# (3000 files) cannot prove the list is complete, so the gate fails closed with
+# PR_FILES_TOO_MANY instead of treating a partial list as the whole PR.
+_PR_FILES_PER_PAGE = 100
+_PR_FILES_MAX_PAGES = 30
+PR_FILES_TOO_MANY = 'PR_FILES_TOO_MANY'
+_PR_FILES_UNAVAILABLE = 'PR_FILES_UNAVAILABLE'
+
+
+def _pr_files(number, github_get):
+    """Return (files, None) for every changed file, or (None, code).
+
+    Page 1 keeps the historical read path; page N > 1 adds ``&page=N``. At
+    most 30 reads, so it never loops. A read error or a malformed page gives
+    PR_FILES_UNAVAILABLE; a full page 30 gives PR_FILES_TOO_MANY.
+    """
+    files = []
+    for page in range(1, _PR_FILES_MAX_PAGES + 1):
+        path = f'pulls/{number}/files?per_page={_PR_FILES_PER_PAGE}'
+        if page > 1:
+            path += f'&page={page}'
+        try:
+            batch = github_get(path)
+        except Exception:
+            return None, _PR_FILES_UNAVAILABLE
+        if type(batch) is not list or len(batch) > _PR_FILES_PER_PAGE:
+            return None, _PR_FILES_UNAVAILABLE
+        files.extend(batch)
+        if len(batch) < _PR_FILES_PER_PAGE:
+            return files, None
+    return None, PR_FILES_TOO_MANY
+
+
+# #1502 WP-G gate 2: llmtool-linux-ci.yml runs only its 'ai-loop' job for a PR
+# that changes nothing but tools/ai-loop/ (the 'changes' job sets code=false,
+# so no shards and no 'check (Linux 3.14)'). Require the check that change
+# class produces, never one that cannot appear.
+_AI_LOOP_CHECK = 'ai-loop helper tests (Python 3.14)'
+_AI_LOOP_PREFIX = 'tools/ai-loop/'
+
+
+def _required_linux_checks(paths, old_paths=()):
+    """The exact-head Linux workflow check names a PR with these paths needs.
+
+    CI diffs with --no-renames, so a rename's old path counts too: a file moved
+    into tools/ai-loop/ from elsewhere still makes a code PR.
+    """
+    if task_completion._docs_only_ci(paths):
+        return ['check (docs)']
+    every = list(paths) + list(old_paths)
+    if paths and all(path.startswith(_AI_LOOP_PREFIX) for path in every):
+        return [_AI_LOOP_CHECK]
+    return ['check (Linux 3.14)']
+
+
 def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False,
                   owner_acceptance=None, acceptance_out=None, skip_owner_acceptance=False):
     """Check every exact-head merge gate; return None or one refusal code.
@@ -462,13 +518,16 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     """
     try:
         checks = github_get(f'commits/{head}/check-runs?per_page=100')
-        files = github_get(f'pulls/{number}/files?per_page=100')
     except Exception:
         return 'MERGE_CHECKS_UNAVAILABLE'
-    if (type(checks) is not dict or type(checks.get('check_runs')) is not list or
+    files, files_code = _pr_files(number, github_get)
+    if files_code == PR_FILES_TOO_MANY:
+        return 'MERGE_PR_FILES_TOO_MANY'
+    if (files_code is not None or type(checks) is not dict or
+            type(checks.get('check_runs')) is not list or
             type(checks.get('total_count')) is not int or
             checks['total_count'] != len(checks['check_runs']) or
-            len(checks['check_runs']) > 100 or type(files) is not list or len(files) >= 100):
+            len(checks['check_runs']) > 100):
         return 'MERGE_CHECKS_UNAVAILABLE'
     check_runs = checks['check_runs']
     if not check_runs:
@@ -493,15 +552,12 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     paths = [item.get('filename') for item in files if type(item) is dict]
     if len(paths) != len(files) or any(type(path) is not str for path in paths):
         return 'MERGE_CHECKS_UNAVAILABLE'
-    docs_only = task_completion._docs_only_ci(paths)
-    if docs_only:
-        required_checks = ['check (docs)']
-    else:
-        required_checks = ['check (Linux 3.14)']
     old_paths = [item.get('previous_filename') for item in files
                  if type(item) is dict and item.get('previous_filename') is not None]
     if any(type(path) is not str for path in old_paths):
         return 'MERGE_CHECKS_UNAVAILABLE'
+    required_checks = _required_linux_checks(paths, old_paths)
+    docs_only = required_checks == ['check (docs)']
     requires_macos = not docs_only and _mac_ci_runs(paths + old_paths)
     if requires_macos:
         required_checks.append('check (macOS 3.13)')
@@ -587,27 +643,35 @@ def _review_ci_gate(number, head, github_get, latest_out=None):
     """Require the newest exact-head Linux CI check to pass before review.
 
     latest_out, when a dict, gets the newest completed non-success run so a
-    CI_FAILED result can be routed (#1502 WP-D D11).
+    CI_FAILED result can be routed (#1502 WP-D D11). A PR whose file list
+    cannot be read completely (more than GitHub's 3000-file limit) returns
+    STOPPED with PR_FILES_TOO_MANY instead of waiting forever (#1502 WP-G).
     """
     try:
         checks = github_get(f'commits/{head}/check-runs?per_page=100')
-        files = github_get(f'pulls/{number}/files?per_page=100')
     except Exception:
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    if (type(checks) is not dict or type(checks.get('check_runs')) is not list or
+    files, files_code = _pr_files(number, github_get)
+    if files_code == PR_FILES_TOO_MANY:
+        return 'STOPPED', PR_FILES_TOO_MANY
+    if (files_code is not None or type(checks) is not dict or
+            type(checks.get('check_runs')) is not list or
             type(checks.get('total_count')) is not int or
             checks['total_count'] < len(checks['check_runs']) or
-            checks['total_count'] < 0 or len(checks['check_runs']) > 100 or
-            type(files) is not list or len(files) >= 100):
+            checks['total_count'] < 0 or len(checks['check_runs']) > 100):
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    paths = []
+    paths, old_paths = [], []
     for item in files:
         path = item.get('filename') if type(item) is dict else None
         if type(path) is not str:
             return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
         paths.append(path)
-    docs_only = task_completion._docs_only_ci(paths)
-    required_name = 'check (docs)' if docs_only else 'check (Linux 3.14)'
+        old = item.get('previous_filename')
+        if old is not None:
+            if type(old) is not str:
+                return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+            old_paths.append(old)
+    required_name = _required_linux_checks(paths, old_paths)[0]
     runs = checks['check_runs']
     if any(type(item) is not dict for item in runs):
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
