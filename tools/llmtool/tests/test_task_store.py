@@ -416,6 +416,191 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.task_store_error_code,
                          'TASK_LINEAGE_TRANSITION_INVALID')
 
+    WAITING_RESUME = 'quota resets at 00:00 UTC'
+
+    def _waiting(self, **overrides):
+        value = {'waiting_since': '2026-11-13T00:00:00Z', 'reason': 'QUOTA',
+                 'resume_condition': self.WAITING_RESUME}
+        value.update(overrides)
+        return value
+
+    def test_waiting_is_optional_and_strictly_validated(self):
+        # #1502 WP-D D12: a Task without the field is not WAITING and stays as it is.
+        from llmtool.task_store import clear_waiting, is_waiting
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        task_id = task['task_id']
+        legacy = self.store.get(task_id)
+        self.assertNotIn('waiting', legacy)
+        self.assertFalse(is_waiting(legacy))
+        self.assertEqual(clear_waiting(self.store, task_id), legacy)
+        self.assertEqual(self.store.get(task_id), legacy)   # no write at all
+        bad_values = (
+            'QUOTA', [], {}, self._waiting(extra=1),
+            {'waiting_since': '2026-11-13T00:00:00Z', 'reason': 'QUOTA'},
+            self._waiting(waiting_since='2026-11-13 00:00:00'),
+            self._waiting(waiting_since='2026-11-13T00:00:00.000001Z'),
+            self._waiting(waiting_since='2026-13-01T00:00:00Z'),
+            self._waiting(waiting_since=None),
+            self._waiting(reason='quota'), self._waiting(reason=''),
+            self._waiting(reason='Q' * 65), self._waiting(reason='ROUTE-DOWN'),
+            self._waiting(reason=7),
+            # Waiting for an Owner answer is waiting_owner, never WAITING.
+            self._waiting(reason='WAITING_OWNER'), self._waiting(reason='OWNER'),
+            self._waiting(resume_condition=''), self._waiting(resume_condition='   '),
+            self._waiting(resume_condition='first line\nsecond line'),
+            self._waiting(resume_condition='x' * 501),
+            self._waiting(resume_condition=None),
+        )
+        for bad in bad_values:
+            with self.subTest(bad=bad):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(task_id, waiting=bad)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_WAITING_INVALID')
+        self.assertEqual(self.store.get(task_id), legacy)
+        for good in (self._waiting(), self._waiting(reason='AUTH'),
+                     self._waiting(reason='Q' * 64, resume_condition=(
+                         'wait until the shared runner is back online ' * 12)[:500])):
+            with self.subTest(good=good):
+                other = self._codex_dispatch_task()
+                self.store.create(other)
+                self.store.update(other['task_id'], waiting=good)
+                stored = self.store.get(other['task_id'])
+                self.assertEqual(stored['waiting'], good)
+                self.assertTrue(is_waiting(stored))
+        for value in (None, {}, {'waiting': None}, {'waiting': 'QUOTA'}):
+            self.assertFalse(is_waiting(value))
+
+    def test_waiting_resume_condition_goes_through_the_sensitive_screen(self):
+        # The screen is injected (Owner #763 A); the store must still refuse.
+        from llmtool.task_store import enter_waiting
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        before = self.store.get(task['task_id'])
+        flagged = 'condition the injected screen flags'
+        calls = []
+
+        def screen(value):
+            calls.append(value)
+            return value == flagged
+        with patch.object(task_store_module, '_emitted_sensitive', side_effect=screen):
+            with self.assertRaises(LLMToolError) as caught:
+                enter_waiting(self.store, task['task_id'], reason='QUOTA',
+                              resume_condition=flagged, now='2026-11-13T00:00:00Z')
+            self.assertEqual(caught.exception.task_store_error_code, 'TASK_WAITING_INVALID')
+            self.assertIn(flagged, calls)
+            self.assertEqual(self.store.get(task['task_id']), before)
+            enter_waiting(self.store, task['task_id'], reason='QUOTA',
+                          resume_condition=self.WAITING_RESUME, now='2026-11-13T00:00:00Z')
+        self.assertIn(self.WAITING_RESUME, calls)
+        self.assertEqual(self.store.get(task['task_id'])['waiting'], self._waiting())
+
+    def test_valid_waiting_is_the_store_rule_without_raising(self):
+        # The monitor shows a Task file's WAITING record only when this says True.
+        from llmtool.task_store import valid_waiting
+        for good in (self._waiting(), self._waiting(reason='AUTH')):
+            with self.subTest(good=good):
+                self.assertIs(valid_waiting(good), True)
+        for bad in (None, 'QUOTA', [], {}, self._waiting(extra=1),
+                    self._waiting(waiting_since='2026-11-13 00:00:00'),
+                    self._waiting(reason='quota'), self._waiting(reason='WAITING_OWNER'),
+                    self._waiting(resume_condition='   '),
+                    self._waiting(resume_condition='first\x1bline'),
+                    self._waiting(resume_condition='x' * 501),
+                    self._waiting(resume_condition=None)):
+            with self.subTest(bad=bad):
+                self.assertIs(valid_waiting(bad), False)
+        # The sensitive screen is injected (Owner #763 A) and still decides.
+        flagged = 'condition the injected screen flags'
+        calls = []
+
+        def screen(value):
+            calls.append(value)
+            return value == flagged
+        with patch.object(task_store_module, '_emitted_sensitive', side_effect=screen):
+            self.assertIs(valid_waiting(self._waiting(resume_condition=flagged)), False)
+            self.assertIs(valid_waiting(self._waiting()), True)
+        self.assertIn(flagged, calls)
+        self.assertIn(self.WAITING_RESUME, calls)
+
+    def test_enter_and_clear_waiting_restart_the_clock_only_on_progress(self):
+        from llmtool.task_store import clear_waiting, enter_waiting, is_waiting
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        task_id = task['task_id']
+        saved = enter_waiting(self.store, task_id, reason='QUOTA',
+                              resume_condition=self.WAITING_RESUME,
+                              now='2026-11-13T00:00:00Z')
+        self.assertEqual(saved['waiting'], self._waiting())
+        # Entering again while WAITING never moves the clock (no silent reset).
+        again = enter_waiting(self.store, task_id, reason='AUTH',
+                              resume_condition='the Owner logs in again',
+                              now='2026-11-13T05:00:00Z')
+        self.assertEqual(again['waiting'], {'waiting_since': '2026-11-13T00:00:00Z',
+                                            'reason': 'AUTH',
+                                            'resume_condition': 'the Owner logs in again'})
+        # A plain update cannot move the clock either.
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.update(task_id, waiting=dict(again['waiting'],
+                                                    waiting_since='2026-11-13T06:00:00Z'))
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'TASK_WAITING_TRANSITION_INVALID')
+        for kwargs in ({'reason': 'WAITING_OWNER', 'resume_condition': 'an answer'},
+                       {'reason': 'QUOTA', 'resume_condition': ''}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(LLMToolError) as caught:
+                    enter_waiting(self.store, task_id, now='2026-11-13T07:00:00Z', **kwargs)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_WAITING_INVALID')
+        self.assertEqual(self.store.get(task_id)['waiting'], again['waiting'])
+        # Progress clears WAITING; clearing again writes nothing.
+        cleared = clear_waiting(self.store, task_id)
+        self.assertIsNone(cleared['waiting'])
+        self.assertFalse(is_waiting(cleared))
+        self.assertEqual(clear_waiting(self.store, task_id), self.store.get(task_id))
+        self.assertEqual(self.store.get(task_id)['record_sha256'], cleared['record_sha256'])
+        # Entering after a clear restarts the clock.
+        restarted = enter_waiting(self.store, task_id, reason='QUOTA',
+                                  resume_condition=self.WAITING_RESUME,
+                                  now='2026-11-14T00:00:00Z')
+        self.assertEqual(restarted['waiting']['waiting_since'], '2026-11-14T00:00:00Z')
+        # Without now, the clock starts at the current UTC second.
+        fresh = self._codex_dispatch_task()
+        self.store.create(fresh)
+        since = enter_waiting(self.store, fresh['task_id'], reason='ENV',
+                              resume_condition='the runner is back')['waiting']['waiting_since']
+        self.assertTrue(task_store_module._valid_utc_seconds(since))
+        started = task_store_module._utc_seconds(since).timestamp()
+        self.assertLessEqual(abs(time.time() - started), 60)
+        unstarted = self._codex_dispatch_task()
+        self.store.create(unstarted)
+        with self.assertRaises(LLMToolError) as caught:
+            enter_waiting(self.store, unstarted['task_id'], reason='ENV',
+                          resume_condition='the runner is back', now='yesterday')
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_WAITING_INVALID')
+        self.assertNotIn('waiting', self.store.get(unstarted['task_id']))
+
+    def test_enter_waiting_never_undoes_a_concurrent_change(self):
+        from llmtool.task_store import clear_waiting, enter_waiting
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        task_id = task['task_id']
+        stale = self.store.get(task_id)
+        enter_waiting(self.store, task_id, reason='QUOTA',
+                      resume_condition=self.WAITING_RESUME, now='2026-11-13T00:00:00Z')
+        current = self.store.get(task_id)
+        with patch.object(self.store, 'get', return_value=stale):
+            with self.assertRaises(TaskStoreConflict):
+                enter_waiting(self.store, task_id, reason='QUOTA',
+                              resume_condition=self.WAITING_RESUME,
+                              now='2026-11-14T00:00:00Z')
+        with patch.object(self.store, 'get',
+                          return_value=dict(current, waiting=self._waiting(reason='ENV'))):
+            with self.assertRaises(TaskStoreConflict):
+                clear_waiting(self.store, task_id)
+        self.assertEqual(self.store.get(task_id), current)
+
     def test_park_and_merge_claim_exclude_each_other_under_the_task_lock(self):
         # #1502 D10c2 (security v91, CWE-362): parking a ROOT and claiming its merge
         # are each checked against the other inside the same locked write.
@@ -539,6 +724,152 @@ class TaskStoreTests(unittest.TestCase):
         stored = self.store.get(task['task_id'])
         self.assertEqual((stored['lineage']['state'], stored['merge_attempt']['state']),
                          ('OPEN', 'CLAIMED'))
+
+    def test_waiting_and_split_merge_gates_each_still_apply_after_the_merge(self):
+        # PR #1764 merge check: the D12 WAITING transition gate and the D10c2
+        # PARKED / merge-claim gates sit side by side under the task lock. Each
+        # still applies alone on a Task that carries the other fields.
+        from llmtool.task_store import (clear_waiting, enter_waiting, park_lineage_root,
+                                        record_lineage)
+        claim = {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+                 'claimed_at': '2026-11-13T00:00:00.000000Z'}
+
+        def root_line(task_id, state):
+            return {'lineage_id': task_id, 'kind': 'root', 'parent': None, 'replaces': [],
+                    'state': state, 'reason': 'split', 'base_sha': None,
+                    'recorded_at': '2026-11-13T00:00:00Z'}
+
+        def refused(task_id, code, call):
+            before = self.store.get(task_id)
+            with self.assertRaises(LLMToolError) as caught:
+                call()
+            self.assertEqual(caught.exception.task_store_error_code, code)
+            self.assertEqual(self.store.get(task_id), before)
+
+        def waiting_task():
+            task = self._codex_dispatch_task()
+            self.store.create(task)
+            enter_waiting(self.store, task['task_id'], reason='QUOTA',
+                          resume_condition=self.WAITING_RESUME, now='2026-11-13T00:00:00Z')
+            return task['task_id']
+
+        moved = self._waiting(waiting_since='2026-11-13T06:00:00Z')
+        # WAITING gate alone, on a Task with an OPEN lineage and a CLAIMED merge.
+        claimed = waiting_task()
+        record_lineage(self.store, claimed, root_line(claimed, 'OPEN'))
+        self.store.update(claimed, merge_attempt=dict(claim))
+        refused(claimed, 'TASK_WAITING_TRANSITION_INVALID',
+                lambda: self.store.update(claimed, waiting=moved))
+        # D10c2 park gate alone, on a WAITING Task whose merge started.
+        refused(claimed, 'SPLIT_ROOT_MERGE_STARTED', lambda: park_lineage_root(
+            self.store, claimed, root_line(claimed, 'PARKED')))
+        refused(claimed, 'SPLIT_ROOT_MERGE_STARTED', lambda: record_lineage(
+            self.store, claimed, root_line(claimed, 'PARKED')))
+        self.assertEqual(self.store.get(claimed)['waiting'], self._waiting())
+        # D10c2 merge-claim gate alone, on a WAITING Task that was parked.
+        parked = waiting_task()
+        park_lineage_root(self.store, parked, root_line(parked, 'PARKED'))
+        self.assertEqual(self.store.get(parked)['waiting'], self._waiting())
+        refused(parked, 'MERGE_ROOT_PARKED',
+                lambda: self.store.update(parked, merge_attempt=dict(claim)))
+        digest = self.store.get(parked)['record_sha256']   # current, so only the gate refuses
+        refused(parked, 'MERGE_ROOT_PARKED', lambda: self.store.compare_and_update(
+            parked, expected={'record_sha256': digest}, merge_attempt=dict(claim)))
+        # WAITING still enters, keeps its clock and clears on a parked ROOT.
+        refused(parked, 'TASK_WAITING_TRANSITION_INVALID',
+                lambda: self.store.update(parked, waiting=moved))
+        again = enter_waiting(self.store, parked, reason='ENV',
+                              resume_condition='the runner is back',
+                              now='2026-11-13T09:00:00Z')
+        self.assertEqual(again['waiting']['waiting_since'], '2026-11-13T00:00:00Z')
+        self.assertIsNone(clear_waiting(self.store, parked)['waiting'])
+        stored = self.store.get(parked)
+        self.assertEqual(stored['lineage']['state'], 'PARKED')
+        self.assertNotIn('merge_attempt', stored)
+
+    def test_one_write_with_waiting_lineage_and_merge_claim_meets_every_gate(self):
+        # PR #1764 merge check: one update carrying waiting, lineage and
+        # merge_attempt together is refused whole when any gate refuses, and
+        # commits all three only when every gate allows it.
+        from llmtool.task_store import enter_waiting, record_lineage
+        claim = {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+                 'claimed_at': '2026-11-13T00:00:00.000000Z'}
+
+        def root_line(task_id, state):
+            return {'lineage_id': task_id, 'kind': 'root', 'parent': None, 'replaces': [],
+                    'state': state, 'reason': 'split', 'base_sha': None,
+                    'recorded_at': '2026-11-13T00:00:00Z'}
+
+        def refused(task_id, code, call):
+            before = self.store.get(task_id)
+            with self.assertRaises(LLMToolError) as caught:
+                call()
+            self.assertEqual(caught.exception.task_store_error_code, code)
+            self.assertEqual(self.store.get(task_id), before)
+
+        def new_task(waiting):
+            task = self._codex_dispatch_task()
+            self.store.create(task)
+            if waiting:
+                enter_waiting(self.store, task['task_id'], reason='QUOTA',
+                              resume_condition=self.WAITING_RESUME,
+                              now='2026-11-13T00:00:00Z')
+            return task['task_id']
+
+        kept = self._waiting(reason='ENV')
+        moved = self._waiting(waiting_since='2026-11-13T06:00:00Z')
+        for already_waiting in (False, True):
+            with self.subTest(already_waiting=already_waiting):
+                task_id = new_task(already_waiting)
+                # PARKED lineage + merge claim + a valid WAITING: the D10c2 gate refuses.
+                refused(task_id, 'MERGE_ROOT_PARKED', lambda: self.store.update(
+                    task_id, waiting=kept, lineage=root_line(task_id, 'PARKED'),
+                    merge_attempt=dict(claim)))
+                digest = self.store.get(task_id)['record_sha256']
+                refused(task_id, 'MERGE_ROOT_PARKED', lambda: self.store.compare_and_update(
+                    task_id, expected={'record_sha256': digest}, waiting=kept,
+                    lineage=root_line(task_id, 'PARKED'), merge_attempt=dict(claim)))
+                # An ended lineage in the same write is refused the same way.
+                refused(task_id, 'MERGE_LINEAGE_ENDED', lambda: self.store.update(
+                    task_id, waiting=kept, lineage=root_line(task_id, 'FAILED_FINAL'),
+                    merge_attempt=dict(claim)))
+                # An invalid WAITING shape refuses an otherwise allowed OPEN claim.
+                refused(task_id, 'TASK_WAITING_INVALID', lambda: self.store.update(
+                    task_id, waiting=self._waiting(reason='WAITING_OWNER'),
+                    lineage=root_line(task_id, 'OPEN'), merge_attempt=dict(claim)))
+                if already_waiting:
+                    # A moved clock refuses an otherwise allowed OPEN claim.
+                    refused(task_id, 'TASK_WAITING_TRANSITION_INVALID',
+                            lambda: self.store.update(
+                                task_id, waiting=moved, lineage=root_line(task_id, 'OPEN'),
+                                merge_attempt=dict(claim)))
+                stored = self.store.get(task_id)
+                self.assertNotIn('lineage', stored)
+                self.assertNotIn('merge_attempt', stored)
+                self.assertEqual(stored.get('waiting'),
+                                 self._waiting() if already_waiting else None)
+                # Every gate allows it: all three are written together.
+                self.store.update(task_id, waiting=kept, lineage=root_line(task_id, 'OPEN'),
+                                  merge_attempt=dict(claim))
+                stored = self.store.get(task_id)
+                self.assertEqual(stored['waiting'], kept)
+                self.assertEqual((stored['lineage']['state'], stored['merge_attempt']['state']),
+                                 ('OPEN', 'CLAIMED'))
+                # Afterwards a park with a kept WAITING is refused (merge started),
+                # and a park with a moved clock is refused before the WAITING write.
+                refused(task_id, 'SPLIT_ROOT_MERGE_STARTED', lambda: self.store.update(
+                    task_id, waiting=kept, lineage=root_line(task_id, 'PARKED')))
+                refused(task_id, 'SPLIT_ROOT_MERGE_STARTED', lambda: self.store.update(
+                    task_id, waiting=moved, lineage=root_line(task_id, 'PARKED')))
+        # WAITING + PARKED lineage without a merge claim is allowed in one write;
+        # a moved clock in that same write is still refused by the WAITING gate.
+        task_id = new_task(True)
+        refused(task_id, 'TASK_WAITING_TRANSITION_INVALID', lambda: self.store.update(
+            task_id, waiting=moved, lineage=root_line(task_id, 'PARKED')))
+        self.store.update(task_id, waiting=kept, lineage=root_line(task_id, 'PARKED'))
+        stored = self.store.get(task_id)
+        self.assertEqual((stored['waiting'], stored['lineage']['state']), (kept, 'PARKED'))
+        self.assertNotIn('merge_attempt', stored)
 
     def test_retry_claim_transition_is_atomic_with_next_attempt(self):
         task = self._codex_dispatch_task()

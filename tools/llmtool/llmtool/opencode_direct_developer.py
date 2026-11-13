@@ -393,7 +393,7 @@ def _read_scoped_file(root, name):
             if identity(before) != identity(after) or len(raw) != before.st_size:
                 _reject('OPENCODE_SOURCE_CHANGED')
             try:
-                text = bytes(raw).decode('utf-8')
+                bytes(raw).decode('utf-8')  # UTF-8 check only; the text is not kept
             except UnicodeError:
                 _reject('OPENCODE_SOURCE_INVALID')
             return {
