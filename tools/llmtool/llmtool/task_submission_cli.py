@@ -928,6 +928,10 @@ def add_task_submission_parsers(actions):
     repair.add_argument('--family', help='root-cause family key (default: pr-<N>)')
     repair.add_argument('--auto-review', action='store_true',
                         help='dispatch the next formal review after a successful repair')
+    repair.add_argument('--pm-session',
+                        help=('caller PM session (native UUID or pm- ID); must own '
+                              'the Task; default: CLAUDE_CODE_SESSION_ID or '
+                              'CODEX_THREAD_ID'))
     remote_test = actions.add_parser(
         'remote-test', help='Run admitted Task tests once on EC2 unless --hosted is given')
     remote_test.add_argument('task_id', help='existing durable Task ID')
@@ -1728,10 +1732,23 @@ def run_task_review_result(args, *, store=None, github_get=None):
 def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
                     current_head=None, review_dispatcher=None,
                     delegate_callable=None, repair_task_recorder=None):
-    """Thin CLI adapter for a bounded review-triggered Developer repair."""
+    """Thin CLI adapter for a bounded review-triggered Developer repair.
+
+    #1230 A1 (#1124 rest, item 2): the caller's PM session must own the Task.
+    A refused caller gets one ``pm_caller.refusal`` line and exit 1, before any
+    repair. ``task advance`` calls ``repair_review`` directly and is not checked
+    here; advance already checked its caller.
+    """
+    from . import pm_caller
+    store = TaskStore() if store is None else store
+    try:
+        pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
+    except pm_caller.PMCallerRefused as exc:
+        _print(pm_caller.refusal(args.task_id, exc.code))
+        return 1
     from .review_repair import repair_review
     result = repair_review(
-        store=TaskStore() if store is None else store, task_id=args.task_id,
+        store=store, task_id=args.task_id,
         executor_task=args.executor_task, pr_number=args.pr,
         family=getattr(args, 'family', None),
         github_get=github_get, dispatch_adapter=dispatch_adapter,
