@@ -19,16 +19,22 @@ NEIGHBOURS = (CJK, 'İ', 'ı', 'ſ', 'K', ' ')
 
 def _cloud_keys():
     # Synthetic cloud-key shapes: 4-letter prefix + 16 uppercase/digit chars.
+    # synthetic-fixture: screen-tool test
     return [prefix + FILL[:16] for prefix in ('AK' + 'IA', 'AS' + 'IA')]
 
 
 def _families():
     scheme = 'BEARER'.lower()
+    # synthetic-fixture: screen-tool test
     key = 'api' + '_key'
+    # synthetic-fixture: screen-tool test
     jwt = '.'.join(('eyJ' + FILL, FILL, FILL))
     dashes = '-' * 5
+    # synthetic-fixture: screen-tool test
     header = dashes + 'BEGIN ' + 'PRIVATE' + ' KEY' + dashes
+    # synthetic-fixture: screen-tool test
     return (['sk-' + FILL, 'ghp_' + FILL, 'xoxb-' + FILL, jwt,
+             # synthetic-fixture: screen-tool test
              scheme + ' ' + FILL, key + '=' + FILL, header] + _cloud_keys())
 
 
@@ -60,13 +66,16 @@ class CredentialAfterNonAsciiTests(unittest.TestCase):
                                               message=text, component='provider.openai')
 
     def test_ascii_word_prefix_still_not_a_credential(self):
+        # synthetic-fixture: screen-tool test
         for text in ('mask-' + FILL, 'xghp_' + FILL, 'myxoxb-' + FILL,
+                     # synthetic-fixture: screen-tool test
                      'pre' + 'api' + '_key' + '=' + FILL):
             with self.subTest(case=len(text)):
                 self.assertEqual(d.safe_diagnostic_text(text), text)
 
     def test_cloud_key_inside_ascii_word_is_not_a_credential(self):
         for value in _cloud_keys():
+            # synthetic-fixture: screen-tool test
             for text in ('x' + value, value + 'x', '_' + value, value + '7',
                          value + '_', 'Z' + value + 'Z'):
                 with self.subTest(case=text[:2] + text[-1:]):
