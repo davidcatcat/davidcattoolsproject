@@ -2703,6 +2703,9 @@ def advance(*, task_id, store=None, merge=False, owner_acceptance=None,
                     guard, publish_gh_runner or _publish_run_gh, gh=True),
                 merge_gh_runner=_guarded_runner(
                     guard, merge_gh_runner or _publish_run_gh, gh=True),
+                # The label helper keeps the caller's own runner: it re-checks the
+                # Task itself (I4) right before its `pr edit --add-label mac-ci`.
+                label_gh_runner=merge_gh_runner,
                 **options)
         except _ExternalActionRefused as refused:
             return _advance_refused(task_id, refused.code)
@@ -2713,7 +2716,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                   record_review_result_call=None, repair_review_call, relay_verdict_call=None,
                   run_task_complete_call=None, record_github_event_call=None,
                   github_get=None, cwd=None, publish_git_runner, publish_gh_runner,
-                  record_result_call=None, merge_gh_runner,
+                  record_result_call=None, merge_gh_runner, label_gh_runner=None,
                   owner_acceptance=None, owner_exception=None, executor_task=None,
                   sleep_fn=None, sleep=None):
     """One advance step; the caller holds the advance lease and passes guarded runners."""
@@ -3083,7 +3086,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                 try:
                     label_result = label_mac_ci_for_skipped_check(
                         task_id=task_id, store=store, pr_number=number,
-                        github_get=get, merge_gh_runner=merge_gh_runner, cwd=cwd)
+                        github_get=get, merge_gh_runner=label_gh_runner, cwd=cwd)
                     if type(label_result) is dict:
                         if label_result.get('step') == 'WAITING_CI':
                             step = 'WAITING_CI'
