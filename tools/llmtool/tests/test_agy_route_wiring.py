@@ -384,6 +384,94 @@ class AgyRouteWiringTests(unittest.TestCase):
                 self.assertEqual(caught.exception.dispatch_code, expected_code)
                 self.assertEqual(writes, [])
 
+    # #1692 PR 2 (Owner decision 2026-11-13): the real worker-dispatch.json pauses
+    # AGY. These tests read the live file through the real gate; nothing is mocked
+    # in the policy decision. Gate-level transitions (repair, recovery, retry,
+    # continuation, historical record) are covered in test_worker_dispatch.py.
+    @staticmethod
+    def _real_policy():
+        return patch.object(worker_dispatch, '_POLICY_PATH',
+                            Path(worker_dispatch._DEFAULT_POLICY_PATH))
+
+    def _real_policy_agy_delegate(self, *, owner_ref, repair_packet):
+        task_id = 'a' * 32
+        task = {
+            'schema_version': 2, 'task_id': task_id, 'run_id': 'b' * 32,
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'AGY goal',
+            'task_binding': {'contract_digest': 'c' * 64},
+            'pm_assignment': {'route': 'agy', 'risk': 'LOW', 'goal': 'AGY goal',
+                              'acceptance': ['the result is recorded']},
+            'developer': None, 'completion': None,
+        }
+        writes = []
+
+        class Store:
+            def get(self, _task_id):
+                return dict(task)
+
+            def __getattr__(self, attr):
+                def record(*args, **kwargs):
+                    writes.append((attr, args, kwargs))
+                    raise AssertionError('no store write is allowed')
+                return record
+
+        args = Namespace(task_id=task_id, provider='agy', mode='direct',
+                         owner_ref=owner_ref, context_stdin=False, selection_source='PM',
+                         acceptance=['the result is recorded'],
+                         egress_basis='Approved non-sensitive Task context.',
+                         executor_task='executor-d6', read_path=['src.py'],
+                         write_path=['src.py'], repair_packet=repair_packet)
+        route_runner = Mock()
+        with self._real_policy(), \
+                patch.object(task_submission_cli.task_completion, 'validate_task_binding'), \
+                patch.object(task_submission_cli, '_delegate_d6_binding',
+                             return_value=(SimpleNamespace(task_id='executor-d6'),
+                                           SimpleNamespace(head='d' * 40))), \
+                patch.object(task_submission_cli, '_reject_claude_reserved_d6'):
+            with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
+                task_submission_cli.run_task_agy_delegate(
+                    args, store=Store(), route_runner=route_runner)
+        route_runner.assert_not_called()
+        return caught.exception.dispatch_code, writes
+
+    def test_real_policy_pauses_agy(self):
+        with self._real_policy():
+            decision = worker_dispatch.evaluate('agy')
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
+
+    def test_real_policy_refuses_agy_delegate_new_repair_and_ci_return(self):
+        def packet(excerpt):
+            return {'task': 'task-1', 'pr': 7, 'executor_task': 'executor-d6',
+                    'failed_head': 'd' * 40, 'version': 1, 'verdict_comment_id': 9,
+                    'findings_count': 1, 'reviewer_text_excerpt_untrusted_data': excerpt}
+
+        entry_points = (
+            ('new task delegate', None),
+            ('automatic review repair', packet('Correct the import.')),
+            ('CI-failure return to the original Developer',
+             packet('check (Linux 3.14) failed on the candidate head.')),
+        )
+        owner_refs = (None, 'https://github.com/davidcatcat/davidcattoolsproject/'
+                            'issues/289#issuecomment-1')
+        for name, repair_packet in entry_points:
+            for owner_ref in owner_refs:
+                with self.subTest(entry_point=name, owner_ref=owner_ref):
+                    code, writes = self._real_policy_agy_delegate(
+                        owner_ref=owner_ref, repair_packet=repair_packet)
+                    self.assertEqual(code, 'OWNER_PAUSED')
+                    self.assertEqual(writes, [])
+
+    def test_real_policy_agy_route_gate_refuses_launch(self):
+        # The adapter-boundary gate rechecked before every AGY provider launch
+        # (new, repair, retry, recovery or re-dispatch) refuses under the real policy.
+        refs = (None, 'https://github.com/davidcatcat/davidcattoolsproject/'
+                      'issues/289#issuecomment-1')
+        with self._real_policy():
+            for owner_ref in refs:
+                with self.subTest(owner_ref=owner_ref):
+                    self.assertFalse(owner_assignment_gate('a' * 32, owner_ref)())
+
     def test_agy_developer_record_stores_omitted_owner_ref_as_none(self):
         _status, saved, _events, _prompts = self._run_agy_delegate(owner_ref=None)
         self.assertIn('owner_assignment_ref', saved['developer'])

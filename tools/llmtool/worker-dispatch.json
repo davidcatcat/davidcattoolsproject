@@ -23,11 +23,11 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6560737617"
     },
     "agy": {
-      "dispatch": "ALLOWED",
+      "dispatch": "PAUSED",
       "decided_by": "Owner",
-      "decided_at": "2026-11-04",
-      "reason": "PM-selected AGY Developer route on its configured model; requires its formal Reviewer (Claude Reviewer) to be a different model family than the actual author; pause after 2 consecutive route failures; no automatic retry or fallback",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6683494255"
+      "decided_at": "2026-11-13",
+      "reason": "Owner decision 2026-11-13, relayed by PM on https://github.com/davidcatcat/davidcattoolsproject/issues/1692: pause AGY Developer dispatch. No new delegate, review repair, retry, recovery, timeout continuation, CI-failure return or re-dispatch of an existing AGY Task; the AGY adapter, CLI and tests stay",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6850974885"
     },
     "company-gw": {
       "dispatch": "PAUSED",
