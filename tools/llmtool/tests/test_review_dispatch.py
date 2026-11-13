@@ -1,10 +1,14 @@
 import hashlib
 import json
 import io
-from contextlib import redirect_stderr
+import os
+from contextlib import contextmanager, redirect_stderr
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,11 +30,28 @@ def _runtime_parts(*pieces):
 import review_trust_fixture
 
 
+# #1705: a COMPLETED Codex claim now posts its verdict itself. No test may reach
+# the real GitHub CLI or API, so the default poster and lister are replaced for
+# the whole module; tests of the real functions use the saved originals.
+_REAL_POST_PR_COMMENT = review_dispatch._post_pr_comment
+_REAL_LIST_PR_COMMENT_BODIES = review_dispatch._list_pr_comment_bodies
+_DEFAULT_POSTS = []
+_MODULE_PATCHES = (
+    patch.object(review_dispatch, '_post_pr_comment',
+                 new=lambda pr, body, root: _DEFAULT_POSTS.append((pr, body))),
+    patch.object(review_dispatch, '_list_pr_comment_bodies', new=lambda pr: []),
+)
+
+
 def setUpModule():
     review_trust_fixture.start_module()
+    for module_patch in _MODULE_PATCHES:
+        module_patch.start()
 
 
 def tearDownModule():
+    for module_patch in reversed(_MODULE_PATCHES):
+        module_patch.stop()
     review_trust_fixture.stop_module()
 
 
@@ -1103,7 +1124,10 @@ def _claim(*, head=HEAD, version=1, reviewer='reviewer-a'):
 class RealTaskStoreReviewClaimTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.store, self.task_id = _real_store(self.temp.name)
+        # A subdirectory keeps the store's sibling verdict-post directory
+        # (#1705) inside this test's own temporary directory.
+        self.store_dir = Path(self.temp.name).resolve() / 'tasks'
+        self.store, self.task_id = _real_store(self.store_dir)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -1207,7 +1231,7 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
                         'verdict': 'PASS'}))
 
         first = invoke(self.store, [preflight, preflight])
-        reopened = task_store.TaskStore(Path(self.temp.name).resolve())
+        reopened = task_store.TaskStore(self.store_dir)
         second = invoke(reopened, [preflight])
         self.assertEqual(first['state'], 'COMPLETED')
         self.assertEqual(second['review_text'], review_text)
@@ -1241,7 +1265,7 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
                         'verdict': 'PASS'}))
 
         first = invoke(self.store, [preflight, preflight])
-        reopened = task_store.TaskStore(Path(self.temp.name).resolve())
+        reopened = task_store.TaskStore(self.store_dir)
         second = invoke(reopened, [preflight])
         for result in (first, second):
             self.assertEqual(result['verdict'], 'BLOCKED')
@@ -1288,7 +1312,7 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
         self.assertEqual(raised.exception.review_failure_reason, 'VERDICT_BINDING_MISMATCH')
         self.assertNotIn(wrong_head, str(raised.exception))
         # Reopen from disk: the real store kept the UNKNOWN claim and its key names.
-        reopened = task_store.TaskStore(Path(self.temp.name).resolve())
+        reopened = task_store.TaskStore(self.store_dir)
         claims = reopened.get(self.task_id)['review_dispatch_claim']
         self.assertEqual(len(claims), 1)
         claim = claims[0]
@@ -1626,6 +1650,347 @@ class ReviewRefusalReceiptTests(unittest.TestCase):
         self.assertIsNone(getattr(exc, 'review_failure_reason', None))
         self.assertFalse(hasattr(exc, 'review_refusal'))
         self.assertFalse(self.receipt_dir.exists())
+
+
+class CompletedVerdictPostTests(unittest.TestCase):
+    """#1705: a COMPLETED Codex verdict is posted exactly once, verbatim."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store_dir = Path(self.temp.name).resolve() / 'tasks'
+        self.store, self.task_id = _real_store(self.store_dir)
+        self.post_dir = self.store_dir.parent / 'review-verdict-posts'
+        self.executor = SimpleNamespace(root='/repo/executor', common_dir='/repo/.git')
+        self.reviewer = SimpleNamespace(root='/repo/reviewer')
+        task = self.store.get(self.task_id)
+        self.text = _codex_review_text(
+            run_id=task['run_id'], contract=task['task_binding']['contract_digest'])
+        self.lock = threading.Lock()
+        self.posts, self.comments, self.runs = [], [], []
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def post(self, pr_number, body, repo_root):
+        with self.lock:
+            self.posts.append((pr_number, body))
+            self.comments.append(body)
+
+    def list_bodies(self, pr_number):
+        with self.lock:
+            return list(self.comments)
+
+    def run_codex(self, **_kw):
+        self.runs.append('called')
+        return {'thread_id': '0123456789abcdef', 'review_text': self.text, 'verdict': 'PASS'}
+
+    @contextmanager
+    def dispatch_patches(self):
+        # Entered once from the main thread; threads never patch themselves.
+        preflight = (self.task_id, self.executor, HEAD, 'e' * 40, 'codex-reviewer')
+        with patch.object(review_dispatch, '_preflight', return_value=preflight), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                             return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                patch.object(review_dispatch, '_resolve_github_login',
+                             return_value='reviewer-user'), \
+                patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                             return_value=self.reviewer):
+            yield
+
+    def call(self, *, store=None, post=None, lister=None):
+        return review_dispatch.dispatch_review(
+            store=store or self.store, task_id=self.task_id,
+            executor_task='executor-d6', pr_number=42,
+            create_d6=lambda **_: None, bind_session=lambda **_: None,
+            prompt_renderer=lambda *_: 'prompt', codex_runner=self.run_codex,
+            post_comment=post or self.post, list_comments=lister or self.list_bodies)
+
+    def dispatch(self, **kwargs):
+        with self.dispatch_patches():
+            return self.call(**kwargs)
+
+    def complete_claim_without_posting(self):
+        """Store a COMPLETED claim whose caller never posted (the #1705 state)."""
+        initial = self.store.get(self.task_id)
+        claimed = dict(_claim(), account_mode='CODEX_CLI')
+        self.store.compare_and_update(
+            self.task_id, expected={'record_sha256': initial['record_sha256']},
+            review_dispatch_claim=[claimed])
+        current = self.store.get(self.task_id)
+        completed = dict(claimed, state='COMPLETED', native_session_id='codex-thread')
+        completed['review_result'] = {
+            'task_id': self.task_id, 'run_id': current['run_id'],
+            'contract_digest': current['task_binding']['contract_digest'],
+            'head': HEAD, 'verdict': 'PASS', 'review_text': self.text}
+        self.store.compare_and_update(
+            self.task_id, expected={'record_sha256': current['record_sha256']},
+            review_dispatch_claim=[completed])
+
+    def attempt_path(self, attempt):
+        return review_dispatch._verdict_attempt_path(
+            self.post_dir, self.task_id, 42, HEAD, 1, attempt)
+
+    def make_stale(self, attempt):
+        old = time.time() - review_dispatch._VERDICT_POST_STALE_SECONDS - 60
+        os.utime(self.attempt_path(attempt), (old, old))
+
+    def test_fresh_verdict_is_posted_once_verbatim_and_replays_do_not_repost(self):
+        first = self.dispatch()
+        self.assertEqual(first['state'], 'COMPLETED')
+        self.assertEqual(first['verdict'], 'PASS')
+        self.assertEqual(first['verdict_post'], {'state': 'POSTED', 'codes': []})
+        # The text was posted here, so a caller has nothing left to post.
+        self.assertNotIn('review_text', first)
+        self.assertNotIn('review_result', first)
+        self.assertEqual(self.posts, [(42, self.text)])
+        reopened = task_store.TaskStore(self.store_dir)
+        for store in (self.store, reopened):
+            replay = self.dispatch(store=store)
+            self.assertEqual(replay['verdict_post'], {'state': 'POSTED', 'codes': []})
+            self.assertEqual(replay['review_text'], self.text)
+        self.assertEqual(self.posts, [(42, self.text)])
+        self.assertEqual(self.runs, ['called'])
+        claim = reopened.get(self.task_id)['review_dispatch_claim'][0]
+        self.assertEqual(claim['state'], 'COMPLETED')
+        self.assertEqual(stat.S_IMODE(self.post_dir.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(self.attempt_path(1).stat().st_mode), 0o600)
+        receipt = json.loads(self.attempt_path(1).read_text(encoding='utf-8'))
+        self.assertEqual(receipt['state'], 'POSTED')
+        self.assertEqual(receipt['review_text_sha256'],
+                         hashlib.sha256(self.text.encode('utf-8')).hexdigest())
+        # The receipt binds the text by digest only; it never copies it.
+        self.assertNotIn(self.text, json.dumps(receipt))
+
+    def test_replay_posts_a_completed_verdict_its_caller_never_posted(self):
+        self.complete_claim_without_posting()
+        result = self.dispatch()
+        self.assertEqual(result['state'], 'COMPLETED')
+        self.assertEqual(result['verdict_post'], {'state': 'POSTED', 'codes': []})
+        self.assertEqual(result['review_text'], self.text)
+        self.assertEqual(self.posts, [(42, self.text)])
+        self.assertEqual(self.runs, [])
+
+    def test_verdict_already_on_the_pr_is_not_posted_again(self):
+        self.complete_claim_without_posting()
+        self.comments.append(self.text.replace('\n', '\r\n') + '\n')
+        result = self.dispatch()
+        self.assertEqual(result['verdict_post'], {'state': 'ALREADY_POSTED', 'codes': []})
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.dispatch()['verdict_post'], {'state': 'POSTED', 'codes': []})
+        self.assertEqual(self.posts, [])
+
+    def test_concurrent_replays_post_exactly_once(self):
+        self.complete_claim_without_posting()
+        # Create the private directory first so only the attempt claim races.
+        self.assertEqual(review_dispatch._verdict_post_dir(self.store), self.post_dir)
+        barrier = threading.Barrier(2, timeout=10)
+        real_create = review_dispatch._create_verdict_attempt
+
+        def racing_create(path, record):
+            # Both replays have read "no attempt yet" and now race to claim it.
+            barrier.wait()
+            return real_create(path, record)
+
+        results, errors = [], []
+
+        def replay():
+            try:
+                results.append(self.call())
+            except BaseException as exc:  # pragma: no cover - reported below
+                errors.append(exc)
+
+        with self.dispatch_patches(), \
+                patch.object(review_dispatch, '_create_verdict_attempt',
+                             side_effect=racing_create):
+            threads = [threading.Thread(target=replay) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(30)
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(item['verdict_post']['state'] for item in results),
+                         ['IN_PROGRESS', 'POSTED'])
+        self.assertEqual(self.posts, [(42, self.text)])
+
+    def test_replay_during_an_in_flight_post_observes_the_claim_and_does_not_post(self):
+        self.complete_claim_without_posting()
+        listing, release = threading.Event(), threading.Event()
+        outcome = []
+
+        def slow_list(pr_number):
+            listing.set()
+            release.wait(10)
+            return self.list_bodies(pr_number)
+
+        with self.dispatch_patches():
+            owner = threading.Thread(
+                target=lambda: outcome.append(self.call(lister=slow_list)))
+            owner.start()
+            try:
+                self.assertTrue(listing.wait(10))
+                second = self.call()
+            finally:
+                release.set()
+                owner.join(30)
+        self.assertEqual(second['verdict_post'],
+                         {'state': 'IN_PROGRESS', 'codes': ['VERDICT_POST_IN_PROGRESS']})
+        self.assertEqual(outcome[0]['verdict_post'], {'state': 'POSTED', 'codes': []})
+        self.assertEqual(self.posts, [(42, self.text)])
+
+    def test_post_and_receipt_failure_is_a_visible_error_never_success(self):
+        self.complete_claim_without_posting()
+
+        def failing_post(*_args):
+            raise RuntimeError('post refused')
+
+        with patch.object(review_dispatch, '_replace_verdict_attempt',
+                          side_effect=OSError('disk full')):
+            failed = self.dispatch(post=failing_post)
+        self.assertEqual(failed['verdict_post'], {
+            'state': 'FAILED',
+            'codes': ['VERDICT_POST_FAILED', 'VERDICT_POST_RECEIPT_WRITE_FAILED']})
+        self.assertEqual(self.posts, [])
+        # The unwritten attempt still holds the claim: no post until it is stale.
+        waiting = self.dispatch()
+        self.assertEqual(waiting['verdict_post']['state'], 'IN_PROGRESS')
+        self.assertEqual(self.posts, [])
+        self.make_stale(1)
+        retried = self.dispatch()
+        self.assertEqual(retried['verdict_post'], {'state': 'POSTED', 'codes': []})
+        self.assertEqual(self.posts, [(42, self.text)])
+
+    def test_recorded_post_failure_is_retried_once_by_the_next_replay(self):
+        self.complete_claim_without_posting()
+
+        def failing_post(*_args):
+            raise RuntimeError('post refused')
+
+        failed = self.dispatch(post=failing_post)
+        self.assertEqual(failed['verdict_post'],
+                         {'state': 'FAILED', 'codes': ['VERDICT_POST_FAILED']})
+        receipt = json.loads(self.attempt_path(1).read_text(encoding='utf-8'))
+        self.assertEqual((receipt['state'], receipt['code']),
+                         ('POST_FAILED', 'VERDICT_POST_FAILED'))
+        self.assertEqual(self.dispatch()['verdict_post'], {'state': 'POSTED', 'codes': []})
+        self.assertEqual(self.dispatch()['verdict_post'], {'state': 'POSTED', 'codes': []})
+        self.assertEqual(self.posts, [(42, self.text)])
+
+    def test_failed_fresh_post_keeps_claim_completed_and_withholds_text_from_caller(self):
+        def failing_post(*_args):
+            raise RuntimeError('post refused')
+
+        result = self.dispatch(post=failing_post)
+        self.assertEqual(result['state'], 'COMPLETED')
+        self.assertEqual(result['verdict_post'],
+                         {'state': 'FAILED', 'codes': ['VERDICT_POST_FAILED']})
+        self.assertNotIn('review_text', result)
+        claim = self.store.get(self.task_id)['review_dispatch_claim'][0]
+        self.assertEqual(claim['state'], 'COMPLETED')
+        self.assertEqual(claim['review_result']['review_text'], self.text)
+        self.assertEqual(self.runs, ['called'])
+
+    def test_unknown_post_outcome_blocks_reposting_until_stale_then_lists_first(self):
+        self.complete_claim_without_posting()
+
+        def landed_then_timed_out(pr_number, body, repo_root):
+            self.post(pr_number, body, repo_root)
+            raise review_dispatch._VerdictPostUnknown('VERDICT_POST_TIMEOUT')
+
+        first = self.dispatch(post=landed_then_timed_out)
+        self.assertEqual(first['verdict_post'],
+                         {'state': 'UNKNOWN', 'codes': ['VERDICT_POST_OUTCOME_UNKNOWN']})
+        self.assertEqual(self.dispatch()['verdict_post']['state'], 'UNKNOWN')
+        self.make_stale(1)
+        self.assertEqual(self.dispatch()['verdict_post'],
+                         {'state': 'ALREADY_POSTED', 'codes': []})
+        self.assertEqual(self.posts, [(42, self.text)])
+
+    def test_unavailable_comment_listing_never_posts(self):
+        self.complete_claim_without_posting()
+
+        def no_listing(_pr_number):
+            raise RuntimeError('listing unavailable')
+
+        result = self.dispatch(lister=no_listing)
+        self.assertEqual(result['verdict_post'],
+                         {'state': 'FAILED', 'codes': ['VERDICT_COMMENTS_UNAVAILABLE']})
+        self.assertEqual(self.posts, [])
+
+    def test_receipt_storage_failure_never_posts_and_is_reported(self):
+        self.complete_claim_without_posting()
+        with patch.object(review_dispatch, '_create_verdict_attempt',
+                          side_effect=PermissionError('read-only')):
+            result = self.dispatch()
+        self.assertEqual(result['verdict_post'], {
+            'state': 'UNAVAILABLE', 'codes': ['VERDICT_POST_RECEIPT_UNAVAILABLE']})
+        self.assertEqual(self.posts, [])
+        self.assertFalse(self.attempt_path(1).exists())
+
+    def test_symlinked_post_directory_never_posts(self):
+        self.complete_claim_without_posting()
+        target = Path(self.temp.name).resolve() / 'elsewhere'
+        target.mkdir()
+        self.post_dir.symlink_to(target, target_is_directory=True)
+        result = self.dispatch()
+        self.assertEqual(result['verdict_post']['state'], 'UNAVAILABLE')
+        self.assertEqual(self.posts, [])
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_withheld_verdict_is_never_posted(self):
+        with patch.object(task_submission_cli, '_screen_text',
+                          side_effect=LLMToolError('screen refused')):
+            result = self.dispatch()
+        self.assertEqual(result['verdict'], 'BLOCKED')
+        self.assertEqual(result['review_dispatch_code'], 'REVIEW_TEXT_WITHHELD')
+        self.assertNotIn('verdict_post', result)
+        self.assertEqual(self.posts, [])
+        self.assertFalse(self.post_dir.exists())
+
+    def test_default_poster_sends_text_verbatim_on_stdin_with_ai_identity(self):
+        with patch.object(review_dispatch.shutil, 'which', return_value='/bin/gh'), \
+                patch.object(review_dispatch.subprocess, 'run',
+                             return_value=SimpleNamespace(returncode=0)) as run:
+            _REAL_POST_PR_COMMENT(42, self.text, '/repo')
+        self.assertEqual(run.call_args.args[0],
+                         ['/bin/gh', 'pr', 'comment', '42', '--body-file', '-'])
+        self.assertEqual(run.call_args.kwargs['input'], self.text.encode('utf-8'))
+        self.assertEqual(run.call_args.kwargs['cwd'], '/repo')
+        self.assertEqual(run.call_args.kwargs['env']['GH_CONFIG_DIR'],
+                         review_dispatch.github_identity.ai_gh_config_dir(
+                             run.call_args.kwargs['env']['HOME']))
+        self.assertNotIn(self.text, ' '.join(run.call_args.args[0]))
+        with patch.object(review_dispatch.shutil, 'which', return_value='/bin/gh'), \
+                patch.object(review_dispatch.subprocess, 'run',
+                             return_value=SimpleNamespace(returncode=1)), \
+                self.assertRaises(RuntimeError):
+            _REAL_POST_PR_COMMENT(42, self.text, '/repo')
+        with patch.object(review_dispatch.shutil, 'which', return_value='/bin/gh'), \
+                patch.object(review_dispatch.subprocess, 'run',
+                             side_effect=subprocess.TimeoutExpired('gh', 60)), \
+                self.assertRaises(review_dispatch._VerdictPostUnknown):
+            _REAL_POST_PR_COMMENT(42, self.text, '/repo')
+        with patch.object(review_dispatch.shutil, 'which', return_value=None), \
+                self.assertRaises(RuntimeError):
+            _REAL_POST_PR_COMMENT(42, self.text, '/repo')
+
+    def test_default_lister_reads_every_page_and_refuses_partial_reads(self):
+        full = [{'body': f'comment {index}'} for index in range(100)]
+        with patch.object(review_dispatch.task_completion, '_github_get',
+                          side_effect=[full, [{'body': self.text}, {'id': 1}]]) as get:
+            bodies = _REAL_LIST_PR_COMMENT_BODIES(42)
+        self.assertEqual(len(bodies), 101)
+        self.assertEqual(bodies[-1], self.text)
+        self.assertEqual([call.args[0] for call in get.call_args_list], [
+            'issues/42/comments?per_page=100&page=1',
+            'issues/42/comments?per_page=100&page=2'])
+        with patch.object(review_dispatch.task_completion, '_github_get',
+                          return_value={'message': 'not a list'}), \
+                self.assertRaises(RuntimeError):
+            _REAL_LIST_PR_COMMENT_BODIES(42)
+        with patch.object(review_dispatch.task_completion, '_github_get',
+                          return_value=full), \
+                self.assertRaises(RuntimeError):
+            _REAL_LIST_PR_COMMENT_BODIES(42)
 
 
 class CodexQuotaRecordingTests(unittest.TestCase):

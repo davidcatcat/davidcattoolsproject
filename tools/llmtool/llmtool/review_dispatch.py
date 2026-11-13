@@ -2,6 +2,7 @@
 
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
+import hashlib
 import io
 import json
 import math
@@ -12,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 
 from .errors import LLMToolError
 from . import github_identity, role_config, task_completion, worker_dispatch
@@ -41,6 +43,18 @@ REVIEW_OUTPUT_ABSENT = 'REVIEW_OUTPUT_ABSENT'
 _REVIEW_REFUSALS_DIR = 'review-refusals'
 _RECEIPT_NAME_RE = re.compile(r'^[0-9a-zA-Z._-]+-[0-9a-zA-Z._-]+-[0-9]+\.json\Z')
 _RECEIPT_PRUNE_LIMIT = 64
+# #1705: one exclusive attempt file per post attempt of a COMPLETED Codex
+# verdict. Creating it with O_EXCL is the claim that lets exactly one caller
+# list the PR comments and post; every other caller sees it and does not post.
+_VERDICT_POSTS_DIR = 'review-verdict-posts'
+_VERDICT_POST_MAX_ATTEMPTS = 3
+# An attempt still POSTING (or of unknown outcome) after this many seconds is
+# treated as abandoned; the next attempt lists the PR before it posts again.
+_VERDICT_POST_STALE_SECONDS = 900
+_VERDICT_POST_TIMEOUT = 60
+_VERDICT_POST_STATES = frozenset(('POSTING', 'POSTED', 'POST_FAILED', 'POST_UNKNOWN'))
+_COMMENT_PAGE_SIZE = 100
+_COMMENT_PAGE_LIMIT = 20
 
 
 def _unique_json_object(pairs):
@@ -620,10 +634,285 @@ def _write_refusal_receipt(*, store, task_id, pr_number, head, version,
     return receipt_path
 
 
+class _VerdictPostUnknown(Exception):
+    """The post may or may not have reached GitHub (for example a timeout)."""
+
+
+def _gh_env():
+    home = os.environ.get('HOME') or os.path.expanduser('~')
+    return {'PATH': task_completion._GH_PATH, 'HOME': home,
+            'LC_ALL': 'C', 'GH_PROMPT_DISABLED': '1',
+            'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1',
+            'GH_CONFIG_DIR': github_identity.ai_gh_config_dir(home)}
+
+
+def _post_pr_comment(pr_number, body, repo_root):
+    """Post body verbatim as one PR comment; raise on any non-success."""
+    gh = shutil.which('gh', path=task_completion._GH_PATH)
+    if gh is None:
+        raise RuntimeError('VERDICT_POST_GH_UNAVAILABLE')
+    try:
+        result = subprocess.run(
+            [gh, 'pr', 'comment', str(pr_number), '--body-file', '-'],
+            cwd=str(repo_root), env=_gh_env(), input=body.encode('utf-8'),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False, timeout=_VERDICT_POST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise _VerdictPostUnknown('VERDICT_POST_TIMEOUT') from None
+    if result.returncode:
+        raise RuntimeError('VERDICT_POST_GH_FAILED')
+
+
+def _list_pr_comment_bodies(pr_number):
+    """Return every PR comment body; raise when the read is not complete."""
+    bodies = []
+    for page in range(1, _COMMENT_PAGE_LIMIT + 1):
+        comments = task_completion._github_get(
+            f'issues/{pr_number}/comments?per_page={_COMMENT_PAGE_SIZE}&page={page}')
+        if type(comments) is not list:
+            raise RuntimeError('VERDICT_COMMENTS_UNAVAILABLE')
+        for comment in comments:
+            body = comment.get('body') if type(comment) is dict else None
+            if type(body) is str:
+                bodies.append(body)
+        if len(comments) < _COMMENT_PAGE_SIZE:
+            return bodies
+    raise RuntimeError('VERDICT_COMMENTS_UNAVAILABLE')
+
+
+def _same_comment_text(body, text):
+    def normal(value):
+        return value.replace('\r\n', '\n').strip()
+    return type(body) is str and normal(body) == normal(text)
+
+
+def _verdict_post_dir(store):
+    root = getattr(store, 'root', None)
+    if not isinstance(root, Path):
+        return None
+    directory = root.parent / _VERDICT_POSTS_DIR
+    if directory.is_symlink():
+        return None
+    from . import high_debug
+    try:
+        high_debug._private_directory(directory)
+    except FileExistsError:
+        # Another caller created it first; check it again the same way.
+        high_debug._private_directory(directory)
+    if directory.is_symlink() or not directory.is_dir():
+        return None
+    return directory
+
+
+def _verdict_attempt_path(directory, task_id, pr_number, head, version, attempt):
+    return directory / f'{task_id}-pr{pr_number}-{head}-v{version}-attempt{attempt}.json'
+
+
+def _read_verdict_attempt(path):
+    """Return None when absent, else the attempt state and mtime."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return {'state': 'INVALID', 'mtime': info.st_mtime}
+    record = None
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        with os.fdopen(fd, 'rb') as handle:
+            data = handle.read(8192)
+        record = json.loads(data.decode('utf-8'))
+    except (OSError, ValueError, UnicodeError):
+        record = None
+    state = record.get('state') if type(record) is dict else None
+    if state not in _VERDICT_POST_STATES:
+        # Created but not yet (or never) written: its owner may be posting.
+        state = 'POSTING'
+    return {'state': state, 'mtime': info.st_mtime}
+
+
+_EXCLUSIVE_CREATE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+
+
+def _write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+    os.fsync(fd)
+
+
+def _write_new_file(path, data):
+    fd = os.open(path, _EXCLUSIVE_CREATE, 0o600)
+    try:
+        _write_all(fd, data)
+    finally:
+        os.close(fd)
+
+
+def _create_verdict_attempt(path, record):
+    """Create the attempt exclusively; FileExistsError means another caller owns it."""
+    data = (json.dumps(record, sort_keys=True) + '\n').encode('utf-8')
+    fd = os.open(path, _EXCLUSIVE_CREATE, 0o600)
+    # From here this caller owns the path; only it may remove it.
+    try:
+        _write_all(fd, data)
+    except BaseException:
+        os.close(fd)
+        # Nothing was posted under this claim, so it is released.
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    os.close(fd)
+
+
+def _replace_verdict_attempt(path, record):
+    data = (json.dumps(record, sort_keys=True) + '\n').encode('utf-8')
+    temp = path.with_name(f'.{path.name}.{os.urandom(8).hex()}.tmp')
+    _write_new_file(temp, data)
+    try:
+        os.replace(temp, path)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
+def _ensure_verdict_posted(*, store, task_id, claim, text, repo_root,
+                           post_comment, list_comments):
+    """Post one COMPLETED Codex verdict at most once; never report a false success.
+
+    Returns {'state': ..., 'codes': [...]} with fixed names only. States:
+    POSTED and ALREADY_POSTED mean the exact text is on the PR; IN_PROGRESS
+    means another caller holds the claim; UNKNOWN means a post may have
+    happened; FAILED means nothing is known to be posted; UNAVAILABLE means
+    no exclusive claim could be taken, so this call did not post.
+    """
+    pr_number, head, version = claim.get('pr'), claim.get('head_sha'), claim.get('version')
+    if (type(task_id) is not str or re.fullmatch(r'[0-9A-Za-z_-]{1,64}', task_id) is None or
+            type(pr_number) is not int or pr_number < 1 or
+            type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None or
+            type(version) is not int or version < 1):
+        return {'state': 'FAILED', 'codes': ['VERDICT_POST_BINDING_INVALID']}
+    try:
+        directory = _verdict_post_dir(store)
+    except Exception:
+        directory = None
+    if directory is None:
+        return {'state': 'UNAVAILABLE', 'codes': ['VERDICT_POST_RECEIPT_UNAVAILABLE']}
+    digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+    def record(attempt, state, code=None):
+        value = {'task_id': task_id, 'pr': pr_number, 'head': head, 'version': version,
+                 'reviewer_task': claim.get('reviewer_task'), 'attempt': attempt,
+                 'state': state, 'review_text_sha256': digest, 'recorded_at': _now()}
+        if code is not None:
+            value['code'] = code
+        return value
+
+    latest, attempt = None, 0
+    for number in range(1, _VERDICT_POST_MAX_ATTEMPTS + 1):
+        try:
+            found = _read_verdict_attempt(_verdict_attempt_path(
+                directory, task_id, pr_number, head, version, number))
+        except OSError:
+            return {'state': 'UNAVAILABLE', 'codes': ['VERDICT_POST_RECEIPT_UNAVAILABLE']}
+        if found is None:
+            break
+        if found['state'] == 'INVALID':
+            return {'state': 'FAILED', 'codes': ['VERDICT_POST_RECEIPT_INVALID']}
+        if found['state'] == 'POSTED':
+            return {'state': 'POSTED', 'codes': []}
+        latest, attempt = found, number
+    if latest is not None and latest['state'] in ('POSTING', 'POST_UNKNOWN'):
+        if time.time() - latest['mtime'] < _VERDICT_POST_STALE_SECONDS:
+            if latest['state'] == 'POST_UNKNOWN':
+                return {'state': 'UNKNOWN', 'codes': ['VERDICT_POST_OUTCOME_UNKNOWN']}
+            return {'state': 'IN_PROGRESS', 'codes': ['VERDICT_POST_IN_PROGRESS']}
+    attempt += 1
+    if attempt > _VERDICT_POST_MAX_ATTEMPTS:
+        return {'state': 'FAILED', 'codes': ['VERDICT_POST_ATTEMPTS_EXHAUSTED']}
+    path = _verdict_attempt_path(directory, task_id, pr_number, head, version, attempt)
+    try:
+        _create_verdict_attempt(path, record(attempt, 'POSTING'))
+    except FileExistsError:
+        # Another caller won this attempt; it alone lists and posts.
+        return {'state': 'IN_PROGRESS', 'codes': ['VERDICT_POST_IN_PROGRESS']}
+    except Exception:
+        return {'state': 'UNAVAILABLE', 'codes': ['VERDICT_POST_RECEIPT_UNAVAILABLE']}
+
+    def finish(state, outcome, code, *codes):
+        try:
+            _replace_verdict_attempt(path, record(attempt, outcome, code))
+        except Exception:
+            # The attempt stays POSTING, so no other caller posts before it
+            # is stale; then the PR is listed again before any new post.
+            codes = codes + ('VERDICT_POST_RECEIPT_WRITE_FAILED',)
+        return {'state': state, 'codes': list(codes)}
+
+    try:
+        bodies = list_comments(pr_number)
+        if type(bodies) is not list:
+            raise RuntimeError('VERDICT_COMMENTS_UNAVAILABLE')
+    except Exception:
+        return finish('FAILED', 'POST_FAILED', 'VERDICT_COMMENTS_UNAVAILABLE',
+                      'VERDICT_COMMENTS_UNAVAILABLE')
+    if any(_same_comment_text(body, text) for body in bodies):
+        return finish('ALREADY_POSTED', 'POSTED', None)
+    try:
+        post_comment(pr_number, text, repo_root)
+    except _VerdictPostUnknown:
+        return finish('UNKNOWN', 'POST_UNKNOWN', 'VERDICT_POST_OUTCOME_UNKNOWN',
+                      'VERDICT_POST_OUTCOME_UNKNOWN')
+    except Exception:
+        return finish('FAILED', 'POST_FAILED', 'VERDICT_POST_FAILED', 'VERDICT_POST_FAILED')
+    return finish('POSTED', 'POSTED', None)
+
+
+def _completed_return(*, store, task_id, claim, repo_root, post_comment,
+                      list_comments, fresh):
+    """Return a COMPLETED Codex claim after making sure its verdict is posted.
+
+    #1705: posting used to be left to the caller, so a COMPLETED claim whose
+    caller failed or never posted kept its verdict off the PR for good.
+    """
+    result = claim.get('review_result')
+    output = _review_return(claim, result)
+    text = output.get('review_text')
+    stored = result.get('review_text') if type(result) is dict else None
+    if type(text) is not str or not text or text != stored:
+        return output  # Withheld text is never published.
+    if (result.get('task_id') != task_id or result.get('head') != claim.get('head_sha')):
+        output.pop('review_text', None)
+        output['verdict_post'] = {'state': 'FAILED', 'codes': ['VERDICT_POST_BINDING_INVALID']}
+        return output
+    status = _ensure_verdict_posted(
+        store=store, task_id=task_id, claim=claim, text=stored, repo_root=repo_root,
+        post_comment=post_comment or _post_pr_comment,
+        list_comments=list_comments or _list_pr_comment_bodies)
+    output['verdict_post'] = status
+    if fresh and status['state'] != 'UNAVAILABLE':
+        # This call owned (or saw another owner of) the post, so the caller
+        # must not post the text again. Only when no exclusive claim could be
+        # taken does the caller keep the text, as before #1705.
+        output.pop('review_text', None)
+    return output
+
+
 def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     create_d6=None, dispatch_session=None, bind_session=None,
-                    prompt_renderer=None, codex_runner=None, reviewer=None):
-    """Claim once, create a read-only Reviewer D6 and bind its dispatched session."""
+                    prompt_renderer=None, codex_runner=None, reviewer=None,
+                    post_comment=None, list_comments=None):
+    """Claim once, create a read-only Reviewer D6 and bind its dispatched session.
+
+    A COMPLETED Codex claim, fresh or replayed, has its stored verdict text
+    posted on the PR at most once (#1705); see ``verdict_post`` in the result.
+    When a fresh call took part in posting, the result carries no review_text,
+    so a caller never posts the verdict a second time.
+    """
     task = store.get(task_id)
     _, executor, head, _base, reviewer_key = _preflight(
         store, task_id, executor_task, pr_number, version, task=task,
@@ -643,8 +932,11 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         if prior.get('executor_task') != executor_task:
             _refuse('REVIEW_DISPATCH_CLAIM_MISMATCH')
         if prior.get('state') == 'COMPLETED':
-            result = prior.get('review_result')
-            return _review_return(prior, result)
+            # Never re-dispatched; only a missing verdict comment is repaired.
+            return _completed_return(
+                store=store, task_id=task_id, claim=prior,
+                repo_root=str(Path(executor.common_dir).parent),
+                post_comment=post_comment, list_comments=list_comments, fresh=False)
         if prior['state'] == 'CLAIMED':
             unknown = dict(prior, state='UNKNOWN', updated_at=_now())
             updated_claims = [unknown if claim is prior else claim for claim in claims]
@@ -803,9 +1095,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         updated_claims = [dispatched if item is claim else item for item in claims + [claim]]
         store.compare_and_update(task_id, expected={'review_dispatch_claim': claims + [claim]},
                                  review_dispatch_claim=updated_claims)
-        if reviewer_key == 'codex-reviewer':
-            return _review_return(dispatched, codex_result)
-        return dispatched
+        if reviewer_key != 'codex-reviewer':
+            return dispatched
     except Exception as exc:
         unknown = dict(claim, state='UNKNOWN', updated_at=_now())
         if session_id is not None:
@@ -860,3 +1151,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         if hasattr(exc, 'review_refusal'):
             outcome_error.review_refusal = exc.review_refusal
         raise outcome_error from None
+    # The COMPLETED claim is durable. Posting happens outside the block above,
+    # so a post failure never turns the finished review into UNKNOWN; it is
+    # reported in verdict_post and a replay of this claim retries it.
+    return _completed_return(
+        store=store, task_id=task_id, claim=dispatched, repo_root=repo_root,
+        post_comment=post_comment, list_comments=list_comments, fresh=True)
