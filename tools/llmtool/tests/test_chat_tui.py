@@ -1407,7 +1407,8 @@ class WidgetTests(Base):
             self.assertTrue(ui.send_interrupted)
             self.assertIn('interrupting', ui.status_text())
             gate.set()                      # one more chunk arrives, then the stream stops
-            await self.idle(ui)
+            # #1750: wait on the observed state (generous bound), not a fixed poll budget.
+            await self.until(ui, lambda ui: not ui.busy, 'interrupted request finished')
 
         def after(ui):
             self.assertEqual(ui.input.text, '')
@@ -1418,8 +1419,15 @@ class WidgetTests(Base):
             self.assertIn('interrupted', ui.status_text())
             self.assertGreater(ui._default_timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
 
-        ui, result = self.drive(['question\r', streaming, lone_escape, escaped, after,
-                                 lambda ui: self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen),
+        async def restored(ui):
+            # #1750: the Esc timeout is re-synced before the next draw (before_render), and
+            # that draw can come later than the step on a slow runner; wait for it, then
+            # check that the default Esc Enter window is back.
+            await self.until(ui, lambda ui: ui.app.timeoutlen == ui._default_timeoutlen,
+                             'default Esc timeout after the reply')
+            self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+
+        ui, result = self.drive(['question\r', streaming, lone_escape, escaped, after, restored,
                                  '/status\r'])
         self.assertEqual(result, 0)
         self.assertEqual([t['content'] for t in self.session.history], ['question', 'Hello world'])
@@ -7179,14 +7187,26 @@ class PMConversationTests(BoundedPMTest):
 
     def test_w60_double_click_in_the_detail_selects_a_word(self):
         async def clicked(ui, copies):
-            await self.until(ui, lambda ui: 'Status (from' in ui.task_view.text, 'status row')
-            left, top, _height = ui._pane_geometry()
-            lines = ui.task_view.text.splitlines()
+            view = ui.task_view
+            await self.until(ui, lambda ui: 'Status (from' in view.text, 'status row')
+            lines = view.text.splitlines()
             row = next(n for n, line in enumerate(lines) if line.startswith('Status (from'))
             self.assertTrue(all(get_cwidth(line) < 80 for line in lines[:row]))  # no wrap above
-            x = left + 1 + get_cwidth(lines[row][:lines[row].index('TaskStore')]) + 2
+            column = get_cwidth(lines[row][:lines[row].index('TaskStore')]) + 2
+            word = len('\n'.join(lines[:row])) + (1 if row else 0) + lines[row].index('TaskStore')
+
+            def aimed(ui):
+                # #1750: the pane is laid out at draw time; wait until the drawn rows put the
+                # click cell inside the word, instead of trusting a fixed delay.
+                return (ui._pane_geometry() is not None
+                        and word <= view.offset_at(view.top + row, column) < word + len('TaskStore'))
+            await self.until(ui, aimed, 'status row drawn')
+            left, top, _height = ui._pane_geometry()
+            x = left + 1 + column
             y = top + 1 + row
-            await self.w60_mouse(ui, press(x, y), release(x, y), press(x, y), release(x, y))
+            # #1750: both clicks in one input write, so the key processor handles them in one
+            # pass; the gap between them no longer depends on how slowly the runner sleeps.
+            ui.app.input.send_text(press(x, y) + release(x, y) + press(x, y) + release(x, y))
             # #1573: the last release can still be queued; wait until its copy is recorded.
             await self.until(ui, lambda ui: ui.task_view.wait_copy() and copies, 'word copied')
             self.assertEqual(copies[-1:], ['TaskStore'])
