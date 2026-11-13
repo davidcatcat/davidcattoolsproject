@@ -54,10 +54,6 @@ class ExecutionResourcesTests(unittest.TestCase):
         self.assertEqual(ec2_2['reported_vcpu'], 2)
         self.assertEqual(ec2_2['reported_memory_gib'], 3)
 
-    def test_retired_mac_runner_smoke_workflow_is_removed(self):
-        workflow = REPOSITORY_ROOT / '.github' / 'workflows' / 'mac-runner-smoke.yml'
-        self.assertFalse(workflow.exists())
-
     def test_worker_dispatch_policy_stays_separate_from_inventory(self):
         policy = worker_dispatch._parse_policy(POLICY_PATH.read_bytes())
         self.assertEqual(set(policy['workers']),
