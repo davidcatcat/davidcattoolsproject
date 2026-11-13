@@ -5,9 +5,9 @@ fake SSH transport; nothing reaches EC2, Git, GitHub or CI.
 
 The output-screening tests (PR #1763, CWE-532) run the real sensitive screen.
 Their only credential-shaped value is ``synthetic_credential()``: labelled
-synthetic under the #763/#981 sensitive-detector exception, built at runtime
-from fragments (so the source holds no credential-shaped literal), never a
-real credential, and subject to independent review.
+synthetic under the #763/#981 sensitive-detector exception, decoded at runtime
+from hex (so the source holds no credential-shaped literal or fragments of
+one), never a real credential, and subject to independent review.
 """
 
 import json
@@ -35,14 +35,20 @@ TESTS = ('test_alpha.AlphaTests.test_one', 'test_beta.BetaTests.test_two',
 NOW = 1_763_000_000
 
 
+# SYNTHETIC (#763/#981): hex of the label-and-prefix part of the fixture. The
+# source holds neither a credential-shaped literal nor joinable fragments of one.
+_SYNTHETIC_PREFIX_HEX = '746f6b656e3d736b2d'
+
+
 def synthetic_credential():
     """SYNTHETIC (#763/#981): a credential-shaped value built at runtime, never real.
 
-    The same construction the Task-path excerpt test in test_remote_test uses;
+    Decodes to the same runtime value as the Task-path excerpt test in
+    test_remote_test (label, prefix and a run of one letter);
     ``test_synthetic_fixture_is_flagged_by_the_real_screen`` proves the real
     screen flags it, so a test that passes with it exercises real refusals.
     """
-    return ''.join(('to', 'ken', '=')) + ''.join(('sk', '-')) + 'a' * 16
+    return bytes.fromhex(_SYNTHETIC_PREFIX_HEX).decode('ascii') + 'a' * 16
 
 
 def observation(tests, *, observed_at=STAMP, merges=(MID, HEAD)):
