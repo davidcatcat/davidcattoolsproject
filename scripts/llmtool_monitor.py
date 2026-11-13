@@ -6946,7 +6946,10 @@ WAITING_POLICY_READ = 4096
 WAITING_REASON = re.compile(r"^[A-Z0-9_]{1,64}$")
 WAITING_END_STATES = ("CLOSED", "DROPPED", "STOPPED", "FAILED_FINAL")
 WAITING_HIDDEN = "(hidden)"    # shown instead of an invalid or screened value
-_waiting_parsed: dict = {}     # root -> {path: ((st_ino, st_mtime_ns, st_size), entries)}
+WAITING_SCAN = 4096            # Task files looked at (lstat) per call; the rest on later calls
+WAITING_UNSEEN = "task 檔案尚未全部讀過，WAITING 可能不完整"
+_waiting_parsed: dict = {}     # root -> {name: (file key or None, entries, read ok)}
+_waiting_cursor: dict = {}     # root -> last name of the previous page; the next page follows it
 _store_waiting_lock = threading.Lock()
 _store_waiting_loaded: list = []    # [task_store module or None] once tried
 
@@ -7029,74 +7032,113 @@ def _waiting_entry(record) -> WaitingRecord | None:
     return WaitingRecord(task[:8], reason, since, text)
 
 
-def _waiting_task_files(root: str) -> tuple[list, bool]:
-    """([(mtime_ns, path, file key)] of every regular, singly linked *.json file in
-    root, newest first; whether the listing stopped at REMOTE_TEST_SCAN entries).
+def _waiting_task_names(root: str) -> list[str]:
+    """Sorted names of every *.json entry in root, with no cap.
 
-    Never follows a link. Raises FileNotFoundError when root is absent and
+    Names only: nothing is stat'ed, opened or followed here, so the listing
+    costs one directory read. Raises FileNotFoundError when root is absent and
     OSError when it cannot be listed."""
-    found, seen, capped = [], 0, False
     with os.scandir(root) as entries:
-        for entry in entries:
-            if seen >= REMOTE_TEST_SCAN:
-                capped = True   # more entries remain; a WAITING Task may be among them
-                break
-            seen += 1
-            if not entry.name.endswith(".json"):
-                continue
-            try:
-                info = entry.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
-                found.append((info.st_mtime_ns, entry.path,
-                              (info.st_ino, info.st_mtime_ns, info.st_size)))
-    found.sort(reverse=True)
-    return found, capped
+        return sorted(entry.name for entry in entries if entry.name.endswith(".json"))
+
+
+def _waiting_page(root: str, names: list[str], parsed: dict) -> list[str]:
+    """The names looked at on this call, at most WAITING_SCAN of them.
+
+    Names never looked at yet come first, so a new Task file shows at once.
+    The rest of the page continues after the previous page's last name and
+    wraps round, so every file is looked at again within
+    ceil(len(names) / WAITING_SCAN) calls (Codex v1 F1, PR #1751)."""
+    limit = max(1, WAITING_SCAN)
+    if len(names) <= limit:
+        return list(names)
+    page = [name for name in names if name not in parsed][:limit]
+    picked = set(page)
+    cursor = _waiting_cursor.get(root, "")
+    start = next((index for index, name in enumerate(names) if name > cursor), 0)
+    last = None
+    for name in names[start:] + names[:start]:
+        if len(page) >= limit:
+            break
+        if name not in picked:
+            page.append(name)
+            picked.add(name)
+            last = name
+    if last is not None:
+        _waiting_cursor[root] = last
+    return page
 
 
 def waiting_records(root: str | None = None) -> tuple[list[WaitingRecord], str]:
     """Every WAITING Task in root; the second value names any shortfall.
 
-    Codex v1 F1 (PR #1744): unlike the newest-32 readers, this looks at every
-    Task file, so an old WAITING Task still gets its row. It stays bounded: the
-    folder listing stops at REMOTE_TEST_SCAN entries, a file over
-    REMOTE_TEST_READ is never read, and an unchanged file (same inode, mtime
-    and size) is served from the cache without being read again. New or
-    changed files are read newest first up to WAITING_BUDGET bytes per call;
-    the rest are read on later calls. Any file not covered names a shortfall,
-    so a WAITING Task is never dropped silently."""
+    Codex v1 F1 (PR #1744, PR #1751): unlike the newest-32 readers, this covers
+    every Task file, so an old WAITING Task still gets its row. The listing has
+    no cap; the work per call is bounded instead. At most WAITING_SCAN files
+    are looked at (lstat) per call, a page at a time, never-seen files first;
+    the others keep their last result until their page comes round again. A
+    link or a hard-linked file is never read; a file over REMOTE_TEST_READ is
+    never read; an unchanged file (same inode, mtime and size) is served from
+    the cache. New or changed files are read newest first up to WAITING_BUDGET
+    bytes per call; the rest are read on later calls. Any file not yet covered
+    names a shortfall, so a WAITING Task is never dropped silently."""
     root = LLMTOOL_TASKS if root is None else root
     try:
-        listed, capped = _waiting_task_files(root)
+        names = _waiting_task_names(root)
     except FileNotFoundError:
-        listed, capped = [], False
+        names = []
     except OSError:
         return [], WAITING_UNREADABLE
-    budget, short, kept, entries = WAITING_BUDGET, False, {}, []
     parsed = _waiting_parsed.get(root, {})
-    for _, path, key in listed:
-        if key[2] > REMOTE_TEST_READ:
-            short = True
+    page = _waiting_page(root, names, parsed)
+    on_page = set(page)
+    stamped, kept = [], {}
+    for name in page:
+        try:
+            info = os.lstat(os.path.join(root, name))
+        except OSError:
+            continue   # gone since the listing
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            kept[name] = (None, (), True)   # never read; not a Task file to show
             continue
-        cached = parsed.get(path)
-        if cached and cached[0] == key:
-            record_entries = cached[1]
+        stamped.append((info.st_mtime_ns, name, (info.st_ino, info.st_mtime_ns, info.st_size)))
+    budget = WAITING_BUDGET
+    for _, name, key in sorted(stamped, reverse=True):
+        if key[2] > REMOTE_TEST_READ:
+            kept[name] = (key, (), False)   # never read; named as a shortfall
+            continue
+        cached = parsed.get(name)
+        if cached and cached[0] == key and cached[2]:
+            kept[name] = cached
+            continue
+        loaded = _task_load(os.path.join(root, name), budget)
+        if loaded is None:
+            # Unreadable now, or over this call's budget: keep any earlier rows,
+            # name the shortfall and read it again when its page comes round.
+            kept[name] = (None, cached[1] if cached else (), False)
+            continue
+        key, record, used = loaded
+        budget -= used
+        entry = _waiting_entry(record)
+        kept[name] = (key, (entry,) if entry is not None else (), True)
+    unseen = False
+    for name in names:
+        if name in on_page:
+            continue
+        if name in parsed:
+            kept[name] = parsed[name]   # looked at on an earlier page
         else:
-            loaded = _task_load(path, budget)
-            if loaded is None:   # unreadable now, or over this call's budget
-                short = True
-                continue
-            key, record, used = loaded
-            budget -= used
-            entry = _waiting_entry(record)
-            record_entries = (entry,) if entry is not None else ()
-        kept[path] = (key, record_entries)
-        entries.extend(record_entries)
+            unseen = True
+    short = any(not value[2] for value in kept.values())
     if root not in _waiting_parsed and len(_waiting_parsed) >= 8:
         _waiting_parsed.clear()   # one root in use; tests pass many
+        _waiting_cursor.clear()
     _waiting_parsed[root] = kept
-    problem = REMOTE_TEST_CAPPED if capped else REMOTE_TEST_OVER_BUDGET if short else ""
+    entries = []
+    for _, _, value in sorted(((value[0][1] if value[0] else 0, name, value)
+                               for name, value in kept.items()), reverse=True):
+        entries.extend(value[1])
+    problem = WAITING_UNSEEN if unseen else REMOTE_TEST_OVER_BUDGET if short else ""
     return entries, problem
 
 
@@ -7155,10 +7197,11 @@ def waiting_lines(records, now, hours=WAITING_NOTIFY_HOURS,
     """[(line, style)]: one row per WAITING Task, notice-due rows first and marked.
 
     Every WAITING Task gets its own row; none is folded into a count. The screen
-    may scroll or cut rows to fit, but this list never drops a Task (Codex v1 F1)."""
+    may scroll or cut rows to fit, but this list never drops a Task (Codex v1 F1).
+    A shortfall is shown even when no WAITING Task was found (Codex v1 F1, PR #1751)."""
     found = [record for record in records or [] if isinstance(record, WaitingRecord)]
     if not found:
-        return []
+        return [(f"WAITING 清單可能不完整：{problem}", "")] if problem else []
     ordered = sorted(((not waiting_notice_due(record.reason, record.since, now, hours),
                        record.since, record.task, record) for record in found),
                      key=lambda item: item[:3])

@@ -10569,18 +10569,23 @@ class WaitingTaskTests(unittest.TestCase):
         self.assertIn("已等 0 分鐘", mon.waiting_lines([ahead], self.NOW)[0][0])
         # Codex v1 F1: one row per WAITING Task, never a cap with an aggregate count.
         many = [replace(record, task=f"{index:08x}") for index in range(12)]
-        rows = mon.waiting_lines(many, self.NOW, problem=mon.REMOTE_TEST_CAPPED)
+        rows = mon.waiting_lines(many, self.NOW, problem=mon.WAITING_UNSEEN)
         self.assertEqual(len(rows), len(many) + 1)
         self.assertEqual(rows[:-1], [
             (f"WAITING：task {index:08x}（QUOTA，已等 3 小時）恢復條件：{self.RESUME}", "")
             for index in range(12)])
         self.assertFalse(any("另有" in line for line, _ in rows))
-        self.assertEqual(rows[-1], (f"WAITING 清單可能不完整：{mon.REMOTE_TEST_CAPPED}", ""))
+        self.assertEqual(rows[-1], (f"WAITING 清單可能不完整：{mon.WAITING_UNSEEN}", ""))
         # Every row also reaches the office view, which wraps rows but drops none.
         view = mon.office_view([], top=mon.office_top(None, [], self.NOW, waiting=rows))
         for index in range(12):
             self.assertTrue(any(f"task {index:08x}" in line for line, _ in view))
-        self.assertEqual(mon.waiting_lines([], self.NOW, problem="x"), [])
+        # Codex v1 F1 (PR #1751): a shortfall shows even when no WAITING Task was found.
+        self.assertEqual(mon.waiting_lines([], self.NOW, problem="x"),
+                         [("WAITING 清單可能不完整：x", "")])
+        self.assertEqual(mon.waiting_lines(["not a record"], self.NOW, problem="x"),
+                         [("WAITING 清單可能不完整：x", "")])
+        self.assertEqual(mon.waiting_lines([], self.NOW), [])
         self.assertEqual(mon.waiting_lines(None, self.NOW), [])
         self.assertEqual(mon.waiting_lines(["not a record"], self.NOW), [])
 
@@ -10639,6 +10644,59 @@ class WaitingTaskTests(unittest.TestCase):
             os.utime(paths[0], ns=(1, 1))
             self.assertEqual(mon.waiting_records(root), ([], ""))
 
+    def test_waiting_records_page_through_every_task_file(self):
+        """Codex v1 F1 (PR #1751): no scan prefix hides a WAITING Task for good.
+
+        40 Task files, 16 looked at per call: the WAITING Task is the oldest and
+        sorts last by name, so it is on neither the first page nor the newest 32."""
+        self.assertLess(mon.REMOTE_TEST_FILES, 40)
+        waiting = self.task(task="f" * 32)
+        others = [{"task_id": f"{index:032x}"} for index in range(1, 40)]
+        with tempfile.TemporaryDirectory() as root, patch.object(mon, "WAITING_SCAN", 16):
+            paths = self.write_tasks(root, [waiting] + others)
+            self.assertEqual(len(os.listdir(root)), 40)
+            looked = []
+            real_lstat = os.lstat
+
+            def counting_lstat(path, *args, **kwargs):
+                looked.append(path)
+                return real_lstat(path, *args, **kwargs)
+
+            # Pages 1 and 2 hold no WAITING Task: the shortfall row still shows.
+            for _ in range(2):
+                looked.clear()
+                with patch.object(mon.os, "lstat", side_effect=counting_lstat):
+                    records, problem = mon.waiting_records(root)
+                self.assertLessEqual(len(looked), 16)   # bounded work per call
+                self.assertEqual((records, problem), ([], mon.WAITING_UNSEEN))
+                self.assertEqual(mon.waiting_lines(records, self.NOW, problem=problem),
+                                 [(f"WAITING 清單可能不完整：{mon.WAITING_UNSEEN}", "")])
+            # Page 3 reaches the last file: one row, nothing missing.
+            records, problem = mon.waiting_records(root)
+            self.assertEqual(records, [mon._waiting_entry(waiting)])
+            self.assertEqual(problem, "")
+            rows = mon.waiting_lines(records, self.NOW)
+            self.assertEqual(len(rows), 1)
+            self.assertIn("task ffffffff（QUOTA", rows[0][0])
+            # Unchanged files come from the cache and the row stays on every page.
+            with patch.object(mon, "_task_load", side_effect=AssertionError("read")):
+                for _ in range(3):
+                    self.assertEqual(mon.waiting_records(root), (records, ""))
+            # Pages keep rotating: a later change to that file is seen within
+            # ceil(40 / 16) = 3 calls, and clearing WAITING removes the row.
+            paths[0].write_text(json.dumps({"task_id": "f" * 32, "waiting": None}),
+                                encoding="utf-8")
+            os.utime(paths[0], ns=(1, 1))
+            results = [mon.waiting_records(root) for _ in range(3)]
+            self.assertEqual(results[-1], ([], ""))
+            # A new WAITING Task file is looked at on the very next call.
+            added = self.task(task="e" * 32)
+            self.write_tasks(root, [added])
+            self.assertEqual(mon.waiting_records(root), ([mon._waiting_entry(added)], ""))
+            # A removed file drops out of the result.
+            os.remove(Path(root) / f"{'e' * 32}.json")
+            self.assertEqual(mon.waiting_records(root), ([], ""))
+
     def test_waiting_records_stay_bounded_and_name_any_shortfall(self):
         tasks = [self.task(task=letter * 32) for letter in "abc"]
         with tempfile.TemporaryDirectory() as root:
@@ -10655,11 +10713,14 @@ class WaitingTaskTests(unittest.TestCase):
                                         mon.REMOTE_TEST_OVER_BUDGET, ""])
         with tempfile.TemporaryDirectory() as root:
             self.write_tasks(root, tasks)
-            # A listing cut at the folder cap says so.
-            with patch.object(mon, "REMOTE_TEST_SCAN", 2):
+            # A page smaller than the folder says so, then the next page covers the rest.
+            with patch.object(mon, "WAITING_SCAN", 2):
                 records, problem = mon.waiting_records(root)
-            self.assertEqual(len(records), 2)
-            self.assertEqual(problem, mon.REMOTE_TEST_CAPPED)
+                self.assertEqual(len(records), 2)
+                self.assertEqual(problem, mon.WAITING_UNSEEN)
+                records, problem = mon.waiting_records(root)
+                self.assertEqual([record.task[0] for record in records], ["c", "b", "a"])
+                self.assertEqual(problem, "")
         with tempfile.TemporaryDirectory() as root:
             paths = self.write_tasks(root, tasks)
             # A file over the read limit is never read and is named as a shortfall.
@@ -10678,8 +10739,11 @@ class WaitingTaskTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             self.assertEqual(mon.waiting_records(os.path.join(root, "absent")), ([], ""))
         # A folder that cannot be listed is named, not shown as empty.
-        with patch.object(mon, "_waiting_task_files", side_effect=PermissionError("denied")):
+        with patch.object(mon, "_waiting_task_names", side_effect=PermissionError("denied")):
             self.assertEqual(mon.waiting_records("root"), ([], mon.WAITING_UNREADABLE))
+            records, problem = mon.waiting_records("root")
+            self.assertEqual(mon.waiting_lines(records, self.NOW, problem=problem),
+                             [(f"WAITING 清單可能不完整：{mon.WAITING_UNREADABLE}", "")])
 
     def test_monitor_lines_and_office_top_placement(self):
         from types import SimpleNamespace
