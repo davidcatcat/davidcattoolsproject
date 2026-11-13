@@ -176,6 +176,27 @@ class LineageMergedTests(LineageCase):
         merged(self.store, plain)
         self.assertIsNone(cli.lineage_close_merged(self.store, plain))
 
+    def test_a_failed_roll_up_after_close_is_retried(self):
+        root = self.parked_root()
+        only = self.member(root)
+        merged(self.store, only)
+        real = cli._lineage_roll_up
+
+        def failing(store, lineage_id):
+            raise LLMToolError('LINEAGE_ROLL_UP_FAILED')
+        cli._lineage_roll_up = failing
+        try:
+            self.assertEqual(cli.lineage_close_merged(self.store, only),
+                             {'code': 'LINEAGE_CLOSE_FAILED'})
+        finally:
+            cli._lineage_roll_up = real
+        self.assertEqual(self.state(only), 'CLOSED')
+        self.assertEqual(self.state(root), 'PARKED')
+        retried = cli.lineage_close_merged(self.store, only)
+        self.assertEqual(retried['root']['state'], 'CLOSED')
+        self.assertEqual(self.state(root), 'CLOSED')
+        self.assertIsNone(cli.lineage_close_merged(self.store, only))
+
 
 if __name__ == '__main__':
     unittest.main()

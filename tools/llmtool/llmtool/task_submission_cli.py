@@ -1117,11 +1117,15 @@ def lineage_close_merged(store, task_id):
     try:
         record = store.get(task_id)
         line, attempt = record.get('lineage'), record.get('merge_attempt')
-        if (type(line) is not dict or line.get('state') != 'OPEN' or
+        if (type(line) is not dict or line.get('state') not in ('OPEN', 'CLOSED') or
                 type(attempt) is not dict or attempt.get('state') != 'MERGED'):
             return None
-        record_lineage(store, task_id, dict(line, state='CLOSED', recorded_at=_timestamp()))
+        retry = line['state'] == 'CLOSED'  # saved CLOSED whose roll-up failed: retry the roll-up
+        if not retry:
+            record_lineage(store, task_id, dict(line, state='CLOSED', recorded_at=_timestamp()))
         root = None if line['kind'] == 'root' else _lineage_roll_up(store, line['lineage_id'])
+        if retry and root is None:
+            return None
     except LLMToolError:
         return {'code': 'LINEAGE_CLOSE_FAILED'}
     return {'task_id': task_id, 'state': 'CLOSED', 'owner_notice': None, 'root': root}
