@@ -20,6 +20,7 @@ from llmtool import worker_dispatch
 
 
 import review_trust_fixture
+import worker_policy_fixture
 
 
 def setUpModule():
@@ -36,6 +37,8 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         (self.root / 'source.py').write_text('VALUE = 1\n')
+        # #1692: no test in this class reads the live worker-dispatch.json.
+        worker_policy_fixture.install(self)
 
     def run_with_valid_binding(self, **kwargs):
         store = kwargs.pop('dispatch_store', object())
@@ -96,15 +99,13 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                 self.record['dispatch_audit'].append(json.loads(json.dumps(entry)))
                 return json.loads(json.dumps(self.record))
 
-        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
-        policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
-        policy['workers']['opencode-developer']['reason'] = 'prior assignment transition'
-        allowed_policy_path = self.root / 'worker-dispatch-allowed.json'
-        allowed_policy_path.write_text(json.dumps(policy), encoding='utf-8')
-        policy['workers']['opencode-developer']['dispatch'] = 'PAUSED'
-        policy['workers']['opencode-developer']['reason'] = 'controlled paused test'
-        paused_policy_path = self.root / 'worker-dispatch-paused.json'
-        paused_policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        # #1692: the shared test policy, never the live worker-dispatch.json.
+        allowed_policy_path = worker_policy_fixture.write(
+            self.root / 'worker-dispatch-allowed.json',
+            worker_policy_fixture.policy({'opencode-developer': 'ALLOWED'}))
+        paused_policy_path = worker_policy_fixture.write(
+            self.root / 'worker-dispatch-paused.json',
+            worker_policy_fixture.policy({'opencode-developer': 'PAUSED'}))
         store = Store('a' * 32, allowed_policy_path)
         run_marker = self.root / 'provider-run-invoked'
         cli = self.fake_cli(self.event('step_start') + '\n',

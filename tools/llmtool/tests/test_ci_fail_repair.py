@@ -3,8 +3,6 @@
 Fixtures come from test_review_repair. A CI repair shares the '<base>-ec2'
 test-failure count with EC2 remote-test repairs (policy test_fail_max).
 """
-import json
-from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -13,6 +11,7 @@ from llmtool import review_repair
 from llmtool.errors import LLMToolError
 
 import review_trust_fixture
+import worker_policy_fixture
 from test_review_repair import (EXECUTOR, HEAD, PR, TASK, TempTaskStore, _receipt,
                                 _record)
 
@@ -40,11 +39,9 @@ class CiFailRepairTests(unittest.TestCase):
         self.store = TempTaskStore(self.temp.name, _record())
         self.calls = []
         dispatch = review_repair.worker_dispatch
-        policy = json.loads(Path(dispatch._POLICY_PATH).read_text(encoding='utf-8'))
-        policy_path = Path(self.temp.name).resolve() / 'worker-dispatch.json'
-        policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        # #1692: the shared test policy, never the live worker-dispatch.json.
+        worker_policy_fixture.install(self)
         for patcher in (
-                patch.object(dispatch, '_POLICY_PATH', policy_path),
                 patch.object(dispatch, 'evaluate',
                              return_value=type('Decision', (), {'allowed': True})()),
                 patch.object(review_repair.shutil, 'which', return_value='/usr/bin/agy')):
