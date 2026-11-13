@@ -24,7 +24,7 @@ def tearDownModule():
 
 
 class ExecutionResourcesTests(unittest.TestCase):
-    def test_inventory_shape_and_runner_accounts(self):
+    def test_inventory_shape_and_no_retired_self_hosted_runners(self):
         inventory = json.loads(INVENTORY_PATH.read_text(encoding='utf-8'))
 
         self.assertEqual(set(inventory), {
@@ -33,42 +33,26 @@ class ExecutionResourcesTests(unittest.TestCase):
         })
         self.assertEqual(inventory['schema_version'], 1)
         self.assertEqual(inventory['remote_development_authority'], 'NOT_GRANTED')
+        self.assertEqual(inventory['live_online_state'], 'UNKNOWN')
+        self.assertEqual(inventory['live_busy_state'], 'UNKNOWN')
 
-        runners = [runner for host in inventory['hosts']
-                   for runner in host['runners']]
-        names = [runner['name'] for runner in runners]
-        self.assertEqual(len(names), len(set(names)))
+        ids = [host['id'] for host in inventory['hosts']]
+        self.assertEqual(ids, ['local-mac', 'aws-ec2', 'aws-ec2-2'])
+        self.assertEqual(len(ids), len(set(ids)))
 
-        ec2 = next(host for host in inventory['hosts'] if host['id'] == 'aws-ec2')
-        for runner in ec2['runners']:
-            with self.subTest(runner=runner['name']):
-                self.assertTrue(runner['service_account'])
-                self.assertTrue(runner['runner_label'])
-                self.assertTrue(runner['role'])
+        # Self-hosted CI on the Owner Mac and EC2 is retired (#1253, #1502
+        # WP-G): no runner entries and no self-hosted CI capability remain.
+        for host in inventory['hosts']:
+            with self.subTest(host=host['id']):
+                self.assertNotIn('runners', host)
+                self.assertFalse(any('self-hosted' in capability
+                                     for capability in host['capabilities']))
+                self.assertTrue((REPOSITORY_ROOT / host['reference']).is_file())
 
-        runner3 = next(runner for runner in ec2['runners']
-                       if runner['name'] == 'ec2-self-runner-3')
-        self.assertEqual(runner3, {
-            'name': 'ec2-self-runner-3',
-            'runner_label': 'local-ec2-linux-ci-pending until #446 merges',
-            'service_account': 'ghrunner3',
-            'role': 'Linux CI shard',
-        })
-
-        # Runner 4 is on a second, smaller EC2 host (#1093); no host address.
+        # The second, smaller EC2 host (#1093) stays listed; no host address.
         ec2_2 = next(host for host in inventory['hosts'] if host['id'] == 'aws-ec2-2')
         self.assertEqual(ec2_2['reported_vcpu'], 2)
         self.assertEqual(ec2_2['reported_memory_gib'], 3)
-        self.assertEqual(ec2_2['capabilities'], ['self-hosted-linux-ci'])
-        self.assertEqual(ec2_2['runners'], [{
-            'name': 'ec2-self-runner-4',
-            'runner_label': 'local-ec2-linux-ci',
-            'service_account': 'ghrunner4',
-            'role': 'Linux CI',
-        }])
-        linux_accounts = [runner['service_account'] for host in inventory['hosts']
-                          for runner in host['runners'] if 'service_account' in runner]
-        self.assertEqual(linux_accounts, ['ghrunner', 'ghrunner2', 'ghrunner3', 'ghrunner4'])
 
     def test_worker_dispatch_policy_stays_separate_from_inventory(self):
         policy = worker_dispatch._parse_policy(POLICY_PATH.read_bytes())
