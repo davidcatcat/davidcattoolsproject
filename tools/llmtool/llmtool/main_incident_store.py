@@ -21,9 +21,15 @@ A record without the field is valid, so records written before R9 still read;
 ``create`` never writes it. Each entry is checked against the record it lives
 in: its SHA must be recorded in the incident (``admitted_shas``), its modules
 must be recorded as failing (``failing_modules``) and a stored receipt must
-match its own ``receipt_digest``. Its output-derived strings (``final`` lines
-and ``failure_excerpt``) must pass the sensitive-content screen, else the
-record is INCIDENT_RECORD_INVALID (PR #1763, CWE-532).
+match its own ``receipt_digest``. A stored receipt has exactly the
+``REMOTE_RECEIPT_FIELDS`` (plus the optional ``failure_excerpt``); an append
+with any other receipt field refuses INCIDENT_RECEIPT_FIELDS_INVALID before
+anything is written, and such a field on disk makes the record invalid. Every
+structured receipt field must match its fixed grammar, each ``final`` line
+must be a unittest summary line or ``FINAL_REDACTED``, and the output-derived
+strings (``final`` lines and ``failure_excerpt``) must pass the real
+sensitive-content screen, else the record is INCIDENT_RECORD_INVALID
+(PR #1763, CWE-532).
 
 Every doubt fails closed with a typed code in ``error.incident_code``; error
 messages carry only the code and, when it is a safe identifier, the incident ID.
@@ -66,6 +72,7 @@ INCIDENT_RECORD_BUSY = 'INCIDENT_RECORD_BUSY'
 INCIDENT_RECORD_FULL = 'INCIDENT_RECORD_FULL'
 INCIDENT_OUTCOME_INVALID = 'INCIDENT_OUTCOME_INVALID'
 INCIDENT_CLOSED = 'INCIDENT_CLOSED'
+INCIDENT_RECEIPT_FIELDS_INVALID = 'INCIDENT_RECEIPT_FIELDS_INVALID'
 
 OPEN = 'UNKNOWN_OPEN'
 RESOLVED = 'RESOLVED'
@@ -106,6 +113,27 @@ REMOTE_TEST_FIELDS = frozenset((
 # run without a valid receipt carries one of the outcome results and its code.
 REMOTE_RECEIPT_RESULTS = frozenset(('PASS', 'FAIL', 'TIMEOUT', 'SHA_MISMATCH'))
 REMOTE_OUTCOME_RESULTS = frozenset(('TIMEOUT', 'UNAVAILABLE', 'UNKNOWN'))
+# The exact fields of a stored receipt: the validated EC2 receipt
+# (remote_test._RECEIPT_FIELDS) plus the three fields bound before recording.
+# ``failure_excerpt`` is the only optional field; nothing else is accepted.
+REMOTE_RECEIPT_FIELDS = frozenset((
+    'result', 'exit_code', 'source_sha', 'tree', 'fetch_head', 'modules',
+    'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
+    'failures', 'log_bytes', 'log_sha256', 'remote_log_path',
+    'incident_id', 'command_digest', 'receipt_digest'))
+REMOTE_RECEIPT_OPTIONAL = frozenset(('failure_excerpt',))
+# A recorded final line is a unittest summary line or the remote NO_FINAL
+# marker; remote_test replaces any other line with FINAL_REDACTED.
+_SUMMARY_COUNT = (r'(?:failures|errors|skipped|expected failures|unexpected successes)'
+                  r'=[0-9]{1,6}')
+FINAL_SUMMARY = re.compile(r'(?:OK|FAILED)(?: \(%s(?:, %s){0,4}\))?|NO_FINAL'
+                           % (_SUMMARY_COUNT, _SUMMARY_COUNT))
+FINAL_REDACTED = 'REDACTED_NOT_SUMMARY'
+MAX_FINAL_LINE = 512
+MAX_RECEIPT_FAILURES = 10
+MAX_LOG_BYTES = 20_000_000
+MAX_EXCERPT_BYTES = 4096
+MAX_EXCERPT_LINES = 40
 
 INCIDENT_ID = re.compile(r'mi-x?[0-9a-f]{40}')
 _RECORD_NAME = re.compile(r'(mi-x?[0-9a-f]{40})\.json')
@@ -114,6 +142,8 @@ _SHA256 = re.compile(r'[0-9a-f]{64}')
 _TEST_MODULE = re.compile(r'test_[a-z0-9_]{1,80}')
 _TEST_PATH = re.compile(r'tools/llmtool/tests/(test_[a-z0-9_]{1,80})\.py')
 _REMOTE_CODE = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
+_RECEIPT_STAMP = re.compile(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ')
+_REMOTE_LOG = re.compile(r'/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log')
 
 
 def _safe_id(value):
@@ -352,25 +382,75 @@ def _remote_modules(value, failing):
             value == sorted(set(value)) and set(value) <= failing)
 
 
+def receipt_fields_allowed(receipt):
+    """True when ``receipt`` is a dict with exactly the allowlisted receipt fields."""
+    return type(receipt) is dict and set(receipt) in (
+        REMOTE_RECEIPT_FIELDS, REMOTE_RECEIPT_FIELDS | REMOTE_RECEIPT_OPTIONAL)
+
+
+def _sha256(value):
+    return type(value) is str and _SHA256.fullmatch(value) is not None
+
+
+def _valid_receipt_shape(receipt, item):
+    """Every structured receipt field matches its fixed grammar; no free text."""
+    identity = receipt['identity']
+    uid = identity.get('uid') if type(identity) is dict else None
+    failures = receipt['failures']
+    log_path = receipt['remote_log_path']
+    return (type(receipt['exit_code']) is int and
+            all(receipt[key] is None or _sha40(receipt[key]) for key in ('tree', 'fetch_head')) and
+            type(identity) is dict and set(identity) == {'uid'} and
+            (uid is None or (type(uid) is int and uid >= 0)) and
+            all(type(receipt[key]) is str and _RECEIPT_STAMP.fullmatch(receipt[key]) is not None
+                for key in ('started_at', 'ended_at')) and
+            type(receipt['elapsed_s']) in (int, float) and receipt['elapsed_s'] >= 0 and
+            type(receipt['ran_total']) is int and receipt['ran_total'] >= 0 and
+            type(failures) is list and len(failures) <= MAX_RECEIPT_FAILURES and
+            all(type(name) is str and name in item['modules'] for name in failures) and
+            type(receipt['log_bytes']) is int and 0 <= receipt['log_bytes'] <= MAX_LOG_BYTES and
+            _sha256(receipt['log_sha256']) and _sha256(receipt['command_digest']) and
+            _sha256(receipt['receipt_digest']) and
+            (log_path is None or (type(log_path) is str and
+                                  _REMOTE_LOG.fullmatch(log_path) is not None)))
+
+
+def _valid_excerpt(value):
+    if type(value) is not str or len(value.splitlines()) > MAX_EXCERPT_LINES:
+        return False
+    try:
+        return len(value.encode('utf-8')) <= MAX_EXCERPT_BYTES
+    except UnicodeError:
+        return False
+
+
 def _screened_output(receipt):
-    """Output-derived receipt strings (``final``, ``failure_excerpt``) pass the screen."""
-    values = []
-    if 'final' in receipt:
-        if type(receipt['final']) is not list:
-            return False
-        values.extend(receipt['final'])
+    """The output-derived strings (``final``, ``failure_excerpt``) pass the real screen.
+
+    Each ``final`` line must also be a unittest summary line or FINAL_REDACTED,
+    so a line the screen misses is still never stored as free text.
+    """
+    finals = receipt['final']
+    if type(finals) is not list or not all(
+            type(line) is str and len(line) <= MAX_FINAL_LINE and
+            (line == FINAL_REDACTED or FINAL_SUMMARY.fullmatch(line) is not None)
+            for line in finals):
+        return False
+    values = list(finals)
     if 'failure_excerpt' in receipt:
-        values.append(receipt['failure_excerpt'])
-    return all(type(value) is str and not task_store._emitted_sensitive(value)
-               for value in values)
+        excerpt = receipt['failure_excerpt']
+        if receipt['result'] == 'PASS' or not _valid_excerpt(excerpt):
+            return False
+        values.append(excerpt)
+    return not any(task_store._emitted_sensitive(value) for value in values)
 
 
 def _valid_receipt(receipt, item, incident):
-    if (type(receipt) is not dict or receipt.get('result') != item['result'] or
-            receipt.get('source_sha') != item['sha'] or
-            receipt.get('modules') != item['modules'] or
-            receipt.get('incident_id') != incident or
-            type(receipt.get('receipt_digest')) is not str or
+    if (not receipt_fields_allowed(receipt) or receipt['result'] != item['result'] or
+            receipt['source_sha'] != item['sha'] or
+            receipt['modules'] != item['modules'] or
+            receipt['incident_id'] != incident or
+            not _valid_receipt_shape(receipt, item) or
             not _screened_output(receipt)):
         return False
     try:
@@ -799,8 +879,14 @@ def append_remote_test(incident, expected_sha256, entry, root=None):
 
     The sealed record is validated whole, so an entry whose SHA is not recorded
     in the incident, whose modules are not recorded as failing, or whose
-    receipt does not match its digest refuses INCIDENT_RECORD_INVALID.
+    receipt does not match its digest refuses INCIDENT_RECORD_INVALID. A
+    receipt with any field outside the exact allowlist refuses
+    INCIDENT_RECEIPT_FIELDS_INVALID before the record is read or written.
     """
+    receipt = entry.get('receipt') if type(entry) is dict else None
+    if receipt is not None and not receipt_fields_allowed(receipt):
+        _refuse(INCIDENT_RECEIPT_FIELDS_INVALID, incident)
+
     def mutate(body):
         entries = body.setdefault(REMOTE_TESTS, [])
         if len(entries) >= MAX_REMOTE_TESTS:

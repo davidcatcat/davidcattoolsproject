@@ -2,6 +2,12 @@
 
 Every test uses a real ``main_incident_store`` in a temporary directory and a
 fake SSH transport; nothing reaches EC2, Git, GitHub or CI.
+
+The output-screening tests (PR #1763, CWE-532) run the real sensitive screen.
+Their only credential-shaped value is ``synthetic_credential()``: labelled
+synthetic under the #763/#981 sensitive-detector exception, built at runtime
+from fragments (so the source holds no credential-shaped literal), never a
+real credential, and subject to independent review.
 """
 
 import json
@@ -27,6 +33,16 @@ STAMP = '2026-11-13T00:00:00Z'
 TESTS = ('test_alpha.AlphaTests.test_one', 'test_beta.BetaTests.test_two',
          'test_alpha.AlphaTests.test_three')
 NOW = 1_763_000_000
+
+
+def synthetic_credential():
+    """SYNTHETIC (#763/#981): a credential-shaped value built at runtime, never real.
+
+    The same construction the Task-path excerpt test in test_remote_test uses;
+    ``test_synthetic_fixture_is_flagged_by_the_real_screen`` proves the real
+    screen flags it, so a test that passes with it exercises real refusals.
+    """
+    return ''.join(('to', 'ken', '=')) + ''.join(('sk', '-')) + 'a' * 16
 
 
 def observation(tests, *, observed_at=STAMP, merges=(MID, HEAD)):
@@ -187,27 +203,41 @@ class IncidentRemoteTestTests(unittest.TestCase):
         self.assertEqual(len(self.stored()[incident_store.REMOTE_TESTS]), len(cases))
 
     def test_failure_excerpt_goes_through_the_output_screen(self):
-        excerpt = 'AssertionError: 1 != 2'
-        stdout = self.receipt(result='FAIL', failure_excerpt=excerpt)
-        with patch.object(remote_test, '_emitted_sensitive', return_value=True) as screen:
-            refused = self.run_it(transport=self.transport(stdout))
-        screen.assert_called_once_with(excerpt)
+        # Real screen, no patched predicate: the shared validator refuses it.
+        flagged = synthetic_credential()
+        stdout = self.receipt(result='FAIL', failure_excerpt=flagged)
+        refused = self.run_it(transport=self.transport(stdout))
         self.assertEqual((refused['result'], refused['code']), ('UNKNOWN', 'RECEIPT_INVALID'))
         self.assertIsNone(refused['receipt'])
+        self.assertTrue(refused['persisted'])
+        self.assertNotIn(flagged, json.dumps(refused))
+        self.assertNotIn(flagged, self.record_path().read_text())
 
-        kept = self.run_it(transport=self.transport(stdout))
+        excerpt = 'AssertionError: 1 != 2'
+        kept = self.run_it(transport=self.transport(
+            self.receipt(result='FAIL', failure_excerpt=excerpt)))
         self.assertEqual(kept['result'], 'FAIL')
         self.assertEqual(kept['receipt']['failure_excerpt'], excerpt)
 
     # output screening before recording (PR #1763, CWE-532) -----------------
 
+    def test_synthetic_fixture_is_flagged_by_the_real_screen(self):
+        flagged = synthetic_credential()
+        self.assertTrue(remote_test._emitted_sensitive(flagged))
+        self.assertTrue(incident_store.task_store._emitted_sensitive(flagged))
+        self.assertIs(remote_test._emitted_sensitive,
+                      incident_store.task_store._emitted_sensitive)
+        for benign in ('FAILED (failures=1)', 'AssertionError: 1 != 2',
+                       incident_store.FINAL_REDACTED):
+            self.assertFalse(remote_test._emitted_sensitive(benign))
+
     def test_final_lines_outside_the_summary_grammar_are_redacted(self):
         cases = (
             ('PASS', ['OK', 'OK (skipped=2)', 'loader note OK'],
-             ['OK', 'OK (skipped=2)', remote_test.FINAL_REDACTED]),
+             ['OK', 'OK (skipped=2)', incident_store.FINAL_REDACTED]),
             ('FAIL', ['FAILED (failures=1, errors=2)', 'NO_FINAL',
                       'ERROR: test_one (test_alpha.Case.test_one)'],
-             ['FAILED (failures=1, errors=2)', 'NO_FINAL', remote_test.FINAL_REDACTED]),
+             ['FAILED (failures=1, errors=2)', 'NO_FINAL', incident_store.FINAL_REDACTED]),
         )
         for result_name, finals, expected in cases:
             with self.subTest(result=result_name):
@@ -228,38 +258,36 @@ class IncidentRemoteTestTests(unittest.TestCase):
                 self.assertEqual(receipt['receipt_digest'],
                                  incident_store.remote_test_digest(receipt))
 
-    def test_flagged_final_line_refuses_the_receipt(self):
-        flagged = 'FAILED (errors=7)'
-        stdout = self.receipt(result='FAIL', final=[flagged])
-        with patch.object(remote_test, '_emitted_sensitive',
-                          side_effect=lambda value: value == flagged) as screen:
-            result = self.run_it(transport=self.transport(stdout))
-        screen.assert_any_call(flagged)
-        self.assertEqual((result['result'], result['code']),
-                         ('UNKNOWN', remote_test.INCIDENT_RECEIPT_SENSITIVE))
-        self.assertIsNone(result['receipt'])
-        self.assertTrue(result['persisted'])
-        [entry] = self.stored()[incident_store.REMOTE_TESTS]
-        self.assertIsNone(entry['receipt'])
+    def test_credential_shaped_final_line_refuses_the_receipt(self):
+        # Real screen, no patched predicate. The shared Task-path validator
+        # does not screen final lines, so this is the incident screen's refusal.
+        flagged = synthetic_credential()
+        for final in ([flagged], ['FAILED (failures=1)', flagged]):
+            with self.subTest(final=len(final)):
+                stdout = self.receipt(result='FAIL', final=final)
+                self.assertIsNotNone(remote_test._validate_remote_receipt(
+                    stdout, sha=HEAD, modules=('test_alpha',)))
+                result = self.run_it(transport=self.transport(stdout))
+                self.assertEqual((result['result'], result['code']),
+                                 ('UNKNOWN', remote_test.INCIDENT_RECEIPT_SENSITIVE))
+                self.assertIsNone(result['receipt'])
+                self.assertTrue(result['persisted'])
+                self.assertIsNone(self.stored()[incident_store.REMOTE_TESTS][-1]['receipt'])
+                self.assertNotIn(flagged, json.dumps(result))
         self.assertNotIn(flagged, self.record_path().read_text())
 
-    def test_failure_excerpt_is_screened_again_before_recording(self):
-        excerpt = 'AssertionError: 3 != 4'
-        stdout = self.receipt(result='FAIL', failure_excerpt=excerpt)
-        seen = []
-
-        def screen(value):
-            # The shared validator passes it; the incident screen flags it.
-            seen.append(value)
-            return value == excerpt and seen.count(excerpt) > 1
-
-        with patch.object(remote_test, '_emitted_sensitive', side_effect=screen):
-            result = self.run_it(transport=self.transport(stdout))
-        self.assertEqual(seen, [excerpt, 'FAILED (failures=1)', excerpt])
-        self.assertEqual((result['result'], result['code']),
-                         ('UNKNOWN', remote_test.INCIDENT_RECEIPT_SENSITIVE))
-        self.assertIsNone(result['receipt'])
-        self.assertNotIn(excerpt, self.record_path().read_text())
+    def test_incident_screen_refuses_credential_shaped_output_fields(self):
+        # The second screen, run directly with the real predicate: a value the
+        # shared validator might pass is still refused in final and in excerpt.
+        flagged = synthetic_credential()
+        parsed = json.loads(self.receipt(result='FAIL', failure_excerpt='AssertionError'))
+        self.assertEqual(remote_test._screen_incident_receipt(parsed)['failure_excerpt'],
+                         'AssertionError')
+        for field, value in (('final', [flagged]), ('final', ['NO_FINAL', flagged]),
+                             ('failure_excerpt', flagged)):
+            with self.subTest(field=field, lines=len(value) if type(value) is list else 1):
+                self.assertIsNone(remote_test._screen_incident_receipt(
+                    dict(parsed, **{field: value})))
 
     def test_no_git_ci_or_github_call_is_made(self):
         def forbidden(*args, **kwargs):
@@ -392,24 +420,64 @@ class IncidentStoreRemoteTestTests(unittest.TestCase):
         value.update(changes)
         return value
 
-    def receipt_entry(self, **receipt_changes):
-        receipt = {'result': 'PASS', 'source_sha': HEAD, 'modules': ['test_alpha'],
-                   'incident_id': self.incident, 'ran_total': 2}
+    def stored_receipt(self, *, result='PASS', drop=(), reseal=True, **changes):
+        """A full stored receipt, as run_incident_remote_test builds it.
+
+        ``changes`` are applied before the digest when ``reseal`` (so only the
+        changed field can be the reason for a refusal), else after it.
+        """
+        passed = result == 'PASS'
+        receipt = {
+            'result': result, 'exit_code': 0 if passed else 1, 'source_sha': HEAD,
+            'tree': 'c' * 40, 'fetch_head': HEAD, 'modules': ['test_alpha'],
+            'identity': {'uid': 65534}, 'started_at': STAMP, 'ended_at': STAMP,
+            'elapsed_s': 1.0, 'ran_total': 2,
+            'final': ['OK'] if passed else ['FAILED (failures=1)'],
+            'failures': [] if passed else ['test_alpha'],
+            'log_bytes': 10, 'log_sha256': 'd' * 64,
+            'remote_log_path': '/tmp/llmtool-remote-log.Abc123/remote-test.log',
+            'incident_id': self.incident, 'command_digest': 'e' * 64,
+        }
+        if reseal:
+            receipt.update(changes)
+        for key in drop:
+            receipt.pop(key)
         receipt['receipt_digest'] = incident_store.remote_test_digest(receipt)
-        receipt.update(receipt_changes)
-        return self.entry(result='PASS', code=None, receipt=receipt)
+        if not reseal:
+            receipt.update(changes)
+        return receipt
+
+    def receipt_entry(self, *, result='PASS', **receipt_changes):
+        receipt = self.stored_receipt(result=result, **receipt_changes)
+        return self.entry(result=result, code=None, receipt=receipt)
 
     def append(self, entry):
         current = incident_store.get(self.incident, self.root)
         return incident_store.append_remote_test(
             self.incident, current['record_sha256'], entry, self.root)
 
-    def assert_invalid(self, entry):
+    def assert_refused(self, entry, code):
         before = incident_store.get(self.incident, self.root)['record_sha256']
         with self.assertRaises(LLMToolError) as caught:
             self.append(entry)
-        self.assertEqual(caught.exception.incident_code, incident_store.INCIDENT_RECORD_INVALID)
+        self.assertEqual(caught.exception.incident_code, code)
         self.assertEqual(incident_store.get(self.incident, self.root)['record_sha256'], before)
+        self.assertNotIn(incident_store.REMOTE_TESTS, incident_store.get(self.incident, self.root))
+
+    def assert_invalid(self, entry):
+        self.assert_refused(entry, incident_store.INCIDENT_RECORD_INVALID)
+
+    def reseal_on_disk(self, change):
+        """Apply change(data) to the stored record and reseal its digests."""
+        path = self.root.parent / incident_store.DIRECTORY_NAME / (self.incident + '.json')
+        data = json.loads(path.read_text())
+        change(data)
+        receipt = data[incident_store.REMOTE_TESTS][0]['receipt']
+        if receipt is not None:
+            receipt['receipt_digest'] = incident_store.remote_test_digest(receipt)
+        data['record_sha256'] = incident_store.record_digest(data)
+        path.write_text(json.dumps(data))
+        return path
 
     def test_new_and_older_records_have_no_remote_tests_and_still_read(self):
         self.assertNotIn(incident_store.REMOTE_TESTS, self.record)
@@ -438,35 +506,119 @@ class IncidentStoreRemoteTestTests(unittest.TestCase):
             'outcome without code': self.entry(code=None),
             'receipt result on outcome': self.entry(result='PASS'),
             'extra field': dict(self.entry(), note='x'),
-            'receipt digest': self.receipt_entry(ran_total=3),
+            'receipt digest': self.receipt_entry(reseal=False, ran_total=3),
             'receipt other incident': self.receipt_entry(incident_id='mi-' + OUTSIDE),
+            'receipt other sha': self.receipt_entry(source_sha=MID),
             'receipt with code': dict(self.receipt_entry(), code='SSH_FAILED'),
         }
         for name, entry in cases.items():
             with self.subTest(name):
                 self.assert_invalid(entry)
 
-    def output_entry(self, final=('FAILED (failures=1)',), excerpt='AssertionError: 1 != 2'):
-        receipt = {'result': 'FAIL', 'source_sha': HEAD, 'modules': ['test_alpha'],
-                   'incident_id': self.incident, 'final': final if type(final) is str
-                   else list(final), 'failure_excerpt': excerpt}
-        receipt['receipt_digest'] = incident_store.remote_test_digest(receipt)
-        return self.entry(result='FAIL', code=None, receipt=receipt)
+    # exact receipt allowlist (Codex v1 F1 on PR #1763) ---------------------
 
-    def test_receipt_output_fields_go_through_the_screen(self):
-        for flagged in ('FAILED (failures=1)', 'AssertionError: 1 != 2'):
-            with self.subTest(flagged=flagged):
-                with patch.object(incident_store.task_store, '_emitted_sensitive',
-                                  side_effect=lambda value: value == flagged) as screen:
-                    self.assert_invalid(self.output_entry())
-                screen.assert_any_call(flagged)
-        self.assert_invalid(self.output_entry(final='FAILED (failures=1)'))
-        self.assert_invalid(self.output_entry(final=[7]))
-        self.assert_invalid(self.output_entry(excerpt=None))
+    def test_receipt_allowlist_matches_the_remote_receipt(self):
+        bound = frozenset(('incident_id', 'command_digest', 'receipt_digest'))
+        self.assertEqual(incident_store.REMOTE_RECEIPT_FIELDS,
+                         remote_test._RECEIPT_FIELDS | bound)
+        self.assertEqual(incident_store.REMOTE_RECEIPT_FIELDS | incident_store.REMOTE_RECEIPT_OPTIONAL,
+                         remote_test._RECEIPT_FIELDS_WITH_EXCERPT | bound)
 
-        saved = self.append(self.output_entry())
-        self.assertEqual(saved[incident_store.REMOTE_TESTS][0]['receipt']['final'],
-                         ['FAILED (failures=1)'])
+    def test_receipt_with_a_field_outside_the_allowlist_is_refused(self):
+        code = incident_store.INCIDENT_RECEIPT_FIELDS_INVALID
+        cases = {
+            'extra field': self.receipt_entry(note='x'),
+            'extra output field': self.receipt_entry(result='FAIL', stdout='FAILED'),
+            'task binding field': self.receipt_entry(task_id='t-1'),
+            'missing field': self.receipt_entry(drop=('log_sha256',)),
+            'missing digest': self.receipt_entry(),
+            'receipt not a dict': self.entry(result='PASS', code=None, receipt=['PASS']),
+        }
+        cases['missing digest']['receipt'].pop('receipt_digest')
+        for name, entry in cases.items():
+            with self.subTest(name):
+                self.assert_refused(entry, code)
+        self.assertTrue(incident_store.receipt_fields_allowed(self.stored_receipt()))
+        self.assertTrue(incident_store.receipt_fields_allowed(
+            self.stored_receipt(result='FAIL', failure_excerpt='AssertionError')))
+
+    def test_extra_receipt_field_on_disk_fails_read(self):
+        self.append(self.receipt_entry())
+        self.reseal_on_disk(
+            lambda data: data[incident_store.REMOTE_TESTS][0]['receipt'].update(note='x'))
+        with self.assertRaises(LLMToolError) as caught:
+            incident_store.get(self.incident, self.root)
+        self.assertEqual(caught.exception.incident_code, incident_store.INCIDENT_RECORD_INVALID)
+
+    def test_structured_receipt_fields_must_match_their_grammar(self):
+        cases = {
+            'log path free text': {'remote_log_path': '/tmp/elsewhere/notes.txt'},
+            'stamp free text': {'started_at': 'yesterday'},
+            'tree free text': {'tree': 'not a sha'},
+            'identity extra key': {'identity': {'uid': 1, 'user': 'runner'}},
+            'failures not admitted': {'failures': ['test_beta']},
+            'log digest free text': {'log_sha256': 'not a digest'},
+            'command digest free text': {'command_digest': 'x'},
+            'exit code text': {'exit_code': 'zero'},
+        }
+        for name, changes in cases.items():
+            with self.subTest(name):
+                self.assert_invalid(self.receipt_entry(**changes))
+
+    # output screening in the store (PR #1763 CWE-532; Codex v1 F2) ---------
+
+    def test_credential_shaped_output_fields_are_refused_by_the_real_screen(self):
+        # No patched predicate: the store's own call to the real screen refuses.
+        flagged = synthetic_credential()
+        cases = {
+            'final': {'final': [flagged]},
+            'final after a summary line': {'final': ['FAILED (failures=1)', flagged]},
+            'failure_excerpt': {'failure_excerpt': flagged},
+        }
+        for name, changes in cases.items():
+            with self.subTest(name):
+                self.assert_invalid(self.receipt_entry(result='FAIL', **changes))
+        path = self.root.parent / incident_store.DIRECTORY_NAME / (self.incident + '.json')
+        self.assertNotIn(flagged, path.read_text())
+
+    def test_credential_shaped_output_on_disk_fails_read(self):
+        flagged = synthetic_credential()
+        self.append(self.receipt_entry(result='FAIL', failure_excerpt='AssertionError'))
+        path = self.root.parent / incident_store.DIRECTORY_NAME / (self.incident + '.json')
+        original = path.read_text()
+        for field, value in (('final', [flagged]), ('failure_excerpt', flagged)):
+            with self.subTest(field):
+                path.write_text(original)
+                incident_store.get(self.incident, self.root)  # the untouched record reads
+
+                def change(data, field=field, value=value):
+                    data[incident_store.REMOTE_TESTS][0]['receipt'][field] = value
+                self.reseal_on_disk(change)
+                with self.assertRaises(LLMToolError) as caught:
+                    incident_store.get(self.incident, self.root)
+                self.assertEqual(caught.exception.incident_code,
+                                 incident_store.INCIDENT_RECORD_INVALID)
+
+    def test_receipt_output_fields_keep_their_shape(self):
+        cases = {
+            'final not a list': {'final': 'FAILED (failures=1)'},
+            'final not text': {'final': [7]},
+            'final outside the summary grammar': {'final': ['loader note FAILED']},
+            'excerpt not text': {'failure_excerpt': None},
+            'excerpt too long': {'failure_excerpt': 'x' * (incident_store.MAX_EXCERPT_BYTES + 1)},
+        }
+        for name, changes in cases.items():
+            with self.subTest(name):
+                self.assert_invalid(self.receipt_entry(result='FAIL', **changes))
+        self.assert_invalid(self.receipt_entry(failure_excerpt='AssertionError'))  # on PASS
+
+        saved = self.append(self.receipt_entry(
+            result='FAIL', final=['FAILED (failures=1)', 'NO_FINAL', incident_store.FINAL_REDACTED],
+            failure_excerpt='AssertionError: 1 != 2'))
+        receipt = saved[incident_store.REMOTE_TESTS][0]['receipt']
+        self.assertEqual(receipt['final'],
+                         ['FAILED (failures=1)', 'NO_FINAL', incident_store.FINAL_REDACTED])
+        self.assertEqual(receipt['failure_excerpt'], 'AssertionError: 1 != 2')
 
     def test_tampered_entry_fails_read_even_with_a_resealed_record(self):
         self.append(self.entry())
