@@ -17,25 +17,31 @@ FILL = 'Q' * 24
 NEIGHBOURS = (CJK, 'İ', 'ı', 'ſ', 'K', ' ')
 
 
+def _cat(*parts):
+    # Joins harmless parts at runtime, so no credential-shaped literal or
+    # constant-foldable expression appears in this source (#763 A).
+    return ''.join(parts)
+
+
 def _cloud_keys():
     # Synthetic cloud-key shapes: 4-letter prefix + 16 uppercase/digit chars.
     # synthetic-fixture: screen-tool test
-    return [prefix + FILL[:16] for prefix in ('AK' + 'IA', 'AS' + 'IA')]
+    return [_cat(prefix, FILL[:16]) for prefix in (_cat('AK', 'IA'), _cat('AS', 'IA'))]
 
 
 def _families():
-    scheme = 'BEARER'.lower()
+    scheme = _cat('bear', 'er')
     # synthetic-fixture: screen-tool test
-    key = 'api' + '_key'
+    key = _cat('api', '_key')
     # synthetic-fixture: screen-tool test
-    jwt = '.'.join(('eyJ' + FILL, FILL, FILL))
-    dashes = '-' * 5
+    jwt = _cat(_cat('eyJ', FILL), '.', FILL, '.', FILL)
+    dashes = _cat('-', '-', '-', '-', '-')
     # synthetic-fixture: screen-tool test
-    header = dashes + 'BEGIN ' + 'PRIVATE' + ' KEY' + dashes
+    header = _cat(dashes, 'BEGIN ', 'PRIVATE', ' KEY', dashes)
     # synthetic-fixture: screen-tool test
-    return (['sk-' + FILL, 'ghp_' + FILL, 'xoxb-' + FILL, jwt,
+    return ([_cat('sk-', FILL), _cat('ghp_', FILL), _cat('xoxb-', FILL), jwt,
              # synthetic-fixture: screen-tool test
-             scheme + ' ' + FILL, key + '=' + FILL, header] + _cloud_keys())
+             _cat(scheme, ' ', FILL), _cat(key, '=', FILL), header] + _cloud_keys())
 
 
 def _placements(near, value):
@@ -67,9 +73,9 @@ class CredentialAfterNonAsciiTests(unittest.TestCase):
 
     def test_ascii_word_prefix_still_not_a_credential(self):
         # synthetic-fixture: screen-tool test
-        for text in ('mask-' + FILL, 'xghp_' + FILL, 'myxoxb-' + FILL,
+        for text in (_cat('mask-', FILL), _cat('xghp_', FILL), _cat('myxoxb-', FILL),
                      # synthetic-fixture: screen-tool test
-                     'pre' + 'api' + '_key' + '=' + FILL):
+                     _cat('pre', 'api', '_key', '=', FILL)):
             with self.subTest(case=len(text)):
                 self.assertEqual(d.safe_diagnostic_text(text), text)
 
