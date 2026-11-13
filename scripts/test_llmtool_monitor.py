@@ -778,6 +778,32 @@ class MonitorTaskBaselineTests(unittest.TestCase):
             self.poll([])
         self.assertEqual(self.monitor.stuck_records, expected)
 
+    def _poll_waiting(self, **patches):
+        with patch.object(mon, "llmtool_task_records", return_value=[]), \
+                patch.object(mon, "llmtool_route_outcomes", return_value={"opencode": None}), \
+                patch.object(mon, "quota_warnings", return_value=[]), \
+                patch.object(mon, "office_rows", return_value=[]), \
+                patch.object(mon, "waiting_records", **patches["records"]), \
+                patch.object(mon, "waiting_notify_hours", **patches["hours"]):
+            self.poll([])
+
+    def test_waiting_refresh_stores_a_good_read_and_policy_hours(self):
+        # #1502 WP-D D12: no WAITING read yet means no WAITING rows.
+        self.assertIsNone(self.monitor.waiting_records)
+        self.assertEqual(self.monitor.waiting_hours, mon.WAITING_NOTIFY_HOURS)
+        expected = ([mon.WaitingRecord("b" * 8, "QUOTA", 1.0, "quota resets")], "")
+        self._poll_waiting(records={"return_value": expected}, hours={"return_value": 6})
+        self.assertEqual(self.monitor.waiting_records, expected)
+        self.assertEqual(self.monitor.waiting_hours, 6)
+
+    def test_waiting_refresh_failure_preserves_previous_value(self):
+        previous = ([mon.WaitingRecord("a" * 8, "AUTH", 1.0, "log in again")], "")
+        self.monitor.waiting_records, self.monitor.waiting_hours = previous, 12
+        self._poll_waiting(records={"side_effect": OSError("offline")},
+                           hours={"return_value": 6})
+        self.assertIs(self.monitor.waiting_records, previous)
+        self.assertEqual(self.monitor.waiting_hours, 12)
+
     def task_kinds(self, new):
         return [kind for _, kind, _ in new if kind in self.TASK_KINDS]
 
@@ -10331,6 +10357,178 @@ class StuckAlertTests(unittest.TestCase):
         mon._paint_screen(Screen(), monitor, "office", 0, False, {},
                           lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertNotIn(mon.BEHIND_WARNING, "\n".join(drawn.values()))
+
+
+class WaitingTaskTests(unittest.TestCase):
+    """#1502 WP-D D12 (E5): WAITING Task rows and the Owner notice rule."""
+    NOW = 1_800_000_000.0
+    TASK = "a" * 32
+    RESUME = "quota resets at 00:00 UTC"
+
+    def stamp(self, age):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.NOW - age))
+
+    def task(self, reason="QUOTA", age=3 * 3600, task=None, **extra):
+        return {"task_id": task or self.TASK,
+                "waiting": {"waiting_since": self.stamp(age), "reason": reason,
+                            "resume_condition": self.RESUME}, **extra}
+
+    def test_notice_rule_auth_is_immediate_and_others_wait_the_threshold(self):
+        self.assertEqual(mon.WAITING_NOTIFY_HOURS, 24)
+        self.assertTrue(mon.waiting_notice_due("AUTH", self.NOW, self.NOW))
+        self.assertTrue(mon.waiting_notice_due("AUTH", self.NOW - 1, self.NOW, 1000))
+        day = 24 * 3600
+        for reason in ("QUOTA", "ROUTE_UNAVAILABLE", "NO_REVIEWER", "ENV", "X9"):
+            with self.subTest(reason=reason):
+                self.assertFalse(mon.waiting_notice_due(reason, self.NOW, self.NOW))
+                self.assertFalse(mon.waiting_notice_due(reason, self.NOW - day + 1, self.NOW))
+                self.assertTrue(mon.waiting_notice_due(reason, self.NOW - day, self.NOW))
+                self.assertTrue(mon.waiting_notice_due(reason, self.NOW - 2 * day, self.NOW))
+        self.assertFalse(mon.waiting_notice_due("QUOTA", self.NOW - 7199, self.NOW, 2))
+        self.assertTrue(mon.waiting_notice_due("QUOTA", self.NOW - 7200, self.NOW, 2))
+        self.assertTrue(mon.waiting_notice_due("QUOTA", self.NOW, self.NOW, 0))
+        # Anything unknown counts as due: a notice is never silently withheld.
+        for since, now, hours in ((0, self.NOW, 24), (float("nan"), self.NOW, 24),
+                                  ("x", self.NOW, 24), (self.NOW, None, 24),
+                                  (self.NOW, self.NOW, -1), (self.NOW, self.NOW, True),
+                                  (self.NOW, self.NOW, 1.5)):
+            with self.subTest(since=since, now=now, hours=hours):
+                self.assertTrue(mon.waiting_notice_due("QUOTA", since, now, hours))
+
+    def test_notify_hours_come_from_policy_json_else_24(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            self.assertEqual(mon.waiting_notify_hours(str(path)), 24)   # absent
+            for content, expected in (('{"schema_version": 1, "waiting_notify_after_hours": 6}', 6),
+                                      ('{"waiting_notify_after_hours": 0}', 0),
+                                      ('{"waiting_notify_after_hours": "6"}', 24),
+                                      ('{"waiting_notify_after_hours": true}', 24),
+                                      ('{"waiting_notify_after_hours": 1001}', 24),
+                                      ('{"waiting_notify_after_hours": -1}', 24),
+                                      ('{"other": 6}', 24), ("[6]", 24), ("{", 24),
+                                      ('{"waiting_notify_after_hours": 6, "pad": "'
+                                       + "x" * 5000 + '"}', 24)):
+                with self.subTest(content=content[:60]):
+                    path.write_text(content, encoding="utf-8")
+                    self.assertEqual(mon.waiting_notify_hours(str(path)), expected)
+            path.write_text('{"waiting_notify_after_hours": 6}', encoding="utf-8")
+            link = Path(directory) / "link.json"
+            link.symlink_to(path)
+            self.assertEqual(mon.waiting_notify_hours(str(link)), 24)
+            self.assertEqual(mon.waiting_notify_hours(directory), 24)
+            with patch.object(mon, "canonical_root", return_value=directory):
+                self.assertEqual(mon.waiting_notify_hours(), 24)
+                (Path(directory) / "tools" / "llmtool").mkdir(parents=True)
+                os.replace(path, Path(directory) / "tools" / "llmtool" / "policy.json")
+                self.assertEqual(mon.waiting_notify_hours(), 6)
+
+    def test_waiting_entry_reads_only_a_valid_waiting_record(self):
+        since = mon._dispatch_time(self.stamp(3 * 3600))
+        self.assertEqual(mon._waiting_entry(self.task()),
+                         mon.WaitingRecord("a" * 8, "QUOTA", since, self.RESUME))
+        self.assertEqual(tuple(field.name for field in __import__("dataclasses").fields(
+            mon.WaitingRecord)), ("task", "reason", "since", "resume"))
+        good = self.task()
+        bad_cases = {
+            "legacy record without the field": {"task_id": self.TASK},
+            "cleared": {"task_id": self.TASK, "waiting": None},
+            "waiting_owner is not WAITING": self.task(reason="WAITING_OWNER"),
+            "owner answer": self.task(reason="OWNER"),
+            "lower-case reason": self.task(reason="quota"),
+            "long reason": self.task(reason="Q" * 65),
+            "extra key": {**good, "waiting": {**good["waiting"], "extra": 1}},
+            "missing key": {"task_id": self.TASK, "waiting": {"reason": "QUOTA"}},
+            "bad time": {**good, "waiting": {**good["waiting"], "waiting_since": "yesterday"}},
+            "blank condition": {**good, "waiting": {**good["waiting"], "resume_condition": " \n"}},
+            "condition not text": {**good, "waiting": {**good["waiting"], "resume_condition": 5}},
+            "bad task id": {**good, "task_id": "A" * 32},
+            "abandoned": {**good, "abandonment": {"reason": "stop"}},
+            "lineage closed": {**good, "lineage": {"state": "CLOSED"}},
+            "lineage dropped": {**good, "lineage": {"state": "DROPPED"}},
+            "not a dict": [good],
+        }
+        for label, record in bad_cases.items():
+            with self.subTest(label=label):
+                self.assertIsNone(mon._waiting_entry(record))
+        self.assertIsNotNone(mon._waiting_entry({**good, "lineage": {"state": "OPEN"}}))
+        self.assertIsNotNone(mon._waiting_entry({**good, "lineage": {"state": ["x"]}}))
+        messy = {**good, "waiting": {**good["waiting"],
+                                     "resume_condition": "line one\n\tline\x1b two  " + "z" * 80}}
+        shown = mon._waiting_entry(messy).resume
+        self.assertEqual(len(shown), mon.WAITING_RESUME_SHOWN)
+        self.assertTrue(shown.startswith("line one line two zz"))
+        self.assertTrue(shown.endswith("…"))
+
+    def test_rows_show_reason_age_condition_and_mark_due_notices_first(self):
+        record = mon._waiting_entry(self.task())
+        self.assertEqual(mon.waiting_lines([record], self.NOW), [
+            (f"WAITING：task aaaaaaaa（QUOTA，已等 3 小時）恢復條件：{self.RESUME}", "")])
+        auth = mon._waiting_entry(self.task(reason="AUTH", age=30, task="b" * 32))
+        old = mon._waiting_entry(self.task(reason="ROUTE_UNAVAILABLE", age=24 * 3600,
+                                           task="c" * 32))
+        days = mon._waiting_entry(self.task(reason="ENV", age=3 * 86400, task="d" * 32))
+        lines = mon.waiting_lines([record, auth, old, days], self.NOW)
+        self.assertEqual(lines, [
+            (f"WAITING：task dddddddd（ENV，已等 3 天）恢復條件：{self.RESUME}；★ 該通知 Owner", "!"),
+            (f"WAITING：task cccccccc（ROUTE_UNAVAILABLE，已等 24 小時）恢復條件：{self.RESUME}"
+             "；★ 該通知 Owner", "!"),
+            (f"WAITING：task bbbbbbbb（AUTH，已等 0 分鐘）恢復條件：{self.RESUME}；★ 該通知 Owner", "!"),
+            (f"WAITING：task aaaaaaaa（QUOTA，已等 3 小時）恢復條件：{self.RESUME}", "")])
+        # The threshold follows the policy hours: at 2 hours the 3-hour wait is due.
+        self.assertEqual(mon.waiting_lines([record], self.NOW, 2)[0][1], "!")
+        # A clock that runs behind the record never shows a negative wait.
+        ahead = replace(record, since=self.NOW + 600)
+        self.assertIn("已等 0 分鐘", mon.waiting_lines([ahead], self.NOW)[0][0])
+        many = [replace(record, task=f"{index:08x}") for index in range(7)]
+        capped = mon.waiting_lines(many, self.NOW, problem="只讀最近 32 筆 task，較舊的未確認")
+        self.assertEqual(len(capped), mon.WAITING_SHOWN + 2)
+        self.assertEqual(capped[-2], ("另有 2 件 WAITING", ""))
+        self.assertEqual(capped[-1], ("WAITING 清單可能不完整：只讀最近 32 筆 task，較舊的未確認", ""))
+        self.assertEqual(mon.waiting_lines([], self.NOW, problem="x"), [])
+        self.assertEqual(mon.waiting_lines(None, self.NOW), [])
+        self.assertEqual(mon.waiting_lines(["not a record"], self.NOW), [])
+
+    def test_waiting_records_read_the_task_store_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            for task_id, payload in (("a" * 32, self.task()),
+                                     ("b" * 32, {"task_id": "b" * 32}),
+                                     ("c" * 32, self.task(reason="WAITING_OWNER",
+                                                          task="c" * 32))):
+                path = Path(root) / f"{task_id}.json"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                os.chmod(path, 0o600)
+            records, problem = mon.waiting_records(root)
+            self.assertEqual(records, [mon._waiting_entry(self.task())])
+            self.assertEqual(problem, "")
+            with patch.object(mon, "LLMTOOL_TASKS", root):
+                self.assertEqual(mon.waiting_records(), (records, ""))
+
+    def test_waiting_records_name_an_incomplete_listing(self):
+        with patch.object(mon, "_bounded_task_entries", return_value=([], "")), \
+                patch.object(mon, "_remote_test_paths",
+                             return_value=(["p"] * mon.REMOTE_TEST_FILES, False)):
+            self.assertEqual(mon.waiting_records("root"),
+                             ([], f"只讀最近 {mon.REMOTE_TEST_FILES} 筆 task，較舊的未確認"))
+        with patch.object(mon, "_bounded_task_entries",
+                          return_value=([], mon.REMOTE_TEST_OVER_BUDGET)):
+            self.assertEqual(mon.waiting_records("root"), ([], mon.REMOTE_TEST_OVER_BUDGET))
+
+    def test_monitor_lines_and_office_top_placement(self):
+        from types import SimpleNamespace
+        record = mon._waiting_entry(self.task())
+        monitor = SimpleNamespace(waiting_records=([record], ""), waiting_hours=2)
+        self.assertEqual(mon.waiting_task_lines(monitor, self.NOW)[0][1], "!")
+        monitor.waiting_hours = 24
+        self.assertEqual(mon.waiting_task_lines(monitor, self.NOW)[0][1], "")
+        # No WAITING read yet, or only waiting_owner requests on GitHub: no WAITING row.
+        github = SimpleNamespace(pending=[mon.OwnerPending(1, "#1", "WAITING", "", "waiting_owner")])
+        self.assertEqual(mon.waiting_task_lines(SimpleNamespace(github=github), self.NOW), [])
+        self.assertEqual(mon.waiting_task_lines(SimpleNamespace(waiting_records=None), self.NOW), [])
+        self.assertEqual(mon.waiting_task_lines(SimpleNamespace(waiting_records=5), self.NOW), [])
+        row = ("WAITING：task aaaaaaaa", "")
+        self.assertEqual(mon.office_top(None, ["quota"], self.NOW, stuck=["stuck"], waiting=[row]),
+                         [("等你決定：未讀 GitHub", ""), ("quota", "!"), ("stuck", "!"), row])
+        self.assertEqual(mon.office_top(None, [], self.NOW), [("等你決定：未讀 GitHub", "")])
 
 
 class MainAiGhConfigTests(unittest.TestCase):

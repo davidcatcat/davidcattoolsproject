@@ -979,6 +979,8 @@ class Monitor:
         self.d6: list = []   # D6 task lines, refreshed with the office view
         self.ec2_heads = None
         self.stuck_records = None
+        self.waiting_records = None   # (WaitingRecord list, shortfall) of the last good read
+        self.waiting_hours = WAITING_NOTIFY_HOURS
         self.version = monitor_version()   # the code this process loaded
         self.digest = script_digest()
         self.stale = False   # the file on disk changed since start: a restart is needed
@@ -1157,6 +1159,11 @@ class Monitor:
                     pass
                 try:
                     self.stuck_records = stuck_records()
+                except Exception:  # optional local evidence; preserve the last good snapshot
+                    pass
+                try:
+                    self.waiting_records = waiting_records()
+                    self.waiting_hours = waiting_notify_hours()
                 except Exception:  # optional local evidence; preserve the last good snapshot
                     pass
         if self.short_lived and now - self.last_summary >= self.summary_every:
@@ -6927,6 +6934,136 @@ def stuck_records(root: str | None = None) -> tuple[list[StuckRecord], str]:
     return _bounded_task_entries(root, _stuck_parsed, STUCK_BUDGET, _stuck_entry)
 
 
+# #1502 WP-D D12 (E5): a WAITING Task, read only from the Task's own 'waiting'
+# record. A waiting_owner marker (an Owner answer is due) is not WAITING and
+# never counts here. The rule below only says whether a notice is due; the
+# monitor sends nothing and replays nothing.
+WAITING_NOTIFY_HOURS = 24      # used when policy.json gives no valid value
+WAITING_BUDGET = 4 << 20
+WAITING_SHOWN = 5
+WAITING_RESUME_SHOWN = 60
+WAITING_POLICY_READ = 4096
+WAITING_REASON = re.compile(r"^[A-Z0-9_]{1,64}$")
+WAITING_END_STATES = ("CLOSED", "DROPPED", "STOPPED", "FAILED_FINAL")
+_waiting_parsed: dict = {}
+
+
+@dataclass(frozen=True)
+class WaitingRecord:
+    task: str
+    reason: str
+    since: float
+    resume: str
+
+
+def _waiting_entry(record) -> WaitingRecord | None:
+    """The bounded fields of one WAITING Task; None when it is not WAITING."""
+    if type(record) is not dict:
+        return None
+    task = record.get("task_id")
+    waiting = record.get("waiting")
+    lineage = record.get("lineage")
+    if (type(task) is not str or re.fullmatch(r"[0-9a-f]{32}", task) is None
+            or type(waiting) is not dict
+            or set(waiting) != {"waiting_since", "resume_condition", "reason"}
+            or record.get("abandonment") is not None
+            or (type(lineage) is dict and lineage.get("state") in WAITING_END_STATES)):
+        return None
+    reason, resume = waiting["reason"], waiting["resume_condition"]
+    since = _dispatch_time(waiting["waiting_since"])
+    if (type(reason) is not str or not WAITING_REASON.fullmatch(reason) or "OWNER" in reason
+            or type(resume) is not str or since <= 0):
+        return None
+    text = " ".join("".join(char if char.isprintable() else " " for char in resume).split())
+    if not text:
+        return None
+    if len(text) > WAITING_RESUME_SHOWN:
+        text = text[:WAITING_RESUME_SHOWN - 1] + "…"
+    return WaitingRecord(task[:8], reason, since, text)
+
+
+def waiting_records(root: str | None = None) -> tuple[list[WaitingRecord], str]:
+    """Read bounded cached WAITING records; the second value names any shortfall."""
+    root = LLMTOOL_TASKS if root is None else root
+    entries, problem = _bounded_task_entries(root, _waiting_parsed, WAITING_BUDGET,
+                                             _waiting_entry)
+    if not problem:
+        paths, _ = _remote_test_paths(root)
+        if len(paths) >= REMOTE_TEST_FILES:
+            problem = f"只讀最近 {REMOTE_TEST_FILES} 筆 task，較舊的未確認"
+    return entries, problem
+
+
+def waiting_notice_due(reason, since, now, hours=WAITING_NOTIFY_HOURS) -> bool:
+    """E5: True when the Owner should be told about one WAITING Task.
+
+    AUTH (a login only the Owner can fix) is due at once; any other reason once
+    it has waited `hours` hours (since and now are epoch seconds). Pure: it
+    never sends anything. An unknown time or hours count as due.
+    """
+    if reason == "AUTH":
+        return True
+    if (type(since) not in (int, float) or not math.isfinite(since) or since <= 0
+            or type(now) not in (int, float) or not math.isfinite(now)
+            or type(hours) is not int or hours < 0):
+        return True
+    return now - since >= hours * 3600
+
+
+def waiting_notify_hours(path: str | None = None) -> int:
+    """waiting_notify_after_hours from tools/llmtool/policy.json, else 24.
+
+    A local, bounded read that never follows a link or blocks on a FIFO."""
+    if path is None:
+        path = os.path.join(canonical_root(), "tools", "llmtool", "policy.json")
+    fd = -1
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return WAITING_NOTIFY_HOURS
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            raw = handle.read(WAITING_POLICY_READ + 1)
+        data = json.loads(raw) if len(raw) <= WAITING_POLICY_READ else None
+    except (OSError, ValueError, RecursionError):
+        return WAITING_NOTIFY_HOURS
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    value = data.get("waiting_notify_after_hours") if type(data) is dict else None
+    return value if type(value) is int and 0 <= value <= 1000 else WAITING_NOTIFY_HOURS
+
+
+def _waited(age: float) -> str:
+    age = max(0.0, age)
+    if age < 3600:
+        return f"{int(age // 60)} 分鐘"
+    if age < 2 * 86400:
+        return f"{int(age // 3600)} 小時"
+    return f"{int(age // 86400)} 天"
+
+
+def waiting_lines(records, now, hours=WAITING_NOTIFY_HOURS,
+                  problem: str = "") -> list[tuple[str, str]]:
+    """[(line, style)]: one row per WAITING Task, notice-due rows first and marked."""
+    found = [record for record in records or [] if isinstance(record, WaitingRecord)]
+    if not found:
+        return []
+    ordered = sorted(((not waiting_notice_due(record.reason, record.since, now, hours),
+                       record.since, record.task, record) for record in found),
+                     key=lambda item: item[:3])
+    out = []
+    for quiet, _, _, record in ordered[:WAITING_SHOWN]:
+        text = (f"WAITING：task {record.task}（{record.reason}，已等 "
+                f"{_waited(now - record.since)}）恢復條件：{record.resume}")
+        out.append((text if quiet else text + "；★ 該通知 Owner", "" if quiet else "!"))
+    if len(ordered) > WAITING_SHOWN:
+        out.append((f"另有 {len(ordered) - WAITING_SHOWN} 件 WAITING", ""))
+    if problem:
+        out.append((f"WAITING 清單可能不完整：{problem}", ""))
+    return out
+
+
 def stuck_reviews(office, details) -> list[tuple[str, str, float]]:
     found = []
     running = _d6_running_tasks(office if type(office) is list else [])
@@ -8938,7 +9075,20 @@ def stuck_lines(mon, now) -> list[str]:
         return []
 
 
-def office_top(github, quota, now, stuck=None, progress=None, install=None) -> list[tuple[str, str]]:
+def waiting_task_lines(mon, now) -> list[tuple[str, str]]:
+    """The WAITING rows from the last good Task read; [] when there is none."""
+    try:
+        found = getattr(mon, "waiting_records", None)
+        if found is None:
+            return []
+        return waiting_lines(found[0], now,
+                             getattr(mon, "waiting_hours", WAITING_NOTIFY_HOURS), found[1])
+    except Exception:
+        return []
+
+
+def office_top(github, quota, now, stuck=None, progress=None, install=None,
+               waiting=None) -> list[tuple[str, str]]:
     out = [owner_count_line(github)]
     if isinstance(install, list):
         out.extend(install)
@@ -8948,6 +9098,7 @@ def office_top(github, quota, now, stuck=None, progress=None, install=None) -> l
         out.append(progress)
     out.extend((line, "!") for line in (quota or []))
     out.extend((line, "!") for line in (stuck or []))
+    out.extend(waiting or [])
     return out
 
 
@@ -9158,6 +9309,7 @@ def run_once(github: "GitHubSource | None" = None) -> int:
                                  waiting=owner_waiting(github or mon.github),
                                  top=office_top(github, mon.quota, time.time(),
                                                 stuck=stuck_lines(mon, time.time()),
+                                                waiting=waiting_task_lines(mon, time.time()),
                                                 progress=pm_progress(mon, time.time()),
                                                 install=rule_alert_lines() + install_lines(github)))))
     print("\n".join(line for line, _ in board_view(
@@ -9357,6 +9509,7 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
                             waiting=owner_waiting(mon.github),
                             top=office_top(mon.github, mon.quota, time.time(),
                                            stuck=stuck_lines(mon, time.time()),
+                                           waiting=waiting_task_lines(mon, time.time()),
                                            progress=pm_progress(mon, time.time()),
                                            install=rule_alert_lines() + install_lines(mon.github)))
         offset = max(0, min(offset, len(lines) - body))

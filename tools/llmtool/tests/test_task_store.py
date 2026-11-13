@@ -416,6 +416,163 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.task_store_error_code,
                          'TASK_LINEAGE_TRANSITION_INVALID')
 
+    WAITING_RESUME = 'quota resets at 00:00 UTC'
+
+    def _waiting(self, **overrides):
+        value = {'waiting_since': '2026-11-13T00:00:00Z', 'reason': 'QUOTA',
+                 'resume_condition': self.WAITING_RESUME}
+        value.update(overrides)
+        return value
+
+    def test_waiting_is_optional_and_strictly_validated(self):
+        # #1502 WP-D D12: a Task without the field is not WAITING and stays as it is.
+        from llmtool.task_store import clear_waiting, is_waiting
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        task_id = task['task_id']
+        legacy = self.store.get(task_id)
+        self.assertNotIn('waiting', legacy)
+        self.assertFalse(is_waiting(legacy))
+        self.assertEqual(clear_waiting(self.store, task_id), legacy)
+        self.assertEqual(self.store.get(task_id), legacy)   # no write at all
+        bad_values = (
+            'QUOTA', [], {}, self._waiting(extra=1),
+            {'waiting_since': '2026-11-13T00:00:00Z', 'reason': 'QUOTA'},
+            self._waiting(waiting_since='2026-11-13 00:00:00'),
+            self._waiting(waiting_since='2026-11-13T00:00:00.000001Z'),
+            self._waiting(waiting_since='2026-13-01T00:00:00Z'),
+            self._waiting(waiting_since=None),
+            self._waiting(reason='quota'), self._waiting(reason=''),
+            self._waiting(reason='Q' * 65), self._waiting(reason='ROUTE-DOWN'),
+            self._waiting(reason=7),
+            # Waiting for an Owner answer is waiting_owner, never WAITING.
+            self._waiting(reason='WAITING_OWNER'), self._waiting(reason='OWNER'),
+            self._waiting(resume_condition=''), self._waiting(resume_condition='   '),
+            self._waiting(resume_condition='first line\nsecond line'),
+            self._waiting(resume_condition='x' * 501),
+            self._waiting(resume_condition=None),
+        )
+        for bad in bad_values:
+            with self.subTest(bad=bad):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(task_id, waiting=bad)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_WAITING_INVALID')
+        self.assertEqual(self.store.get(task_id), legacy)
+        for good in (self._waiting(), self._waiting(reason='AUTH'),
+                     self._waiting(reason='Q' * 64, resume_condition=(
+                         'wait until the shared runner is back online ' * 12)[:500])):
+            with self.subTest(good=good):
+                other = self._codex_dispatch_task()
+                self.store.create(other)
+                self.store.update(other['task_id'], waiting=good)
+                stored = self.store.get(other['task_id'])
+                self.assertEqual(stored['waiting'], good)
+                self.assertTrue(is_waiting(stored))
+        for value in (None, {}, {'waiting': None}, {'waiting': 'QUOTA'}):
+            self.assertFalse(is_waiting(value))
+
+    def test_waiting_resume_condition_goes_through_the_sensitive_screen(self):
+        # The screen is injected (Owner #763 A); the store must still refuse.
+        from llmtool.task_store import enter_waiting
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        before = self.store.get(task['task_id'])
+        flagged = 'condition the injected screen flags'
+        calls = []
+
+        def screen(value):
+            calls.append(value)
+            return value == flagged
+        with patch.object(task_store_module, '_emitted_sensitive', side_effect=screen):
+            with self.assertRaises(LLMToolError) as caught:
+                enter_waiting(self.store, task['task_id'], reason='QUOTA',
+                              resume_condition=flagged, now='2026-11-13T00:00:00Z')
+            self.assertEqual(caught.exception.task_store_error_code, 'TASK_WAITING_INVALID')
+            self.assertIn(flagged, calls)
+            self.assertEqual(self.store.get(task['task_id']), before)
+            enter_waiting(self.store, task['task_id'], reason='QUOTA',
+                          resume_condition=self.WAITING_RESUME, now='2026-11-13T00:00:00Z')
+        self.assertIn(self.WAITING_RESUME, calls)
+        self.assertEqual(self.store.get(task['task_id'])['waiting'], self._waiting())
+
+    def test_enter_and_clear_waiting_restart_the_clock_only_on_progress(self):
+        from llmtool.task_store import clear_waiting, enter_waiting, is_waiting
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        task_id = task['task_id']
+        saved = enter_waiting(self.store, task_id, reason='QUOTA',
+                              resume_condition=self.WAITING_RESUME,
+                              now='2026-11-13T00:00:00Z')
+        self.assertEqual(saved['waiting'], self._waiting())
+        # Entering again while WAITING never moves the clock (no silent reset).
+        again = enter_waiting(self.store, task_id, reason='AUTH',
+                              resume_condition='the Owner logs in again',
+                              now='2026-11-13T05:00:00Z')
+        self.assertEqual(again['waiting'], {'waiting_since': '2026-11-13T00:00:00Z',
+                                            'reason': 'AUTH',
+                                            'resume_condition': 'the Owner logs in again'})
+        # A plain update cannot move the clock either.
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.update(task_id, waiting=dict(again['waiting'],
+                                                    waiting_since='2026-11-13T06:00:00Z'))
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'TASK_WAITING_TRANSITION_INVALID')
+        for kwargs in ({'reason': 'WAITING_OWNER', 'resume_condition': 'an answer'},
+                       {'reason': 'QUOTA', 'resume_condition': ''}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(LLMToolError) as caught:
+                    enter_waiting(self.store, task_id, now='2026-11-13T07:00:00Z', **kwargs)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_WAITING_INVALID')
+        self.assertEqual(self.store.get(task_id)['waiting'], again['waiting'])
+        # Progress clears WAITING; clearing again writes nothing.
+        cleared = clear_waiting(self.store, task_id)
+        self.assertIsNone(cleared['waiting'])
+        self.assertFalse(is_waiting(cleared))
+        self.assertEqual(clear_waiting(self.store, task_id), self.store.get(task_id))
+        self.assertEqual(self.store.get(task_id)['record_sha256'], cleared['record_sha256'])
+        # Entering after a clear restarts the clock.
+        restarted = enter_waiting(self.store, task_id, reason='QUOTA',
+                                  resume_condition=self.WAITING_RESUME,
+                                  now='2026-11-14T00:00:00Z')
+        self.assertEqual(restarted['waiting']['waiting_since'], '2026-11-14T00:00:00Z')
+        # Without now, the clock starts at the current UTC second.
+        fresh = self._codex_dispatch_task()
+        self.store.create(fresh)
+        since = enter_waiting(self.store, fresh['task_id'], reason='ENV',
+                              resume_condition='the runner is back')['waiting']['waiting_since']
+        self.assertTrue(task_store_module._valid_utc_seconds(since))
+        started = task_store_module._utc_seconds(since).timestamp()
+        self.assertLessEqual(abs(time.time() - started), 60)
+        unstarted = self._codex_dispatch_task()
+        self.store.create(unstarted)
+        with self.assertRaises(LLMToolError) as caught:
+            enter_waiting(self.store, unstarted['task_id'], reason='ENV',
+                          resume_condition='the runner is back', now='yesterday')
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_WAITING_INVALID')
+        self.assertNotIn('waiting', self.store.get(unstarted['task_id']))
+
+    def test_enter_waiting_never_undoes_a_concurrent_change(self):
+        from llmtool.task_store import clear_waiting, enter_waiting
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        task_id = task['task_id']
+        stale = self.store.get(task_id)
+        enter_waiting(self.store, task_id, reason='QUOTA',
+                      resume_condition=self.WAITING_RESUME, now='2026-11-13T00:00:00Z')
+        current = self.store.get(task_id)
+        with patch.object(self.store, 'get', return_value=stale):
+            with self.assertRaises(TaskStoreConflict):
+                enter_waiting(self.store, task_id, reason='QUOTA',
+                              resume_condition=self.WAITING_RESUME,
+                              now='2026-11-14T00:00:00Z')
+        with patch.object(self.store, 'get',
+                          return_value=dict(current, waiting=self._waiting(reason='ENV'))):
+            with self.assertRaises(TaskStoreConflict):
+                clear_waiting(self.store, task_id)
+        self.assertEqual(self.store.get(task_id), current)
+
     def test_retry_claim_transition_is_atomic_with_next_attempt(self):
         task = self._codex_dispatch_task()
         self.store.create(task)

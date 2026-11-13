@@ -99,7 +99,7 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'review_dispatch_claim', 'review_repair_claims', 'high_debug',
     'abandonment', 'pm_session_adoptions', 'pm_provenance', 'merge_attempt',
     'published_pr', 'repair_cap_override', 'publish_operations',
-    'review_exception', 'lineage'))
+    'review_exception', 'lineage', 'waiting'))
 # Owner-exception merge evidence (#1253, #1519). Only this one exception type
 # is persisted; its evidence is the exact owner_exception.verify() result.
 _REVIEW_EXCEPTION_TYPE = 'OWNER_EXCEPTION_DETERMINISTIC_REDACTION'
@@ -1193,6 +1193,69 @@ def record_lineage(store, task_id, lineage):
     return store.update(task_id, lineage=dict(lineage))
 
 
+# #1502 WP-D D12 (spec 3-4, E5): a Task that cannot go on until something outside
+# it changes (login, quota, a route, a Reviewer, ...) is WAITING. A Task without
+# this field, or with it cleared to None, is not WAITING. Waiting for an Owner
+# answer is waiting_owner, a different thing, so no reason may name the Owner.
+# The clock starts on entry and restarts only through clear_waiting (progress).
+_WAITING_FIELDS = frozenset(('waiting_since', 'resume_condition', 'reason'))
+WAITING_REASON = re.compile(r'[A-Z0-9_]{1,64}')
+WAITING_RESUME_MAX = 500
+
+
+def _validate_waiting(item):
+    if item is None:
+        return
+    reason = item.get('reason') if type(item) is dict else None
+    resume = item.get('resume_condition') if type(item) is dict else None
+    if (type(item) is not dict or set(item) != _WAITING_FIELDS or
+            not _valid_utc_seconds(item.get('waiting_since')) or
+            type(reason) is not str or WAITING_REASON.fullmatch(reason) is None or
+            'OWNER' in reason or
+            type(resume) is not str or not 1 <= len(resume) <= WAITING_RESUME_MAX or
+            not resume.strip() or not all(char.isprintable() for char in resume) or
+            _emitted_sensitive(resume)):
+        _fail('TASK_WAITING_INVALID')
+
+
+def _check_waiting_transition(old, new):
+    """While a Task stays WAITING its clock never moves; only a clear restarts it."""
+    if (type(old) is dict and type(new) is dict and
+            new.get('waiting_since') != old.get('waiting_since')):
+        _fail('TASK_WAITING_TRANSITION_INVALID')
+
+
+def is_waiting(record):
+    """True only for a Task with a recorded WAITING; waiting_owner is not WAITING."""
+    return type(record) is dict and type(record.get('waiting')) is dict
+
+
+def enter_waiting(store, task_id, *, reason, resume_condition, now=None):
+    """Put a Task in WAITING. Entering again while WAITING keeps the clock running.
+
+    now is a UTC '%Y-%m-%dT%H:%M:%SZ' string; it defaults to the current time.
+    The write is refused TASK_STORE_CONFLICT if the WAITING record changed since
+    it was read, so a concurrent clear is never silently undone.
+    """
+    current = store.get(task_id)
+    old = current.get('waiting')
+    since = (old['waiting_since'] if type(old) is dict else
+             datetime.now(timezone.utc).strftime(_UTC_SECONDS) if now is None else now)
+    waiting = {'waiting_since': since, 'resume_condition': resume_condition,
+               'reason': reason}
+    _validate_waiting(waiting)
+    return store.compare_and_update(task_id, expected={'waiting': old}, waiting=waiting)
+
+
+def clear_waiting(store, task_id):
+    """Progress: leave WAITING. A Task that is not WAITING is left unchanged."""
+    current = store.get(task_id)
+    old = current.get('waiting')
+    if old is None:
+        return current
+    return store.compare_and_update(task_id, expected={'waiting': old}, waiting=None)
+
+
 def _validate(record, *, strict=True):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
@@ -1204,6 +1267,9 @@ def _validate(record, *, strict=True):
     if 'lineage' in keys:
         keys.discard('lineage')
         _validate_lineage(record)
+    if 'waiting' in keys:
+        keys.discard('waiting')
+        _validate_waiting(record['waiting'])
     if type(record) is dict and 'pm_session_adoptions' in record:
         keys.discard('pm_session_adoptions')
     if (type(record) is not dict or
@@ -4288,6 +4354,9 @@ class TaskStore:
             if 'lineage' in changes:
                 # #1502 WP-D D9b: every lineage write is forward-only, under the task lock.
                 _check_lineage_transition(current.get('lineage'), changes['lineage'])
+            if 'waiting' in changes:
+                # #1502 WP-D D12: the WAITING clock restarts only through a clear.
+                _check_waiting_transition(current.get('waiting'), changes['waiting'])
             if trusted_abandonment:
                 item = changes['abandonment']
                 if (current.get('pm_session_id') != abandonment_pm_session_id or
