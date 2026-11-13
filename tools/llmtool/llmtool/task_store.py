@@ -99,7 +99,7 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'review_dispatch_claim', 'review_repair_claims', 'high_debug',
     'abandonment', 'pm_session_adoptions', 'pm_provenance', 'merge_attempt',
     'published_pr', 'repair_cap_override', 'publish_operations',
-    'review_exception', 'lineage'))
+    'review_exception', 'lineage', 'review_disputes'))
 # Owner-exception merge evidence (#1253, #1519). Only this one exception type
 # is persisted; its evidence is the exact owner_exception.verify() result.
 _REVIEW_EXCEPTION_TYPE = 'OWNER_EXCEPTION_DETERMINISTIC_REDACTION'
@@ -1193,6 +1193,123 @@ def record_lineage(store, task_id, lineage):
     return store.update(task_id, lineage=dict(lineage))
 
 
+# #1502 WP-D D13 (section 4 items 1-12, E10): PM disputes of formal review
+# findings. An entry is appended OPEN (a dispute) or DEFERRED (a Low or
+# Advisory finding put off); an OPEN entry moves once to RULED, carrying the
+# arbiter's ruling, or to WITHDRAWN. Nothing else changes. At most one ruling
+# exists per (pr, finding_id). A ruling never replaces the formal PASS.
+_REVIEW_DISPUTE_FIELDS = frozenset(('finding_id', 'pr', 'head_sha', 'review_version',
+                                    'severity', 'state', 'evidence_ref', 'opened_at'))
+_REVIEW_DISPUTE_RULING_FIELDS = frozenset(('outcome', 'head_sha', 'reviewer', 'reviewer_task',
+                                           'reviewer_session', 'evidence_ref', 'ruled_at'))
+REVIEW_DISPUTE_STATES = ('OPEN', 'RULED', 'DEFERRED', 'WITHDRAWN')
+# Severity words of formal verdict Finding lines (formal-verdict.md, #1502 4.12).
+REVIEW_DISPUTE_SEVERITIES = ('Blocker', 'Blocking', 'Critical', 'High', 'Medium',
+                             'Low', 'Advisory')
+REVIEW_DISPUTE_DEFERRABLE = ('Low', 'Advisory')
+REVIEW_DISPUTE_OUTCOMES = ('UPHELD', 'WITHDRAWN')
+REVIEW_DISPUTE_REVIEWERS = ('claude-reviewer', 'codex-reviewer')
+MAX_REVIEW_DISPUTES = 64
+# Evidence and rulings are Issue or PR conversation comments of this repository.
+_REVIEW_DISPUTE_REF = re.compile(
+    r'https://github\.com/davidcatcat/davidcattoolsproject/(?:issues|pull)/'
+    r'[1-9][0-9]{0,8}#issuecomment-[1-9][0-9]{0,19}')
+REVIEW_DISPUTE_FINDING_ID = re.compile(r'F[1-9][0-9]{0,3}')
+
+
+def valid_review_dispute_ref(value):
+    """A comment URL of this repository that passes the sensitive screen."""
+    return (type(value) is str and _REVIEW_DISPUTE_REF.fullmatch(value) is not None and
+            not _emitted_sensitive(value))
+
+
+def valid_review_dispute_session(value):
+    """A bounded printable Reviewer session id that passes the sensitive screen."""
+    return (type(value) is str and 1 <= len(value) <= 256 and
+            all(0x20 < ord(char) < 0x7f for char in value) and
+            not _emitted_sensitive(value))
+
+
+def _valid_review_dispute_ruling(item):
+    ruling = item.get('ruling')
+    return (type(ruling) is dict and set(ruling) == _REVIEW_DISPUTE_RULING_FIELDS and
+            ruling['outcome'] in REVIEW_DISPUTE_OUTCOMES and
+            ruling['head_sha'] == item['head_sha'] and
+            ruling['reviewer'] in REVIEW_DISPUTE_REVIEWERS and
+            _safe_identifier(ruling['reviewer_task'], D6_TASK_ID) and
+            valid_review_dispute_session(ruling['reviewer_session']) and
+            valid_review_dispute_ref(ruling['evidence_ref']) and
+            ruling['evidence_ref'] != item['evidence_ref'] and
+            _valid_utc_seconds(ruling['ruled_at']) and
+            ruling['ruled_at'] >= item['opened_at'])
+
+
+def _validate_review_disputes(record):
+    items = record.get('review_disputes')
+    if type(items) is not list or len(items) > MAX_REVIEW_DISPUTES:
+        _fail('REVIEW_DISPUTE_INVALID')
+    ruled, live, open_keys = set(), set(), set()
+    for item in items:
+        if (type(item) is not dict or
+                set(item) not in (_REVIEW_DISPUTE_FIELDS,
+                                  _REVIEW_DISPUTE_FIELDS | frozenset(('ruling',))) or
+                not _safe_identifier(item['finding_id'], REVIEW_DISPUTE_FINDING_ID) or
+                type(item['pr']) is not int or not 1 <= item['pr'] <= 9999999 or
+                type(item['head_sha']) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', item['head_sha']) is None or
+                type(item['review_version']) is not int or
+                not 1 <= item['review_version'] <= 9999 or
+                type(item['severity']) is not str or
+                item['severity'] not in REVIEW_DISPUTE_SEVERITIES or
+                type(item['state']) is not str or item['state'] not in REVIEW_DISPUTE_STATES or
+                not valid_review_dispute_ref(item['evidence_ref']) or
+                not _valid_utc_seconds(item['opened_at']) or
+                ('ruling' in item) != (item['state'] == 'RULED') or
+                (item['state'] == 'RULED' and not _valid_review_dispute_ruling(item)) or
+                (item['state'] == 'DEFERRED' and
+                 item['severity'] not in REVIEW_DISPUTE_DEFERRABLE)):
+            _fail('REVIEW_DISPUTE_INVALID')
+        key = (item['pr'], item['finding_id'])
+        if item['state'] == 'RULED':
+            if key in ruled:
+                _fail('REVIEW_DISPUTE_INVALID')
+            ruled.add(key)
+        if item['state'] == 'OPEN':
+            open_keys.add(key)
+        if item['state'] != 'WITHDRAWN':
+            if key + (item['head_sha'],) in live:
+                _fail('REVIEW_DISPUTE_INVALID')
+            live.add(key + (item['head_sha'],))
+    # A finding with a ruling can never be ruled again, so it is never OPEN again.
+    if ruled & open_keys:
+        _fail('REVIEW_DISPUTE_INVALID')
+
+
+def _check_review_disputes_transition(old, new):
+    """Append one OPEN or DEFERRED entry, or move one OPEN entry to RULED or WITHDRAWN."""
+    old = [] if old is None else old
+    if type(old) is not list or type(new) is not list:
+        _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+    if len(new) == len(old) + 1:
+        added = new[-1]
+        if (new[:-1] != old or type(added) is not dict or
+                added.get('state') not in ('OPEN', 'DEFERRED') or 'ruling' in added):
+            _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+        return
+    changed = [index for index, (before, after) in enumerate(zip(old, new))
+               if before != after]
+    if len(new) != len(old) or len(changed) != 1:
+        _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+    before, after = old[changed[0]], new[changed[0]]
+    if (type(before) is not dict or type(after) is not dict or
+            before.get('state') != 'OPEN' or
+            after.get('state') not in ('RULED', 'WITHDRAWN') or
+            set(after) - set(before) - {'ruling'} or set(before) - set(after) or
+            any(before.get(key) != after.get(key)
+                for key in _REVIEW_DISPUTE_FIELDS - {'state'})):
+        _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
+
+
 def _validate(record, *, strict=True):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
@@ -1204,6 +1321,9 @@ def _validate(record, *, strict=True):
     if 'lineage' in keys:
         keys.discard('lineage')
         _validate_lineage(record)
+    if 'review_disputes' in keys:
+        keys.discard('review_disputes')
+        _validate_review_disputes(record)
     if type(record) is dict and 'pm_session_adoptions' in record:
         keys.discard('pm_session_adoptions')
     if (type(record) is not dict or
@@ -2795,6 +2915,9 @@ class TaskStore:
         if type(record) is dict and 'lineage' in record:
             # #1502 WP-D D10: a new Task is created first, then labelled by record_lineage.
             _fail('TASK_LINEAGE_TRANSITION_INVALID')
+        if type(record) is dict and 'review_disputes' in record:
+            # #1502 WP-D D13: disputes are appended to an existing Task only.
+            _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
         if type(record) is dict and 'abandonment' in record:
             _fail('TASK_ABANDONMENT_MUTATION_FORBIDDEN')
         if (type(record) is not dict or 'dispatch_audit' in record or
@@ -4288,6 +4411,10 @@ class TaskStore:
             if 'lineage' in changes:
                 # #1502 WP-D D9b: every lineage write is forward-only, under the task lock.
                 _check_lineage_transition(current.get('lineage'), changes['lineage'])
+            if 'review_disputes' in changes:
+                # #1502 WP-D D13: append and forward transitions only, under the task lock.
+                _check_review_disputes_transition(current.get('review_disputes'),
+                                                  changes['review_disputes'])
             if trusted_abandonment:
                 item = changes['abandonment']
                 if (current.get('pm_session_id') != abandonment_pm_session_id or
