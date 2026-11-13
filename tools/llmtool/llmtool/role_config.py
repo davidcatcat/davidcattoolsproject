@@ -25,6 +25,14 @@ ROUTE_ROLES = {
 # Legacy user-config role names (keys) are aliases of the new ids (values),
 # so an existing user config keeps working without an edit.
 LEGACY_ROLE_ALIASES = {"reviewer": "claude-reviewer"}
+# The provider each provider-bound role id runs under. A legacy alias entry is
+# accepted only when its provider and account kind match its target role's
+# provider here (#1777, CWE-863); a target missing here accepts no binding.
+ROLE_PROVIDERS = {
+    "claude-debug": "claude", "claude-developer": "claude", "claude-reviewer": "claude",
+    "codex-debug": "codex", "codex-developer": "codex", "codex-reviewer": "codex",
+}
+ROLE_ALIAS_PROVIDER_MISMATCH = "ROLE_ALIAS_PROVIDER_MISMATCH"
 # Role ids `llmtool roles` always lists, in addition to configured roles.
 KNOWN_ROLES = (
     "agy-developer", "claude-debug", "claude-developer", "claude-reviewer",
@@ -59,6 +67,27 @@ def config_names(role):
     names.extend(legacy for legacy, new in sorted(LEGACY_ROLE_ALIASES.items())
                  if new == role)
     return names
+
+
+def _check_alias_provider(role, configured_name, configured, accounts):
+    """Refuse a legacy alias whose entry binds another provider's account.
+
+    Applies when the configured entry is a legacy name, or when role itself is
+    a legacy name (it then stands for its target role). The entry's explicit
+    provider and its account kind must each be absent or equal to the target
+    role's provider; an entry with neither binds no account and is accepted.
+    """
+    legacy = next((name for name in (configured_name, role)
+                   if name in LEGACY_ROLE_ALIASES), None)
+    if legacy is None:
+        return
+    expected = ROLE_PROVIDERS.get(LEGACY_ROLE_ALIASES[legacy])
+    account = configured.get("account")
+    bound = (configured.get("provider"),
+             accounts[account]["kind"] if account is not None else None)
+    if any(value is not None and value != expected for value in bound):
+        _fail("legacy role alias names an account of another provider",
+              ROLE_ALIAS_PROVIDER_MISMATCH)
 
 
 def _name(value):
@@ -251,6 +280,7 @@ def resolve_role(role, cli=None, environ=None, *, home=None, route_config=None,
     legacy = user.get("pm_runtime", {}).get("claude_config_dir")
     configured_name = next((name for name in config_names(role) if name in roles), None)
     configured = roles.get(configured_name, {}) if configured_name is not None else {}
+    _check_alias_provider(role, configured_name, configured, accounts)
     settings = {"role": role, "provider": None, "provider_profile": None,
                 "account": None, "config_dir": None, "model": None, "effort": None}
     source = "builtin"

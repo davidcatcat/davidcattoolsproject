@@ -219,6 +219,64 @@ class AliasTests(AccountBase):
         self.assertEqual(self.resolve('claude-reviewer')['model'], 'new-model')
         self.assertEqual(self.resolve('reviewer')['model'], 'legacy-model')
 
+    def add_codex_account(self):
+        codex_dir = self.root / 'codex-account'
+        codex_dir.mkdir(mode=0o700)
+        codex_dir.chmod(0o700)
+        self.accounts['codex-work'] = {'kind': 'codex', 'config_dir': str(codex_dir)}
+
+    def assert_alias_refused(self, role):
+        with self.assertRaises(LLMToolError) as caught:
+            self.resolve(role)
+        self.assertEqual(caught.exception.role_config_code, 'ROLE_ALIAS_PROVIDER_MISMATCH')
+        self.assertNotIn(str(self.root), str(caught.exception))
+
+    def test_legacy_alias_naming_a_codex_account_is_refused(self):
+        # #1777 (CWE-863): a legacy alias cannot bind claude-reviewer to Codex.
+        self.add_codex_account()
+        self.save({'accounts': self.accounts,
+                   'roles': {'reviewer': {'account': 'codex-work', 'model': 'sonnet'}}})
+        for role in ('claude-reviewer', 'reviewer'):
+            with self.subTest(role=role):
+                self.assert_alias_refused(role)
+
+    def test_legacy_alias_naming_a_codex_provider_is_refused(self):
+        self.save({'accounts': self.accounts,
+                   'roles': {'reviewer': {'provider': 'codex'}}})
+        for role in ('claude-reviewer', 'reviewer'):
+            with self.subTest(role=role):
+                self.assert_alias_refused(role)
+
+    def test_legacy_role_name_cannot_resolve_a_codex_bound_new_entry(self):
+        # 'reviewer' stands for claude-reviewer, so its target entry is checked too.
+        self.add_codex_account()
+        self.save({'accounts': self.accounts,
+                   'roles': {'claude-reviewer': {'account': 'codex-work'}}})
+        self.assert_alias_refused('reviewer')
+
+    def test_exact_entry_is_used_without_the_mismatched_alias(self):
+        self.add_codex_account()
+        self.save({'accounts': self.accounts,
+                   'roles': {'reviewer': {'account': 'codex-work'},
+                             'claude-reviewer': {'account': 'work'}}})
+        resolved = self.resolve('claude-reviewer')
+        self.assertEqual((resolved['provider'], resolved['account']), ('claude', 'work'))
+        self.assert_alias_refused('reviewer')
+
+    def test_legacy_alias_with_a_matching_provider_resolves(self):
+        self.save({'accounts': self.accounts,
+                   'roles': {'reviewer': {'provider': 'claude', 'account': 'work'}}})
+        resolved = self.resolve('claude-reviewer')
+        self.assertEqual((resolved['provider'], resolved['account'], resolved['config_dir']),
+                         ('claude', 'work', str(self.account_dir)))
+
+    def test_alias_check_fails_closed_for_a_target_without_a_provider(self):
+        aliases = dict(role_config.LEGACY_ROLE_ALIASES, tester='unbound-tester')
+        self.save({'accounts': self.accounts,
+                   'roles': {'tester': {'account': 'work'}}})
+        with mock.patch.object(role_config, 'LEGACY_ROLE_ALIASES', aliases):
+            self.assert_alias_refused('unbound-tester')
+
 
 class DispatchPathTests(ResolverBase):
     def routes(self):
@@ -405,6 +463,21 @@ class RolesCommandTests(AccountBase):
         rows = {line.split('\t')[0]: line.split('\t') for line in lines}
         self.assertEqual(rows['pm-codex-binding'][3], 'm1')
         self.assertEqual(rows['agy-developer'], ['agy-developer', 'ERROR', 'ROLE_MODEL_NOT_ALLOWED'])
+
+    def test_reports_a_mismatched_legacy_alias_without_paths(self):
+        codex_dir = self.root / 'codex-account'
+        codex_dir.mkdir(mode=0o700)
+        codex_dir.chmod(0o700)
+        self.accounts['codex-work'] = {'kind': 'codex', 'config_dir': str(codex_dir)}
+        self.save({'accounts': self.accounts,
+                   'roles': {'reviewer': {'account': 'codex-work'}}})
+        status, lines = self.run_roles()
+        self.assertEqual(status, 1)
+        rows = {line.split('\t')[0]: line.split('\t') for line in lines}
+        self.assertEqual(rows['claude-reviewer'],
+                         ['claude-reviewer', 'ERROR', 'ROLE_ALIAS_PROVIDER_MISMATCH'])
+        self.assertNotIn('reviewer', rows)
+        self.assertNotIn(str(codex_dir), '\n'.join(lines))
 
     def test_roles_command_uses_the_single_resolver(self):
         calls = self.isolated_resolver()
