@@ -134,7 +134,9 @@ def _record(store, task, session, event_id, issue_number, item_id, marker_type, 
         return next(item for item in known if item.get('event_id') == event_id)
     stream = [item['sequence'] for item in known
               if item.get('source') == 'GITHUB' and item.get('session_id') == session]
-    source_sha = sha or hashlib.sha1(f'github-comment-{item_id}'.encode()).hexdigest()
+    # #1230 A3 B4: SHA-1 only names the event here; it is not a security use.
+    source_sha = sha or hashlib.sha1(f'github-comment-{item_id}'.encode(),
+                                     usedforsecurity=False).hexdigest()
     metadata = f'{item_id}:{marker_type}:{status}:{sha or ""}'.encode()
     return store.record_completion_event(task['task_id'], event_id=event_id,
         run_id=task['run_id'], session_id=session, source='GITHUB',
