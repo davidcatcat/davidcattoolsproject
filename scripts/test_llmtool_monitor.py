@@ -10485,25 +10485,27 @@ class WaitingTaskTests(unittest.TestCase):
             entry = mon._waiting_entry(record)
             return entry, "\n".join(line for line, _ in mon.waiting_lines([entry], self.NOW))
 
-        # A credential-shaped condition: TaskStore's real screen is called, and the
-        # injected screen flags this text (Owner #763 A: no credential-shaped data here).
-        flagged = "condition the injected screen flags"
-        calls = []
-
-        def screen(value):
-            calls.append(value)
-            return value == flagged
+        # Codex v1 F2: a credential-shaped condition, hidden by the real, unpatched
+        # screens. Assembled at runtime from parts, as test_task_store does, so no
+        # literal credential-shaped string is in this file (Owner #763 A).
+        shaped = "".join(("api", "_", "key", "=", "secret"))
+        resume = f"resume after {shaped} is rotated"
         record = self.task()
-        record["waiting"]["resume_condition"] = flagged
-        with patch.object(module, "_emitted_sensitive", side_effect=screen):
-            entry, text = shown(record)
-            self.assertEqual(entry, hidden)
-            self.assertNotIn(flagged, text)
-            self.assertIn(flagged, calls)
-            self.assertIn(mon.WAITING_HIDDEN, text)
-            # A hidden reason is unknown, so the notice is due at once.
-            self.assertIn("★ 該通知 Owner", text)
-            self.assertEqual(mon._waiting_entry(self.task()).resume, self.RESUME)
+        record["waiting"]["resume_condition"] = resume
+        self.assertFalse(module.valid_waiting(record["waiting"]))   # TaskStore's screen
+        self.assertIsNotNone(mon.SECRETISH.search(resume))          # the monitor's screen
+        entry, text = shown(record)
+        self.assertEqual(entry, hidden)
+        self.assertNotIn(shaped, text)
+        self.assertNotIn("api", text)
+        self.assertNotIn("rotated", text)
+        self.assertNotIn("QUOTA", text)
+        self.assertIn(mon.WAITING_HIDDEN, text)
+        # A hidden reason is unknown, so the notice is due at once.
+        self.assertIn("★ 該通知 Owner", text)
+        # The real screens leave an ordinary condition alone.
+        self.assertTrue(module.valid_waiting(self.task()["waiting"]))
+        self.assertEqual(mon._waiting_entry(self.task()).resume, self.RESUME)
         # The monitor's own SECRETISH screen also hides the reason and the condition.
         record = self.task()
         record["waiting"]["resume_condition"] = "monitor screen marker here"
@@ -10558,11 +10560,19 @@ class WaitingTaskTests(unittest.TestCase):
         # A clock that runs behind the record never shows a negative wait.
         ahead = replace(record, since=self.NOW + 600)
         self.assertIn("已等 0 分鐘", mon.waiting_lines([ahead], self.NOW)[0][0])
-        many = [replace(record, task=f"{index:08x}") for index in range(7)]
-        capped = mon.waiting_lines(many, self.NOW, problem="只讀最近 32 筆 task，較舊的未確認")
-        self.assertEqual(len(capped), mon.WAITING_SHOWN + 2)
-        self.assertEqual(capped[-2], ("另有 2 件 WAITING", ""))
-        self.assertEqual(capped[-1], ("WAITING 清單可能不完整：只讀最近 32 筆 task，較舊的未確認", ""))
+        # Codex v1 F1: one row per WAITING Task, never a cap with an aggregate count.
+        many = [replace(record, task=f"{index:08x}") for index in range(12)]
+        rows = mon.waiting_lines(many, self.NOW, problem="只讀最近 32 筆 task，較舊的未確認")
+        self.assertEqual(len(rows), len(many) + 1)
+        self.assertEqual(rows[:-1], [
+            (f"WAITING：task {index:08x}（QUOTA，已等 3 小時）恢復條件：{self.RESUME}", "")
+            for index in range(12)])
+        self.assertFalse(any("另有" in line for line, _ in rows))
+        self.assertEqual(rows[-1], ("WAITING 清單可能不完整：只讀最近 32 筆 task，較舊的未確認", ""))
+        # Every row also reaches the office view, which wraps rows but drops none.
+        view = mon.office_view([], top=mon.office_top(None, [], self.NOW, waiting=rows))
+        for index in range(12):
+            self.assertTrue(any(f"task {index:08x}" in line for line, _ in view))
         self.assertEqual(mon.waiting_lines([], self.NOW, problem="x"), [])
         self.assertEqual(mon.waiting_lines(None, self.NOW), [])
         self.assertEqual(mon.waiting_lines(["not a record"], self.NOW), [])

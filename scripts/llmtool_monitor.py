@@ -6940,7 +6940,6 @@ def stuck_records(root: str | None = None) -> tuple[list[StuckRecord], str]:
 # monitor sends nothing and replays nothing.
 WAITING_NOTIFY_HOURS = 24      # used when policy.json gives no valid value
 WAITING_BUDGET = 4 << 20
-WAITING_SHOWN = 5
 WAITING_RESUME_SHOWN = 60
 WAITING_POLICY_READ = 4096
 WAITING_REASON = re.compile(r"^[A-Z0-9_]{1,64}$")
@@ -7093,7 +7092,10 @@ def _waited(age: float) -> str:
 
 def waiting_lines(records, now, hours=WAITING_NOTIFY_HOURS,
                   problem: str = "") -> list[tuple[str, str]]:
-    """[(line, style)]: one row per WAITING Task, notice-due rows first and marked."""
+    """[(line, style)]: one row per WAITING Task, notice-due rows first and marked.
+
+    Every WAITING Task gets its own row; none is folded into a count. The screen
+    may scroll or cut rows to fit, but this list never drops a Task (Codex v1 F1)."""
     found = [record for record in records or [] if isinstance(record, WaitingRecord)]
     if not found:
         return []
@@ -7101,12 +7103,10 @@ def waiting_lines(records, now, hours=WAITING_NOTIFY_HOURS,
                        record.since, record.task, record) for record in found),
                      key=lambda item: item[:3])
     out = []
-    for quiet, _, _, record in ordered[:WAITING_SHOWN]:
+    for quiet, _, _, record in ordered:
         text = (f"WAITING：task {record.task}（{record.reason}，已等 "
                 f"{_waited(now - record.since)}）恢復條件：{record.resume}")
         out.append((text if quiet else text + "；★ 該通知 Owner", "" if quiet else "!"))
-    if len(ordered) > WAITING_SHOWN:
-        out.append((f"另有 {len(ordered) - WAITING_SHOWN} 件 WAITING", ""))
     if problem:
         out.append((f"WAITING 清單可能不完整：{problem}", ""))
     return out
