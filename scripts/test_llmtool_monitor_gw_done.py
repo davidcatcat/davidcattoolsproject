@@ -4,6 +4,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 if SCRIPTS not in sys.path:
@@ -74,9 +75,38 @@ class TestLlmtoolMonitorGwDone(unittest.TestCase):
         _write_record(self.root, "current123456789", dev)
         self.assertEqual(mon.gw_task_rows(self.now, self.root), [])
 
+    def test_monitor_reads_through_the_gate_alias_and_keeps_no_table(self):
+        # Codex v1 F1 on PR #1780: the monitor uses the gate's one shared alias
+        # (worker_dispatch in this checkout), never a second table of its own.
+        gate = mon._checkout_llmtool_module("worker_dispatch", "stored_worker_id")
+        self.assertIsNotNone(gate)
+        root = os.path.join(os.path.dirname(SCRIPTS), "tools", "llmtool")
+        self.assertTrue(os.path.realpath(gate.__file__).startswith(os.path.realpath(root) + os.sep))
+        self.assertIs(mon._retired_worker_aliases(), gate.RETIRED_WORKER_ALIASES)
+        self.assertFalse(hasattr(mon, "RETIRED_WORKER_IDS"))
+        self.assertFalse(hasattr(mon, "RETIRED_WORKER_ALIASES"))
+        # A change to the gate's table is what the monitor sees.
+        with patch.dict(gate.RETIRED_WORKER_ALIASES, {"old-route": "agy"}):
+            self.assertEqual(mon.stored_worker_id("old-route"), "agy")
+            self.assertIn("old-route", mon._retired_worker_aliases())
+        self.assertEqual(mon.stored_worker_id("old-route"), "old-route")
+
+    def test_without_the_gate_module_ids_show_as_stored_and_no_legacy_row(self):
+        _write_record(self.root, "agent00123456789",
+                      {"provider_profile": "company-gw-agent", "state": "DEVELOPER_COMPLETED"})
+        with patch.object(mon, "_checkout_llmtool_module", return_value=None):
+            self.assertEqual(mon._retired_worker_aliases(), {})
+            self.assertEqual(mon.stored_worker_id("company-gw-agent"), "company-gw-agent")
+            self.assertEqual(mon.gw_task_rows(self.now, self.root), [])
+
+    def test_non_string_profile_is_skipped(self):
+        for index, profile in enumerate((["company-gw-agent"], {"a": 1}, 7, None)):
+            _write_record(self.root, f"badprofile{index:06d}",
+                          {"provider_profile": profile, "state": "DEVELOPER_COMPLETED"})
+        self.assertEqual(mon.gw_task_rows(self.now, self.root), [])
+
     def test_retired_gw_agent_id_reads_as_gw_agent_in_route_views(self):
-        # #1502 WP-E: the monitor's one alias map, the same as the gate's.
-        self.assertEqual(mon.RETIRED_WORKER_IDS, {"company-gw-agent": "gw-agent"})
+        # #1502 WP-E: the retired id reads as gw-agent through the gate's alias.
         self.assertEqual(mon.stored_worker_id("company-gw-agent"), "gw-agent")
         for value in ("gw-agent", "company-gw", "agy", None, 7):
             self.assertEqual(mon.stored_worker_id(value), value)

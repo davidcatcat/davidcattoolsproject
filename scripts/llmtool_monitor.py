@@ -6650,17 +6650,60 @@ def hosted_ci_rows(ci_runs: list | None, view: CiView | None, now: float) -> lis
 LLMTOOL_TASKS = os.path.expanduser("~/.local/state/llmtool/tasks")
 LLMTOOL_EVIDENCE_WINDOW = 7 * 86400
 PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}")
+_checkout_llmtool_lock = threading.Lock()
+_checkout_llmtool_loaded: dict = {}   # module name -> llmtool module or None, once tried
+
+
+def _checkout_llmtool_module(name: str, required: str):
+    """llmtool.<name> from this checkout, or None when it cannot be loaded or
+    lacks the callable `required`. Loaded once, like the agreement tests do:
+    never some other installed llmtool."""
+    with _checkout_llmtool_lock:
+        if name not in _checkout_llmtool_loaded:
+            module = None
+            root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "tools", "llmtool")
+            added = root not in sys.path
+            try:
+                if added:
+                    sys.path.insert(0, root)
+                try:
+                    module = importlib.import_module(f"llmtool.{name}")
+                finally:
+                    if added and root in sys.path:
+                        sys.path.remove(root)
+                if (not os.path.realpath(module.__file__).startswith(os.path.realpath(root) + os.sep)
+                        or not callable(getattr(module, required, None))):
+                    module = None
+            except Exception:
+                module = None
+            _checkout_llmtool_loaded[name] = module
+        return _checkout_llmtool_loaded[name]
+
+
 # #1502 WP-E (E9): the gw Agent route's id is gw-agent. A record written with
-# the retired id still reads, as gw-agent; this is the monitor's one alias map,
-# the same as RETIRED_WORKER_ALIASES in the gate (worker_dispatch.py). The
-# dispatch file itself must use gw-agent, as the gate requires.
-RETIRED_WORKER_IDS = {"company-gw-agent": "gw-agent"}
+# the retired id still reads, as gw-agent, through the gate's one shared alias
+# (worker_dispatch.RETIRED_WORKER_ALIASES and stored_worker_id); the monitor
+# keeps no table of its own. When that module cannot be loaded, ids are shown
+# as stored and no retired-id row is added.
+def _retired_worker_aliases() -> dict:
+    """The gate's retired-id alias table, or {} when it is unavailable."""
+    module = _checkout_llmtool_module("worker_dispatch", "stored_worker_id")
+    aliases = getattr(module, "RETIRED_WORKER_ALIASES", None) if module is not None else None
+    return aliases if type(aliases) is dict else {}
 
 
 def stored_worker_id(value):
-    """The current id for a worker id or route read from a stored record;
-    anything else, including a non-string, unchanged."""
-    return RETIRED_WORKER_IDS.get(value, value) if type(value) is str else value
+    """The current id for a worker id or route read from a stored record,
+    through the gate's shared helper; anything else, including a non-string,
+    unchanged."""
+    module = _checkout_llmtool_module("worker_dispatch", "stored_worker_id")
+    if module is None:
+        return value
+    try:
+        return module.stored_worker_id(value)
+    except Exception:
+        return value
 
 
 DEVELOPER_RESULTS = {   # llmtool developer state / error code -> plain words
@@ -6755,7 +6798,7 @@ GW_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$")
 
 def gw_task_rows(now: float, root: str | None = None) -> list[OfficeRow]:
     """Live and finished subagent rows for company-gw Tasks and Tasks recorded
-    under the retired gw Agent id (RETIRED_WORKER_IDS), changed within
+    under the retired gw Agent id (_retired_worker_aliases), changed within
     OFFICE_DONE_WINDOW. A current gw-agent run has its own rows (gw_rows), so
     it gets none here. Only bounded developer route fields
     (profile, state, model, executor_task_id, usage, error_code) and task_id
@@ -6778,7 +6821,8 @@ def gw_task_rows(now: float, root: str | None = None) -> list[OfficeRow]:
         if type(developer) is not dict:
             continue
         profile = developer.get("provider_profile")
-        if profile != "company-gw" and profile not in RETIRED_WORKER_IDS:
+        if type(profile) is not str or (profile != "company-gw"
+                                        and profile not in _retired_worker_aliases()):
             continue
         task_id = record.get("task_id")
         task_id = task_id if type(task_id) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task_id) else ""
@@ -6969,8 +7013,6 @@ WAITING_UNSEEN = "task 檔案尚未全部讀過，WAITING 可能不完整"
 WAITING_ROOTS = 8              # roots with a retained scan; tests pass many
 _waiting_scans: dict = {}      # root -> _WaitingScan, kept in memory between calls
 _waiting_lock = threading.Lock()
-_store_waiting_lock = threading.Lock()
-_store_waiting_loaded: list = []    # [task_store module or None] once tried
 
 
 @dataclass(frozen=True)
@@ -6985,27 +7027,7 @@ def _store_waiting_module():
     """llmtool.task_store from this checkout, or None when it cannot be loaded.
 
     Loaded once, like the agreement tests do: never some other installed llmtool."""
-    with _store_waiting_lock:
-        if not _store_waiting_loaded:
-            module = None
-            root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                "tools", "llmtool")
-            added = root not in sys.path
-            try:
-                if added:
-                    sys.path.insert(0, root)
-                try:
-                    module = importlib.import_module("llmtool.task_store")
-                finally:
-                    if added and root in sys.path:
-                        sys.path.remove(root)
-                if (not os.path.realpath(module.__file__).startswith(os.path.realpath(root) + os.sep)
-                        or not callable(getattr(module, "valid_waiting", None))):
-                    module = None
-            except Exception:
-                module = None
-            _store_waiting_loaded.append(module)
-        return _store_waiting_loaded[0]
+    return _checkout_llmtool_module("task_store", "valid_waiting")
 
 
 def _store_waiting_valid(waiting) -> bool:

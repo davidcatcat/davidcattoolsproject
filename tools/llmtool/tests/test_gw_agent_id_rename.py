@@ -261,7 +261,6 @@ _ALIAS_TABLES = {
     'worker_dispatch.py': _assignments_to('RETIRED_WORKER_ALIASES'),
     'task_submission_cli.py': _delegate_provider_argument,
 }
-_MONITOR_TABLE = _assignments_to('RETIRED_WORKER_IDS')
 # Modules that read stored records naming the retired id: they use the shared
 # alias (worker_dispatch.stored_worker_id) and keep no table of their own.
 _SHARED_ALIAS_READERS = ('task_store.py',)
@@ -312,8 +311,19 @@ class RetiredIdGuardTests(unittest.TestCase):
                 for table in ('RETIRED_WORKER_ALIASES', 'RETIRED_WORKER_IDS'):
                     self.assertEqual(list(_assignments_to(table)(tree)), [])
 
-    def test_monitor_names_the_retired_id_only_in_its_alias_table(self):
-        self.assertEqual(_stray_lines(_MONITOR.read_text(encoding='utf-8'), _MONITOR_TABLE), [])
+    def test_monitor_keeps_no_alias_table_and_reads_through_the_gate(self):
+        # Codex v1 F1 on PR #1780: no second table that could drift from the gate.
+        text = _MONITOR.read_text(encoding='utf-8')
+        self.assertEqual(_stray_lines(text), [])
+        tree = ast.parse(text)
+        for table in ('RETIRED_WORKER_ALIASES', 'RETIRED_WORKER_IDS'):
+            self.assertEqual(list(_assignments_to(table)(tree)), [])
+        loads = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == '_checkout_llmtool_module'
+                 and [arg.value for arg in node.args if isinstance(arg, ast.Constant)]
+                 == ['worker_dispatch', 'stored_worker_id']]
+        self.assertTrue(loads)
 
     def test_dispatch_policy_never_names_the_retired_id(self):
         self.assertEqual(_stray_lines(_POLICY.read_text(encoding='utf-8')), [])
