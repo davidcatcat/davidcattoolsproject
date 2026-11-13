@@ -70,20 +70,35 @@ class EntrypointInterruptTests(unittest.TestCase):
     def test_repeated_real_subprocess_startup_import_and_parser_interrupts(self):
         text = (ROOT / 'tools/llmtool/pyproject.toml').read_text()
         module = re.search(r'^llmtool = "([^:"]+):main"$', text, re.M).group(1)
+        # #1688: the child must never wait with signal.pause(). CPython's pause() enters
+        # pause(2) without checking for an already-tripped signal, so a SIGINT landing
+        # between the ready-file write and pause(2) was lost and the child hung forever.
+        # 'pending' forces exactly that ordering (SIGINT arrives before the wait begins)
+        # on every sample; 'waiting' lets it arrive while the child waits. Both waits
+        # cross an interpreter signal check at least every 10ms, so neither can lose it.
         with tempfile.TemporaryDirectory() as directory:
             for phase in ('cli-import', 'parser-build', 'parse-args'):
-                for sample in range(3):
-                    with self.subTest(phase=phase, sample=sample):
-                        ready = str(Path(directory) / (phase + str(sample)))
+                for mode, sample in (('pending', 0), ('pending', 1), ('waiting', 0), ('waiting', 1)):
+                    with self.subTest(phase=phase, mode=mode, sample=sample):
+                        ready = str(Path(directory) / (phase + mode + str(sample)))
                         bootstrap = '''
-import importlib, importlib.abc, importlib.util, signal
+import importlib, importlib.abc, importlib.util, signal, time
 from pathlib import Path
 signal.signal(signal.SIGINT, signal.default_int_handler)
-phase, ready, target = %r, Path(%r), %r
+phase, mode, ready, target = %r, %r, Path(%r), %r
 def block(*args, **kwargs):
-    ready.write_text('product controlled')
-    signal.pause()
-    raise AssertionError('SIGINT did not interrupt')
+    if mode == 'pending':
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        ready.write_text('product controlled')
+        while signal.SIGINT not in signal.sigpending():
+            time.sleep(0.01)
+        # The real SIGINT is now pending before any wait: the ordering that hung
+        # signal.pause(). Unblocking delivers it to default_int_handler here.
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+    else:
+        ready.write_text('product controlled')
+    while True:
+        time.sleep(0.01)
 class Loader(importlib.abc.Loader):
     def create_module(self, spec): return None
     def exec_module(self, module): block()
@@ -98,7 +113,7 @@ else:
     if phase == 'parser-build': cli.parser_for_cli = block
     else: cli.SafeParser.parse_args = block
 raise SystemExit(importlib.import_module(target).main(['providers']))
-''' % (phase, ready, module)
+''' % (phase, mode, ready, module)
                         environment = {'HOME': directory, 'PATH': '/usr/bin:/bin',
                             'PYTHONPATH': str(ROOT / 'tools/llmtool'), 'PYTHONDONTWRITEBYTECODE': '1'}
                         process = subprocess.Popen([sys.executable, '-c', bootstrap], cwd=ROOT,
