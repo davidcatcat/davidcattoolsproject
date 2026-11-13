@@ -293,6 +293,85 @@ class DispatchPathTests(ResolverBase):
             task_submission_cli._gw_agent_developer_profile(route)
         self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
 
+    def test_gw_agent_served_model_is_checked_and_returned(self):
+        # #1773 (CWE-863): the gateway profile model is the one actually served.
+        self.isolated_resolver()
+        route = dict(self.routes()['gw-agent'])
+        route['allowed_models'] = [route['default_model'], 'served-listed']
+        self.assertEqual(task_submission_cli._gw_agent_developer_profile(
+            route, served_model='served-listed'), ('served-listed', route['default_effort']))
+
+    def test_gw_agent_unlisted_served_model_is_refused(self):
+        self.isolated_resolver()
+        route = dict(self.routes()['gw-agent'])
+        for served in ('served-unlisted', '', 7):
+            with self.subTest(served=served):
+                with self.assertRaises(LLMToolError) as caught:
+                    task_submission_cli._gw_agent_developer_profile(
+                        route, served_model=served)
+                self.assertEqual(caught.exception.role_config_code,
+                                 'ROLE_MODEL_NOT_ALLOWED')
+
+    def test_gw_agent_listed_role_model_does_not_admit_an_unlisted_served_model(self):
+        # The role model passing allowed_models says nothing about the gateway.
+        self.isolated_resolver()
+        route = dict(self.routes()['gw-agent'])
+        with mock.patch.object(task_submission_cli, '_require_developer_model',
+                               wraps=task_submission_cli._require_developer_model) as role_check:
+            with self.assertRaises(LLMToolError) as caught:
+                task_submission_cli._gw_agent_developer_profile(
+                    route, served_model='served-unlisted')
+        role_check.assert_called_once()
+        self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
+
+    def test_gw_agent_served_model_accepts_only_a_matching_verified_override(self):
+        self.isolated_resolver()
+        route = dict(self.routes()['gw-agent'])
+        override = {'model': 'served-extra', 'ref': REF}
+        fetch = mock.Mock(return_value=comment(route='gw-agent', model='served-extra'))
+        self.assertEqual(task_submission_cli._gw_agent_developer_profile(
+            route, served_model='served-extra', owner_override=override,
+            repository=REPOSITORY, fetch_comment=fetch)[0], 'served-extra')
+        fetch.assert_called_once_with(345)
+        cases = (
+            ('OWNER_OVERRIDE_MISMATCH', 'served-extra',
+             mock.Mock(return_value=comment(route='agy', model='served-extra'))),
+            ('OWNER_OVERRIDE_MISMATCH', 'served-extra',
+             mock.Mock(return_value=comment(route='gw-agent', model='served-other'))),
+            ('OWNER_OVERRIDE_MISMATCH', 'served-other',
+             mock.Mock(return_value=comment(route='gw-agent', model='served-extra'))),
+            ('OWNER_OVERRIDE_MARKER_MISSING', 'served-extra',
+             mock.Mock(return_value=comment(route='gw-agent', model='served-extra',
+                                            marker=False))),
+            ('OWNER_OVERRIDE_REF_UNREADABLE', 'served-extra', None),
+        )
+        for code, served, fake in cases:
+            with self.subTest(code=code, served=served):
+                with self.assertRaises(LLMToolError) as caught:
+                    task_submission_cli._gw_agent_developer_profile(
+                        route, served_model=served, owner_override=override,
+                        repository=REPOSITORY, fetch_comment=fake)
+                self.assertEqual(caught.exception.role_config_code,
+                                 'ROLE_MODEL_NOT_ALLOWED')
+                self.assertIn(code, str(caught.exception))
+
+    def test_gw_agent_served_model_reuses_the_resolver_verified_override(self):
+        verified = {'route': 'gw-agent', 'model': 'served-extra', 'ref': REF,
+                    'comment_id': 345}
+        route = dict(self.routes()['gw-agent'])
+        role = {'model': 'served-extra', 'effort': 'low', 'account': None,
+                'owner_override': verified}
+        with mock.patch.object(role_config, 'resolve_role', return_value=role):
+            self.assertEqual(task_submission_cli._gw_agent_developer_profile(
+                route, served_model='served-extra'), ('served-extra', 'low'))
+            for other in ('served-other', route['default_model'] + '-x'):
+                with self.subTest(served=other):
+                    with self.assertRaises(LLMToolError) as caught:
+                        task_submission_cli._gw_agent_developer_profile(
+                            route, served_model=other)
+                    self.assertEqual(caught.exception.role_config_code,
+                                     'ROLE_MODEL_NOT_ALLOWED')
+
 
 class RolesCommandTests(AccountBase):
     def run_roles(self):

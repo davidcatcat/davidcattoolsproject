@@ -3532,12 +3532,16 @@ def _claude_developer_profile(route_config, *, owner_override=None, repository=N
 _GW_AGENT_EFFORTS = ('minimal', 'low', 'medium', 'high')
 
 
-def _gw_agent_developer_profile(route_config, *, owner_override=None, repository=None,
-                                fetch_comment=None):
+def _gw_agent_developer_profile(route_config, *, served_model=None, owner_override=None,
+                                repository=None, fetch_comment=None):
     """Resolve the gw-agent role model and effort through the single resolver.
 
-    The returned model is the route-level model id checked against
-    allowed_models; the served model still comes from the gateway profile.
+    The role model is checked against allowed_models. The gateway profile, not
+    the role, decides the model the gateway actually serves, so dispatch passes
+    it as served_model: that model is checked too (allowed_models or a verified
+    owner override naming route gw-agent and that exact model) and is the model
+    returned (#1773, CWE-863). Without served_model the checked role model is
+    returned.
     """
     role = _resolve_developer_role('gw-agent-developer', owner_override=owner_override,
                                    repository=repository, fetch_comment=fetch_comment)
@@ -3554,7 +3558,38 @@ def _gw_agent_developer_profile(route_config, *, owner_override=None, repository
         error = LLMToolError('gw-agent-developer role model or effort is invalid')
         error.role_config_code = 'GW_AGENT_ROLE_PROFILE_INVALID'
         raise error
+    if served_model is not None:
+        model = _require_gw_agent_served_model(
+            route_config, served_model, role, owner_override=owner_override,
+            repository=repository, fetch_comment=fetch_comment)
     return model, effort
+
+
+def _require_gw_agent_served_model(route_config, served_model, role, *, owner_override=None,
+                                   repository=None, fetch_comment=None):
+    """Return the gateway-served model once it passes the allowed_models check.
+
+    An override the resolver already verified for this same route and model
+    is reused; otherwise role_config.check_role_model verifies the supplied
+    override against served_model itself. Anything else is refused with
+    ROLE_MODEL_NOT_ALLOWED.
+    """
+    if type(served_model) is not str or not served_model:
+        _refuse_developer_model('gw-agent-developer')
+    verified = role.get('owner_override') if type(role) is dict else None
+    if (type(verified) is dict and verified.get('route') == 'gw-agent' and
+            verified.get('model') == served_model):
+        return served_model
+    try:
+        role_config.check_role_model('gw-agent', route_config, served_model,
+                                     owner_override=owner_override,
+                                     repository=repository, fetch_comment=fetch_comment)
+    except LLMToolError as exc:
+        if getattr(exc, 'role_config_code', None) == role_config.ROLE_MODEL_NOT_ALLOWED:
+            _refuse_developer_model('gw-agent-developer',
+                                    getattr(exc, 'owner_override_code', None))
+        raise LLMToolError('gw-agent-developer role configuration is invalid') from None
+    return served_model
 
 
 def _required_skills(registration, snapshot, provider):
@@ -4704,9 +4739,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         max_output_tokens = min(max_output_tokens, route_output_cap,
                                 context_cap_tokens - 1)
         route_config = copy.deepcopy(route_config)
-        route_config['default_model'] = model
-        route_config['expected_served_model'] = model
-        route_config['profile'].update(base_url=gateway_base_url, model=model,
+        route_config['profile'].update(base_url=gateway_base_url,
             max_output_tokens=max_output_tokens,
             context_cap_tokens=context_cap_tokens)
         route_config['profile'].pop('http_allow_hosts', None)
@@ -4717,11 +4750,14 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             route_config['profile']['http_allow_hosts'] = [host]
     except Exception:
         raise LLMToolError('gateway profile is unavailable or invalid') from None
-    # #1502 WP-E: after the gateway validation, the role resolver checks the
-    # route-level model against allowed_models and supplies the effort; the
-    # gateway profile above still supplies and binds the served model.
-    _route_model, role_effort = _gw_agent_developer_profile(role_route_config)
-    effort = role_effort
+    # #1502 WP-E, #1773 (CWE-863): after the gateway validation, the role
+    # resolver checks the role model and supplies the effort, and the model the
+    # gateway profile will actually serve is checked against allowed_models (or
+    # a verified owner override). Only that checked model is bound below.
+    model, effort = _gw_agent_developer_profile(role_route_config, served_model=model)
+    route_config['default_model'] = model
+    route_config['expected_served_model'] = model
+    route_config['profile']['model'] = model
     prompt_packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
         'task_contract_digest': binding['contract_digest'], 'source_sha': snapshot.head,
