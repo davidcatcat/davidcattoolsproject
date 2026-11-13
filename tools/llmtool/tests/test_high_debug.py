@@ -1881,6 +1881,34 @@ class HighDebugTests(unittest.TestCase):
                 self.assertEqual(self._debug_refusal(route='codex'),
                                  'ROLE_MODEL_NOT_ALLOWED')
 
+    def test_codex_debug_launch_model_is_never_taken_from_role_config(self):
+        # R1 regardless of user config: the Codex Debug route admits only its
+        # listed model; a configured codex-debug model never reaches the launch.
+        resolve = unittest.mock.Mock(return_value={
+            'source': 'roles', 'provider': 'codex', 'account': None,
+            'config_dir': None, 'model': 'gpt-unlisted-model'})
+        reader = unittest.mock.Mock(side_effect=OSError('stop before the D6'))
+        create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+        store = _Store()
+        with patch.object(high_debug.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=True)), \
+             patch.object(high_debug.role_config, 'resolve_role', resolve), \
+             patch.object(high_debug, '_admit_debug_model',
+                          wraps=high_debug._admit_debug_model) as admit:
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(
+                    store=store, task_id='a' * 32, executor_task='executor',
+                    pr_number=17, family='family', failed_corrections=2,
+                    runner=runner, create_d6=create, route='codex',
+                    read_registration=reader)
+        # Admission passed with the listed model; the run then stopped at the D6.
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_D6_UNAVAILABLE')
+        admit.assert_called_once_with('codex-debug', high_debug._CODEX_MODEL)
+        reader.assert_called_once()
+        create.assert_not_called()
+        runner.assert_not_called()
+        self.assertEqual(store.entries, [])
+
     def test_claude_debug_resolver_refusal_keeps_the_model_code(self):
         # The real resolver on a temporary home: a cross-family claude-debug
         # model in the user config is refused after precedence.
