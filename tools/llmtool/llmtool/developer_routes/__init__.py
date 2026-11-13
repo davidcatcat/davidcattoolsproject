@@ -14,9 +14,60 @@ from .write_boundary import (
 __all__ = [
     'DeveloperRoute', 'RouteError', 'RouteResult', 'capture_snapshot', 'run_route',
     'AgyRoute', 'ClaudeRoute', 'GwAgentRoute', 'owner_assignment_gate', 'load_route_config',
+    'check_route_model',
     'SandboxExecBoundary', 'UnsupportedBoundary', 'WriteBoundary',
     'for_platform',
 ]
+
+_MAX_ALLOWED_MODELS = 16
+_GENERIC_MODEL_PATTERN = r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}'
+_CLAUDE_MODEL_PATTERN = r'claude-[a-z0-9][a-z0-9.-]{0,120}'
+
+
+def _generic_model_ok(value):
+    import re
+
+    return (type(value) is str and '://' not in value and
+            re.fullmatch(_GENERIC_MODEL_PATTERN, value) is not None)
+
+
+def _claude_model_ok(value):
+    import re
+
+    return type(value) is str and re.fullmatch(_CLAUDE_MODEL_PATTERN, value) is not None
+
+
+def _allowed_models_ok(value, default_model, model_ok):
+    """Return True when value is exactly [default_model], a valid one-item list.
+
+    Security repair (PR #1759 F1): until the Owner decides to allow more
+    models, a route's allowed_models must list only its current default
+    model. Any extra or different entry is refused at load.
+    """
+    return (type(value) is list and 1 <= len(value) <= _MAX_ALLOWED_MODELS and
+            all(type(item) is str for item in value) and
+            len(set(value)) == len(value) and
+            all(model_ok(item) for item in value) and
+            default_model in value and
+            len(value) == 1 and type(default_model) is str and
+            value[0] == default_model)
+
+
+def check_route_model(config, route, model):
+    """Return model when it is allowed for route in a load_route_config() result.
+
+    Pure check: no file, network or environment reads. Raises
+    RouteError('ROLE_MODEL_NOT_ALLOWED') for an absent route, a non-str model
+    or a model not listed in that route's allowed_models.
+    """
+    routes = config.get('routes') if type(config) is dict else None
+    entry = (routes.get(route) if type(routes) is dict and type(route) is str
+             else None)
+    allowed = entry.get('allowed_models') if type(entry) is dict else None
+    if (type(model) is not str or type(allowed) is not list or
+            not any(type(item) is str and item == model for item in allowed)):
+        raise RouteError('ROLE_MODEL_NOT_ALLOWED')
+    return model
 
 
 def load_route_config(path=None):
@@ -44,7 +95,8 @@ def load_route_config(path=None):
             ('gw-agent' in routes and type(routes['gw-agent']) is not dict)):
         raise RouteError('ROUTE_CONFIG_INVALID')
     entry = routes['agy']
-    expected = {'executable', 'default_model', 'default_effort', 'denied_dirs', 'state_dirs'}
+    expected = {'executable', 'default_model', 'allowed_models', 'default_effort',
+                'denied_dirs', 'state_dirs'}
     if set(entry) != expected:
         raise RouteError('ROUTE_CONFIG_INVALID')
     if (entry['executable'] != 'agy' or type(entry['default_model']) is not str or
@@ -52,12 +104,15 @@ def load_route_config(path=None):
             re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}', entry['default_model']) is None or
             entry['default_effort'] not in ('minimal', 'low', 'medium', 'high') or
             type(entry['denied_dirs']) is not list or entry['denied_dirs'] != ['.gemini'] or
-            entry['state_dirs'] != {'policy': 'private-temp-only'}):
+            entry['state_dirs'] != {'policy': 'private-temp-only'} or
+            not _allowed_models_ok(entry['allowed_models'], entry['default_model'],
+                                   _generic_model_ok)):
         raise RouteError('ROUTE_CONFIG_INVALID')
     normalized = {'agy': dict(entry)}
+    normalized['agy']['allowed_models'] = list(entry['allowed_models'])
     if 'claude' in routes:
         claude = routes['claude']
-        expected_claude = {'executable', 'default_model', 'default_effort',
+        expected_claude = {'executable', 'default_model', 'allowed_models', 'default_effort',
                            'denied_dirs', 'state_dirs'}
         if (set(claude) != expected_claude or claude.get('executable') != 'claude' or
                 type(claude.get('default_model')) is not str or
@@ -67,12 +122,15 @@ def load_route_config(path=None):
                 claude['default_effort'] not in ('low', 'medium', 'high', 'xhigh', 'max') or
                 type(claude.get('denied_dirs')) is not list or
                 claude['denied_dirs'] != ['.claude'] or
-                claude.get('state_dirs') != {'policy': 'private-temp-only'}):
+                claude.get('state_dirs') != {'policy': 'private-temp-only'} or
+                not _allowed_models_ok(claude.get('allowed_models'), claude['default_model'],
+                                       _claude_model_ok)):
             raise RouteError('ROUTE_CONFIG_INVALID')
         normalized['claude'] = dict(claude)
+        normalized['claude']['allowed_models'] = list(claude['allowed_models'])
     if 'gw-agent' in routes:
         gw = routes['gw-agent']
-        expected_gw = {'package_path', 'default_model', 'default_effort',
+        expected_gw = {'package_path', 'default_model', 'allowed_models', 'default_effort',
                        'profile_name', 'profile', 'authorization_ref',
                        'allowed_data_classes'}
         if (set(gw) != expected_gw or
@@ -91,9 +149,14 @@ def load_route_config(path=None):
                 not gw['allowed_data_classes'] or
                 any(type(item) is not str or not item for item in gw['allowed_data_classes']) or
                 len(set(gw['allowed_data_classes'])) != len(gw['allowed_data_classes']) or
-                type(gw.get('authorization_ref')) is not str or not gw['authorization_ref'].strip()):
+                type(gw.get('authorization_ref')) is not str or
+                not gw['authorization_ref'].strip() or
+                not _allowed_models_ok(gw.get('allowed_models'), gw['default_model'],
+                                       _generic_model_ok) or
+                gw['profile'].get('model') not in gw['allowed_models']):
             raise RouteError('ROUTE_CONFIG_INVALID')
         normalized['gw-agent'] = dict(gw)
+        normalized['gw-agent']['allowed_models'] = list(gw['allowed_models'])
     return {'schema_version': 1, 'routes': normalized}
 
 
