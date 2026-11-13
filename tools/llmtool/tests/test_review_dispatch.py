@@ -15,11 +15,17 @@ import yaml
 
 from llmtool import cli, review_dispatch, review_result, task_store, task_submission_cli
 from llmtool.config import user_config_path
+from llmtool.developer_routes import load_route_config
 from llmtool.errors import LLMToolError
 
 
 TASK = 'a' * 32
 HEAD = 'b' * 40
+# #1502 WP-E R1: the roles registry's listed Reviewer models (the only ones
+# the shared check admits).
+_ROLES = load_route_config()['roles']
+CODEX_REVIEW_MODEL = _ROLES['codex-reviewer']['allowed_models'][0]
+CLAUDE_REVIEW_MODEL = _ROLES['claude-reviewer']['allowed_models'][0]
 # What the fake screen returns in refusal-flow tests.
 SCREENED_EXCERPT = 'screened reply excerpt'
 
@@ -342,6 +348,122 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertNotIn(str(account), str(raised.exception))
         self.assert_refused_without_side_effects()
 
+    # #1502 WP-E R1: dispatch_review admits the Reviewer model through the
+    # shared registry check before the claim; no fallback model is tried.
+    CODEX_PREFLIGHT = (TASK, SimpleNamespace(root='/repo/worktree', common_dir='/repo/.git'),
+                       HEAD, 'd' * 40, 'codex-reviewer')
+
+    def test_registry_refuses_unlisted_and_cross_family_claude_reviewer_model(self):
+        for model in ('claude-unlisted-model', CODEX_REVIEW_MODEL):
+            with self.subTest(model=model):
+                with self.assertRaises(LLMToolError) as raised:
+                    self.invoke(reviewer_role={
+                        'config_dir': '/private/test-reviewer-account', 'source': 'roles',
+                        'model': model})
+                self.assertEqual(raised.exception.review_dispatch_code,
+                                 'ROLE_MODEL_NOT_ALLOWED')
+                self.assert_refused_without_side_effects()
+
+    def test_registry_refuses_unlisted_and_cross_family_codex_reviewer_model(self):
+        calls = []
+        for model in ('gpt-unlisted-model', CLAUDE_REVIEW_MODEL):
+            with self.subTest(model=model):
+                with self.assertRaises(LLMToolError) as raised:
+                    self.invoke(
+                        preflight=[self.CODEX_PREFLIGHT, self.CODEX_PREFLIGHT],
+                        codex_runner=lambda **kw: calls.append(kw),
+                        reviewer_role={'provider': 'codex', 'config_dir': None,
+                                       'source': 'roles', 'model': model})
+                self.assertEqual(raised.exception.review_dispatch_code,
+                                 'ROLE_MODEL_NOT_ALLOWED')
+                self.assert_refused_without_side_effects()
+        self.assertEqual(calls, [])
+
+    def test_registry_admits_the_listed_claude_reviewer_model(self):
+        result = self.invoke(reviewer_role={
+            'config_dir': '/private/test-reviewer-account', 'source': 'roles',
+            'model': CLAUDE_REVIEW_MODEL})
+        self.assertEqual(result['state'], 'DISPATCHED')
+        self.assertEqual(len(self.sent), 1)
+
+    def test_resolver_refusal_carries_the_dispatch_code_before_any_claim(self):
+        # The real resolver on a temporary home: a cross-family model in the
+        # user config is refused after precedence, for either Reviewer.
+        root = Path(self.temp.name)
+        home = root / 'home'
+        config = user_config_path(home)
+        config.parent.mkdir(parents=True)
+        real = self.real_resolve_role
+        for name, model, preflight in (
+                ('reviewer', CODEX_REVIEW_MODEL, self.preflight),
+                ('codex-reviewer', CLAUDE_REVIEW_MODEL, self.CODEX_PREFLIGHT)):
+            with self.subTest(role=name):
+                config.write_text(yaml.safe_dump({'roles': {name: {'model': model}}}),
+                                  encoding='utf-8')
+                with patch.object(review_dispatch, '_preflight',
+                                  side_effect=[preflight, preflight]), \
+                        patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                                     return_value=SimpleNamespace(allowed=True,
+                                                                  reason_code='')), \
+                        patch.object(review_dispatch.role_config, 'resolve_role',
+                                     side_effect=lambda role: real(role, environ={},
+                                                                   home=home)):
+                    with self.assertRaises(LLMToolError) as raised:
+                        review_dispatch.dispatch_review(
+                            store=self.store, task_id=TASK, executor_task='executor-d6',
+                            pr_number=42, version=1,
+                            create_d6=lambda **kw: self.created.append(kw),
+                            dispatch_session=lambda **kw: (
+                                self.sent.append(kw) or 'native-session'),
+                            bind_session=lambda **kw: self.bound.append(kw),
+                            prompt_renderer=lambda *_: 'bound prompt',
+                            codex_runner=lambda **kw: self.sent.append(kw))
+                self.assertEqual(raised.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
+                self.assertEqual(raised.exception.review_dispatch_code,
+                                 'ROLE_MODEL_NOT_ALLOWED')
+                self.assert_refused_without_side_effects()
+
+    def test_launch_helpers_refuse_unlisted_and_cross_family_models(self):
+        task = {'task_id': TASK, 'run_id': 'c' * 32,
+                'task_binding': {'contract_digest': 'd' * 64}}
+        for model in ('gpt-unlisted-model', CLAUDE_REVIEW_MODEL, 'OPENAI/' + CODEX_REVIEW_MODEL):
+            with self.subTest(launch='codex', model=model), \
+                    patch.object(review_dispatch.shutil, 'which') as which, \
+                    patch.object(review_dispatch.subprocess, 'run') as run:
+                for call in (
+                        lambda: review_dispatch._codex_argv('/bin/codex', '/repo/r',
+                                                            model=model),
+                        lambda: review_dispatch._dispatch_codex(
+                            reviewer_root='/repo/r', prompt='p', task=task, head=HEAD,
+                            model=model)):
+                    with self.assertRaises(LLMToolError) as raised:
+                        call()
+                    self.assertEqual(raised.exception.review_dispatch_code,
+                                     'ROLE_MODEL_NOT_ALLOWED')
+                which.assert_not_called()
+                run.assert_not_called()
+        for model in ('claude-unlisted-model', CODEX_REVIEW_MODEL, None):
+            with self.subTest(launch='claude', model=model), \
+                    patch.object(review_dispatch.subprocess, 'run') as run:
+                with self.assertRaises(LLMToolError) as raised:
+                    review_dispatch._dispatch(task_id='reviewer-task', prompt='p',
+                                              repo_root='/repo', env={}, model=model)
+                self.assertEqual(raised.exception.review_dispatch_code,
+                                 'ROLE_MODEL_NOT_ALLOWED')
+                run.assert_not_called()
+
+    def test_claude_bridge_receives_the_admitted_model_explicitly(self):
+        receipt = SimpleNamespace(returncode=0, stdout=json.dumps({
+            'result': 'DELIVERED', 'actual_session_id': 'native-session'}).encode('utf-8'))
+        with patch.object(review_dispatch.subprocess, 'run', return_value=receipt) as run:
+            session = review_dispatch._dispatch(task_id='reviewer-task', prompt='p',
+                                                repo_root='/repo', env={},
+                                                model=CLAUDE_REVIEW_MODEL)
+        self.assertEqual(session, 'native-session')
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index('--model') + 1], CLAUDE_REVIEW_MODEL)
+        self.assertEqual(argv[argv.index('--name') + 1], 'claude-reviewer')
+
     def test_replay_after_restart_returns_claim_without_redispatch(self):
         first = self.invoke()
         restarted = DurableFakeStore(self.store.path)
@@ -584,7 +706,7 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(self.bound[0]['session_id'], '0123456789abcdef')
         self.assertEqual(result['review_text'], _codex_review_text())
         self.assertEqual(result['verdict'], 'PASS')
-        self.assertEqual(runner_args[0]['model'], 'gpt-6-luna')
+        self.assertEqual(runner_args[0]['model'], CODEX_REVIEW_MODEL)
         self.assertEqual(runner_args[0]['effort'], 'high')
         self.assertEqual(self.store.get(TASK)['review_dispatch_claim'][0]['review_result']['verdict'],
                          'PASS')
@@ -606,13 +728,13 @@ class ReviewDispatchTests(unittest.TestCase):
                     'thread_id': '0123456789abcdef',
                     'review_text': _codex_review_text(), 'verdict': 'PASS'}),
                 reviewer_role={'provider': 'codex', 'config_dir': '/private/codex-review',
-                    'account': 'review-account', 'model': 'gpt-review', 'effort': 'medium',
-                    'source': 'roles'})
+                    'account': 'review-account', 'model': CODEX_REVIEW_MODEL,
+                    'effort': 'medium', 'source': 'roles'})
         claim = self.store.get(TASK)['review_dispatch_claim'][0]
         self.assertEqual(result['account_mode'], 'ROLES')
         self.assertEqual(claim['account'], 'review-account')
         self.assertNotIn('/private/codex-review', repr(claim))
-        self.assertEqual(calls[0]['model'], 'gpt-review')
+        self.assertEqual(calls[0]['model'], CODEX_REVIEW_MODEL)
         self.assertEqual(calls[0]['effort'], 'medium')
         self.assertEqual(calls[0]['config_dir'], '/private/codex-review')
 
@@ -640,7 +762,7 @@ class ReviewDispatchTests(unittest.TestCase):
         argv = run.call_args.args[0]
         self.assertIn('-s', argv)
         self.assertEqual(argv[argv.index('-s') + 1], 'read-only')
-        self.assertEqual(argv[argv.index('--model') + 1], 'gpt-6-luna')
+        self.assertEqual(argv[argv.index('--model') + 1], CODEX_REVIEW_MODEL)
         self.assertIn('model_reasoning_effort=high', argv)
         self.assertEqual(argv[argv.index('--cd') + 1], '/repo/reviewer-d6')
         self.assertEqual(run.call_args.kwargs['cwd'], '/repo/reviewer-d6')

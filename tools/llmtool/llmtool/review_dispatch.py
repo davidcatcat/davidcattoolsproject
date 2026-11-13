@@ -1155,8 +1155,15 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             'REVIEW_DISPATCH_VERSION_USED',
             f'Review version {version} is already used for PR {pr_number} '
             f'on another head; use version {next_version}.')
-    reviewer_role = role_config.resolve_role(
-        'reviewer' if reviewer_key == 'claude-reviewer' else 'codex-reviewer')
+    try:
+        reviewer_role = role_config.resolve_role(
+            'reviewer' if reviewer_key == 'claude-reviewer' else 'codex-reviewer')
+    except LLMToolError as exc:
+        # #1502 WP-E R1: the resolver's registry refusal (after precedence)
+        # also carries the dispatch code; nothing is claimed or launched.
+        if getattr(exc, 'role_config_code', None) == role_config.ROLE_MODEL_NOT_ALLOWED:
+            exc.review_dispatch_code = 'ROLE_MODEL_NOT_ALLOWED'
+        raise
     config_dir = reviewer_role['config_dir'] if reviewer_role is not None else None
     # #1777 (CWE-863): the Claude Reviewer never runs under another provider's
     # account directory, whichever layer or alias resolved it. The resolver

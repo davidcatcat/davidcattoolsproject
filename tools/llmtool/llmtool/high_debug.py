@@ -978,6 +978,22 @@ def _admit_debug_model(role, model):
         _refuse('ROLE_MODEL_NOT_ALLOWED')
 
 
+def _resolve_debug_role(role):
+    """Resolve role; a resolver model refusal keeps the code ROLE_MODEL_NOT_ALLOWED.
+
+    #1502 WP-E R1: the resolver already applied the shared registry check
+    after precedence. Its refusal is re-raised as the High Debug code, which is
+    outside DEBUG_FALLBACK_CODES and _CLAUDE_DEBUG_UNAVAILABLE, so it never
+    switches routes. Other resolver errors propagate unchanged.
+    """
+    try:
+        return role_config.resolve_role(role)
+    except LLMToolError as error:
+        if getattr(error, 'role_config_code', None) == role_config.ROLE_MODEL_NOT_ALLOWED:
+            _refuse('ROLE_MODEL_NOT_ALLOWED')
+        raise
+
+
 def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
     from . import codex_direct_developer
     model = _admit_debug_model('codex-debug', model)
@@ -1266,12 +1282,12 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         # only on whether claude-debug names an account (explicit account
         # configuration state), never on the resolver's source label; the
         # model always comes from claude-debug itself.
-        role_settings = role_config.resolve_role('claude-debug')
+        role_settings = _resolve_debug_role('claude-debug')
         debug_model = role_settings.get('model') or _CLAUDE_MODEL
         account_settings = role_settings
         if (role_settings.get('account') is None and
                 role_settings.get('config_dir') is None):
-            account_settings = role_config.resolve_role('reviewer')
+            account_settings = _resolve_debug_role('reviewer')
         if (account_settings.get('config_dir') is None or
                 account_settings.get('account') is None):
             _refuse('HIGH_DEBUG_ACCOUNT_UNCONFIGURED')

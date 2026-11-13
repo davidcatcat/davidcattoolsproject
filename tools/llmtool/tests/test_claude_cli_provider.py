@@ -11,11 +11,17 @@ from unittest.mock import patch
 import yaml
 
 from llmtool.config import resolve_config
+from llmtool.developer_routes import load_route_config
 from llmtool.errors import LLMToolError
 from llmtool.providers import PROVIDER_REGISTRY, get_provider_capabilities
 from llmtool.providers.claude_cli import ClaudeCLIProvider
 from llmtool.providers.cli_lifecycle import background_cli_invocation, tui_cli_signal_scope
 
+
+# #1502 WP-E R1: the only model a review job may launch, and the other family's.
+_ROLES = load_route_config()["roles"]
+REVIEW_MODEL = _ROLES["claude-reviewer"]["allowed_models"][0]
+CROSS_FAMILY_MODEL = _ROLES["codex-reviewer"]["allowed_models"][0]
 
 CAPABILITIES = {
     "chat": True, "large_context": False, "reasoning_control": False,
@@ -432,7 +438,7 @@ class WorkerEnvelopeTests(unittest.TestCase):
         from llmtool.providers import cli_lifecycle as lifecycle
         with tempfile.TemporaryDirectory() as tmp:
             exe=Path(tmp)/'fake-blocked';exe.write_text('#!'+sys.executable+' -IB\nimport time\ntime.sleep(10)\n');exe.chmod(0o700)
-            provider=ClaudeCLIProvider({'model':'fake-model'},None)
+            provider=ClaudeCLIProvider({'model':REVIEW_MODEL},None)
             real_wait=subprocess.Popen.wait
             def bounded_wait(process,*args,**kwargs):
                 self.assertIsNotNone(kwargs.get('timeout'))
@@ -446,6 +452,40 @@ class WorkerEnvelopeTests(unittest.TestCase):
             self.assertEqual(caught.exception.review_code,'REVIEW_TIMEOUT')
             self.assertLess(time.monotonic()-started,1.5)
             self.assertIsNone(provider.pending_job)
+
+    def test_review_job_refuses_unlisted_and_cross_family_model_before_spawn(self):
+        # #1502 WP-E R1: the review job admits only the claude-reviewer listed model.
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            exe=Path(tmp)/'fake-unused';exe.write_text('#!'+sys.executable+' -IB\n');exe.chmod(0o700)
+            for model in ('claude-unlisted-model', CROSS_FAMILY_MODEL,
+                          'anthropic/'+REVIEW_MODEL, REVIEW_MODEL.upper(), None):
+                with self.subTest(model=model):
+                    provider=ClaudeCLIProvider({'model':model},None)
+                    with patch('subprocess.Popen',side_effect=AssertionError('spawn')) as spawn, \
+                            self.assertRaises(LLMToolError) as caught:
+                        provider._invoke_review_job(str(exe),'prompt',deadline=time.monotonic()+5,
+                            auth_home=tmp,launch_nonce='a'*32,runtime_pin='b'*64,
+                            forbidden_sessions=())
+                    self.assertEqual(caught.exception.review_code,'ROLE_MODEL_NOT_ALLOWED')
+                    spawn.assert_not_called()
+                    self.assertIsNone(getattr(provider,'pending_job',None))
+
+    def test_review_job_launches_the_listed_model_explicitly(self):
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            exe=Path(tmp)/'fake-unused';exe.write_text('#!'+sys.executable+' -IB\n');exe.chmod(0o700)
+            provider=ClaudeCLIProvider({'model':REVIEW_MODEL},None)
+            launched=[]
+            def refuse_after_capture(argv,*args,**kwargs):
+                launched.append(argv)
+                raise OSError('fixture stops before a real process')
+            with patch('subprocess.Popen',side_effect=refuse_after_capture), \
+                    self.assertRaises(Exception):
+                provider._invoke_review_job(str(exe),'prompt',deadline=time.monotonic()+5,
+                    auth_home=tmp,launch_nonce='a'*32,runtime_pin='b'*64,forbidden_sessions=())
+        self.assertEqual(len(launched),1)
+        self.assertEqual(launched[0][launched[0].index('--model')+1],REVIEW_MODEL)
 
 
 if __name__ == "__main__":

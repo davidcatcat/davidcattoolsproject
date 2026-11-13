@@ -201,5 +201,79 @@ class ResolverEnforcementTests(unittest.TestCase):
         self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
 
 
+def _bg_dispatch_module():
+    """The claude_bg_dispatch script, loaded like its own test module does."""
+    import importlib.util
+    script = Path(__file__).resolve().parents[1] / 'scripts' / 'claude_bg_dispatch.py'
+    spec = importlib.util.spec_from_file_location('claude_bg_dispatch_registry_test', script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ConsumerAdmissionTests(unittest.TestCase):
+    """Every High Debug #1782 consumer admits through the one shared check.
+
+    Each row is (consumer, role, admit(model), code(error)). Full launch tests
+    (no claim, no D6, no spawn on refusal) live next to each consumer.
+    """
+
+    def setUp(self):
+        from llmtool import high_debug, review_authority, review_dispatch
+        self.config = load_route_config()
+        bg = _bg_dispatch_module()
+
+        def bg_code(error):
+            return error.code
+
+        self.rows = (
+            ('review_dispatch', 'claude-reviewer',
+             lambda model: review_dispatch._admit_review_model('claude-reviewer', model),
+             lambda error: error.review_dispatch_code),
+            ('review_dispatch', 'codex-reviewer',
+             lambda model: review_dispatch._admit_review_model('codex-reviewer', model),
+             lambda error: error.review_dispatch_code),
+            ('review_authority', 'claude-reviewer', review_authority.admit_reviewer_model,
+             lambda error: error.review_code),
+            ('claude_bg_dispatch', 'claude-reviewer', bg._reviewer_model, bg_code),
+            ('high_debug', 'claude-debug',
+             lambda model: high_debug._admit_debug_model('claude-debug', model),
+             lambda error: error.high_debug_code),
+            ('high_debug', 'codex-debug',
+             lambda model: high_debug._admit_debug_model('codex-debug', model),
+             lambda error: error.high_debug_code),
+        )
+        self.bg_error = bg.DispatchError
+
+    def test_each_consumer_admits_only_the_listed_model(self):
+        for consumer, role, admit, code in self.rows:
+            model = listed(self.config, role)
+            family = 'gpt-' if role in CODEX_ROLES else 'claude-'
+            with self.subTest(consumer=consumer, role=role, model=model):
+                self.assertEqual(admit(model), model)
+            for refused in (family + 'unlisted-model', cross_family(self.config, role),
+                            'openai/' + model, model.upper(), None):
+                with self.subTest(consumer=consumer, role=role, model=refused):
+                    with self.assertRaises((LLMToolError, self.bg_error)) as caught:
+                        admit(refused)
+                    self.assertEqual(code(caught.exception), 'ROLE_MODEL_NOT_ALLOWED')
+
+    def test_consumer_builtin_fallback_models_are_the_listed_models(self):
+        # A fallback used when no model is resolved still passes the check, so
+        # it must equal the registry entry (otherwise every launch would fail).
+        from llmtool import high_debug, review_dispatch
+        self.assertEqual(review_dispatch._CODEX_REVIEW_MODEL,
+                         listed(self.config, 'codex-reviewer'))
+        self.assertEqual(review_dispatch._CLAUDE_REVIEW_MODEL,
+                         listed(self.config, 'claude-reviewer'))
+        self.assertEqual(high_debug._CODEX_MODEL, listed(self.config, 'codex-debug'))
+        self.assertEqual(high_debug._CLAUDE_MODEL, listed(self.config, 'claude-debug'))
+
+    def test_model_refusal_is_never_a_debug_fallback_code(self):
+        from llmtool import high_debug
+        self.assertNotIn('ROLE_MODEL_NOT_ALLOWED', high_debug.DEBUG_FALLBACK_CODES)
+        self.assertNotIn('ROLE_MODEL_NOT_ALLOWED', high_debug._CLAUDE_DEBUG_UNAVAILABLE)
+
+
 if __name__ == '__main__':
     unittest.main()
