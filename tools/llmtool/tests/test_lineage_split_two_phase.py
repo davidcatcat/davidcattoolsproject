@@ -525,5 +525,81 @@ class PendingEntryPointTests(TwoPhaseCase):
         self.assertIsNone(cli.lineage_close_merged(self.store, self.child))
 
 
+class SplitVsStartedChildTests(TwoPhaseCase):
+    """#1781 (security v91, I4): a split never reserves a child that has started.
+
+    A published PR, a merge claim, a Developer launch or result, a completion or
+    a running advance/drive refuses the reservation. The store repeats the check
+    under the child lock in the reservation write itself, so a change that lands
+    after the split's preflight is caught too. Nothing is written on refusal.
+    """
+
+    def reserve(self, root, child):
+        return task_store.reserve_split_child(self.store, child, self.reservation(root, new_id()),
+                                              expected_sha256=self.digests(child)[child])
+
+    def assert_refused_with_nothing_written(self, code, root, child):
+        before = self.digests(root, child)
+        # The store's own check, in the locked reservation write.
+        self.refused(code, lambda: self.reserve(root, child))
+        # The split preflight: refused before any main SHA read or write.
+        self.refused(code, lambda: self.split(root, [child]))
+        self.assertEqual(self.reads, [])
+        self.assert_unchanged(before)
+        self.assert_no_lineage(root, child)
+
+    def test_a_published_child_is_refused(self):
+        root, child = self.task(), self.task()
+        self.store.record_published_pr(child, 17, 'a' * 40)
+        self.assert_refused_with_nothing_written('SPLIT_CHILD_STARTED', root, child)
+
+    def test_a_child_with_a_merge_claim_is_refused(self):
+        root, child = self.task(), self.task()
+        self.store.update(child, merge_attempt=CLAIM)
+        self.assert_refused_with_nothing_written('LINEAGE_MEMBER_INVALID', root, child)
+        self.assertEqual(self.store.get(child)['merge_attempt'], CLAIM)
+
+    def test_a_developer_launch_result_or_completion_counts_as_started(self):
+        for state in ('DEVELOPER_DISPATCHING', 'DEVELOPER_RESPONDED',
+                      'DEVELOPER_OUTCOME_UNKNOWN', 'DEVELOPER_OUTPUT_REJECTED'):
+            with self.subTest(state=state):
+                self.assertTrue(task_store.split_child_started({'developer': {'state': state}}))
+        for record in ({'completion': {'state': 'WAITING_REVIEW'}},
+                       {'published_pr': {'pr': 17}}, {'merge_attempt': CLAIM}, None):
+            with self.subTest(record=record):
+                self.assertTrue(task_store.split_child_started(record))
+        for record in ({}, {'developer': None}, {'developer': {'state': 'DEVELOPER_PENDING'}}):
+            with self.subTest(record=record):
+                self.assertFalse(task_store.split_child_started(record))
+
+    def test_a_child_whose_advance_or_drive_is_running_is_refused(self):
+        # task advance and task drive hold this lease for their whole run.
+        root, child = self.task(), self.task()
+        before = self.digests(root, child)
+        with self.store.advance_lease(child):
+            self.refused('SPLIT_CHILD_ADVANCING', lambda: self.reserve(root, child))
+            self.refused('SPLIT_CHILD_ADVANCING', lambda: self.split(root, [child]))
+            self.assert_unchanged(before)
+            self.assert_no_lineage(root, child)
+        # Once the advance has ended, the same split runs.
+        self.assertEqual(self.split(root, [child])['state'], 'PARKED')
+        self.assertEqual(self.state(child), 'OPEN')
+
+    def test_a_publish_after_the_locked_preflight_refuses_with_nothing_written(self):
+        # The child is published between the split's locked digest check and its
+        # reservation write: the write's compare-and-set refuses.
+        root, child = self.task(), self.task()
+        before = self.digests(root)
+        store = FaultStore(self.store, fault_at(
+            'RESERVE', child, code=None,
+            then=lambda: self.store.record_published_pr(child, 17, 'a' * 40)))
+        self.refused('SPLIT_CHILD_CHANGED', lambda: self.split(root, [child], store))
+        self.assert_unchanged(before)
+        self.assert_no_lineage(root, child)
+        self.assertEqual(self.store.get(child)['published_pr']['pr'], 17)
+        # A re-run now refuses in the preflight.
+        self.refused('SPLIT_CHILD_STARTED', lambda: self.split(root, [child]))
+
+
 if __name__ == '__main__':
     unittest.main()

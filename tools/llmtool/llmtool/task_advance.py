@@ -1304,8 +1304,10 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     except Exception as exc:
         # #1502 D10c2 (security v91): the store re-reads the lineage under the Task
         # lock in this same write; a ROOT parked since `record` was read is refused.
+        # #1781 (I4): so is a split reservation that landed since then.
         code = getattr(exc, 'task_store_error_code', None)
-        return _merge_refusal(code if code in ('MERGE_ROOT_PARKED', 'MERGE_LINEAGE_ENDED')
+        return _merge_refusal(code if code in ('MERGE_ROOT_PARKED', 'MERGE_LINEAGE_ENDED',
+                                               'TASK_LINEAGE_PENDING')
                               else 'MERGE_CLAIM_CONFLICT')
     args = ['pr', 'merge', str(number), '--squash', '--match-head-commit', head]
     try:
