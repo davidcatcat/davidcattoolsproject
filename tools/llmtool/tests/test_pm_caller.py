@@ -564,6 +564,123 @@ class PMCallerStoreTests(unittest.TestCase):
         from llmtool.cli import TASK_ACTIONS
         self.assertEqual(TASK_ACTIONS['delegate'], ('run_task_delegate_checked', True))
 
+    def _claude_bind(self, task_id, *extra, claude='', returned=0):
+        argv = ['task', 'claude-bind', task_id, '--executor-task', 'executor-1',
+                '--owner-ref', 'https://github.com/example/repo/issues/1#issuecomment-1',
+                '--read-path', 'a.txt', '--write-path', 'a.txt', *extra]
+        args = parser_for_cli().parse_args(argv)
+        output = io.StringIO()
+        before = self.store.get(task_id)
+        with _environment(claude=claude), \
+                patch('llmtool.task_submission_cli.run_task_claude_bind',
+                      return_value=returned) as run, \
+                patch.object(self.store, 'claude_bind_compare_and_update') as bind, \
+                patch.object(task_submission_cli.task_completion,
+                             'read_d6_registration') as registration, \
+                redirect_stdout(io.StringIO()) as printed:
+            code = task_submission_cli.run_task_claude_bind_checked(
+                args, store=self.store, stdout=output)
+        self.assertEqual(printed.getvalue(), '')
+        return code, output.getvalue(), run, args, (before, bind, registration)
+
+    def _assert_claude_bind_refused(self, task_id, code, output, run, side, expected):
+        run.assert_not_called()
+        before, bind, registration = side
+        bind.assert_not_called()
+        registration.assert_not_called()
+        self.assertEqual(self.store.get(task_id), before)
+        self.assertEqual(code, 1)
+        lines = output.splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0]), {
+            'task_id': task_id, 'step': 'REFUSED', 'result': None, 'next': 'REFUSED',
+            'codes': [expected], 'acked': []})
+
+    def test_claude_bind_refuses_missing_identity(self):
+        task_id = self._task(OWNER)
+        code, output, run, _, side = self._claude_bind(task_id)
+        self._assert_claude_bind_refused(task_id, code, output, run, side,
+                                         'PM_CALLER_SESSION_MISSING')
+
+    def test_claude_bind_refuses_invalid_identity(self):
+        task_id = self._task(OWNER)
+        for extra, claude in ((('--pm-session', 'not a session'), ''),
+                              ((), 'not a session')):
+            with self.subTest(extra=extra, claude=claude):
+                code, output, run, _, side = self._claude_bind(task_id, *extra,
+                                                               claude=claude)
+                self._assert_claude_bind_refused(task_id, code, output, run, side,
+                                                 'PM_CALLER_SESSION_INVALID')
+
+    def test_claude_bind_refuses_non_owner(self):
+        task_id = self._task(OWNER)
+        for extra, claude in (((), OTHER), (('--pm-session', OTHER), ''),
+                              (('--pm-session', 'pm-' + OTHER), ''))):
+            with self.subTest(extra=extra, claude=claude):
+                code, output, run, _, side = self._claude_bind(task_id, *extra,
+                                                               claude=claude)
+                self._assert_claude_bind_refused(task_id, code, output, run, side,
+                                                 'PM_CALLER_NOT_TASK_OWNER')
+
+    def test_claude_bind_refuses_conflicting_explicit_session(self):
+        task_id = self._task(OWNER)
+        code, output, run, _, side = self._claude_bind(task_id, '--pm-session', OWNER,
+                                                       claude=OTHER)
+        self._assert_claude_bind_refused(task_id, code, output, run, side,
+                                         'PM_CALLER_SESSION_CONFLICT')
+
+    def test_claude_bind_refuses_fenced_owner(self):
+        task_id = self._task(OWNER)
+        pm_runtime.write_session_fence(OWNER, 'pm-' + OTHER, '2026-11-12T00:00:00Z')
+        code, output, run, _, side = self._claude_bind(task_id, claude=OWNER)
+        self._assert_claude_bind_refused(task_id, code, output, run, side,
+                                         'PM_CALLER_SESSION_FENCED')
+
+    def test_claude_bind_runs_for_owner(self):
+        task_id = self._task(OWNER)
+        for extra, claude in ((('--pm-session', OWNER), ''), ((), OWNER),
+                              (('--pm-session', 'pm-' + OWNER), OWNER)):
+            with self.subTest(extra=extra, claude=claude):
+                code, output, run, args, _ = self._claude_bind(
+                    task_id, *extra, claude=claude, returned=7)
+                self.assertEqual(code, 7)
+                run.assert_called_once()
+                self.assertIs(run.call_args.args[0], args)
+                self.assertEqual(len(run.call_args.args), 1)
+                self.assertEqual(set(run.call_args.kwargs), {'store', 'stdout'})
+                self.assertIs(run.call_args.kwargs['store'], self.store)
+                self.assertIsNotNone(run.call_args.kwargs['stdout'])
+                self.assertEqual(output, '')
+
+    def test_claude_bind_pm_session_is_optional_in_parser(self):
+        args = parser_for_cli().parse_args([
+            'task', 'claude-bind', 't', '--executor-task', 'executor-1',
+            '--owner-ref', 'https://github.com/example/repo/issues/1#issuecomment-1',
+            '--read-path', 'a.txt', '--write-path', 'a.txt'])
+        self.assertIsNone(args.pm_session)
+
+    def test_direct_claude_bind_is_not_caller_checked(self):
+        # The fixture Task is not a Claude Task, so the unchecked function
+        # refuses on its own eligibility rule, never on the caller.
+        from llmtool.errors import LLMToolError
+        task_id = self._task(OWNER)
+        args = parser_for_cli().parse_args([
+            'task', 'claude-bind', task_id, '--executor-task', 'executor-1',
+            '--owner-ref', 'https://github.com/example/repo/issues/1#issuecomment-1',
+            '--read-path', 'a.txt', '--write-path', 'a.txt'])
+        with _environment(), \
+                patch.object(pm_caller, 'check_caller',
+                             wraps=pm_caller.check_caller) as check:
+            with self.assertRaisesRegex(LLMToolError, 'low-risk active-PM Claude Task'):
+                task_submission_cli.run_task_claude_bind(
+                    args, store=self.store, stdout=io.StringIO())
+        check.assert_not_called()
+
+    def test_cli_claude_bind_action_names_checked_adapter(self):
+        from llmtool.cli import TASK_ACTIONS
+        self.assertEqual(TASK_ACTIONS['claude-bind'],
+                         ('run_task_claude_bind_checked', True))
+
     def test_drive_adapter_refuses_non_owner_before_any_call(self):
         task_id = self._task(OWNER)
         args = parser_for_cli().parse_args(['task', 'drive', task_id, '--merge'])

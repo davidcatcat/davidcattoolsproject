@@ -774,6 +774,10 @@ def add_task_submission_parsers(actions):
                              help='authorized relative target path; repeat as needed')
     claude_bind.add_argument('--common-dir',
                              help='Git common dir holding the D6 registry (default: from cwd)')
+    claude_bind.add_argument('--pm-session',
+                             help=('caller PM session (native UUID or pm- ID); must own '
+                                   'the Task; default: CLAUDE_CODE_SESSION_ID or '
+                                   'CODEX_THREAD_ID'))
     assignments = actions.add_parser(
         'assignments', help='List live Developer assignment ids for one worker')
     assignments.add_argument('--worker', required=True, help='worker-dispatch key')
@@ -1719,6 +1723,22 @@ def run_task_claude_bind(args, *, store=None, stdout=None):
         developer=developer, completion=completion)
     _print(_task_view(saved), stdout=stdout)
     return 0
+
+
+def run_task_claude_bind_checked(args, *, store=None, stdout=None):
+    """CLI entry for ``task claude-bind``: the caller's PM session must own the Task.
+
+    #1230 A1 step 5: only the CLI checks the caller. Direct callers of
+    ``run_task_claude_bind`` are not checked here.
+    """
+    from . import pm_caller
+    store = TaskStore() if store is None else store
+    try:
+        pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
+    except pm_caller.PMCallerRefused as exc:
+        _print(pm_caller.refusal(args.task_id, exc.code), stdout)
+        return 1
+    return run_task_claude_bind(args, store=store, stdout=stdout)
 
 
 def run_task_review_result(args, *, store=None, github_get=None):
