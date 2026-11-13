@@ -882,6 +882,17 @@ class DependencyCheckTests(unittest.TestCase):
                 self.assertEqual((dependent['kinds'], dependent['names']),
                                  ([mi.USES_ADDED_NAME], ['llmtool.alpha.added']))
 
+    def test_later_merge_using_a_name_the_scope_binds_with_with(self):
+        data = {'files': {ALPHA: {'before': 'def run():\n    return 1\n',
+                                  'after': ('def run():\n    return 1\n\n\n'
+                                            'with open("a") as added:\n    pass\n')}}}
+        result = mi.dependency_check(data, [later(201, M1,
+                                                  {USER: 'from llmtool.alpha import added\n'})])
+        self.assertEqual(result['code'], mi.REVERT_DEPENDENT)
+        dependent = result['dependents'][0]
+        self.assertEqual((dependent['kinds'], dependent['names']),
+                         ([mi.USES_ADDED_NAME], ['llmtool.alpha.added']))
+
     def test_unrelated_later_merge_is_no_dependency(self):
         result = self.check_one({USER: 'from llmtool.alpha import run\n', 'README.md': 'text',
                                  LL + 'llmtool/gone.py': None})

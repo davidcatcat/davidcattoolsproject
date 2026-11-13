@@ -143,6 +143,10 @@ def _top_level(body, out):
             _top_level(node.body, out)
             _top_level(node.orelse, out)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
+            # ``with manager() as name:`` binds name at module level.
+            for item in node.items:
+                if item.optional_vars is not None:
+                    _bind(item.optional_vars, out)
             _top_level(node.body, out)
         elif _TRY and isinstance(node, _TRY):
             _top_level(node.body, out)

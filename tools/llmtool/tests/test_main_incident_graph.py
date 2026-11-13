@@ -144,6 +144,13 @@ class NameTests(unittest.TestCase):
         self.assertIsNone(graph.defined_names('def broken(:\n'))
         self.assertIsNone(graph.defined_names(None))
 
+    def test_defined_names_cover_with_targets(self):
+        text = ('with open("a") as added:\n    INSIDE = 1\n'
+                'with first() as (LEFT, *RIGHT), second() as SECOND, third():\n    pass\n'
+                'async def run():\n    async with lock() as LOCAL:\n        pass\n')
+        self.assertEqual(graph.defined_names(text),
+                         {'added', 'INSIDE', 'LEFT', 'RIGHT', 'SECOND', 'run'})
+
     def test_used_names_from_from_imports_and_module_attributes(self):
         text = ('from llmtool.alpha import run\nfrom llmtool import gamma as g\n'
                 'import llmtool.delta\nimport llmtool.epsilon as eps\nfrom . import beta\n'
