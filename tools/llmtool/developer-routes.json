@@ -34,6 +34,18 @@
       },
       "authorization_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167",
       "allowed_data_classes": ["synthetic", "public_repo"]
+    },
+    "opencode": {
+      "executable": "opencode",
+      "default_model": "opencode/deepseek-v4.1-flash-free",
+      "allowed_models": ["opencode/deepseek-v4.1-flash-free"],
+      "default_effort": "high"
     }
+  },
+  "roles": {
+    "codex-reviewer": {"allowed_models": ["gpt-6.1-sol"]},
+    "claude-reviewer": {"allowed_models": ["claude-opus-5-5"]},
+    "codex-debug": {"allowed_models": ["gpt-6.1-sol"]},
+    "claude-debug": {"allowed_models": ["claude-opus-5-5"]}
   }
 }

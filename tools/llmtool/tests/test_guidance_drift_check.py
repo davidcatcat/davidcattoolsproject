@@ -19,8 +19,8 @@ check = guidance_drift_check.check
 FIXTURE_MODELS = ("gpt-6-luna", "gpt-6.1-sol", "gpt-7-x", "gpt-8-y", "qwen3-coder", "kimi-k2")
 
 
-def fixture_routes(models=FIXTURE_MODELS):
-    return {
+def fixture_routes(models=FIXTURE_MODELS, roles=None):
+    routes = {
         "schema_version": 1,
         "routes": {
             "fixture": {
@@ -31,6 +31,9 @@ def fixture_routes(models=FIXTURE_MODELS):
             },
         },
     }
+    if roles is not None:
+        routes["roles"] = roles
+    return routes
 
 
 class GuidanceDriftCheckTests(unittest.TestCase):
@@ -277,7 +280,25 @@ class GuidanceDriftCheckTests(unittest.TestCase):
 def valid_rule_files():
     """Minimal valid documents for each registered rule-file schema."""
     return {
-        "developer-routes.json": fixture_routes(),
+        "developer-routes.json": fixture_routes(
+            roles={"fixture-reviewer": {"allowed_models": ["gpt-6.1-sol"]}}),
+        "policy.json": {
+            "schema_version": 1, "repair_max": 2, "parent_debug_max": 1,
+            "group_debug_max": 1, "child_max": 3, "replan_max": 1,
+            "test_fail_max": 2, "review_fail_max": 3, "waiting_notify_after_hours": 24,
+        },
+        "worker-dispatch.json": {
+            "schema_version": 1,
+            "workers": {
+                "fixture-worker": {
+                    "dispatch": "PAUSED",
+                    "decided_by": "Owner",
+                    "decided_at": "2026-11-14",
+                    "reason": "Fixture entry",
+                    "evidence": "https://example.invalid/decision",
+                },
+            },
+        },
         "sensitive-paths.json": {
             "schema_version": 1,
             "exact": ["tools/llmtool/sensitive-paths.json"],
@@ -373,6 +394,49 @@ class RuleFileSchemaTests(unittest.TestCase):
             ("execution-resources.json", {**resources, "remote_development_authority": "GRANTED"}, "must be"),
             ("execution-resources.json", {**resources, "as_of": "yesterday"}, "invalid format"),
         ]
+        valid_routes = self.valid["developer-routes.json"]
+        cases += [
+            ("developer-routes.json", {**valid_routes, "roles": "codex-reviewer"}, "must be an object"),
+            ("developer-routes.json", {**valid_routes, "roles": {}}, "at least 1"),
+            ("developer-routes.json", {**valid_routes, "roles": {
+                "fixture-reviewer": {"allowed_models": []}}}, "at least 1"),
+            ("developer-routes.json", {**valid_routes, "roles": {
+                "fixture-reviewer": {"allowed_models": "gpt-6.1-sol"}}}, "must be a list"),
+            ("developer-routes.json", {**valid_routes, "roles": {
+                "fixture-reviewer": {"allowed_models": ["gpt-6.1-sol"], "default": "x"}}}, "unknown key"),
+            ("developer-routes.json", {**valid_routes, "roles": {
+                "Fixture Reviewer": {"allowed_models": ["gpt-6.1-sol"]}}}, "invalid key"),
+        ]
+        policy = self.valid["policy.json"]
+        policy_missing = {key: value for key, value in policy.items() if key != "repair_max"}
+        cases += [
+            ("policy.json", {**policy, "repair_max": "2"}, "integer"),
+            ("policy.json", {**policy, "repair_max": True}, "integer"),
+            ("policy.json", {**policy, "child_max": -1}, "integer"),
+            ("policy.json", {**policy, "review_fail_max": 2.5}, "integer"),
+            ("policy.json", {**policy, "waiting_notify_after_hours": 0}, "integer"),
+            ("policy.json", policy_missing, 'missing key "repair_max"'),
+        ]
+        dispatch = self.valid["worker-dispatch.json"]
+        worker = dispatch["workers"]["fixture-worker"]
+        worker_missing = {key: value for key, value in worker.items() if key != "evidence"}
+
+        def with_worker(entry, key="fixture-worker"):
+            return {**dispatch, "workers": {key: entry}}
+
+        cases += [
+            ("worker-dispatch.json", {**dispatch, "workers": {}}, "at least 1"),
+            ("worker-dispatch.json", {**dispatch, "workers": []}, "must be an object"),
+            ("worker-dispatch.json", with_worker({**worker, "dispatch": "paused"}), "must be one of"),
+            ("worker-dispatch.json", with_worker({**worker, "dispatch": "RUNNING"}), "must be one of"),
+            ("worker-dispatch.json", with_worker({**worker, "hosts": []}), "unknown key"),
+            ("worker-dispatch.json", with_worker(worker_missing), 'missing key "evidence"'),
+            ("worker-dispatch.json", with_worker({**worker, "evidence": "http://x.invalid"}), "invalid format"),
+            ("worker-dispatch.json", with_worker({**worker, "decided_at": "today"}), "invalid format"),
+            ("worker-dispatch.json", with_worker({**worker, "reason": "one\ntwo"}), "one line"),
+            ("worker-dispatch.json", with_worker({**worker, "reason": ""}), "non-empty string"),
+            ("worker-dispatch.json", with_worker(worker, "Bad Worker"), "invalid key"),
+        ]
         for name, value, expected in cases:
             with self.subTest(name=name, expected=expected, value=value):
                 self.reset_rules()
@@ -382,6 +446,19 @@ class RuleFileSchemaTests(unittest.TestCase):
                         for item in findings),
                     findings,
                 )
+
+    def test_every_real_rule_file_has_a_registered_schema(self):
+        # #1502 WP-G: no tools/llmtool/*.json rule file is left without a schema.
+        repository = Path(__file__).resolve().parents[3]
+        rule_files = {path.name for path in (repository / "tools" / "llmtool").glob("*.json")
+                      if not path.name.startswith(".")}
+        self.assertTrue({"policy.json", "worker-dispatch.json"} <= rule_files)
+        self.assertEqual(rule_files - set(guidance_drift_check.RULE_SCHEMAS), set())
+        self.assertFalse(any("RULE_SCHEMA_MISSING" in item
+                             for item in guidance_drift_check.check_rule_files(repository)))
+
+    def test_routes_without_roles_still_pass(self):
+        self.assertEqual(self.findings_after("developer-routes.json", fixture_routes()), [])
 
     def test_unreadable_duplicate_key_and_non_finite_rule_files_fail(self):
         cases = {
@@ -462,6 +539,23 @@ class ModelNameTests(unittest.TestCase):
     def test_allowed_models_pass_including_case_and_provider_prefix(self):
         self.write_doc("CLAUDE.md", "Use `gpt-6-luna`, GPT-6-LUNA or openrouter/kimi-k2.\n")
         self.assertEqual(guidance_drift_check.check_model_names(self.repo), [])
+
+    def test_role_registry_models_are_allowed(self):
+        # #1502 WP-E: review and AI Debug role models count as allowed names.
+        (self.repo / "tools" / "llmtool" / "developer-routes.json").write_text(json.dumps(fixture_routes(
+            ("gpt-6-luna",),
+            roles={"codex-debug": {"allowed_models": ["gpt-7-x"]},
+                   "claude-reviewer": {"allowed_models": ["claude-opus-5-5"]}})), encoding="utf-8")
+        self.write_doc("AGENTS.md", "Debug `gpt-7-x`, review claude-opus-5-5, route gpt-6-luna, not gpt-9-wrong.\n")
+        self.assertEqual(guidance_drift_check.check_model_names(self.repo),
+                         ["AGENTS.md: MODEL_NOT_ALLOWED gpt-9-wrong"])
+
+    def test_invalid_role_registry_fails_closed(self):
+        (self.repo / "tools" / "llmtool" / "developer-routes.json").write_text(json.dumps(fixture_routes(
+            ("gpt-6-luna",), roles={"codex-debug": {"allowed_models": []}})), encoding="utf-8")
+        self.write_doc("CLAUDE.md", "gpt-6-luna\n")
+        self.assertEqual(guidance_drift_check.check_model_names(self.repo),
+                         ["tools/llmtool/developer-routes.json: MODEL_ALLOWLIST_UNAVAILABLE schema invalid"])
 
     def test_history_reports_and_non_normative_files_are_not_checked(self):
         for relative in ("docs/history/old.md", "docs/reports/run.md",

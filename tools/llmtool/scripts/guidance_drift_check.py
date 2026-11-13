@@ -4,7 +4,8 @@
 - CLAUDE.md acknowledges hard values in AGENTS.md (hash-pinned).
 - Every tools/llmtool/*.json rule file matches a strict schema (#1502 WP-G).
 - Normative docs name only models listed in developer-routes.json
-  allowed_models (#1502 WP-G); docs/history and docs/reports are exempt.
+  allowed_models, for a route or a review/debug role (#1502 WP-E, WP-G);
+  docs/history and docs/reports are exempt.
 """
 
 from __future__ import annotations
@@ -76,6 +77,18 @@ class Const:
     def errors(self, value: Any, where: str) -> list[str]:
         if type(value) is not type(self.value) or value != self.value:
             return [f"{where} must be {json.dumps(self.value)}"]
+        return []
+
+
+class OneOf:
+    """An exact, case-sensitive string from a fixed set."""
+
+    def __init__(self, *values: str):
+        self.values = values
+
+    def errors(self, value: Any, where: str) -> list[str]:
+        if type(value) is not str or value not in self.values:
+            return [f"{where} must be one of {', '.join(self.values)}"]
         return []
 
 
@@ -157,6 +170,16 @@ DEVELOPER_ROUTE = Obj(
         "allowed_data_classes": ListOf(Str(r"[a-z_]+"), min_items=1),
     },
 )
+# Review/AI Debug role model registry (#1502 WP-E). The route loader checks
+# the exact role names; this schema checks shape only.
+ROLE_MODELS = Obj({"allowed_models": ListOf(Str(), min_items=1)})
+WORKER_DISPATCH_ENTRY = Obj({
+    "dispatch": OneOf(*sorted(DISPATCH_VALUES)),
+    "decided_by": Str(),
+    "decided_at": Str(r"\d{4}-\d{2}-\d{2}"),
+    "reason": Str(),
+    "evidence": Str(r"https://\S+"),
+})
 EXECUTION_HOST = Obj(
     {
         "id": Str(r"[a-z0-9][a-z0-9-]*"),
@@ -180,9 +203,24 @@ RULE_SCHEMAS: dict[str, Any] = {
         "prefixes": ListOf(Str(REPO_PATH + r"(?<=/)")),
         "globs": ListOf(Str(REPO_PATH)),
     }),
-    "developer-routes.json": Obj({
+    "developer-routes.json": Obj(
+        {"schema_version": Const(1), "routes": MapOf(DEVELOPER_ROUTE, min_items=1)},
+        {"roles": MapOf(ROLE_MODELS, min_items=1)},
+    ),
+    "policy.json": Obj({
         "schema_version": Const(1),
-        "routes": MapOf(DEVELOPER_ROUTE, min_items=1),
+        "repair_max": Int(0),
+        "parent_debug_max": Int(0),
+        "group_debug_max": Int(0),
+        "child_max": Int(0),
+        "replan_max": Int(0),
+        "test_fail_max": Int(0),
+        "review_fail_max": Int(0),
+        "waiting_notify_after_hours": Int(1),
+    }),
+    "worker-dispatch.json": Obj({
+        "schema_version": Const(1),
+        "workers": MapOf(WORKER_DISPATCH_ENTRY, min_items=1),
     }),
     "execution-resources.json": Obj({
         "schema_version": Const(1),
@@ -340,7 +378,8 @@ def _allowed_models(root: Path) -> tuple[set[str] | None, list[str]]:
         error = "schema invalid"
     if error is not None:
         return None, [_finding(label, "MODEL_ALLOWLIST_UNAVAILABLE", error)]
-    return {model.lower() for route in value["routes"].values() for model in route["allowed_models"]}, []
+    entries = [*value["routes"].values(), *value.get("roles", {}).values()]
+    return {model.lower() for entry in entries for model in entry["allowed_models"]}, []
 
 
 def _normative_docs(root: Path) -> list[tuple[str, Path]]:
@@ -359,7 +398,8 @@ def _model_allowed(name: str, allowed: set[str]) -> bool:
 
 
 def check_model_names(root: Path) -> list[str]:
-    """Normative docs may name a model only if developer-routes.json allows it.
+    """Normative docs may name a model only if developer-routes.json allows it
+    for a route or a review/debug role.
 
     Only model-shaped names are scanned; dispatch states, counts and worker
     IDs such as claude-reviewer or gw-agent are not model names.

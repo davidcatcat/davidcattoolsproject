@@ -22,6 +22,9 @@ __all__ = [
 _MAX_ALLOWED_MODELS = 16
 _GENERIC_MODEL_PATTERN = r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}'
 _CLAUDE_MODEL_PATTERN = r'claude-[a-z0-9][a-z0-9.-]{0,120}'
+# Only OpenCode-hosted free models; the variant (for example high) is the
+# route's default_effort, never part of the model name.
+_OPENCODE_MODEL_PATTERN = r'opencode/[A-Za-z0-9][A-Za-z0-9._-]{0,94}-free'
 
 
 def _generic_model_ok(value):
@@ -35,6 +38,45 @@ def _claude_model_ok(value):
     import re
 
     return type(value) is str and re.fullmatch(_CLAUDE_MODEL_PATTERN, value) is not None
+
+
+def _opencode_model_ok(value):
+    import re
+
+    return type(value) is str and re.fullmatch(_OPENCODE_MODEL_PATTERN, value) is not None
+
+
+def _codex_model_ok(value):
+    """A Codex role model: well formed and never a Claude model (cross-family)."""
+    return _generic_model_ok(value) and not value.lower().startswith('claude')
+
+
+# #1502 WP-E: allowed models for the review and AI Debug roles. Each role
+# lists exactly the one model in use until the Owner decides to allow more
+# (same rule as PR #1759 F1 for routes).
+_ROLE_MODEL_CHECKS = {
+    'codex-reviewer': _codex_model_ok,
+    'claude-reviewer': _claude_model_ok,
+    'codex-debug': _codex_model_ok,
+    'claude-debug': _claude_model_ok,
+}
+
+
+def _role_models(roles):
+    """Return the normalized roles registry or raise ROUTE_CONFIG_INVALID."""
+    if type(roles) is not dict or set(roles) != set(_ROLE_MODEL_CHECKS):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    normalized = {}
+    for role, model_ok in _ROLE_MODEL_CHECKS.items():
+        entry = roles[role]
+        if type(entry) is not dict or set(entry) != {'allowed_models'}:
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        models = entry['allowed_models']
+        if (type(models) is not list or len(models) != 1 or
+                not model_ok(models[0])):
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        normalized[role] = {'allowed_models': list(models)}
+    return normalized
 
 
 def _allowed_models_ok(value, default_model, model_ok):
@@ -84,15 +126,18 @@ def load_route_config(path=None):
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
     except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
         raise RouteError('ROUTE_CONFIG_INVALID') from None
-    if (type(value) is not dict or set(value) != {'schema_version', 'routes'} or
+    # 'roles' is optional so older fixtures still load; when present it is
+    # validated strictly (#1502 WP-E).
+    if (type(value) is not dict or set(value) - {'roles'} != {'schema_version', 'routes'} or
             type(value.get('schema_version')) is not int or value['schema_version'] != 1 or
             type(value.get('routes')) is not dict):
         raise RouteError('ROUTE_CONFIG_INVALID')
     routes = value['routes']
-    if ('agy' not in routes or set(routes) - {'agy', 'claude', 'gw-agent'} or
+    if ('agy' not in routes or set(routes) - {'agy', 'claude', 'gw-agent', 'opencode'} or
             type(routes['agy']) is not dict or
             ('claude' in routes and type(routes['claude']) is not dict) or
-            ('gw-agent' in routes and type(routes['gw-agent']) is not dict)):
+            ('gw-agent' in routes and type(routes['gw-agent']) is not dict) or
+            ('opencode' in routes and type(routes['opencode']) is not dict)):
         raise RouteError('ROUTE_CONFIG_INVALID')
     entry = routes['agy']
     expected = {'executable', 'default_model', 'allowed_models', 'default_effort',
@@ -157,7 +202,23 @@ def load_route_config(path=None):
             raise RouteError('ROUTE_CONFIG_INVALID')
         normalized['gw-agent'] = dict(gw)
         normalized['gw-agent']['allowed_models'] = list(gw['allowed_models'])
-    return {'schema_version': 1, 'routes': normalized}
+    if 'opencode' in routes:
+        opencode = routes['opencode']
+        if (set(opencode) != {'executable', 'default_model', 'allowed_models',
+                              'default_effort'} or
+                opencode.get('executable') != 'opencode' or
+                not _opencode_model_ok(opencode.get('default_model')) or
+                type(opencode.get('default_effort')) is not str or
+                opencode['default_effort'] not in ('low', 'medium', 'high') or
+                not _allowed_models_ok(opencode.get('allowed_models'),
+                                       opencode['default_model'], _opencode_model_ok)):
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        normalized['opencode'] = dict(opencode)
+        normalized['opencode']['allowed_models'] = list(opencode['allowed_models'])
+    result = {'schema_version': 1, 'routes': normalized}
+    if 'roles' in value:
+        result['roles'] = _role_models(value['roles'])
+    return result
 
 
 def _unique_config_pairs(pairs):
