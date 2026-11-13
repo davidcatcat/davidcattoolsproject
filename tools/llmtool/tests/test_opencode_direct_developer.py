@@ -868,9 +868,11 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         for version in ('opencode v2.1.4', 'opencode v3.0.0-beta.1+build.7'):
             with self.subTest(version=version):
                 cli = self.fake_cli(body, version_output=version + '\n')
-                result = self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
-                    write_paths=['source.py'], prompt='bounded task prompt',
-                    timeout_seconds=5, executable=cli)
+                # #1776: a loose version-probe timeout, so a slow runner does not fail it.
+                with patch('llmtool.opencode_direct_developer.VERSION_TIMEOUT_SECONDS', 120):
+                    result = self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                        write_paths=['source.py'], prompt='bounded task prompt',
+                        timeout_seconds=5, executable=cli)
                 self.assertEqual(result.cli_version, version)
 
     def test_malformed_version_is_rejected_before_provider_run(self):
@@ -881,7 +883,9 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                 cli = self.fake_cli(self.event('step_start') + '\n',
                                     version_output=version + '\n',
                                     run_invocation_marker=marker)
-                with self.assertRaises(DirectOpenCodeError) as caught:
+                # #1776: a loose version-probe timeout, so a slow runner does not fail it.
+                with patch('llmtool.opencode_direct_developer.VERSION_TIMEOUT_SECONDS', 120), \
+                        self.assertRaises(DirectOpenCodeError) as caught:
                     self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
                         write_paths=['source.py'], prompt='bounded task prompt',
                         timeout_seconds=5, executable=cli)

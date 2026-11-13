@@ -15,6 +15,27 @@ starts as UNKNOWN_OPEN and only advances to RESOLVED or SUPERSEDED, which are
 final: a final record takes no further change. Every update is checked against
 the stored record before it is written.
 
+#1706 R9 adds the optional, append-only ``remote_tests`` list: one entry per
+EC2 remote test run for the incident (``remote_test.run_incident_remote_test``).
+A record without the field is valid, so records written before R9 still read;
+``create`` never writes it. Each entry is checked against the record it lives
+in: its SHA must be recorded in the incident (``admitted_shas``), its modules
+must be recorded as failing (``failing_modules``) and a stored receipt must
+match its own ``receipt_digest``. A stored receipt has exactly the
+``REMOTE_RECEIPT_FIELDS`` (plus the optional ``failure_excerpt``); an append
+with any other receipt field refuses INCIDENT_RECEIPT_FIELDS_INVALID before
+anything is written, and such a field on disk makes the record invalid. Every
+structured receipt field must match its fixed grammar, each ``final`` line
+must be a unittest summary line or ``FINAL_REDACTED``, and the output-derived
+strings (``final`` lines and ``failure_excerpt``) must pass the real
+sensitive-content screen, else the record is INCIDENT_RECORD_INVALID
+(PR #1763, CWE-532). A stored receipt must also be consistent with its own
+``result`` (``receipt_consistent``; Codex v1 F1 on PR #1769): an append of a
+well-formed receipt that contradicts its result refuses
+INCIDENT_RECEIPT_INCONSISTENT before anything is written, and such a receipt
+on disk makes the record INCIDENT_RECORD_INVALID even when its receipt and
+record digests were recomputed.
+
 Every doubt fails closed with a typed code in ``error.incident_code``; error
 messages carry only the code and, when it is a safe identifier, the incident ID.
 """
@@ -56,6 +77,8 @@ INCIDENT_RECORD_BUSY = 'INCIDENT_RECORD_BUSY'
 INCIDENT_RECORD_FULL = 'INCIDENT_RECORD_FULL'
 INCIDENT_OUTCOME_INVALID = 'INCIDENT_OUTCOME_INVALID'
 INCIDENT_CLOSED = 'INCIDENT_CLOSED'
+INCIDENT_RECEIPT_FIELDS_INVALID = 'INCIDENT_RECEIPT_FIELDS_INVALID'
+INCIDENT_RECEIPT_INCONSISTENT = 'INCIDENT_RECEIPT_INCONSISTENT'
 
 OPEN = 'UNKNOWN_OPEN'
 RESOLVED = 'RESOLVED'
@@ -85,11 +108,56 @@ CONFIRMATION_FIELDS = frozenset((
     'pm_session_id', 'confirmed_at', 'scope', 'reason', 'observation_index',
     'evidence_sha256'))
 EVENT_FIELDS = frozenset(('outcome', 'at', 'head'))
+REMOTE_TESTS = 'remote_tests'
+OPTIONAL_FIELDS = frozenset((REMOTE_TESTS,))
+MAX_REMOTE_TESTS = 50
+MAX_REMOTE_MODULES = 8
+REMOTE_TEST_WHERE = 'EC2'
+REMOTE_TEST_FIELDS = frozenset((
+    'sha', 'modules', 'result', 'code', 'receipt', 'where', 'recorded_at'))
+# A validated EC2 receipt carries one of these results and no outcome code; a
+# run without a valid receipt carries one of the outcome results and its code.
+REMOTE_RECEIPT_RESULTS = frozenset(('PASS', 'FAIL', 'TIMEOUT', 'SHA_MISMATCH'))
+REMOTE_OUTCOME_RESULTS = frozenset(('TIMEOUT', 'UNAVAILABLE', 'UNKNOWN'))
+# The exact fields of a stored receipt: the validated EC2 receipt
+# (remote_test._RECEIPT_FIELDS) plus the three fields bound before recording.
+# ``failure_excerpt`` is the only optional field; nothing else is accepted.
+REMOTE_RECEIPT_FIELDS = frozenset((
+    'result', 'exit_code', 'source_sha', 'tree', 'fetch_head', 'modules',
+    'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
+    'failures', 'log_bytes', 'log_sha256', 'remote_log_path',
+    'incident_id', 'command_digest', 'receipt_digest'))
+REMOTE_RECEIPT_OPTIONAL = frozenset(('failure_excerpt',))
+# A recorded final line is a unittest summary line or the remote NO_FINAL
+# marker; remote_test replaces any other line with FINAL_REDACTED.
+_SUMMARY_COUNT = (r'(?:failures|errors|skipped|expected failures|unexpected successes)'
+                  r'=[0-9]{1,6}')
+FINAL_SUMMARY = re.compile(r'(?:OK|FAILED)(?: \(%s(?:, %s){0,4}\))?|NO_FINAL'
+                           % (_SUMMARY_COUNT, _SUMMARY_COUNT))
+FINAL_REDACTED = 'REDACTED_NOT_SUMMARY'
+# The final lines a PASS receipt can carry: the passing lines the remote
+# program and the receipt validator accept that are also summary lines; any
+# other line the validator accepts on PASS was redacted before recording.
+PASS_FINAL = re.compile(r'OK(?: \(skipped=[1-9][0-9]{0,5}\))?')
+# The exit code the remote program sets for each result; FAIL has any
+# non-zero code (the failing test process's own code, or 1).
+TIMEOUT_EXIT_CODE = 124
+SHA_MISMATCH_EXIT_CODE = 41
+MAX_FINAL_LINE = 512
+MAX_RECEIPT_FAILURES = 10
+MAX_LOG_BYTES = 20_000_000
+MAX_EXCERPT_BYTES = 4096
+MAX_EXCERPT_LINES = 40
 
 INCIDENT_ID = re.compile(r'mi-x?[0-9a-f]{40}')
 _RECORD_NAME = re.compile(r'(mi-x?[0-9a-f]{40})\.json')
 _SHA40 = re.compile(r'[0-9a-f]{40}')
 _SHA256 = re.compile(r'[0-9a-f]{64}')
+_TEST_MODULE = re.compile(r'test_[a-z0-9_]{1,80}')
+_TEST_PATH = re.compile(r'tools/llmtool/tests/(test_[a-z0-9_]{1,80})\.py')
+_REMOTE_CODE = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
+_RECEIPT_STAMP = re.compile(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ')
+_REMOTE_LOG = re.compile(r'/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log')
 
 
 def _safe_id(value):
@@ -258,9 +326,257 @@ def _valid_events(events, outcome):
     return outcome == state
 
 
+def failing_test_module(test):
+    """The unittest module of one failing test ID or test file path, or None.
+
+    ``tools/llmtool/tests/test_x.py`` gives ``test_x``. A dotted test ID gives
+    its first ``test_*`` part, but never its last part when it has several:
+    in ``__main__.Case.test_y`` the ``test_y`` part is a method, not a module.
+    """
+    if type(test) is not str or not test:
+        return None
+    match = _TEST_PATH.fullmatch(test)
+    if match is not None:
+        return match.group(1)
+    if '/' in test:
+        return None
+    parts = test.split('.')
+    for index, part in enumerate(parts):
+        if _TEST_MODULE.fullmatch(part):
+            return part if index < len(parts) - 1 or len(parts) == 1 else None
+    return None
+
+
+def failing_modules(record):
+    """Modules of every TEST_FAILURE test recorded in any observation of ``record``."""
+    modules = set()
+    observations = record.get('observations') if type(record) is dict else None
+    for observation in observations if type(observations) is list else []:
+        evidence = observation.get('evidence') if type(observation) is dict else None
+        for entry in evidence if type(evidence) is list else []:
+            if type(entry) is not dict or entry.get('code') != 'TEST_FAILURE':
+                continue
+            tests = entry.get('tests')
+            for test in tests if type(tests) is list else []:
+                module = failing_test_module(test)
+                if module is not None:
+                    modules.add(module)
+    return frozenset(modules)
+
+
+def admitted_shas(record):
+    """SHAs recorded in ``record``: last-good head, failing heads and range SHAs."""
+    shas = set()
+    if type(record) is not dict:
+        return frozenset()
+    if _sha40(record.get('last_good_head')):
+        shas.add(record['last_good_head'])
+    observations = record.get('observations')
+    for observation in observations if type(observations) is list else []:
+        if type(observation) is not dict:
+            continue
+        if _sha40(observation.get('failing_head')):
+            shas.add(observation['failing_head'])
+        merges = observation.get('range')
+        for item in merges if type(merges) is list else []:
+            if type(item) is dict and _sha40(item.get('sha')):
+                shas.add(item['sha'])
+    return frozenset(shas)
+
+
+def remote_test_digest(receipt):
+    """SHA-256 of the canonical JSON of a stored receipt without ``receipt_digest``."""
+    body = {key: item for key, item in receipt.items() if key != 'receipt_digest'}
+    return hashlib.sha256(_canonical(body)).hexdigest()
+
+
+def _remote_modules(value, failing):
+    return (type(value) is list and 1 <= len(value) <= MAX_REMOTE_MODULES and
+            all(type(item) is str and _TEST_MODULE.fullmatch(item) for item in value) and
+            value == sorted(set(value)) and set(value) <= failing)
+
+
+def receipt_fields_allowed(receipt):
+    """True when ``receipt`` is a dict with exactly the allowlisted receipt fields."""
+    return type(receipt) is dict and set(receipt) in (
+        REMOTE_RECEIPT_FIELDS, REMOTE_RECEIPT_FIELDS | REMOTE_RECEIPT_OPTIONAL)
+
+
+def _sha256(value):
+    return type(value) is str and _SHA256.fullmatch(value) is not None
+
+
+def _valid_receipt_shape(receipt, item):
+    """Every structured receipt field matches its fixed grammar; no free text."""
+    identity = receipt['identity']
+    uid = identity.get('uid') if type(identity) is dict else None
+    failures = receipt['failures']
+    log_path = receipt['remote_log_path']
+    return (type(receipt['exit_code']) is int and
+            all(receipt[key] is None or _sha40(receipt[key]) for key in ('tree', 'fetch_head')) and
+            type(identity) is dict and set(identity) == {'uid'} and
+            (uid is None or (type(uid) is int and uid >= 0)) and
+            all(type(receipt[key]) is str and _RECEIPT_STAMP.fullmatch(receipt[key]) is not None
+                for key in ('started_at', 'ended_at')) and
+            type(receipt['elapsed_s']) in (int, float) and receipt['elapsed_s'] >= 0 and
+            type(receipt['ran_total']) is int and receipt['ran_total'] >= 0 and
+            type(failures) is list and len(failures) <= MAX_RECEIPT_FAILURES and
+            all(type(name) is str and name in item['modules'] for name in failures) and
+            type(receipt['log_bytes']) is int and 0 <= receipt['log_bytes'] <= MAX_LOG_BYTES and
+            _sha256(receipt['log_sha256']) and _sha256(receipt['command_digest']) and
+            _sha256(receipt['receipt_digest']) and
+            (log_path is None or (type(log_path) is str and
+                                  _REMOTE_LOG.fullmatch(log_path) is not None)))
+
+
+def _valid_excerpt(value):
+    if type(value) is not str or len(value.splitlines()) > MAX_EXCERPT_LINES:
+        return False
+    try:
+        return len(value.encode('utf-8')) <= MAX_EXCERPT_BYTES
+    except UnicodeError:
+        return False
+
+
+def _screened_output(receipt):
+    """The output-derived strings (``final``, ``failure_excerpt``) pass the real screen.
+
+    Each ``final`` line must also be a unittest summary line or FINAL_REDACTED,
+    so a line the screen misses is still never stored as free text. A
+    ``failure_excerpt`` on PASS is a result contradiction (``receipt_consistent``).
+    """
+    finals = receipt['final']
+    if type(finals) is not list or not all(
+            type(line) is str and len(line) <= MAX_FINAL_LINE and
+            (line == FINAL_REDACTED or FINAL_SUMMARY.fullmatch(line) is not None)
+            for line in finals):
+        return False
+    values = list(finals)
+    if 'failure_excerpt' in receipt:
+        excerpt = receipt['failure_excerpt']
+        if not _valid_excerpt(excerpt):
+            return False
+        values.append(excerpt)
+    return not any(task_store._emitted_sensitive(value) for value in values)
+
+
+def receipt_consistent(receipt):
+    """True when no field of a stored receipt contradicts its ``result``.
+
+    Codex v1 F1 on PR #1769. The invariants follow the fixed remote program
+    (``remote_test._REMOTE_SCRIPT``) and its receipt validator:
+
+    - every result: ``failures`` lists failing modules once each, in module
+      order; every failing module has a final line, and there are at most
+      two final lines per module (``len(failures) <= len(final) <=
+      2 * len(modules)``); a ``tree`` is only read after FETCH_HEAD matched
+      ``source_sha``;
+    - PASS: exit code 0, no ``failure_excerpt``, no failures, at least one
+      test ran, FETCH_HEAD is ``source_sha``, a tree, a non-root uid, a
+      passing final line (``PASS_FINAL`` or FINAL_REDACTED) per module;
+    - FAIL: a non-zero exit code; FETCH_HEAD is ``source_sha`` or unknown;
+    - TIMEOUT: exit code 124; FETCH_HEAD is ``source_sha`` or unknown;
+    - SHA_MISMATCH: exit code 41, FETCH_HEAD is not ``source_sha``, and
+      nothing ran (no tree, no tests, no final lines, no failures).
+
+    Any doubt, including a field of the wrong type, returns False.
+    """
+    try:
+        return _receipt_invariants(receipt)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+
+
+def _receipt_invariants(receipt):
+    result, exit_code = receipt['result'], receipt['exit_code']
+    modules, final, failures = receipt['modules'], receipt['final'], receipt['failures']
+    source, fetched, tree = receipt['source_sha'], receipt['fetch_head'], receipt['tree']
+    if (type(result) is not str or result not in REMOTE_RECEIPT_RESULTS or
+            type(exit_code) is not int or type(modules) is not list or
+            type(final) is not list or type(failures) is not list):
+        return False
+    if failures != [name for name in modules if name in failures]:
+        return False  # repeated, out of module order or not a module
+    if not len(failures) <= len(final) <= 2 * len(modules):
+        return False
+    if tree is not None and fetched != source:
+        return False
+    if result == 'PASS':
+        uid = receipt['identity']['uid']
+        return (exit_code == 0 and 'failure_excerpt' not in receipt and not failures and
+                type(receipt['ran_total']) is int and receipt['ran_total'] > 0 and
+                fetched == source and tree is not None and
+                type(uid) is int and uid != 0 and len(final) >= len(modules) and
+                all(type(line) is str and
+                    (line == FINAL_REDACTED or PASS_FINAL.fullmatch(line) is not None)
+                    for line in final))
+    if result == 'SHA_MISMATCH':
+        return (exit_code == SHA_MISMATCH_EXIT_CODE and fetched != source and
+                tree is None and receipt['ran_total'] == 0 and not final and not failures)
+    if result == 'TIMEOUT' and exit_code != TIMEOUT_EXIT_CODE:
+        return False
+    return exit_code != 0 and (fetched is None or fetched == source)
+
+
+def _well_formed_receipt(receipt, item, incident):
+    """Every stored-receipt check except the result invariants and the digest."""
+    return (receipt_fields_allowed(receipt) and receipt['result'] == item['result'] and
+            receipt['source_sha'] == item['sha'] and
+            receipt['modules'] == item['modules'] and
+            receipt['incident_id'] == incident and
+            _valid_receipt_shape(receipt, item) and
+            _screened_output(receipt))
+
+
+def _receipt_entry_typed(entry):
+    """The entry fields a receipt is checked against have their basic types."""
+    return (type(entry) is dict and set(entry) == REMOTE_TEST_FIELDS and
+            type(entry['result']) is str and entry['result'] in REMOTE_RECEIPT_RESULTS and
+            type(entry['modules']) is list and
+            all(type(name) is str for name in entry['modules']))
+
+
+def _valid_receipt(receipt, item, incident):
+    if (not _well_formed_receipt(receipt, item, incident) or
+            not receipt_consistent(receipt)):
+        return False
+    try:
+        return receipt['receipt_digest'] == remote_test_digest(receipt)
+    except (TypeError, ValueError):
+        return False
+
+
+def _valid_remote_test(item, incident, shas, failing):
+    """One remote-test entry, bound to the SHAs and failing modules of its record."""
+    if (type(item) is not dict or set(item) != REMOTE_TEST_FIELDS or
+            not _sha40(item['sha']) or item['sha'] not in shas or
+            not _remote_modules(item['modules'], failing) or
+            item['where'] != REMOTE_TEST_WHERE or
+            not _utc_iso(item['recorded_at']) or type(item['result']) is not str):
+        return False
+    if item['receipt'] is None:
+        return (item['result'] in REMOTE_OUTCOME_RESULTS and type(item['code']) is str and
+                _REMOTE_CODE.fullmatch(item['code']) is not None)
+    return (item['code'] is None and item['result'] in REMOTE_RECEIPT_RESULTS and
+            _valid_receipt(item['receipt'], item, incident))
+
+
+def _valid_remote_tests(record):
+    if REMOTE_TESTS not in record:
+        return True
+    items = record[REMOTE_TESTS]
+    if type(items) is not list or len(items) > MAX_REMOTE_TESTS:
+        return False
+    shas, failing = admitted_shas(record), failing_modules(record)
+    return all(_valid_remote_test(item, record['incident_id'], shas, failing)
+               for item in items)
+
+
 def _valid_body(record):
     """Check every field except ``record_sha256``; return False on any doubt."""
-    if type(record) is not dict or set(record) != FIELDS - {'record_sha256'}:
+    body_fields = FIELDS - {'record_sha256'}
+    if type(record) is not dict or set(record) not in (body_fields,
+                                                       body_fields | OPTIONAL_FIELDS):
         return False
     if (type(record['schema_version']) is not int or
             record['schema_version'] != SCHEMA_VERSION or
@@ -281,6 +597,8 @@ def _valid_body(record):
     if (type(confirmations) is not list or len(confirmations) > MAX_CONFIRMATIONS or
             not all(_valid_confirmation(item, observations) for item in confirmations)):
         return False
+    if not _valid_remote_tests(record):
+        return False
     return _valid_events(record['outcome_events'], record['outcome'])
 
 
@@ -291,7 +609,8 @@ def _expected_id(record):
 
 def _validate(record, incident=None):
     """Return ``record`` when its shape and digest are valid, else refuse INVALID."""
-    if (type(record) is not dict or set(record) != FIELDS or
+    if (type(record) is not dict or
+            set(record) not in (FIELDS, FIELDS | OPTIONAL_FIELDS) or
             type(record.get('record_sha256')) is not str or
             _SHA256.fullmatch(record['record_sha256']) is None):
         _refuse(INCIDENT_RECORD_INVALID, incident)
@@ -482,7 +801,7 @@ def create(record, root=None):
     body = {key: item for key, item in record.items() if key != 'record_sha256'}
     sealed = _sealed(body, incident)
     if (sealed['outcome'] != OPEN or sealed['outcome_events'] or sealed['confirmations'] or
-            len(sealed['observations']) != 1):
+            len(sealed['observations']) != 1 or REMOTE_TESTS in sealed):
         _refuse(INCIDENT_OUTCOME_INVALID, incident)
     name = _record_name(sealed['incident_id'])
     directory = _open_directory(root)
@@ -563,6 +882,13 @@ def _check_forward(old, new, incident):
         value = new.get(key)
         if type(value) is not list or value[:len(old[key])] != old[key]:
             _refuse(INCIDENT_RECORD_IMMUTABLE, incident)
+    # The optional remote-test list: absent reads as empty; once written it stays.
+    if REMOTE_TESTS in old and REMOTE_TESTS not in new:
+        _refuse(INCIDENT_RECORD_IMMUTABLE, incident)
+    earlier = old.get(REMOTE_TESTS, [])
+    value = new.get(REMOTE_TESTS, [])
+    if type(value) is not list or value[:len(earlier)] != earlier:
+        _refuse(INCIDENT_RECORD_IMMUTABLE, incident)
     outcome = new.get('outcome')
     if outcome != old['outcome'] and (type(outcome) is not str or
                                       outcome not in OUTCOME_MOVES[old['outcome']]):
@@ -631,6 +957,35 @@ def append_confirmation(incident, expected_sha256, confirmation, root=None):
         if len(body['confirmations']) >= MAX_CONFIRMATIONS:
             _refuse(INCIDENT_RECORD_FULL, incident)
         body['confirmations'].append(copy.deepcopy(confirmation))
+        return body
+    return _commit(incident, expected_sha256, mutate, root)
+
+
+def append_remote_test(incident, expected_sha256, entry, root=None):
+    """Append one EC2 remote-test entry to an open record; return the new record.
+
+    The sealed record is validated whole, so an entry whose SHA is not recorded
+    in the incident, whose modules are not recorded as failing, or whose
+    receipt does not match its digest refuses INCIDENT_RECORD_INVALID. A
+    receipt with any field outside the exact allowlist refuses
+    INCIDENT_RECEIPT_FIELDS_INVALID, and a well-formed receipt whose fields
+    contradict its result (``receipt_consistent``) refuses
+    INCIDENT_RECEIPT_INCONSISTENT, both before the record is read or written.
+    The whole-record validation checks the same invariants again.
+    """
+    receipt = entry.get('receipt') if type(entry) is dict else None
+    if receipt is not None:
+        if not receipt_fields_allowed(receipt):
+            _refuse(INCIDENT_RECEIPT_FIELDS_INVALID, incident)
+        if (_receipt_entry_typed(entry) and _well_formed_receipt(receipt, entry, incident) and
+                not receipt_consistent(receipt)):
+            _refuse(INCIDENT_RECEIPT_INCONSISTENT, incident)
+
+    def mutate(body):
+        entries = body.setdefault(REMOTE_TESTS, [])
+        if len(entries) >= MAX_REMOTE_TESTS:
+            _refuse(INCIDENT_RECORD_FULL, incident)
+        entries.append(copy.deepcopy(entry))
         return body
     return _commit(incident, expected_sha256, mutate, root)
 
