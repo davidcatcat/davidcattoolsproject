@@ -5349,6 +5349,30 @@ class TaskAdvanceLineageCloseTests(unittest.TestCase):
         self.assertEqual(self.merges, [only])
         self.assertEqual(self.closes, [only, only, only])
 
+    def test_a_split_after_advance_read_the_root_open_still_refuses_the_merge(self):
+        # #1502 D10c2 (security v91, CWE-362): advance read the ROOT OPEN and passed
+        # the D10f1 gate; the split parks it just before the merge claim. The claim
+        # re-reads the lineage under the Task lock and refuses; nothing is merged.
+        root, child = self.task(), self.task()
+        real_gate = task_advance._merge_main_gate
+        splits = []
+
+        def split_then_gate(*args, **kwargs):
+            splits.append(task_submission_cli.lineage_split(
+                self.store, root, [child], pm_session=self.PM, reason='Review FAIL 3.',
+                main_sha_reader=lambda: MAIN_SHA))
+            return real_gate(*args, **kwargs)
+        with patch.object(task_advance, '_merge_main_gate', side_effect=split_then_gate):
+            result = self.advance(root)
+        self.assertEqual(len(splits), 1)
+        self.assertEqual((result['step'], result['codes']),
+                         ('MERGE_REFUSED', ['MERGE_ROOT_PARKED']))
+        self.assertEqual(self.merges, [])
+        self.assertEqual(self.closes, [])
+        self.assertNotIn('merge_attempt', self.store.get(root))
+        self.assertEqual(self.lineage(root)['state'], 'PARKED')
+        self.assertEqual(self.lineage(child)['state'], 'OPEN')
+
 
 if __name__ == '__main__':
     unittest.main()
