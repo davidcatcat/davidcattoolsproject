@@ -104,5 +104,28 @@ class LineageNoticeTests(LineageCase):
             self.refused('R', lambda _store, value: cli._lineage_reason(value, 'R'), reason)
 
 
+class LineageRollUpTests(LineageCase):
+    def end(self, task_id, state):
+        line = self.store.get(task_id)['lineage']
+        record_lineage(self.store, task_id, dict(line, state=state, reason='ended'))
+
+    def test_a_parked_root_rolls_up_once_and_never_notifies(self):
+        root = self.parked_root()
+        child = self.member(root)
+        replan = self.member(root, kind='replan', replaces=[child])
+        self.assertIsNone(cli._lineage_roll_up(self.store, root))
+        self.end(child, 'STOPPED')
+        self.assertIsNone(cli._lineage_roll_up(self.store, root))
+        self.end(replan, 'CLOSED')
+        self.assertEqual(cli._lineage_roll_up(self.store, root),
+                         {'task_id': root, 'state': 'CLOSED', 'owner_notice': None})
+        self.assertEqual(self.state(root), 'CLOSED')
+        self.assertIsNone(cli._lineage_roll_up(self.store, root))
+        other = self.parked_root()
+        self.end(self.member(other), 'DROPPED')
+        self.assertEqual(cli._lineage_roll_up(self.store, other)['state'], 'FAILED_FINAL')
+        self.assertIsNone(cli._lineage_roll_up(self.store, self.task()))
+
+
 if __name__ == '__main__':
     unittest.main()
