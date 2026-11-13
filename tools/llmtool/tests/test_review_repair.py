@@ -967,7 +967,9 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         # A later authorization permits exactly one dispatch on the unused count.
         result = self.dispatch(repair_task_recorder=self._recording_recorder(recorded))
-        self.assertFalse(result['replayed'])
+        # A fresh dispatch carries the provider result; only a reused claim is 'replayed'.
+        self.assertNotIn('replayed', result)
+        self.assertEqual(result['result'], {'status': 'DISPATCHED', 'head': HEAD})
         self.assertEqual((result['claim']['attempt'], result['claim']['state']),
                          (1, 'DISPATCHED'))
         self.assertEqual(result['repair_task_id'], recorded[1])

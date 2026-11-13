@@ -190,7 +190,9 @@ class CiFailRepairTests(unittest.TestCase):
         # A later authorization dispatches the same CI failure exactly once,
         # as the second and last test-failure repair.
         result = self.dispatch(ci_failure=_ci(check_run_id=8))
-        self.assertFalse(result['replayed'])
+        # A fresh dispatch carries the provider result; only a reused claim is 'replayed'.
+        self.assertNotIn('replayed', result)
+        self.assertEqual(result['result'], {'status': 'DISPATCHED', 'head': HEAD})
         self.assertEqual((result['claim']['family'], result['claim']['attempt']),
                          (EC2_FAMILY, 2))
         self.assertNotEqual(result['repair_task_id'],
