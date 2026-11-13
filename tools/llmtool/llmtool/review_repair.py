@@ -10,7 +10,7 @@ from argparse import Namespace
 
 from . import review_result, run_budget, task_completion, worker_dispatch
 from .errors import LLMToolError
-from .task_store import _json_bytes, new_id
+from .task_store import REVIEW_DISPUTE_DEFERRABLE, REVIEW_DISPUTE_SEVERITIES, _json_bytes, new_id
 
 # This same-class repair cap is separate from worker_dispatch's per-dispatch limit of 1.
 MAX_REPAIR_ATTEMPTS = run_budget.MAX_REPAIR_ATTEMPTS
@@ -38,6 +38,133 @@ def _refuse_unclaimed(code, repair_task_id):
 
 def _now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+# #1502 WP-D D13 (section 4, E10): review disputes. These helpers only read
+# records and choose; they never run or launch a review.
+
+def dispute_refuse(code):
+    error = LLMToolError(code)
+    error.dispute_code = code
+    raise error from None
+
+
+_FINDING_LINE = re.compile(r'^Finding: (F[1-9][0-9]{0,3}) \[([A-Za-z]+)\](?=[ \t]|$)', re.M)
+
+
+def verdict_findings(text):
+    """Return {finding_id: severity} from the formal verdict Finding lines.
+
+    {} when no Finding line carries an ID; None when an ID repeats or a
+    severity word is unknown, so nothing can be disputed by an unclear ID.
+    """
+    if type(text) is not str:
+        return None
+    found = {}
+    for match in _FINDING_LINE.finditer(text):
+        finding_id, severity = match.groups()
+        if severity not in REVIEW_DISPUTE_SEVERITIES or finding_id in found:
+            return None
+        found[finding_id] = severity
+    return found
+
+
+def dispute_open_on(task, pr, head):
+    """True while a dispute on this PR head is OPEN; a malformed list counts as open."""
+    disputes = task.get('review_disputes', []) if type(task) is dict else None
+    if type(disputes) is not list:
+        return True
+    return any(type(item) is not dict or
+               (item.get('pr') == pr and item.get('head_sha') == head and
+                item.get('state') == 'OPEN')
+               for item in disputes)
+
+
+def withdrawn_findings(task, pr, head):
+    """Finding IDs of this PR head that an arbiter ruling WITHDREW."""
+    disputes = task.get('review_disputes', []) if type(task) is dict else None
+    if type(disputes) is not list:
+        return frozenset()
+    return frozenset(
+        item['finding_id'] for item in disputes
+        if type(item) is dict and type(item.get('finding_id')) is str and
+        item.get('pr') == pr and item.get('head_sha') == head and
+        item.get('state') == 'RULED' and type(item.get('ruling')) is dict and
+        item['ruling'].get('outcome') == 'WITHDRAWN' and item['ruling'].get('head_sha') == head)
+
+
+# Formal Reviewer keys and their model families, in the fixed choice order.
+ARBITER_REVIEWERS = (('claude-reviewer', 'claude'), ('codex-reviewer', 'codex'))
+_PROFILE_FAMILIES = {'claude': 'claude', 'codex': 'codex', 'agy': 'gemini',
+                     'opencode': 'opencode', 'gw-agent': 'gw-agent', 'company-gw': 'gw-agent'}
+_REVIEW_ACCOUNT_MODES = {'CODEX_CLI': 'codex-reviewer',
+                         'EXPLICIT_CLAUDE_CONFIG_DIR': 'claude-reviewer',
+                         'DEFAULT_SECOND_ACCOUNT': 'claude-reviewer'}
+_VERDICT_ACTOR = re.compile(r'<!-- activity: type=review_verdict actor=(Claude|Codex) ')
+
+
+def developer_family(developer):
+    """The actual model family of a Task's Developer, or None when unknown.
+
+    A route that can serve another vendor's model (OpenCode, gw-agent) takes
+    the family of the recorded model when its name shows one.
+    """
+    if type(developer) is not dict:
+        return None
+    family = _PROFILE_FAMILIES.get(developer.get('provider_profile'))
+    model = developer.get('model')
+    if family in ('opencode', 'gw-agent') and type(model) is str:
+        lowered = model.lower()
+        for marker, named in (('claude', 'claude'), ('gpt', 'codex'), ('codex', 'codex'),
+                              ('gemini', 'gemini')):
+            if marker in lowered:
+                return named
+    return family
+
+
+def claim_reviewer(claim):
+    """The Reviewer key of one COMPLETED review claim, or None when unknown.
+
+    The verdict marker names the actor; a claim without one falls back to its
+    account mode. Any other account mode is unknown.
+    """
+    if type(claim) is not dict:
+        return None
+    result = claim.get('review_result')
+    text = result.get('review_text') if type(result) is dict else None
+    if type(text) is str:
+        first = next((line.strip() for line in text.splitlines() if line.strip()), '')
+        match = _VERDICT_ACTOR.match(first)
+        if match is not None:
+            return {'Claude': 'claude-reviewer', 'Codex': 'codex-reviewer'}[match.group(1)]
+    return _REVIEW_ACCOUNT_MODES.get(claim.get('account_mode'))
+
+
+def choose_arbiter(*, developer_family, first_reviewer, first_review_session):
+    """Pure arbiter choice (#1502 section 4): llmtool picks; the PM cannot.
+
+    The arbiter's family differs from the actual Developer family and, when
+    possible, from the first Reviewer's. Otherwise it is the cross-family first
+    Reviewer again, in a fresh session. The first review session never rules.
+    Refuses DISPUTE_ARBITER_UNAVAILABLE when no such Reviewer exists.
+    """
+    families = dict(ARBITER_REVIEWERS)
+    if (type(developer_family) is not str or not developer_family or
+            first_reviewer not in families or
+            type(first_review_session) is not str or not first_review_session):
+        dispute_refuse('DISPUTE_ARBITER_UNAVAILABLE')
+    cross = [(key, family) for key, family in ARBITER_REVIEWERS if family != developer_family]
+    other = [(key, family) for key, family in cross if family != families[first_reviewer]]
+    if other:
+        reviewer, family = other[0]
+        fresh = False
+    elif any(key == first_reviewer for key, _ in cross):
+        reviewer, family = first_reviewer, families[first_reviewer]
+        fresh = True
+    else:
+        dispute_refuse('DISPUTE_ARBITER_UNAVAILABLE')
+    return {'reviewer': reviewer, 'family': family, 'fresh_session': fresh,
+            'excluded_session': first_review_session}
 
 
 def _update_claim_state(store, task_id, claim, state):
@@ -391,8 +518,18 @@ def _review_gate(task, attempts, packet, family, policy):
     counted adds no valid FAIL and is refused REPAIR_LIMIT_REACHED.
     """
     from . import repair_policy
-    if review_result.blocking_findings(packet['reviewer_text_excerpt_untrusted_data']) == []:
+    text = packet['reviewer_text_excerpt_untrusted_data']
+    if review_result.blocking_findings(text) == []:
         _refuse('REPAIR_NO_BLOCKING_FINDING')
+    # #1502 WP-D D13: a FAIL whose every blocking finding an arbiter withdrew
+    # is not a valid FAIL. Findings without IDs all stay blocking.
+    withdrawn = withdrawn_findings(task, packet.get('pr'), packet['failed_head'])
+    findings = verdict_findings(text) if withdrawn else None
+    if findings:
+        blocking = {finding_id for finding_id, severity in findings.items()
+                    if severity not in REVIEW_DISPUTE_DEFERRABLE}
+        if blocking <= withdrawn:
+            _refuse('REPAIR_NO_BLOCKING_FINDING')
     spent = len(attempts) >= policy['repair_max']
     heads = {claim.get('head_sha'): 'FAIL' for claim in attempts}
     new_fail = packet['failed_head'] not in heads
@@ -476,6 +613,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                       pr_number=pr_number, receipt=remote_test_receipt)
     if _current_d6_head(task, executor_task, current_head) != packet['failed_head']:
         _refuse('REPAIR_HEAD_MOVED')
+    # #1502 WP-D D13: no review repair while a dispute on this PR head is OPEN.
+    if not test_failure and dispute_open_on(task, pr_number, packet['failed_head']):
+        _refuse('REPAIR_DISPUTE_OPEN')
     policy_task = executor_task if claude_cli else task_id
     decision = worker_dispatch.evaluate(
         worker, developer.get('owner_assignment_ref'), policy_task)

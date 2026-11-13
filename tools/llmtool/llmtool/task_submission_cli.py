@@ -930,6 +930,33 @@ def add_task_submission_parsers(actions):
     choice.add_argument('--early')
     high_debug.add_argument('--evidence-file')
     high_debug.add_argument('--route', choices=('codex', 'claude'), default='codex')
+    dispute = actions.add_parser(
+        'dispute', help=('Record a PM dispute, deferral or arbiter ruling of one formal '
+                         'review finding; never runs a review'))
+    dispute_actions = dispute.add_subparsers(dest='dispute_action', metavar='ACTION')
+    dispute_actions.required = True
+    for name, text in (('open', 'Dispute one finding of the recorded FAIL verdict'),
+                       ('defer', 'Defer one Low or Advisory finding'),
+                       ('rule', "Record the llmtool-chosen arbiter's ruling")):
+        command = dispute_actions.add_parser(name, help=text)
+        command.add_argument('task_id', help='existing durable Task ID')
+        command.add_argument('--pr', required=True, type=int, help='GitHub pull request number')
+        command.add_argument('--finding', required=True, help='finding ID of the verdict, e.g. F1')
+        command.add_argument('--evidence-ref', required=True,
+                             help='Issue or PR comment URL of this repository')
+        command.add_argument('--pm-session',
+                             help=('caller PM session (native UUID or pm- ID); must own '
+                                   'the Task; default: CLAUDE_CODE_SESSION_ID or '
+                                   'CODEX_THREAD_ID'))
+        if name == 'rule':
+            command.add_argument('--outcome', required=True, choices=('UPHELD', 'WITHDRAWN'))
+            command.add_argument('--reviewer', required=True,
+                                 choices=('claude-reviewer', 'codex-reviewer'),
+                                 help='must be the arbiter llmtool chose')
+            command.add_argument('--reviewer-task', required=True,
+                                 help='registered D6 Reviewer task id of the arbiter run')
+            command.add_argument('--reviewer-session', required=True,
+                                 help='native session id of the arbiter run')
     repair = actions.add_parser(
         'repair', help='Dispatch one bounded repair for the newest failed formal review')
     repair.add_argument('task_id', help='existing durable Task ID')
@@ -1862,6 +1889,479 @@ def run_task_high_debug(args, *, store=None, runner=None, create_d6=None):
         family=args.family, failed_corrections=getattr(args, 'failed_corrections', None),
         early_reason=getattr(args, 'early', None), evidence=getattr(args, 'evidence_file', None),
         runner=runner, create_d6=create_d6, route=getattr(args, 'route', 'codex'))
+
+
+# #1502 WP-D D13 (section 4 items 1-12, E10): PM disputes of formal review
+# findings. These commands record and gate only: they never run or launch a
+# Reviewer or an arbiter, and a ruling never replaces the formal PASS.
+
+
+def _dispute_task(store, task_id):
+    if type(task_id) is not str or re.fullmatch(r'[0-9a-f]{32}', task_id) is None:
+        _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
+    record = store.get(task_id)
+    if type(record) is not dict or record.get('task_id') != task_id:
+        _dispute_refuse('DISPUTE_TASK_INVALID')
+    if record.get('abandonment') is not None:
+        _dispute_refuse('DISPUTE_TASK_ABANDONED')
+    disputes = record.get('review_disputes', [])
+    if type(disputes) is not list or any(type(item) is not dict for item in disputes):
+        _dispute_refuse('DISPUTE_RECORD_INVALID')
+    return record, list(disputes)
+
+
+def _dispute_refuse(code):
+    from .review_repair import dispute_refuse
+    dispute_refuse(code)
+
+
+def _dispute_repository():
+    """The trusted owner/name slug from the trust source; unreadable refuses.
+
+    Evidence URLs are checked against this slug, never against an owner or
+    repository name written into the code (owner literal guard).
+    """
+    from .task_store import REVIEW_DISPUTE_REPOSITORY
+    try:
+        slug = task_completion._trusted_slug()
+    except Exception:
+        slug = None
+    if type(slug) is not str or REVIEW_DISPUTE_REPOSITORY.fullmatch(slug) is None:
+        _dispute_refuse('DISPUTE_REPOSITORY_UNKNOWN')
+    return slug
+
+
+def _dispute_arguments(pr, finding_id, evidence_ref):
+    """Check the arguments; return the trusted repository slug the evidence belongs to."""
+    from .task_store import REVIEW_DISPUTE_FINDING_ID, valid_review_dispute_ref
+    if (type(pr) is not int or not 1 <= pr <= 9999999 or type(finding_id) is not str or
+            REVIEW_DISPUTE_FINDING_ID.fullmatch(finding_id) is None):
+        _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
+    repository = _dispute_repository()
+    if not valid_review_dispute_ref(evidence_ref, repository):
+        _dispute_refuse('DISPUTE_EVIDENCE_REF_INVALID')
+    return repository
+
+
+def _live_pr_head(_record, pr):
+    """The PR head SHA from a live GitHub read (security v91 F3).
+
+    The recorded published_pr is never used: it can lag behind the PR. An
+    unreadable or malformed answer refuses DISPUTE_HEAD_UNKNOWN; a closed or
+    merged PR refuses DISPUTE_PR_NOT_OPEN.
+    """
+    try:
+        data = task_completion._github_get(f'pulls/{pr}')
+    except Exception:
+        data = None
+    if (type(data) is not dict or type(data.get('number')) is not int or
+            data['number'] != pr or type(data.get('head')) is not dict):
+        _dispute_refuse('DISPUTE_HEAD_UNKNOWN')
+    if data.get('state') != 'open':
+        _dispute_refuse('DISPUTE_PR_NOT_OPEN')
+    return data['head'].get('sha')
+
+
+def _dispute_head(record, pr, current_head):
+    """The PR's current head from a live read; current_head injects the reader."""
+    reader = _live_pr_head if current_head is None else current_head
+    try:
+        head = reader(record, pr)
+    except LLMToolError as exc:
+        if getattr(exc, 'dispute_code', None) is not None:
+            raise
+        head = None
+    except Exception:
+        head = None
+    if type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None:
+        _dispute_refuse('DISPUTE_HEAD_UNKNOWN')
+    return head
+
+
+def _dispute_arbiter_registration(record, *, reviewer, reviewer_task, reviewer_session, head):
+    """Authenticate the arbiter run against its registered D6 Reviewer record (v91 F1).
+
+    The Reviewer Task must be a registered D6 Reviewer record of the chosen
+    Reviewer, distinct from the Executor, with its worktree at the disputed
+    HEAD. The session must be that record's own native session and not the
+    Developer's run session. A fabricated Task or a foreign session refuses.
+    """
+    completion = record.get('completion')
+    evidence = completion.get('evidence') if type(completion) is dict else None
+    common_dir = evidence.get('common_dir') if type(evidence) is dict else None
+    executor_task = completion.get('executor_task_id') if type(completion) is dict else None
+    if type(common_dir) is not str or not common_dir or reviewer_task == executor_task:
+        _dispute_refuse('DISPUTE_ARBITER_UNVERIFIED')
+    try:
+        registration = task_completion.read_d6_registration(
+            reviewer_task, common_dir, allowed_states=task_completion._D6_EVIDENCE_STATES)
+        root = registration.root
+        snapshot = task_completion.collect_git_snapshot(root)
+    except Exception:
+        registration = snapshot = None
+    if (registration is None or
+            getattr(registration, 'task_id', reviewer_task) != reviewer_task or
+            getattr(registration, 'trusted_agent_id', None) != reviewer or
+            getattr(registration, 'result_sha', None) != head or
+            getattr(snapshot, 'head', None) != head or
+            getattr(snapshot, 'root', None) != getattr(registration, 'root', None) or
+            getattr(snapshot, 'common_dir', None) != getattr(registration, 'common_dir', None) or
+            getattr(snapshot, 'branch', None) != getattr(registration, 'branch', None)):
+        _dispute_refuse('DISPUTE_ARBITER_UNVERIFIED')
+    native = getattr(registration, 'native_session_id', None)
+    if type(native) is not str or native != reviewer_session:
+        _dispute_refuse('DISPUTE_ARBITER_SESSION_MISMATCH')
+    developer = record.get('developer')
+    execution = developer.get('execution') if type(developer) is dict else None
+    developer_sessions = {execution.get('native_session_id')} if type(execution) is dict else set()
+    initial = completion.get('initial') if type(completion) is dict else None
+    if type(initial) is dict:
+        developer_sessions.add(initial.get('executor_native_session_id'))
+    if reviewer_session in developer_sessions:
+        _dispute_refuse('DISPUTE_ARBITER_NOT_INDEPENDENT')
+    return registration
+
+
+_RULING_MARKER = re.compile(
+    r'<!-- activity: type=dispute_ruling actor=(Claude|Codex) target=PM '
+    r'status=(UPHELD|WITHDRAWN) -->')
+_RULING_HEADER = re.compile(
+    r'Ruling: (F[1-9][0-9]{0,3}) (UPHELD|WITHDRAWN) \| PR: #([1-9][0-9]{0,8}) \| '
+    r'HEAD: ([0-9a-f]{40})')
+_RULING_ANY_LINE = re.compile(r'^Ruling: ', re.M)
+_GITHUB_TIME = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
+
+
+def _is_ruling_claim(claim):
+    """True when a review claim's text is an arbiter ruling, not a formal verdict."""
+    result = claim.get('review_result') if type(claim) is dict else None
+    text = result.get('review_text') if type(result) is dict else None
+    if type(text) is not str:
+        return False
+    first = next((line.rstrip('\r') for line in text.split('\n') if line.strip()), '')
+    return _RULING_MARKER.fullmatch(first) is not None
+
+
+def _dispute_ruling_claim(record, entry, *, pr, head, arbiter, reviewer_task, reviewer_session):
+    """The one COMPLETED review-dispatch claim of the arbiter's ruling run (High Debug #1775).
+
+    Every review-dispatch claim of the Task that names the arbiter's Reviewer
+    D6 or its session is a candidate; there must be exactly one. It must be
+    COMPLETED and bound to this Task, run and contract, this PR, the disputed
+    HEAD (claim head_sha and review_result.head), the Executor D6 of this Task,
+    the arbiter's Reviewer D6 and session and the Reviewer _dispute_arbiter
+    chose, with a later version than the disputed review and a non-empty
+    review_text. A GitHub login is never identity (#926). Missing or
+    ambiguous provenance refuses.
+    """
+    from .review_repair import claim_reviewer
+    claims = record.get('review_dispatch_claim')
+    claims = [claims] if type(claims) is dict else claims
+    if type(claims) is not list:
+        _dispute_refuse('DISPUTE_RULING_CLAIM_MISSING')
+    if any(type(claim) is not dict for claim in claims):
+        _dispute_refuse('DISPUTE_RULING_CLAIM_INVALID')
+    candidates = [claim for claim in claims
+                  if claim.get('reviewer_task') == reviewer_task or
+                  claim.get('native_session_id') == reviewer_session]
+    if not candidates:
+        _dispute_refuse('DISPUTE_RULING_CLAIM_MISSING')
+    if len(candidates) != 1:
+        _dispute_refuse('DISPUTE_RULING_CLAIM_AMBIGUOUS')
+    [claim] = candidates
+    result = claim.get('review_result')
+    if (claim.get('state') != 'COMPLETED' or type(result) is not dict or
+            claim.get('pr') != pr):
+        _dispute_refuse('DISPUTE_RULING_CLAIM_INVALID')
+    if claim.get('head_sha') != head or result.get('head') != head:
+        _dispute_refuse('DISPUTE_RULING_CLAIM_STALE')
+    completion = record.get('completion')
+    executor = completion.get('executor_task_id') if type(completion) is dict else None
+    binding = record.get('task_binding')
+    contract = binding.get('contract_digest') if type(binding) is dict else None
+    text = result.get('review_text')
+    version, disputed = claim.get('version'), entry.get('review_version')
+    if (type(executor) is not str or not executor or
+            claim.get('executor_task') != executor or
+            claim.get('reviewer_task') != reviewer_task or
+            claim.get('native_session_id') != reviewer_session or
+            claim_reviewer(claim) != arbiter['reviewer'] or
+            type(contract) is not str or not contract or
+            result.get('task_id') != record.get('task_id') or
+            result.get('run_id') != record.get('run_id') or
+            result.get('contract_digest') != contract or
+            type(version) is not int or type(disputed) is not int or version <= disputed or
+            type(text) is not str or not text.strip()):
+        _dispute_refuse('DISPUTE_RULING_CLAIM_INVALID')
+    return claim
+
+
+def _dispute_ruling_comment(record, entry, *, pr, head, finding_id, outcome, reviewer,
+                            review_text, evidence_ref, repository, github_get):
+    """Authenticate the ruling's evidence as the arbiter's own ruling comment (v91 F1).
+
+    The comment is read live and must be an unedited comment on this PR,
+    posted after the dispute opened, whose body equals, byte for byte, the
+    review_text of the arbiter's one COMPLETED ruling claim (High Debug
+    #1775), and whose first three non-empty lines are:
+
+        <!-- activity: type=dispute_ruling actor=<Claude|Codex> target=PM status=<OUTCOME> -->
+        Ruling: <finding_id> <OUTCOME> | PR: #<pr> | HEAD: <head>
+        LLMTOOL-REVIEW-BINDING v1 task=<task> run=<run> contract=<digest> head=<head>
+
+    The actor is the chosen arbiter's family and the comment carries no other
+    Ruling line. The comment author's login is not identity: all agents share
+    one login (#926), so the claim's review_text binds the comment instead.
+    The URL and the comment's thread must both be of the trusted repository
+    slug the caller read.
+    """
+    from .task_store import review_dispute_ref_parts
+    parts = review_dispute_ref_parts(evidence_ref, repository)
+    if parts is None or parts[0] != pr:
+        _dispute_refuse('DISPUTE_EVIDENCE_REF_INVALID')
+    comment_id = parts[1]
+    binding = record.get('task_binding')
+    try:
+        binding_line = task_completion._review_binding_line(
+            record['task_id'], record['run_id'], binding['contract_digest'], head).strip()
+    except Exception:
+        binding_line = None
+    get = task_completion._github_get if github_get is None else github_get
+    try:
+        comment = get(f'issues/comments/{comment_id}')
+    except Exception:
+        comment = None
+    if type(comment) is not dict or type(binding_line) is not str:
+        _dispute_refuse('DISPUTE_RULING_EVIDENCE_INVALID')
+    body = comment.get('body')
+    created, updated = comment.get('created_at'), comment.get('updated_at')
+    lines = ([line.rstrip('\r') for line in body.split('\n') if line.strip()]
+             if type(body) is str else [])
+    marker = _RULING_MARKER.fullmatch(lines[0]) if lines else None
+    header = _RULING_HEADER.fullmatch(lines[1]) if len(lines) > 1 else None
+    actor = {'claude-reviewer': 'Claude', 'codex-reviewer': 'Codex'}.get(reviewer)
+    if (type(comment.get('id')) is not int or comment['id'] != comment_id or
+            comment.get('issue_url') !=
+            f'https://api.github.com/repos/{repository}/issues/{pr}' or
+            type(body) is not str or type(review_text) is not str or
+            body.encode('utf-8', 'surrogatepass') !=
+            review_text.encode('utf-8', 'surrogatepass') or
+            type(created) is not str or _GITHUB_TIME.fullmatch(created) is None or
+            updated != created or created < entry.get('opened_at', '') or
+            marker is None or header is None or len(lines) < 3 or
+            marker.groups() != (actor, outcome) or
+            header.groups() != (finding_id, outcome, str(pr), head) or
+            lines[2] != binding_line or
+            len(_RULING_ANY_LINE.findall(body)) != 1):
+        _dispute_refuse('DISPUTE_RULING_EVIDENCE_INVALID')
+
+
+def _dispute_review_claims(record, pr, head=None):
+    """Review dispatch claims of this PR, of one head unless head is None."""
+    claims = record.get('review_dispatch_claim')
+    claims = [claims] if type(claims) is dict else claims
+    if type(claims) is not list:
+        return []
+    return [claim for claim in claims
+            if type(claim) is dict and claim.get('pr') == pr and
+            (head is None or claim.get('head_sha') == head)]
+
+
+def _dispute_fail_verdict(record, pr, head):
+    """The latest COMPLETED formal verdict of this PR head, which must be a FAIL."""
+    from .review_repair import verdict_findings
+    # An arbiter's ruling claim is not a formal verdict and is never disputed.
+    completed = [claim for claim in _dispute_review_claims(record, pr, head)
+                 if claim.get('state') == 'COMPLETED' and type(claim.get('version')) is int and
+                 type(claim.get('review_result')) is dict and not _is_ruling_claim(claim)]
+    if not completed:
+        _dispute_refuse('DISPUTE_NO_FAIL_VERDICT')
+    claim = max(completed, key=lambda item: item['version'])
+    result = claim['review_result']
+    if result.get('verdict') not in ('FAIL', 'FIX') or result.get('head') != head:
+        _dispute_refuse('DISPUTE_NO_FAIL_VERDICT')
+    findings = verdict_findings(result.get('review_text'))
+    if findings is None:
+        _dispute_refuse('DISPUTE_FINDINGS_INVALID')
+    return claim, findings
+
+
+def _dispute_arbiter(record, claim):
+    from .review_repair import choose_arbiter, claim_reviewer, developer_family
+    return choose_arbiter(developer_family=developer_family(record.get('developer')),
+                          first_reviewer=claim_reviewer(claim),
+                          first_review_session=claim.get('native_session_id'))
+
+
+def _dispute_append(store, task_id, *, pr, finding_id, evidence_ref, state, current_head):
+    """Append one OPEN or DEFERRED entry for a finding of the recorded FAIL."""
+    from .task_store import REVIEW_DISPUTE_DEFERRABLE
+    _dispute_arguments(pr, finding_id, evidence_ref)
+    record, disputes = _dispute_task(store, task_id)
+    head = _dispute_head(record, pr, current_head)
+    claim, findings = _dispute_fail_verdict(record, pr, head)
+    severity = findings.get(finding_id)
+    if severity is None:
+        _dispute_refuse('DISPUTE_FINDING_NOT_FOUND')
+    if state == 'DEFERRED' and severity not in REVIEW_DISPUTE_DEFERRABLE:
+        _dispute_refuse('DEFER_BLOCKING_REFUSED')
+    same = [item for item in disputes
+            if item.get('pr') == pr and item.get('finding_id') == finding_id]
+    if any(item.get('state') == 'RULED' for item in same):
+        _dispute_refuse('DISPUTE_ALREADY_RULED')
+    for existing in ('OPEN', 'DEFERRED'):
+        if any(item.get('state') == existing and item.get('head_sha') == head for item in same):
+            _dispute_refuse('DISPUTE_ALREADY_' + existing)
+    entry = {'finding_id': finding_id, 'pr': pr, 'head_sha': head,
+             'review_version': claim['version'], 'severity': severity, 'state': state,
+             'evidence_ref': evidence_ref, 'opened_at': _timestamp()}
+    store.compare_and_update(task_id, expected={'record_sha256': record.get('record_sha256')},
+                             review_disputes=disputes + [entry])
+    return record, claim, entry
+
+
+def dispute_open(store, task_id, *, pr, finding_id, evidence_ref, current_head=None):
+    """Open a dispute of one finding named by the recorded FAIL verdict of the PR head."""
+    record, claim, entry = _dispute_append(
+        store, task_id, pr=pr, finding_id=finding_id, evidence_ref=evidence_ref,
+        state='OPEN', current_head=current_head)
+    try:
+        chosen = _dispute_arbiter(record, claim)
+        arbiter = {key: chosen[key] for key in ('reviewer', 'family', 'fresh_session')}
+    except LLMToolError as exc:
+        # The dispute is recorded; without an arbiter it stays OPEN and blocks.
+        arbiter = {'code': getattr(exc, 'dispute_code', 'DISPUTE_ARBITER_UNAVAILABLE')}
+    return {'task_id': task_id, 'state': 'OPEN', 'pr': pr, 'finding_id': finding_id,
+            'head_sha': entry['head_sha'], 'severity': entry['severity'],
+            'arbiter': arbiter, 'review_launched': False}
+
+
+def dispute_defer(store, task_id, *, pr, finding_id, evidence_ref, current_head=None):
+    """Defer one Low or Advisory finding; any other severity is refused."""
+    _record_unused, _claim, entry = _dispute_append(
+        store, task_id, pr=pr, finding_id=finding_id, evidence_ref=evidence_ref,
+        state='DEFERRED', current_head=current_head)
+    return {'task_id': task_id, 'state': 'DEFERRED', 'pr': pr, 'finding_id': finding_id,
+            'head_sha': entry['head_sha'], 'severity': entry['severity']}
+
+
+def dispute_rule(store, task_id, *, pr, finding_id, outcome, reviewer, reviewer_task,
+                 reviewer_session, evidence_ref, current_head=None, github_get=None):
+    """Record the arbiter's one ruling on an OPEN dispute of the current PR head.
+
+    The arbiter must be the Reviewer llmtool chose and its run must not be a
+    recorded review run of this PR. The Reviewer Task, its session and the
+    evidence comment are authenticated against the registered D6 Reviewer
+    record and a live comment read (security v91 F1). Exactly one COMPLETED
+    review-dispatch claim must bind the arbiter's run to this Task, PR and
+    HEAD, and the comment body must equal its review_text byte for byte
+    (High Debug #1775). Every refusal happens before the one store update.
+    The ruling binds the exact HEAD, run and evidence; it never replaces the
+    formal PASS.
+    """
+    from .task_store import (D6_TASK_ID, REVIEW_DISPUTE_OUTCOMES, REVIEW_DISPUTE_REVIEWERS,
+                             valid_review_dispute_session)
+    repository = _dispute_arguments(pr, finding_id, evidence_ref)
+    if (outcome not in REVIEW_DISPUTE_OUTCOMES or reviewer not in REVIEW_DISPUTE_REVIEWERS or
+            type(reviewer_task) is not str or D6_TASK_ID.fullmatch(reviewer_task) is None or
+            not valid_review_dispute_session(reviewer_session)):
+        _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
+    record, disputes = _dispute_task(store, task_id)
+    same = [(index, item) for index, item in enumerate(disputes)
+            if item.get('pr') == pr and item.get('finding_id') == finding_id]
+    if any(item.get('state') == 'RULED' for _, item in same):
+        _dispute_refuse('DISPUTE_ALREADY_RULED')
+    head = _dispute_head(record, pr, current_head)
+    opened = [(index, item) for index, item in same if item.get('state') == 'OPEN']
+    current = [(index, item) for index, item in opened if item.get('head_sha') == head]
+    if not current:
+        # An OPEN dispute of an earlier HEAD is stale: the HEAD it disputed is gone.
+        _dispute_refuse('DISPUTE_STALE' if opened else 'DISPUTE_NOT_OPEN')
+    index, entry = current[0]
+    if evidence_ref == entry.get('evidence_ref'):
+        _dispute_refuse('DISPUTE_EVIDENCE_REF_INVALID')
+    claims = _dispute_review_claims(record, pr, head)
+    claim = next((item for item in claims
+                  if item.get('version') == entry.get('review_version') and
+                  item.get('state') == 'COMPLETED'), None)
+    if claim is None:
+        _dispute_refuse('DISPUTE_NO_FAIL_VERDICT')
+    arbiter = _dispute_arbiter(record, claim)
+    if reviewer != arbiter['reviewer']:
+        _dispute_refuse('DISPUTE_ARBITER_MISMATCH')
+    # A fresh run: neither the first review run nor any other recorded review
+    # run (session or Reviewer D6) of this PR. Only claims of exactly this
+    # arbiter run are left out; _dispute_ruling_claim needs exactly one.
+    recorded = [item for item in _dispute_review_claims(record, pr)
+                if (item.get('reviewer_task'), item.get('native_session_id')) !=
+                (reviewer_task, reviewer_session)]
+    recorded_sessions = {item.get('native_session_id') for item in recorded}
+    recorded_tasks = {item.get('reviewer_task') for item in recorded}
+    if (reviewer_session == arbiter['excluded_session'] or
+            reviewer_session in recorded_sessions or reviewer_task in recorded_tasks):
+        _dispute_refuse('DISPUTE_ARBITER_NOT_FRESH')
+    _dispute_arbiter_registration(
+        record, reviewer=reviewer, reviewer_task=reviewer_task,
+        reviewer_session=reviewer_session, head=head)
+    ruling_claim = _dispute_ruling_claim(
+        record, entry, pr=pr, head=head, arbiter=arbiter, reviewer_task=reviewer_task,
+        reviewer_session=reviewer_session)
+    _dispute_ruling_comment(record, entry, pr=pr, head=head, finding_id=finding_id,
+                            outcome=outcome, reviewer=reviewer,
+                            review_text=ruling_claim['review_result']['review_text'],
+                            evidence_ref=evidence_ref, repository=repository,
+                            github_get=github_get)
+    ruling = {'outcome': outcome, 'head_sha': head, 'reviewer': reviewer,
+              'reviewer_task': reviewer_task, 'reviewer_session': reviewer_session,
+              'evidence_ref': evidence_ref, 'ruled_at': _timestamp()}
+    updated = list(disputes)
+    updated[index] = dict(entry, state='RULED', ruling=ruling)
+    store.compare_and_update(task_id, expected={'record_sha256': record.get('record_sha256')},
+                             review_disputes=updated)
+    return {'task_id': task_id, 'state': 'RULED', 'pr': pr, 'finding_id': finding_id,
+            'head_sha': head, 'outcome': outcome, 'reviewer': reviewer,
+            'formal_pass_required': True}
+
+
+_DISPUTE_ACTIONS = ('open', 'defer', 'rule')
+
+
+def run_task_dispute(args, *, store=None, stdout=None, current_head=None):
+    """Thin CLI adapter for ``task dispute open|defer|rule``.
+
+    The caller's PM session must own the Task. A refusal prints only its code
+    and exits 1; nothing here runs or launches a review.
+    """
+    from . import pm_caller
+    store = TaskStore() if store is None else store
+    try:
+        pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
+    except pm_caller.PMCallerRefused as exc:
+        _print(pm_caller.refusal(args.task_id, exc.code), stdout=stdout)
+        return 1
+    action = getattr(args, 'dispute_action', None)
+    common = {'pr': args.pr, 'finding_id': args.finding,
+              'evidence_ref': args.evidence_ref, 'current_head': current_head}
+    try:
+        if action not in _DISPUTE_ACTIONS:
+            _dispute_refuse('DISPUTE_ARGUMENT_INVALID')
+        if action == 'open':
+            result = dispute_open(store, args.task_id, **common)
+        elif action == 'defer':
+            result = dispute_defer(store, args.task_id, **common)
+        else:
+            result = dispute_rule(store, args.task_id, outcome=args.outcome,
+                                  reviewer=args.reviewer, reviewer_task=args.reviewer_task,
+                                  reviewer_session=args.reviewer_session, **common)
+    except LLMToolError as exc:
+        code = (getattr(exc, 'dispute_code', None) or
+                getattr(exc, 'task_store_error_code', None))
+        if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
+            code = 'DISPUTE_REFUSED'
+        _print({'task_id': args.task_id, 'code': code}, stdout=stdout)
+        return 1
+    _print(result, stdout=stdout)
+    return 0
 
 
 _DIFF_HEADER = re.compile(r'^diff --git a/([^\r\n]+) b/([^\r\n]+)$')
