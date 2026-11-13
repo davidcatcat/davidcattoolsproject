@@ -1020,6 +1020,13 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == 'posix', 'requires POSIX process signals')
     def test_sigint_and_sigterm_reap_owned_process_and_preserve_signal_semantics(self):
+        # #1709: a runner started with nohup or & inherits SIGINT=SIG_IGN, so
+        # Python never installs default_int_handler and the self-sent SIGINT
+        # below would be ignored. Install it for this test body only and
+        # restore whatever handler the runner had afterwards.
+        previous_sigint = signal.getsignal(signal.SIGINT)
+        self.addCleanup(signal.signal, signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
         for sig, error_type, expected_code in (
                 (signal.SIGINT, KeyboardInterrupt, None),
                 (signal.SIGTERM, CLIHostTermination, 128 + signal.SIGTERM)):
@@ -1052,6 +1059,26 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                 child_pid = int(marker.read_text(encoding='ascii').splitlines()[0])
                 with self.assertRaises(ProcessLookupError):
                     os.kill(child_pid, 0)
+
+    @unittest.skipUnless(os.name == 'posix', 'requires POSIX process signals')
+    def test_sigint_signal_test_passes_when_runner_inherited_sigint_ignored(self):
+        # #1709 regression: simulate a runner started with nohup or &, where
+        # SIGINT is SIG_IGN, then run the real signal test in full (setUp,
+        # body and cleanups). It must still pass and must leave the inherited
+        # SIG_IGN disposition in place afterwards.
+        previous_sigint = signal.getsignal(signal.SIGINT)
+        self.addCleanup(signal.signal, signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        inner = type(self)(
+            'test_sigint_and_sigterm_reap_owned_process_and_preserve_signal_semantics')
+        result = unittest.TestResult()
+        inner.run(result)
+        problems = [text for _, text in result.failures + result.errors]
+        self.assertEqual(problems, [])
+        self.assertEqual(result.skipped, [])
+        self.assertEqual(result.testsRun, 1)
+        self.assertTrue(result.wasSuccessful())
+        self.assertIs(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
 
     def test_nonzero_exit_preserves_only_observed_bounded_execution_metadata(self):
         cli = self.fake_cli(self.event('step_start') + '\n', exit_code=7)
