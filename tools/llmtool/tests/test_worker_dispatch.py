@@ -349,6 +349,11 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(agy['decided_at'], '2026-11-13')
         self.assertIn('https://github.com/davidcatcat/davidcattoolsproject/issues/1692',
                       agy['reason'])
+        # The #289 relay of the #1692 Owner decision (the validator accepts only #289).
+        self.assertEqual(
+            agy['evidence'],
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+            '#issuecomment-6850974885')
         self.assertNotIn('owner_assignments', agy)
         self.assertEqual(
             {key: row['dispatch'] for key, row in policy['workers'].items()},

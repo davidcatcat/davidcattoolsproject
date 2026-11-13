@@ -27,7 +27,7 @@
       "decided_by": "Owner",
       "decided_at": "2026-11-13",
       "reason": "Owner decision 2026-11-13, relayed by PM on https://github.com/davidcatcat/davidcattoolsproject/issues/1692: pause AGY Developer dispatch. No new delegate, review repair, retry, recovery, timeout continuation, CI-failure return or re-dispatch of an existing AGY Task; the AGY adapter, CLI and tests stay",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6850974885"
     },
     "company-gw": {
       "dispatch": "PAUSED",
