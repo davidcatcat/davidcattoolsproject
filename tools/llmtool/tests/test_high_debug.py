@@ -1962,31 +1962,38 @@ class HighDebugTests(unittest.TestCase):
         self.assertNotIn('ROLE_MODEL_NOT_ALLOWED', high_debug.DEBUG_FALLBACK_CODES)
         self.assertNotIn('ROLE_MODEL_NOT_ALLOWED', high_debug._CLAUDE_DEBUG_UNAVAILABLE)
         real = high_debug.run_high_debug
-        with patch.object(high_debug, '_CODEX_MODEL', 'gpt-unlisted-model'), \
-             patch.object(high_debug.worker_dispatch, 'evaluate',
-                          return_value=SimpleNamespace(allowed=True)), \
-             patch.object(high_debug, 'run_high_debug', wraps=real) as wrapped:
-            with self.assertRaises(LLMToolError) as caught:
-                high_debug.run_high_debug_with_fallback(**kwargs)
-        self.assertEqual(caught.exception.high_debug_code, 'ROLE_MODEL_NOT_ALLOWED')
-        self.assertEqual([call.kwargs['route'] for call in wrapped.call_args_list], ['codex'])
-        # After a real fallback code, a refused Claude Debug model still stops
-        # with its own code, never HIGH_DEBUG_WAITING.
+        # An unlisted and a cross-family Codex Debug model: no switch to Claude.
+        for model in ('gpt-unlisted-model', high_debug._CLAUDE_MODEL):
+            with self.subTest(route='codex', model=model), \
+                 patch.object(high_debug, '_CODEX_MODEL', model), \
+                 patch.object(high_debug.worker_dispatch, 'evaluate',
+                              return_value=SimpleNamespace(allowed=True)), \
+                 patch.object(high_debug, 'run_high_debug', wraps=real) as wrapped:
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug_with_fallback(**kwargs)
+                self.assertEqual(caught.exception.high_debug_code, 'ROLE_MODEL_NOT_ALLOWED')
+                self.assertEqual([call.kwargs['route'] for call in wrapped.call_args_list],
+                                 ['codex'])
+        # After a real fallback code, a refused Claude Debug model (unlisted or
+        # cross-family) still stops with its own code, never HIGH_DEBUG_WAITING.
         def staged(*, route, **rest):
             if route == 'codex':
                 high_debug._refuse('HIGH_DEBUG_QUOTA_EXHAUSTED')
             return real(route=route, **rest)
-        with patch.object(high_debug, 'run_high_debug', side_effect=staged), \
-             patch.object(high_debug.worker_dispatch, 'evaluate',
-                          return_value=SimpleNamespace(allowed=True)), \
-             patch.object(high_debug.role_config, 'resolve_role', return_value={
-                 'source': 'roles', 'account': 'debug-account', 'config_dir': '/safe/claude',
-                 'provider': 'claude', 'model': high_debug._CODEX_MODEL}):
-            with self.assertRaises(LLMToolError) as caught:
-                high_debug.run_high_debug_with_fallback(**kwargs)
-        self.assertEqual(caught.exception.high_debug_code, 'ROLE_MODEL_NOT_ALLOWED')
+        for model in ('claude-unlisted-model', high_debug._CODEX_MODEL):
+            with self.subTest(route='claude', model=model), \
+                 patch.object(high_debug, 'run_high_debug', side_effect=staged), \
+                 patch.object(high_debug.worker_dispatch, 'evaluate',
+                              return_value=SimpleNamespace(allowed=True)), \
+                 patch.object(high_debug.role_config, 'resolve_role', return_value={
+                     'source': 'roles', 'account': 'debug-account',
+                     'config_dir': '/safe/claude', 'provider': 'claude', 'model': model}):
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug_with_fallback(**kwargs)
+                self.assertEqual(caught.exception.high_debug_code, 'ROLE_MODEL_NOT_ALLOWED')
         kwargs['runner'].assert_not_called()
         kwargs['create_d6'].assert_not_called()
+        self.assertEqual(kwargs['store'].entries, [])
 
     def test_claude_debug_account_fallback_follows_account_state_not_source(self):
         report = ''.join('## ' + heading + '\nDetails.\n'
