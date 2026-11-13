@@ -5914,7 +5914,8 @@ class TaskCompletionTests(unittest.TestCase):
                               side_effect=dispatch_github):
                     rc, dispatched = call(['task', 'review-dispatch', task_id,
                         '--executor-task', d6_task, '--pr', '10',
-                        '--reviewer', 'codex-reviewer'])
+                        '--reviewer', 'codex-reviewer',
+                        '--pm-session', task['pm_session_id']])
                 self.assertIsNone(rc)
                 reviewer_task = dispatched['reviewer_task']
 
@@ -5974,7 +5975,8 @@ class TaskCompletionTests(unittest.TestCase):
                               side_effect=github_get):
                     rc, result = call(['task', 'review-dispatch', task_id,
                         '--executor-task', d6_task, '--pr', '10',
-                        '--reviewer', 'codex-reviewer', '--version', str(version)])
+                        '--reviewer', 'codex-reviewer', '--version', str(version),
+                        '--pm-session', task['pm_session_id']])
                 return rc, result, prompts
 
             return {

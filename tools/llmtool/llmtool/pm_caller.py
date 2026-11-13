@@ -1,4 +1,4 @@
-"""Caller PM session check for ``task advance`` and ``task drive`` (#1124).
+"""Caller PM session check for the PM-only Task CLI adapters (#1124, #1230 A1).
 
 The caller's PM session key comes only from the caller: an explicit
 ``--pm-session`` value, else the runtime's own session in the environment
@@ -22,10 +22,11 @@ Refusal codes:
   another session's.
 
 An empty environment variable counts as unset. Only the ``task advance``,
-``task drive`` and ``task remote-test`` CLI adapters use this check (#1230 A1).
-Worker result callbacks (``task complete``, ``claude-result``), ``abandon``,
-``delegate``, ``bind``, ``review-dispatch``, ``repair`` and the internal calls
-that ``advance`` makes, including its remote test, are not checked here.
+``task drive``, ``task remote-test`` and ``task review-dispatch`` CLI adapters
+use this check (#1230 A1). Worker result callbacks (``task complete``,
+``claude-result``), ``abandon``, ``delegate``, ``bind``, ``repair`` and the
+internal calls that ``advance`` makes, including its remote test and its
+review dispatch, are not checked here.
 
 Known limit: fenced sessions are now refused, but the check is still not taken
 under the adoption lock, so a Task adopted between the check and the call is
