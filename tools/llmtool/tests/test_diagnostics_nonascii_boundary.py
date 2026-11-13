@@ -4,10 +4,11 @@ Sensitive-detector tests (#763/#981 exception): every credential-shaped value
 here is SYNTHETIC, assembled at runtime from parts and never a real credential.
 """
 
+import ast
 import unittest
+from pathlib import Path
 
 from llmtool import diagnostics as d
-from llmtool import test_output_excerpts as excerpts
 
 CJK = '中文'
 FILL = 'Q' * 24
@@ -25,19 +26,38 @@ def _families():
     scheme = 'BEARER'.lower()
     key = 'api' + '_key'
     jwt = '.'.join(('eyJ' + FILL, FILL, FILL))
+    dashes = '-' * 5
+    header = dashes + 'BEGIN ' + 'PRIVATE' + ' KEY' + dashes
     return (['sk-' + FILL, 'ghp_' + FILL, 'xoxb-' + FILL, jwt,
-             scheme + ' ' + FILL, key + '=' + FILL] + _cloud_keys())
+             scheme + ' ' + FILL, key + '=' + FILL, header] + _cloud_keys())
+
+
+def _placements(near, value):
+    return (near + value, value + near, near + value + near,
+            near + value + ' ', 'ok ' + near + value + ' end',
+            'ok ' + value + near + ' end')
 
 
 class CredentialAfterNonAsciiTests(unittest.TestCase):
     def test_credential_next_to_non_ascii_or_space_is_rejected(self):
         for near in NEIGHBOURS:
             for index, value in enumerate(_families()):
-                for text in (near + value, value + near, near + value + near,
-                             near + value + ' '):
-                    with self.subTest(near=ord(near[0]), family=index, case=len(text)):
+                for case, text in enumerate(_placements(near, value)):
+                    with self.subTest(near=ord(near[0]), family=index, case=case):
                         with self.assertRaises(ValueError):
                             d.safe_diagnostic_text(text)
+
+    def test_cloud_key_next_to_non_ascii_or_space_is_rejected_everywhere(self):
+        # The same screen gates error messages and serialized event data.
+        for near in NEIGHBOURS:
+            for value in _cloud_keys():
+                for case, text in enumerate(_placements(near, value)):
+                    with self.subTest(near=ord(near[0]), case=case):
+                        with self.assertRaises(ValueError):
+                            d.diagnostic_json({'message': text})
+                        with self.assertRaises(ValueError):
+                            d.DiagnosticError(code=d.ErrorCode.PROVIDER_TIMEOUT,
+                                              message=text, component='provider.openai')
 
     def test_ascii_word_prefix_still_not_a_credential(self):
         for text in ('mask-' + FILL, 'xghp_' + FILL, 'myxoxb-' + FILL,
@@ -53,23 +73,25 @@ class CredentialAfterNonAsciiTests(unittest.TestCase):
                     self.assertEqual(d.safe_diagnostic_text(text), text)
 
 
-class ExcerptCloudKeyBoundaryTests(unittest.TestCase):
-    """The shared _CLOUD_KEY also gates captured test-output excerpts."""
+class CloudKeyPatternOwnershipTests(unittest.TestCase):
+    """diagnostics owns its cloud-key pattern; the excerpt screen is untouched."""
 
-    def test_cloud_key_next_to_non_ascii_or_space_is_screened(self):
-        for near in NEIGHBOURS:
-            for value in _cloud_keys():
-                for text in (near + value, value + near, near + value + near,
-                             near + value + ' ', 'ok ' + near + value + ' end'):
-                    with self.subTest(near=ord(near[0]), case=len(text)):
-                        self.assertTrue(excerpts._sensitive(text))
-                        self.assertTrue(excerpts._emitted_json_sensitive(text))
+    def test_pattern_uses_case_sensitive_ascii_lookarounds_not_word_boundary(self):
+        self.assertNotIn(r'\b', d._CLOUD_KEY)
+        self.assertTrue(d._CLOUD_KEY.startswith(r'(?:(?<!(?-i:[A-Za-z0-9_]))'))
+        self.assertTrue(d._CLOUD_KEY.endswith(r'(?!(?-i:[A-Za-z0-9_])))'))
+        self.assertIn(d._CLOUD_KEY, d._CREDENTIAL.pattern)
 
-    def test_cloud_key_inside_ascii_word_is_not_screened(self):
-        for value in _cloud_keys():
-            for text in ('x' + value, value + 'x', '_' + value, value + '7'):
-                with self.subTest(case=text[:2] + text[-1:]):
-                    self.assertFalse(excerpts._sensitive(text))
+    def test_diagnostics_does_not_import_the_excerpt_module(self):
+        tree = ast.parse(Path(d.__file__).read_text(encoding='utf-8'))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                self.assertNotEqual(node.module, 'test_output_excerpts')
+                self.assertNotIn('test_output_excerpts',
+                                 [alias.name for alias in node.names])
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    self.assertNotIn('test_output_excerpts', alias.name)
 
 
 if __name__ == '__main__':

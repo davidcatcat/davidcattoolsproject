@@ -17,7 +17,6 @@ from types import MappingProxyType
 from typing import Mapping, Optional
 
 from .terminal import contains_unsafe_controls
-from .test_output_excerpts import _CLOUD_KEY
 
 EVENT_MAX_BYTES = 16 * 1024
 DIAGNOSTIC_TEXT_MAX_BYTES = 2 * 1024
@@ -95,6 +94,13 @@ _CAUSE_CATEGORIES = frozenset((
 ))
 _PROVIDER_TYPES = frozenset(('openai', 'openai-compatible', 'claude-cli', 'codex-cli'))
 _RUN_STATUSES = frozenset(('success', 'error', 'interrupted', 'output_closed', 'incomplete'))
+# Diagnostics-only cloud-key alternative (#1138), separate from the excerpt
+# screen. Both boundaries are case-sensitive ASCII look-arounds, never \b or a
+# bare ASCII class: under IGNORECASE those treat U+0130, U+0131, U+017F, U+212A
+# (or any non-ASCII word character, for \b) as an ASCII word neighbour.
+_CLOUD_KEY = (
+    r'(?:(?<!(?-i:[A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]{16}(?!(?-i:[A-Za-z0-9_])))'
+)
 # Recognizable credential values, not ordinary authorization/status vocabulary.
 _CREDENTIAL = re.compile(
     r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
