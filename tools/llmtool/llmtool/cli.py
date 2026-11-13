@@ -48,7 +48,7 @@ TASK_ACTIONS = {
     'assignments': ('run_task_assignments', False),
     'brief': ('run_task_brief', False),
     'claim': ('run_task_claim', False),
-    'claude-bind': ('run_task_claude_bind', True),
+    'claude-bind': ('run_task_claude_bind_checked', True),
     'claude-result': ('run_task_claude_result', False),
     'complete': ('run_task_complete', False),
     'delegate': ('run_task_delegate_checked', True),

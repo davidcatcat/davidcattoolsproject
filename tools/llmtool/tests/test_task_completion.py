@@ -5910,7 +5910,8 @@ class TaskCompletionTests(unittest.TestCase):
             rc, _ = call(['task', 'claude-bind', task_id, '--executor-task',
                           d6_task, '--owner-ref', owner_ref, '--common-dir', self.common,
                           '--read-path', self.source_path,
-                          '--write-path', self.source_path])
+                          '--write-path', self.source_path,
+                          '--pm-session', task['pm_session_id']])
             self.assertEqual(rc, 0)
             if not old_sha_receipt:
                 rc, _ = call(['task', 'claude-result', task_id, '--executor-task',

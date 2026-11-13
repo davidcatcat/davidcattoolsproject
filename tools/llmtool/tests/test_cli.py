@@ -139,7 +139,7 @@ class CLITests(unittest.TestCase):
         called = []
         with patch('llmtool.source_freshness.require_fresh_source',
                    return_value='OK') as freshness, \
-                patch.object(task_submission_cli, 'run_task_claude_bind',
+                patch.object(task_submission_cli, 'run_task_claude_bind_checked',
                              side_effect=lambda args: called.append(args) or 0):
             rc = main(['task', 'claude-bind', 'a' * 32, '--executor-task', 'd6-task',
                        '--owner-ref', 'https://github.com/example/repo/issues/1',
