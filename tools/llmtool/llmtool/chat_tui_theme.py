@@ -142,7 +142,7 @@ def repo_info(cwd=None):
     def git(*args):
         try:
             done = subprocess.run(("git",) + args, cwd=cwd, capture_output=True, text=True,
-                                  timeout=GIT_SECONDS, stdin=subprocess.DEVNULL)
+                                  timeout=GIT_SECONDS, stdin=subprocess.DEVNULL, check=False)
             if done.returncode != 0 or not isinstance(done.stdout, str):
                 return None
             return done.stdout.strip() or None
