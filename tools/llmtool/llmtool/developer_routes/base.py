@@ -103,20 +103,24 @@ class DeveloperRoute(ABC):
     def quota_exhausted(self, parsed: Mapping[str, Any], stderr: bytes) -> bool: ...
 
     def prepare_files(self, tmpdir: str, request: Mapping[str, Any]) -> None:
-        """Create route-owned input files before argv is built, when needed."""
+        """Optional hook, default no-op: create route-owned input files before argv is built."""
+        return None
 
     def collect(self, tmpdir: str, request: Mapping[str, Any]) -> None:
-        """Collect route outputs while its private temporary directory exists."""
+        """Optional hook, default no-op: collect route outputs while the private tmpdir exists."""
+        return None
 
     def configure_boundary(self, boundary: Any) -> Any:
         """Return the write boundary this route runs under; verified as usual."""
         return boundary
 
     def validate_exit(self, exit_code: int, parsed: Mapping[str, Any]) -> None:
-        """Validate provider-specific status and process exit consistency."""
+        """Optional hook, default accepts: check provider status and process exit consistency."""
+        return None
 
     def validate_status(self, parsed: Mapping[str, Any]) -> None:
-        """Map a consistent provider status to route-specific errors, when needed."""
+        """Optional hook, default accepts: map a consistent provider status to route errors."""
+        return None
 
     def validate_request(self, request: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(request, Mapping):
