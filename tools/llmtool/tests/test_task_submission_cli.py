@@ -4713,8 +4713,8 @@ class DelegateRepairCapTests(unittest.TestCase):
                         run_task_delegate(self._args(task, provider), store=self.store)
                     route.assert_not_called()
 
-    def test_two_prior_assignments_allow_next_and_other_d6_is_unaffected(self):
-        self._prior_assignments(2)
+    def test_one_prior_assignment_allows_repair_one_and_other_d6_is_unaffected(self):
+        self._prior_assignments(1)
         self._prior_assignments(3, executor='executor-task-other')
         task = self._task()
         args = self._args(task, 'opencode')
@@ -4722,14 +4722,25 @@ class DelegateRepairCapTests(unittest.TestCase):
             self.assertEqual(run_task_delegate(args, store=self.store), 7)
         route.assert_called_once()
 
-    def test_same_task_replay_is_not_counted(self):
+    def test_repair_two_without_high_debug_refuses_before_route_call(self):
+        # #1502 WP-D D7: two prior runs make this repair #2, which needs a
+        # confirmed root cause.
         self._prior_assignments(2)
+        task = self._task()
+        with patch.object(submission_cli, 'run_task_opencode_delegate') as route:
+            with self.assertRaisesRegex(LLMToolError,
+                                        '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$'):
+                run_task_delegate(self._args(task, 'opencode'), store=self.store)
+        route.assert_not_called()
+
+    def test_same_task_replay_is_not_counted(self):
+        self._prior_assignments(1)
         task = self._task(executor='executor-task-1', developer=True)
         self.assertIsNone(submission_cli._check_delegate_repair_cap(
             self._args(task, 'opencode'), self.store))
 
     def test_exact_prelaunch_refusals_are_skipped(self):
-        self._prior_assignments(2)
+        self._prior_assignments(1)
         cases = (
             ('codex', 'DEVELOPER_UNAVAILABLE',
              'DEVELOPER_PROFILE_UNAVAILABLE'),
@@ -4980,12 +4991,13 @@ class DelegateRepairCapTests(unittest.TestCase):
                         run_task_delegate(args, store=self.store)
                 binding.assert_called_once_with(args)
 
-    def test_valid_high_debug_ref_stores_override(self):
-        self._prior_assignments()
+    def _high_debug_args(self, prior):
+        """Args for the next run after ``prior`` runs, the first holding a High Debug."""
         task = self._task()
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123'
         # The High Debug Task is the original Task of the D6 being repaired.
         diagnosis = self._task(executor='executor-task-1', developer=True)
+        self._prior_assignments(prior - 1)
         from llmtool.high_debug import REPORT_SECTIONS, _d6_name
         report = ''.join('## ' + section + '\nSynthetic fixture.\n'
                          for section in REPORT_SECTIONS[:-1])
@@ -5014,17 +5026,32 @@ class DelegateRepairCapTests(unittest.TestCase):
         args = self._args(task, 'opencode', high_debug_ref=ref,
                           high_debug_task=diagnosis['task_id'],
                           high_debug_family='pr-938')
+        return task, args
+
+    def _check_with_high_debug(self, args):
         with patch.object(submission_cli.trust, 'load_trust') as trusted:
             trusted.return_value.repository = {'slug': 'davidcatcat/davidcattoolsproject'}
             with patch.object(submission_cli, '_delegate_d6_binding',
                               return_value=(None, Namespace(head='a' * 40))):
-                submission_cli._check_delegate_repair_cap(args, self.store)
-        override = self.store.get(task['task_id'])['repair_cap_override']
-        self.assertEqual(override['ref'], ref)
-        self.assertGreaterEqual(override['rounds'], 3)
+                return submission_cli._check_delegate_repair_cap(args, self.store)
+
+    def test_valid_high_debug_allows_repair_two_and_records_nothing(self):
+        task, args = self._high_debug_args(2)
+        before = {task_id: self.store.get(task_id)['record_sha256']
+                  for task_id in self.store.task_ids()}
+        self.assertIsNone(self._check_with_high_debug(args))
+        self.assertNotIn('repair_cap_override', self.store.get(task['task_id']))
+        self.assertEqual({task_id: self.store.get(task_id)['record_sha256']
+                          for task_id in self.store.task_ids()}, before)
+
+    def test_valid_high_debug_never_passes_the_limit(self):
+        task, args = self._high_debug_args(3)
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+            self._check_with_high_debug(args)
+        self.assertNotIn('repair_cap_override', self.store.get(task['task_id']))
 
     def test_valid_high_debug_ref_without_task_is_task_required(self):
-        self._prior_assignments()
+        self._prior_assignments(2)
         task = self._task()
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123'
         args = self._args(task, 'opencode', high_debug_ref=ref)
@@ -5036,7 +5063,7 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertNotIn('repair_cap_override', self.store.get(task['task_id']))
 
     def test_invalid_high_debug_refs_refuse(self):
-        self._prior_assignments()
+        self._prior_assignments(2)
         task = self._task()
         refs = (
             'http://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123',
