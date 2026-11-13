@@ -34,6 +34,7 @@ from .task_lifecycle_cli import add_task_parser, run_task_inspect
 from . import task_submission_cli
 from .task_review_cli import add_review_parser, run_task_review
 from .review_authority_cli import add_review_authority_parser, run_review_authority_check
+from .roles_cli import add_roles_parser, run_roles
 from .dispatch_check import add_dispatch_check_parser, run_dispatch_check
 from .board_check import add_board_check_parser, run_board_check
 from .trust_cli import add_trust_parser, run_trust
@@ -183,6 +184,7 @@ def parser_for_cli():
     from .merge_train_cli import add_train_parser
     add_train_parser(task_actions)
     add_review_authority_parser(sub)
+    add_roles_parser(sub)
     add_dispatch_check_parser(sub)
     add_board_check_parser(sub)
     from .mac_full_due import add_ci_parser
@@ -543,6 +545,9 @@ def main(argv=None):
         args = parser_for_cli().parse_args(argv)
         if args.command == 'review-authority':
             return run_review_authority_check(args)
+        if args.command == 'roles':
+            # Read-only: resolves and prints; never writes config or needs fresh source.
+            return run_roles(args)
         if args.command == 'dispatch-check':
             return run_dispatch_check(args)
         if args.command == 'board-check':

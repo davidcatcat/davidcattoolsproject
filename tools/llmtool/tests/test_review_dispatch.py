@@ -11,7 +11,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import yaml
+
 from llmtool import cli, review_dispatch, review_result, task_store, task_submission_cli
+from llmtool.config import user_config_path
 from llmtool.errors import LLMToolError
 
 
@@ -274,6 +277,70 @@ class ReviewDispatchTests(unittest.TestCase):
             'config_dir': account, 'source': 'env'})
         self.assertEqual(result['account_mode'], 'EXPLICIT')
         self.assertEqual(self.sent[0]['env']['CLAUDE_CONFIG_DIR'], account)
+
+    def assert_refused_without_side_effects(self):
+        self.assertNotIn('review_dispatch_claim', self.store.get(TASK))
+        self.assertEqual(self.created, [])
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.bound, [])
+
+    def test_claude_reviewer_refuses_a_non_claude_resolved_provider(self):
+        # #1777 (CWE-863): whichever layer resolved it, a Codex account
+        # directory is never passed to the Claude Reviewer as CLAUDE_CONFIG_DIR.
+        for source in ('roles', 'env', 'cli'):
+            with self.subTest(source=source):
+                with self.assertRaises(LLMToolError) as raised:
+                    self.invoke(reviewer_role={
+                        'provider': 'codex', 'account': 'codex-account',
+                        'config_dir': '/private/codex-review-account', 'source': source})
+                self.assertEqual(raised.exception.review_dispatch_code,
+                                 'REVIEWER_PROVIDER_MISMATCH')
+                self.assertNotIn('/private/codex-review-account', str(raised.exception))
+                self.assert_refused_without_side_effects()
+
+    def test_claude_reviewer_accepts_a_resolved_claude_provider(self):
+        account = '/private/claude-review-account'
+        result = self.invoke(reviewer_role={
+            'provider': 'claude', 'account': 'claude-account', 'config_dir': account,
+            'source': 'roles'})
+        self.assertEqual(result['account_mode'], 'ROLES')
+        self.assertEqual(self.sent[0]['env']['CLAUDE_CONFIG_DIR'], account)
+        self.assertEqual(self.store.get(TASK)['review_dispatch_claim'][0]['account'],
+                         'claude-account')
+
+    def test_legacy_alias_naming_a_codex_account_is_refused_before_any_claim(self):
+        # The real resolver on a temporary home: the Owner-style legacy
+        # 'reviewer' entry names a Codex account, so dispatch stops at resolve.
+        root = Path(self.temp.name)
+        home = root / 'home'
+        account = root / 'codex-account'
+        account.mkdir(mode=0o700)
+        account.chmod(0o700)
+        config = user_config_path(home)
+        config.parent.mkdir(parents=True)
+        config.write_text(yaml.safe_dump({
+            'accounts': {'codex-work': {'kind': 'codex', 'config_dir': str(account)}},
+            'roles': {'reviewer': {'account': 'codex-work'}}}), encoding='utf-8')
+        real = self.real_resolve_role
+        with patch.object(review_dispatch, '_preflight',
+                          side_effect=[self.preflight, self.preflight]), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                             return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                patch.object(review_dispatch, '_resolve_github_login',
+                             return_value='reviewer-user'), \
+                patch.object(review_dispatch.role_config, 'resolve_role',
+                             side_effect=lambda role: real(role, environ={}, home=home)):
+            with self.assertRaises(LLMToolError) as raised:
+                review_dispatch.dispatch_review(
+                    store=self.store, task_id=TASK, executor_task='executor-d6',
+                    pr_number=42, version=1,
+                    create_d6=lambda **kw: self.created.append(kw),
+                    dispatch_session=lambda **kw: (self.sent.append(kw) or 'native-session'),
+                    bind_session=lambda **kw: self.bound.append(kw),
+                    prompt_renderer=lambda *_: 'bound prompt')
+        self.assertEqual(raised.exception.role_config_code, 'ROLE_ALIAS_PROVIDER_MISMATCH')
+        self.assertNotIn(str(account), str(raised.exception))
+        self.assert_refused_without_side_effects()
 
     def test_replay_after_restart_returns_claim_without_redispatch(self):
         first = self.invoke()
