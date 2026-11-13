@@ -42,7 +42,8 @@ from . import skill_ledger
 from . import skill_manifest
 from . import trust
 from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, capture_snapshot,
-                               UnsupportedBoundary, for_platform, load_route_config, run_route)
+                               UnsupportedBoundary, check_route_model, for_platform,
+                               load_route_config, run_route)
 from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent_usage,
                                         cleanup_audit_copies)
 from .developer_routes.agy import (
@@ -3430,45 +3431,165 @@ def _opencode_developer_profile():
                            'opencode/<name>-free model') from None
 
 
-def _agy_developer_profile(route_config):
-    """Apply the AGY role model and effort before the route's normal validation."""
+def _resolve_developer_role(role_name, *, owner_override=None, repository=None,
+                            fetch_comment=None):
+    """Resolve a Developer role through the single role_config resolver (#1502 WP-E).
+
+    The resolver applies CLI > env > user config > developer-routes.json
+    precedence and refuses a model outside allowed_models at resolve time.
+    Override arguments are passed only when an owner override is supplied.
+    """
+    kwargs = {}
+    if owner_override is not None:
+        kwargs = {'owner_override': owner_override, 'repository': repository,
+                  'fetch_comment': fetch_comment}
     try:
-        role = role_config.resolve_role('agy-developer')
-    except LLMToolError:
-        raise LLMToolError('agy-developer role configuration is invalid') from None
+        return role_config.resolve_role(role_name, **kwargs)
+    except LLMToolError as exc:
+        if getattr(exc, 'role_config_code', None) == role_config.ROLE_MODEL_NOT_ALLOWED:
+            _refuse_developer_model(role_name, getattr(exc, 'owner_override_code', None))
+        raise LLMToolError(role_name + ' role configuration is invalid') from None
+
+
+def _refuse_developer_model(role_name, detail=None):
+    message = (role_name + ' role model or effort is invalid: ' +
+               role_config.ROLE_MODEL_NOT_ALLOWED)
+    if type(detail) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', detail):
+        message += ' (' + detail + ')'
+    error = LLMToolError(message)
+    error.role_config_code = role_config.ROLE_MODEL_NOT_ALLOWED
+    raise error from None
+
+
+def _developer_role_value(role, key, route_config):
+    """Return a configured role value, else this dispatch's route default.
+
+    A value the resolver filled from the repo default is replaced by the same
+    route_config default this dispatch validates against.
+    """
+    value = None if role.get(key + '_source') == 'repo_default' else role.get(key)
+    return value or route_config.get('default_' + key)
+
+
+def _require_developer_model(role_name, route, route_config, model, role):
+    """Dispatch-time allowed_models check; a verified override must match exactly."""
+    try:
+        check_route_model({'routes': {route: route_config}}, route, model)
+        return
+    except RouteError:
+        pass
+    verified = role.get('owner_override') if type(role) is dict else None
+    if (type(verified) is dict and verified.get('route') == route and
+            type(model) is str and verified.get('model') == model):
+        return
+    _refuse_developer_model(role_name)
+
+
+def _agy_developer_profile(route_config, *, owner_override=None, repository=None,
+                           fetch_comment=None):
+    """Apply the AGY role model and effort before the route's normal validation."""
+    role = _resolve_developer_role('agy-developer', owner_override=owner_override,
+                                   repository=repository, fetch_comment=fetch_comment)
     if role.get('account') is not None:
         error = LLMToolError('agy-developer role accounts are not supported')
         error.role_config_code = 'AGY_ROLE_ACCOUNT_UNSUPPORTED'
         raise error
-    model = role.get('model') or route_config['default_model']
-    effort = role.get('effort') or route_config['default_effort']
+    model = _developer_role_value(role, 'model', route_config)
+    effort = _developer_role_value(role, 'effort', route_config)
+    # The allowlist check runs after the route's own profile validation, so a
+    # malformed model or effort keeps its AGY_ROLE_PROFILE_INVALID refusal.
     try:
         model, effort = AgyRoute(route_config).validate_profile(model, effort)
     except RouteError:
         error = LLMToolError('agy-developer role model or effort is invalid')
         error.role_config_code = 'AGY_ROLE_PROFILE_INVALID'
         raise error from None
+    _require_developer_model('agy-developer', 'agy', route_config, model, role)
     return model, effort
 
 
-def _claude_developer_profile(route_config):
+def _claude_developer_profile(route_config, *, owner_override=None, repository=None,
+                              fetch_comment=None):
     """Apply the configured Claude role model, effort, and config directory."""
-    try:
-        role = role_config.resolve_role('claude-developer')
-    except LLMToolError:
-        raise LLMToolError('claude-developer role configuration is invalid') from None
+    role = _resolve_developer_role('claude-developer', owner_override=owner_override,
+                                   repository=repository, fetch_comment=fetch_comment)
     if type(role) is not dict:
         raise LLMToolError('claude-developer role configuration is invalid')
-    model = role.get('model') or route_config.get('default_model')
-    effort = role.get('effort') or route_config.get('default_effort')
+    model = _developer_role_value(role, 'model', route_config)
+    effort = _developer_role_value(role, 'effort', route_config)
     config_dir = role.get('config_dir')
     if type(config_dir) is not str or not os.path.isabs(config_dir):
         raise LLMToolError('claude-developer config_dir is unavailable or invalid')
+    _require_developer_model('claude-developer', 'claude', route_config, model, role)
     try:
         model, effort = ClaudeRoute(route_config).validate_profile(model, effort)
     except RouteError:
         raise LLMToolError('claude-developer role model or effort is invalid') from None
+    _require_developer_model('claude-developer', 'claude', route_config, model, role)
     return model, effort, config_dir
+
+
+_GW_AGENT_EFFORTS = ('minimal', 'low', 'medium', 'high')
+
+
+def _gw_agent_developer_profile(route_config, *, served_model=None, owner_override=None,
+                                repository=None, fetch_comment=None):
+    """Resolve the gw-agent role model and effort through the single resolver.
+
+    The role model is checked against allowed_models. The gateway profile, not
+    the role, decides the model the gateway actually serves, so dispatch passes
+    it as served_model: that model is checked too (allowed_models or a verified
+    owner override naming route gw-agent and that exact model) and is the model
+    returned (#1773, CWE-863). Without served_model the checked role model is
+    returned.
+    """
+    role = _resolve_developer_role('gw-agent-developer', owner_override=owner_override,
+                                   repository=repository, fetch_comment=fetch_comment)
+    if type(role) is not dict:
+        raise LLMToolError('gw-agent-developer role configuration is invalid')
+    if role.get('account') is not None:
+        error = LLMToolError('gw-agent-developer role accounts are not supported')
+        error.role_config_code = 'GW_AGENT_ROLE_ACCOUNT_UNSUPPORTED'
+        raise error
+    model = _developer_role_value(role, 'model', route_config)
+    effort = _developer_role_value(role, 'effort', route_config)
+    _require_developer_model('gw-agent-developer', 'gw-agent', route_config, model, role)
+    if effort not in _GW_AGENT_EFFORTS:
+        error = LLMToolError('gw-agent-developer role model or effort is invalid')
+        error.role_config_code = 'GW_AGENT_ROLE_PROFILE_INVALID'
+        raise error
+    if served_model is not None:
+        model = _require_gw_agent_served_model(
+            route_config, served_model, role, owner_override=owner_override,
+            repository=repository, fetch_comment=fetch_comment)
+    return model, effort
+
+
+def _require_gw_agent_served_model(route_config, served_model, role, *, owner_override=None,
+                                   repository=None, fetch_comment=None):
+    """Return the gateway-served model once it passes the allowed_models check.
+
+    An override the resolver already verified for this same route and model
+    is reused; otherwise role_config.check_role_model verifies the supplied
+    override against served_model itself. Anything else is refused with
+    ROLE_MODEL_NOT_ALLOWED.
+    """
+    if type(served_model) is not str or not served_model:
+        _refuse_developer_model('gw-agent-developer')
+    verified = role.get('owner_override') if type(role) is dict else None
+    if (type(verified) is dict and verified.get('route') == 'gw-agent' and
+            verified.get('model') == served_model):
+        return served_model
+    try:
+        role_config.check_role_model('gw-agent', route_config, served_model,
+                                     owner_override=owner_override,
+                                     repository=repository, fetch_comment=fetch_comment)
+    except LLMToolError as exc:
+        if getattr(exc, 'role_config_code', None) == role_config.ROLE_MODEL_NOT_ALLOWED:
+            _refuse_developer_model('gw-agent-developer',
+                                    getattr(exc, 'owner_override_code', None))
+        raise LLMToolError('gw-agent-developer role configuration is invalid') from None
+    return served_model
 
 
 def _required_skills(registration, snapshot, provider):
@@ -4585,6 +4706,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     if (type(route_config) is not dict or gateway_data_class is None or
             gateway_data_class not in route_config.get('allowed_data_classes', [])):
         raise LLMToolError('gw-agent data class is not allowed by its profile')
+    # The gateway block below replaces route_config with an edited copy; the
+    # role check uses this original repo route config.
+    role_route_config = route_config
     try:
         company_provider, generation = _gw_agent_endpoint()
         model = company_provider.get('model')
@@ -4615,9 +4739,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         max_output_tokens = min(max_output_tokens, route_output_cap,
                                 context_cap_tokens - 1)
         route_config = copy.deepcopy(route_config)
-        route_config['default_model'] = model
-        route_config['expected_served_model'] = model
-        route_config['profile'].update(base_url=gateway_base_url, model=model,
+        route_config['profile'].update(base_url=gateway_base_url,
             max_output_tokens=max_output_tokens,
             context_cap_tokens=context_cap_tokens)
         route_config['profile'].pop('http_allow_hosts', None)
@@ -4628,7 +4750,14 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             route_config['profile']['http_allow_hosts'] = [host]
     except Exception:
         raise LLMToolError('gateway profile is unavailable or invalid') from None
-    effort = route_config['default_effort']
+    # #1502 WP-E, #1773 (CWE-863): after the gateway validation, the role
+    # resolver checks the role model and supplies the effort, and the model the
+    # gateway profile will actually serve is checked against allowed_models (or
+    # a verified owner override). Only that checked model is bound below.
+    model, effort = _gw_agent_developer_profile(role_route_config, served_model=model)
+    route_config['default_model'] = model
+    route_config['expected_served_model'] = model
+    route_config['profile']['model'] = model
     prompt_packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
         'task_contract_digest': binding['contract_digest'], 'source_sha': snapshot.head,
