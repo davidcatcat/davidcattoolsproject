@@ -15,7 +15,13 @@ _UNKNOWN = {
     'UNKNOWN', 'OUTCOME_UNKNOWN', 'REVIEW_OUTCOME_UNKNOWN',
     'REPAIR_OUTCOME_UNKNOWN', 'MERGE_OUTCOME_UNKNOWN',
 }
-_TERMINAL = {'CLOSED', 'CI_FAILED', 'MERGED', 'MERGE_REFUSED', 'REFUSED'}
+# #1502 WP-D D11: CI_FAILED is not terminal. Without codes advance has just
+# dispatched a CI repair and the next step waits for it (WAITING_REPAIR); with
+# codes the generic codes rule below still returns it to the caller. STOPPED
+# (test-failure count used up) is terminal.
+_TERMINAL = {'CLOSED', 'MERGED', 'MERGE_REFUSED', 'REFUSED', 'STOPPED'}
+# A stop for the PM, never polled: an ENV CI conclusion is not re-run here.
+_PM_STOPS = {'WAITING_ENV'}
 _MAX_PAUSE_SECONDS = 60
 
 
@@ -165,7 +171,8 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
             continue
         completed += 1
         next_pause = poll_seconds
-        if step in _TERMINAL or step in _UNKNOWN or step.endswith('_UNKNOWN'):
+        if (step in _TERMINAL or step in _PM_STOPS or step in _UNKNOWN or
+                step.endswith('_UNKNOWN')):
             return dict(result, steps=completed)
         if step == 'READY_FOR_INTEGRATION':
             if not merge:

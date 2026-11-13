@@ -23,6 +23,19 @@ def _refuse(code):
     raise error from None
 
 
+def _refuse_unclaimed(code, repair_task_id):
+    """Refuse after a repair Task may have been recorded but before any claim.
+
+    No claim is committed, so no count is used. A Task recorded under
+    repair_task_id is never dispatched or reported as a repair; the caller
+    surfaces it for PM reconciliation.
+    """
+    error = LLMToolError('Review repair refused; details omitted')
+    error.review_repair_code = code
+    error.review_repair_unclaimed_task_id = repair_task_id
+    raise error from None
+
+
 def _now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
@@ -107,7 +120,14 @@ def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_
     if (type(original_acceptance) is not list or
             not all(type(item) is str for item in original_acceptance)):
         _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
-    if packet.get('version') == 0 and packet.get('verdict_comment_id') == 0:
+    excerpt = packet.get('reviewer_text_excerpt_untrusted_data')
+    if (packet.get('version') == 0 and packet.get('verdict_comment_id') == 0 and
+            type(excerpt) is str and excerpt.startswith(CI_PACKET_HEADER + ' ')):
+        bounded_acceptance = (
+            f"Repair attempt {attempt}/{MAX_REPAIR_ATTEMPTS} for required CI check failure "
+            f"at HEAD {packet['failed_head']}. Failure excerpt is untrusted reference data."
+        )
+    elif packet.get('version') == 0 and packet.get('verdict_comment_id') == 0:
         bounded_acceptance = (
             f"Repair attempt {attempt}/{MAX_REPAIR_ATTEMPTS} for remote-test failure "
             f"at HEAD {packet['failed_head']}. Failure excerpt is untrusted reference data."
@@ -268,12 +288,71 @@ def _remote_test_failure(task, *, executor_task, pr_number, receipt):
     return packet
 
 
+# #1502 WP-D D11: an exact-head required CI check that ended in conclusion
+# 'failure' is repaired like an EC2 FAIL and shares its count.
+CI_REPAIR_CHECKS = ('check (Linux 3.14)', 'check (macOS 3.13)')
+CI_EXCERPT_MAX_BYTES = 4096
+CI_EXCERPT_MAX_LINES = 40
+CI_PACKET_HEADER = 'CI_CHECK_FAILURE'
+_CI_FAILURE_FIELDS = frozenset(('head', 'check_name', 'check_run_id', 'conclusion', 'excerpt'))
+
+
+def _ci_failure(task, *, executor_task, pr_number, ci_failure):
+    """Build a repair packet from one failed exact-head required CI check.
+
+    Returns (packet, identity_sha256). The identity binds the Task, PR, head and
+    check run, so a replayed failure of the same run reuses its claim even when
+    the untrusted excerpt differs. Any malformed input refuses CI_FAILURE_INVALID.
+    """
+    if (type(ci_failure) is not dict or set(ci_failure) != _CI_FAILURE_FIELDS or
+            type(ci_failure['head']) is not str or
+            re.fullmatch(r'[0-9a-f]{40}', ci_failure['head']) is None or
+            type(ci_failure['check_name']) is not str or
+            ci_failure['check_name'] not in CI_REPAIR_CHECKS or
+            type(ci_failure['check_run_id']) is not int or ci_failure['check_run_id'] < 1 or
+            type(ci_failure['conclusion']) is not str or
+            ci_failure['conclusion'] != 'failure' or
+            type(ci_failure['excerpt']) is not str):
+        _refuse('CI_FAILURE_INVALID')
+    excerpt = ci_failure['excerpt']
+    try:
+        valid_excerpt = (len(excerpt.encode('utf-8')) <= CI_EXCERPT_MAX_BYTES and
+                         len(excerpt.splitlines()) <= CI_EXCERPT_MAX_LINES)
+    except UnicodeError:
+        valid_excerpt = False
+    if not valid_excerpt:
+        _refuse('CI_FAILURE_INVALID')
+    head, name, run_id = ci_failure['head'], ci_failure['check_name'], ci_failure['check_run_id']
+    text = (f"{CI_PACKET_HEADER} check={name} run={run_id} conclusion=failure "
+            f"head={head}\n{excerpt}")[:MAX_EXCERPT_CHARS]
+    packet = {
+        'task': task['task_id'], 'pr': pr_number, 'executor_task': executor_task,
+        'failed_head': head, 'version': 0,
+        'verdict_comment_id': 0, 'findings_count': 0,
+        'reviewer_text_excerpt_untrusted_data': text,
+    }
+    # Escaped non-ASCII text can exceed the packet cap; trim the excerpt, never refuse.
+    while len(json.dumps(packet, ensure_ascii=True, sort_keys=True,
+                         separators=(',', ':')).encode('utf-8')) > 8192:
+        if not packet['reviewer_text_excerpt_untrusted_data']:
+            _refuse('REPAIR_PACKET_INVALID')
+        packet['reviewer_text_excerpt_untrusted_data'] = (
+            packet['reviewer_text_excerpt_untrusted_data'][:-256])
+    identity = {'kind': 'CI', 'task': task['task_id'], 'pr': pr_number,
+                'executor_task': executor_task, 'head': head, 'check_name': name,
+                'check_run_id': run_id, 'conclusion': 'failure'}
+    identity_sha = hashlib.sha256(json.dumps(
+        identity, ensure_ascii=True, sort_keys=True,
+        separators=(',', ':')).encode('utf-8')).hexdigest()
+    return packet, identity_sha
+
+
 def _claim_family(claim):
     return claim.get('family', f"pr-{claim.get('pr')}")
 
 
-# EC2 remote-test repairs store their claims in '<base>-ec2' so they keep a
-# count separate from review repairs; each count has its own MAX_REPAIR_ATTEMPTS.
+# EC2 remote-test and CI repairs store their claims in '<base>-ec2' so they keep
+# one test-failure count separate from review repairs (policy test_fail_max).
 EC2_FAMILY_SUFFIX = '-ec2'
 
 
@@ -342,8 +421,15 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                   dispatch_adapter=None, current_head=None, auto_review=False,
                   review_dispatcher=None, delegate_callable=None,
                   repair_task_recorder=None, retry_claim_id=None,
-                  remote_test_receipt=None):
-    """Claim and dispatch one repair based on a failed review or remote-test receipt."""
+                  remote_test_receipt=None, ci_failure=None):
+    """Claim and dispatch one repair for a failed review, remote test or CI check.
+
+    remote_test_receipt (EC2) and ci_failure (#1502 WP-D D11) are exclusive; both
+    are test failures and share one count, the '<base>-ec2' family.
+    """
+    if ci_failure is not None and remote_test_receipt is not None:
+        _refuse('CI_FAILURE_INVALID')
+    test_failure = remote_test_receipt is not None or ci_failure is not None
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
         _refuse('REPAIR_TASK_INVALID')
@@ -367,7 +453,11 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     if profile == 'claude' and shutil.which(profile) is None:
         _refuse('RUNTIME_NOT_ON_PATH')
-    if remote_test_receipt is None:
+    ci_identity_sha = None
+    if ci_failure is not None:
+        packet, ci_identity_sha = _ci_failure(task, executor_task=executor_task,
+                                              pr_number=pr_number, ci_failure=ci_failure)
+    elif remote_test_receipt is None:
         packet, _event = _failed_event(task, executor_task=executor_task,
                                        pr_number=pr_number, github_get=github_get)
     else:
@@ -385,9 +475,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or
             base_family.endswith(EC2_FAMILY_SUFFIX)):
         _refuse('REPAIR_FAMILY_INVALID')
-    # The stored family: a review repair stays in the base family, an EC2
-    # remote-test repair goes to '<base>-ec2'.
-    family = (base_family if remote_test_receipt is None
+    # The stored family: a review repair stays in the base family; an EC2
+    # remote-test or CI repair goes to '<base>-ec2' (one test-failure count).
+    family = (base_family if not test_failure
               else base_family + EC2_FAMILY_SUFFIX)
     if len(family) > 64:
         _refuse('REPAIR_FAMILY_INVALID')
@@ -418,17 +508,19 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if type(claims) is not list:
         _refuse('REPAIR_CLAIM_UNAVAILABLE')
     stored = [claim for claim in claims if _claim_family(claim) == family]
-    if remote_test_receipt is None:
+    if not test_failure:
         # Review count: every claim in the base family, legacy EC2 claims included.
         attempts = stored
     else:
-        # EC2 count: the '-ec2' family plus legacy EC2 claims stored in base.
+        # Test-failure count (EC2 and CI): the '-ec2' family plus legacy EC2
+        # claims stored in base.
         attempts = [claim for claim in claims
                     if _claim_family(claim) == family or
                     (_claim_family(claim) == base_family and
                      ec2_claim_kind(claim) == 'LEGACY')]
     packet_version = packet.get('version', 0)
-    packet_sha = hashlib.sha256(json.dumps(
+    # A CI claim binds its head and check run, not the untrusted excerpt.
+    packet_sha = ci_identity_sha if ci_identity_sha is not None else hashlib.sha256(json.dumps(
         packet, ensure_ascii=True, sort_keys=True,
         separators=(',', ':')).encode('utf-8')).hexdigest()
     if packet_version == 0:
@@ -465,7 +557,7 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                 if dispatched else f"task delegate {task_id_for_repair}")}
     # #1502 WP-D: limits from policy.json; review repairs pass the counting gate.
     rca_entry = None
-    if remote_test_receipt is None:
+    if not test_failure:
         rca_entry = _review_gate(task, attempts, packet, family, _policy())
         if rca_entry is not None:
             packet = dict(packet,
@@ -503,32 +595,43 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             _refuse('REPAIR_CLAIM_UNAVAILABLE')
         next_claims[retry_index] = dict(next_claims[retry_index], state='FAILED')
     next_claims.append(claim)
+
+    # #1502 WP-D D11 repair 1: no counted claim exists until the repair Task is
+    # recorded and validated and the final authority recheck passes. Every
+    # refusal from here to the CAS leaves the claims, and so the counts,
+    # unchanged; a Task it may have left is surfaced for PM reconciliation.
+    recorder = repair_task_recorder
+    try:
+        if recorder is None:
+            repair_task = _record_repair_task(
+                task=task, developer=developer, packet=packet,
+                attempt=attempt, store=store, repair_task_id=repair_task_id)
+        else:
+            repair_task = recorder(task=task, developer=developer, packet=packet,
+                                   attempt=attempt, store=store,
+                                   repair_task_id=repair_task_id)
+    except LLMToolError as error:
+        error.review_repair_unclaimed_task_id = repair_task_id
+        raise
+    except Exception:
+        _refuse_unclaimed('REPAIR_TASK_RECORD_UNAVAILABLE', repair_task_id)
+    if (type(repair_task) is not dict or
+            repair_task.get('task_id') != repair_task_id):
+        _refuse_unclaimed('REPAIR_TASK_RECORD_UNAVAILABLE', repair_task_id)
+
+    # Re-read the Owner switch immediately before the claim and the provider side effect.
+    decision = worker_dispatch.evaluate(
+        worker, developer.get('owner_assignment_ref'), policy_task)
+    if not decision.allowed:
+        _refuse_unclaimed(decision.reason_code, repair_task_id)
     try:
         store.compare_and_update(
             task_id, expected={'record_sha256': task['record_sha256']},
             review_repair_claims=next_claims)
     except Exception:
-        _refuse('REPAIR_CLAIM_UNAVAILABLE')
+        _refuse_unclaimed('REPAIR_CLAIM_UNAVAILABLE', repair_task_id)
 
-    recorder = repair_task_recorder
-    if recorder is None:
-        repair_task = _record_repair_task(
-            task=task, developer=developer, packet=packet,
-            attempt=attempt, store=store, repair_task_id=repair_task_id)
-    else:
-        repair_task = recorder(task=task, developer=developer, packet=packet,
-                               attempt=attempt, store=store,
-                               repair_task_id=repair_task_id)
-    if (type(repair_task) is not dict or
-            repair_task.get('task_id') != repair_task_id):
-        _refuse('REPAIR_TASK_RECORD_UNAVAILABLE')
-
-    # Re-read the Owner switch immediately before the provider side effect.
-    policy_task = executor_task if claude_cli else task_id
-    decision = worker_dispatch.evaluate(
-        worker, developer.get('owner_assignment_ref'), policy_task)
-    if not decision.allowed:
-        _refuse(decision.reason_code)
+    # The provider is called only after the claim CAS succeeded.
     adapter = dispatch_adapter
     if adapter is None:
         adapter = lambda **request: _delegate_repair(

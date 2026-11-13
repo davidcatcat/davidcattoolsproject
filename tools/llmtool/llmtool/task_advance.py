@@ -18,7 +18,7 @@ from argparse import Namespace
 
 from . import active_pm_inbox, github_events, remote_test, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
-from . import mac_full_suite, review_transcript, task_submission_cli
+from . import mac_full_suite, repair_policy, review_transcript, task_submission_cli
 from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes
@@ -564,8 +564,12 @@ def _merge_main_gate(head, github_get, pr):
     return 'MERGE_CHECKS_UNAVAILABLE', None
 
 
-def _review_ci_gate(number, head, github_get):
-    """Require the newest exact-head Linux CI check to pass before review."""
+def _review_ci_gate(number, head, github_get, latest_out=None):
+    """Require the newest exact-head Linux CI check to pass before review.
+
+    latest_out, when a dict, gets the newest completed non-success run so a
+    CI_FAILED result can be routed (#1502 WP-D D11).
+    """
     try:
         checks = github_get(f'commits/{head}/check-runs?per_page=100')
         files = github_get(f'pulls/{number}/files?per_page=100')
@@ -603,7 +607,159 @@ def _review_ci_gate(number, head, github_get):
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
     if latest['conclusion'] == 'success':
         return None, None
+    if type(latest_out) is dict:
+        latest_out.update(latest)
     return 'CI_FAILED', 'LINUX_CI_FAILED'
+
+
+# #1502 WP-D D11: required exact-head CI checks a CI repair may answer.
+_LINUX_CHECK = 'check (Linux 3.14)'
+_MAC_CHECK = 'check (macOS 3.13)'
+# These conclusions say the CI environment stopped the check: wait uncounted,
+# never re-run or re-request CI (main PM open-item 1).
+_CI_ENV_CONCLUSIONS = ('cancelled', 'timed_out', 'startup_failure')
+
+
+def _ci_excerpt(run):
+    """Bounded untrusted excerpt from the check run output title and summary only."""
+    output = run.get('output')
+    parts = []
+    if type(output) is dict:
+        for key in ('title', 'summary'):
+            value = output.get(key)
+            if type(value) is str and value:
+                parts.append(value)
+    lines = '\n'.join(parts).splitlines()[:review_repair.CI_EXCERPT_MAX_LINES]
+    raw = '\n'.join(lines).encode('utf-8', errors='replace')
+    return raw[:review_repair.CI_EXCERPT_MAX_BYTES].decode('utf-8', errors='ignore')
+
+
+def _read_check_run(head, name, run_id, github_get):
+    """Read one check run by id; None unless it is this completed exact-head check."""
+    if type(run_id) is not int or run_id < 1:
+        return None
+    try:
+        run = github_get(f'check-runs/{run_id}')
+    except Exception:
+        return None
+    if (type(run) is not dict or type(run.get('id')) is not int or run['id'] != run_id or
+            run.get('head_sha') != head or run.get('name') != name or
+            run.get('status') != 'completed' or type(run.get('conclusion')) is not str):
+        return None
+    return run
+
+
+def _newest_check_run(head, name, github_get):
+    """Read the newest exact-head run of one check by id, or None."""
+    try:
+        checks = github_get(f'commits/{head}/check-runs?per_page=100')
+    except Exception:
+        return None
+    runs = checks.get('check_runs') if type(checks) is dict else None
+    if type(runs) is not list:
+        return None
+    candidates = [item for item in runs if type(item) is dict and
+                  item.get('head_sha') == head and item.get('name') == name and
+                  type(item.get('id')) is int and item['id'] >= 1]
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda item: item['id'])
+    if newest.get('status') != 'completed':
+        return None
+    return _read_check_run(head, name, newest['id'], github_get)
+
+
+def _test_fail_count(record, number):
+    """EC2 and CI repairs used on this PR, counted as review_repair counts them."""
+    claims = record.get('review_repair_claims', [])
+    if type(claims) is not list or any(type(item) is not dict for item in claims):
+        return repair_policy.UNKNOWN
+    base = f'pr-{number}'
+    return sum(1 for claim in claims
+               if claim.get('family') == base + review_repair.EC2_FAMILY_SUFFIX or
+               (claim.get('family') == base and
+                review_repair.ec2_claim_kind(claim) == 'LEGACY'))
+
+
+def _test_family_used_up(record, number, head):
+    """True when policy test_fail_max stops a new EC2 or CI repair on this head.
+
+    A live claim on the head replays in review_repair, so it is left to that
+    path. A policy that cannot be read is left to review_repair's own refusal.
+    """
+    claims = record.get('review_repair_claims', [])
+    if type(claims) is list and any(
+            type(item) is dict and item.get('head_sha') == head and
+            item.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN') for item in claims):
+        return False
+    try:
+        policy = repair_policy.load_policy()
+    except Exception:
+        return False
+    return repair_policy.test_failure_action(
+        test_fail_count=_test_fail_count(record, number), policy=policy) == 'STOPPED'
+
+
+def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, related,
+                      run, fail_code, github_get, repair_review_call):
+    """#1502 WP-D D11: route one completed exact-head required check that did not pass.
+
+    Return (step, codes, result), or None when the conclusion keeps today's
+    CI_FAILED result (neutral, skipped, stale, action_required). A failure goes
+    back to the original Developer through review_repair on the shared EC2/CI
+    count; an ENV conclusion waits uncounted and nothing re-runs CI.
+    """
+    head = d6['result_head']
+    conclusion = run['conclusion']
+    if conclusion in _CI_ENV_CONCLUSIONS:
+        return ('WAITING_ENV', ['CI_ENV_' + conclusion.upper()],
+                {'check': run['name'], 'check_run_id': run['id'], 'head': head})
+    if conclusion != 'failure':
+        return None
+    action = _remote_fail_action(related, head)
+    if action in ('WAITING_REPAIR', 'REPAIR_OUTCOME_UNKNOWN'):
+        return action, [action], None
+    if action == 'DEVELOPER_ATTENTION':
+        return action, ['REPAIR_TASK_RECORD_UNAVAILABLE'], None
+    if action == 'PUBLISH':
+        # The repair answered but the head did not move: nothing to publish.
+        return 'REPAIR_RESULT_NOT_PUBLISHED', ['REPAIR_RESULT_NOT_PUBLISHED'], None
+    retry_claim_id = None
+    if action == 'REPAIR_RETRY':
+        retry = next((item for item in reversed(related.get('repair_claims', []))
+                      if type(item) is dict and item.get('head_sha') == head and
+                      item.get('state') == 'DISPATCHED'), None)
+        retry_claim_id = retry.get('repair_task_id') if type(retry) is dict else None
+        if type(retry_claim_id) is not str:
+            return 'CI_FAILED', [fail_code, 'REPAIR_CLAIM_UNAVAILABLE'], None
+    elif _test_family_used_up(record, number, head):
+        return 'STOPPED', ['TEST_FAIL_LIMIT_REACHED'], None
+    if type(d6.get('root')) is not str:
+        return 'REFUSED', ['D6_BINDING_UNAVAILABLE'], None
+    profile = (record.get('developer') or {}).get('provider_profile')
+    if profile in ('codex', 'claude') and shutil.which(profile) is None:
+        return 'RUNTIME_NOT_ON_PATH', ['RUNTIME_NOT_ON_PATH'], None
+    ci_failure = {'head': head, 'check_name': run['name'], 'check_run_id': run['id'],
+                  'conclusion': 'failure', 'excerpt': _ci_excerpt(run)}
+    invoke = repair_review_call or review_repair.repair_review
+    try:
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            value = invoke(store=store, task_id=task_id, executor_task=executor_task,
+                           pr_number=number, auto_review=False, github_get=github_get,
+                           retry_claim_id=retry_claim_id, ci_failure=ci_failure)
+        emitted = captured.getvalue().strip()
+        try:
+            result = json.loads(emitted) if emitted else value
+        except (TypeError, ValueError):
+            result = value
+    except Exception as exc:
+        code = _refusal(exc, 'review_repair_code')
+        if code == 'REPAIR_LIMIT_REACHED':
+            return 'STOPPED', ['TEST_FAIL_LIMIT_REACHED'], None
+        return 'CI_FAILED', [fail_code, code], None
+    # No codes: task drive goes on to WAITING_REPAIR like the EC2 repair path.
+    return 'CI_FAILED', [], result
 
 
 def _remote_test_receipt_summary(record, head):
@@ -2496,6 +2652,19 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             root=d6.get('root') or cwd or os.getcwd(), owner_acceptance=owner_acceptance,
             owner_exception=owner_exception,
             sleep_fn=sleep_fn, sleep=sleep)
+        if (owner_exception is None and type(number) is int and
+                merge_result.get('step') == 'MERGE_REFUSED' and
+                merge_result.get('codes') == ['MERGE_CHECKS_NOT_GREEN']):
+            # #1502 WP-D D11: a failed exact-head Mac check after PASS goes to repair.
+            mac_run = _newest_check_run(d6['result_head'], _MAC_CHECK, get)
+            routed = None if mac_run is None else _route_ci_failure(
+                store=store, record=record, task_id=task_id,
+                executor_task=executor_task, number=number, d6=d6, related=related,
+                run=mac_run, fail_code='MAC_CI_FAILED', github_get=get,
+                repair_review_call=repair_review_call)
+            if routed is not None:
+                merge_result = {'step': routed[0], 'codes': list(routed[1]),
+                                'result': routed[2]}
         merge_result.update(task_id=task_id, next=merge_result['step'])
         return _ack_consumed_events(merge_result, record, store, d6['result_head'])
     if type(d6) is dict and d6.get('state') == 'D6_BINDING_UNAVAILABLE':
@@ -2506,6 +2675,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
     step = decide(record, d6, pr, related)
     result, codes, refusal_dict = None, [], None
     redispatch_reason = None
+    ci_routed = False
     if step == 'REVIEW_REDISPATCH':
         unusable = _head_review_claim(record, number, d6['result_head'])
         if unusable is not None and _review_verdict_absent(unusable, get):
@@ -2540,12 +2710,32 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         except Exception as exc:
             codes.append(_refusal(exc, 'remote_test_code'))
     elif step == 'DISPATCH_REVIEW':
-        gate_step, ci_code = _review_ci_gate(number, d6['result_head'], get)
+        gate_latest = {}
+        gate_step, ci_code = _review_ci_gate(number, d6['result_head'], get,
+                                             latest_out=gate_latest)
         if gate_step is not None:
             step = gate_step
             if ci_code is not None:
                 codes.append(ci_code)
-    if step == 'DISPATCH_REVIEW':
+        if (step == 'CI_FAILED' and gate_latest.get('name') == _LINUX_CHECK and
+                gate_latest.get('conclusion') in ('failure', *_CI_ENV_CONCLUSIONS)):
+            # #1502 WP-D D11: route the newest exact-head Linux run before review.
+            linux_run = _read_check_run(d6['result_head'], _LINUX_CHECK,
+                                        gate_latest.get('id'), get)
+            if linux_run is None:
+                codes.append('CI_CHECK_RUN_UNAVAILABLE')
+            else:
+                routed = _route_ci_failure(
+                    store=store, record=record, task_id=task_id,
+                    executor_task=executor_task, number=number, d6=d6, related=related,
+                    run=linux_run, fail_code='LINUX_CI_FAILED', github_get=get,
+                    repair_review_call=repair_review_call)
+                if routed is not None:
+                    step, codes, result = routed[0], list(routed[1]), routed[2]
+                    ci_routed = True
+    if ci_routed:
+        pass   # _route_ci_failure already set the step, codes and result.
+    elif step == 'DISPATCH_REVIEW':
         claims = _claims(record)
         versions = [c.get('version', 0) for c in claims if type(c) is dict and
                     type(c.get('version')) is int]
@@ -2641,6 +2831,11 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                                          item.get('state') == 'DISPATCHED'), None)
                     if repair_claim is None:
                         step, codes = 'REFUSED', ['REPAIR_CLAIM_UNAVAILABLE']
+                remote_status, _, failure_receipt = _remote_test_status(record, d6)
+                if (step == 'REPAIR_REVIEW' and remote_status == 'FAIL' and
+                        _test_family_used_up(record, number, d6['result_head'])):
+                    # #1502 WP-D D11: the shared EC2/CI count is used up.
+                    step, codes = 'STOPPED', ['TEST_FAIL_LIMIT_REACHED']
                 if step in ('REPAIR_REVIEW', 'REPAIR_RETRY'):
                     invoke = repair_review_call or review_repair.repair_review
                     try:
@@ -2651,7 +2846,6 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                             retry_claim_id=(repair_claim.get('repair_task_id')
                                             if step == 'REPAIR_RETRY' and
                                             type(repair_claim) is dict else None))
-                        remote_status, _, failure_receipt = _remote_test_status(record, d6)
                         if remote_status == 'FAIL':
                             repair_args['remote_test_receipt'] = failure_receipt
                         with contextlib.redirect_stdout(captured):
@@ -2662,7 +2856,11 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                         except (TypeError, ValueError):
                             result = result_value
                     except Exception as exc:
-                        codes.append(_refusal(exc, 'review_repair_code'))
+                        code = _refusal(exc, 'review_repair_code')
+                        if code == 'REPAIR_LIMIT_REACHED' and remote_status == 'FAIL':
+                            step, codes = 'STOPPED', ['TEST_FAIL_LIMIT_REACHED']
+                        else:
+                            codes.append(code)
     elif step == 'RUN_TASK_COMPLETE':
         claim = next(c for c in reversed(_claims(record)) if type(c) is dict and
                      c.get('pr') == number and c.get('head_sha') == d6['result_head'])
@@ -2706,6 +2904,16 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                     codes.append('MAC_CI_LABEL_FAILED')
         except Exception as exc:
             codes.append(_refusal(exc, 'completion_code'))
+        if step == 'CI_FAILED':
+            # #1502 WP-D D11: after PASS, route the newest exact-head Mac run.
+            mac_run = _newest_check_run(d6['result_head'], _MAC_CHECK, get)
+            routed = None if mac_run is None else _route_ci_failure(
+                store=store, record=record, task_id=task_id,
+                executor_task=executor_task, number=number, d6=d6, related=related,
+                run=mac_run, fail_code='MAC_CI_FAILED', github_get=get,
+                repair_review_call=repair_review_call)
+            if routed is not None:
+                step, codes, result = routed[0], list(routed[1]), routed[2]
     elif step == 'READY_FOR_INTEGRATION':
         try:
             integration = _pr_snapshot(integration_pr, get) if integration_pr is not None else pr

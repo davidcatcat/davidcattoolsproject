@@ -929,33 +929,163 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(recorded, [])
         self.assertNotIn('review_repair_claims', self.store.get(TASK))
 
-    def test_failed_recheck_is_resumable_without_claiming_replay(self):
-        decisions = iter([type('D', (), {'allowed': True})(),
-                          type('D', (), {'allowed': False, 'reason_code': 'PAUSED'})()])
-        with patch.object(review_repair.worker_dispatch, 'evaluate',
-                          side_effect=lambda *a, **k: next(decisions)):
-            with self.assertRaisesRegex(Exception, 'refused'):
-                review_repair.repair_review(
-                    store=self.store, task_id=TASK, executor_task=EXECUTOR,
-                    pr_number=PR, github_get=lambda _path: [_comment()],
-                    current_head=lambda _task, _executor: HEAD,
-                    dispatch_adapter=lambda **_kwargs: self.fail('must not dispatch'),
-                    repair_task_recorder=lambda **kwargs: {'task_id': kwargs['repair_task_id']})
-        result = self.dispatch()
-        self.assertFalse(result['replayed'])
-        self.assertTrue(result['next_action'].startswith('task delegate '))
-        self.assertEqual(self.calls, [])
+    # #1502 WP-D D11 repair 1: a counted claim is committed only after the
+    # repair Task is recorded and validated and the final authority recheck passes.
 
-    def test_claim_cas_failure_does_not_create_repair_task(self):
+    @staticmethod
+    def _decisions(*allowed, log=None):
+        items = iter([type('D', (), {'allowed': True})() if ok else
+                      type('D', (), {'allowed': False, 'reason_code': 'PAUSED'})()
+                      for ok in allowed])
+
+        def evaluate(*_args, **_kwargs):
+            if log is not None:
+                log.append('evaluate')
+            return next(items)
+        return evaluate
+
+    @staticmethod
+    def _recording_recorder(recorded, log=None):
+        def recorder(**request):
+            recorded.append(request['repair_task_id'])
+            if log is not None:
+                log.append('record')
+            return {'task_id': request['repair_task_id'],
+                    'pm_assignment': {'acceptance': ['Repair the reported issue.']}}
+        return recorder
+
+    def test_final_recheck_refusal_preserves_claims_and_counts(self):
+        recorded = []
+        with self.assertRaises(LLMToolError) as caught:
+            self.dispatch(evaluate=self._decisions(True, False),
+                          repair_task_recorder=self._recording_recorder(recorded))
+        self.assertEqual(caught.exception.review_repair_code, 'PAUSED')
+        # The prepared Task is surfaced for PM reconciliation, not dispatched.
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(caught.exception.review_repair_unclaimed_task_id, recorded[0])
+        self.assertNotIn('review_repair_claims', self.store.get(TASK))
+        self.assertEqual(self.calls, [])
+        # A later authorization permits exactly one dispatch on the unused count.
+        result = self.dispatch(repair_task_recorder=self._recording_recorder(recorded))
+        # A fresh dispatch carries the provider result; only a reused claim is 'replayed'.
+        self.assertNotIn('replayed', result)
+        self.assertEqual(result['result'], {'status': 'DISPATCHED', 'head': HEAD})
+        self.assertEqual((result['claim']['attempt'], result['claim']['state']),
+                         (1, 'DISPATCHED'))
+        self.assertEqual(result['repair_task_id'], recorded[1])
+        self.assertNotEqual(recorded[0], recorded[1])
+        claims = self.store.get(TASK)['review_repair_claims']
+        self.assertEqual([claim['repair_task_id'] for claim in claims], [recorded[1]])
+        self.assertEqual(len(self.calls), 1)
+        replay = self.dispatch()
+        self.assertTrue(replay['replayed'])
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(self.store.get(TASK)['review_repair_claims']), 1)
+
+    def test_claim_is_committed_after_record_and_recheck_and_before_provider(self):
+        log = []
+        test = self
+
+        class LoggingStore(TempTaskStore):
+            def compare_and_update(self, task_id, *, expected, **changes):
+                log.append('cas:' + '+'.join(
+                    claim['state'] for claim in changes.get('review_repair_claims', [])))
+                return super().compare_and_update(task_id, expected=expected, **changes)
+
+        self.store = LoggingStore(self.temp.name, self.store.get(TASK))
+
+        def adapter(**request):
+            log.append('provider')
+            claims = test.store.get(TASK)['review_repair_claims']
+            test.assertEqual([claim['state'] for claim in claims], ['CLAIMED'])
+            test.assertEqual(claims[0]['repair_task_id'], request['task']['task_id'])
+            return {'status': 'DISPATCHED', 'head': HEAD}
+
+        self.dispatch(evaluate=self._decisions(True, True, log=log),
+                      repair_task_recorder=self._recording_recorder([], log=log),
+                      dispatch_adapter=adapter)
+        self.assertEqual(log, ['evaluate', 'record', 'evaluate', 'cas:CLAIMED',
+                               'provider', 'cas:DISPATCHED'])
+
+    def test_claim_cas_failure_leaves_claims_unchanged_and_never_dispatches(self):
         class ConflictStore(TempTaskStore):
             def compare_and_update(self, *args, **kwargs):
                 raise RuntimeError('conflict')
         record = self.store.get(TASK)
         self.store = ConflictStore(self.temp.name, record)
         recorded = []
-        with self.assertRaisesRegex(Exception, 'refused'):
-            self.dispatch(repair_task_recorder=lambda **kwargs: recorded.append(kwargs))
-        self.assertEqual(recorded, [])
+        with self.assertRaises(LLMToolError) as caught:
+            self.dispatch(repair_task_recorder=self._recording_recorder(recorded))
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_CLAIM_UNAVAILABLE')
+        self.assertEqual(caught.exception.review_repair_unclaimed_task_id, recorded[0])
+        self.assertNotIn('review_repair_claims', self.store.get(TASK))
+        self.assertEqual(self.calls, [])
+
+    def test_recorder_exception_commits_no_claim_and_never_dispatches(self):
+        evaluated = []
+
+        def broken(**_request):
+            raise RuntimeError('recorder failure')
+
+        def refusing(**_request):
+            review_repair._refuse('REPAIR_PM_SESSION_UNAVAILABLE')
+
+        for recorder, code in ((broken, 'REPAIR_TASK_RECORD_UNAVAILABLE'),
+                               (refusing, 'REPAIR_PM_SESSION_UNAVAILABLE')):
+            with self.subTest(code=code):
+                evaluated.clear()
+                with self.assertRaises(LLMToolError) as caught:
+                    self.dispatch(evaluate=self._decisions(True, True, log=evaluated),
+                                  repair_task_recorder=recorder)
+                self.assertEqual(caught.exception.review_repair_code, code)
+                self.assertRegex(caught.exception.review_repair_unclaimed_task_id,
+                                 r'^[0-9a-f]{32}$')
+                # The final recheck and the CAS are never reached.
+                self.assertEqual(evaluated, ['evaluate'])
+                self.assertNotIn('review_repair_claims', self.store.get(TASK))
+                self.assertEqual(self.calls, [])
+        result = self.dispatch()
+        self.assertEqual(result['claim']['attempt'], 1)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_invalid_recorder_result_commits_no_claim_and_never_dispatches(self):
+        for label, make in (('none', lambda _id: None),
+                            ('not a dict', lambda _id: [_id]),
+                            ('no task id', lambda _id: {}),
+                            ('null task id', lambda _id: {'task_id': None}),
+                            ('other task id', lambda _id: {'task_id': '9' * 32})):
+            with self.subTest(label):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.dispatch(repair_task_recorder=lambda make=make, **request:
+                                  make(request['repair_task_id']))
+                self.assertEqual(caught.exception.review_repair_code,
+                                 'REPAIR_TASK_RECORD_UNAVAILABLE')
+                self.assertNotIn('review_repair_claims', self.store.get(TASK))
+                self.assertEqual(self.calls, [])
+
+    def test_refused_replacement_retry_keeps_dispatched_claim_and_count(self):
+        self._repair_history(1)
+        self._confirm_rca('network')
+        before = self.store.get(TASK)['review_repair_claims']
+        retry_id = before[-1]['repair_task_id']
+        recorded = []
+        with self.assertRaises(LLMToolError) as caught:
+            self.dispatch(family='network', retry_claim_id=retry_id,
+                          github_get=lambda _path: [_comment(version=2)],
+                          evaluate=self._decisions(True, False),
+                          repair_task_recorder=self._recording_recorder(recorded))
+        self.assertEqual(caught.exception.review_repair_code, 'PAUSED')
+        self.assertEqual(caught.exception.review_repair_unclaimed_task_id, recorded[0])
+        # The retried claim is not FAILED and no replacement claim is counted.
+        self.assertEqual(self.store.get(TASK)['review_repair_claims'], before)
+        self.assertEqual(self.calls, [])
+        result = self.dispatch(family='network', retry_claim_id=retry_id,
+                               github_get=lambda _path: [_comment(version=2)])
+        claims = self.store.get(TASK)['review_repair_claims']
+        self.assertEqual(result['claim']['attempt'], 2)
+        self.assertEqual([claim['state'] for claim in claims], ['FAILED', 'DISPATCHED'])
+        self.assertNotEqual(claims[1]['repair_task_id'], recorded[0])
+        self.assertEqual(len(self.calls), 1)
 
     def test_adapter_failure_records_unknown_and_never_replays(self):
         def fail_adapter(**_kwargs):
