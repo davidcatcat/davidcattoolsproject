@@ -245,15 +245,17 @@ class IncidentRemoteTestTests(unittest.TestCase):
                       'ERROR: test_one (test_alpha.Case.test_one)'],
              ['FAILED (failures=1, errors=2)', 'NO_FINAL', incident_store.FINAL_REDACTED]),
         )
+        # Two modules, so three final lines stay within two per module.
+        modules = ('test_alpha', 'test_beta')
         for result_name, finals, expected in cases:
             with self.subTest(result=result_name):
-                stdout = self.receipt(result=result_name, final=finals)
+                stdout = self.receipt(result=result_name, modules=modules, final=finals)
                 # The shared Task-path validator is unchanged and keeps raw lines.
                 self.assertEqual(remote_test._validate_remote_receipt(
-                    stdout, sha=HEAD, modules=('test_alpha',))['final'], finals)
+                    stdout, sha=HEAD, modules=modules)['final'], finals)
                 with patch.object(remote_test, '_emitted_sensitive',
                                   wraps=remote_test._emitted_sensitive) as screen:
-                    result = self.run_it(transport=self.transport(stdout))
+                    result = self.run_it(modules=modules, transport=self.transport(stdout))
                 screened = [call.args[0] for call in screen.call_args_list]
                 for line in finals:
                     self.assertIn(line, screened)
@@ -294,6 +296,35 @@ class IncidentRemoteTestTests(unittest.TestCase):
             with self.subTest(field=field, lines=len(value) if type(value) is list else 1):
                 self.assertIsNone(remote_test._screen_incident_receipt(
                     dict(parsed, **{field: value})))
+
+    # result invariants before recording (Codex v1 F1 on PR #1769) -----------
+
+    def test_receipt_contradicting_its_result_is_recorded_without_it(self):
+        cases = {
+            'TIMEOUT with exit_code 1': self.receipt(result='TIMEOUT'),
+            'SHA_MISMATCH with exit_code 1': self.receipt(
+                result='SHA_MISMATCH', fetch_head=MID, tree=None, ran_total=0, final=[],
+                failures=[]),
+            'FAIL at another FETCH_HEAD': self.receipt(result='FAIL', fetch_head=MID, tree=None),
+            'failure without a final line': self.receipt(result='FAIL', final=[]),
+        }
+        for name, stdout in cases.items():
+            with self.subTest(name):
+                # The unchanged Task-path validator accepts it; the incident
+                # path refuses to record it as a receipt.
+                self.assertIsNotNone(remote_test._validate_remote_receipt(
+                    stdout, sha=HEAD, modules=('test_alpha',)))
+                result = self.run_it(transport=self.transport(stdout))
+                self.assertEqual((result['result'], result['code']),
+                                 ('UNKNOWN', remote_test.INCIDENT_RECEIPT_INCONSISTENT))
+                self.assertIsNone(result['receipt'])
+                self.assertTrue(result['persisted'])
+                self.assertIsNone(self.stored()[incident_store.REMOTE_TESTS][-1]['receipt'])
+
+        kept = self.run_it(transport=self.transport(self.receipt(result='TIMEOUT', exit_code=124)))
+        self.assertEqual((kept['result'], kept['code']), ('TIMEOUT', None))
+        self.assertTrue(kept['persisted'])
+        self.assertTrue(incident_store.receipt_consistent(kept['receipt']))
 
     def test_no_git_ci_or_github_call_is_made(self):
         def forbidden(*args, **kwargs):
@@ -453,9 +484,12 @@ class IncidentStoreRemoteTestTests(unittest.TestCase):
             receipt.update(changes)
         return receipt
 
-    def receipt_entry(self, *, result='PASS', **receipt_changes):
+    def receipt_entry(self, *, result='PASS', modules=None, **receipt_changes):
+        entry_changes = {}
+        if modules is not None:
+            receipt_changes['modules'] = entry_changes['modules'] = list(modules)
         receipt = self.stored_receipt(result=result, **receipt_changes)
-        return self.entry(result=result, code=None, receipt=receipt)
+        return self.entry(result=result, code=None, receipt=receipt, **entry_changes)
 
     def append(self, entry):
         current = incident_store.get(self.incident, self.root)
@@ -616,15 +650,118 @@ class IncidentStoreRemoteTestTests(unittest.TestCase):
         for name, changes in cases.items():
             with self.subTest(name):
                 self.assert_invalid(self.receipt_entry(result='FAIL', **changes))
-        self.assert_invalid(self.receipt_entry(failure_excerpt='AssertionError'))  # on PASS
 
         saved = self.append(self.receipt_entry(
-            result='FAIL', final=['FAILED (failures=1)', 'NO_FINAL', incident_store.FINAL_REDACTED],
+            result='FAIL', modules=('test_alpha', 'test_beta'),
+            final=['FAILED (failures=1)', 'NO_FINAL', incident_store.FINAL_REDACTED],
             failure_excerpt='AssertionError: 1 != 2'))
         receipt = saved[incident_store.REMOTE_TESTS][0]['receipt']
         self.assertEqual(receipt['final'],
                          ['FAILED (failures=1)', 'NO_FINAL', incident_store.FINAL_REDACTED])
         self.assertEqual(receipt['failure_excerpt'], 'AssertionError: 1 != 2')
+
+    # result invariants in the store (Codex v1 F1 on PR #1769) ----------------
+
+    # Changes that make a stored_receipt() consistent with each result.
+    CONSISTENT = {
+        'PASS': {},
+        'FAIL': {},
+        'TIMEOUT': {'exit_code': incident_store.TIMEOUT_EXIT_CODE},
+        'SHA_MISMATCH': {'exit_code': incident_store.SHA_MISMATCH_EXIT_CODE, 'fetch_head': MID,
+                         'tree': None, 'ran_total': 0, 'final': [], 'failures': []},
+    }
+
+    def result_entry(self, result, **changes):
+        """A receipt entry consistent with ``result`` except for ``changes``."""
+        return self.receipt_entry(result=result, **dict(self.CONSISTENT[result], **changes))
+
+    def test_consistent_receipts_of_every_result_append(self):
+        results = sorted(incident_store.REMOTE_RECEIPT_RESULTS)
+        for result in results:
+            saved = self.append(self.result_entry(result))
+        entries = saved[incident_store.REMOTE_TESTS]
+        self.assertEqual([entry['result'] for entry in entries], results)
+        for entry in entries:
+            self.assertTrue(incident_store.receipt_consistent(entry['receipt']))
+
+    def test_receipt_contradicting_its_result_is_refused_on_append(self):
+        # Each case is consistent but for its own change and otherwise well
+        # formed, so the refusal is the result invariant, not another check.
+        two = ('test_alpha', 'test_beta')
+        cases = {
+            'PASS with non-zero exit_code': ('PASS', {'exit_code': 1}),
+            'PASS with failure_excerpt': ('PASS', {'failure_excerpt': 'AssertionError'}),
+            'PASS with failures': ('PASS', {'failures': ['test_alpha']}),
+            'PASS that ran no test': ('PASS', {'ran_total': 0}),
+            'PASS at another FETCH_HEAD': ('PASS', {'fetch_head': MID, 'tree': None}),
+            'PASS without tree': ('PASS', {'tree': None}),
+            'PASS as root': ('PASS', {'identity': {'uid': 0}}),
+            'PASS without uid': ('PASS', {'identity': {'uid': None}}),
+            'PASS missing a final line': ('PASS', {'modules': two, 'final': ['OK']}),
+            'PASS with a failing final line': ('PASS', {'final': ['FAILED (failures=1)']}),
+            'PASS with NO_FINAL': ('PASS', {'final': ['NO_FINAL']}),
+            'FAIL with exit_code 0': ('FAIL', {'exit_code': 0}),
+            'FAIL at another FETCH_HEAD': ('FAIL', {'fetch_head': MID, 'tree': None}),
+            'TIMEOUT with exit_code 0': ('TIMEOUT', {'exit_code': 0}),
+            'TIMEOUT with exit_code 1': ('TIMEOUT', {'exit_code': 1}),
+            'TIMEOUT at another FETCH_HEAD': ('TIMEOUT', {'fetch_head': MID, 'tree': None}),
+            'SHA_MISMATCH with exit_code 0': ('SHA_MISMATCH', {'exit_code': 0}),
+            'SHA_MISMATCH with exit_code 1': ('SHA_MISMATCH', {'exit_code': 1}),
+            'SHA_MISMATCH at the source SHA': ('SHA_MISMATCH', {'fetch_head': HEAD}),
+            'SHA_MISMATCH with tree': ('SHA_MISMATCH', {'tree': 'c' * 40}),
+            'SHA_MISMATCH that ran tests': ('SHA_MISMATCH', {'ran_total': 1}),
+            'SHA_MISMATCH with a final line': ('SHA_MISMATCH', {'final': ['NO_FINAL']}),
+            'SHA_MISMATCH with failures': ('SHA_MISMATCH', {'final': ['NO_FINAL'],
+                                                            'failures': ['test_alpha']}),
+            'failure repeated': ('FAIL', {'final': ['FAILED (failures=1)', 'NO_FINAL'],
+                                          'failures': ['test_alpha', 'test_alpha']}),
+            'failures out of module order': ('FAIL', {
+                'modules': two, 'final': ['FAILED (failures=1)', 'FAILED (errors=1)'],
+                'failures': ['test_beta', 'test_alpha']}),
+            'failure without a final line': ('FAIL', {'final': []}),
+            'more than two final lines per module': ('FAIL', {'final': ['NO_FINAL'] * 3}),
+            'tree without FETCH_HEAD': ('FAIL', {'fetch_head': None}),
+        }
+        for name, (result, changes) in cases.items():
+            with self.subTest(name):
+                entry = self.result_entry(result, **changes)
+                self.assertFalse(incident_store.receipt_consistent(entry['receipt']))
+                self.assert_refused(entry, incident_store.INCIDENT_RECEIPT_INCONSISTENT)
+
+    def test_receipt_contradicting_its_result_fails_read_with_recomputed_digests(self):
+        self.append(self.receipt_entry())
+        path = self.root.parent / incident_store.DIRECTORY_NAME / (self.incident + '.json')
+        original = path.read_text()
+        failed = {'final': ['FAILED (failures=1)'], 'failures': ['test_alpha']}
+        cases = {
+            'PASS with non-zero exit_code': {'exit_code': 1},
+            'PASS with failure_excerpt': {'failure_excerpt': 'AssertionError'},
+            'PASS with failures': {'failures': ['test_alpha']},
+            'PASS that ran no test': {'ran_total': 0},
+            'FAIL with exit_code 0': dict(failed, result='FAIL'),
+            'TIMEOUT with exit_code 0': dict(failed, result='TIMEOUT'),
+            'SHA_MISMATCH with exit_code 0': {'result': 'SHA_MISMATCH', 'fetch_head': MID,
+                                              'tree': None, 'ran_total': 0, 'final': []},
+        }
+        for name, changes in cases.items():
+            with self.subTest(name):
+                path.write_text(original)
+                incident_store.get(self.incident, self.root)  # the untouched record reads
+
+                def change(data, changes=changes):
+                    entry = data[incident_store.REMOTE_TESTS][0]
+                    entry['receipt'].update(changes)
+                    entry['result'] = entry['receipt']['result']
+                self.reseal_on_disk(change)
+                data = json.loads(path.read_text())
+                receipt = data[incident_store.REMOTE_TESTS][0]['receipt']
+                self.assertEqual(receipt['receipt_digest'],
+                                 incident_store.remote_test_digest(receipt))
+                self.assertEqual(data['record_sha256'], incident_store.record_digest(data))
+                with self.assertRaises(LLMToolError) as caught:
+                    incident_store.get(self.incident, self.root)
+                self.assertEqual(caught.exception.incident_code,
+                                 incident_store.INCIDENT_RECORD_INVALID)
 
     def test_tampered_entry_fails_read_even_with_a_resealed_record(self):
         self.append(self.entry())

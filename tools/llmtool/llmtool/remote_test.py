@@ -584,6 +584,7 @@ INCIDENT_MODULE_NOT_FAILING = 'INCIDENT_MODULE_NOT_FAILING'
 INCIDENT_MODULE_CAP = 'INCIDENT_MODULE_CAP'
 INCIDENT_CONFIG_INVALID = 'CONFIG_INVALID'
 INCIDENT_RECEIPT_SENSITIVE = 'RECEIPT_SENSITIVE'
+INCIDENT_RECEIPT_INCONSISTENT = 'RECEIPT_INCONSISTENT'
 _INCIDENT_RECORD_ATTEMPTS = 3
 
 
@@ -658,6 +659,9 @@ def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
     screened again (``_screen_incident_receipt``): a sensitive hit records
     UNKNOWN/RECEIPT_SENSITIVE without the receipt, and a final line outside the
     unittest summary grammar is stored as ``main_incident_store.FINAL_REDACTED``.
+    A receipt whose fields contradict its result
+    (``main_incident_store.receipt_consistent``, e.g. PASS with a non-zero
+    exit code) records UNKNOWN/RECEIPT_INCONSISTENT without the receipt.
     The store accepts only the exact allowlisted receipt fields. The SHA itself is the
     fetched ref, so the remote checks FETCH_HEAD against it; nothing pushes,
     resets or updates a ref, and no CI job is triggered or rerun.
@@ -722,6 +726,8 @@ def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
     if screened is None:
         return finish('UNKNOWN', INCIDENT_RECEIPT_SENSITIVE)
     receipt = dict(screened, incident_id=incident_id, command_digest=command_digest)
+    if not incident_store.receipt_consistent(receipt):
+        return finish('UNKNOWN', INCIDENT_RECEIPT_INCONSISTENT)
     receipt['receipt_digest'] = incident_store.remote_test_digest(receipt)
     return finish(parsed['result'], None, receipt)
 

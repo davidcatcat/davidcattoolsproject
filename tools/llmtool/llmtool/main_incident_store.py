@@ -29,7 +29,12 @@ structured receipt field must match its fixed grammar, each ``final`` line
 must be a unittest summary line or ``FINAL_REDACTED``, and the output-derived
 strings (``final`` lines and ``failure_excerpt``) must pass the real
 sensitive-content screen, else the record is INCIDENT_RECORD_INVALID
-(PR #1763, CWE-532).
+(PR #1763, CWE-532). A stored receipt must also be consistent with its own
+``result`` (``receipt_consistent``; Codex v1 F1 on PR #1769): an append of a
+well-formed receipt that contradicts its result refuses
+INCIDENT_RECEIPT_INCONSISTENT before anything is written, and such a receipt
+on disk makes the record INCIDENT_RECORD_INVALID even when its receipt and
+record digests were recomputed.
 
 Every doubt fails closed with a typed code in ``error.incident_code``; error
 messages carry only the code and, when it is a safe identifier, the incident ID.
@@ -73,6 +78,7 @@ INCIDENT_RECORD_FULL = 'INCIDENT_RECORD_FULL'
 INCIDENT_OUTCOME_INVALID = 'INCIDENT_OUTCOME_INVALID'
 INCIDENT_CLOSED = 'INCIDENT_CLOSED'
 INCIDENT_RECEIPT_FIELDS_INVALID = 'INCIDENT_RECEIPT_FIELDS_INVALID'
+INCIDENT_RECEIPT_INCONSISTENT = 'INCIDENT_RECEIPT_INCONSISTENT'
 
 OPEN = 'UNKNOWN_OPEN'
 RESOLVED = 'RESOLVED'
@@ -129,6 +135,14 @@ _SUMMARY_COUNT = (r'(?:failures|errors|skipped|expected failures|unexpected succ
 FINAL_SUMMARY = re.compile(r'(?:OK|FAILED)(?: \(%s(?:, %s){0,4}\))?|NO_FINAL'
                            % (_SUMMARY_COUNT, _SUMMARY_COUNT))
 FINAL_REDACTED = 'REDACTED_NOT_SUMMARY'
+# The final lines a PASS receipt can carry: the passing lines the remote
+# program and the receipt validator accept that are also summary lines; any
+# other line the validator accepts on PASS was redacted before recording.
+PASS_FINAL = re.compile(r'OK(?: \(skipped=[1-9][0-9]{0,5}\))?')
+# The exit code the remote program sets for each result; FAIL has any
+# non-zero code (the failing test process's own code, or 1).
+TIMEOUT_EXIT_CODE = 124
+SHA_MISMATCH_EXIT_CODE = 41
 MAX_FINAL_LINE = 512
 MAX_RECEIPT_FAILURES = 10
 MAX_LOG_BYTES = 20_000_000
@@ -428,7 +442,8 @@ def _screened_output(receipt):
     """The output-derived strings (``final``, ``failure_excerpt``) pass the real screen.
 
     Each ``final`` line must also be a unittest summary line or FINAL_REDACTED,
-    so a line the screen misses is still never stored as free text.
+    so a line the screen misses is still never stored as free text. A
+    ``failure_excerpt`` on PASS is a result contradiction (``receipt_consistent``).
     """
     finals = receipt['final']
     if type(finals) is not list or not all(
@@ -439,19 +454,91 @@ def _screened_output(receipt):
     values = list(finals)
     if 'failure_excerpt' in receipt:
         excerpt = receipt['failure_excerpt']
-        if receipt['result'] == 'PASS' or not _valid_excerpt(excerpt):
+        if not _valid_excerpt(excerpt):
             return False
         values.append(excerpt)
     return not any(task_store._emitted_sensitive(value) for value in values)
 
 
+def receipt_consistent(receipt):
+    """True when no field of a stored receipt contradicts its ``result``.
+
+    Codex v1 F1 on PR #1769. The invariants follow the fixed remote program
+    (``remote_test._REMOTE_SCRIPT``) and its receipt validator:
+
+    - every result: ``failures`` lists failing modules once each, in module
+      order; every failing module has a final line, and there are at most
+      two final lines per module (``len(failures) <= len(final) <=
+      2 * len(modules)``); a ``tree`` is only read after FETCH_HEAD matched
+      ``source_sha``;
+    - PASS: exit code 0, no ``failure_excerpt``, no failures, at least one
+      test ran, FETCH_HEAD is ``source_sha``, a tree, a non-root uid, a
+      passing final line (``PASS_FINAL`` or FINAL_REDACTED) per module;
+    - FAIL: a non-zero exit code; FETCH_HEAD is ``source_sha`` or unknown;
+    - TIMEOUT: exit code 124; FETCH_HEAD is ``source_sha`` or unknown;
+    - SHA_MISMATCH: exit code 41, FETCH_HEAD is not ``source_sha``, and
+      nothing ran (no tree, no tests, no final lines, no failures).
+
+    Any doubt, including a field of the wrong type, returns False.
+    """
+    try:
+        return _receipt_invariants(receipt)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+
+
+def _receipt_invariants(receipt):
+    result, exit_code = receipt['result'], receipt['exit_code']
+    modules, final, failures = receipt['modules'], receipt['final'], receipt['failures']
+    source, fetched, tree = receipt['source_sha'], receipt['fetch_head'], receipt['tree']
+    if (type(result) is not str or result not in REMOTE_RECEIPT_RESULTS or
+            type(exit_code) is not int or type(modules) is not list or
+            type(final) is not list or type(failures) is not list):
+        return False
+    if failures != [name for name in modules if name in failures]:
+        return False  # repeated, out of module order or not a module
+    if not len(failures) <= len(final) <= 2 * len(modules):
+        return False
+    if tree is not None and fetched != source:
+        return False
+    if result == 'PASS':
+        uid = receipt['identity']['uid']
+        return (exit_code == 0 and 'failure_excerpt' not in receipt and not failures and
+                type(receipt['ran_total']) is int and receipt['ran_total'] > 0 and
+                fetched == source and tree is not None and
+                type(uid) is int and uid != 0 and len(final) >= len(modules) and
+                all(type(line) is str and
+                    (line == FINAL_REDACTED or PASS_FINAL.fullmatch(line) is not None)
+                    for line in final))
+    if result == 'SHA_MISMATCH':
+        return (exit_code == SHA_MISMATCH_EXIT_CODE and fetched != source and
+                tree is None and receipt['ran_total'] == 0 and not final and not failures)
+    if result == 'TIMEOUT' and exit_code != TIMEOUT_EXIT_CODE:
+        return False
+    return exit_code != 0 and (fetched is None or fetched == source)
+
+
+def _well_formed_receipt(receipt, item, incident):
+    """Every stored-receipt check except the result invariants and the digest."""
+    return (receipt_fields_allowed(receipt) and receipt['result'] == item['result'] and
+            receipt['source_sha'] == item['sha'] and
+            receipt['modules'] == item['modules'] and
+            receipt['incident_id'] == incident and
+            _valid_receipt_shape(receipt, item) and
+            _screened_output(receipt))
+
+
+def _receipt_entry_typed(entry):
+    """The entry fields a receipt is checked against have their basic types."""
+    return (type(entry) is dict and set(entry) == REMOTE_TEST_FIELDS and
+            type(entry['result']) is str and entry['result'] in REMOTE_RECEIPT_RESULTS and
+            type(entry['modules']) is list and
+            all(type(name) is str for name in entry['modules']))
+
+
 def _valid_receipt(receipt, item, incident):
-    if (not receipt_fields_allowed(receipt) or receipt['result'] != item['result'] or
-            receipt['source_sha'] != item['sha'] or
-            receipt['modules'] != item['modules'] or
-            receipt['incident_id'] != incident or
-            not _valid_receipt_shape(receipt, item) or
-            not _screened_output(receipt)):
+    if (not _well_formed_receipt(receipt, item, incident) or
+            not receipt_consistent(receipt)):
         return False
     try:
         return receipt['receipt_digest'] == remote_test_digest(receipt)
@@ -881,11 +968,18 @@ def append_remote_test(incident, expected_sha256, entry, root=None):
     in the incident, whose modules are not recorded as failing, or whose
     receipt does not match its digest refuses INCIDENT_RECORD_INVALID. A
     receipt with any field outside the exact allowlist refuses
-    INCIDENT_RECEIPT_FIELDS_INVALID before the record is read or written.
+    INCIDENT_RECEIPT_FIELDS_INVALID, and a well-formed receipt whose fields
+    contradict its result (``receipt_consistent``) refuses
+    INCIDENT_RECEIPT_INCONSISTENT, both before the record is read or written.
+    The whole-record validation checks the same invariants again.
     """
     receipt = entry.get('receipt') if type(entry) is dict else None
-    if receipt is not None and not receipt_fields_allowed(receipt):
-        _refuse(INCIDENT_RECEIPT_FIELDS_INVALID, incident)
+    if receipt is not None:
+        if not receipt_fields_allowed(receipt):
+            _refuse(INCIDENT_RECEIPT_FIELDS_INVALID, incident)
+        if (_receipt_entry_typed(entry) and _well_formed_receipt(receipt, entry, incident) and
+                not receipt_consistent(receipt)):
+            _refuse(INCIDENT_RECEIPT_INCONSISTENT, incident)
 
     def mutate(body):
         entries = body.setdefault(REMOTE_TESTS, [])
