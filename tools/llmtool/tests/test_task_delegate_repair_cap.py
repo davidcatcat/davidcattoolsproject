@@ -689,6 +689,74 @@ class SplitRepairCountTests(unittest.TestCase):
         self._passes(store, args=_args())
 
 
+def _legacy_overrides():
+    """Old per-Task cap and override keys; the delegate cap reads none of them."""
+    return {
+        'repair_cap_override': {'ref': _HIGH_DEBUG_REF, 'rounds': 9,
+                                'recorded_at': '2026-11-04T00:00:00Z'},
+        'repair_max': 9, 'max_repair_attempts': 9, 'test_fail_max': 9,
+        'review_fail_max': 9,
+    }
+
+
+def _add_legacy_overrides(store, *task_ids):
+    for task_id in task_ids:
+        store.records.setdefault(task_id, {}).update(_legacy_overrides())
+
+
+class LegacyDataTests(unittest.TestCase):
+    """#1502 WP-D D14 (spec section 7): legacy Task data under the new limits."""
+
+    def setUp(self):
+        _patch_trust_and_binding(self)
+
+    def _refuses(self, store, args, code):
+        with self.assertRaisesRegex(LLMToolError, code):
+            task_submission_cli._check_delegate_repair_cap(args, store)
+        self.assertEqual(store.writes, [])
+
+    def test_unreadable_claims_leave_test_runs_on_the_review_count(self):
+        # UNKNOWN: runs the parent's claims cannot name as EC2 runs count as
+        # review runs, so one review run plus two such runs uses the review limit.
+        policy = dict(_POLICY, repair_max=2, test_fail_max=2)
+        with patch.object(task_submission_cli.repair_policy, 'load_policy',
+                          return_value=policy):
+            store = _split_store(ec2_runs=2)
+            task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store)
+            self.assertEqual(store.writes, [])
+            for claims in ('UNKNOWN', None, ['UNKNOWN']):
+                store = _split_store(ec2_runs=2)
+                store.records[_record_id(0)]['review_repair_claims'] = claims
+                with self.subTest(claims=claims):
+                    self._refuses(store, _no_high_debug(), '^DELEGATE_REPAIR_LIMIT_REACHED$')
+
+    def test_legacy_override_fields_do_not_raise_the_review_limit(self):
+        for count in (_REVIEW_LIMIT, _REVIEW_LIMIT + 2):
+            store = _Store(count=count, diagnosis=_diagnosis([_entry()]))
+            _add_legacy_overrides(store, _CURRENT_TASK, *map(_record_id, range(count)))
+            with self.subTest(count=count, root_cause='arguments'):
+                self._refuses(store, _args(), '^DELEGATE_REPAIR_LIMIT_REACHED$')
+            store = _Store(count=count)
+            store.records[_ROOT_TASK].update(task_id=_ROOT_TASK, high_debug=[_entry()])
+            _add_legacy_overrides(store, *map(_record_id, range(count)))
+            with self.subTest(count=count, root_cause='packet'):
+                self._refuses(store, _no_high_debug(repair_packet=_packet()),
+                              '^DELEGATE_REPAIR_LIMIT_REACHED$')
+
+    def test_legacy_override_fields_do_not_skip_the_root_cause(self):
+        store = _Store(count=_REPAIR_TWO, diagnosis=_diagnosis([_entry()]))
+        _add_legacy_overrides(store, _CURRENT_TASK, *map(_record_id, range(_REPAIR_TWO)))
+        self._refuses(store, _no_high_debug(), '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$')
+
+    def test_legacy_override_fields_do_not_raise_the_test_fail_limit(self):
+        current = _ec2_claim(_CURRENT_TASK)
+        for ec2_runs in (_TEST_FAIL_MAX, _TEST_FAIL_MAX + 1):
+            store = _split_store(ec2_runs=ec2_runs, current=current)
+            _add_legacy_overrides(store, *list(store.records))
+            with self.subTest(ec2_runs=ec2_runs):
+                self._refuses(store, _no_high_debug(), '^DELEGATE_REPAIR_LIMIT_REACHED$')
+
+
 class MixedFamilyRepairChainTests(unittest.TestCase):
     """Completion walks review and EC2 repairs in stored claim order."""
 

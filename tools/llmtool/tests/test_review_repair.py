@@ -8,7 +8,8 @@ from contextlib import nullcontext, redirect_stdout
 from io import StringIO
 from unittest.mock import Mock, patch
 
-from llmtool import cli, review_repair, run_budget, task_store, task_submission_cli
+from llmtool import (cli, repair_policy, review_repair, run_budget, task_store,
+                     task_submission_cli)
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
 
@@ -153,6 +154,8 @@ def _receipt(head=HEAD):
 
 MAX = run_budget.MAX_REPAIR_ATTEMPTS
 EC2_FAMILY = f'pr-{PR}-ec2'
+# Marks a field that a legacy record does not carry at all.
+_MISSING = object()
 
 
 class ReviewRepairTests(unittest.TestCase):
@@ -1373,6 +1376,288 @@ class ReviewRepairTests(unittest.TestCase):
                 result = self.dispatch()
                 self.assertEqual(result['claim']['attempt'], 1)
                 self.assertEqual(len(self.calls), calls_before + 1)
+
+    # #1502 WP-D D14 (spec section 7): legacy Task data under the new limits.
+
+    # Old per-Task cap and override keys; no gate reads them any more.
+    _LEGACY_OVERRIDES = {
+        'repair_cap_override': {'rounds': 9, 'recorded_at': '2026-10-27T00:00:00Z'},
+        'repair_max': 9, 'max_repair_attempts': 9, 'test_fail_max': 9,
+        'review_fail_max': 9,
+    }
+
+    def _legacy_record(self, claims, *, kind=None, overrides=False):
+        """A fresh Task holding legacy repair claims, lineage and override fields."""
+        record = _record()
+        record['review_repair_claims'] = claims
+        if kind is not None:
+            record['lineage'] = {'kind': kind}
+        if overrides:
+            record.update(json.loads(json.dumps(self._LEGACY_OVERRIDES)))
+            record['developer'].update(json.loads(json.dumps(self._LEGACY_OVERRIDES)))
+        self.store = TempTaskStore(self.temp.name, record)
+
+    def _claims_on_new_heads(self, count, *, ec2=False):
+        """count stored claims, each on its own earlier HEAD (one valid FAIL each)."""
+        family = dict(family=EC2_FAMILY, comment_id=None) if ec2 else {}
+        return [self._stored_claim(attempt=n, repair_id=f'{n:032x}', head=str(n) * 40,
+                                   **family)
+                for n in range(1, count + 1)]
+
+    def test_d14_unknown_claim_list_is_used_up(self):
+        # A claim list that cannot be read is an UNKNOWN count: no review
+        # repair and no test-failure repair, and nothing is recorded.
+        for claims in ('UNKNOWN', None, 0, {'attempts': 0}):
+            for receipt in (None, _receipt()):
+                with self.subTest(claims=claims, test_failure=receipt is not None):
+                    self._legacy_record(claims)
+                    recorded = []
+                    self._assert_refused(
+                        'REPAIR_CLAIM_UNAVAILABLE', remote_test_receipt=receipt,
+                        repair_task_recorder=self._recording_recorder(recorded))
+                    self.assertEqual(recorded, [])
+        self.assertEqual(self.calls, [])
+
+    def test_d14_legacy_claim_without_a_readable_head_is_used_up(self):
+        # Without a HEAD the valid FAIL count is UNKNOWN, which counts as
+        # review_fail_max: the Task escalates by its kind instead of repairing,
+        # even with a confirmed Debug on the failed HEAD.
+        for kind, code in ((None, 'REPAIR_SPLIT_REQUIRED'),
+                           ('root', 'REPAIR_SPLIT_REQUIRED'),
+                           ('child', 'REPAIR_PM_DECIDE_REQUIRED'),
+                           ('replan', 'REPAIR_FAILED_FINAL_REQUIRED')):
+            for label, head in (('none', None), ('int', 5), ('missing', _MISSING)):
+                for rca in (False, True):
+                    legacy = self._stored_claim(attempt=1, repair_id='1' * 32)
+                    if head is _MISSING:
+                        del legacy['head_sha']
+                    else:
+                        legacy['head_sha'] = head
+                    with self.subTest(kind=kind, head=label, rca=rca):
+                        self._legacy_record([legacy], kind=kind)
+                        if rca:
+                            self._confirm_rca()
+                        recorded = []
+                        self._assert_refused(
+                            code, repair_task_recorder=self._recording_recorder(recorded))
+                        self.assertEqual(recorded, [])
+        self.assertEqual(self.calls, [])
+
+    def test_d14_claims_in_unknown_or_missing_state_still_count(self):
+        policy = repair_policy.load_policy()
+        for label, state in (('UNKNOWN', 'UNKNOWN'), ('none', None), ('missing', _MISSING)):
+            for ec2, limit, receipt in ((False, policy['repair_max'], None),
+                                        (True, policy['test_fail_max'], _receipt())):
+                claims = self._claims_on_new_heads(limit, ec2=ec2)
+                for claim in claims:
+                    if state is _MISSING:
+                        del claim['state']
+                    else:
+                        claim['state'] = state
+                with self.subTest(state=label, test_failure=ec2):
+                    self._legacy_record(claims)
+                    self._assert_refused('REPAIR_LIMIT_REACHED', remote_test_receipt=receipt)
+        self.assertEqual(self.calls, [])
+
+    def test_d14_unreadable_policy_gives_no_repair(self):
+        for receipt in (None, _receipt()):
+            with self.subTest(test_failure=receipt is not None), \
+                    patch.object(repair_policy, 'load_policy',
+                                 side_effect=LLMToolError('POLICY_INVALID')):
+                self._assert_refused('REPAIR_POLICY_INVALID', remote_test_receipt=receipt)
+        self.assertEqual(self.calls, [])
+
+    def test_d14_legacy_override_fields_do_not_raise_the_limits(self):
+        policy = repair_policy.load_policy()
+        self._legacy_record(self._claims_on_new_heads(policy['repair_max']), overrides=True)
+        self._confirm_rca()
+        self._assert_refused('REPAIR_LIMIT_REACHED')
+        self._legacy_record(self._claims_on_new_heads(policy['test_fail_max'], ec2=True),
+                            overrides=True)
+        self._assert_refused('REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
+        self.assertEqual(self.calls, [])
+
+    def test_d14_legacy_override_fields_do_not_change_the_debug_step(self):
+        self._legacy_record([self._stored_claim(attempt=1, repair_id='1' * 32,
+                                                head='e' * 40, state='DISPATCHED')],
+                            overrides=True)
+        # Valid FAIL #2 still needs AI Debug first ...
+        self._assert_refused('REPAIR_DEBUG_REQUIRED')
+        # ... and a confirmed Debug still admits repair #2 as usual.
+        self._confirm_rca()
+        result = self.dispatch()
+        self.assertEqual(result['claim']['attempt'], 2)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_d14_task_over_the_new_limits_gets_no_further_repair(self):
+        # Current behaviour, pinned: no claim, no recorded Task, no provider call.
+        policy = repair_policy.load_policy()
+        for extra in (0, 1):
+            for kind in (None, 'child'):
+                for rca in (False, True):
+                    with self.subTest(extra=extra, kind=kind, rca=rca):
+                        self._legacy_record(
+                            self._claims_on_new_heads(policy['repair_max'] + extra), kind=kind)
+                        if rca:
+                            self._confirm_rca()
+                        recorded = []
+                        self._assert_refused(
+                            'REPAIR_LIMIT_REACHED',
+                            repair_task_recorder=self._recording_recorder(recorded))
+                        self.assertEqual(recorded, [])
+            with self.subTest(extra=extra, test_failure=True):
+                self._legacy_record(
+                    self._claims_on_new_heads(policy['test_fail_max'] + extra, ec2=True))
+                self._assert_refused('REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
+        self.assertEqual(self.calls, [])
+
+    # D14 (3) gap, reported and not fixed here (tests-only Task): _review_gate
+    # refuses REPAIR_LIMIT_REACHED (review_repair.py:391-392) before
+    # review_action runs, so a Task already at or over repair_max is not
+    # directed to SPLIT or PM_DECIDE at its next valid FAIL. Remove the
+    # expectedFailure marks once the product names the escalation.
+    def _over_the_new_repair_limit(self, kind):
+        self._legacy_record(
+            self._claims_on_new_heads(repair_policy.load_policy()['repair_max']), kind=kind)
+
+    @unittest.expectedFailure
+    def test_d14_root_over_the_new_limits_is_directed_to_split(self):
+        self._over_the_new_repair_limit('root')
+        self._assert_refused('REPAIR_SPLIT_REQUIRED')
+
+    @unittest.expectedFailure
+    def test_d14_child_over_the_new_limits_is_directed_to_pm_decide(self):
+        self._over_the_new_repair_limit('child')
+        self._assert_refused('REPAIR_PM_DECIDE_REQUIRED')
+
+
+# Counts a legacy record may hold that are not a known non-negative int.
+_UNKNOWN_COUNTS = (repair_policy.UNKNOWN, None, -1, '1', 1.5, True, [], {})
+
+
+class LegacyPolicyGateTests(unittest.TestCase):
+    """#1502 WP-D D14 (spec section 7): the repair_policy gates under legacy data."""
+
+    def setUp(self):
+        self.policy = repair_policy.load_policy()
+
+    def test_new_limits(self):
+        self.assertEqual((self.policy['repair_max'], self.policy['test_fail_max']), (2, 2))
+        # FAIL #2 goes to Debug, so escalation by count starts after it.
+        self.assertGreater(self.policy['review_fail_max'], 2)
+
+    def test_unknown_review_fail_count_escalates_by_kind(self):
+        for kind, expected in (('root', 'SPLIT'), ('child', 'PM_DECIDE'),
+                               ('replan', 'FAILED_FINAL')):
+            for value in _UNKNOWN_COUNTS:
+                for debug_status in (None, 'RCA_CONFIRMED'):
+                    with self.subTest(kind=kind, value=value, debug_status=debug_status):
+                        self.assertEqual(repair_policy.review_action(
+                            kind=kind, fail_count=value, debug_status=debug_status,
+                            policy=self.policy), expected)
+
+    def test_unknown_repair_count_admits_no_repair(self):
+        self.assertIsNone(repair_policy.admit_repair(
+            repair_count=0, rca_confirmed=False, policy=self.policy))
+        for value in _UNKNOWN_COUNTS:
+            for rca in (False, True):
+                with self.subTest(value=value, rca=rca):
+                    self.assertEqual(repair_policy.admit_repair(
+                        repair_count=value, rca_confirmed=rca, policy=self.policy),
+                        'REPAIR_LIMIT_REACHED')
+
+    def test_unknown_test_fail_count_stops(self):
+        self.assertEqual(repair_policy.test_failure_action(
+            test_fail_count=0, policy=self.policy), 'REPAIR')
+        for value in _UNKNOWN_COUNTS:
+            with self.subTest(value=value):
+                self.assertEqual(repair_policy.test_failure_action(
+                    test_fail_count=value, policy=self.policy), 'STOPPED')
+
+    def test_unknown_debug_count_is_used(self):
+        for kind, keyword, code in (('root', 'parent_debug_used', 'DEBUG_PARENT_USED'),
+                                    ('replan', 'parent_debug_used', 'DEBUG_PARENT_USED'),
+                                    ('child', 'group_debug_used', 'DEBUG_GROUP_USED')):
+            self.assertIsNone(repair_policy.admit_debug(kind=kind, policy=self.policy))
+            for value in _UNKNOWN_COUNTS:
+                with self.subTest(kind=kind, value=value):
+                    self.assertEqual(repair_policy.admit_debug(
+                        kind=kind, policy=self.policy, **{keyword: value}), code)
+        # A child at valid FAIL #2 whose shared Debug count is UNKNOWN goes to PM_DECIDE.
+        self.assertEqual(repair_policy.review_action(
+            kind='child', fail_count=2, policy=self.policy), 'DEBUG')
+        for value in _UNKNOWN_COUNTS:
+            with self.subTest(child_group_debug=value):
+                self.assertEqual(repair_policy.review_action(
+                    kind='child', fail_count=2, group_debug_used=value,
+                    policy=self.policy), 'PM_DECIDE')
+
+    def test_legacy_override_field_is_ignored_by_the_gates(self):
+        p = self.policy
+        legacy = dict(p, repair_cap_override={'rounds': 9}, max_repair_attempts=9)
+        self.assertEqual(repair_policy.admit_repair(
+            repair_count=p['repair_max'], rca_confirmed=True, policy=legacy),
+            'REPAIR_LIMIT_REACHED')
+        self.assertEqual(repair_policy.test_failure_action(
+            test_fail_count=p['test_fail_max'], policy=legacy), 'STOPPED')
+        self.assertEqual(repair_policy.review_action(
+            kind='root', fail_count=p['review_fail_max'], policy=legacy), 'SPLIT')
+        self.assertEqual(repair_policy.admit_debug(
+            kind='root', parent_debug_used=p['parent_debug_max'], policy=legacy),
+            'DEBUG_PARENT_USED')
+        # No gate takes a per-call override.
+        for call in (lambda: repair_policy.review_action(
+                         kind='root', fail_count=1, policy=p, repair_max=9),
+                     lambda: repair_policy.admit_repair(
+                         repair_count=0, rca_confirmed=False, policy=p, override=9),
+                     lambda: repair_policy.test_failure_action(
+                         test_fail_count=0, policy=p, test_fail_max=9)):
+            with self.assertRaises(TypeError):
+                call()
+
+    def test_policy_file_with_a_legacy_override_key_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            control = Path(temp) / 'policy.json'
+            control.write_text(json.dumps(self.policy), encoding='utf-8')
+            self.assertEqual(repair_policy.load_policy(control), self.policy)
+            for extra in ('repair_cap_override', 'max_repair_attempts'):
+                path = Path(temp) / f'{extra}.json'
+                path.write_text(json.dumps(dict(self.policy, **{extra: 9})), encoding='utf-8')
+                with self.subTest(extra=extra), \
+                        self.assertRaisesRegex(LLMToolError, 'POLICY_INVALID'):
+                    repair_policy.load_policy(path)
+
+    def test_task_over_the_new_limits_escalates_at_its_next_valid_fail(self):
+        p = self.policy
+        for over in (0, 1, 5):
+            for kind, expected in (('root', 'SPLIT'), ('child', 'PM_DECIDE'),
+                                   ('replan', 'FAILED_FINAL')):
+                for debug_status in (None, 'RCA_CONFIRMED', 'RCA_UNCONFIRMED'):
+                    with self.subTest(over=over, kind=kind, debug_status=debug_status):
+                        self.assertEqual(repair_policy.review_action(
+                            kind=kind, fail_count=p['review_fail_max'] + over,
+                            debug_status=debug_status, policy=p), expected)
+            with self.subTest(over=over, gate='counts'):
+                self.assertEqual(repair_policy.admit_repair(
+                    repair_count=p['repair_max'] + over, rca_confirmed=True, policy=p),
+                    'REPAIR_LIMIT_REACHED')
+                self.assertEqual(repair_policy.test_failure_action(
+                    test_fail_count=p['test_fail_max'] + over, policy=p), 'STOPPED')
+                self.assertEqual(repair_policy.admit_debug(
+                    kind='root', parent_debug_used=p['parent_debug_max'] + over, policy=p),
+                    'DEBUG_PARENT_USED')
+                self.assertEqual(repair_policy.admit_debug(
+                    kind='child', group_debug_used=p['group_debug_max'] + over, policy=p),
+                    'DEBUG_GROUP_USED')
+        # Over the Debug limit at valid FAIL #2: an unconfirmed Debug, or a
+        # child lineage whose shared Debug is used, escalates instead of repairing.
+        for kind, expected in (('root', 'SPLIT'), ('child', 'PM_DECIDE'),
+                               ('replan', 'FAILED_FINAL')):
+            self.assertEqual(repair_policy.review_action(
+                kind=kind, fail_count=2, debug_status='RCA_UNCONFIRMED', policy=p), expected)
+        self.assertEqual(repair_policy.review_action(
+            kind='child', fail_count=2, group_debug_used=p['group_debug_max'], policy=p),
+            'PM_DECIDE')
 
 
 if __name__ == '__main__':
