@@ -143,6 +143,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             patch.object(task_submission_cli, '_remote_receipt_test_policy', return_value='LOCAL'),
             patch.object(task_submission_cli, 'load_route_config', return_value={
                 'routes': {'claude': {'default_model': 'claude-test-1',
+                    'allowed_models': ['claude-test-1'],
                     'default_effort': 'high', 'denied_dirs': ['.claude']}}}),
             patch.object(task_submission_cli.role_config, 'resolve_role', return_value={
                 'model': None, 'effort': None, 'config_dir': '/tmp/claude-config'}),

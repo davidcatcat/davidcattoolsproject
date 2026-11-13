@@ -6495,11 +6495,12 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                for attempts in family_attempts.values()):
             invalid()
         ordered = claims
-        dispatched = [claim for claim in ordered
-                      if type(claim) is dict and claim.get('state') == 'DISPATCHED']
-        if any(type(claim) is not dict or claim.get('state') not in ('DISPATCHED', 'FAILED')
+        if any(type(claim) is not dict or
+               claim.get('state') not in ('DISPATCHED', 'UNKNOWN', 'FAILED')
                for claim in ordered):
             invalid()
+        candidates = [claim for claim in ordered
+                      if claim.get('state') in ('DISPATCHED', 'UNKNOWN')]
         original = task.get('developer')
         if type(original) is not dict or original.get('source_sha') != source_sha:
             invalid()
@@ -6511,10 +6512,15 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
         if (registration.root != root or registration.branch != branch or
                 registration.source_sha != source_sha):
             invalid()
-        artifacts = [(original.get('artifact'), original.get('artifact_sha256'),
-                      source_sha,
-                      dispatched[0].get('head_sha') if dispatched else registration.result_sha)]
-        for index, claim in enumerate(dispatched):
+        # #1745: a repair whose Task has no usable Developer result (refused,
+        # BLOCKED, outcome unknown, never delegated) is skipped only when it
+        # made no commit: its claim head must equal the next chain head. A
+        # repair that moved the head without a recorded result, and an UNKNOWN
+        # claim whose repair Task did respond, stay invalid (fail closed).
+        dispatched = []
+        repairs = {}
+        for index, claim in enumerate(candidates):
+            head = claim.get('head_sha')
             repair_id = claim.get('repair_task_id')
             if type(repair_id) is not str:
                 invalid()
@@ -6522,11 +6528,27 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                 repair = store.get(repair_id)
             except Exception:
                 invalid()
-            developer = repair.get('developer') if type(repair) is dict else None
-            if (type(developer) is not dict or
-                    developer.get('state') != 'DEVELOPER_RESPONDED' or
-                    developer.get('source_sha') != claim.get('head_sha')):
+            if type(repair) is not dict:
                 invalid()
+            developer = repair.get('developer')
+            if (type(developer) is dict and
+                    developer.get('state') == 'DEVELOPER_RESPONDED'):
+                if (claim.get('state') != 'DISPATCHED' or
+                        developer.get('source_sha') != head):
+                    invalid()
+                dispatched.append(claim)
+                repairs[id(claim)] = developer
+                continue
+            next_head = (candidates[index + 1].get('head_sha')
+                         if index + 1 < len(candidates) else registration.result_sha)
+            if (type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None or
+                    head != next_head):
+                invalid()
+        artifacts = [(original.get('artifact'), original.get('artifact_sha256'),
+                      source_sha,
+                      dispatched[0].get('head_sha') if dispatched else registration.result_sha)]
+        for index, claim in enumerate(dispatched):
+            developer = repairs[id(claim)]
             next_head = (dispatched[index + 1].get('head_sha')
                          if index + 1 < len(dispatched) else registration.result_sha)
             artifacts.append((developer.get('artifact'), developer.get('artifact_sha256'),
@@ -6553,6 +6575,10 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
         invalid()
     except Exception:
         invalid()
+    if candidates and not dispatched:
+        # Every repair was skipped as a no-commit attempt: the original
+        # proposal alone ends at the D6 head, so use the single-artifact path.
+        return None
     return artifacts
 
 

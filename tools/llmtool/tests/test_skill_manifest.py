@@ -1,8 +1,11 @@
 """Tests for commit-pinned governance manifests."""
 
+import errno
 import os
+import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 
@@ -43,11 +46,23 @@ class SkillManifestTests(unittest.TestCase):
         self._git('init', '-q')
         self._git('config', 'user.email', 'manifest-tests@example.invalid')
         self._git('config', 'user.name', 'Manifest Tests')
+        # #1757: no automatic gc or maintenance may still write under .git at cleanup.
+        self._git('config', 'gc.auto', '0')
+        self._git('config', 'maintenance.auto', 'false')
         self._write_files(FILES)
         self.commit = self._commit()
 
     def tearDown(self):
-        self.temp.cleanup()
+        # #1757: retry once, after a short pause, when a late git child process
+        # left .git not empty (Errno 66 on macOS). Any other error is raised.
+        try:
+            self.temp.cleanup()
+        except OSError as error:
+            if error.errno != errno.ENOTEMPTY:
+                raise
+            time.sleep(0.2)
+            if os.path.exists(self.temp.name):
+                shutil.rmtree(self.temp.name)
 
     def _git(self, *args):
         return subprocess.run(

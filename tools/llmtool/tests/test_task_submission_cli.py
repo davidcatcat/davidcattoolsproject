@@ -255,6 +255,139 @@ class TaskSubmissionCLITests(unittest.TestCase):
              retry_head, result_head),
         ])
 
+    def _repair_chain_1745(self, claims, repairs, result_head):
+        """#1745: run the completion chain builder over stored claims."""
+        from types import SimpleNamespace
+
+        source_sha = 'a' * 40
+        original_artifact = 'diff --git a/sample.py b/sample.py\n'
+        task = {
+            'developer': {'source_sha': source_sha, 'write_paths': ['sample.py'],
+                          'artifact': original_artifact,
+                          'artifact_sha256': hashlib.sha256(
+                              original_artifact.encode()).hexdigest()},
+            'review_repair_claims': claims,
+        }
+
+        class Store:
+            def get(self, task_id):
+                if task_id not in repairs:
+                    raise AssertionError('unexpected repair Task load')
+                return repairs[task_id]
+
+        registration = SimpleNamespace(root='/repo/task', branch='task-branch',
+                                       source_sha=source_sha, result_sha=result_head)
+        with patch.object(submission_cli.task_completion, 'read_d6_registration',
+                          return_value=registration):
+            return task, submission_cli._completion_repair_artifact_segments(
+                task, Store(), executor_task='executor', common_dir='/repo/.git',
+                root='/repo/task', branch='task-branch', source_sha=source_sha)
+
+    def test_completion_repair_chain_skips_refused_no_commit_repair_1745(self):
+        refused_head, result_head = 'b' * 40, 'd' * 40
+        refused_id, repair_id = '3' * 32, '4' * 32
+        repair_artifact = 'diff --git a/sample.py b/sample.py\n'
+        responded = {'developer': {'state': 'DEVELOPER_RESPONDED',
+                                   'source_sha': refused_head,
+                                   'artifact': repair_artifact,
+                                   'artifact_sha256': hashlib.sha256(
+                                       repair_artifact.encode()).hexdigest()}}
+        claims = [
+            # The refused repair made no commit: the next repair starts at its head.
+            {'attempt': 1, 'state': 'DISPATCHED', 'head_sha': refused_head,
+             'repair_task_id': refused_id},
+            {'attempt': 2, 'state': 'DISPATCHED', 'head_sha': refused_head,
+             'repair_task_id': repair_id},
+        ]
+        repairs = {refused_id: {'developer': {'state': 'DEVELOPER_UNAVAILABLE',
+                                              'artifact': None,
+                                              'artifact_sha256': None}},
+                   repair_id: responded}
+        task, artifacts = self._repair_chain_1745(claims, repairs, result_head)
+        self.assertEqual(artifacts, [
+            (task['developer']['artifact'], task['developer']['artifact_sha256'],
+             'a' * 40, refused_head),
+            (repair_artifact, responded['developer']['artifact_sha256'],
+             refused_head, result_head),
+        ])
+
+    def test_completion_repair_chain_without_usable_repairs_uses_single_artifact_1745(self):
+        head = 'b' * 40
+        unusable = {
+            'blocked_no_changes': {'developer': {'state': 'BLOCKED',
+                                                 'error_code': 'CLAUDE_NO_CHANGES',
+                                                 'artifact': None,
+                                                 'artifact_sha256': None}},
+            'outcome_unknown': {'developer': {'state': 'DEVELOPER_OUTCOME_UNKNOWN'}},
+            'never_delegated': {'state': 'PM_RESPONDED'},
+        }
+        for name, repair in unusable.items():
+            for claim_state in ('DISPATCHED', 'UNKNOWN'):
+                with self.subTest(repair=name, claim_state=claim_state):
+                    claims = [{'attempt': 1, 'state': claim_state, 'head_sha': head,
+                               'repair_task_id': '3' * 32}]
+                    _, artifacts = self._repair_chain_1745(
+                        claims, {'3' * 32: repair}, head)
+                    self.assertIsNone(artifacts)
+
+    def test_completion_repair_chain_refuses_unrecorded_commit_after_repair_1745(self):
+        claim_head, moved_head = 'b' * 40, 'e' * 40
+        for claim_state in ('UNKNOWN', 'DISPATCHED'):
+            with self.subTest(claim_state=claim_state):
+                claims = [{'attempt': 1, 'state': claim_state, 'head_sha': claim_head,
+                           'repair_task_id': '3' * 32}]
+                repairs = {'3' * 32: {'developer': {
+                    'state': 'DEVELOPER_OUTCOME_UNKNOWN'}}}
+                with self.assertRaises(LLMToolError) as raised:
+                    self._repair_chain_1745(claims, repairs, moved_head)
+                self.assertEqual(raised.exception.completion_code,
+                                 'DEVELOPER_ARTIFACT_CHAIN_INVALID')
+
+    def test_completion_repair_chain_refuses_unknown_claim_with_recorded_result_1745(self):
+        head, result_head = 'b' * 40, 'd' * 40
+        artifact = 'diff --git a/sample.py b/sample.py\n'
+        claims = [{'attempt': 1, 'state': 'UNKNOWN', 'head_sha': head,
+                   'repair_task_id': '3' * 32}]
+        repairs = {'3' * 32: {'developer': {
+            'state': 'DEVELOPER_RESPONDED', 'source_sha': head, 'artifact': artifact,
+            'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest()}}}
+        with self.assertRaises(LLMToolError) as raised:
+            self._repair_chain_1745(claims, repairs, result_head)
+        self.assertEqual(raised.exception.completion_code,
+                         'DEVELOPER_ARTIFACT_CHAIN_INVALID')
+
+    def test_completion_repair_chain_keeps_normal_responded_chain_1745(self):
+        first_head, second_head, result_head = 'b' * 40, 'c' * 40, 'd' * 40
+        artifact = 'diff --git a/sample.py b/sample.py\n'
+        digest = hashlib.sha256(artifact.encode()).hexdigest()
+        claims = [
+            {'attempt': 1, 'state': 'DISPATCHED', 'head_sha': first_head,
+             'repair_task_id': '3' * 32},
+            {'attempt': 2, 'state': 'DISPATCHED', 'head_sha': second_head,
+             'repair_task_id': '4' * 32},
+        ]
+        repairs = {
+            '3' * 32: {'developer': {'state': 'DEVELOPER_RESPONDED',
+                                     'source_sha': first_head, 'artifact': artifact,
+                                     'artifact_sha256': digest}},
+            '4' * 32: {'developer': {'state': 'DEVELOPER_RESPONDED',
+                                     'source_sha': second_head, 'artifact': artifact,
+                                     'artifact_sha256': digest}},
+        }
+        task, artifacts = self._repair_chain_1745(claims, repairs, result_head)
+        self.assertEqual(artifacts, [
+            (task['developer']['artifact'], task['developer']['artifact_sha256'],
+             'a' * 40, first_head),
+            (artifact, digest, first_head, second_head),
+            (artifact, digest, second_head, result_head),
+        ])
+        # A responded repair that is not the D6 head's author is still refused.
+        repairs['4' * 32]['developer']['source_sha'] = first_head
+        with self.assertRaises(LLMToolError) as raised:
+            self._repair_chain_1745(claims, repairs, result_head)
+        self.assertEqual(raised.exception.completion_code,
+                         'DEVELOPER_ARTIFACT_CHAIN_INVALID')
+
     def test_trusted_bootstrap_helper_requires_clean_pinned_dispatcher_source(self):
         dispatcher_root = Path(self.temp.name).resolve() / 'dispatcher'
         helper = dispatcher_root / 'tools' / 'llmtool' / 'scripts' / 'd6_worktree_env.py'
