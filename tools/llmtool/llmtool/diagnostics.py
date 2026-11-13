@@ -98,17 +98,17 @@ _RUN_STATUSES = frozenset(('success', 'error', 'interrupted', 'output_closed', '
 # Recognizable credential values, not ordinary authorization/status vocabulary.
 _CREDENTIAL = re.compile(
     r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
-    + _CLOUD_KEY + r'|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|'
-    r'(?<![A-Za-z0-9_])(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
-    r'(?<![A-Za-z0-9_])xox[abprs]-[A-Za-z0-9-]{20,}|'
-    r'(?<![A-Za-z0-9_])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_])', re.IGNORECASE,
+    + _CLOUD_KEY + r'|(?<!(?-i:[A-Za-z0-9_]))sk-[A-Za-z0-9_-]{12,}|'
+    r'(?<!(?-i:[A-Za-z0-9_]))(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
+    r'(?<!(?-i:[A-Za-z0-9_]))xox[abprs]-[A-Za-z0-9-]{20,}|'
+    r'(?<!(?-i:[A-Za-z0-9_]))eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?!(?-i:[A-Za-z0-9_]))', re.IGNORECASE,
 )
 _AUTH_VALUE = re.compile(
-    r'(?<![A-Za-z0-9_])(bearer|basic)\s+([A-Za-z0-9._~+/-]+={0,2})',
+    r'(?<!(?-i:[A-Za-z0-9_]))(bearer|basic)\s+([A-Za-z0-9._~+/-]+={0,2})',
     re.IGNORECASE,
 )
 _CREDENTIAL_ASSIGNMENT = re.compile(
-    r'["\']?(?<![A-Za-z0-9_])(?:api[_-]?key|password|token|secret|access[_-]?token|client[_-]?secret|'
+    r'["\']?(?<!(?-i:[A-Za-z0-9_]))(?:api[_-]?key|password|token|secret|access[_-]?token|client[_-]?secret|'
     r'aws_secret_access_key)["\']?\s*[:=]\s*(<redacted>|\[redacted\]|"[^"\n]*"|\'[^\'\n]*\'|[^\s,;}\]]+)',
     re.IGNORECASE,
 )

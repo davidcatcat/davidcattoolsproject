@@ -13,12 +13,14 @@ class CredentialAfterNonAsciiTests(unittest.TestCase):
         scheme = 'BEARER'.lower()
         key = 'api' + '_key'
         jwt = '.'.join(('eyJ' + FILL, FILL, FILL))
-        for text in (CJK + 'sk-' + FILL, CJK + 'ghp_' + FILL, CJK + 'xoxb-' + FILL,
-                     CJK + jwt, jwt + CJK, CJK + scheme + ' ' + FILL,
-                     CJK + key + '=' + FILL):
-            with self.subTest(case=len(text)):
-                with self.assertRaises(ValueError):
-                    d.safe_diagnostic_text(text)
+        # Under re.IGNORECASE an ASCII class also matches some non-ASCII letters.
+        for near in (CJK, '\u0130', '\u0131', '\u017f', '\u212a'):
+            for text in (near + 'sk-' + FILL, near + 'ghp_' + FILL, near + 'xoxb-' + FILL,
+                         near + jwt, jwt + near, near + scheme + ' ' + FILL,
+                         near + key + '=' + FILL):
+                with self.subTest(near=ord(near[0]), case=len(text)):
+                    with self.assertRaises(ValueError):
+                        d.safe_diagnostic_text(text)
 
     def test_ascii_word_prefix_still_not_a_credential(self):
         for text in ('mask-' + FILL, 'xghp_' + FILL, 'myxoxb-' + FILL,
