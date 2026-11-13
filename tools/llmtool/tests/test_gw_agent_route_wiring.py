@@ -50,6 +50,21 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             'base_url': 'https://authorized.example'}, {'max_tokens': 49152}))
         endpoint.start()
         self.addCleanup(endpoint.stop)
+        # #1773: dispatch checks the gateway-served model against allowed_models,
+        # so the default route config lists the served model the fake endpoint
+        # names. A test that patches load_route_config itself overrides this.
+        real_load = task_submission_cli.load_route_config
+
+        def listed_route_config(*args, **kwargs):
+            config = real_load(*args, **kwargs)
+            entry = config['routes']['gw-agent']
+            entry['allowed_models'] = list(entry['allowed_models']) + ['authorized-model']
+            return config
+
+        routes = patch.object(task_submission_cli, 'load_route_config',
+                              side_effect=listed_route_config)
+        routes.start()
+        self.addCleanup(routes.stop)
 
     def test_gw_agent_endpoint_reads_the_gateway_profile_not_company_gw(self):
         profile = {'name': 'work', 'base_url': 'https://gateway.example', 'model': 'm1',
@@ -458,7 +473,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                                   'max_output_tokens': 8192,
                                   'allowed_data_classes': ['synthetic', 'public_repo']},
                               'default_model': 'gw-agent-default',
-                              'allowed_models': ['gw-agent-default'],
+                              'allowed_models': ['gw-agent-default', 'authorized-model'],
                               'default_effort': 'low'}}}), \
              patch.object(task_submission_cli, 'resolve_profile_config',
                           return_value={'generation': {'max_tokens': 49152}}), \
@@ -486,6 +501,62 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(store.value['developer']['error_code'], 'DEVELOPER_OWNER_PAUSED')
         self.assertEqual(store.value['dispatch_audit'][-1]['action'], 'DISPATCH')
         self.assertEqual(store.value['dispatch_audit'][-1]['decision'], 'ALLOWED')
+        runner.assert_not_called()
+
+    def test_unlisted_gateway_profile_model_is_refused_before_task_mutation(self):
+        # #1773 (CWE-863): the role model is listed, but the gateway profile
+        # serves a model allowed_models does not list; dispatch must refuse it.
+        task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'bounded task',
+            'task_binding': {'contract_digest': 'c' * 64},
+            'pm_assignment': {'route': 'gw-agent', 'risk': 'LOW', 'goal': 'goal',
+                              'acceptance': ['record result']},
+            'developer': None, 'completion': None}
+
+        class Store:
+            def get(self, _task_id):
+                return copy.deepcopy(task)
+
+            def _mutate(self, *_args, **_kwargs):
+                raise AssertionError('an unlisted served model must not mutate the Task')
+
+            compare_and_update = d6_bind_compare_and_update = update = _mutate
+
+        registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
+            common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
+            session_ref='session-ref', native_session_id=None)
+        snapshot = SimpleNamespace(head='d' * 40)
+        args = Namespace(task_id='a' * 32, mode='direct', context_stdin=False,
+            data_class='SYNTHETIC', egress_basis='Synthetic test context.',
+            acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
+            read_path=['src.py'], write_path=['src.py'])
+        route_config = {
+            'allowed_data_classes': ['synthetic', 'public_repo'],
+            'profile': {'adapter': 'openai-chat-tools', 'model': 'gw-agent-default',
+                        'context_cap_tokens': 32768, 'max_output_tokens': 8192,
+                        'allowed_data_classes': ['synthetic', 'public_repo']},
+            'default_model': 'gw-agent-default', 'allowed_models': ['gw-agent-default'],
+            'default_effort': 'low'}
+        with tempfile.TemporaryDirectory() as home, \
+             patch.dict(os.environ, {'HOME': home}), \
+             patch.object(task_completion, 'validate_task_binding'), \
+             patch.object(task_submission_cli, '_delegate_d6_binding',
+                          return_value=(registration, snapshot)), \
+             patch.object(task_submission_cli, '_assignment_paths',
+                          return_value=(['src.py'], ['src.py'])), \
+             patch.object(task_submission_cli, 'load_route_config',
+                          return_value={'routes': {'gw-agent': route_config}}), \
+             patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
+                 'type': 'openai-compatible', 'model': 'unlisted-model',
+                 'base_url': 'https://authorized.example'}, {'max_tokens': 4096})), \
+             patch.object(task_submission_cli, 'GwAgentRoute') as constructor, \
+             patch.object(task_submission_cli, 'run_route') as runner:
+            with self.assertRaises(LLMToolError) as caught:
+                task_submission_cli.run_task_gw_agent_delegate(
+                    args, store=Store(), route_runner=runner)
+        self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
+        self.assertIn('ROLE_MODEL_NOT_ALLOWED', str(caught.exception))
+        constructor.assert_not_called()
         runner.assert_not_called()
 
     def test_gw_agent_developer_shape_includes_execution_and_direct_callback(self):
@@ -663,7 +734,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                                   'max_output_tokens': 8192,
                                   'allowed_data_classes': ['synthetic', 'public_repo']},
                               'default_model': 'gw-agent-default',
-                              'allowed_models': ['gw-agent-default'],
+                              'allowed_models': ['gw-agent-default', 'authorized-model'],
                               'default_effort': 'low'}}}), \
              patch.object(task_submission_cli, 'resolve_profile_config',
                           return_value={'generation': {'max_tokens': 49152}}), \
@@ -909,7 +980,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                               'profile_name': 'llmtool-direct',
                               'authorization_ref': 'pm-task-ref',
                               'default_model': 'gw-agent-default',
-                              'allowed_models': ['gw-agent-default'],
+                              'allowed_models': ['gw-agent-default', 'authorized-model'],
                               'default_effort': 'low'}}}), \
              patch.dict(os.environ, {'HOME': str(config_home)}), \
              patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
@@ -1115,9 +1186,12 @@ class GwAgentRealStoreTests(unittest.TestCase):
                   provider_model='gw', reject_responded=False, route_runner=None,
                   wrap_store=None, gate=None, authorize=None, route_factory=None,
                   content='hello synthetic\n', bind=None, repair_packet=None,
-                  data_class='SYNTHETIC', egress_basis='Synthetic test content only.'):
+                  data_class='SYNTHETIC', egress_basis='Synthetic test content only.',
+                  list_provider_model=True):
         # #1072: without ``bind`` the D6 session step keeps today's unbound
         # result; with it the real step runs against that fake lifecycle helper.
+        # #1773: the gateway profile model must be in allowed_models, so the
+        # fixture lists it unless list_provider_model is False.
         task_id = self.task_id = self._active_pm_task(target)
         if provider_model != 'gw':
             config = self.base / '.config' / 'llmtool' / 'config.yaml'
@@ -1147,6 +1221,9 @@ class GwAgentRealStoreTests(unittest.TestCase):
         real_config = load_route_config()
         real_config['routes']['gw-agent']['package_path'] = str(
             Path(__file__).resolve().parents[2] / 'api-agent-gateway')
+        if list_provider_model:
+            real_config['routes']['gw-agent']['allowed_models'] = [
+                real_config['routes']['gw-agent']['default_model'], provider_model]
         decision = worker_dispatch.PolicyDecision('gw-agent', True,
                                                   'OWNER_POLICY_ALLOWED', 'f' * 64)
         store = self.store
@@ -1404,6 +1481,18 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertEqual(developer['model'], 'qwen3.8-27b')
         self.assertEqual(developer['usage']['served_model'], 'qwen3.8-27b')
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
+
+    def test_gateway_profile_model_outside_allowed_models_is_refused(self):
+        # #1773 (CWE-863): the real repo route lists only its default model; a
+        # gateway profile serving another model is refused before any claim.
+        with self.assertRaises(LLMToolError) as caught:
+            self._delegate('gw-agent-unlisted-model.md', provider_model='unlisted-model',
+                           list_provider_model=False, route_runner=self._unused_runner)
+        self.assertEqual(caught.exception.role_config_code, 'ROLE_MODEL_NOT_ALLOWED')
+        task = self._reloaded()
+        self.assertIsNone(task.get('developer'))
+        self.assertEqual(task['state'], 'PM_RESPONDED')
+        self.assertFalse((self.root / 'gw-agent-unlisted-model.md').exists())
 
     def test_untestable_file_persists_but_waits_with_a_named_gate(self):
         target = 'gw-agent-synthetic.txt'

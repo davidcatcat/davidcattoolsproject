@@ -1139,6 +1139,12 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     reviewer_role = role_config.resolve_role(
         'reviewer' if reviewer_key == 'claude-reviewer' else 'codex-reviewer')
     config_dir = reviewer_role['config_dir'] if reviewer_role is not None else None
+    # #1777 (CWE-863): the Claude Reviewer never runs under another provider's
+    # account directory, whichever layer or alias resolved it. The resolver
+    # always sets provider alongside an account directory.
+    if (reviewer_key == 'claude-reviewer' and
+            reviewer_role.get('provider') not in (None, 'claude')):
+        _refuse('REVIEWER_PROVIDER_MISMATCH')
     if (reviewer_key == 'claude-reviewer' and
             (reviewer_role['source'] == 'builtin' or config_dir is None)):
         _refuse('REVIEWER_ACCOUNT_UNCONFIGURED')
