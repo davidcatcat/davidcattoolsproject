@@ -818,6 +818,10 @@ def add_task_submission_parsers(actions):
                           help='root-cause family matching the confirmed High Debug diagnosis')
     delegate.add_argument('--context-stdin', action='store_true',
                           help='codex text proposals only: read bounded, sensitive-screened context from stdin')
+    delegate.add_argument('--pm-session',
+                          help=('caller PM session (native UUID or pm- ID); must own '
+                                'the Task; default: CLAUDE_CODE_SESSION_ID or '
+                                'CODEX_THREAD_ID'))
     complete = actions.add_parser('complete', help='Collect verified Executor evidence and return it to the original PM')
     complete.add_argument('task_id', help='existing durable Task ID')
     complete.add_argument('--executor-task', required=True, help='registered D6 Executor task id bound at delegation')
@@ -6078,6 +6082,23 @@ def run_task_delegate(args, *, store=None):
         raise LLMToolError('developer outcome could not be persisted; details omitted') from None
     _print(_task_view(saved))
     return 0
+
+
+def run_task_delegate_checked(args, *, store=None):
+    """CLI entry for ``task delegate``: the caller's PM session must own the Task.
+
+    #1230 A1 (#1124 rest, item 2): only the CLI checks the caller.
+    ``review_repair`` makes its internal delegate by calling ``run_task_delegate``
+    directly, so that call is not checked here.
+    """
+    from . import pm_caller
+    store = TaskStore() if store is None else store
+    try:
+        pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
+    except pm_caller.PMCallerRefused as exc:
+        _print(pm_caller.refusal(args.task_id, exc.code), None)
+        return 1
+    return run_task_delegate(args, store=store)
 
 
 def run_task_submit(args, *, store=None, stdout=None):
