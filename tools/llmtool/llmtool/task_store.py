@@ -1310,6 +1310,8 @@ def _validate(record, *, strict=True):
                                         'RUN_FAILED')):
                 _fail('HIGH_DEBUG_INVALID')
     if 'repair_cap_override' in record:
+        # #1502 WP-D D7: nothing writes this field any more and nothing reads
+        # it to raise a cap; old records stay valid with the same shape check.
         item = record['repair_cap_override']
         if (type(item) is not dict or set(item) !=
                 frozenset(('ref', 'rounds', 'recorded_at')) or
@@ -3169,22 +3171,6 @@ class TaskStore:
                 self._update(task_id, expected={'record_sha256': current['record_sha256']},
                              changes={'publish_operations': operations})
                 return operation
-            except TaskStoreConflict:
-                continue
-        _fail('TASK_STORE_BUSY')
-
-    def record_repair_cap_override(self, task_id, *, ref, rounds, recorded_at=None):
-        """Persist the trusted PM reference that raises this Task's repair cap."""
-        item = {'ref': ref, 'rounds': rounds,
-                'recorded_at': (datetime.now(timezone.utc).replace(
-                    microsecond=0).strftime(_UTC_SECONDS)
-                    if recorded_at is None else recorded_at)}
-        for _ in range(4):
-            current = self.get(task_id)
-            try:
-                return self._update(
-                    task_id, expected={'record_sha256': current['record_sha256']},
-                    changes={'repair_cap_override': item})
             except TaskStoreConflict:
                 continue
         _fail('TASK_STORE_BUSY')
