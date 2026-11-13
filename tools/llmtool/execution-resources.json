@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "purpose": "Informational static execution-resource inventory only; never grants AI dispatch, CI job execution, remote SSH or credentials",
-  "as_of": "2026-11-07",
+  "as_of": "2026-11-14",
   "hosts": [
     {
       "id": "local-mac",
@@ -9,22 +9,9 @@
       "os": "macOS",
       "reported_memory_gib": 8,
       "capabilities": [
-        "macos-native-validation",
-        "self-hosted-ci"
+        "macos-native-validation"
       ],
-      "reference": "tools/mac-runner/README.md",
-      "runners": [
-        {
-          "name": "davidproject-self-action",
-          "runner_label": "local-mac-ci",
-          "role": "macOS 3.13 CI"
-        },
-        {
-          "name": "davidproject-self-action-2",
-          "runner_label": "local-mac-ci",
-          "role": "macOS 3.13 CI"
-        }
-      ]
+      "reference": "tools/mac-runner/README.md"
     },
     {
       "id": "aws-ec2",
@@ -33,30 +20,8 @@
       "arch": "x86_64",
       "reported_vcpu": 4,
       "reported_memory_gib": 8,
-      "capabilities": [
-        "self-hosted-linux-ci"
-      ],
-      "reference": "tools/ec2-runner/README.md",
-      "runners": [
-        {
-          "name": "ec2-self-runner",
-          "runner_label": "local-ec2-linux-ci",
-          "service_account": "ghrunner",
-          "role": "Linux CI"
-        },
-        {
-          "name": "ec2-self-runner-2",
-          "runner_label": "local-ec2-linux-ci",
-          "service_account": "ghrunner2",
-          "role": "Linux CI"
-        },
-        {
-          "name": "ec2-self-runner-3",
-          "runner_label": "local-ec2-linux-ci-pending until #446 merges",
-          "service_account": "ghrunner3",
-          "role": "Linux CI shard"
-        }
-      ]
+      "capabilities": [],
+      "reference": "tools/ec2-runner/README.md"
     },
     {
       "id": "aws-ec2-2",
@@ -65,18 +30,8 @@
       "arch": "x86_64",
       "reported_vcpu": 2,
       "reported_memory_gib": 3,
-      "capabilities": [
-        "self-hosted-linux-ci"
-      ],
-      "reference": "tools/ec2-runner/README.md",
-      "runners": [
-        {
-          "name": "ec2-self-runner-4",
-          "runner_label": "local-ec2-linux-ci",
-          "service_account": "ghrunner4",
-          "role": "Linux CI"
-        }
-      ]
+      "capabilities": [],
+      "reference": "tools/ec2-runner/README.md"
     }
   ],
   "live_online_state": "UNKNOWN",
