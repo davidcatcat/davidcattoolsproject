@@ -15,12 +15,50 @@ _ENV_FIELDS = {
     "MODEL": "model",
     "EFFORT": "effort",
 }
+# #1502 WP-E: Developer role ids bound to a developer-routes.json route. The
+# route supplies the repo-default model and effort and its allowed_models.
+ROUTE_ROLES = {
+    "agy-developer": "agy",
+    "claude-developer": "claude",
+    "gw-agent-developer": "gw-agent",
+}
+# Legacy user-config role names (keys) are aliases of the new ids (values),
+# so an existing user config keeps working without an edit.
+LEGACY_ROLE_ALIASES = {"reviewer": "claude-reviewer"}
+# Role ids `llmtool roles` always lists, in addition to configured roles.
+KNOWN_ROLES = (
+    "agy-developer", "claude-debug", "claude-developer", "claude-reviewer",
+    "codex-debug", "codex-developer", "codex-reviewer", "gw-agent-developer",
+    "opencode-developer", "pm",
+)
+ROLE_MODEL_NOT_ALLOWED = "ROLE_MODEL_NOT_ALLOWED"
 
 
 def _fail(message="role configuration: invalid configuration", code="ROLE_CONFIG_INVALID"):
     error = LLMToolError(message)
     error.role_config_code = code
     raise error from None
+
+
+def _fail_model(detail=None):
+    """Refuse a Developer model outside its route's allowed_models."""
+    message = "role model is not allowed for its route: " + ROLE_MODEL_NOT_ALLOWED
+    if detail is not None:
+        message += " (" + detail + ")"
+    error = LLMToolError(message)
+    error.role_config_code = ROLE_MODEL_NOT_ALLOWED
+    error.owner_override_code = detail
+    raise error from None
+
+
+def config_names(role):
+    """Return the user-config names for role: itself first, then its aliases."""
+    names = [role]
+    if role in LEGACY_ROLE_ALIASES:
+        names.append(LEGACY_ROLE_ALIASES[role])
+    names.extend(legacy for legacy, new in sorted(LEGACY_ROLE_ALIASES.items())
+                 if new == role)
+    return names
 
 
 def _name(value):
@@ -99,30 +137,128 @@ def _override_value(key, value):
             _fail("role override is invalid", "ROLE_CONFIG_OVERRIDE_INVALID")
 
 
-def resolve_role(role, cli=None, environ=None, *, home=None):
-    """Resolve one role. CLI and environment overrides are one-shot and never save."""
+def _load_user(home):
     import copy
     from .config import DEFAULTS, _apply_user, user_config_path, _read_yaml
 
-    if not _name(role):
-        _fail("role name is invalid", "ROLE_CONFIG_ROLE_INVALID")
     path = user_config_path(home)
     user = _read_yaml(path, "user config") if os.path.lexists(path) else {}
     loaded = copy.deepcopy(DEFAULTS)
     _apply_user(loaded, user)
+    return user
+
+
+def configured_roles(home=None):
+    """Return the validated role names in the user config (no other data)."""
+    _, roles = validate_role_config(_load_user(home))
+    return sorted(roles)
+
+
+def _env_values(env, role):
+    """Return env overrides; LLMTOOL_ROLE_<ROLE>_ accepts '-' or '_' in ROLE."""
+    prefixes = ["LLMTOOL_ROLE_" + role.upper() + "_"]
+    underscored = "LLMTOOL_ROLE_" + role.upper().replace("-", "_") + "_"
+    if underscored != prefixes[0]:
+        prefixes.append(underscored)
+    values = {}
+    for suffix, field in _ENV_FIELDS.items():
+        found = [env[prefix + suffix] for prefix in prefixes if prefix + suffix in env]
+        if any(value != found[0] for value in found):
+            _fail("role override is ambiguous", "ROLE_CONFIG_OVERRIDE_INVALID")
+        if found:
+            values[field] = found[0]
+    return values
+
+
+def _route_entry(route, route_config):
+    """Return one developer-routes.json entry, loaded when not supplied."""
+    if route_config is None:
+        from .developer_routes import RouteError, load_route_config
+        try:
+            route_config = load_route_config()["routes"].get(route)
+        except RouteError:
+            _fail("developer route configuration is invalid", "ROUTE_CONFIG_INVALID")
+    if (type(route_config) is not dict or
+            type(route_config.get("default_model")) is not str or
+            type(route_config.get("default_effort")) is not str or
+            type(route_config.get("allowed_models")) is not list):
+        _fail("developer route configuration is invalid", "ROUTE_CONFIG_INVALID")
+    return route_config
+
+
+def _default_repository():
+    from .config import repository_config
+    from .owner_override import OwnerOverrideError
+    try:
+        return repository_config()["slug"]
+    except Exception:
+        raise OwnerOverrideError("OWNER_OVERRIDE_INVALID") from None
+
+
+def check_role_model(route, route_config, model, *, owner_override=None,
+                     repository=None, fetch_comment=None):
+    """Return None for an allowed model, else the verified owner override.
+
+    A model outside the route's allowed_models is refused with
+    ROLE_MODEL_NOT_ALLOWED unless owner_override ({"model", "ref"}) names the
+    same model and owner_override.py verifies that its ref names this route and
+    model. fetch_comment(comment_id) is the injected GitHub reader; without it
+    the ref is unreadable and the override is refused.
+    """
+    from .developer_routes import RouteError, check_route_model
+    from .owner_override import OwnerOverrideError, validate_owner_override
+
+    try:
+        check_route_model({"routes": {route: route_config}}, route, model)
+        return None
+    except RouteError:
+        pass
+    if owner_override is None:
+        _fail_model()
+    try:
+        if type(owner_override) is not dict or owner_override.get("model") != model:
+            raise OwnerOverrideError("OWNER_OVERRIDE_MISMATCH")
+        if fetch_comment is None:
+            raise OwnerOverrideError("OWNER_OVERRIDE_REF_UNREADABLE")
+        if repository is None:
+            repository = _default_repository()
+        accepted = validate_owner_override(owner_override, route, repository=repository,
+                                           fetch_comment=fetch_comment)
+    except OwnerOverrideError as exc:
+        _fail_model(exc.code)
+    if accepted.get("route") != route or accepted.get("model") != model:
+        _fail_model("OWNER_OVERRIDE_MISMATCH")
+    return accepted
+
+
+def resolve_role(role, cli=None, environ=None, *, home=None, route_config=None,
+                 owner_override=None, repository=None, fetch_comment=None):
+    """Resolve one role. CLI and environment overrides are one-shot and never save.
+
+    Precedence: CLI > env > user config (the role or its legacy alias) >
+    repo default. Developer roles (ROUTE_ROLES) take their repo default model
+    and effort from developer-routes.json (route_config overrides the loaded
+    entry) and their model must be in allowed_models; see check_role_model.
+    """
+    if not _name(role):
+        _fail("role name is invalid", "ROLE_CONFIG_ROLE_INVALID")
+    user = _load_user(home)
     # Reuse the ordinary user-config validation path, then resolve the
     # user-only role data from that explicit user file.
     # Role data is intentionally not part of the general provider config
     # projection. Validate it directly from the trusted user-config load.
     accounts, roles = validate_role_config(user)
     legacy = user.get("pm_runtime", {}).get("claude_config_dir")
-    configured = roles.get(role, {})
+    configured_name = next((name for name in config_names(role) if name in roles), None)
+    configured = roles.get(configured_name, {}) if configured_name is not None else {}
     settings = {"role": role, "provider": None, "provider_profile": None,
                 "account": None, "config_dir": None, "model": None, "effort": None}
     source = "builtin"
-    if role in roles:
+    if configured_name is not None:
         settings.update(configured)
         source = "roles"
+    model_source = "roles" if settings["model"] is not None else None
+    effort_source = "roles" if settings["effort"] is not None else None
     if role == "pm" and legacy is not None:
         if settings["account"] is None:
             settings["provider"] = "claude"
@@ -135,10 +271,7 @@ def resolve_role(role, cli=None, environ=None, *, home=None):
     elif settings["config_dir"] is not None:
         settings["config_dir"] = _validate_account_dir(settings["config_dir"])
     env = os.environ if environ is None else environ
-    env_prefix = "LLMTOOL_ROLE_" + role.upper() + "_"
-    for source_name, values in (("env", {field: env[env_prefix + suffix]
-                                             for suffix, field in _ENV_FIELDS.items()
-                                             if env_prefix + suffix in env}),
+    for source_name, values in (("env", _env_values(env, role)),
                                 ("cli", cli or {})):
         if source_name == "cli":
             values = {key: value for key, value in values.items()
@@ -168,5 +301,27 @@ def resolve_role(role, cli=None, environ=None, *, home=None):
                 settings["provider"] = value
             else:
                 settings[key] = value
+                if key == "model":
+                    model_source = source_name
+                elif key == "effort":
+                    effort_source = source_name
+    route = ROUTE_ROLES.get(role)
+    if route is not None:
+        entry = _route_entry(route, route_config)
+        if settings["model"] is None:
+            settings["model"] = entry["default_model"]
+            model_source = "repo_default"
+        if settings["effort"] is None:
+            settings["effort"] = entry["default_effort"]
+            effort_source = "repo_default"
+        if source == "builtin":
+            source = "repo_default"
+        settings["model_source"] = model_source
+        settings["effort_source"] = effort_source
+        accepted = check_role_model(route, entry, settings["model"],
+                                    owner_override=owner_override,
+                                    repository=repository, fetch_comment=fetch_comment)
+        if accepted is not None:
+            settings["owner_override"] = accepted
     settings["source"] = source
     return settings
