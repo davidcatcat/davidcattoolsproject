@@ -1,6 +1,10 @@
 {
   "schema_version": 1,
   "exact": [
+    "CLAUDE.md",
+    "AGENTS.md",
+    "scripts/llmtool_monitor.py",
+    "tools/llmtool/policy.json",
     "tools/llmtool/worker-dispatch.json",
     "tools/llmtool/developer-routes.json",
     "tools/llmtool/execution-resources.json",
@@ -28,8 +32,8 @@
     "tools/llmtool/llmtool/remote_test.py",
     "tools/llmtool/llmtool/log_safety.py",
     "tools/llmtool/llmtool/sensitive_paths.py",
-    "tools/llmtool/llmtool/owner_tty_issuer.py",
-    "tools/llmtool/llmtool/self_update.py"
+    "tools/llmtool/llmtool/run_budget.py",
+    "tools/llmtool/llmtool/high_debug.py"
   ],
   "prefixes": [
     ".github/",
@@ -38,6 +42,9 @@
     "tools/api-agent-gateway/api_agent_gateway/"
   ],
   "globs": [
-    "tools/llmtool/llmtool/authorization_*.py"
+    ".claude/skills/**",
+    "tools/llmtool/llmtool/authorization_*.py",
+    "tools/llmtool/llmtool/merge_train*.py",
+    "tools/llmtool/llmtool/developer_routes/*.py"
   ]
 }

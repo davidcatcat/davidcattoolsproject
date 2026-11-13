@@ -28,6 +28,16 @@ class DocsCheckTests(unittest.TestCase):
         config = self.repo / "tools" / "llmtool" / "guidance-drift.json"
         config.parent.mkdir(parents=True)
         config.write_text(json.dumps({"schema_version": 1, "hashes": hashes, "codex_only": []}), encoding="utf-8")
+        # Minimal valid model allowlist (#1502 WP-G); the guidance check reads it
+        # from the checked repository root. The model name is fictional.
+        (config.parent / "developer-routes.json").write_text(json.dumps({
+            "schema_version": 1,
+            "routes": {"fixture": {
+                "default_model": "gpt-6-luna",
+                "allowed_models": ["gpt-6-luna"],
+                "default_effort": "medium",
+            }},
+        }), encoding="utf-8")
         subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=self.repo, check=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo, check=True)
@@ -83,6 +93,19 @@ class DocsCheckTests(unittest.TestCase):
             self.assertTrue(any("HASH_STALE" in item for item in self.findings("# Good\n")))
         finally:
             docs_check.guidance_drift_check.check = original
+
+    def test_checked_root_without_model_allowlist_fails_closed(self):
+        (self.repo / "tools" / "llmtool" / "developer-routes.json").unlink()
+        self.assertIn(
+            "tools/llmtool/developer-routes.json: MODEL_ALLOWLIST_UNAVAILABLE FileNotFoundError",
+            self.findings("# Good\n"),
+        )
+
+    def test_model_check_uses_checked_root_allowlist(self):
+        skill = self.repo / "skills" / "sample" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("---\nname: sample\ndescription: d\n---\nUse `gpt-9-wrong`.\n", encoding="utf-8")
+        self.assertIn("skills/sample/SKILL.md: MODEL_NOT_ALLOWED gpt-9-wrong", self.findings("# Good\n"))
 
     def test_link_inside_fenced_code_is_ignored(self):
         self.assertFalse(self.findings("```md\n[example](missing.md)\n```\n"))
