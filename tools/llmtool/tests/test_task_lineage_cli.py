@@ -316,5 +316,554 @@ class LineageSplitTests(LineageCase):
         self.assertEqual(self.store.get(first)['lineage']['state'], 'OPEN')
 
 
+def run_command(function, args, **kwargs):
+    """Run one lineage adapter; return its exit code and the one printed JSON object."""
+    import io
+    import json
+    out = io.StringIO()
+    code = function(args, stdout=out, **kwargs)
+    return code, json.loads(out.getvalue())
+
+
+def parse(*argv):
+    from llmtool import cli as main_cli
+    return main_cli.parser_for_cli().parse_args(['task', *argv])
+
+
+class LineageSplitCommandTests(LineageCase):
+    def split_args(self, root, children, reason='Review FAIL 3.', session=PM):
+        from types import SimpleNamespace
+        return SimpleNamespace(root_id=root, child=list(children), reason=reason,
+                               pm_session=session)
+
+    def test_split_refusals_write_nothing_read_no_main_sha_and_print_only_the_code(self):
+        # D10c3: every refusal exits 1, prints only {'code': ...}, records no lineage
+        # on any Task and never reads the main SHA.
+        root, first, second, claimed = self.task(), self.task(), self.task(), self.task()
+        self.store.update(claimed, merge_attempt=CLAIM)
+        reads = []
+
+        def main_sha():
+            reads.append(True)
+            return MAIN
+        cases = (
+            ('SPLIT_REASON_REQUIRED', self.split_args(root, [first], reason=' ')),
+            ('LINEAGE_PM_SESSION_DENIED',
+             self.split_args(root, [first], session='pm-other')),
+            ('LINEAGE_MEMBER_INVALID', self.split_args(root, [root])),
+            ('LINEAGE_MEMBER_INVALID', self.split_args(root, [first, first])),
+            ('LINEAGE_MEMBER_INVALID', self.split_args(root, [first, claimed])),
+            ('SPLIT_ROOT_NOT_OPEN', self.split_args(claimed, [first])),
+        )
+        every = (root, first, second, claimed)
+        before = {task_id: self.store.get(task_id)['record_sha256'] for task_id in every}
+        for code, args in cases:
+            with self.subTest(code=code):
+                self.assertEqual(run_command(cli.run_task_split, args, store=self.store,
+                                             main_sha_reader=main_sha),
+                                 (1, {'code': code}))
+        self.assertEqual(reads, [])
+        for task_id in every:
+            record = self.store.get(task_id)
+            self.assertEqual(record['record_sha256'], before[task_id])
+            self.assertNotIn('lineage', record)
+
+    def test_a_parked_race_refusal_prints_only_the_code_and_records_no_child(self):
+        # The locked park refuses after the main SHA read: still only a code, no child.
+        root, first = self.task(), self.task()
+
+        def main_sha():
+            self.store.update(root, merge_attempt=CLAIM)
+            return MAIN
+        self.assertEqual(run_command(cli.run_task_split, self.split_args(root, [first]),
+                                     store=self.store, main_sha_reader=main_sha),
+                         (1, {'code': 'SPLIT_ROOT_MERGE_STARTED'}))
+        self.assertNotIn('lineage', self.store.get(root))
+        self.assertNotIn('lineage', self.store.get(first))
+
+    def test_split_through_the_real_parser_parks_the_root(self):
+        from llmtool import cli as main_cli
+        root, first, second = self.task(), self.task(), self.task()
+        args = parse('split', root, '--child', first, '--child', second,
+                     '--pm-session', PM, '--reason', 'Review FAIL 3.')
+        self.assertEqual((args.command, args.action, args.root_id, args.child),
+                         ('task', 'split', root, [first, second]))
+        self.assertEqual(parse('split', root, '--child', first, second, '--pm-session', PM,
+                               '--reason', 'x').child, [first, second])
+        self.assertEqual(main_cli.TASK_ACTIONS['split'], ('run_task_split', False))
+        function = getattr(cli, main_cli.TASK_ACTIONS[args.action][0])
+        code, result = run_command(function, args, store=self.store,
+                                   main_sha_reader=lambda: MAIN)
+        self.assertEqual(code, 0)
+        self.assertEqual((result['state'], result['children'], result['base_sha'],
+                          result['owner_notice']), ('PARKED', [first, second], MAIN, None))
+        self.assertEqual(self.state(root), 'PARKED')
+        self.assertEqual([self.state(first), self.state(second)], ['OPEN', 'OPEN'])
+
+
+class LineageSplitRaceTests(LineageCase):
+    """PR #1768 v91 (CWE-362): split admission and child reservation are atomic per ROOT.
+
+    Interleavings are driven by injected hooks: the main SHA reader runs between the
+    preflight and the lineage lock, and a wrapped park runs while the lock is held.
+    A rival that meets the held lock gets a zero lock wait, so no test sleeps.
+    """
+
+    def split(self, root, children, main_sha=lambda: MAIN, store=None):
+        return cli.lineage_split(self.store if store is None else store, root,
+                                 list(children), pm_session=PM, reason='Review FAIL 3.',
+                                 main_sha_reader=main_sha)
+
+    def split_args(self, root, children):
+        from types import SimpleNamespace
+        return SimpleNamespace(root_id=root, child=list(children), reason='Review FAIL 3.',
+                               pm_session=PM)
+
+    def member_ids(self, root):
+        return sorted(item['id'] for item in cli._lineage_members(self.store, root))
+
+    def assert_untouched(self, digests):
+        for task_id, digest in digests.items():
+            record = self.store.get(task_id)
+            self.assertEqual(record['record_sha256'], digest)
+            self.assertNotIn('lineage', record)
+
+    def over_the_limit_code(self):
+        """Two plus two children exceed the child limit; two alone do not."""
+        from llmtool import repair_policy
+        policy = repair_policy.load_policy()
+        self.assertIsNone(repair_policy.admit_split(kind='root', child_count=0,
+                                                    new_children=2, policy=policy))
+        code = repair_policy.admit_split(kind='root', child_count=2, new_children=2,
+                                         policy=policy)
+        self.assertIsNotNone(code)
+        return code
+
+    def holding_the_lock(self, rival):
+        """Patch the ROOT commit so rival() runs inside a split that holds the lineage lock.
+
+        Owner B: the ROOT PARKED commit replaced the old park as the split's
+        commit point; rival() runs just before it, with the lock held.
+        """
+        from unittest import mock
+        from llmtool import task_store
+        real_commit = task_store.commit_split_root
+
+        def commit(store, task_id, lineage, **kwargs):
+            with mock.patch.object(task_store, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 0):
+                rival()
+            return real_commit(store, task_id, lineage, **kwargs)
+        return mock.patch.object(task_store, 'commit_split_root', new=commit)
+
+    def test_a_split_that_ran_after_the_preflight_is_counted_and_the_limit_holds(self):
+        # Interleaving 1: split B runs whole after split A's preflight, before A's lock.
+        over = self.over_the_limit_code()
+        root = self.task()
+        first, second = [self.task(), self.task()], [self.task(), self.task()]
+        untouched = {task_id: self.store.get(task_id)['record_sha256'] for task_id in first}
+
+        def rival_then_main():
+            self.split(root, second)
+            return MAIN
+        self.refused(over, lambda _store: self.split(root, first, main_sha=rival_then_main))
+        self.assertEqual(self.state(root), 'PARKED')
+        self.assertEqual(self.member_ids(root), sorted(second))
+        self.assert_untouched(untouched)
+
+    def test_a_split_started_while_another_holds_the_lock_writes_nothing(self):
+        # Interleaving 2: split B passes its preflight while split A holds the lock.
+        root = self.task()
+        first, second = [self.task(), self.task()], [self.task(), self.task()]
+        untouched = {task_id: self.store.get(task_id)['record_sha256'] for task_id in second}
+        seen = []
+        with self.holding_the_lock(lambda: seen.append(run_command(
+                cli.run_task_split, self.split_args(root, second), store=self.store,
+                main_sha_reader=lambda: MAIN))):
+            result = self.split(root, first)
+        self.assertEqual(seen, [(1, {'code': 'LINEAGE_LOCK_BUSY'})])
+        self.assertEqual((result['state'], result['children']), ('PARKED', first))
+        self.assertEqual(self.member_ids(root), sorted(first))
+        self.assert_untouched(untouched)
+
+    def test_a_child_that_changed_after_the_preflight_refuses_with_nothing_written(self):
+        changes = (
+            ('merge claimed', lambda child: self.store.update(child, merge_attempt=CLAIM)),
+            ('joined another split', lambda child: self.split(self.task(), [child])),
+        )
+        for name, change in changes:
+            with self.subTest(name):
+                root, child, other = self.task(), self.task(), self.task()
+                untouched = {task_id: self.store.get(task_id)['record_sha256']
+                             for task_id in (root, other)}
+
+                def change_then_main(child=child, change=change):
+                    change(child)
+                    return MAIN
+                self.assertEqual(
+                    run_command(cli.run_task_split, self.split_args(root, [child, other]),
+                                store=self.store, main_sha_reader=change_then_main),
+                    (1, {'code': 'SPLIT_CHILD_CHANGED'}))
+                self.assert_untouched(untouched)
+                self.assertEqual(self.member_ids(root), [])
+                # The child keeps only its own change: the claim or the other lineage.
+                record = self.store.get(child)
+                if 'lineage' in record:
+                    self.assertNotEqual(record['lineage']['lineage_id'], root)
+                else:
+                    self.assertEqual(record['merge_attempt'], CLAIM)
+
+    def test_end_and_close_wait_for_a_split_that_holds_the_lineage_lock(self):
+        parked = self.parked_root()
+        child, done = self.member(parked), self.member(parked)
+        merged(self.store, done)
+        root, first = self.task(), self.task()
+        closes = []
+
+        def rivals():
+            self.refused('LINEAGE_LOCK_BUSY', cli.lineage_end, child, 'STOPPED',
+                         pm_session=PM, reason='test failures used up')
+            closes.append(cli.lineage_close_merged(self.store, done))
+        with self.holding_the_lock(rivals):
+            self.split(root, [first])
+        self.assertEqual(closes, [{'code': 'LINEAGE_CLOSE_FAILED'}])
+        self.assertEqual([self.state(child), self.state(done), self.state(parked)],
+                         ['OPEN', 'OPEN', 'PARKED'])
+        # Once the split released the lock, both run.
+        self.assertEqual(cli.lineage_close_merged(self.store, done)['state'], 'CLOSED')
+        self.assertEqual(cli.lineage_end(self.store, child, 'STOPPED', pm_session=PM,
+                                         reason='test failures used up')['state'], 'STOPPED')
+        self.assertEqual([self.state(child), self.state(done)], ['STOPPED', 'CLOSED'])
+
+    def test_a_store_without_the_lineage_lock_refuses_before_any_write(self):
+        real = self.store
+
+        class Unlocked:
+            def __getattr__(self, name):
+                if name in ('_dirfd', '_lock_sidecar', '_unlock_sidecar'):
+                    raise AttributeError(name)
+                return getattr(real, name)
+        root, first = self.task(), self.task()
+        untouched = {task_id: self.store.get(task_id)['record_sha256']
+                     for task_id in (root, first)}
+        self.refused('LINEAGE_LOCK_UNAVAILABLE',
+                     lambda _store: self.split(root, [first], store=Unlocked()))
+        self.assert_untouched(untouched)
+
+
+NEW_MAIN = 'f' * 40
+
+
+class LineageReplanTests(LineageCase):
+    """#1502 D10d1/D10d2: the lineage's one REPLAN, chosen at PM_DECIDE of a child."""
+
+    def split(self, count=2):
+        root, children = self.task(), [self.task() for _ in range(count)]
+        cli.lineage_split(self.store, root, children, pm_session=PM,
+                          reason='Review FAIL 3.', main_sha_reader=lambda: MAIN)
+        return root, children
+
+    def replan_args(self, child, replan, replaces, reason='Review route used up.',
+                    session=PM):
+        from types import SimpleNamespace
+        return SimpleNamespace(child_id=child, replan_task=replan, replaces=list(replaces),
+                               reason=reason, pm_session=session)
+
+    def test_replan_records_the_one_replan_from_latest_main_and_stops_replaced_children(self):
+        from llmtool import repair_policy
+        self.assertEqual(repair_policy.load_policy()['replan_max'], 1)
+        root, (first, second) = self.split()
+        replan = self.task()
+        result = cli.lineage_replan(self.store, first, replan, [first], pm_session=PM,
+                                    reason='Review route used up.',
+                                    main_sha_reader=lambda: NEW_MAIN)
+        line = self.store.get(replan)['lineage']
+        self.assertEqual((line['lineage_id'], line['kind'], line['parent'], line['replaces'],
+                          line['state'], line['base_sha']),
+                         (root, 'replan', root, [first], 'OPEN', NEW_MAIN))
+        self.assertEqual((result['task_id'], result['base_sha'], result['stopped'],
+                          result['stop_failed']), (replan, NEW_MAIN, [first], []))
+        self.assertEqual([notice['state'] for notice in result['owner_notices']], ['STOPPED'])
+        self.assertEqual(result['owner_notices'][0]['marker'], cli.OWNER_NOTICE_MARKER)
+        self.assertEqual([self.state(first), self.state(second), self.state(root)],
+                         ['STOPPED', 'OPEN', 'PARKED'])
+        # The lineage's one REPLAN is used: a second one is refused with nothing written.
+        other, before = self.task(), self.store.get(second)['record_sha256']
+        self.refused('REPLAN_USED', cli.lineage_replan, second, other, [second],
+                     pm_session=PM, reason='again', main_sha_reader=lambda: NEW_MAIN)
+        self.assertNotIn('lineage', self.store.get(other))
+        self.assertEqual(self.store.get(second)['record_sha256'], before)
+
+    def test_replan_refusals_write_nothing_read_no_main_sha_and_print_only_the_code(self):
+        root, (first, second) = self.split()
+        merged(self.store, second)
+        cli.lineage_close_merged(self.store, second)  # second is CLOSED, root stays PARKED
+        replan, plain = self.task(), self.task()
+        reads = []
+
+        def main_sha():
+            reads.append(True)
+            return NEW_MAIN
+        cases = (
+            ('REPLAN_NOT_CHILD', self.replan_args(root, replan, [root])),
+            ('REPLAN_REPLACES_INVALID', self.replan_args(first, replan, [])),
+            ('REPLAN_REPLACES_INVALID', self.replan_args(first, replan, [second])),
+            ('REPLAN_REPLACES_INVALID', self.replan_args(first, replan, [first, second])),
+            ('REPLAN_REPLACES_INVALID', self.replan_args(first, replan, [first, plain])),
+            ('REPLAN_REPLACES_INVALID', self.replan_args(first, replan, [first, first])),
+            ('LINEAGE_MEMBER_INVALID', self.replan_args(first, first, [first])),
+            ('LINEAGE_MEMBER_INVALID', self.replan_args(first, second, [first])),
+            ('LINEAGE_PM_SESSION_DENIED',
+             self.replan_args(first, replan, [first], session='pm-other')),
+            ('REPLAN_REASON_REQUIRED', self.replan_args(first, replan, [first], reason=' ')),
+        )
+        every = (root, first, second, replan, plain)
+        before = {task_id: self.store.get(task_id)['record_sha256'] for task_id in every}
+        for code, args in cases:
+            with self.subTest(code=code, replaces=args.replaces):
+                self.assertEqual(run_command(cli.run_task_replan, args, store=self.store,
+                                             main_sha_reader=main_sha), (1, {'code': code}))
+        self.assertEqual(reads, [])
+        for task_id in every:
+            self.assertEqual(self.store.get(task_id)['record_sha256'], before[task_id])
+        self.assertNotIn('lineage', self.store.get(replan))
+        # A child that already ended is not at PM_DECIDE.
+        cli.lineage_end(self.store, first, 'STOPPED', pm_session=PM, reason='tests used up')
+        self.refused('REPLAN_CHILD_NOT_OPEN', cli.lineage_replan, first, replan, [first],
+                     pm_session=PM, reason='x', main_sha_reader=main_sha)
+        self.assertEqual(reads, [])
+
+    def test_a_replan_task_that_changed_after_the_preflight_refuses_with_nothing_written(self):
+        _root, (first, _second) = self.split()
+        replan = self.task()
+        before = self.store.get(first)['record_sha256']
+
+        def change_then_main():
+            self.store.update(replan, merge_attempt=CLAIM)
+            return NEW_MAIN
+        self.refused('REPLAN_TASK_CHANGED', cli.lineage_replan, first, replan, [first],
+                     pm_session=PM, reason='x', main_sha_reader=change_then_main)
+        self.assertNotIn('lineage', self.store.get(replan))
+        self.assertEqual(self.store.get(first)['record_sha256'], before)
+
+    def test_a_closed_replan_meets_the_obligation_and_closes_the_root_without_notice(self):
+        # D10d2: the adapter records the REPLAN; once it is merged the ROOT is CLOSED.
+        root, (first, second) = self.split()
+        merged(self.store, first)
+        self.assertIsNone(cli.lineage_close_merged(self.store, first)['root'])
+        replan = self.task()
+        code, result = run_command(cli.run_task_replan, self.replan_args(second, replan,
+                                   [second]), store=self.store,
+                                   main_sha_reader=lambda: NEW_MAIN)
+        self.assertEqual((code, result['stopped'], result['base_sha']),
+                         (0, [second], NEW_MAIN))
+        self.assertEqual(result['owner_notices'][0]['state'], 'STOPPED')
+        self.assertEqual(self.state(root), 'PARKED')
+        merged(self.store, replan)
+        closed = cli.lineage_close_merged(self.store, replan)
+        self.assertEqual((closed['state'], closed['owner_notice']), ('CLOSED', None))
+        self.assertEqual(closed['root'], {'task_id': root, 'state': 'CLOSED',
+                                          'owner_notice': None})
+        self.assertEqual([self.state(second), self.state(replan), self.state(root)],
+                         ['STOPPED', 'CLOSED', 'CLOSED'])
+
+
+class LineageReplanCommandTests(LineageCase):
+    def test_replan_through_the_real_parser(self):
+        import contextlib
+        import io
+        from llmtool import cli as main_cli
+        root, first, second = self.task(), self.task(), self.task()
+        cli.lineage_split(self.store, root, [first, second], pm_session=PM,
+                          reason='Review FAIL 3.', main_sha_reader=lambda: MAIN)
+        replan = self.task()
+        args = parse('replan', first, '--replan-task', replan, '--replaces', first, second,
+                     '--pm-session', PM, '--reason', 'Review route used up.')
+        self.assertEqual((args.action, args.child_id, args.replan_task, args.replaces),
+                         ('replan', first, replan, [first, second]))
+        self.assertEqual(parse('replan', first, '--replan-task', replan, '--replaces', first,
+                               '--replaces', second, '--pm-session', PM,
+                               '--reason', 'x').replaces, [first, second])
+        self.assertEqual(main_cli.TASK_ACTIONS['replan'], ('run_task_replan', False))
+        function = getattr(cli, main_cli.TASK_ACTIONS[args.action][0])
+        code, result = run_command(function, args, store=self.store,
+                                   main_sha_reader=lambda: NEW_MAIN)
+        self.assertEqual((code, result['task_id'], result['stopped']),
+                         (0, replan, [first, second]))
+        self.assertEqual([self.state(first), self.state(second), self.state(replan)],
+                         ['STOPPED', 'STOPPED', 'OPEN'])
+        bad = (('replan', first, '--replaces', first, '--pm-session', PM, '--reason', 'x'),
+               ('replan', first, '--replan-task', replan, '--pm-session', PM, '--reason', 'x'),
+               ('replan', first, '--replan-task', replan, '--replaces', first, '--reason', 'x'),
+               ('replan', first, '--replan-task', replan, '--replaces', first,
+                '--pm-session', PM))
+        for argv in bad:
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parse(*argv)
+        self.assertEqual(list(main_cli.TASK_ACTIONS), sorted(main_cli.TASK_ACTIONS))
+
+
+class LineageCommandRegistrationTests(LineageCase):
+    def test_drop_through_the_real_parser_and_the_actions_stay_sorted(self):
+        import contextlib
+        import io
+        from llmtool import cli as main_cli
+        child = self.member(self.parked_root())
+        self.assertEqual(parse('drop', child, '--pm-session', PM, '--reason', 'x').state,
+                         'DROPPED')
+        args = parse('drop', child, '--state', 'STOPPED', '--pm-session', PM,
+                     '--reason', 'test failures used up')
+        self.assertEqual((args.action, args.task_id, args.state), ('drop', child, 'STOPPED'))
+        self.assertEqual(main_cli.TASK_ACTIONS['drop'], ('run_task_drop', False))
+        function = getattr(cli, main_cli.TASK_ACTIONS[args.action][0])
+        code, result = run_command(function, args, store=self.store)
+        self.assertEqual((code, result['state'], result['owner_notice']['state']),
+                         (0, 'STOPPED', 'STOPPED'))
+        self.assertEqual(self.state(child), 'STOPPED')
+        bad = (('drop', child, '--state', 'CLOSED', '--pm-session', PM, '--reason', 'x'),
+               ('drop', child, '--reason', 'x'),
+               ('split', child, '--pm-session', PM, '--reason', 'x'),
+               ('split', child, '--child', child, '--pm-session', PM))
+        for argv in bad:
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parse(*argv)
+        self.assertEqual(list(main_cli.TASK_ACTIONS), sorted(main_cli.TASK_ACTIONS))
+
+
+class LineageEndVsAdvanceTests(LineageCase):
+    """PR #1789 v91 F1 (CWE-841): a lineage end honours the Task's advance lease.
+
+    task advance and task drive hold the lease shared for their whole run (the
+    lease is held here directly, as SplitVsStartedChildTests does for a split).
+    Every end path (task drop, a REPLAN's STOP, the ROOT roll-up) takes it
+    exclusively without waiting, so it refuses LINEAGE_TASK_ADVANCING and writes
+    nothing while an advance runs; once the advance ends, the same end runs.
+    """
+
+    def digests(self, *task_ids):
+        return {task_id: self.store.get(task_id)['record_sha256'] for task_id in task_ids}
+
+    def test_drop_stop_and_failed_final_refuse_while_the_task_is_advanced(self):
+        root = self.parked_root()
+        child = self.member(root)
+        replan = self.member(root, kind='replan', replaces=[child])
+        for task_id, state in ((child, 'DROPPED'), (child, 'STOPPED'),
+                               (replan, 'FAILED_FINAL')):
+            with self.subTest(state=state):
+                before = self.digests(root, child, replan)
+                with self.store.advance_lease(task_id):
+                    self.refused('LINEAGE_TASK_ADVANCING', cli.lineage_end, task_id, state,
+                                 pm_session=PM, reason='Original function is not affected.')
+                self.assertEqual(self.digests(root, child, replan), before)
+        self.assertEqual([self.state(child), self.state(replan), self.state(root)],
+                         ['OPEN', 'OPEN', 'PARKED'])
+        # The adapter prints only the refusal code.
+        from types import SimpleNamespace
+        args = SimpleNamespace(task_id=child, state='STOPPED', pm_session=PM,
+                               reason='test failures used up')
+        with self.store.advance_lease(child):
+            self.assertEqual(run_command(cli.run_task_drop, args, store=self.store),
+                             (1, {'code': 'LINEAGE_TASK_ADVANCING'}))
+        self.assertEqual(self.state(child), 'OPEN')
+        # After the advance, the same end runs and an advance then sees it ended.
+        code, result = run_command(cli.run_task_drop, args, store=self.store)
+        self.assertEqual((code, result['state'], result['owner_notice']['state']),
+                         (0, 'STOPPED', 'STOPPED'))
+        self.refused('TASK_LINEAGE_ENDED', lambda store: store.check_external_action(child))
+
+    def test_a_replan_never_stops_a_replaced_child_that_is_being_advanced(self):
+        root, first, second = self.task(), self.task(), self.task()
+        cli.lineage_split(self.store, root, [first, second], pm_session=PM,
+                          reason='Review FAIL 3.', main_sha_reader=lambda: MAIN)
+        replan = self.task()
+        with self.store.advance_lease(second):
+            result = cli.lineage_replan(self.store, first, replan, [first, second],
+                                        pm_session=PM, reason='Review route used up.',
+                                        main_sha_reader=lambda: MAIN)
+        self.assertEqual((result['stopped'], result['stop_failed']), ([first], [second]))
+        self.assertEqual([notice['task_id'] for notice in result['owner_notices']], [first])
+        self.assertEqual([self.state(first), self.state(second), self.state(replan)],
+                         ['STOPPED', 'OPEN', 'OPEN'])
+        # The PM ends the child with task drop once its advance has ended.
+        self.assertEqual(cli.lineage_end(self.store, second, 'STOPPED', pm_session=PM,
+                                         reason='Replaced by the REPLAN.')['state'], 'STOPPED')
+
+    def test_the_root_roll_up_waits_for_an_advance_of_the_root(self):
+        root = self.parked_root()
+        only = self.member(root)
+        with self.store.advance_lease(root):
+            result = cli.lineage_end(self.store, only, 'DROPPED', pm_session=PM,
+                                     reason='Original function is not affected.')
+        # The child's end is saved and notified; the ROOT stays PARKED (fail closed).
+        self.assertEqual((result['state'], result['root']),
+                         ('DROPPED', {'code': 'LINEAGE_ROLL_UP_FAILED'}))
+        self.assertEqual(result['owner_notice']['state'], 'DROPPED')
+        self.assertEqual(self.state(root), 'PARKED')
+        # PR #1794 v91 F1: I4 is an allowlist, so the PARKED ROOT takes no action either.
+        self.refused('TASK_LINEAGE_PARKED', lambda store: store.check_external_action(root))
+        # Without the advance the roll-up ends the ROOT, which then takes no action.
+        self.assertEqual(cli._lineage_roll_up(self.store, root)['state'], 'FAILED_FINAL')
+        self.refused('TASK_LINEAGE_ENDED', lambda store: store.check_external_action(root))
+        # A merged member's roll-up refuses the same way and is retried by the replay.
+        other = self.parked_root()
+        member = self.member(other)
+        merged(self.store, member)
+        with self.store.advance_lease(other):
+            self.assertEqual(cli.lineage_close_merged(self.store, member),
+                             {'code': 'LINEAGE_CLOSE_FAILED'})
+        self.assertEqual([self.state(member), self.state(other)], ['CLOSED', 'PARKED'])
+        self.assertEqual(cli.lineage_close_merged(self.store, member)['root']['state'], 'CLOSED')
+
+
+class LineageSplitVsRootAdvanceTests(LineageCase):
+    """PR #1794 v91 F1 (CWE-362): a split honours the ROOT's advance lease.
+
+    task advance and task drive hold the advanced Task's lease shared for their
+    whole run (held here directly). A split of that Task as ROOT commits PARKED
+    only under the ROOT lease, taken exclusively without waiting, so it refuses
+    SPLIT_ROOT_ADVANCING and leaves no lineage on the ROOT or any child. Once
+    the advance ends the same split runs, and the PARKED ROOT then takes no
+    external action (I4 allowlist).
+    """
+
+    def split_args(self, root, children):
+        from types import SimpleNamespace
+        return SimpleNamespace(root_id=root, child=list(children), reason='Review FAIL 3.',
+                               pm_session=PM)
+
+    def test_a_split_of_a_root_being_advanced_is_refused_and_writes_nothing(self):
+        root, first, second = self.task(), self.task(), self.task()
+        before = self.store.get(root)['record_sha256']
+        with self.store.advance_lease(root):
+            self.refused('SPLIT_ROOT_ADVANCING', cli.lineage_split, root, [first, second],
+                         pm_session=PM, reason='Review FAIL 3.', main_sha_reader=lambda: MAIN)
+            # The adapter prints only the refusal code.
+            self.assertEqual(run_command(cli.run_task_split, self.split_args(root, [first]),
+                                         store=self.store, main_sha_reader=lambda: MAIN),
+                             (1, {'code': 'SPLIT_ROOT_ADVANCING'}))
+        # The children's reservations were removed (I1); the ROOT is untouched.
+        for task_id in (root, first, second):
+            self.assertNotIn('lineage', self.store.get(task_id))
+        self.assertEqual(self.store.get(root)['record_sha256'], before)
+        self.assertEqual(self.store.check_external_action(root)['task_id'], root)
+        # After the advance the same split runs; the PARKED ROOT takes no action,
+        # its OPEN children do.
+        code, result = run_command(cli.run_task_split, self.split_args(root, [first]),
+                                   store=self.store, main_sha_reader=lambda: MAIN)
+        self.assertEqual((code, result['state']), (0, 'PARKED'))
+        self.refused('TASK_LINEAGE_PARKED', lambda store: store.check_external_action(root))
+        self.assertEqual(self.store.check_external_action(first)['task_id'], first)
+        # A later split of the PARKED ROOT honours the lease the same way.
+        parked = self.store.get(root)['lineage']
+        with self.store.advance_lease(root):
+            self.refused('SPLIT_ROOT_ADVANCING', cli.lineage_split, root, [second],
+                         pm_session=PM, reason='Review FAIL 3.', main_sha_reader=lambda: MAIN)
+        self.assertEqual(self.store.get(root)['lineage'], parked)
+        self.assertNotIn('lineage', self.store.get(second))
+        self.assertEqual([item['id'] for item in cli._lineage_members(self.store, root)],
+                         [first])
+
+
 if __name__ == '__main__':
     unittest.main()
