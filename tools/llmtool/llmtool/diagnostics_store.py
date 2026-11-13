@@ -113,6 +113,14 @@ def _private(info, directory=False):
         raise _Unsafe()
 
 
+def _ancestor(info):
+    # #137 R26: owned by root or this user; not group/other-writable unless sticky.
+    mode = stat.S_IMODE(info.st_mode)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
+            or (mode & 0o022 and not mode & stat.S_ISVTX)):
+        raise _Unsafe()
+
+
 def _directory(parent, name, create=False, private=True):
     if create:
         try:
@@ -135,6 +143,7 @@ def _home(path):
         raise _Unsafe()
     fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
+        _ancestor(os.fstat(fd))
         for index, name in enumerate(path.parts[1:], 1):
             try:
                 child = _directory(fd, name, private=index == len(path.parts) - 1)
@@ -142,6 +151,8 @@ def _home(path):
                 child = _directory(fd, name, create=True)
             parent, fd = fd, child
             os.close(parent)
+            if index < len(path.parts) - 1:
+                _ancestor(os.fstat(fd))
         return fd
     except Exception:
         os.close(fd)
