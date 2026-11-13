@@ -19,14 +19,14 @@
     },
     "gw-agent": {
       "package_path": "~/.local/lib/api-agent-gateway",
-      "default_model": "gw-agent-default",
-      "allowed_models": ["gw-agent-default"],
+      "default_model": "gw",
+      "allowed_models": ["gw"],
       "default_effort": "low",
       "profile_name": "llmtool-direct",
       "profile": {
         "adapter": "openai-chat-tools",
         "auth_env": "GW_AGENT_API_KEY",
-        "model": "gw-agent-default",
+        "model": "gw",
         "context_cap_tokens": 32768,
         "max_output_tokens": 16384,
         "allowed_data_classes": ["synthetic", "public_repo"],

@@ -52,7 +52,10 @@ class AllowedModelsConfigTests(unittest.TestCase):
         self.assertEqual(config['routes']['agy']['allowed_models'],
                          ['gemini-3.8-flash-medium'])
         self.assertEqual(config['routes']['claude']['allowed_models'], ['claude-opus-5-5'])
-        self.assertEqual(config['routes']['gw-agent']['allowed_models'], ['gw-agent-default'])
+        # #1502 WP-E: gw-agent lists today's actual served default model.
+        self.assertEqual(config['routes']['gw-agent']['allowed_models'], ['gw'])
+        self.assertEqual(config['routes']['gw-agent']['default_model'], 'gw')
+        self.assertEqual(config['routes']['gw-agent']['profile']['model'], 'gw')
         self.assertEqual(config['routes']['opencode']['allowed_models'],
                          ['opencode/deepseek-v4.1-flash-free'])
         for route in ROUTE_NAMES:
