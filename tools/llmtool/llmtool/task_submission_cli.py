@@ -2010,22 +2010,86 @@ _GITHUB_TIME = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2
 _DISPUTE_ISSUE_API = 'https://api.github.com/repos/davidcatcat/davidcattoolsproject/issues/'
 
 
+def _is_ruling_claim(claim):
+    """True when a review claim's text is an arbiter ruling, not a formal verdict."""
+    result = claim.get('review_result') if type(claim) is dict else None
+    text = result.get('review_text') if type(result) is dict else None
+    if type(text) is not str:
+        return False
+    first = next((line.rstrip('\r') for line in text.split('\n') if line.strip()), '')
+    return _RULING_MARKER.fullmatch(first) is not None
+
+
+def _dispute_ruling_claim(record, entry, *, pr, head, arbiter, reviewer_task, reviewer_session):
+    """The one COMPLETED review-dispatch claim of the arbiter's ruling run (High Debug #1775).
+
+    Every review-dispatch claim of the Task that names the arbiter's Reviewer
+    D6 or its session is a candidate; there must be exactly one. It must be
+    COMPLETED and bound to this Task, run and contract, this PR, the disputed
+    HEAD (claim head_sha and review_result.head), the Executor D6 of this Task,
+    the arbiter's Reviewer D6 and session and the Reviewer _dispute_arbiter
+    chose, with a later version than the disputed review and a non-empty
+    review_text. A GitHub login is never identity (#926). Missing or
+    ambiguous provenance refuses.
+    """
+    from .review_repair import claim_reviewer
+    claims = record.get('review_dispatch_claim')
+    claims = [claims] if type(claims) is dict else claims
+    if type(claims) is not list:
+        _dispute_refuse('DISPUTE_RULING_CLAIM_MISSING')
+    if any(type(claim) is not dict for claim in claims):
+        _dispute_refuse('DISPUTE_RULING_CLAIM_INVALID')
+    candidates = [claim for claim in claims
+                  if claim.get('reviewer_task') == reviewer_task or
+                  claim.get('native_session_id') == reviewer_session]
+    if not candidates:
+        _dispute_refuse('DISPUTE_RULING_CLAIM_MISSING')
+    if len(candidates) != 1:
+        _dispute_refuse('DISPUTE_RULING_CLAIM_AMBIGUOUS')
+    [claim] = candidates
+    result = claim.get('review_result')
+    if (claim.get('state') != 'COMPLETED' or type(result) is not dict or
+            claim.get('pr') != pr):
+        _dispute_refuse('DISPUTE_RULING_CLAIM_INVALID')
+    if claim.get('head_sha') != head or result.get('head') != head:
+        _dispute_refuse('DISPUTE_RULING_CLAIM_STALE')
+    completion = record.get('completion')
+    executor = completion.get('executor_task_id') if type(completion) is dict else None
+    binding = record.get('task_binding')
+    contract = binding.get('contract_digest') if type(binding) is dict else None
+    text = result.get('review_text')
+    version, disputed = claim.get('version'), entry.get('review_version')
+    if (type(executor) is not str or not executor or
+            claim.get('executor_task') != executor or
+            claim.get('reviewer_task') != reviewer_task or
+            claim.get('native_session_id') != reviewer_session or
+            claim_reviewer(claim) != arbiter['reviewer'] or
+            type(contract) is not str or not contract or
+            result.get('task_id') != record.get('task_id') or
+            result.get('run_id') != record.get('run_id') or
+            result.get('contract_digest') != contract or
+            type(version) is not int or type(disputed) is not int or version <= disputed or
+            type(text) is not str or not text.strip()):
+        _dispute_refuse('DISPUTE_RULING_CLAIM_INVALID')
+    return claim
+
+
 def _dispute_ruling_comment(record, entry, *, pr, head, finding_id, outcome, reviewer,
-                            registration, evidence_ref, github_get):
+                            review_text, evidence_ref, github_get):
     """Authenticate the ruling's evidence as the arbiter's own ruling comment (v91 F1).
 
     The comment is read live and must be an unedited comment on this PR,
-    posted after the dispute opened, whose first three non-empty lines are,
-    byte for byte:
+    posted after the dispute opened, whose body equals, byte for byte, the
+    review_text of the arbiter's one COMPLETED ruling claim (High Debug
+    #1775), and whose first three non-empty lines are:
 
         <!-- activity: type=dispute_ruling actor=<Claude|Codex> target=PM status=<OUTCOME> -->
         Ruling: <finding_id> <OUTCOME> | PR: #<pr> | HEAD: <head>
         LLMTOOL-REVIEW-BINDING v1 task=<task> run=<run> contract=<digest> head=<head>
 
     The actor is the chosen arbiter's family and the comment carries no other
-    Ruling line. When the Reviewer D6 record names a GitHub login, the comment
-    author must be that login. The shared login is not a security boundary
-    (#926); this binds the comment to the Task, HEAD, finding and outcome.
+    Ruling line. The comment author's login is not identity: all agents share
+    one login (#926), so the claim's review_text binds the comment instead.
     """
     from .task_store import review_dispute_ref_parts
     parts = review_dispute_ref_parts(evidence_ref)
@@ -2046,9 +2110,6 @@ def _dispute_ruling_comment(record, entry, *, pr, head, finding_id, outcome, rev
     if type(comment) is not dict or type(binding_line) is not str:
         _dispute_refuse('DISPUTE_RULING_EVIDENCE_INVALID')
     body = comment.get('body')
-    user = comment.get('user')
-    login = user.get('login') if type(user) is dict else None
-    expected_login = getattr(registration, 'github_login', None)
     created, updated = comment.get('created_at'), comment.get('updated_at')
     lines = ([line.rstrip('\r') for line in body.split('\n') if line.strip()]
              if type(body) is str else [])
@@ -2057,8 +2118,9 @@ def _dispute_ruling_comment(record, entry, *, pr, head, finding_id, outcome, rev
     actor = {'claude-reviewer': 'Claude', 'codex-reviewer': 'Codex'}.get(reviewer)
     if (type(comment.get('id')) is not int or comment['id'] != comment_id or
             comment.get('issue_url') != _DISPUTE_ISSUE_API + str(pr) or
-            type(login) is not str or not login or
-            (expected_login is not None and login != expected_login) or
+            type(body) is not str or type(review_text) is not str or
+            body.encode('utf-8', 'surrogatepass') !=
+            review_text.encode('utf-8', 'surrogatepass') or
             type(created) is not str or _GITHUB_TIME.fullmatch(created) is None or
             updated != created or created < entry.get('opened_at', '') or
             marker is None or header is None or len(lines) < 3 or
@@ -2083,9 +2145,10 @@ def _dispute_review_claims(record, pr, head=None):
 def _dispute_fail_verdict(record, pr, head):
     """The latest COMPLETED formal verdict of this PR head, which must be a FAIL."""
     from .review_repair import verdict_findings
+    # An arbiter's ruling claim is not a formal verdict and is never disputed.
     completed = [claim for claim in _dispute_review_claims(record, pr, head)
                  if claim.get('state') == 'COMPLETED' and type(claim.get('version')) is int and
-                 type(claim.get('review_result')) is dict]
+                 type(claim.get('review_result')) is dict and not _is_ruling_claim(claim)]
     if not completed:
         _dispute_refuse('DISPUTE_NO_FAIL_VERDICT')
     claim = max(completed, key=lambda item: item['version'])
@@ -2164,8 +2227,12 @@ def dispute_rule(store, task_id, *, pr, finding_id, outcome, reviewer, reviewer_
     The arbiter must be the Reviewer llmtool chose and its run must not be a
     recorded review run of this PR. The Reviewer Task, its session and the
     evidence comment are authenticated against the registered D6 Reviewer
-    record and a live comment read (security v91 F1). The ruling binds the
-    exact HEAD, run and evidence; it never replaces the formal PASS.
+    record and a live comment read (security v91 F1). Exactly one COMPLETED
+    review-dispatch claim must bind the arbiter's run to this Task, PR and
+    HEAD, and the comment body must equal its review_text byte for byte
+    (High Debug #1775). Every refusal happens before the one store update.
+    The ruling binds the exact HEAD, run and evidence; it never replaces the
+    formal PASS.
     """
     from .task_store import (D6_TASK_ID, REVIEW_DISPUTE_OUTCOMES, REVIEW_DISPUTE_REVIEWERS,
                              valid_review_dispute_session)
@@ -2197,19 +2264,26 @@ def dispute_rule(store, task_id, *, pr, finding_id, outcome, reviewer, reviewer_
     arbiter = _dispute_arbiter(record, claim)
     if reviewer != arbiter['reviewer']:
         _dispute_refuse('DISPUTE_ARBITER_MISMATCH')
-    # A fresh run: neither the first review run nor any recorded review run
-    # (session or Reviewer D6) of this PR.
-    recorded = _dispute_review_claims(record, pr)
+    # A fresh run: neither the first review run nor any other recorded review
+    # run (session or Reviewer D6) of this PR. Only claims of exactly this
+    # arbiter run are left out; _dispute_ruling_claim needs exactly one.
+    recorded = [item for item in _dispute_review_claims(record, pr)
+                if (item.get('reviewer_task'), item.get('native_session_id')) !=
+                (reviewer_task, reviewer_session)]
     recorded_sessions = {item.get('native_session_id') for item in recorded}
     recorded_tasks = {item.get('reviewer_task') for item in recorded}
     if (reviewer_session == arbiter['excluded_session'] or
             reviewer_session in recorded_sessions or reviewer_task in recorded_tasks):
         _dispute_refuse('DISPUTE_ARBITER_NOT_FRESH')
-    registration = _dispute_arbiter_registration(
+    _dispute_arbiter_registration(
         record, reviewer=reviewer, reviewer_task=reviewer_task,
         reviewer_session=reviewer_session, head=head)
+    ruling_claim = _dispute_ruling_claim(
+        record, entry, pr=pr, head=head, arbiter=arbiter, reviewer_task=reviewer_task,
+        reviewer_session=reviewer_session)
     _dispute_ruling_comment(record, entry, pr=pr, head=head, finding_id=finding_id,
-                            outcome=outcome, reviewer=reviewer, registration=registration,
+                            outcome=outcome, reviewer=reviewer,
+                            review_text=ruling_claim['review_result']['review_text'],
                             evidence_ref=evidence_ref, github_get=github_get)
     ruling = {'outcome': outcome, 'head_sha': head, 'reviewer': reviewer,
               'reviewer_task': reviewer_task, 'reviewer_session': reviewer_session,
