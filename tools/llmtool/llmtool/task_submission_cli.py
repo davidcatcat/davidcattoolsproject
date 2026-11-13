@@ -1111,6 +1111,22 @@ def lineage_end(store, task_id, state, *, pm_session, reason):
             'owner_notice': lineage_owner_notice(task_id, state, reason)}
 
 
+def lineage_close_merged(store, task_id):
+    """After llmtool merged a lineage Task: CLOSED, no Owner notice, then the roll-up."""
+    from .task_store import record_lineage
+    try:
+        record = store.get(task_id)
+        line, attempt = record.get('lineage'), record.get('merge_attempt')
+        if (type(line) is not dict or line.get('state') != 'OPEN' or
+                type(attempt) is not dict or attempt.get('state') != 'MERGED'):
+            return None
+        record_lineage(store, task_id, dict(line, state='CLOSED', recorded_at=_timestamp()))
+        root = None if line['kind'] == 'root' else _lineage_roll_up(store, line['lineage_id'])
+    except LLMToolError:
+        return {'code': 'LINEAGE_CLOSE_FAILED'}
+    return {'task_id': task_id, 'state': 'CLOSED', 'owner_notice': None, 'root': root}
+
+
 def run_task_remote_test(args, *, store=None, stdout=None):
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,
