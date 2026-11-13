@@ -43,9 +43,12 @@ def setUpModule():
     for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS", "GW_AUDIT_ROOT"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
     _RULE_ALERT_PATCH.start()
+    mon.waiting_scan_reset()   # no WAITING folder scan from before this module
 
 
 def tearDownModule():
+    # Monitor.refresh in any test may leave a WAITING folder scan open: close it.
+    mon.waiting_scan_reset()
     _RULE_ALERT_PATCH.stop()
     _RULE_ALERT_ISOLATED.cleanup()
     _ISOLATED.cleanup()
@@ -10393,9 +10396,24 @@ class WaitingTaskTests(unittest.TestCase):
     RESUME = "quota resets at 00:00 UTC"
 
     def setUp(self):
-        # Every test starts and ends with no retained WAITING folder scan.
+        # Every test starts and ends with no retained WAITING folder scan, so
+        # scans left by other tests (Monitor.refresh reads the WAITING folder
+        # too) or by an earlier test here never reach this one, in any order.
         mon.waiting_scan_reset()
-        self.addCleanup(mon.waiting_scan_reset)
+        self.assertEqual(mon._waiting_scans, {})
+
+    def tearDown(self):
+        mon.waiting_scan_reset()
+
+    @contextlib.contextmanager
+    def tasks_root(self):
+        """A temporary Task folder whose scans are closed and forgotten before
+        it is removed, so a later part of the same test starts with none."""
+        with tempfile.TemporaryDirectory() as root:
+            try:
+                yield root
+            finally:
+                mon.waiting_scan_reset()
 
     def stamp(self, age):
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.NOW - age))
@@ -10940,8 +10958,10 @@ class WaitingTaskTests(unittest.TestCase):
         reset.assert_called_once_with()
 
     def test_waiting_records_stay_bounded_and_name_any_shortfall(self):
+        # Each part uses its own folder; tasks_root closes and forgets its scan
+        # on exit, so no part sees a scan left by an earlier one (PR #1751 CI).
         tasks = [self.task(task=letter * 32) for letter in "abc"]
-        with tempfile.TemporaryDirectory() as root:
+        with self.tasks_root() as root:
             paths = self.write_tasks(root, tasks)
             size = max(path.stat().st_size for path in paths)
             # A small budget reads one file a call: the over-budget file waits for
@@ -10952,7 +10972,9 @@ class WaitingTaskTests(unittest.TestCase):
             self.assertEqual([problem for _, problem in results],
                              [mon.WAITING_UNSEEN, mon.WAITING_UNSEEN, ""])
             self.assertEqual([record.task[0] for record in results[-1][0]], ["c", "b", "a"])
-        with tempfile.TemporaryDirectory() as root:
+            self.assertEqual(list(mon._waiting_scans), [root])
+        self.assertEqual(mon._waiting_scans, {})
+        with self.tasks_root() as root:
             self.write_tasks(root, tasks)
             # A call smaller than the folder says so, then the next call covers the rest.
             with patch.object(mon, "WAITING_SCAN", 2):
@@ -10962,7 +10984,7 @@ class WaitingTaskTests(unittest.TestCase):
                 records, problem = mon.waiting_records(root)
                 self.assertEqual([record.task[0] for record in records], ["c", "b", "a"])
                 self.assertEqual(problem, "")
-        with tempfile.TemporaryDirectory() as root:
+        with self.tasks_root() as root:
             paths = self.write_tasks(root, tasks)
             # A file over the read limit is never read and is named as a shortfall.
             with patch.object(mon, "REMOTE_TEST_READ", size - 1):
@@ -10976,17 +10998,50 @@ class WaitingTaskTests(unittest.TestCase):
             records, problem = mon.waiting_records(root)
             self.assertEqual([record.task[0] for record in records], ["c"])
             self.assertEqual(problem, "")
-        # No Task folder yet: nothing to show and nothing missing.
-        with tempfile.TemporaryDirectory() as root:
+        # No Task folder yet: nothing to show, nothing missing and no scan kept.
+        with self.tasks_root() as root:
             self.assertEqual(mon.waiting_records(os.path.join(root, "absent")), ([], ""))
-        # A folder that cannot be listed is named, not shown as empty.
-        with tempfile.TemporaryDirectory() as root, \
+            self.assertEqual(mon._waiting_scans, {})
+        # A folder that cannot be listed is named, not shown as empty, and its
+        # scan is dropped (the only scan this part could have made).
+        with self.tasks_root() as root, \
                 patch.object(mon, "_waiting_open", side_effect=PermissionError("denied")):
             self.assertEqual(mon.waiting_records(root), ([], mon.WAITING_UNREADABLE))
             records, problem = mon.waiting_records(root)
             self.assertEqual(mon.waiting_lines(records, self.NOW, problem=problem),
                              [(f"WAITING 清單可能不完整：{mon.WAITING_UNREADABLE}", "")])
+            self.assertNotIn(root, mon._waiting_scans)
             self.assertEqual(mon._waiting_scans, {})
+
+    def test_waiting_scan_reset_clears_scans_left_by_other_tests(self):
+        """PR #1751 Linux CI: scans left behind (here by Monitor.refresh-style
+        calls on other roots) are all closed and cleared by one reset, even
+        when one of them fails to close, and never reach a later scan."""
+        log, opener = self.counting()
+        tasks = [self.task(task=letter * 32) for letter in "abc"]
+        with tempfile.TemporaryDirectory() as parent, patch.object(mon, "WAITING_SCAN", 2), \
+                opener:
+            roots = []
+            for index in range(3):
+                root = Path(parent) / f"left-{index}"
+                root.mkdir()
+                self.write_tasks(root, tasks)
+                roots.append(str(root))
+                self.assertEqual(mon.waiting_records(str(root))[1], mon.WAITING_UNSEEN)
+            self.assertEqual(sorted(mon._waiting_scans), sorted(roots))
+            failing = mon._waiting_scans[roots[0]]
+            with patch.object(failing, "close", side_effect=RuntimeError("close failed")):
+                with self.assertRaises(RuntimeError):
+                    mon.waiting_scan_reset()
+            # Every scan is forgotten and every other folder iterator is closed.
+            self.assertEqual(mon._waiting_scans, {})
+            self.assertEqual([scan.closed for scan in log["open"]], [False, True, True])
+            failing.close()
+            self.assertTrue(all(scan.closed for scan in log["open"]))
+            # A new scan of a fresh root sees only its own folder.
+            records, problem = mon.waiting_records(roots[1])
+            self.assertEqual((len(records), problem), (2, mon.WAITING_UNSEEN))
+            self.assertEqual(list(mon._waiting_scans), [roots[1]])
 
     def test_monitor_lines_and_office_top_placement(self):
         from types import SimpleNamespace

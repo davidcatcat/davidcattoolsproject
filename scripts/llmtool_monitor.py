@@ -7202,12 +7202,30 @@ def _waiting_drop(root: str) -> None:
         scan.close()
 
 
-def waiting_scan_reset() -> None:
-    """Close every retained WAITING scan; the next call starts a new, incomplete one."""
-    with _waiting_lock:
-        for scan in _waiting_scans.values():
+def _waiting_close_all() -> None:
+    """Close and forget every retained scan; the caller holds _waiting_lock.
+
+    The table is emptied first and every scan is closed even when one close
+    fails, so no scan of an earlier root (or an earlier test) is ever kept."""
+    scans = list(_waiting_scans.values())
+    _waiting_scans.clear()
+    error = None
+    for scan in scans:
+        try:
             scan.close()
-        _waiting_scans.clear()
+        except BaseException as exc:   # close the rest first, then report it
+            error = error or exc
+    if error is not None:
+        raise error
+
+
+def waiting_scan_reset() -> None:
+    """Close every retained WAITING scan; the next call starts a new, incomplete one.
+
+    The monitor calls this at exit and tests call it around every WAITING test,
+    so module-level scan state never carries over from one run to the next."""
+    with _waiting_lock:
+        _waiting_close_all()
 
 
 def waiting_records(root: str | None = None) -> tuple[list[WaitingRecord], str]:
@@ -7240,9 +7258,7 @@ def waiting_records(root: str | None = None) -> tuple[list[WaitingRecord], str]:
             scan = None
         if scan is None:
             if len(_waiting_scans) >= WAITING_ROOTS:
-                for old in _waiting_scans.values():
-                    old.close()
-                _waiting_scans.clear()
+                _waiting_close_all()
             scan = _waiting_scans[root] = _WaitingScan(identity)
         try:
             scan.step(root)
