@@ -457,7 +457,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                                   'context_cap_tokens': 32768,
                                   'max_output_tokens': 8192,
                                   'allowed_data_classes': ['synthetic', 'public_repo']},
-                              'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
+                              'default_model': 'gw-agent-default',
+                              'allowed_models': ['gw-agent-default'],
+                              'default_effort': 'low'}}}), \
              patch.object(task_submission_cli, 'resolve_profile_config',
                           return_value={'generation': {'max_tokens': 49152}}), \
              patch.object(task_submission_cli, 'selected_provider', return_value={
@@ -660,7 +662,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                                   'context_cap_tokens': 32768,
                                   'max_output_tokens': 8192,
                                   'allowed_data_classes': ['synthetic', 'public_repo']},
-                              'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
+                              'default_model': 'gw-agent-default',
+                              'allowed_models': ['gw-agent-default'],
+                              'default_effort': 'low'}}}), \
              patch.object(task_submission_cli, 'resolve_profile_config',
                           return_value={'generation': {'max_tokens': 49152}}), \
              patch.object(task_submission_cli, 'selected_provider', return_value={
@@ -904,7 +908,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                               'profile': gateway_profile,
                               'profile_name': 'llmtool-direct',
                               'authorization_ref': 'pm-task-ref',
-                              'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
+                              'default_model': 'gw-agent-default',
+                              'allowed_models': ['gw-agent-default'],
+                              'default_effort': 'low'}}}), \
              patch.dict(os.environ, {'HOME': str(config_home)}), \
              patch.object(task_submission_cli, '_gw_agent_endpoint', return_value=({
                  'type': 'openai-compatible', 'model': 'authorized-model',

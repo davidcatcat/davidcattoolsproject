@@ -214,6 +214,7 @@ class AgyRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, '_remote_receipt_test_policy', return_value='LOCAL'), \
              patch.object(task_submission_cli, 'load_route_config', return_value={
                  'routes': {'agy': {'executable': 'agy', 'default_model': 'gemini-test',
+                                    'allowed_models': ['gemini-test'],
                                     'default_effort': 'high', 'denied_dirs': ['.gemini'],
                                     'state_dirs': {'policy': 'private-temp-only'}}}}), \
              patch.object(task_submission_cli.shutil, 'which', return_value='/usr/bin/agy'), \
