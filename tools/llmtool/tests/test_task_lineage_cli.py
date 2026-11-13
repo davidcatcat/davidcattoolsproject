@@ -87,5 +87,19 @@ class LineageMemberTests(LineageCase):
         self.assertEqual(cli._lineage_members(self.store, plain), [])
 
 
+class LineageNoticeTests(LineageCase):
+    def test_owner_notice_only_for_failed_end_states_and_reasons_are_screened(self):
+        notice = cli.lineage_owner_notice('a' * 32, 'DROPPED', 'not needed')
+        self.assertTrue(notice['body'].startswith(cli.OWNER_NOTICE_MARKER + '\n'))
+        self.assertEqual((notice['state'], notice['marker']),
+                         ('DROPPED', cli.OWNER_NOTICE_MARKER))
+        for state in ('CLOSED', 'OPEN', 'PARKED'):
+            self.assertIsNone(cli.lineage_owner_notice('a' * 32, state, 'merged'))
+        self.assertEqual(cli._lineage_reason('Original function unaffected.', 'R'),
+                         'Original function unaffected.')
+        for reason in ('', 'x' * 501, 'line\nbreak', None):
+            self.refused('R', lambda _store, value: cli._lineage_reason(value, 'R'), reason)
+
+
 if __name__ == '__main__':
     unittest.main()
