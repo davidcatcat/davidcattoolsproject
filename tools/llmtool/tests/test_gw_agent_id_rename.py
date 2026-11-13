@@ -346,6 +346,25 @@ class RetiredIdGuardTests(unittest.TestCase):
             for table in ('RETIRED_WORKER_ALIASES', 'RETIRED_WORKER_IDS'):
                 self.assertEqual(list(_assignments_to(table)(tree)), [])
 
+    def test_script_modules_never_name_the_retired_id(self):
+        # High Debug #1780 completeness: every script beside the package reads
+        # stored ids through the shared alias and keeps no table of its own.
+        # The alias tables and the retired-route parse list live only in the
+        # package (checked above). Test modules under scripts/ are fixtures that
+        # load old records on purpose, as tools/llmtool/tests does, so they are
+        # not scanned here.
+        for directory in (_LLMTOOL_ROOT / 'scripts', _REPO_ROOT / 'scripts'):
+            modules = sorted(path for path in directory.glob('*.py')
+                             if not path.name.startswith('test_'))
+            with self.subTest(directory=str(directory.relative_to(_REPO_ROOT))):
+                self.assertTrue(modules)
+            for path in modules:
+                with self.subTest(module=str(path.relative_to(_REPO_ROOT))):
+                    self.assertEqual(_stray_lines(path.read_text(encoding='utf-8')), [])
+        # The monitor and gw_root_stats, checked in detail above, are in the scan.
+        self.assertTrue(_MONITOR.is_file())
+        self.assertTrue(_GW_ROOT_STATS.is_file())
+
     def test_dispatch_policy_never_names_the_retired_id(self):
         self.assertEqual(_stray_lines(_POLICY.read_text(encoding='utf-8')), [])
 
