@@ -1309,6 +1309,46 @@ def _check_review_disputes_transition(old, new):
                 for key in _REVIEW_DISPUTE_FIELDS - {'state'})):
         _fail('REVIEW_DISPUTE_TRANSITION_INVALID')
 
+def _check_lineage_merge_claim(current, changes):
+    """#1502 D10c2 (security v91): no new merge claim on a PARKED or ended Task.
+
+    Runs under the task lock with the lineage write gate in _update_record, so a
+    split that parks the ROOT and a task advance that claims its merge cannot
+    both succeed: whichever commits first makes the other one refuse.
+
+    PR #1758 v91 (CWE-841): both the persisted lineage and the lineage this
+    same update proposes are checked, so one write that carries a merge claim
+    together with a PARKED (or ended) lineage is refused as a whole.
+    """
+    proposed = changes.get('merge_attempt')
+    if type(proposed) is not dict or proposed.get('state') != 'CLAIMED':
+        return
+    lines = [current.get('lineage')]
+    if 'lineage' in changes:
+        lines.append(changes['lineage'])
+    for line in lines:
+        if line is not None and (type(line) is not dict or line.get('state') != 'OPEN'):
+            _fail('MERGE_ROOT_PARKED' if type(line) is dict and line.get('state') == 'PARKED'
+                  else 'MERGE_LINEAGE_ENDED')
+
+
+def park_lineage_root(store, task_id, lineage):
+    """#1502 D10c2: PARK a ROOT in one locked compare-and-set (security v91).
+
+    Under the task lock the store refuses unless the ROOT's lineage is OPEN or
+    PARKED (an end state fails SPLIT_ROOT_NOT_OPEN) and it has no merge_attempt
+    (SPLIT_ROOT_MERGE_STARTED). The caller records child Tasks only after this.
+    """
+    if (type(lineage) is not dict or lineage.get('kind') != 'root' or
+            lineage.get('state') != 'PARKED' or lineage.get('lineage_id') != task_id):
+        _fail('TASK_LINEAGE_INVALID')
+    try:
+        return store.update(task_id, lineage=dict(lineage))
+    except LLMToolError as exc:
+        if getattr(exc, 'task_store_error_code', None) == 'TASK_LINEAGE_TRANSITION_INVALID':
+            _fail('SPLIT_ROOT_NOT_OPEN')
+        raise
+
 
 def _validate(record, *, strict=True):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
@@ -4371,6 +4411,7 @@ class TaskStore:
                         _fail('TASK_STORE_BUSY')
                     time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
             current = self._read_at(directory, task_id)
+            _check_lineage_merge_claim(current, changes)
             if expected is not None and any(current.get(key) != value
                                             for key, value in expected.items()):
                 raise TaskStoreConflict() from None
@@ -4411,6 +4452,14 @@ class TaskStore:
             if 'lineage' in changes:
                 # #1502 WP-D D9b: every lineage write is forward-only, under the task lock.
                 _check_lineage_transition(current.get('lineage'), changes['lineage'])
+                new_line = changes['lineage']
+                if (type(new_line) is dict and new_line.get('state') == 'PARKED' and
+                        (current.get('merge_attempt') is not None or
+                         changes.get('merge_attempt') is not None)):
+                    # #1502 D10c2 (security v91): a Task whose merge started is never
+                    # PARKED, whether the merge_attempt is persisted or arrives in this
+                    # same update (PR #1758 v91, CWE-841).
+                    _fail('SPLIT_ROOT_MERGE_STARTED')
             if 'review_disputes' in changes:
                 # #1502 WP-D D13: append and forward transitions only, under the task lock.
                 _check_review_disputes_transition(current.get('review_disputes'),

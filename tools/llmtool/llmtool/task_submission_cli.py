@@ -1201,6 +1201,42 @@ def _lineage_new_member(store, task_id, pm_session, taken):
     return record
 
 
+def lineage_split(store, root_id, children, *, pm_session, reason, main_sha_reader=None):
+    """SPLIT a ROOT into child Tasks that start from the latest main; the ROOT is PARKED."""
+    from . import repair_policy
+    from .task_store import park_lineage_root, record_lineage
+    root = _lineage_task(store, root_id, pm_session)
+    line = _lineage_of(root)
+    _lineage_reason(reason, 'SPLIT_REASON_REQUIRED')
+    members = _lineage_members(store, root_id)
+    code = repair_policy.admit_split(
+        kind=line['kind'], child_count=sum(item['kind'] == 'child' for item in members),
+        new_children=len(children) if type(children) is list else 0,
+        policy=repair_policy.load_policy())
+    if code is not None:
+        _lineage_refuse(code)
+    if line['state'] not in ('OPEN', 'PARKED') or root.get('merge_attempt') is not None:
+        _lineage_refuse('SPLIT_ROOT_NOT_OPEN')
+    for index, child_id in enumerate(children):
+        _lineage_new_member(store, child_id, pm_session, {root_id, *children[:index]})
+    base_sha = (main_sha_reader or task_completion.read_authenticated_main_sha)()
+    now = _timestamp()
+    # Security v91: the OPEN/PARKED and no-merge_attempt checks above are early
+    # refusals only. Parking is one compare-and-set under the Task lock that
+    # repeats them (SPLIT_ROOT_NOT_OPEN / SPLIT_ROOT_MERGE_STARTED), and the
+    # store refuses any later merge claim on the PARKED ROOT (MERGE_ROOT_PARKED).
+    # No child is recorded unless the ROOT was parked.
+    park_lineage_root(store, root_id, dict(line, state='PARKED', reason=reason,
+                                           recorded_at=now))
+    for child_id in children:
+        record_lineage(store, child_id, {
+            'lineage_id': root_id, 'kind': 'child', 'parent': root_id, 'replaces': [],
+            'state': 'OPEN', 'reason': None, 'base_sha': base_sha, 'recorded_at': now})
+    return {'task_id': root_id, 'state': 'PARKED', 'children': list(children),
+            'base_sha': base_sha, 'owner_notice': None,
+            'next': 'PM closes the ROOT PR with a comment; the ROOT is never merged'}
+
+
 def run_task_remote_test(args, *, store=None, stdout=None):
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,
@@ -6691,11 +6727,12 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                for attempts in family_attempts.values()):
             invalid()
         ordered = claims
-        dispatched = [claim for claim in ordered
-                      if type(claim) is dict and claim.get('state') == 'DISPATCHED']
-        if any(type(claim) is not dict or claim.get('state') not in ('DISPATCHED', 'FAILED')
+        if any(type(claim) is not dict or
+               claim.get('state') not in ('DISPATCHED', 'UNKNOWN', 'FAILED')
                for claim in ordered):
             invalid()
+        candidates = [claim for claim in ordered
+                      if claim.get('state') in ('DISPATCHED', 'UNKNOWN')]
         original = task.get('developer')
         if type(original) is not dict or original.get('source_sha') != source_sha:
             invalid()
@@ -6707,10 +6744,15 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
         if (registration.root != root or registration.branch != branch or
                 registration.source_sha != source_sha):
             invalid()
-        artifacts = [(original.get('artifact'), original.get('artifact_sha256'),
-                      source_sha,
-                      dispatched[0].get('head_sha') if dispatched else registration.result_sha)]
-        for index, claim in enumerate(dispatched):
+        # #1745: a repair whose Task has no usable Developer result (refused,
+        # BLOCKED, outcome unknown, never delegated) is skipped only when it
+        # made no commit: its claim head must equal the next chain head. A
+        # repair that moved the head without a recorded result, and an UNKNOWN
+        # claim whose repair Task did respond, stay invalid (fail closed).
+        dispatched = []
+        repairs = {}
+        for index, claim in enumerate(candidates):
+            head = claim.get('head_sha')
             repair_id = claim.get('repair_task_id')
             if type(repair_id) is not str:
                 invalid()
@@ -6718,11 +6760,27 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                 repair = store.get(repair_id)
             except Exception:
                 invalid()
-            developer = repair.get('developer') if type(repair) is dict else None
-            if (type(developer) is not dict or
-                    developer.get('state') != 'DEVELOPER_RESPONDED' or
-                    developer.get('source_sha') != claim.get('head_sha')):
+            if type(repair) is not dict:
                 invalid()
+            developer = repair.get('developer')
+            if (type(developer) is dict and
+                    developer.get('state') == 'DEVELOPER_RESPONDED'):
+                if (claim.get('state') != 'DISPATCHED' or
+                        developer.get('source_sha') != head):
+                    invalid()
+                dispatched.append(claim)
+                repairs[id(claim)] = developer
+                continue
+            next_head = (candidates[index + 1].get('head_sha')
+                         if index + 1 < len(candidates) else registration.result_sha)
+            if (type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None or
+                    head != next_head):
+                invalid()
+        artifacts = [(original.get('artifact'), original.get('artifact_sha256'),
+                      source_sha,
+                      dispatched[0].get('head_sha') if dispatched else registration.result_sha)]
+        for index, claim in enumerate(dispatched):
+            developer = repairs[id(claim)]
             next_head = (dispatched[index + 1].get('head_sha')
                          if index + 1 < len(dispatched) else registration.result_sha)
             artifacts.append((developer.get('artifact'), developer.get('artifact_sha256'),
@@ -6749,6 +6807,10 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
         invalid()
     except Exception:
         invalid()
+    if candidates and not dispatched:
+        # Every repair was skipped as a no-commit attempt: the original
+        # proposal alone ends at the D6 head, so use the single-artifact path.
+        return None
     return artifacts
 
 

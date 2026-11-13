@@ -11,6 +11,8 @@ from llmtool.task_store import TaskStore, new_id, record_lineage
 MAIN = 'e' * 40
 PM = 'pm-lineage-test'
 AT = '2026-11-13T00:00:00Z'
+CLAIM = {'pr': 17, 'head_sha': 'a' * 40, 'state': 'CLAIMED',
+         'claimed_at': '2026-11-13T00:00:00.000000Z'}
 
 
 class LineageCase(unittest.TestCase):
@@ -243,6 +245,75 @@ class LineageNewMemberTests(LineageCase):
                                          'owner_notice': None})
         self.assertEqual(self.state(root), 'FAILED_FINAL')
         self.assertIsNone(cli._lineage_roll_up(self.store, root))
+
+
+class LineageSplitTests(LineageCase):
+    def test_split_parks_the_root_and_children_start_from_main(self):
+        root, first, second = self.task(), self.task(), self.task()
+        result = cli.lineage_split(self.store, root, [first, second], pm_session=PM,
+                                   reason='Review FAIL 3.', main_sha_reader=lambda: MAIN)
+        self.assertEqual((result['state'], result['base_sha']), ('PARKED', MAIN))
+        self.assertEqual(self.state(root), 'PARKED')
+        for child in (first, second):
+            line = self.store.get(child)['lineage']
+            self.assertEqual((line['kind'], line['parent'], line['state'], line['base_sha']),
+                             ('child', root, 'OPEN', MAIN))
+
+    def split_racing(self, race):
+        """Split a fresh ROOT; race(root) runs after the split's checks, before its park."""
+        root, first, second = self.task(), self.task(), self.task()
+
+        def main_sha():
+            race(root)
+            return MAIN
+        return root, (first, second), lambda _store: cli.lineage_split(
+            self.store, root, [first, second], pm_session=PM, reason='Review FAIL 3.',
+            main_sha_reader=main_sha)
+
+    def assert_nothing_recorded(self, root, children):
+        self.assertNotIn('lineage', self.store.get(root))
+        for child in children:
+            self.assertNotIn('lineage', self.store.get(child))
+
+    def test_merge_claimed_before_the_park_refuses_the_split_and_records_no_child(self):
+        # Security v91 (CWE-362): task advance claims the merge after split read OPEN.
+        root, children, split = self.split_racing(lambda root: self.store.update(
+            root, merge_attempt=CLAIM))
+        self.refused('SPLIT_ROOT_MERGE_STARTED', split)
+        self.assert_nothing_recorded(root, children)
+        self.assertEqual(self.store.get(root)['merge_attempt'], CLAIM)
+
+    def test_root_ended_before_the_park_refuses_the_split_and_records_no_child(self):
+        root, children, split = self.split_racing(lambda root: record_lineage(
+            self.store, root, {'lineage_id': root, 'kind': 'root', 'parent': None,
+                               'replaces': [], 'state': 'CLOSED', 'reason': None,
+                               'base_sha': None, 'recorded_at': AT}))
+        self.refused('SPLIT_ROOT_NOT_OPEN', split)
+        self.assertEqual(self.state(root), 'CLOSED')
+        for child in children:
+            self.assertNotIn('lineage', self.store.get(child))
+
+    def test_a_root_whose_merge_started_is_refused_before_any_write(self):
+        root, first = self.task(), self.task()
+        self.store.update(root, merge_attempt=CLAIM)
+        self.refused('SPLIT_ROOT_NOT_OPEN', cli.lineage_split, root, [first], pm_session=PM,
+                     reason='Review FAIL 3.', main_sha_reader=lambda: MAIN)
+        self.assert_nothing_recorded(root, [first])
+
+    def test_park_first_then_a_merge_claim_is_refused_under_the_lock(self):
+        # Security v91: a task advance that read the ROOT OPEN before the park, then
+        # claims with its stale record_sha256, still gets MERGE_ROOT_PARKED.
+        root, first = self.task(), self.task()
+        stale = self.store.get(root)['record_sha256']
+        cli.lineage_split(self.store, root, [first], pm_session=PM,
+                          reason='Review FAIL 3.', main_sha_reader=lambda: MAIN)
+        self.refused('MERGE_ROOT_PARKED', lambda store: store.compare_and_update(
+            root, expected={'record_sha256': stale}, merge_attempt=CLAIM))
+        self.refused('MERGE_ROOT_PARKED', lambda store: store.update(
+            root, merge_attempt=CLAIM))
+        self.assertNotIn('merge_attempt', self.store.get(root))
+        self.assertEqual(self.state(root), 'PARKED')
+        self.assertEqual(self.store.get(first)['lineage']['state'], 'OPEN')
 
 
 if __name__ == '__main__':
