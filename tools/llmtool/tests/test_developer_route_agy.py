@@ -11,6 +11,10 @@ from llmtool.developer_routes import AgyRoute, RouteError, load_route_config
 from llmtool.developer_routes.agy import MAX_PROMPT_BYTES
 from llmtool.developer_routes.base import capture_snapshot, run_route
 
+# #1502 WP-E: derive the AGY model from the route config instead of hard-coding it.
+MODEL = load_route_config()['routes']['agy']['default_model']
+ROUTES_FILE = Path(__file__).resolve().parents[1] / 'developer-routes.json'
+
 
 class Boundary:
     def __init__(self, verified=True):
@@ -43,7 +47,7 @@ class AgyRouteTests(unittest.TestCase):
         self.head = subprocess.check_output(
             ['/usr/bin/git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
         self.log = self.temp_root / 'agy.log'
-        self.log.write_text('model_resolver: Resolving model gemini-4-argon-medium\n')
+        self.log.write_text(f'model_resolver: Resolving model {MODEL}\n')
         self.route = AgyRoute({'executable': 'agy'})
 
     def tearDown(self):
@@ -51,7 +55,7 @@ class AgyRouteTests(unittest.TestCase):
 
     def request(self):
         return {'root': str(self.root), 'prompt': 'bounded prompt',
-                'model': 'gemini-4-argon-medium', 'effort': 'medium',
+                'model': MODEL, 'effort': 'medium',
                 'expected_branch': self.branch, 'expected_head': self.head,
                 'write_paths': ['source.py'], 'executable': '/usr/bin/agy',
                 'log_path': 'agy.log'}
@@ -77,7 +81,7 @@ class AgyRouteTests(unittest.TestCase):
     def test_exact_argv_has_boundary_prefix(self):
         result, calls = self.run_case()
         self.assertEqual(calls[0][:13], ['/verified-boundary', '/usr/bin/agy', '-p',
-            'bounded prompt', '--model', 'gemini-4-argon-medium', '--effort',
+            'bounded prompt', '--model', MODEL, '--effort',
             'medium', '--sandbox', '--output-format', 'json', '--print-timeout',
             '0'])
         self.assertEqual(calls[0][13:15], ['--log-file', calls[0][-1]])
@@ -85,7 +89,7 @@ class AgyRouteTests(unittest.TestCase):
         self.assertIn('llmtool-route-', calls[0][-1])
         self.assertNotIn('--add-dir', calls[0])
         self.assertNotIn('--mode', calls[0])
-        self.assertEqual(result.model, 'gemini-4-argon-medium')
+        self.assertEqual(result.model, MODEL)
         self.assertEqual(result.usage, {'input_tokens': 3, 'output_tokens': 2})
         self.assertEqual(result.changed_files, ('source.py',))
 
@@ -129,7 +133,8 @@ class AgyRouteTests(unittest.TestCase):
 
     def test_config_loader_rejects_unknown_and_personal_values(self):
         config = load_route_config()
-        self.assertEqual(config['routes']['agy']['default_model'], 'gemini-3.8-flash-medium')
+        self.assertEqual(config['routes']['agy']['default_model'],
+                         json.loads(ROUTES_FILE.read_text())['routes']['agy']['default_model'])
         self.assertEqual(config['routes']['agy']['default_effort'], 'medium')
         for entry in ({'unexpected': True}, {'executable': '/Users/name/agy'}):
             path = self.root / 'bad.json'
@@ -138,9 +143,9 @@ class AgyRouteTests(unittest.TestCase):
                 load_route_config(path)
 
     def test_log_in_private_temp_is_read_for_model_verification(self):
-        self.log.write_text('model_resolver: Resolving model gemini-4-argon-medium\n')
+        self.log.write_text(f'model_resolver: Resolving model {MODEL}\n')
         result, calls = self.run_case()
-        self.assertEqual(result.model, 'gemini-4-argon-medium')
+        self.assertEqual(result.model, MODEL)
         self.assertFalse(Path(calls[0][-1]).exists())
 
 
