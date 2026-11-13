@@ -1141,6 +1141,11 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     if any(type(claim) is dict and claim.get('head_sha') == head and
            claim.get('pr') != number for claim in _claims(record)):
         return _merge_refusal('MERGE_CONFLICTING_PR')
+    lineage = record.get('lineage')
+    if type(lineage) is dict and lineage.get('state') != 'OPEN':
+        # #1502 WP-D D10: a split (PARKED) ROOT is never merged, nor is an ended Task.
+        return _merge_refusal('MERGE_ROOT_PARKED' if lineage.get('state') == 'PARKED'
+                              else 'MERGE_LINEAGE_ENDED')
     if owner_exception is not None and pr.get('merged') is True:
         prior = record.get('merge_attempt')
         if type(prior) is dict:

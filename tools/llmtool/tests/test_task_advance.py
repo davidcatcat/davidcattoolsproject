@@ -3666,6 +3666,17 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
         self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
         self.assertEqual(claims, [])
 
+    def test_lineage_parked_root_or_ended_task_refuses_merge(self):
+        # #1502 WP-D D10: a PARKED ROOT is never merged, nor is an ended Task.
+        plain = base_record
+        line = {'lineage_id': '1' * 32, 'kind': 'root', 'parent': None, 'replaces': [],
+                'state': 'OPEN', 'reason': None, 'base_sha': None,
+                'recorded_at': '2026-11-13T00:00:00Z'}
+        for state, code in (('PARKED', 'MERGE_ROOT_PARKED'), ('DROPPED', 'MERGE_LINEAGE_ENDED')):
+            with self.subTest(state=state), patch(f'{__name__}.base_record', lambda **changes:
+                    plain(lineage=dict(line, state=state), **changes)):
+                self.assert_refused(self.merge(), code)
+
     def test_diverged_pr_with_clean_mergeable_state_merges(self):
         result, _reads, calls, claims = self.merge(
             compare_reply={'status': 'diverged', 'ahead_by': 5, 'behind_by': 3},
