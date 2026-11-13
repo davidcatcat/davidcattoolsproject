@@ -893,6 +893,10 @@ def add_task_submission_parsers(actions):
                                  help='review verdict version (1-9999; default 1)')
     review_dispatch.add_argument('--reviewer', choices=('claude-reviewer', 'codex-reviewer'),
                                  help='formal Reviewer (default follows the current mapping)')
+    review_dispatch.add_argument('--pm-session',
+                                 help=('caller PM session (native UUID or pm- ID); must own '
+                                       'the Task; default: CLAUDE_CODE_SESSION_ID or '
+                                       'CODEX_THREAD_ID'))
     review_result = actions.add_parser(
         'review-result', help='Record the dispatched Reviewer verdict for the original PM')
     review_result.add_argument('task_id', help='existing durable Task ID')
@@ -1421,9 +1425,22 @@ def run_task_review_prompt(args, *, store=None):
 
 
 def run_task_review_dispatch(args, *, store=None):
-    """Thin CLI adapter for the one-shot Reviewer dispatcher."""
+    """Thin CLI adapter for the one-shot Reviewer dispatcher.
+
+    #1230 A1 (#1124 rest, item 2): the caller's PM session must own the Task.
+    A refused caller gets one ``pm_caller.refusal`` line and exit 1, before any
+    dispatch. ``task advance`` and ``task repair`` call ``dispatch_review``
+    directly and are not checked here; advance already checked its caller.
+    """
+    from . import pm_caller
+    store = TaskStore() if store is None else store
+    try:
+        pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
+    except pm_caller.PMCallerRefused as exc:
+        _print(pm_caller.refusal(args.task_id, exc.code))
+        return 1
     from .review_dispatch import dispatch_review
-    result = dispatch_review(store=TaskStore() if store is None else store,
+    result = dispatch_review(store=store,
                              task_id=args.task_id, executor_task=args.executor_task,
                              pr_number=args.pr, version=getattr(args, 'version', 1),
                              reviewer=getattr(args, 'reviewer', None))

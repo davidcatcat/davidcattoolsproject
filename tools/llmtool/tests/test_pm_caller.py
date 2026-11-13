@@ -256,6 +256,104 @@ class PMCallerStoreTests(unittest.TestCase):
         run.assert_called_once()
         self.assertEqual(result, {'result': 'PASS'})
 
+    def _review_dispatch(self, task_id, *extra, claude=''):
+        argv = ['task', 'review-dispatch', task_id, '--executor-task', 'executor-1',
+                '--pr', '17', *extra]
+        args = parser_for_cli().parse_args(argv)
+        output = io.StringIO()
+        with _environment(claude=claude), \
+                patch('llmtool.review_dispatch.dispatch_review',
+                      return_value={'state': 'DISPATCHED'}) as dispatch, \
+                redirect_stdout(output):
+            code = task_submission_cli.run_task_review_dispatch(args, store=self.store)
+        return code, output.getvalue(), dispatch
+
+    def test_review_dispatch_refuses_missing_identity(self):
+        task_id = self._task(OWNER)
+        code, output, dispatch = self._review_dispatch(task_id)
+        dispatch.assert_not_called()
+        self.assertEqual(code, 1)
+        lines = output.splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0]), {
+            'task_id': task_id, 'step': 'REFUSED', 'result': None, 'next': 'REFUSED',
+            'codes': ['PM_CALLER_SESSION_MISSING'], 'acked': []})
+
+    def test_review_dispatch_refuses_non_owner(self):
+        task_id = self._task(OWNER)
+        for extra, claude in (((), OTHER), (('--pm-session', OTHER), '')):
+            with self.subTest(extra=extra, claude=claude):
+                code, output, dispatch = self._review_dispatch(task_id, *extra,
+                                                               claude=claude)
+                dispatch.assert_not_called()
+                self.assertEqual(code, 1)
+                self.assertEqual(json.loads(output)['codes'], ['PM_CALLER_NOT_TASK_OWNER'])
+
+    def test_review_dispatch_refuses_conflicting_explicit_session(self):
+        task_id = self._task(OWNER)
+        code, output, dispatch = self._review_dispatch(task_id, '--pm-session', OWNER,
+                                                       claude=OTHER)
+        dispatch.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output)['codes'], ['PM_CALLER_SESSION_CONFLICT'])
+
+    def test_review_dispatch_refuses_fenced_owner(self):
+        task_id = self._task(OWNER)
+        pm_runtime.write_session_fence(OWNER, 'pm-' + OTHER, '2026-11-12T00:00:00Z')
+        code, output, dispatch = self._review_dispatch(task_id, claude=OWNER)
+        dispatch.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output)['codes'], ['PM_CALLER_SESSION_FENCED'])
+
+    def test_review_dispatch_runs_for_owner(self):
+        task_id = self._task(OWNER)
+        for extra, claude in ((('--pm-session', OWNER), ''), ((), OWNER)):
+            with self.subTest(extra=extra, claude=claude):
+                code, output, dispatch = self._review_dispatch(task_id, *extra,
+                                                               claude=claude)
+                self.assertIsNone(code)
+                dispatch.assert_called_once_with(
+                    store=self.store, task_id=task_id, executor_task='executor-1',
+                    pr_number=17, version=1, reviewer=None)
+                self.assertEqual(json.loads(output), {'state': 'DISPATCHED'})
+
+    def test_review_dispatch_passes_version_and_reviewer_for_owner(self):
+        task_id = self._task(OWNER)
+        code, _, dispatch = self._review_dispatch(
+            task_id, '--version', '3', '--reviewer', 'codex-reviewer',
+            '--pm-session', 'pm-' + OWNER)
+        self.assertIsNone(code)
+        dispatch.assert_called_once_with(
+            store=self.store, task_id=task_id, executor_task='executor-1',
+            pr_number=17, version=3, reviewer='codex-reviewer')
+
+    def test_advance_internal_review_dispatch_is_not_caller_checked(self):
+        from llmtool import task_advance
+        head = 'a' * 40
+        store = _MutableStore({'task_id': 't', 'pm_session_id': 'pm-' + OWNER,
+                               'completion': {'executor_task_id': 'executor-1'}})
+        d6 = {'root': str(self.home), 'branch': 'feat/x', 'dirty': False,
+              'result_head': head, 'recorded_result_head': head}
+        with _environment(), \
+                patch.object(task_advance, '_closed_train_member_head', return_value=None), \
+                patch.object(task_advance, '_d6_snapshot', return_value=d6), \
+                patch.object(task_advance, '_merged_review_target', return_value=None), \
+                patch.object(task_advance, 'decide', return_value='DISPATCH_REVIEW'), \
+                patch.object(task_advance, '_review_ci_gate', return_value=(None, None)), \
+                patch.object(pm_caller, 'check_caller',
+                             wraps=pm_caller.check_caller) as check, \
+                patch('llmtool.review_dispatch.dispatch_review',
+                      return_value={'state': 'DISPATCHED'}) as dispatch, \
+                redirect_stdout(io.StringIO()):
+            result = task_advance.advance(task_id='t', store=store, pr_number=17,
+                                          github_get=lambda _path: {})
+        check.assert_not_called()
+        dispatch.assert_called_once_with(store=store, task_id='t',
+                                         executor_task='executor-1',
+                                         pr_number=17, version=1)
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(result['result'], {'state': 'DISPATCHED'})
+
     def test_drive_adapter_refuses_non_owner_before_any_call(self):
         task_id = self._task(OWNER)
         args = parser_for_cli().parse_args(['task', 'drive', task_id, '--merge'])
