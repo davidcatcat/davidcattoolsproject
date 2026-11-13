@@ -199,6 +199,47 @@ def _env_values(env, role):
     return values
 
 
+def registry_role(role):
+    """Return the canonical review/debug role id for role (or its alias), else None."""
+    from .developer_routes import REGISTRY_ROLES
+    canonical = LEGACY_ROLE_ALIASES.get(role, role)
+    return canonical if canonical in REGISTRY_ROLES else None
+
+
+def check_registry_model(role, model, role_registry=None):
+    """Return model when the shared registry check admits it for role, else refuse.
+
+    #1502 WP-E R1: a thin wrapper over developer_routes.check_registry_role_model
+    that raises the role-config error (role_config_code ROLE_MODEL_NOT_ALLOWED).
+    role may be a legacy alias; role_registry None loads developer-routes.json.
+    """
+    from .developer_routes import RouteError, check_registry_role_model
+    try:
+        return check_registry_role_model(role_registry, registry_role(role), model)
+    except RouteError:
+        _fail_registry_model()
+
+
+def _fail_registry_model():
+    error = LLMToolError("role model is not allowed for its role: " + ROLE_MODEL_NOT_ALLOWED)
+    error.role_config_code = ROLE_MODEL_NOT_ALLOWED
+    error.owner_override_code = None
+    raise error from None
+
+
+def _registry_default(role, role_registry):
+    """Return (config, the registry's listed model for role); refuse when absent."""
+    from .developer_routes import RouteError, load_route_config
+    try:
+        config = load_route_config() if role_registry is None else role_registry
+        models = config["roles"][role]["allowed_models"]
+    except (RouteError, KeyError, TypeError):
+        _fail_registry_model()
+    if type(models) is not list or not models or type(models[0]) is not str:
+        _fail_registry_model()
+    return config, models[0]
+
+
 def _route_entry(route, route_config):
     """Return one developer-routes.json entry, loaded when not supplied."""
     if route_config is None:
@@ -261,13 +302,18 @@ def check_role_model(route, route_config, model, *, owner_override=None,
 
 
 def resolve_role(role, cli=None, environ=None, *, home=None, route_config=None,
-                 owner_override=None, repository=None, fetch_comment=None):
+                 owner_override=None, repository=None, fetch_comment=None,
+                 role_registry=None):
     """Resolve one role. CLI and environment overrides are one-shot and never save.
 
     Precedence: CLI > env > user config (the role or its legacy alias) >
     repo default. Developer roles (ROUTE_ROLES) take their repo default model
     and effort from developer-routes.json (route_config overrides the loaded
     entry) and their model must be in allowed_models; see check_role_model.
+    Review/debug roles (and the legacy 'reviewer' alias) take their default
+    model from the developer-routes.json roles registry (role_registry
+    overrides the loaded config) and the resolved model must pass
+    check_registry_model; the registry default never changes 'source'.
     """
     if not _name(role):
         _fail("role name is invalid", "ROLE_CONFIG_ROLE_INVALID")
@@ -335,6 +381,19 @@ def resolve_role(role, cli=None, environ=None, *, home=None, route_config=None,
                     model_source = source_name
                 elif key == "effort":
                     effort_source = source_name
+    review_role = registry_role(role)
+    if review_role is not None:
+        # #1502 WP-E R1: after precedence, the review/debug model must pass the
+        # shared registry check. An unset model takes the registry's listed
+        # model. No owner_override applies to these roles.
+        if owner_override is not None:
+            _fail_registry_model()
+        registry, default_model = _registry_default(review_role, role_registry)
+        if settings["model"] is None:
+            settings["model"] = default_model
+            model_source = "repo_default"
+        settings["model_source"] = model_source
+        check_registry_model(review_role, settings["model"], registry)
     route = ROUTE_ROLES.get(role)
     if route is not None:
         entry = _route_entry(route, route_config)

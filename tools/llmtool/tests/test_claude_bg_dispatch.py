@@ -25,6 +25,11 @@ _spec = importlib.util.spec_from_file_location('claude_bg_dispatch_under_test', 
 dispatch_tool = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dispatch_tool)
 REAL_RESOLVE_ROLE = dispatch_tool.role_config.resolve_role
+# #1502 WP-E R1: the Claude Reviewer's registry-listed model and the other family's.
+from llmtool.developer_routes import load_route_config  # noqa: E402
+_REGISTRY = load_route_config()['roles']
+REVIEW_MODEL = _REGISTRY['claude-reviewer']['allowed_models'][0]
+CROSS_FAMILY_MODEL = _REGISTRY['codex-reviewer']['allowed_models'][0]
 
 TARGET = '2b128608-8b94-4c12-96b9-e6cdf9a388c7'
 COPY = '95c9758e-1111-4222-8333-944455556666'
@@ -85,7 +90,7 @@ elif '--bg' in argv:
                 add_dirs.append(argv[index])
                 index += 1
             continue
-        if arg in ('-n', '--resume', '--session-id'):
+        if arg in ('-n', '--resume', '--session-id', '--model'):
             index += 2
             continue
         if not arg.startswith('-'):
@@ -459,6 +464,88 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                                  (2, 'ROLE_PROVIDER_UNSUPPORTED'))
                 self.assertEqual(self.calls(), [])
 
+    # #1502 WP-E R1: a Claude Reviewer launch (new or resumed) uses only a model
+    # the shared registry check admits, passed explicitly with --model.
+    def reviewer_role(self, model=None):
+        return {'role': 'reviewer', 'provider': 'claude',
+                'config_dir': str(self.config), 'model': model}
+
+    def reviewer_dispatch(self, *, new, model=None):
+        args = (['dispatch', '--new'] if new else ['dispatch', '--session', TARGET])
+        args += ['--name', 'claude-reviewer', '--task-id', 'executor-task',
+                 '--prompt', 'Task Contract: review']
+        if model is not None:
+            args += ['--model', model]
+        return self.run_tool(*args)
+
+    def test_reviewer_unlisted_and_cross_family_models_are_refused_before_cli(self):
+        for new in (True, False):
+            for model in ('claude-unlisted-model', CROSS_FAMILY_MODEL,
+                          'anthropic/' + REVIEW_MODEL, REVIEW_MODEL.upper()):
+                for layer in ('cli', 'resolved'):
+                    with self.subTest(new=new, model=model, layer=layer):
+                        self.reset()
+                        self.scenario(all=[row(TARGET, status='done', cwd=self.cwd)],
+                                      before=[], after=[[]])
+                        resolved = self.reviewer_role(model if layer == 'resolved' else None)
+                        with patch.object(dispatch_tool.role_config, 'resolve_role',
+                                          return_value=resolved):
+                            code, receipt = self.reviewer_dispatch(
+                                new=new, model=model if layer == 'cli' else None)
+                        self.assertEqual((code, receipt['reason']),
+                                         (2, 'ROLE_MODEL_NOT_ALLOWED'))
+                        self.assertEqual(self.calls(), [])
+
+    def test_reviewer_without_any_model_is_refused_before_cli(self):
+        with patch.object(dispatch_tool.role_config, 'resolve_role',
+                          return_value=self.reviewer_role()):
+            code, receipt = self.reviewer_dispatch(new=True)
+        self.assertEqual((code, receipt['reason']), (2, 'ROLE_MODEL_NOT_ALLOWED'))
+        self.assertEqual(self.calls(), [])
+
+    def test_reviewer_real_resolver_refusal_is_reported_before_cli(self):
+        from llmtool.config import user_config_path
+
+        user_home = self.home / 'user-home'
+        config_path = user_config_path(str(user_home))
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text('roles:\n  reviewer:\n    model: %s\n' % CROSS_FAMILY_MODEL)
+        for model in (None, 'claude-unlisted-model'):
+            with self.subTest(model=model):
+                self.reset()
+                with patch.object(dispatch_tool.role_config, 'resolve_role',
+                                  side_effect=lambda role, **kw: REAL_RESOLVE_ROLE(
+                                      role, environ={}, home=str(user_home), **kw)):
+                    code, receipt = self.reviewer_dispatch(new=True, model=model)
+                self.assertEqual((code, receipt['reason']), (2, 'ROLE_MODEL_NOT_ALLOWED'))
+                self.assertEqual(self.calls(), [])
+
+    def test_reviewer_listed_model_is_explicit_for_new_and_resumed_sessions(self):
+        for new in (True, False):
+            for layer in ('cli', 'resolved'):
+                with self.subTest(new=new, layer=layer):
+                    self.reset()
+                    if new:
+                        self.scenario(after=[[row('NEW-SESSION', name='claude-reviewer',
+                                                  cwd=self.root)]],
+                                      transcripts=[{'session': 'NEW-SESSION',
+                                                    'new_action': True}])
+                    else:
+                        self.scenario(all=[row(TARGET, status='done', cwd=self.cwd)],
+                                      before=[], after=[[]])
+                    resolved = self.reviewer_role(REVIEW_MODEL if layer == 'resolved' else None)
+                    with patch.object(dispatch_tool.role_config, 'resolve_role',
+                                      return_value=resolved), \
+                            patch.dict(os.environ, {'ANTHROPIC_MODEL': 'claude-other-model'}):
+                        self.reviewer_dispatch(new=new,
+                                               model=REVIEW_MODEL if layer == 'cli' else None)
+                    [launch] = self.launches()
+                    argv = launch['argv']
+                    self.assertEqual(argv[argv.index('--model') + 1], REVIEW_MODEL)
+                    self.assertIn('--session-id' if new else '--resume', argv)
+                    # An inherited ANTHROPIC_MODEL never differs from the explicit model.
+                    self.assertEqual(launch['model'], REVIEW_MODEL)
+
     def test_busy_resume_refuses_using_resolved_account(self):
         role_dir = self.home / 'developer-account'
         role_dir.mkdir()
@@ -698,8 +785,11 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                 self.reset()
                 self.scenario(after=[[row('NEW-SESSION', name=name, cwd=self.root)]],
                               transcripts=[{'session': 'NEW-SESSION', 'new_action': True}])
+                # #1502 WP-E R1: a Reviewer launch needs a registry-admitted model.
+                model_args = ['--model', REVIEW_MODEL] if name == 'claude-reviewer' else []
                 code, receipt = self.run_tool('dispatch', '--new', '--name', name,
-                                              '--task-id', 'executor-task', '--prompt', 'work')
+                                              '--task-id', 'executor-task', '--prompt', 'work',
+                                              *model_args)
                 self.assertEqual(code, 0, receipt)
                 [launch] = self.launches()
                 argv = launch['argv']

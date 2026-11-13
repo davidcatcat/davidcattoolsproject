@@ -393,11 +393,18 @@ class ClaudeCLIProvider:
         Only a fixed, empty runtime directory is removed (no unbounded rmtree).
         """
         from ..task_review import reject
+        from .. import role_config
         started = time.monotonic()
         if (type(deadline) not in (int, float) or not math.isfinite(deadline) or
                 deadline <= started or deadline > started + 120 or
                 not os.path.isabs(executable) or not os.path.isabs(auth_home)):
             reject('REVIEW_TIMEOUT')
+        # #1502 WP-E R1: a review job runs only a model the shared registry
+        # check admits for claude-reviewer; refused before any process starts.
+        try:
+            model = role_config.check_registry_model('claude-reviewer', self.provider.get('model'))
+        except LLMToolError:
+            reject('ROLE_MODEL_NOT_ALLOWED')
         work_deadline = deadline - min(20, (deadline - started) * 0.2)
         raw = prompt.encode('utf-8')
         selector = selectors.DefaultSelector()
@@ -423,7 +430,7 @@ class ClaudeCLIProvider:
                     environment['HOME'] = auth_home
                     argv = [executable, '--print', '--output-format', 'json',
                             '--no-session-persistence', '--safe-mode', '--tools', 'WebSearch,WebFetch',
-                            '--model', self.provider['model']]
+                            '--model', model]
                     process = subprocess.Popen(argv, stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
                         shell=False, close_fds=True, start_new_session=True,

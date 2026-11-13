@@ -1638,7 +1638,7 @@ class HighDebugTests(unittest.TestCase):
     def _run_claude_case(self, report, *, runner=None,
                          account='reviewer-account', config_dir='/safe/claude',
                          source='roles', evaluate_allowed=True,
-                         created_agent_id=None, store=None):
+                         created_agent_id=None, store=None, resolve=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -1663,7 +1663,8 @@ class HighDebugTests(unittest.TestCase):
         with patch.object(high_debug.worker_dispatch, 'evaluate',
                           return_value=SimpleNamespace(allowed=evaluate_allowed)) as mock_eval, \
              patch.object(high_debug.role_config, 'resolve_role',
-                          return_value=role_settings) as mock_resolve, \
+                          **({'side_effect': resolve} if resolve is not None else
+                             {'return_value': role_settings})) as mock_resolve, \
              patch.object(high_debug.task_completion, 'collect_git_snapshot',
                           return_value=SimpleNamespace(head='a' * 40)), \
              patch.object(high_debug.task_completion, 'read_d6_registration',
@@ -1843,6 +1844,185 @@ class HighDebugTests(unittest.TestCase):
 
         body_unsafe = high_debug._record_body(entry, 'a' * 32, account='unsafe account!')
         self.assertIn('Account: UNKNOWN', body_unsafe)
+
+    # #1502 WP-E R1: every AI Debug launch admits its model through the shared
+    # registry check; a refusal uses no Debug and never switches routes.
+    def _debug_refusal(self, *, route, resolved=None, resolve=None):
+        create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+        store = _Store()
+        with patch.object(high_debug.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=True)), \
+             patch.object(high_debug.role_config, 'resolve_role',
+                          **({'side_effect': resolve} if resolve is not None else
+                             {'return_value': resolved})):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(
+                    store=store, task_id='a' * 32, executor_task='executor',
+                    pr_number=17, family='family', failed_corrections=2,
+                    runner=runner, create_d6=create, route=route)
+        create.assert_not_called()
+        runner.assert_not_called()
+        self.assertEqual(store.entries, [])
+        self._poster.assert_not_called()
+        return caught.exception.high_debug_code
+
+    def test_claude_debug_unlisted_and_cross_family_models_refused_before_d6(self):
+        for model in ('claude-unlisted-model', high_debug._CODEX_MODEL,
+                      'anthropic/' + high_debug._CLAUDE_MODEL):
+            with self.subTest(model=model):
+                self.assertEqual(self._debug_refusal(route='claude', resolved={
+                    'source': 'roles', 'account': 'debug-account',
+                    'config_dir': '/safe/claude', 'provider': 'claude', 'model': model}),
+                    'ROLE_MODEL_NOT_ALLOWED')
+
+    def test_codex_debug_unlisted_and_cross_family_models_refused_before_d6(self):
+        for model in ('gpt-unlisted-model', high_debug._CLAUDE_MODEL):
+            with self.subTest(model=model), patch.object(high_debug, '_CODEX_MODEL', model):
+                self.assertEqual(self._debug_refusal(route='codex'),
+                                 'ROLE_MODEL_NOT_ALLOWED')
+
+    def test_codex_debug_launch_model_is_never_taken_from_role_config(self):
+        # R1 regardless of user config: the Codex Debug route admits only its
+        # listed model; a configured codex-debug model never reaches the launch.
+        resolve = unittest.mock.Mock(return_value={
+            'source': 'roles', 'provider': 'codex', 'account': None,
+            'config_dir': None, 'model': 'gpt-unlisted-model'})
+        reader = unittest.mock.Mock(side_effect=OSError('stop before the D6'))
+        create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+        store = _Store()
+        with patch.object(high_debug.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=True)), \
+             patch.object(high_debug.role_config, 'resolve_role', resolve), \
+             patch.object(high_debug, '_admit_debug_model',
+                          wraps=high_debug._admit_debug_model) as admit:
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(
+                    store=store, task_id='a' * 32, executor_task='executor',
+                    pr_number=17, family='family', failed_corrections=2,
+                    runner=runner, create_d6=create, route='codex',
+                    read_registration=reader)
+        # Admission passed with the listed model; the run then stopped at the D6.
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_D6_UNAVAILABLE')
+        admit.assert_called_once_with('codex-debug', high_debug._CODEX_MODEL)
+        reader.assert_called_once()
+        create.assert_not_called()
+        runner.assert_not_called()
+        self.assertEqual(store.entries, [])
+
+    def test_claude_debug_resolver_refusal_keeps_the_model_code(self):
+        # The real resolver on a temporary home: a cross-family claude-debug
+        # model in the user config is refused after precedence.
+        from llmtool.config import user_config_path
+        real = high_debug.role_config.resolve_role
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / 'home'
+            config = user_config_path(home)
+            config.parent.mkdir(parents=True)
+            config.write_text(json.dumps({'roles': {'claude-debug': {
+                'model': high_debug._CODEX_MODEL}}}), encoding='utf-8')
+            code = self._debug_refusal(
+                route='claude', resolve=lambda role: real(role, environ={}, home=home))
+        self.assertEqual(code, 'ROLE_MODEL_NOT_ALLOWED')
+
+    def test_run_codex_and_run_claude_refuse_unlisted_and_cross_family_at_launch(self):
+        cases = (
+            (high_debug._run_codex, {}, ('gpt-unlisted-model', high_debug._CLAUDE_MODEL,
+                                         'openai/' + high_debug._CODEX_MODEL,
+                                         high_debug._CODEX_MODEL.upper())),
+            (high_debug._run_claude, {'config_dir': '/safe/claude'},
+             ('claude-unlisted-model', high_debug._CODEX_MODEL,
+              high_debug._CLAUDE_MODEL.upper(), None)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = str(Path(directory) / 'report.md')
+            for launch, extra, models in cases:
+                for model in models:
+                    with self.subTest(launch=launch.__name__, model=model), \
+                         patch.object(high_debug.subprocess, 'run') as run:
+                        with self.assertRaises(LLMToolError) as caught:
+                            launch(prompt='diagnosis', cwd=directory,
+                                   output_path=output_path, model=model, **extra)
+                        self.assertEqual(caught.exception.high_debug_code,
+                                         'ROLE_MODEL_NOT_ALLOWED')
+                        run.assert_not_called()
+
+    def test_run_codex_launches_the_listed_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(high_debug.subprocess, 'run') as run:
+                high_debug._run_codex(prompt='diagnosis', cwd=directory,
+                                      output_path=str(Path(directory) / 'report.md'))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index('-m') + 1], high_debug._CODEX_MODEL)
+
+    def test_model_refusal_never_triggers_the_debug_fallback(self):
+        # A Codex launch refused for its model does not switch to Claude.
+        kwargs = dict(store=_Store(), task_id='a' * 32, executor_task='executor',
+                      pr_number=17, family='family', failed_corrections=2,
+                      runner=unittest.mock.Mock(), create_d6=unittest.mock.Mock())
+        self.assertNotIn('ROLE_MODEL_NOT_ALLOWED', high_debug.DEBUG_FALLBACK_CODES)
+        self.assertNotIn('ROLE_MODEL_NOT_ALLOWED', high_debug._CLAUDE_DEBUG_UNAVAILABLE)
+        real = high_debug.run_high_debug
+        # An unlisted and a cross-family Codex Debug model: no switch to Claude.
+        for model in ('gpt-unlisted-model', high_debug._CLAUDE_MODEL):
+            with self.subTest(route='codex', model=model), \
+                 patch.object(high_debug, '_CODEX_MODEL', model), \
+                 patch.object(high_debug.worker_dispatch, 'evaluate',
+                              return_value=SimpleNamespace(allowed=True)), \
+                 patch.object(high_debug, 'run_high_debug', wraps=real) as wrapped:
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug_with_fallback(**kwargs)
+                self.assertEqual(caught.exception.high_debug_code, 'ROLE_MODEL_NOT_ALLOWED')
+                self.assertEqual([call.kwargs['route'] for call in wrapped.call_args_list],
+                                 ['codex'])
+        # After a real fallback code, a refused Claude Debug model (unlisted or
+        # cross-family) still stops with its own code, never HIGH_DEBUG_WAITING.
+        def staged(*, route, **rest):
+            if route == 'codex':
+                high_debug._refuse('HIGH_DEBUG_QUOTA_EXHAUSTED')
+            return real(route=route, **rest)
+        for model in ('claude-unlisted-model', high_debug._CODEX_MODEL):
+            with self.subTest(route='claude', model=model), \
+                 patch.object(high_debug, 'run_high_debug', side_effect=staged), \
+                 patch.object(high_debug.worker_dispatch, 'evaluate',
+                              return_value=SimpleNamespace(allowed=True)), \
+                 patch.object(high_debug.role_config, 'resolve_role', return_value={
+                     'source': 'roles', 'account': 'debug-account',
+                     'config_dir': '/safe/claude', 'provider': 'claude', 'model': model}):
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug_with_fallback(**kwargs)
+                self.assertEqual(caught.exception.high_debug_code, 'ROLE_MODEL_NOT_ALLOWED')
+        kwargs['runner'].assert_not_called()
+        kwargs['create_d6'].assert_not_called()
+        self.assertEqual(kwargs['store'].entries, [])
+
+    def test_claude_debug_account_fallback_follows_account_state_not_source(self):
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS) + 'RCA_CONFIRMED'
+        reviewer = {'source': 'roles', 'account': 'reviewer-account',
+                    'config_dir': '/safe/claude', 'provider': 'claude'}
+        # No claude-debug account, whatever the source label: the Reviewer account.
+        for source in ('env', 'cli', 'roles', 'builtin'):
+            with self.subTest(source=source):
+                self._poster.reset_mock()
+                debug = {'source': source, 'account': None, 'config_dir': None,
+                         'provider': 'claude', 'model': high_debug._CLAUDE_MODEL}
+                _result, store, _eval, mock_resolve = self._run_claude_case(
+                    report, resolve=lambda role: debug if role == 'claude-debug' else reviewer)
+                calls = [call.args for call in mock_resolve.call_args_list]
+                self.assertEqual(calls[0], ('claude-debug',))
+                self.assertIn(('reviewer',), calls)
+                self.assertEqual(store.entries[0]['model_requested'], high_debug._CLAUDE_MODEL)
+                self.assertIn('Account: reviewer-account', self._poster.call_args.args[1])
+        # A claude-debug account is used as is, even under the 'builtin' label.
+        self._poster.reset_mock()
+        own = {'source': 'builtin', 'account': 'debug-account', 'config_dir': '/safe/debug',
+               'provider': 'claude', 'model': high_debug._CLAUDE_MODEL}
+        _result, _store, _eval, mock_resolve = self._run_claude_case(
+            report, resolve=lambda role: own if role == 'claude-debug' else reviewer)
+        calls = [call.args for call in mock_resolve.call_args_list]
+        self.assertEqual(calls[0], ('claude-debug',))
+        self.assertNotIn(('reviewer',), calls)
+        self.assertIn('Account: debug-account', self._poster.call_args.args[1])
 
 
 class HighDebugWrongTaskOrFamilyTests(unittest.TestCase):

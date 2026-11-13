@@ -135,12 +135,19 @@ def _role_key(role):
     return role
 
 
-def _account_environment(role):
-    """Resolve one CLI account for a run, preserving environment precedence."""
+def _account_environment(role, model=None):
+    """Resolve one CLI account for a run, preserving environment precedence.
+
+    An explicit ``model`` is the one-shot CLI layer of the role resolver, so it
+    passes the same allowed-model check as every other layer.
+    """
     if role == "codex-reviewer":
         raise DispatchError("ROLE_PROVIDER_UNSUPPORTED")
     environ = os.environ.copy()
-    configured = role_config.resolve_role(_role_key(role))
+    if model is None:
+        configured = role_config.resolve_role(_role_key(role))
+    else:
+        configured = role_config.resolve_role(_role_key(role), cli={"model": model})
     if configured.get("provider") not in (None, "claude"):
         raise DispatchError("ROLE_PROVIDER_UNSUPPORTED")
     selected = environ.get("CLAUDE_CONFIG_DIR") or configured.get("config_dir")
@@ -154,6 +161,18 @@ def _account_environment(role):
     else:
         environ["CLAUDE_CONFIG_DIR"] = str(selected)
     return configured, environ
+
+
+def _reviewer_model(requested):
+    """#1502 WP-E R1: the Claude Reviewer model, admitted by the shared registry check.
+
+    The explicit ``--model`` wins, else the resolved role model; anything the
+    check refuses (including no model at all) stops with ROLE_MODEL_NOT_ALLOWED.
+    """
+    try:
+        return role_config.check_registry_model("claude-reviewer", requested)
+    except LLMToolError:
+        raise DispatchError("ROLE_MODEL_NOT_ALLOWED") from None
 
 
 def _worker_key(role):
@@ -388,13 +407,13 @@ def refuse_cross_account_launch(worker_dir, *, account_env=None):
 
 
 def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_interval,
-             new_session=False, owner_assignment_ref=None, worker_dir=None):
+             new_session=False, owner_assignment_ref=None, worker_dir=None, model=None):
     is_claude_developer_role = (type(role) is str and
                                 CLAUDE_DEVELOPER_ROLE_RE.fullmatch(role) is not None)
     if not is_claude_developer_role and not ROLE_RE.fullmatch(role or ""):
         raise DispatchError("ROLE_NAME_INVALID")
     try:
-        role_settings, account_env = _account_environment(role)
+        role_settings, account_env = _account_environment(role, model)
     except LLMToolError as exc:
         raise DispatchError(getattr(exc, "role_config_code", "ROLE_CONFIG_INVALID")) from None
     refuse_cross_account_launch(worker_dir, account_env=account_env)
@@ -404,6 +423,16 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
         raise DispatchError(decision.reason_code)
     if not prompt or len(prompt.encode("utf-8")) > PROMPT_LIMIT or prompt.startswith("-"):
         raise DispatchError("PROMPT_INVALID")
+    # #1502 WP-E R1: the launch model is fixed here, before any CLI call, and is
+    # passed explicitly with --model to new and resumed sessions alike.
+    launch_model = None
+    if role == "claude-reviewer":
+        launch_model = _reviewer_model(model if model is not None else role_settings.get("model"))
+    elif model is not None:
+        # The resolver's CLI layer already checked it against the route.
+        if role_settings.get("model") != model:
+            raise DispatchError("ROLE_MODEL_NOT_ALLOWED")
+        launch_model = model
     registration = _registration(task_id, repo_root)
     rows = list_agents(claude, include_done=True, env=account_env)
     if new_session:
@@ -430,13 +459,17 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
         "first_action": None, "stop": {"attempted": False}, "warnings": [],
     }
     tool_limit = [REVIEWER_DISALLOWED_TOOLS_ARG] if role == "claude-reviewer" else []
-    argv = ([claude, "--bg"] + session_args + tool_limit +
+    model_args = ["--model", launch_model] if launch_model is not None else []
+    argv = ([claude, "--bg"] + session_args + model_args + tool_limit +
             # `--add-dir` is variadic: `--` ends it so the prompt stays the prompt.
             ["-n", role, "--add-dir", registration.root, "--", prompt])
     launch_ms = _now_ms()
     receipt["launched_at"] = _iso(launch_ms)
     launch_env = account_env.copy()
-    if not launch_env.get("ANTHROPIC_MODEL") and role_settings.get("model"):
+    if launch_model is not None:
+        # An inherited ANTHROPIC_MODEL never differs from the explicit model.
+        launch_env["ANTHROPIC_MODEL"] = launch_model
+    elif not launch_env.get("ANTHROPIC_MODEL") and role_settings.get("model"):
         launch_env["ANTHROPIC_MODEL"] = role_settings["model"]
     code, output = _run(argv, cwd=cwd, env=launch_env)
     if code != 0:
@@ -690,6 +723,7 @@ def _main(argv=None):
     start.add_argument("--name", required=True, help="role name passed as -n")
     start.add_argument("--task-id", required=True, help="registered D6 task id")
     start.add_argument("--owner-assignment-ref", help="exact Owner assignment reference")
+    start.add_argument("--model", help="explicit model; must pass the role's allowed-model check")
     prompt = start.add_mutually_exclusive_group(required=True)
     prompt.add_argument("--prompt")
     prompt.add_argument("--prompt-file")
@@ -726,7 +760,7 @@ def _main(argv=None):
                 task_id=args.task_id, prompt=text, repo_root=args.repo_root,
                 timeout=_bounded(args.timeout, 1, 600, "--timeout"), poll_interval=poll,
                 new_session=args.new, owner_assignment_ref=args.owner_assignment_ref,
-                worker_dir=args.worker_config_dir)
+                worker_dir=args.worker_config_dir, model=args.model)
             ok = result["result"] == "DELIVERED"
         elif args.command == "receipt":
             result = delivery_receipt(
