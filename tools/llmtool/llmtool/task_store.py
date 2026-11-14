@@ -277,7 +277,10 @@ _CLAUDE_RESULT_FIELDS = frozenset(('claude_result',))
 _DEVELOPER_CALLBACK_FIELDS = _DEVELOPER_FIELDS | frozenset(('direct_result_callback',))
 _DEVELOPER_GW_AUDIT_FIELDS = frozenset((
     'audit_sha256', 'audit_copy_path_sha256', 'changed_files'))
-_DEVELOPER_SHAPES = (
+# #1815: resolved Developer run timeout, optional on every developer shape.
+_DEVELOPER_TIMEOUT_FIELDS = frozenset(('timeout_seconds',))
+_DEVELOPER_TIMEOUT_MAX_SECONDS = 1800
+_DEVELOPER_UNTIMED_SHAPES = (
     _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
     _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
     _DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
@@ -294,6 +297,11 @@ _DEVELOPER_SHAPES = (
         _DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
         _DEVELOPER_CALLBACK_FIELDS | frozenset(('owner_assignment_ref',)),
     )),
+)
+# Legacy records omit timeout_seconds; every shape also exists with it.
+_DEVELOPER_SHAPES = (
+    *_DEVELOPER_UNTIMED_SHAPES,
+    *(shape | _DEVELOPER_TIMEOUT_FIELDS for shape in _DEVELOPER_UNTIMED_SHAPES),
 )
 _DEVELOPER_TASK_ID_SHAPES = tuple(
     shape | _DEVELOPER_EXECUTOR_TASK_FIELDS for shape in _DEVELOPER_SHAPES
@@ -339,9 +347,9 @@ _DEVELOPER_ALL_SHAPES = (*_DEVELOPER_BASE_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
                          *_DEVELOPER_REPORTED_SHAPES)
 _DEVELOPER_REJECTION_DETAIL_SHAPES = tuple(
     shape | frozenset(('rejection_detail',)) for shape in _DEVELOPER_ALL_SHAPES)
-# #1815: resolved Developer run timeout, optional on every developer shape.
-_DEVELOPER_TIMEOUT_FIELDS = frozenset(('timeout_seconds',))
-_DEVELOPER_TIMEOUT_MAX_SECONDS = 1800
+# Every accepted developer record key set, for a constant-time shape check.
+_DEVELOPER_RECORD_SHAPES = frozenset((*_DEVELOPER_ALL_SHAPES,
+                                      *_DEVELOPER_REJECTION_DETAIL_SHAPES))
 _DIRECT_EXECUTION_FIELDS = frozenset((
     'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
     'elapsed_ms', 'cleanup_status', 'usage_source', 'source_bytes',
@@ -2248,17 +2256,9 @@ def _validate(record, *, strict=True):
             _fail()
         developer = record['developer']
         if developer is not None:
-            assignment_shapes = (*_DEVELOPER_BASE_SHAPES,
-                                 *_DEVELOPER_EXTENSION_SHAPES,
-                                 *_DEVELOPER_BLOCKED_REASON_SHAPES,
-                                 *_DEVELOPER_PROGRESS_SHAPES,
-                                 *_DEVELOPER_CLAUDE_RESULT_SHAPES,
-                                 *_DEVELOPER_INVALID_FINAL_SHAPES,
-                                 *_DEVELOPER_REPORTED_SHAPES,
-                                 *_DEVELOPER_REJECTION_DETAIL_SHAPES)
-            # #1815: optional resolved run timeout; legacy records omit it.
+            # #1815: the shapes carry the optional run timeout; legacy records omit it.
             if (type(developer) is not dict or
-                    set(developer) - _DEVELOPER_TIMEOUT_FIELDS not in assignment_shapes):
+                    frozenset(developer) not in _DEVELOPER_RECORD_SHAPES):
                 _fail()
             if ('timeout_seconds' in developer and
                     (type(developer['timeout_seconds']) is not int or

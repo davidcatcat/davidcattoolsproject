@@ -1481,6 +1481,19 @@ class TaskStoreTests(unittest.TestCase):
                 self.assertEqual(
                     self.store.get(task['task_id'])['developer']['timeout_seconds'], timeout)
 
+    def test_developer_shapes_carry_optional_timeout_seconds(self):
+        # #1815: the field is part of the shapes, not stripped before the check.
+        timed = task_store_module._DEVELOPER_TIMEOUT_FIELDS
+        shapes = task_store_module._DEVELOPER_SHAPES
+        records = task_store_module._DEVELOPER_RECORD_SHAPES
+        for shape in task_store_module._DEVELOPER_UNTIMED_SHAPES:
+            self.assertIn(shape, shapes)
+            self.assertIn(shape | timed, shapes)
+            self.assertIn(shape, records)
+            self.assertIn(shape | timed, records)
+        self.assertNotIn(timed, records)
+        self.assertNotIn(frozenset(('timeout',)) | shapes[0], records)
+
     def test_developer_timeout_seconds_rejects_invalid_values(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
