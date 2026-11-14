@@ -233,7 +233,8 @@ class GwAgentRouteTests(unittest.TestCase):
                 'agy': {'executable': 'agy', 'default_model': 'agy-model',
                         'allowed_models': ['agy-model'],
                         'default_effort': 'low', 'denied_dirs': ['.gemini'],
-                        'state_dirs': {'policy': 'private-temp-only'}},
+                        'state_dirs': {'policy': 'private-temp-only'},
+                        'default_timeout': 600, 'max_timeout': 600},
                 'gw-agent': {
                     'package_path': str(Path(self.temp.name) / 'gateway'),
                     'default_model': 'fake-model', 'allowed_models': ['fake-model'],
@@ -242,6 +243,7 @@ class GwAgentRouteTests(unittest.TestCase):
                     'profile': {'model': 'fake-model', 'auth_env': None},
                     'authorization_ref': 'pm-task-ref',
                     'allowed_data_classes': ['synthetic'],
+                    'default_timeout': 600, 'max_timeout': 600,
                 },
             },
         }
