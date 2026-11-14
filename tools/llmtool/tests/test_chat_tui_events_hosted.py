@@ -169,5 +169,45 @@ class TestChatTuiEventsHosted(unittest.TestCase):
                 self.assertEqual(len(test_events), 0)
 
 
+class TestChatTuiEventsWorkerId(unittest.TestCase):
+    """#1792: dispatch audit worker ids read through stored_worker_id."""
+
+    def _dispatch_text(self, worker_key):
+        item = {
+            "at": "2026-11-09T01:00:00Z",
+            "action": "DISPATCH",
+            "decision": "ALLOW",
+            "worker_key": worker_key,
+            "reason_code": "WORKER_DISPATCH_ALLOWED",
+        }
+        record = {
+            "task_id": "0123456789abcdef0123456789abcdef",
+            "dispatch_audit": [item],
+        }
+        events = [e for e in task_events(record) if e.get("kind") == "DISPATCH"]
+        self.assertEqual(len(events), 1)
+        # Display only: the stored record is never rewritten.
+        self.assertEqual(record["dispatch_audit"][0]["worker_key"], worker_key)
+        return events[0]["text"]
+
+    def test_retired_alias_renders_as_current_id(self):
+        text = self._dispatch_text("company-gw-agent")
+        self.assertIn(" for gw-agent (", text)
+        self.assertNotIn("company-gw-agent", text)
+
+    def test_current_and_unknown_ids_unchanged(self):
+        for worker_key in ("gw-agent", "claude-developer", "company-gw",
+                           "some-future-worker"):
+            with self.subTest(worker_key=worker_key):
+                text = self._dispatch_text(worker_key)
+                self.assertIn(" for " + worker_key + " (", text)
+
+    def test_missing_worker_key_matches_previous_rendering(self):
+        record = {"dispatch_audit": [{"at": "2026-11-09T01:00:00Z"}]}
+        events = [e for e in task_events(record) if e.get("kind") == "DISPATCH"]
+        self.assertEqual(len(events), 1)
+        self.assertNotIn("gw-agent", events[0]["text"])
+
+
 if __name__ == "__main__":
     unittest.main()
