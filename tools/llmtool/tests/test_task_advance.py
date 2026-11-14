@@ -5043,7 +5043,7 @@ class RequiredLinuxChecksUnionTests(unittest.TestCase):
         return module
 
     @staticmethod
-    def run(run_id, name, *, head=HEAD, status='completed', conclusion='success'):
+    def make_run(run_id, name, *, head=HEAD, status='completed', conclusion='success'):
         return {'id': run_id, 'head_sha': head, 'name': name, 'status': status,
                 'conclusion': conclusion}
 
@@ -5076,7 +5076,7 @@ class RequiredLinuxChecksUnionTests(unittest.TestCase):
             with self.subTest(label):
                 self.assertEqual(task_advance._required_linux_checks([new], [old]), expected)
                 renamed = [{'filename': new, 'previous_filename': old}]
-                runs = [self.run(index + 1, name) for index, name in enumerate(expected)]
+                runs = [self.make_run(index + 1, name) for index, name in enumerate(expected)]
                 self.assertEqual(self.gates(renamed, runs), (None, (None, None)))
                 self.assertEqual(
                     self.gates(renamed, runs[:-1]),
@@ -5121,7 +5121,7 @@ class RequiredLinuxChecksUnionTests(unittest.TestCase):
         self.assertEqual(Fake.calls, [b'a.py\0b.py\0'])
 
     def test_unclassifiable_paths_fail_closed(self):
-        runs = [self.run(1, self.LINUX)]
+        runs = [self.make_run(1, self.LINUX)]
         unavailable = ('MERGE_CHECKS_UNAVAILABLE', ('WAITING_CI', 'LINUX_CI_UNAVAILABLE'))
         with patch.object(task_advance, '_ci_path_classes', side_effect=ImportError('gone')):
             self.assertIsNone(task_advance._required_linux_checks([self.CODE_PATH]))
@@ -5139,7 +5139,7 @@ class RequiredLinuxChecksUnionTests(unittest.TestCase):
     def test_all_required_checks_green_passes_both_gates(self):
         for label, paths, expected in self.CASES:
             with self.subTest(label):
-                runs = [self.run(index + 1, name) for index, name in enumerate(expected)]
+                runs = [self.make_run(index + 1, name) for index, name in enumerate(expected)]
                 self.assertEqual(self.gates(paths, runs), (None, (None, None)))
 
     def test_any_dropped_or_unhealthy_required_check_blocks_both_gates(self):
@@ -5166,9 +5166,9 @@ class RequiredLinuxChecksUnionTests(unittest.TestCase):
                         runs = []
                         for index, name in enumerate(expected):
                             if name != target:
-                                runs.append(self.run(index + 1, name))
+                                runs.append(self.make_run(index + 1, name))
                             elif change is not None:
-                                runs.append(self.run(index + 1, name, **change))
+                                runs.append(self.make_run(index + 1, name, **change))
                         self.assertEqual(self.gates(paths, runs), codes)
 
     def test_code_check_alone_no_longer_satisfies_a_mixed_pr(self):
@@ -5178,7 +5178,7 @@ class RequiredLinuxChecksUnionTests(unittest.TestCase):
                 continue
             with self.subTest(label):
                 self.assertEqual(
-                    self.gates(paths, [self.run(1, self.LINUX)]),
+                    self.gates(paths, [self.make_run(1, self.LINUX)]),
                     ('MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')))
 
 
