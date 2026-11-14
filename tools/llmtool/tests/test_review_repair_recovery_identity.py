@@ -1,7 +1,8 @@
 """#1928 PR1: E1 claim checks for UNKNOWN repair claim recovery."""
+import json
 import unittest
 
-from llmtool import review_repair_recovery as rec
+from llmtool import review_repair, review_repair_recovery as rec
 from llmtool.errors import LLMToolError
 
 ROOT, REPAIR, HEAD = 'a' * 32, 'b' * 32, 'c' * 40
@@ -66,6 +67,54 @@ class RecoveryClaimTests(unittest.TestCase):
             with self.subTest(other=other):
                 self.assertEqual(self.code(self.e1, root(), others=[other]),
                                  'REPAIR_RECOVERY_CLAIM_INVALID')
+
+
+def identity_root():
+    return dict(root(), pm_provenance={'pm_native_session_id': 'pm-1', 'pm_cwd': '/repo'},
+                pm_assignment={'goal': 'Fix it.'})
+
+
+def recorded(**packet):
+    """The repair Task exactly as review_repair._record_repair_task records it."""
+    seen = {}
+
+    def record_pm(args, *, store, task_id, input_stream, return_record):
+        seen.update(json.loads(input_stream.read()), session=args.pm_session_id)
+        return {'task_id': task_id}
+    packet = {'verdict_comment_id': 9, 'failed_head': HEAD, 'version': 1, 'findings_count': 3,
+              'reviewer_text_excerpt_untrusted_data': 'x', **packet}
+    review_repair._record_repair_task(
+        task=identity_root(), developer={'provider_profile': 'gw-agent', 'acceptance': ['a']},
+        packet=packet, attempt=1, store=None, repair_task_id=REPAIR, record_pm=record_pm)
+    return {'task_id': REPAIR, 'request': seen['request'], 'response': seen['response'],
+            'pm_assignment': json.loads(seen['response'])['developer_assignment'],
+            'pm_provenance': {'pm_native_session_id': seen['session']}}
+
+
+class RecoveryRepairIdentityTests(unittest.TestCase):
+    code = RecoveryClaimTests.code
+
+    def test_e2_accepts_the_runtime_recorded_repair_task(self):
+        self.assertIsNone(rec.check_identity(identity_root(), recorded(), CLAIM))
+
+    def test_e2_refuses_each_mismatch(self):
+        good = recorded()
+        cases = [dict(good, task_id='e' * 32), dict(good, request=good['request'][:-1] + '0'),
+                 dict(good, response=good['response'].replace(ROOT, 'e' * 32)),
+                 recorded(failed_head='e' * 40), recorded(verdict_comment_id=10),
+                 recorded(version=2), dict(good, pm_provenance={'pm_native_session_id': 'pm-2'}),
+                 dict(good, response=None), dict(good, pm_assignment={'acceptance': []}),
+                 dict(good, pm_provenance={'pm_native_session_id': None}), 'not a record',
+                 dict(good, pm_assignment={'acceptance': [
+                     good['pm_assignment']['acceptance'][-1].replace('count 3.', 'count 03.')]})]
+        for repair in cases:
+            with self.subTest(repair=repair):
+                self.assertEqual(self.code(rec.check_identity, identity_root(), repair, CLAIM),
+                                 'REPAIR_RECOVERY_EVIDENCE_INVALID')
+        for root, claim in ((None, CLAIM), (identity_root(), {}), (identity_root(), None)):
+            with self.subTest(root=root, claim=claim):
+                self.assertEqual(self.code(rec.check_identity, root, good, claim),
+                                 'REPAIR_RECOVERY_EVIDENCE_INVALID')
 
 
 if __name__ == '__main__':
