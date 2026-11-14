@@ -945,6 +945,27 @@ class ReviewDispatchTests(unittest.TestCase):
                 raw, task_id=TASK, run_id='run', contract_digest='digest', head=HEAD)
         self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
 
+    def test_1163_not_jsonl_keeps_only_the_bad_line_shape(self):
+        started = json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'})
+        cases = (
+            ((started + '\nWarning: unexpected banner abc123\n').encode('utf-8'),
+             'OUTPUT_SHAPE line=2 of 2 bytes=33 first=letter'),
+            (b'{"type": broken\n', 'OUTPUT_SHAPE line=1 of 1 bytes=15 first=brace'),
+            (b'  9 lives\n', 'OUTPUT_SHAPE line=1 of 1 bytes=9 first=digit'),
+            (b'\xff\xfe', 'OUTPUT_SHAPE utf8=invalid bytes=2'))
+        for raw, shape in cases:
+            with self.subTest(shape=shape), self.assertRaises(LLMToolError) as raised:
+                self._parse(raw)
+            exc = raised.exception
+            self.assertEqual(exc.review_dispatch_code, 'REVIEW_NOT_POSTED')
+            self.assertEqual(exc.review_failure_reason, 'OUTPUT_NOT_JSONL')
+            self.assertEqual(exc.review_excerpt, shape)
+            self.assertNotIn('banner', exc.review_excerpt)
+            self.assertEqual(str(exc), 'Reviewer dispatch refused; details omitted')
+        self.assertEqual(review_dispatch._jsonl_shape(started.encode('utf-8')),
+                         'OUTPUT_SHAPE no_bad_line lines=1')
+        self.assertEqual(review_dispatch._jsonl_shape('text'), 'OUTPUT_SHAPE unavailable')
+
     def _parse(self, raw):
         return review_dispatch._parse_codex_review(
             raw, task_id=TASK, run_id='c' * 32, contract_digest='d' * 64, head=HEAD)
