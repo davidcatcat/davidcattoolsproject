@@ -1609,7 +1609,7 @@ def _is_reviewer_record(record):
 def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root, squash,
                  train_squash=None,
                  discard_uncommitted=False, unknown_evidence=None,
-                 reviewed_pr_evidence=None, trust=None):
+                 reviewed_pr_evidence=None, trust=None, owner_discard=None):
     """Evaluate every retire gate for one task without changing anything.
 
     With ``discard_uncommitted`` (an Owner-approved task), tracked changes and
@@ -1682,6 +1682,8 @@ def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root,
     if any(os.path.lexists(path) for path in locks):
         plan["reasons"].append("D6_RETIRE_GIT_LOCKED")
     reviewer_record = _is_reviewer_record(record)
+    if owner_discard is not None and reviewer_record:
+        plan["reasons"].append("D6_DISCARD_NOT_APPLICABLE")
     if reviewed_pr_evidence is not None and not reviewer_record:
         plan["reasons"].append("D6_RETIRE_REVIEW_EVIDENCE_NOT_APPLICABLE")
     if reviewer_record:
@@ -1713,8 +1715,19 @@ def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root,
                         plan["reviewed_pr_number"] = pr_number
     else:
         plan["publication"] = _publication(root, branch, head, squash, train_squash)
-        if plan["publication"] is None:
+        if plan["publication"] is None and owner_discard is not None:
+            # #1331: an Owner-approved discard needs a verified backup of this HEAD.
+            reason = _verify_discard_backup(canonical_root, head, owner_discard[1],
+                                            owner_discard[2])
+            if reason is None:
+                plan["publication"] = "owner_approved_discard"
+                plan["owner_discard"] = owner_discard
+            else:
+                plan["reasons"].append(reason)
+        elif plan["publication"] is None:
             plan["reasons"].append("D6_RETIRE_UNPUBLISHED")
+        elif owner_discard is not None:
+            plan["reasons"].append("D6_DISCARD_NOT_NEEDED")
     if _task_git(root, "status", "--porcelain=v1", "-z",
                  "--untracked-files=no").stdout:
         tracked = _tracked_changes(root)
@@ -1812,6 +1825,12 @@ def _execute_retire(plan, record, record_path, canonical_root, common_dir, works
         if unknown and not (plan["accepted_unknown"] and
                             _unknown_digest(unknown) == plan["unknown_digest"]):
             return ["D6_RETIRE_UNKNOWN_LOCAL_STATE"]
+        if plan.get("owner_discard"):
+            reason = _verify_discard_backup(canonical_root, plan["head"],
+                                            plan["owner_discard"][1],
+                                            plan["owner_discard"][2])
+            if reason is not None:
+                return [reason]
         return []
 
     discarded_paths = sorted(plan["discard_tracked"] + plan["discard_untracked"])
@@ -1906,6 +1925,13 @@ def _execute_retire(plan, record, record_path, canonical_root, common_dir, works
             " pycache files=" + str(len(plan["pycache"])) +
             (" accepted unknown digest=" + plan["unknown_digest"]
              if plan["accepted_unknown"] else "")])
+    if plan.get("owner_discard"):
+        # #1331 audit: task, discarded head, approval, backup and digest, time.
+        approval, bundle, digest = plan["owner_discard"]
+        updated["evidence_refs"].append(
+            "Owner-approved discard " + now + ": task=" + plan["task_id"] +
+            " head=" + plan["head"] + " approval=" + approval +
+            " backup=" + bundle + " sha256=" + digest)
     if discarded_paths:
         updated.update(discarded_uncommitted=True,
                        discarded_uncommitted_paths=discarded_paths)
@@ -2108,7 +2134,7 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                      train_evidence=None,
                      discard_uncommitted=(), unknown_evidence=None,
                      reviewed_pr_evidence=None,
-                     workspace_root=None):
+                     workspace_root=None, owner_discard=None):
     """Plan (default) or execute gated retirement; print one JSON line per task.
 
     Returns True only when every task is ready (dry run) or removed.
@@ -2119,12 +2145,14 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
     train_evidence = train_evidence or {}
     unknown_evidence = unknown_evidence or {}
     reviewed_pr_evidence = reviewed_pr_evidence or {}
+    owner_discard = owner_discard or {}
     if (not task_ids or len(task_ids) != len(set(task_ids)) or
             any(not TASK_ID_RE.fullmatch(task_id or "") for task_id in task_ids) or
             not set(squash_evidence) <= set(task_ids) or
             not set(train_evidence) <= set(task_ids) or
             not set(unknown_evidence) <= set(task_ids) or
             not set(reviewed_pr_evidence) <= set(task_ids) or
+            not set(owner_discard) <= set(task_ids) or
             len(discard_uncommitted) != len(set(discard_uncommitted)) or
             not set(discard_uncommitted) <= set(task_ids)):
         _stop("D6_TASK_INPUT_INVALID")
@@ -2169,7 +2197,8 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                                     discard_uncommitted=task_id in discard_uncommitted,
                                     unknown_evidence=unknown_evidence.get(task_id),
                                     reviewed_pr_evidence=reviewed_pr_evidence.get(task_id),
-                                    trust=trust)
+                                    trust=trust,
+                                    owner_discard=owner_discard.get(task_id))
             except LifecycleError as exc:
                 record, plan = None, {"root": str(workspace_root / task_id),
                                       "reasons": [exc.code], "content_block": False,
@@ -2941,6 +2970,10 @@ def _main(argv=None):
                         metavar="TASK_ID=SHA256",
                         help="accept exactly the unknown paths whose digest the dry run "
                              "printed (also needed to retire a RETAIN_BLOCKED record)")
+    parser.add_argument("--owner-approved-discard", action="append",
+                        metavar="TASK_ID=APPROVAL_URL,BUNDLE,SHA256",
+                        help="#1331: retire an unpublished HEAD under an Owner approval comment "
+                             "with a verified private backup bundle (repeatable; retire only)")
     parser.add_argument("--execute-approved-retire", action="store_true",
                         help="actually discard approved files and remove the worktrees")
     parser.add_argument("--lease-status-task-id", action="append", metavar="TASK_ID",
@@ -2955,6 +2988,8 @@ def _main(argv=None):
     parser.add_argument("--repo-root", default=None)
     parser.add_argument("--trust-sha256")
     args = parser.parse_args(argv)
+    if args.owner_approved_discard and args.retire_task_id is None:
+        _stop("D6_TASK_INPUT_INVALID")
     try:
         trust = _load_trust()
         if args.trust_sha256 is not None and args.trust_sha256 != trust["sha256"]:
@@ -3052,7 +3087,9 @@ def _main(argv=None):
                 squash_evidence=_parse_squash_evidence(args.squash_evidence),
                 train_evidence=_parse_train_evidence(args.train_evidence),
                 reviewed_pr_evidence=_parse_reviewed_pr_evidence(
-                    args.reviewed_pr_evidence)) else 1
+                    args.reviewed_pr_evidence),
+                owner_discard=_parse_owner_approved_discard(
+                    args.owner_approved_discard)) else 1
         if args.reconcile_registry or args.execute_approved_reconcile:
             if (args.retire_task_id is not None or args.execute_approved_retire or
                     args.squash_evidence or args.train_evidence or
