@@ -584,14 +584,21 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                   dispatch_adapter=None, current_head=None, auto_review=False,
                   review_dispatcher=None, delegate_callable=None,
                   repair_task_recorder=None, retry_claim_id=None,
-                  remote_test_receipt=None, ci_failure=None):
+                  remote_test_receipt=None, ci_failure=None, replay_only=False):
     """Claim and dispatch one repair for a failed review, remote test or CI check.
 
     remote_test_receipt (EC2) and ci_failure (#1502 WP-D D11) are exclusive; both
     are test failures and share one count, the '<base>-ec2' family.
+
+    replay_only (#1502 WP-D L1 F2, task advance): only a live claim on this
+    exact failure may replay; anything that would allocate a new repair refuses
+    REVIEW_REPAIR_PM_REQUIRED before any count, record or write.
     """
     if ci_failure is not None and remote_test_receipt is not None:
         _refuse('CI_FAILURE_INVALID')
+    if replay_only and retry_claim_id is not None:
+        # A retry always allocates a new claim; it is never a replay.
+        _refuse('REVIEW_REPAIR_PM_REQUIRED')
     test_failure = remote_test_receipt is not None or ci_failure is not None
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
@@ -721,6 +728,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                 'replayed': dispatched,
                 'next_action': (f"review-dispatch --version {packet_version + 1}"
                                 if dispatched else f"task delegate {task_id_for_repair}")}
+    if replay_only:
+        # #1502 WP-D L1 F2: no live claim to replay; the PM dispatches any new repair.
+        _refuse('REVIEW_REPAIR_PM_REQUIRED')
     # #1502 WP-D: limits from policy.json; review repairs pass the counting gate.
     # L1 (I1, I2, I6): the counts cover the whole continuation chain; a link in
     # doubt makes them UNKNOWN, which counts as the limit. The replay above

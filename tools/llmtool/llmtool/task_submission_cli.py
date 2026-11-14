@@ -468,10 +468,14 @@ def _review_pm_recommendation(response):
         return None
 
 
-def _contract(task_id, request_sha256=None):
+def _contract(task_id, request_sha256=None, continues=None):
     goal = ('PM intake rejected; original request was not stored.'
             if request_sha256 is None else
             'PM intake for development request sha256:' + request_sha256)
+    if continues is not None:
+        # #1502 WP-D L1 F3: the continues link is part of the contract digest, so
+        # Tasks continuing different predecessors never share one digest.
+        goal += '; continues Task ' + continues
     return TaskContract(
         schema_version=1,
         task_id=task_id,
@@ -7505,7 +7509,7 @@ def run_task_record_pm(args, *, store=None, input_stream=None, return_record=Fal
 def _record_pm_create(store, task_id, run_id, prompt, response, assignment, session,
                       continues, return_record):
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
-    contract = _contract(task_id, digest)
+    contract = _contract(task_id, digest, continues)
     record = _record(
         task_id, run_id,
         'pm-' + (new_id() if session is None else session['pm_native_session_id']),

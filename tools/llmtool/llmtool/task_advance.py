@@ -798,9 +798,10 @@ def _newest_check_run(head, name, github_get):
 def _test_fail_count(record, number, store=None):
     """EC2 and CI repairs used, counted as review_repair counts them.
 
-    #1502 WP-D L1 (I2): this Task's repairs on this PR plus every EC2 and CI
-    repair of each Task it continues. A chain link in doubt (or a continuation
-    read without a store) gives repair_policy.UNKNOWN, never 0.
+    #1502 WP-D L1 (I2, F1): a Task without continues counts its repairs on this
+    PR; a continuation counts every EC2 and CI repair of every chain Task, its
+    own included, on any PR. A chain link in doubt (or a continuation read
+    without a store) gives repair_policy.UNKNOWN, never 0.
     """
     return lineage_counts.lineage_counts(
         store, record, base_family=f'pr-{number}')['test_fails']
@@ -3186,19 +3187,25 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                     if repair_claim is None:
                         step, codes = 'REFUSED', ['REPAIR_CLAIM_UNAVAILABLE']
                 remote_status, _, failure_receipt = _remote_test_status(record, d6)
+                replay_only = False
                 if (step == 'REPAIR_REVIEW' and remote_status == 'FAIL' and
                         _test_family_used_up(record, number, d6['result_head'], store)):
                     # #1502 WP-D D11: the shared EC2/CI count is used up.
                     step, codes = 'STOPPED', ['TEST_FAIL_LIMIT_REACHED']
-                elif (step == 'REPAIR_REVIEW' and remote_status != 'FAIL' and
-                        not _live_repair_claim(record, d6['result_head'])):
-                    # #1502 WP-D L1 (I4): advance and drive start only the first review
-                    # repair of the chain. Once one is used (or the count is UNKNOWN),
-                    # the PM dispatches repair 2 after the High Debug. A live claim on
-                    # this head is left to review_repair's own replay.
+                elif step in ('REPAIR_REVIEW', 'REPAIR_RETRY') and remote_status != 'FAIL':
+                    # #1502 WP-D L1 (I4, F2): advance and drive start only the first
+                    # review repair of the chain. Once one is used (or the count is
+                    # UNKNOWN), the PM dispatches repair 2 after the High Debug. A
+                    # retry always allocates a new repair, so it stops too. A live
+                    # claim on this head may only replay: review_repair refuses
+                    # REVIEW_REPAIR_PM_REQUIRED before allocating anything.
                     used = _review_repairs_used(record, number, store)
                     if type(used) is not int or used >= 1:
-                        step, codes = 'STOPPED', ['REVIEW_REPAIR_PM_REQUIRED']
+                        if (step == 'REPAIR_REVIEW' and
+                                _live_repair_claim(record, d6['result_head'])):
+                            replay_only = True
+                        else:
+                            step, codes = 'STOPPED', ['REVIEW_REPAIR_PM_REQUIRED']
                 if step in ('REPAIR_REVIEW', 'REPAIR_RETRY'):
                     invoke = repair_review_call or review_repair.repair_review
                     try:
@@ -3211,6 +3218,8 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                                             type(repair_claim) is dict else None))
                         if remote_status == 'FAIL':
                             repair_args['remote_test_receipt'] = failure_receipt
+                        if replay_only:
+                            repair_args['replay_only'] = True
                         with contextlib.redirect_stdout(captured):
                             result_value = invoke(**repair_args)
                         emitted = captured.getvalue().strip()
@@ -3222,6 +3231,8 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                         code = _refusal(exc, 'review_repair_code')
                         if code == 'REPAIR_LIMIT_REACHED' and remote_status == 'FAIL':
                             step, codes = 'STOPPED', ['TEST_FAIL_LIMIT_REACHED']
+                        elif code == 'REVIEW_REPAIR_PM_REQUIRED':
+                            step, codes = 'STOPPED', [code]
                         else:
                             codes.append(code)
     elif step == 'RUN_TASK_COMPLETE':

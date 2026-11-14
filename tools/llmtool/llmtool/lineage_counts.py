@@ -123,14 +123,18 @@ def _unknown():
 def lineage_counts(store, task, *, base_family, include_successors=False):
     """Chain-wide counts for one Task; each value is known or UNKNOWN.
 
-    review_repairs: review repair claims. The Task's own claims are counted as
-      before (the stored base_family, legacy EC2 claims included); each
-      predecessor adds every review-family claim (family not '-ec2'), any PR.
+    review_repairs: review repair claims. Every Task of a chain, the Task
+      itself included, adds every review-family claim (family not '-ec2',
+      legacy EC2 claims included), any PR.
     review_heads: {head: 'FAIL'} for those claims, one entry per HEAD.
-    test_fails: EC2 and CI repair claims. The Task's own '<base>-ec2' claims and
-      legacy EC2 claims in base_family; each predecessor adds every '-ec2' claim
-      and every legacy EC2 claim, any PR.
+    test_fails: EC2 and CI repair claims. Every Task of a chain, the Task
+      itself included, adds every '-ec2' claim and every legacy EC2 claim, any
+      PR.
     chain: the Task IDs of the chain, the Task first.
+
+    A Task alone in its chain (no continues and, when include_successors, no
+    successor) counts as before: only its claims in the stored base_family
+    (review) and '<base>-ec2' plus legacy EC2 claims in base_family (tests).
 
     include_successors (review_repair, under the chain lock): every Task that
     continues this one is counted like a predecessor and listed after the
@@ -151,15 +155,18 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
         if later is None or len(records) + len(later) > MAX_CHAIN:
             return _unknown()
         records = records + later
+    # Family-local counting only for a Task alone in its chain; in a chain every
+    # Task's claims count on any PR, the Task's own included (#1502 F1).
+    local = len(records) == 1
     review, tests, heads, heads_known = 0, 0, {}, True
-    for index, record in enumerate(records):
+    for record in records:
         claims = record.get('review_repair_claims', [])
         if type(claims) is not list or any(type(item) is not dict for item in claims):
             return _unknown()
         for claim in claims:
             family = claim.get('family', f"pr-{claim.get('pr')}")
             legacy = ec2_claim_kind(claim) == 'LEGACY'
-            if index == 0:
+            if local:
                 is_review = family == base_family
                 is_test = (family == base_family + _EC2_SUFFIX or
                            (family == base_family and legacy))

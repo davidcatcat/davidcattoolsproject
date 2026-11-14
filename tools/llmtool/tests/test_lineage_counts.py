@@ -162,6 +162,26 @@ class ChainCountTests(unittest.TestCase):
         # task_advance's legacy count is unchanged for a Task without continues.
         self.assertEqual(task_advance._test_fail_count(own, 17), 1)
 
+    def test_a_continuation_counts_its_own_claims_on_every_pr(self):
+        # F1: a Task with continues keeps its own claims on another PR in the counts.
+        own = [claim('pr-5', OLD_HEAD, pr=5),
+               ec2_claim('pr-5-ec2', HEAD, pr=5, attempt=2),
+               ec2_claim('pr-6', OTHER_HEAD, pr=6, attempt=3)]   # legacy EC2: both counts
+        predecessor = {'task_id': tid(1), 'review_repair_claims': []}
+        current = {'task_id': tid(2), 'continues': tid(1), 'review_repair_claims': own}
+        store = DictStore(predecessor, current)
+        counts = lineage_counts.lineage_counts(store, current, base_family='pr-17')
+        self.assertEqual((counts['review_repairs'], counts['test_fails']), (2, 2))
+        self.assertEqual(counts['review_heads'], {OLD_HEAD: 'FAIL', OTHER_HEAD: 'FAIL'})
+        self.assertEqual(task_advance._test_fail_count(current, 17, store), 2)
+        self.assertEqual(task_advance._review_repairs_used(current, 17, store), 2)
+        # The same claims on a Task without continues stay family-local (unchanged).
+        alone = {'task_id': tid(3), 'review_repair_claims': own}
+        plain = lineage_counts.lineage_counts(None, alone, base_family='pr-17')
+        self.assertEqual((plain['review_repairs'], plain['test_fails'],
+                          plain['review_heads']), (0, 0, {}))
+        self.assertEqual(task_advance._test_fail_count(alone, 17), 0)
+
     def test_one_head_failed_in_two_tasks_counts_once(self):
         first = {'task_id': tid(1), 'review_repair_claims': [claim('pr-5', OLD_HEAD, pr=5)]}
         second = {'task_id': tid(2), 'continues': tid(1),
@@ -403,6 +423,39 @@ class ContinuesLockTests(RecordPmCase):
         self.assertNotIn('continues', plain)
 
 
+class ContractDigestTests(RecordPmCase):
+    """F3: continues is part of the Task contract digest."""
+
+    @staticmethod
+    def digest(contract, run_id):
+        return contract.binding(run_id).to_dict()['contract_digest']
+
+    def test_different_predecessors_give_different_contract_digests(self):
+        task_id, run_id, request = tid(0x51), tid(0x52), 'f' * 64
+        first, second = tid(0x53), tid(0x54)
+        digests = {self.digest(cli._contract(task_id, request, link), run_id)
+                   for link in (None, first, second)}
+        self.assertEqual(len(digests), 3)
+        # record-pm binds the stored contract to the link it records.
+        predecessor = self.task()
+        recorded = self.record_pm(continues=predecessor)
+        expected = cli._contract(recorded['task_id'], recorded['request_sha256'], predecessor)
+        self.assertEqual(recorded['task_contract'], expected.to_dict())
+        self.assertEqual(recorded['task_binding']['contract_digest'],
+                         self.digest(expected, recorded['run_id']))
+        self.assertNotEqual(recorded['task_binding']['contract_digest'], self.digest(
+            cli._contract(recorded['task_id'], recorded['request_sha256']),
+            recorded['run_id']))
+
+    def test_no_continues_keeps_the_contract_unchanged(self):
+        task_id, request = tid(0x55), 'f' * 64
+        self.assertEqual(cli._contract(task_id, request).to_dict(),
+                         cli._contract(task_id, request, None).to_dict())
+        plain = self.record_pm()
+        self.assertEqual(plain['task_contract'],
+                         cli._contract(plain['task_id'], plain['request_sha256']).to_dict())
+
+
 # review_repair through a continuation chain (I1-I3, I6).
 
 TASK, RUN, PRED = 'a' * 32, 'b' * 32, 'd' * 32
@@ -551,6 +604,35 @@ class ReviewRepairChainTests(unittest.TestCase):
         self.assertTrue(result['replayed'])
         self.assertEqual(result['repair_task_id'], tid(321))
         self.assertEqual(self.calls, [])
+
+    def test_a_continuations_own_repair_on_another_pr_counts(self):
+        # F1: this Task's own review repair on PR 5 uses the chain's first repair.
+        own = [claim('pr-5', OLD_HEAD, pr=5)]
+        self.refused(self.store([], review_repair_claims=own), 'REPAIR_DEBUG_REQUIRED')
+        own_ec2 = [ec2_claim('pr-5-ec2', OLD_HEAD, pr=5)]
+        store = self.store([], review_repair_claims=own_ec2)
+        result = self.dispatch(store, remote_test_receipt=_receipt())
+        self.assertEqual(result['claim']['family'], f'pr-{PR}-ec2')
+        store.records[TASK]['review_repair_claims'][-1]['state'] = 'FAILED'
+        self.calls.clear()
+        self.refused(store, 'REPAIR_LIMIT_REACHED', remote_test_receipt=_receipt())
+
+    def test_replay_only_replays_a_live_claim_and_never_allocates(self):
+        # F2: task advance passes replay_only; only a genuine replay goes through.
+        live = claim(f'pr-{PR}', HEAD, pr=PR, state='DISPATCHED', repair=tid(321))
+        store = self.store([], review_repair_claims=[live])
+        result = self.dispatch(store, replay_only=True)
+        self.assertTrue(result['replayed'])
+        self.assertEqual(result['repair_task_id'], tid(321))
+        self.assertEqual(self.calls, [])
+        # A live claim for another verdict version is not this failure: refused.
+        other = claim(f'pr-{PR}', HEAD, pr=PR, attempt=2, state='DISPATCHED',
+                      repair=tid(322))
+        self.refused(self.store([], review_repair_claims=[other], high_debug=self.rca()),
+                     'REVIEW_REPAIR_PM_REQUIRED', replay_only=True)
+        # A retry always allocates, so replay_only refuses it.
+        self.refused(self.store([], review_repair_claims=[live], high_debug=self.rca()),
+                     'REVIEW_REPAIR_PM_REQUIRED', replay_only=True, retry_claim_id=tid(321))
 
     def test_test_failures_are_counted_across_the_chain(self):
         store = self.store([ec2_claim('pr-5-ec2', OLD_HEAD, pr=5)])
@@ -934,6 +1016,66 @@ class AdvanceChainTests(unittest.TestCase):
         advance, repaired = self.review_fail(store)
         self.assertEqual(advance()['step'], 'REPAIR_REVIEW')
         self.assertEqual(len(repaired), 1)
+        # F2: the call may only replay; review_repair refuses any new allocation.
+        self.assertIs(repaired[0].get('replay_only'), True)
+
+    def test_a_replay_only_refusal_stops_for_the_pm(self):
+        live = claim('pr-17', HEAD, state='CLAIMED', repair=tid(55))
+        store = self.store([live], [])
+        store.records[ADV_TASK]['review_dispatch_claim'] = [
+            {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}]
+        calls = []
+
+        def refuse(**kwargs):
+            calls.append(kwargs)
+            error = LLMToolError('Review repair refused; details omitted')
+            error.review_repair_code = 'REVIEW_REPAIR_PM_REQUIRED'
+            raise error
+        with patch.object(task_advance, '_d6_snapshot', return_value=_d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR_SNAPSHOT), \
+             patch.object(task_advance, '_review_outcomes', return_value=[{
+                 'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_FAIL'}]):
+            result = task_advance.advance(
+                task_id=ADV_TASK, store=store, pr_number=17, cwd='/repo/task',
+                github_get=lambda _path: [], repair_review_call=refuse)
+        self.assertEqual((result['step'], result['codes']),
+                         ('STOPPED', ['REVIEW_REPAIR_PM_REQUIRED']))
+        self.assertEqual([call.get('replay_only') for call in calls], [True])
+
+    def test_own_claims_on_another_pr_stop_a_continuation(self):
+        # F1 through advance: the continuation's own repair on PR 9 counts.
+        store = self.store([claim('pr-9', OLD_HEAD, pr=9)], [])
+        advance, repaired = self.review_fail(store)
+        result = advance()
+        self.assertEqual((result['step'], result['codes']),
+                         ('STOPPED', ['REVIEW_REPAIR_PM_REQUIRED']))
+        self.assertEqual(repaired, [])
+
+    def test_repair_retry_after_a_failed_first_repair_stops_for_the_pm(self):
+        # F2: a retry would allocate a new review repair; RCA evidence does not
+        # let advance or drive start it.
+        retry = tid(56)
+        for continues in (True, False):
+            with self.subTest(continues=continues):
+                dispatched = claim('pr-17', HEAD, state='DISPATCHED', repair=retry)
+                rca = ReviewRepairChainTests.rca(family='pr-17')
+                store = self.store([dispatched], [], continues=continues, high_debug=rca)
+                store.records[retry] = {'task_id': retry,
+                                        'developer': {'state': 'DEVELOPER_UNAVAILABLE'}}
+                before = store.get(ADV_TASK)['review_repair_claims']
+                advance, repaired = self.review_fail(store)
+                result = advance()
+                self.assertEqual((result['step'], result['codes']),
+                                 ('STOPPED', ['REVIEW_REPAIR_PM_REQUIRED']))
+                self.assertEqual(repaired, [])
+                self.assertEqual(store.get(ADV_TASK)['review_repair_claims'], before)
+                driven = task_drive.drive(
+                    task_id=ADV_TASK, advance_call=lambda **_kw: advance(),
+                    sleep=lambda _seconds: self.fail('drive must not poll'))
+                self.assertEqual((driven['step'], driven['codes']),
+                                 ('STOPPED', ['REVIEW_REPAIR_PM_REQUIRED']))
+                self.assertEqual(repaired, [])
 
     def test_drive_stops_with_review_repair_pm_required(self):
         store = self.store((), [claim('pr-9', OLD_HEAD, pr=9)])
