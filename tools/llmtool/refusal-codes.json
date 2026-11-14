@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "scope": [
+    "tools/llmtool/llmtool/review_repair.py"
+  ],
+  "codes": {
+    "CI_FAILURE_INVALID": {
+      "class": "TERMINAL",
+      "reason": "The CI failure input is malformed, names a non-required check, is not a failure, or came together with a remote-test receipt.",
+      "pm_action": "Fix the input: pass one exact-head required check failure on its own, or none."
+    },
+    "REMOTE_TEST_RECEIPT_INVALID": {
+      "class": "TERMINAL",
+      "reason": "The remote-test receipt is not a digest-valid FAIL for this Task, run, executor Task and head, or its excerpt is too large.",
+      "pm_action": "Fix the input: rerun the EC2 remote test on the exact head and use its unmodified FAIL receipt."
+    },
+    "REPAIR_CHAIN_LOCK_UNAVAILABLE": {
+      "class": "RECOVERY",
+      "reason": "The continuation chain lock could not be taken, so no count was read and nothing was written.",
+      "recovery": "llmtool task advance {task} --pr {pr}"
+    },
+    "REPAIR_CLAIM_UNAVAILABLE": {
+      "class": "TERMINAL",
+      "reason": "The repair claims are malformed, the retry claim is not a dispatched claim of this head, or the claim write failed.",
+      "pm_action": "Inspect and reconcile the Task's repair claims and any unclaimed repair Task; never replay an UNKNOWN claim."
+    },
+    "REPAIR_CODEX_DEVELOPER_RETIRED": {
+      "class": "TERMINAL",
+      "reason": "The Task's Developer route is Codex, which now serves only as Reviewer and AI Debug.",
+      "pm_action": "Replan the repair on a supported Developer route."
+    },
+    "REPAIR_COUNT_UNAVAILABLE": {
+      "class": "RECOVERY",
+      "reason": "A Task record needed for the repair count could not be read, or the chain changed during the read.",
+      "recovery": "llmtool task advance {task} --pr {pr}"
+    },
+    "REPAIR_DATA_CLASS_INVALID": {
+      "class": "TERMINAL",
+      "reason": "The gw-agent route accepts only SYNTHETIC or PUBLIC_REPO data, and the Task's data class is neither.",
+      "pm_action": "Route the repair to a Developer permitted for the Task's data class; never relabel the data."
+    },
+    "REPAIR_DEBUG_REQUIRED": {
+      "class": "TERMINAL",
+      "reason": "A further review repair needs an RCA_CONFIRMED AI Debug of this failure family on the failed head first.",
+      "pm_action": "Run a bounded AI Debug Task on the failed head, then decide the repair from its result."
+    },
+    "REPAIR_DEVELOPER_BINDING_INVALID": {
+      "class": "TERMINAL",
+      "reason": "The Task's Developer binding, state, scope, goal or acceptance is missing or malformed, or the repair acceptance exceeds 16 items.",
+      "pm_action": "Fix the Task's Developer binding, or replan the repair with a shorter acceptance list."
+    },
+    "REPAIR_DEVELOPER_ROUTE_UNSUPPORTED": {
+      "class": "TERMINAL",
+      "reason": "The Task's Developer route cannot run a repair continuation.",
+      "pm_action": "Replan the repair on a supported Developer route."
+    },
+    "REPAIR_DISPUTE_OPEN": {
+      "class": "RECOVERY",
+      "reason": "A review dispute on this PR head is still open, so no review repair may start until it is ruled.",
+      "recovery": "llmtool task advance {task} --pr {pr}"
+    },
+    "REPAIR_FAILED_FINAL_REQUIRED": {
+      "class": "TERMINAL",
+      "reason": "A REPLAN Task reached its review FAIL limit and ends FAILED_FINAL instead of another repair.",
+      "pm_action": "End the REPLAN Task as FAILED_FINAL under the repair policy."
+    },
+    "REPAIR_FAMILY_INVALID": {
+      "class": "TERMINAL",
+      "reason": "The repair family name is malformed, too long, or ends with the reserved -ec2 suffix.",
+      "pm_action": "Fix the input: omit the family, or give a lowercase name of at most 64 characters without the -ec2 suffix."
+    },
+    "REPAIR_HEAD_MOVED": {
+      "class": "TERMINAL",
+      "reason": "The registered D6 is missing, unreadable or moved, or its head is not the failed head.",
+      "pm_action": "Reconcile the registered D6 and its head before any repair; a new head needs its own review."
+    },
+    "REPAIR_LIMIT_REACHED": {
+      "class": "TERMINAL",
+      "reason": "The policy's repair or test-failure limit is used up, or the count is UNKNOWN, which counts as used up.",
+      "pm_action": "Escalate under the repair policy (split, PM decision or stop) instead of another repair."
+    },
+    "REPAIR_LINEAGE_INVALID": {
+      "class": "TERMINAL",
+      "reason": "The Task lineage kind or the review FAIL count is invalid, so the next policy step cannot be chosen.",
+      "pm_action": "Fix the Task's lineage record before any repair decision."
+    },
+    "REPAIR_NO_BLOCKING_FINDING": {
+      "class": "TERMINAL",
+      "reason": "The failed verdict has no blocking finding, or an arbiter withdrew every blocking finding, so it is not a valid FAIL.",
+      "pm_action": "Do not repair; decide the head's next review step from the verdict and any dispute ruling."
+    },
+    "REPAIR_PACKET_INVALID": {
+      "class": "TERMINAL",
+      "reason": "The repair packet built from the failure exceeds its size limit.",
+      "pm_action": "Replan the repair from a bounded failure summary that fits the packet."
+    },
+    "REPAIR_PM_DECIDE_REQUIRED": {
+      "class": "TERMINAL",
+      "reason": "A child Task reached its review FAIL limit or its group Debug is used, so the PM decides its next step.",
+      "pm_action": "Decide the child Task at PM_DECIDE (replan, drop or stop) under the repair policy."
+    },
+    "REPAIR_PM_SESSION_UNAVAILABLE": {
+      "class": "TERMINAL",
+      "reason": "The Task has no recorded PM session or working directory to record the repair continuation under.",
+      "pm_action": "Replan the repair as a new PM-recorded Task."
+    },
+    "REPAIR_POLICY_INVALID": {
+      "class": "TERMINAL",
+      "reason": "The repair policy file is missing, unreadable or malformed.",
+      "pm_action": "Restore policy.json to its main content without changing any limit."
+    },
+    "REPAIR_ROOT_TASK_REQUIRED": {
+      "class": "TERMINAL",
+      "reason": "The Task is itself a repair continuation; repairs are counted and run from the root Task.",
+      "pm_action": "Run the repair from the root Task that holds the repair claims."
+    },
+    "REPAIR_SPLIT_REQUIRED": {
+      "class": "TERMINAL",
+      "reason": "A root Task reached its review FAIL limit and splits into child Tasks instead of another repair.",
+      "pm_action": "Split the root Task into bounded child Tasks under the repair policy."
+    },
+    "REPAIR_TASK_INVALID": {
+      "class": "TERMINAL",
+      "reason": "The Task record is missing or does not match the requested Task ID.",
+      "pm_action": "Fix the input: name an existing Task ID."
+    },
+    "REPAIR_TASK_RECORD_UNAVAILABLE": {
+      "class": "TERMINAL",
+      "reason": "The repair continuation Task could not be recorded or validated, and no repair claim was counted.",
+      "pm_action": "Reconcile any recorded repair Task before deciding whether to repair again."
+    },
+    "REVIEW_FAIL_EVENT_MISSING": {
+      "class": "TERMINAL",
+      "reason": "No pending Reviewer FAIL event with a matching formal REVIEW_FAIL verdict exists for this executor Task, PR and head.",
+      "pm_action": "Confirm the formal verdict and its recorded review result before any repair."
+    },
+    "REVIEW_REPAIR_PM_REQUIRED": {
+      "class": "TERMINAL",
+      "reason": "The automatic path admits only a chain's first review repair, and this chain already has one or its count is in doubt.",
+      "pm_action": "Decide the next review repair yourself under the repair policy."
+    },
+    "REVIEW_RESULT_COMMENTS_INVALID": {
+      "class": "TERMINAL",
+      "reason": "The PR comments could not be read as a list of comment objects, or there are 100 or more.",
+      "pm_action": "Confirm the verdict comment on the PR, then decide the repair from a confirmed verdict."
+    },
+    "RUNTIME_NOT_ON_PATH": {
+      "class": "RECOVERY",
+      "reason": "The Claude CLI needed for the Developer repair route is not on PATH.",
+      "recovery": "llmtool task advance {task} --pr {pr}"
+    }
+  }
+}
