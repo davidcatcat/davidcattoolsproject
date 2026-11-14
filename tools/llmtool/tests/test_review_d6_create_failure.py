@@ -22,6 +22,10 @@ EXECUTOR = 'executor-d6'
 SECRET_OUT = 'lifecycle-stdout-must-not-be-kept'
 SECRET_ERR = 'lifecycle-stderr-must-not-be-kept'
 CREATE_REASONS = ('REVIEWER_D6_CREATE_FAILED', 'REVIEWER_D6_CREATE_TIMEOUT')
+# #1502 WP-F: a fixed rule prefix stands in for the main-pinned Reviewer cards,
+# so no test here reads GitHub or Git for rules.
+RULES_PREFIX = 'RULES stub for review D6 create failure tests\nRULES_END\n\n'
+RULES_SHA256 = hashlib.sha256(RULES_PREFIX.encode('utf-8')).hexdigest()
 
 
 def setUpModule():
@@ -133,6 +137,10 @@ class ReviewD6CreateFailureClaimTests(unittest.TestCase):
         env_patch = patch.dict(os.environ, {'HOME': str(home)})
         env_patch.start()
         self.addCleanup(env_patch.stop)
+        rules_patch = patch.object(review_dispatch, '_review_rules',
+                                   return_value=(RULES_PREFIX, RULES_SHA256))
+        rules_patch.start()
+        self.addCleanup(rules_patch.stop)
         self.store, self.task_id = _real_store(Path(self.temp.name) / 'store')
         self.codex_calls, self.bind_calls, self.lifecycle_calls = [], [], []
 
@@ -215,6 +223,7 @@ class ReviewD6CreateFailureClaimTests(unittest.TestCase):
                 self.assertEqual(claim['failure_reason'], name)
                 self.assertEqual((claim['pr'], claim['head_sha'], claim['version']),
                                  (PR, HEAD, 1))
+                self.assertEqual(claim['rules_sha256'], RULES_SHA256)
                 self.assertIsNone(claim['native_session_id'])
                 self.assert_no_output_kept(exc)
                 # A reopened store re-validates the saved claim from disk.

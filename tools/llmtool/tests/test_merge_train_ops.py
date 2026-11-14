@@ -363,6 +363,24 @@ class MergeTrainOpsTest(unittest.TestCase):
         self._assert_refused(self._merge(), 'MERGE_MACOS_CHECK_REQUIRED')
         self.assertEqual(len(self.gh.named('edit')), 1)
 
+    def test_mac_ci_label_failures_refuse_without_merge(self):
+        # #1182: a missing macOS check never merges when the mac-ci label step fails.
+        self._create()
+        self.github.checks[self.train_head] = [_run(LINUX, self.train_head)]
+        self.github.pulls[TRAIN_PR]['labels'] = None
+        self._assert_refused(self._merge(), 'MERGE_LABELS_UNAVAILABLE')
+        self.assertEqual(self.gh.calls, [])
+        self.github.pulls[TRAIN_PR]['labels'] = []
+        for failure in (SimpleNamespace(returncode=1, stdout='', stderr=''), OSError('gh')):
+            with self.subTest(failure=failure):
+                gh = mock.Mock(side_effect=[failure])
+                result = merge_train_ops.merge_train(
+                    TRAIN_ID, store=self.store, github_get=self.github, gh_runner=gh,
+                    root=self.root, train_root=self.train_root)
+                self._assert_refused(result, 'MERGE_MAC_CI_LABEL_FAILED')
+                gh.assert_called_once_with(
+                    self.root, ['pr', 'edit', str(TRAIN_PR), '--add-label', 'mac-ci'])
+
     def test_cancelled_or_skipped_linux_refuses(self):
         self._create()
         for conclusion, code in (('cancelled', 'MERGE_CHECKS_NOT_GREEN'),
@@ -847,7 +865,8 @@ class MergeTrainOpsTest(unittest.TestCase):
         return {'step': 'CLOSED', 'codes': []}
 
     def _expected_comment(self):
-        return (f'Closed by llmtool merge train {TRAIN_ID}: this change was merged in '
+        return ('<!-- activity: type=task actor=PM target=PR status=TRACKING -->\n'
+                f'Closed by llmtool merge train {TRAIN_ID}: this change was merged in '
                 f'train PR #{TRAIN_PR} as squash commit {MERGE_SHA}.')
 
     def test_close_closes_only_open_member_prs_with_fixed_comment(self):

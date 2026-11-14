@@ -422,8 +422,12 @@ def _merge_locked(train_id, store, github_get, gh_runner, root, train_root):
 
 
 def _member_pr_comment(record):
-    """The one fixed pointer comment left on a member PR that is closed."""
-    return (f'Closed by llmtool merge train {record["train_id"]}: this change was merged '
+    """The one fixed pointer comment left on a member PR that is closed.
+
+    It starts with the llmtool PR activity marker line (#1208), as task advance comments do.
+    """
+    return ('<!-- activity: type=task actor=PM target=PR status=TRACKING -->\n'
+            f'Closed by llmtool merge train {record["train_id"]}: this change was merged '
             f'in train PR #{record["train_pr"]} as squash commit {record["merge_sha"]}.')
 
 

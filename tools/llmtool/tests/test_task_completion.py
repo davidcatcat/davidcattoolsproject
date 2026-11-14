@@ -29,6 +29,12 @@ import review_trust_fixture  # noqa: E402
 import worker_policy_fixture  # noqa: E402
 
 
+# #1502 WP-F: a fixed rule prefix stands in for the main-pinned Reviewer cards,
+# so no dispatch_review here reads GitHub or Git for rules.
+RULES_PREFIX = 'RULES stub for task completion tests\nRULES_END\n\n'
+RULES_SHA256 = hashlib.sha256(RULES_PREFIX.encode('utf-8')).hexdigest()
+
+
 def setUpModule(): review_trust_fixture.start_module()
 def tearDownModule(): review_trust_fixture.stop_module()
 
@@ -56,6 +62,10 @@ def pm_config(profile, require_configured=True):
 class TaskCompletionTests(unittest.TestCase):
     def setUp(self):
         review_trust_fixture.install_for_case(self)
+        rules_patch = patch('llmtool.review_dispatch._review_rules',
+                            return_value=(RULES_PREFIX, RULES_SHA256))
+        rules_patch.start()
+        self.addCleanup(rules_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
@@ -6109,6 +6119,7 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual((claim['pr'], claim['head_sha'], claim['reviewer_task']),
                          (10, context['head'], context['reviewer_task']))
         self.assertEqual(claim['review_result']['review_text'], context['body'])
+        self.assertEqual(claim['rules_sha256'], RULES_SHA256)
 
     def _main_merged_context(self):
         """Complete a Claude Task at H1, then merge a newer main into its branch."""
@@ -6172,6 +6183,7 @@ class TaskCompletionTests(unittest.TestCase):
         rc, dispatched, prompts = context['review_at'](2, body, reads)
         self.assertIsNone(rc)
         self.assertEqual(len(prompts), 1)
+        self.assertTrue(prompts[0].startswith(RULES_PREFIX))
         self.assertIn(f'Review PR #10 at exact HEAD {head}.', prompts[0])
         self.assertIn(f'Verdict: PASS | Version: v2 | HEAD: {head}', prompts[0])
         self.assertIn(f'contract={context["contract_digest"]} head={head}', prompts[0])

@@ -580,9 +580,17 @@ def _exit_diagnostic(code, stderr):
 
 
 def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
-              runner=None, boundary, snapshot):
-    """Run one route only after dispatch, D6, and OS write-boundary checks."""
+              runner=None, boundary, snapshot, on_launch=None):
+    """Run one route only after dispatch, D6, and OS write-boundary checks.
+
+    ``on_launch`` (optional, no arguments) is called once at the launch
+    boundary: after request validation, the dispatch/D6 gate, write-boundary
+    verification and route input preparation, right before the process
+    starts. No refusal before that point calls it.
+    """
     started = time.monotonic()
+    if on_launch is not None and not callable(on_launch):
+        raise RouteError(_route_code(route, 'REQUEST_INVALID'))
     try:
         value = route.validate_request(request)
     except RouteError:
@@ -703,6 +711,8 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         route.prepare_files(private_tmp, value)
         env = route.build_env(private_tmp)
         argv = list(prefix) + route.build_argv(value['executable'], value)
+        if on_launch is not None:
+            on_launch()
     except RouteError:
         shutil.rmtree(private_tmp, ignore_errors=True)
         raise

@@ -178,6 +178,23 @@ class ReplayTests(unittest.TestCase):
         self.assertIn('HEARTBEAT_EXPIRED', result.findings)
         self.assertEqual(self.inspect(now='2026-10-12T12:05:03Z').exit_code, 0)
 
+    def test_sequence_and_clock_refusals_name_their_code(self):
+        # #367: replay refusals keep TASK_SEQUENCE_INVALID and TASK_CLOCK_INVALID.
+        late = replace(self.events[1], timestamp='2026-10-12T11:59:59Z')
+        cases = (
+            ((self.events[0], self.events[0]), NOW, 'TASK_SEQUENCE_INVALID'),
+            (self.events[:1] + self.events[2:], NOW, 'TASK_SEQUENCE_INVALID'),
+            (None, '2026-10-12T12:00:10+00:00', 'TASK_CLOCK_INVALID'),
+            (None, '2026-02-30T12:00:10Z', 'TASK_CLOCK_INVALID'),
+            (None, '2026-10-12T12:00:00Z', 'TASK_CLOCK_INVALID'),
+            ((self.events[0], late), NOW, 'TASK_CLOCK_INVALID'),
+        )
+        for events, now, code in cases:
+            with self.subTest(code=code, now=now):
+                with self.assertRaises(LLMToolError) as raised:
+                    self.inspect(events, now=now)
+                self.assertEqual(raised.exception.lifecycle_code, code)
+
     def test_handoff_all_pins_and_outstanding_evidence_are_checked(self):
         h = self.events[3].handoff
         changes = dict(source_sha='2'*40, epoch=8, task=self.contract.binding('b'*32),
@@ -192,6 +209,24 @@ class ReplayTests(unittest.TestCase):
         result = self.inspect(self.events[:3]+(replace(self.events[3], handoff=None),))
         self.assertEqual(result.exit_code, 1)
         self.assertIn('HANDOFF_INCOMPLETE', result.findings)
+
+    def test_handoff_state_and_author_refusals_name_their_code(self):
+        # #367: replay refusals keep TASK_HANDOFF_INVALID, TASK_STATE_INVALID and
+        # TASK_REVIEW_NOT_INDEPENDENT.
+        h, e = self.events[3].handoff, self.events
+        cases = (
+            (e[:3] + (replace(e[3], handoff=replace(h, epoch=8)),) + e[4:], 'TASK_HANDOFF_INVALID'),
+            (e[:3] + (replace(e[3], handoff=replace(h, outstanding_criteria=())),) + e[4:],
+             'TASK_HANDOFF_INVALID'),
+            ((e[0], replace(e[1], state=t.State.RUNNING), *e[2:]), 'TASK_STATE_INVALID'),
+            ((replace(e[0], prior_event_id='wrong'),), 'TASK_STATE_INVALID'),
+            (e[:4] + (replace(e[4], agent=self.expect.agents[0]),), 'TASK_REVIEW_NOT_INDEPENDENT'),
+        )
+        for events, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(LLMToolError) as raised:
+                    self.inspect(events)
+                self.assertEqual(raised.exception.lifecycle_code, code)
 
     def test_model_only_false_completion_cannot_satisfy_tests(self):
         review = self.events[-1].evidence[0]
@@ -246,6 +281,24 @@ class ReplayTests(unittest.TestCase):
                 t.parse_events(raw)
         with self.assertRaises((LLMToolError, ValueError)):
             replace(self.expect.agents[0], root='/repo/api_key=SECRET')
+
+    def test_record_construction_refusals_name_their_code(self):
+        # #367: building an expectation or event keeps its own lifecycle code.
+        dev, reviewer = self.expect.agents
+        same_author = replace(reviewer, agent_id=dev.agent_id)
+        cases = (
+            (lambda: replace(self.expect, initial_state=t.State.RUNNING), 'TASK_STATE_INVALID'),
+            (lambda: replace(self.expect, agents=(dev, same_author)),
+             'TASK_REVIEW_NOT_INDEPENDENT'),
+            (lambda: replace(self.events[0], kind='OTHER'), 'TASK_STATE_INVALID'),
+            (lambda: replace(self.events[0], timestamp='2026-10-12 12:00:00'),
+             'TASK_CLOCK_INVALID'),
+        )
+        for build, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(LLMToolError) as raised:
+                    build()
+                self.assertEqual(raised.exception.lifecycle_code, code)
 
     def test_empty_replay_is_incomplete(self):
         result = self.inspect(())

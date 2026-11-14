@@ -1432,6 +1432,10 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         # lock in this same write; a ROOT parked since `record` was read is refused.
         # #1781 (I4): so is a split reservation that landed since then.
         code = getattr(exc, 'task_store_error_code', None)
+        if code == 'TASK_STORE_INVALID':
+            # #1362: the stored record fails strict re-validation on this write
+            # (for example a legacy docs-only test entry). That is not a race.
+            return _merge_refusal('MERGE_RECORD_INVALID')
         return _merge_refusal(code if code in ('MERGE_ROOT_PARKED', 'MERGE_LINEAGE_ENDED',
                                                'TASK_LINEAGE_PENDING')
                               else 'MERGE_CLAIM_CONFLICT')
@@ -2261,6 +2265,44 @@ def decide(record, d6, pr, related):
     return 'REVIEW_OUTCOME_UNKNOWN'
 
 
+# #1831 P1: pre-launch refusals that mean the default Reviewer route is unavailable.
+_REVIEWER_ROUTE_UNAVAILABLE = ('ROLE_MODEL_NOT_ALLOWED', 'REVIEWER_ACCOUNT_UNCONFIGURED',
+                               'REVIEWER_NOT_ALLOWED')
+
+
+def _reviewer_fallback(record, exc):
+    """#1831 P1: return (alternate Reviewer or None, code) for a route refusal.
+
+    None when the refusal is not a route-unavailable code. The alternate is the
+    other formal Reviewer key, and only when review_dispatch's own family and
+    policy check admits it; dispatch_review(reviewer=alt) checks it again.
+    """
+    code = getattr(exc, 'review_dispatch_code', None)
+    if code not in _REVIEWER_ROUTE_UNAVAILABLE:
+        return None
+    family = task_completion._reviewer_author_family(record.get('developer'))
+    alternate = 'claude-reviewer' if family == 'claude' else 'codex-reviewer'
+    try:
+        review_dispatch._select_reviewer(record, alternate)
+    except Exception:
+        return None, code
+    return alternate, code
+
+
+def _blocked_fallback_reviewer(record, head):
+    """#1831 P2: the other eligible Reviewer while the head has one claim, else None."""
+    if sum(type(item) is dict and item.get('head_sha') == head
+           for item in _claims(record)) != 1:
+        return None
+    family = task_completion._reviewer_author_family(record.get('developer'))
+    alternate = 'claude-reviewer' if family == 'claude' else 'codex-reviewer'
+    try:
+        review_dispatch._select_reviewer(record, alternate)
+    except Exception:
+        return None
+    return alternate
+
+
 def _refusal(exc, attribute):
     code = getattr(exc, attribute, None)
     if type(code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', code):
@@ -3024,6 +3066,13 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             redispatch_reason = _failure_reason(unusable.get('failure_reason'))
         else:
             step = 'REVIEW_OUTCOME_UNKNOWN'
+    blocked_reviewer = None
+    if step == 'REVIEWER_ATTENTION' and not reviewer_session_done:
+        # #1831 P2: one redispatch of version N+1 with the other eligible Reviewer.
+        blocked_reviewer = _blocked_fallback_reviewer(record, d6['result_head'])
+        if blocked_reviewer is not None:
+            step = 'DISPATCH_REVIEW'
+            codes.extend(('REVIEW_BLOCKED', 'REVIEWER_FALLBACK'))
     if step == 'RUN_REMOTE_TEST':
         guard()  # #1781: an EC2 run is an external action
         try:
@@ -3086,8 +3135,36 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         if redispatch_reason is not None:
             codes.extend(('REVIEW_REDISPATCHED', redispatch_reason))
         try:
-            result = invoke(store=store, task_id=task_id, executor_task=executor_task,
-                            pr_number=number, version=version)
+            try:
+                result = invoke(store=store, task_id=task_id, executor_task=executor_task,
+                                pr_number=number, version=version,
+                                **({} if blocked_reviewer is None else
+                                   {'reviewer': blocked_reviewer}))
+            except Exception as exc:
+                # A P2 redispatch already uses the alternate: no P1 fallback on top.
+                fallback = None if blocked_reviewer else _reviewer_fallback(record, exc)
+                if fallback is None:
+                    raise
+                # #1831 P1: one fallback per step, through dispatch_review only.
+                alternate, original = fallback
+                codes.append(original)
+                if alternate is not None:
+                    codes.append('REVIEWER_FALLBACK')
+                    try:
+                        result = invoke(store=store, task_id=task_id,
+                                        executor_task=executor_task, pr_number=number,
+                                        version=version, reviewer=alternate)
+                    except Exception as alt_exc:
+                        if (getattr(alt_exc, 'review_dispatch_code', None) not in
+                                _REVIEWER_ROUTE_UNAVAILABLE):
+                            # Security v91 F1: any other refusal of the alternate keeps
+                            # the existing handling (failure reason, refusal receipt).
+                            raise
+                        codes.append(_refusal(alt_exc, 'review_dispatch_code'))
+                        alternate = None
+                if alternate is None:
+                    step = 'REVIEWER_UNAVAILABLE'
+                    codes.append('REVIEWER_UNAVAILABLE')
         except Exception as exc:
             codes.append(_refusal(exc, 'review_dispatch_code'))
             failure = _failure_reason(getattr(exc, 'review_failure_reason', None))
