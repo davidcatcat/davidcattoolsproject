@@ -646,17 +646,8 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
     except OSError:
         _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
     if result.returncode:
-        raw_stderr = result.stderr[:65536] if type(result.stderr) is bytes else b''
-        excerpt = raw_stderr.decode('utf-8', 'replace')
-        if excerpt.strip():
-            try:
-                from .task_submission_cli import _screen_text
-                excerpt = _screen_text(excerpt, 65536)
-            except LLMToolError:
-                excerpt = ''
-        message = ('Codex Reviewer exited unsuccessfully; details omitted' if not excerpt else
-                   'Codex Reviewer exited unsuccessfully: ' + excerpt)
-        _refuse('REVIEW_NOT_POSTED', message)
+        # #1946 (as #1938): fixed words only; stderr text never reaches the message.
+        _refuse('REVIEW_NOT_POSTED', 'Codex Reviewer exited unsuccessfully; details omitted')
     binding = task.get('task_binding')
     if type(binding) is not dict:
         _refuse('REVIEW_PROMPT_BINDING_MISSING')
