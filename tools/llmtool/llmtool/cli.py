@@ -360,6 +360,29 @@ def _run_ask(args):
         if signal_scope is None or exc.owner is not signal_scope:
             raise exc
         termination_handled = True
+        # #1851: a signal may land in a stdlib constructor. Mute only finalizer errors of
+        # objects the termination traceback holds, on this thread; others reach the hook.
+        import threading
+        import traceback
+        released, frame_tb = set(), exc.__traceback__
+        while frame_tb is not None:
+            released.update(id(value) for value in frame_tb.tb_frame.f_locals.values())
+            frame_tb = frame_tb.tb_next
+        handler_thread = threading.get_ident()
+        previous_hook = sys.unraisablehook
+
+        def mute_released(unraisable):
+            tb = unraisable.exc_traceback
+            owner = tb.tb_frame.f_locals.get('self') if tb is not None else None
+            if not (threading.get_ident() == handler_thread and owner is not None
+                    and id(owner) in released):
+                previous_hook(unraisable)
+
+        sys.unraisablehook = mute_released
+        try:
+            traceback.clear_frames(exc.__traceback__)
+        finally:
+            sys.unraisablehook = previous_hook
         if exc.stream is sys.stdout and exc.stream is sys.__stdout__:
             silence_broken_pipe(exc.stream)
             sys.stdout = None
