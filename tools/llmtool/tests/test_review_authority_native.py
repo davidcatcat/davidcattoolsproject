@@ -19,12 +19,14 @@ def tearDownModule(): review_trust_fixture.stop_module()
 CHILD=r'''
 import json,os,sys,sqlite3
 from pathlib import Path
+spec=json.loads(sys.stdin.readline())
+# #1821: import llmtool from the tree under test, also outside the canonical checkout.
+sys.path.insert(0,spec['source_root'])
 from llmtool import authorization_ledger as l,authorization_policy as p
 from llmtool.review_authority import ProductionReviewIssuer
 from llmtool.task_review import ReviewCallBinding
 from llmtool.action_contract import TaskBinding
 import llmtool
-spec=json.loads(sys.stdin.readline())
 assert str(Path(llmtool.__file__).resolve()).startswith(spec['source_root']+'/')
 class NativeFakeIssuer(ProductionReviewIssuer):
     _capability='approved-test-host'
