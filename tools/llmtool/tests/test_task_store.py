@@ -1252,6 +1252,20 @@ class TaskStoreTests(unittest.TestCase):
         task_store_module._validate_remote_test_receipts(
             dict(before, remote_test_receipts=[remote_test_receipt(task)]))
 
+    def test_remote_test_receipt_with_same_digest_and_other_content_conflicts(self):
+        # #425 W1: a stored receipt digest never takes different content.
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        receipt = remote_test_receipt(task)
+        self.store.append_remote_test_receipt(task['task_id'], receipt)
+        before = self.store.get(task['task_id'])
+        changed = dict(receipt, elapsed_s=receipt['elapsed_s'] + 1)
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.append_remote_test_receipt(task['task_id'], changed)
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'REMOTE_TEST_RECEIPT_CONFLICT')
+        self.assertEqual(self.store.get(task['task_id']), before)
+
     def test_published_pr_is_idempotent_replaceable_and_validated(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
