@@ -3318,6 +3318,8 @@ class TaskStatusIndexListTests(unittest.TestCase):
         self.root.mkdir(parents=True)
         os.chmod(self.state, 0o700)
         os.chmod(self.root, 0o700)
+        self.builds = tempfile.TemporaryDirectory()   # synthetic builds, outside the home
+        self.addCleanup(self.builds.cleanup)
 
     def stamp(self, n):
         return (self.BASE + timedelta(seconds=n)).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -3387,24 +3389,35 @@ class TaskStatusIndexListTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
 
     def other_build(self, name, edit):
-        """The validator fingerprint of a synthetic build: copies of the listed modules and
-        of chat_tui.py (outside the list), with ``edit`` changed."""
+        """The validator fingerprint of a synthetic build: a copy of the whole package,
+        outside the TaskStore home, with ``edit`` changed."""
+        import shutil
         package = Path(self.index.__file__).resolve().parent
-        directory = self.home / name
-        directory.mkdir()
-        for module in self.index.VALIDATOR_MODULES + ('chat_tui.py',):
-            contents = (package / module).read_bytes()
-            if module == edit:
-                contents += b'\n# synthetic edit (fingerprint scope test)\n'
-            (directory / module).write_bytes(contents)
+        directory = Path(self.builds.name) / name
+        shutil.copytree(package, directory, ignore=shutil.ignore_patterns('__pycache__'))
+        path = directory / edit
+        path.write_bytes(path.read_bytes() + b'\n# synthetic edit (fingerprint scope test)\n')
         return self.index.validator_fingerprint(package=directory)
 
+    def outside_module(self):
+        """A package module outside the validator closure (chat_tui.py when outside)."""
+        package = Path(self.index.__file__).resolve().parent
+        closure = set(self.index.fingerprint_modules())
+        outside = sorted(path.relative_to(package).as_posix()
+                         for path in package.rglob('*.py')
+                         if '__pycache__' not in path.parts
+                         and path.relative_to(package).as_posix() not in closure)
+        self.assertTrue(outside, 'every package module is in the validator closure')
+        return 'chat_tui.py' if 'chat_tui.py' in outside else outside[0]
+
     def test_3000_entries_from_another_build_with_the_same_listed_modules(self):
-        # A build that differs only outside the listed modules (a PR build) wrote the index.
-        fingerprint = self.other_build('writer-build', 'chat_tui.py')
+        # A build that differs only outside the validator closure (a PR build) wrote the
+        # index. The parse cache is cleared first, so the time includes a cold closure walk.
+        fingerprint = self.other_build('writer-build', self.outside_module())
         store = self.store(3000)
         self.write_index(store, fingerprint=fingerprint)
         before = self.snapshot()
+        self.index._SCAN_CACHE.clear()
         started = time.monotonic()
         with patch.object(chat_tui_status, 'load_records',
                           side_effect=AssertionError('no full read')):

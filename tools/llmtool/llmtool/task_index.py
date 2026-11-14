@@ -1,5 +1,6 @@
 """Best-effort metadata index for read-only Task status listings."""
 
+import ast
 import hashlib
 import json
 import os
@@ -20,37 +21,164 @@ _TUI_KEYS = frozenset({'updated_at', 'stage', 'name', 'executor', 'prs', 'owner'
                        'terminal', 'events', 'event_count'})
 
 
-# The package modules whose code decides what an index entry holds or whether it is valid.
-# Only these are fingerprinted, so a build that changes an unrelated module keeps a fresh
-# index; a change to any of these makes the index stale. A module added to the code paths
-# below must be added here too.
-VALIDATOR_MODULES = (
-    'task_index.py',           # entry schema and validation, the entry builder, the limits
-    'task_store.py',           # TaskStore.get: record validation decides 'readable' and the
-                               # created_at / pm_session_id copied into the entry
-    'chat_tui_status.py',      # index_summary and the stage, row, name, PR, owner and
-                               # terminal code of the 'tui' projection
-    'chat_tui_task.py',        # UNKNOWN / NOT_AVAILABLE / PENDING_DISPATCH and value(),
-                               # used in the projected stage, name and event texts
-    'chat_tui_events.py',      # task_events: the projected events and event_count
-    'worker_dispatch.py',      # stored_worker_id: dispatch-audit event text
-    'task_status.py',          # derive_state: the projected 'terminal' flag
-    'active_pm_inbox.py',      # _handoff_event: the NOT YET RECORDED event
-    'task_submission_cli.py',  # _active_pm_handoff: the NOT YET RECORDED event
-)
+# The validator fingerprint covers the package modules whose code decides what an index
+# entry holds or whether it is valid: the static import closure of these roots. TaskStore.get
+# (task_store) decides 'readable' and the copied created_at / pm_session_id; this module holds
+# the entry schema, builder and limits and reaches the 'tui' projection (chat_tui_status and
+# everything it imports) through its function-local import. A build that changes only modules
+# outside the closure keeps a fresh index; a change to any module inside makes it stale.
+FINGERPRINT_ROOTS = ('task_index', 'task_store')
+_PACKAGE_NAME = __name__.rpartition('.')[0] or 'llmtool'
+_SCAN_CACHE = {}           # sha256 of module bytes -> (imports, bound names); per process
+_SCAN_CACHE_LIMIT = 1024
+
+
+class FingerprintUnavailable(Exception):
+    """The validator closure cannot be computed: one of its modules is unreadable or
+    unparsable, or one of its package imports does not resolve. The index is unavailable."""
+
+
+def _scan(contents):
+    """(import statements, names bound anywhere) of one module, from its AST only.
+
+    Cached by content digest, so an edited module is always parsed again.
+    """
+    key = hashlib.sha256(contents).digest()
+    cached = _SCAN_CACHE.get(key)
+    if cached is not None:
+        return cached
+    imports, bound = set(), set()
+    for node in ast.walk(ast.parse(contents)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.add((0, alias.name, ()))
+                bound.add((alias.asname or alias.name).partition('.')[0])
+        elif isinstance(node, ast.ImportFrom):
+            imports.add((node.level, node.module or '',
+                         tuple(alias.name for alias in node.names)))
+            bound.update(alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+    result = (tuple(sorted(imports)), frozenset(bound))
+    if len(_SCAN_CACHE) >= _SCAN_CACHE_LIMIT:
+        _SCAN_CACHE.clear()
+    _SCAN_CACHE[key] = result
+    return result
+
+
+def _module_source(package, parts):
+    """The file of package module ``parts`` (a tuple of names; () is the package itself),
+    or None. A package's __init__.py comes before a module file of the same name, as in
+    the import system."""
+    base = package.joinpath(*parts)
+    init = base / '__init__.py'
+    if init.is_file():
+        return init
+    if parts:
+        module = base.parent / (parts[-1] + '.py')
+        if module.is_file():
+            return module
+    return None
+
+
+def _closure(package):
+    """{package-relative module name: bytes} of FINGERPRINT_ROOTS and every package module
+    they import, transitively.
+
+    Follows every static import statement in a module (top level, function-local,
+    conditional): relative imports, absolute imports of this package, ``from <package>
+    import <submodule>`` and the __init__.py of every package on the way. Modules are read
+    and parsed, never imported. Imports by string (importlib, __import__) are not seen.
+    Raises FingerprintUnavailable on an unreadable or unparsable module, an unresolved
+    package import or a relative import beyond the package.
+    """
+    modules = {}       # parts -> (is package, relative name, bytes, scan)
+    pending = [tuple(root.split('.')) for root in FINGERPRINT_ROOTS]
+    wanted = set(pending)
+
+    def label(parts):
+        return '.'.join((_PACKAGE_NAME,) + parts)
+
+    def want(parts):
+        if parts not in wanted:
+            wanted.add(parts)
+            pending.append(parts)
+
+    def read(parts):
+        if parts not in modules:
+            source = _module_source(package, parts)
+            if source is None:
+                raise FingerprintUnavailable('unresolved package module ' + label(parts))
+            name = source.relative_to(package).as_posix()
+            try:
+                contents = source.read_bytes()
+                scan = _scan(contents)
+            except Exception as error:
+                raise FingerprintUnavailable(
+                    'unreadable or unparsable package module ' + name) from error
+            modules[parts] = (source.name == '__init__.py', name, contents, scan)
+        return modules[parts]
+
+    while pending:
+        parts = pending.pop()
+        is_package, name, _contents, (imports, _bound) = read(parts)
+        for depth in range(len(parts)):
+            # Importing a submodule first runs each enclosing package's __init__.py.
+            if not (package.joinpath(*parts[:depth]) / '__init__.py').is_file():
+                raise FingerprintUnavailable('no __init__.py for package '
+                                             + label(parts[:depth]))
+            want(parts[:depth])
+        here = parts if is_package else parts[:-1]
+        for level, module, names in imports:
+            if level == 0:
+                if module != _PACKAGE_NAME and not module.startswith(_PACKAGE_NAME + '.'):
+                    continue
+                base = tuple(module.split('.')[1:])
+            else:
+                if level - 1 > len(here):
+                    raise FingerprintUnavailable('relative import beyond the package in '
+                                                 + name)
+                base = here[:len(here) - (level - 1)] + (
+                    tuple(module.split('.')) if module else ())
+            want(base)
+            base_package, _name, _bytes, (_imports, bound) = read(base)
+            for item in names:
+                if item == '*':
+                    continue
+                if base_package and _module_source(package, base + (item,)) is not None:
+                    want(base + (item,))
+                elif item not in bound and '*' not in bound and '__getattr__' not in bound:
+                    raise FingerprintUnavailable('unresolved name %s in %s imported by %s'
+                                                 % (item, label(base), name))
+    return {modules[parts][1]: modules[parts][2] for parts in wanted}
+
+
+def _package_dir(package):
+    return Path(__file__).resolve().parent if package is None else Path(package)
+
+
+def fingerprint_modules(package=None):
+    """The sorted package-relative names of the validator closure (this package by
+    default). Raises FingerprintUnavailable when it cannot be computed."""
+    return sorted(_closure(_package_dir(package)))
 
 
 def validator_fingerprint(package=None):
-    """Hash the names and contents of VALIDATOR_MODULES (this package by default).
+    """Hash the sorted package-relative names and bytes of the validator closure (this
+    package by default).
 
-    A missing module raises, so callers treat the index as unavailable.
+    Raises FingerprintUnavailable when the closure cannot be computed, so callers treat
+    the index as unavailable.
     """
-    package = Path(__file__).resolve().parent if package is None else Path(package)
+    sources = _closure(_package_dir(package))
     digest = hashlib.sha256()
-    for module in sorted(VALIDATOR_MODULES):
-        source = package / module
+    for module in sorted(sources):
         name = module.encode('utf-8')
-        contents = source.read_bytes()
+        contents = sources[module]
         digest.update(len(name).to_bytes(4, 'big'))
         digest.update(name)
         digest.update(len(contents).to_bytes(8, 'big'))
@@ -189,8 +317,9 @@ def _load(path, fingerprint):
 def display_entries(store):
     """Read-only index read for display: (entries, None) or (None, reason).
 
-    reason: unavailable (store root not private or not found), missing, unreadable or
-    stale (schema or validator fingerprint differs). Never writes, creates or repairs.
+    reason: unavailable (store root not private or not found, or the validator closure
+    cannot be computed), missing, unreadable or stale (schema or validator fingerprint
+    differs). Never writes, creates or repairs.
     """
     try:
         path = _index_path(store)
