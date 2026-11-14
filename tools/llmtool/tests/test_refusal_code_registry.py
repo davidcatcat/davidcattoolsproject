@@ -49,8 +49,20 @@ _PLACEHOLDER = re.compile(r'\{([^{}]*)\}')
 #   decision.reason_code: worker_dispatch reason codes, outside this
 #   package's scope and not classified here.
 # A new non-literal call site fails until it is reviewed and listed.
-KNOWN_DYNAMIC_ARGUMENTS = frozenset((
-    "f'REPAIR_{action}_REQUIRED'", 'code', 'decision.reason_code'))
+# Arguments are compared by AST structure, not by ast.unparse text, whose
+# f-string spelling may differ between Python versions.
+KNOWN_DYNAMIC_ARGUMENTS = ("f'REPAIR_{action}_REQUIRED'", 'code', 'decision.reason_code')
+NO_ARGUMENT = '<no argument>'
+
+
+def expression_key(node):
+    """A version-stable identity of one expression node: its AST structure."""
+    return ast.dump(node, annotate_fields=True, include_attributes=False)
+
+
+def known_dynamic_keys():
+    return frozenset(expression_key(ast.parse(text, mode='eval').body)
+                     for text in KNOWN_DYNAMIC_ARGUMENTS)
 
 
 def load_registry(path=REGISTRY):
@@ -74,23 +86,25 @@ def _call_name(node):
 
 
 def collect_refusals(path):
-    """Return (literal codes, unparsed non-literal first arguments) of one file.
+    """Return (literal codes, non-literal first arguments) of one file.
 
-    A missing file raises; it is never read as an empty scope.
+    The non-literal arguments map expression_key(node) to the node's source
+    line text, which is used only in failure messages. A missing file raises;
+    it is never read as an empty scope.
     """
     tree = ast.parse(Path(path).read_text(encoding='utf-8'), filename=str(path))
-    literal, dynamic = set(), set()
+    literal, dynamic = set(), {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or _call_name(node) not in REFUSE_FUNCTIONS:
             continue
         if not node.args:
-            dynamic.add('<no argument>')
+            dynamic[NO_ARGUMENT] = f'line {node.lineno}: {NO_ARGUMENT}'
             continue
         first = node.args[0]
         if isinstance(first, ast.Constant) and type(first.value) is str:
             literal.add(first.value)
         else:
-            dynamic.add(ast.unparse(first))
+            dynamic[expression_key(first)] = f'line {node.lineno}: {ast.unparse(first)}'
     return literal, dynamic
 
 
@@ -232,7 +246,24 @@ class ScopeCoverageTest(unittest.TestCase):
             path.write_text(source, encoding='utf-8')
             literal, dynamic = collect_refusals(path)
         self.assertEqual(literal, {'FIRST_CODE', 'SECOND_CODE'})
-        self.assertEqual(dynamic, {'code'})
+        self.assertEqual(set(dynamic), {expression_key(ast.parse('code', mode='eval').body)})
+
+    def test_known_dynamic_arguments_match_by_structure(self):
+        source = ("def run(action, code, decision):\n"
+                  "    _refuse(f'REPAIR_{action}_REQUIRED')\n"
+                  "    _refuse(code)\n"
+                  "    _refuse_unclaimed(decision.reason_code, 'x')\n"
+                  "    _refuse(f'OTHER_{action}')\n"
+                  "    _refuse()\n")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'sample.py'
+            path.write_text(source, encoding='utf-8')
+            _literal, dynamic = collect_refusals(path)
+        self.assertEqual(len(known_dynamic_keys()), len(KNOWN_DYNAMIC_ARGUMENTS))
+        self.assertTrue(known_dynamic_keys() <= set(dynamic))
+        unknown = set(dynamic) - known_dynamic_keys()
+        self.assertEqual(len(unknown), 2)
+        self.assertIn(NO_ARGUMENT, unknown)
 
     def test_every_literal_refusal_code_is_classified(self):
         data = load_registry()
@@ -251,10 +282,12 @@ class ScopeCoverageTest(unittest.TestCase):
         self.assertTrue(literal)
 
     def test_non_literal_refusals_are_known(self):
-        dynamic = set()
+        unknown = []
         for relative in load_registry()['scope']:
-            dynamic |= collect_refusals(scope_file(relative))[1]
-        self.assertEqual(sorted(dynamic - KNOWN_DYNAMIC_ARGUMENTS), [],
+            dynamic = collect_refusals(scope_file(relative))[1]
+            unknown.extend(f'{relative} {text}' for key, text in sorted(dynamic.items())
+                           if key not in known_dynamic_keys())
+        self.assertEqual(unknown, [],
                          'new non-literal refusal argument; classify its codes and list it')
 
     def test_escalation_refusals_are_classified(self):
