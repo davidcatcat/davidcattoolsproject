@@ -23,7 +23,7 @@ BAD_FORMAT = {'agy': ('https://example.invalid/m', 'has space', '-leading-dash')
 # #1502 WP-E: the review and AI Debug role registry in use.
 SHIPPED_ROLES = {
     'codex-reviewer': {'allowed_models': ['gpt-6.1-sol']},
-    'claude-reviewer': {'allowed_models': ['claude-opus-5-5']},
+    'claude-reviewer': {'allowed_models': ['claude-sonnet-5-5']},
     'codex-debug': {'allowed_models': ['gpt-6.1-sol']},
     'claude-debug': {'allowed_models': ['claude-opus-5-5']},
 }

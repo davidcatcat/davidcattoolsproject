@@ -52,7 +52,7 @@
   },
   "roles": {
     "codex-reviewer": {"allowed_models": ["gpt-6.1-sol"]},
-    "claude-reviewer": {"allowed_models": ["claude-opus-5-5"]},
+    "claude-reviewer": {"allowed_models": ["claude-sonnet-5-5"]},
     "codex-debug": {"allowed_models": ["gpt-6.1-sol"]},
     "claude-debug": {"allowed_models": ["claude-opus-5-5"]}
   }

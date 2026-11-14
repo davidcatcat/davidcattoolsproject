@@ -868,10 +868,10 @@ class WidgetTests(Base):
 
     def test_tab_does_not_offer_dev_commands_without_dev_mode(self):
         def unchanged(ui):
-            self.assertEqual(ui.input.text, '/ta')
+            self.assertEqual(ui.input.text, '/task su')
             self.assertEqual(ui.menu_items, [])
 
-        self.drive(['/ta', '\t', unchanged], dev=False)
+        self.drive(['/task su', '\t', unchanged], dev=False)
         self.factory.assert_not_called()
 
     def test_tab_without_match_keeps_slash_draft_and_non_slash_tab_behavior(self):
@@ -1765,6 +1765,136 @@ class TaskModeTests(Base):
         self.assertEqual(self.store_records(), [])
         self.assertIn('chat mode: Enter sends drafts', ui.conversation.text)
 
+    def test_1819_read_only_task_views_work_without_dev_and_write_nothing(self):
+        # #1819 (Owner B): list, show, events and F2/F3/F4 without --dev; TaskStore unchanged.
+        self.drive(['/task mode profile first\r', 'first task\r', self.idle])
+        task_id = self.store_records()[0]['task_id']
+        state = self.temp_root.resolve() / '.local' / 'state' / 'llmtool'
+        # Security v91 F1: an existing store goes to TaskStore; directories are compared too.
+        self.assertTrue((state / 'tasks').is_dir())
+        self.assertFalse(chat_tui.task_store_absent())
+
+        def snapshot():
+            return sorted((str(p.relative_to(state)), p.is_dir(), p.stat().st_size,
+                           p.stat().st_mtime_ns)
+                          for p in state.rglob('*') if 'chat' not in p.parts)
+
+        async def listed(ui):
+            for _ in range(200):
+                if ui.list_loaded is not None and ui.list_reader is None:
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError('list read did not finish')
+
+        before, calls = snapshot(), self.pm.complete.call_count
+        ui, _ = self.drive(['/task list\r', listed,
+                            lambda ui: self.assertTrue(ui.show_list),
+                            '\x1bOR', lambda ui: self.assertFalse(ui.show_list),
+                            '\x1bOR', listed, lambda ui: self.assertTrue(ui.show_list),
+                            '\x1bOR', '/task events\r',
+                            lambda ui: self.assertTrue(ui.show_events),
+                            '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
+                            '\x1bOS', listed, lambda ui: self.assertTrue(ui.show_events),
+                            '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
+                            '/task show ' + task_id + '\r', self.idle,
+                            lambda ui: self.assertTrue(ui.show_detail),
+                            '\x1bOQ', lambda ui: self.assertFalse(ui.show_detail),
+                            '\x1bOQ', lambda ui: self.assertTrue(ui.show_detail)], dev=False)
+        self.assertFalse(ui.dev)
+        self.assertNotIn(chat_tui.TASK_HIDDEN, ui.conversation.text)
+        self.assertIn(task_id, ui.detail_view.text)
+        self.assertEqual(self.pm.complete.call_count, calls)
+        self.assertEqual(len(self.store_records()), 1)
+        self.assertEqual(snapshot(), before)
+
+    def test_1819_f1_task_store_root_is_looked_at_never_created(self):
+        root = self.temp_root.resolve() / '.local' / 'state' / 'llmtool' / 'tasks'
+        self.assertEqual(chat_tui.task_store_root(), root)
+        self.assertTrue(chat_tui.task_store_absent())
+        self.assertFalse(root.parent.exists())   # the check itself creates nothing
+        root.mkdir(parents=True)
+        self.assertFalse(chat_tui.task_store_absent())
+
+    def test_1819_f1_absent_task_store_stays_absent_without_dev(self):
+        # Security v91 F1: without --dev, /task list, F3, /task events, F4, /task show and F2
+        # on a home with no TaskStore root show the empty views or "task not found", never
+        # call TaskStore or Core, and create nothing under .local/state/llmtool.
+        state = self.temp_root.resolve() / '.local' / 'state' / 'llmtool'
+        self.assertFalse(state.exists())
+        task_id = 'a' * 32
+
+        async def listed(ui):
+            for _ in range(200):
+                if ui.list_loaded is not None and ui.list_reader is None:
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError('list read did not finish')
+
+        def empty_list(ui):
+            self.assertTrue(ui.show_list)
+            self.assertIsNone(ui.list_error)
+            self.assertEqual(ui.list_records, [])
+            self.assertIn('no Tasks in TaskStore', ui.list_plain_text())
+
+        def empty_events(ui):
+            self.assertTrue(ui.show_events)
+            self.assertIn('no events in TaskStore', ui.events_view.text)
+
+        def not_found(ui):
+            self.assertIn(chat_tui.TASK_NOT_FOUND % task_id, ui.conversation.text)
+            self.assertFalse(ui.show_detail)
+
+        with patch('llmtool.task_store.TaskStore',
+                   side_effect=AssertionError('TaskStore must not be called')) as store, \
+                patch.object(chat_tui_status, 'load_records',
+                             side_effect=AssertionError('no TaskStore read')) as load, \
+                patch('llmtool.task_submission_cli.run_task_show',
+                      side_effect=AssertionError('no Core show')) as show:
+            ui, _ = self.drive(['/task list\r', listed, empty_list,
+                                '\x1bOR', lambda ui: self.assertFalse(ui.show_list),
+                                '\x1bOR', listed, empty_list, '\x1bOR',
+                                '/task events\r', listed, empty_events,
+                                '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
+                                '\x1bOS', listed, empty_events, '\x1bOS',
+                                '/task show ' + task_id + '\r', self.idle, not_found,
+                                '\x1bOQ', lambda ui: self.assertFalse(ui.show_detail)],
+                               dev=False)
+        self.assertFalse(ui.dev)
+        for called in (store, load, show):
+            called.assert_not_called()
+        self.assertNotIn(chat_tui.TASK_HIDDEN, ui.conversation.text)
+        self.assertIn('no Task detail loaded yet', ui.conversation.text)
+        self.pm_factory.assert_not_called()
+        self.assertFalse(state.exists())   # no directory or file anywhere under it
+
+    def test_1819_f1_dev_mode_still_reads_through_task_store(self):
+        # --dev is unchanged: list, events and show still go to TaskStore and Core even with
+        # no root (its existing store creation is a separate follow-up); mocks keep the
+        # temporary home untouched here.
+        state = self.temp_root.resolve() / '.local' / 'state' / 'llmtool'
+        self.assertFalse(state.exists())
+
+        async def listed(ui):
+            for _ in range(200):
+                if ui.list_loaded is not None and ui.list_reader is None:
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError('list read did not finish')
+
+        with patch('llmtool.task_store.TaskStore') as store, \
+                patch.object(chat_tui_status, 'load_records', return_value=([], 0)) as load, \
+                patch('llmtool.task_submission_cli.run_task_show', return_value=1) as show:
+            ui, _ = self.drive(['/task list\r', listed, '\x1bOR',
+                                '/task events\r', listed, '\x1bOS',
+                                '/task show ' + 'a' * 32 + '\r', self.idle], dev=True)
+        self.assertTrue(ui.dev)
+        self.assertEqual(load.call_count, 2)
+        self.assertEqual(store.call_count, 2)
+        show.assert_called_once()
+        self.assertNotIn('task not found', ui.conversation.text)
+        self.assertIn('llmtool task command failed', ui.conversation.text)   # Core's answer
+        self.assertFalse(state.exists())   # every TaskStore and Core call was a mock
+
     def test_task_submit_shows_core_receipt_and_opens_core_detail(self):
         request = '請新增測試\n第二行：多行需求'
         ui, _ = self.drive(['/task mode profile first\r', '\x1b[200~' + request + '\x1b[201~', '\r',
@@ -1996,24 +2126,103 @@ class W57ChatTests(Base):
                 self.assertFalse(ui.show_events)
 
             ui, _ = self.drive(['/task mode profile first\r', '/task submit --provider x y\r',
-                                '/task\r', 'plain\r', self.idle,
-                                '\x1bOR', hidden,
-                                '\x1bOS', hidden,
-                                '/tas', lambda ui: self.assertEqual(ui.menu_items, [])])
+                                '/task list extra\r', 'plain\r', self.idle,
+                                hidden, '/task m', lambda ui: self.assertEqual(ui.menu_items, [])])
         submit.assert_not_called()
         self.assertFalse(ui.dev)
         self.assertIsNone(ui.task_profile)
         self.assertEqual(ui.conversation.text.count('llmtool: ' + chat_tui.TASK_HIDDEN), 3)
         self.assertEqual([t['content'] for t in self.session.history], ['plain', 'reply'])
         help_text = ui.help_text()
-        self.assertNotIn('/task', help_text)
-        self.assertNotIn('/task', ui.command_help_text())
-        self.assertNotIn('F3', help_text)
-        self.assertNotIn('Task mode', help_text)
+        for dev_only in ('/task submit', '/task mode', 'Task mode', 'Developer mode'):
+            self.assertNotIn(dev_only, help_text)
+            self.assertNotIn(dev_only, ui.command_help_text())
+        for read_only in ('/task list', '/task show TASK_ID', '/task events', 'F3'):
+            self.assertIn(read_only, help_text)
+            self.assertIn(read_only, ui.command_help_text())
         self.assertIn('/pm connect', help_text)
         self.assertNotIn('/task submit is for development testing', ui.conversation.text)
-        self.assertEqual([c for c in chat_tui.slash_matches('/', dev=False)
-                          if c[0].startswith('/task')], [])
+        self.assertEqual([c[0] for c in chat_tui.slash_matches('/', dev=False)
+                          if c[0].startswith('/task')], ['/task show', '/task list', '/task events'])
+
+    def test_1819_bare_and_other_task_forms_stay_hidden_without_dev(self):
+        # #1819: without --dev only the exact read-only forms run. A bare /task (the case the
+        # advisory pre-review found uncovered) and every other /task form print TASK_HIDDEN
+        # and do nothing else: no usage, no pane, no Task read, no Task mode, no submit.
+        os.environ.pop(chat_tui.DEV_ENV, None)
+        forms = ['/task', '/task ', '/task mode off', '/task mode profile first',
+                 '/task submit --provider first request', '/task show', '/task show a b',
+                 '/task list --all', '/task events now', '/task bogus']
+
+        def enter(form):
+            # Enter on the typed draft without the picker, which would complete '/task'.
+            def step(ui):
+                ui.input.text = form
+                ui.submit()
+            return step
+
+        with patch('llmtool.task_submission_cli.run_task_submit') as submit, \
+                patch.object(chat_tui.ChatTUI, 'start_task') as start, \
+                patch.object(chat_tui.ChatTUI, 'refresh_list') as refresh, \
+                patch.object(chat_tui.ChatTUI, 'set_task_mode') as mode:
+            ui, _ = self.drive([enter(form) for form in forms])
+        self.assertFalse(ui.dev)
+        for called in (submit, start, refresh, mode):
+            called.assert_not_called()
+        self.assertEqual(ui.conversation.text.count('llmtool: ' + chat_tui.TASK_HIDDEN),
+                         len(forms))
+        self.assertNotIn('usage: /task', ui.conversation.text)
+        self.assertFalse(ui.show_list or ui.show_events or ui.show_detail)
+        self.assertIsNone(ui.task_profile)
+        self.assertFalse(ui.busy)
+        self.assertEqual(list(self.session.history), [])
+        self.factory.assert_not_called()
+
+    def test_1819_picker_and_tab_offer_only_read_only_task_commands_without_dev(self):
+        os.environ.pop(chat_tui.DEV_ENV, None)
+        read_only = ['/task show', '/task list', '/task events']
+
+        def offered(ui):
+            self.assertEqual([item[0] for item in ui.menu_items], read_only)
+
+        ui, _ = self.drive(['/task', offered, '\x15',
+                            '/ta', '\t', lambda ui: self.assertEqual(ui.input.text, '/task '),
+                            offered, '\x15',
+                            '/task l', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/task list'),
+                            '\x15', '/task m', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/task m'),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
+        self.assertFalse(ui.dev)
+        self.assertNotIn('> /task', ui.conversation.text)
+        help_text = ui.help_text()
+        for key in ('F2', 'F3', 'F4'):
+            self.assertIn(key, help_text)
+            self.assertIn(key, ui.command_help_text())
+        self.factory.assert_not_called()
+
+    def test_1819_dev_mode_task_behaviour_is_unchanged(self):
+        # With LLMTOOL_TUI_DEV=1 (Base) or --dev: bare /task still prints the usage, every
+        # /task command is offered, and the help keeps the developer section.
+        for dev in (None, True):
+            def enter_bare(ui):
+                ui.input.text = '/task'
+                ui.submit()
+
+            ui, _ = self.drive(['/task', lambda ui: self.assertEqual(
+                                    [item[0] for item in ui.menu_items],
+                                    ['/task submit', '/task show', '/task mode',
+                                     '/task list', '/task events']),
+                                '\x15', enter_bare], dev=dev)
+            self.assertTrue(ui.dev)
+            self.assertIn('usage: /task submit --provider PROFILE REQUEST\n'
+                          '       /task show TASK_ID\n'
+                          '       /task mode profile PROFILE', ui.conversation.text)
+            self.assertNotIn(chat_tui.TASK_HIDDEN, ui.conversation.text)
+            for dev_only in ('/task submit', '/task mode', 'Developer mode'):
+                self.assertIn(dev_only, ui.help_text())
+            self.assertIn('Developer tools', ui.command_help_text())
+        self.factory.assert_not_called()
 
     def test_w60_up_down_with_nothing_to_open_say_why_once(self):
         os.environ.pop(chat_tui.DEV_ENV, None)
@@ -2021,7 +2230,7 @@ class W57ChatTests(Base):
 
         def once(ui):
             self.assertEqual(ui.conversation.text.count(hint), 1)
-            self.assertNotIn('F3', ui.conversation.text)       # F3 exists only with --dev
+            self.assertIn('F3 看 Task 清單', ui.conversation.text)   # #1819: F3 without --dev too
             self.assertEqual(ui.input.text, '')
 
         ui, _ = self.drive(['\x1b[B', once, '\x1b[B', once, '\x1b[A', once,
@@ -2033,7 +2242,9 @@ class W57ChatTests(Base):
         self.assertFalse(chat_tui.dev_enabled({chat_tui.DEV_ENV: '0'}))
         self.assertFalse(chat_tui.dev_enabled({}))
         self.assertIn('/task mode profile PROFILE', chat_tui.key_help(True))
-        self.assertNotIn('/task', chat_tui.key_help(False))
+        self.assertNotIn('/task submit', chat_tui.key_help(False))
+        self.assertNotIn('/task mode', chat_tui.key_help(False))
+        self.assertIn('/task list', chat_tui.key_help(False))
         with patch('llmtool.chat_tui.run_chat_tui', return_value=0) as run:
             from llmtool import cli
             home = self.temp_root
