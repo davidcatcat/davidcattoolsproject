@@ -5336,7 +5336,11 @@ class ReviewerFallbackTests(unittest.TestCase):
         record = base_record(developer=dict(developer))
         with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
              patch.object(task_advance, '_pr_snapshot', return_value=PR), \
-             patch.object(task_advance, '_review_outcomes', return_value=[]):
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(review_dispatch, '_policy',
+                          return_value=type('Policy', (), {'allowed': True})()):
+            # The worker-dispatch policy read depends on the checkout layout (it
+            # refuses on EC2); pin it allowed so the family rule alone decides.
             result = task_advance.advance(
                 task_id=record['task_id'], store=ClaimStore(record),
                 pr_number=17, github_get=green_linux_ci,
