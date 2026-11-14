@@ -1,6 +1,10 @@
 """Provider-neutral execution contracts for direct CLI Developer routes."""
 
-from .base import DeveloperRoute, RouteError, RouteResult, capture_snapshot, run_route
+from .base import (
+    DEFAULT_TIMEOUT_SECONDS, HARD_TIMEOUT_CAP_SECONDS, TIMEOUT_KEYS as _TIMEOUT_KEYS,
+    DeveloperRoute, RouteError, RouteResult, capture_snapshot, resolve_route_timeout,
+    run_route, timeout_limits_ok as _timeout_limits_ok,
+)
 from .agy import AgyRoute, owner_assignment_gate
 from .claude import ClaudeRoute
 from .gw_agent import GwAgentRoute
@@ -15,6 +19,7 @@ __all__ = [
     'DeveloperRoute', 'RouteError', 'RouteResult', 'capture_snapshot', 'run_route',
     'AgyRoute', 'ClaudeRoute', 'GwAgentRoute', 'owner_assignment_gate', 'load_route_config',
     'check_route_model', 'check_registry_role_model', 'REGISTRY_ROLES',
+    'resolve_route_timeout', 'DEFAULT_TIMEOUT_SECONDS', 'HARD_TIMEOUT_CAP_SECONDS',
     'SandboxExecBoundary', 'UnsupportedBoundary', 'WriteBoundary',
     'for_platform',
 ]
@@ -125,6 +130,20 @@ def _allowed_models_ok(value, default_model, model_ok):
             value[0] == default_model)
 
 
+def _route_timeouts_ok(entry):
+    """Return True when entry has no timeout keys or a valid pair of them.
+
+    default_timeout and max_timeout come as a pair of ints with
+    1 <= default_timeout <= max_timeout <= HARD_TIMEOUT_CAP_SECONDS. A route
+    without the pair keeps the former fixed 600-second default and maximum.
+    """
+    present = _TIMEOUT_KEYS & set(entry)
+    if not present:
+        return True
+    return (present == _TIMEOUT_KEYS and
+            _timeout_limits_ok(entry['default_timeout'], entry['max_timeout']))
+
+
 def check_route_model(config, route, model):
     """Return model when it is allowed for route in a load_route_config() result.
 
@@ -202,10 +221,12 @@ def load_route_config(path=None):
             ('gw-agent' in routes and type(routes['gw-agent']) is not dict) or
             ('opencode' in routes and type(routes['opencode']) is not dict)):
         raise RouteError('ROUTE_CONFIG_INVALID')
+    if not all(_route_timeouts_ok(item) for item in routes.values()):
+        raise RouteError('ROUTE_CONFIG_INVALID')
     entry = routes['agy']
     expected = {'executable', 'default_model', 'allowed_models', 'default_effort',
                 'denied_dirs', 'state_dirs'}
-    if set(entry) != expected:
+    if set(entry) - _TIMEOUT_KEYS != expected:
         raise RouteError('ROUTE_CONFIG_INVALID')
     if (entry['executable'] != 'agy' or type(entry['default_model']) is not str or
             '://' in entry['default_model'] or
@@ -222,7 +243,7 @@ def load_route_config(path=None):
         claude = routes['claude']
         expected_claude = {'executable', 'default_model', 'allowed_models', 'default_effort',
                            'denied_dirs', 'state_dirs'}
-        if (set(claude) != expected_claude or claude.get('executable') != 'claude' or
+        if (set(claude) - _TIMEOUT_KEYS != expected_claude or claude.get('executable') != 'claude' or
                 type(claude.get('default_model')) is not str or
                 re.fullmatch(r'claude-[a-z0-9][a-z0-9.-]{0,120}',
                              claude['default_model']) is None or
@@ -241,7 +262,7 @@ def load_route_config(path=None):
         expected_gw = {'package_path', 'default_model', 'allowed_models', 'default_effort',
                        'profile_name', 'profile', 'authorization_ref',
                        'allowed_data_classes'}
-        if (set(gw) != expected_gw or
+        if (set(gw) - _TIMEOUT_KEYS != expected_gw or
                 type(gw.get('package_path')) is not str or
                 not (gw['package_path'].startswith('/') or
                      gw['package_path'].startswith('~/')) or
@@ -267,8 +288,8 @@ def load_route_config(path=None):
         normalized['gw-agent']['allowed_models'] = list(gw['allowed_models'])
     if 'opencode' in routes:
         opencode = routes['opencode']
-        if (set(opencode) != {'executable', 'default_model', 'allowed_models',
-                              'default_effort'} or
+        if (set(opencode) - _TIMEOUT_KEYS != {'executable', 'default_model',
+                                              'allowed_models', 'default_effort'} or
                 opencode.get('executable') != 'opencode' or
                 not _opencode_model_ok(opencode.get('default_model')) or
                 type(opencode.get('default_effort')) is not str or
