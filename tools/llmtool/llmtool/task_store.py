@@ -100,7 +100,7 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'review_dispatch_claim', 'review_repair_claims', 'high_debug',
     'abandonment', 'pm_session_adoptions', 'pm_provenance', 'merge_attempt',
     'published_pr', 'repair_cap_override', 'publish_operations',
-    'review_exception', 'lineage', 'review_disputes', 'waiting'))
+    'review_exception', 'lineage', 'review_disputes', 'waiting', 'continues'))
 # Owner-exception merge evidence (#1253, #1519). Only this one exception type
 # is persisted; its evidence is the exact owner_exception.verify() result.
 _REVIEW_EXCEPTION_TYPE = 'OWNER_EXCEPTION_DETERMINISTIC_REDACTION'
@@ -498,6 +498,12 @@ ASSIGNMENTS_NAME = '.developer-assignments.json'
 ASSIGNMENTS_LOCK_NAME = '.developer-assignments.lock'
 # #1781: per-Task advance lease sidecar, '.<task_id>.json.advance.lock'.
 ADVANCE_LEASE_SUFFIX = '.advance.lock'
+# #1502 WP-D L1 phase 2: record-pm --continues checks and creates under one
+# store-wide lock; a review repair reads chain counts and writes its claim
+# under the chain lock '.<oldest_task_id>.json.chain.lock'.
+CONTINUES_LOCK_NAME = '.task-continues.lock'
+CHAIN_LOCK_SUFFIX = '.chain.lock'
+LINEAGE_LOCK_TIMEOUT_SECONDS = 10.0
 ASSIGNMENTS_MAX_BYTES = 256 * 1024
 MAX_ASSIGNMENTS = 128
 MAX_ASSIGNMENT_AUDIT = 16
@@ -1772,6 +1778,11 @@ def _validate(record, *, strict=True):
     if 'waiting' in keys:
         keys.discard('waiting')
         _validate_waiting(record['waiting'])
+    if 'continues' in keys:
+        # #1502 WP-D L1: the optional predecessor Task; a record without it stays valid.
+        keys.discard('continues')
+        if not _hex32(record['continues']) or record['continues'] == record.get('task_id'):
+            _fail('TASK_CONTINUES_INVALID')
     if type(record) is dict and 'pm_session_adoptions' in record:
         keys.discard('pm_session_adoptions')
     if (type(record) is not dict or
@@ -4464,13 +4475,15 @@ class TaskStore:
             _fail('WORKER_AVAILABILITY_INVALID')
 
     @staticmethod
-    def _lock_sidecar(directory, lock_name, *, exclusive, code):
+    def _lock_sidecar(directory, lock_name, *, exclusive, code, timeout=None):
         """Take a shared or exclusive flock on a sidecar lock file in the store root.
 
         Both the open and the flock are bounded by the TaskStore update-lock
-        deadline; a holder past it fails closed with ``<code>_BUSY``.
+        deadline (or ``timeout`` seconds); a holder past it fails closed with
+        ``<code>_BUSY``.
         """
-        deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+        deadline = time.monotonic() + (TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+                                       if timeout is None else timeout)
         lock_fd = None
         try:
             while True:
@@ -4541,6 +4554,38 @@ class TaskStore:
             yield
         finally:
             self._unlock_sidecar(lock_fd)
+
+    @contextlib.contextmanager
+    def _exclusive_sidecar(self, name, code):
+        directory = self._dirfd()
+        try:
+            lock_fd = self._lock_sidecar(directory, name, exclusive=True, code=code,
+                                         timeout=LINEAGE_LOCK_TIMEOUT_SECONDS)
+        finally:
+            os.close(directory)
+        try:
+            yield
+        finally:
+            self._unlock_sidecar(lock_fd)
+
+    def continues_lock(self):
+        """#1502 WP-D L1: hold the store-wide continues lock exclusively.
+
+        record-pm --continues holds it across check_continues and the create,
+        so a predecessor gets at most one successor. A holder past the bounded
+        wait is TASK_CONTINUES_LOCK_BUSY.
+        """
+        return self._exclusive_sidecar(CONTINUES_LOCK_NAME, 'TASK_CONTINUES_LOCK')
+
+    def chain_lock(self, chain_key):
+        """#1502 WP-D L1: hold one continuation chain's lock exclusively.
+
+        chain_key is the chain's oldest Task ID. review_repair holds it across
+        the chain counts and its claim write. A holder past the bounded wait is
+        TASK_CHAIN_LOCK_BUSY; a malformed key refuses before any file is opened.
+        """
+        name = '.' + self._name(chain_key) + CHAIN_LOCK_SUFFIX
+        return self._exclusive_sidecar(name, 'TASK_CHAIN_LOCK')
 
     def _take_advance_lease_exclusive(self, task_id, *, busy_code='SPLIT_CHILD_ADVANCING'):
         """Take the advance lease exclusively without waiting; return its fd.
@@ -5012,6 +5057,9 @@ class TaskStore:
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
             _fail()
+        if 'continues' in changes:
+            # #1502 WP-D L1: continues is written once, when record-pm creates the Task.
+            _fail('TASK_CONTINUES_IMMUTABLE')
         if (trusted_split is not None or split_child_max is not None) and (
                 trusted_split not in SPLIT_ACTIONS or set(changes) != {'lineage'} or
                 (split_child_max is not None) != (trusted_split == 'COMMIT') or
@@ -5348,7 +5396,8 @@ class TaskStore:
                 self._write(current, create=False)
                 raise dispatch_denial
             immutable = {'schema_version', 'task_id', 'run_id', 'pm_session_id',
-                         'created_at', 'task_contract', 'task_binding', 'record_sha256'}
+                         'created_at', 'task_contract', 'task_binding', 'record_sha256',
+                         'continues'}
             writable = FIELDS - immutable
             if trusted_pm_session_adoption:
                 writable = writable | {'pm_session_id'}

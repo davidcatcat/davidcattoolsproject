@@ -469,10 +469,14 @@ def _review_pm_recommendation(response):
         return None
 
 
-def _contract(task_id, request_sha256=None):
+def _contract(task_id, request_sha256=None, continues=None):
     goal = ('PM intake rejected; original request was not stored.'
             if request_sha256 is None else
             'PM intake for development request sha256:' + request_sha256)
+    if continues is not None:
+        # #1502 WP-D L1 F3: the continues link is part of the contract digest, so
+        # Tasks continuing different predecessors never share one digest.
+        goal += '; continues Task ' + continues
     return TaskContract(
         schema_version=1,
         task_id=task_id,
@@ -757,6 +761,9 @@ def add_task_submission_parsers(actions):
                            help='PM runtime that owns --pm-session-id (default claude-code)')
     record_pm.add_argument('--pm-cwd',
                            help='working directory of the PM session (default: current directory)')
+    record_pm.add_argument('--continues', metavar='TASK',
+                           help='earlier Task ID this Task continues (write-once; '
+                                'repair counts are summed over the chain)')
     inbox = actions.add_parser(
         'inbox', help='Read unacknowledged completion events for one active PM session')
     inbox.add_argument('--pm-session', required=True,
@@ -7538,8 +7545,26 @@ def run_task_record_pm(args, *, store=None, input_stream=None, return_record=Fal
                    'pm_cwd': observer(native_session, os.getcwd() if cwd is None else cwd)}
     prompt, response, assignment = _read_pm_record_input(input_stream)
     task_id, run_id = (new_id() if task_id is None else task_id), new_id()
+    # #1502 WP-D L1: an optional write-once link to the Task this one continues.
+    # The check and the create run under one store-wide continues lock, so two
+    # concurrent record-pm --continues X give X at most one successor. A lock
+    # that cannot be taken refuses CONTINUES_LOCK_UNAVAILABLE; a Task without
+    # continues takes no lock and records as before.
+    continues = getattr(args, 'continues', None)
+    if continues is None:
+        return _record_pm_create(store, task_id, run_id, prompt, response, assignment,
+                                 session, continues, return_record)
+    from . import lineage_counts
+    with lineage_counts.continues_lock(store):
+        lineage_counts.check_continues(store, task_id, continues)
+        return _record_pm_create(store, task_id, run_id, prompt, response, assignment,
+                                 session, continues, return_record)
+
+
+def _record_pm_create(store, task_id, run_id, prompt, response, assignment, session,
+                      continues, return_record):
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
-    contract = _contract(task_id, digest)
+    contract = _contract(task_id, digest, continues)
     record = _record(
         task_id, run_id,
         'pm-' + (new_id() if session is None else session['pm_native_session_id']),
@@ -7562,6 +7587,8 @@ def run_task_record_pm(args, *, store=None, input_stream=None, return_record=Fal
             **({} if session is None else session),
         },
     )
+    if continues is not None:
+        record['continues'] = continues
     try:
         store.create(record)
         saved = store.get(task_id)

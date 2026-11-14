@@ -453,7 +453,8 @@ class TaskAdvanceTests(unittest.TestCase):
     def test_remote_test_fail_uses_repair_path_with_excerpt(self):
         record = base_record(remote_test_receipts=[remote_receipt(
             base_record(), result='FAIL', excerpt='FAIL: test_example\nAssertionError: café')])
-        store = type('S', (), {'get': lambda self, _id: record})()
+        store = type('S', (), {'get': lambda self, _id: record,
+                               'task_ids': lambda self: [record['task_id']]})()
         seen = {}
         def repair(**kwargs):
             seen.update(kwargs)
@@ -1416,6 +1417,10 @@ class CiGateStore:
     def get(self, _task_id):
         return self.record
 
+    def task_ids(self):
+        # #1502 WP-D: the chain test-fail count scans the store for successors.
+        return [self.record['task_id']]
+
 
 CI_OUTPUT = {'title': 'Tests failed', 'summary': 'FAIL: test_example'}
 CI_EXCERPT = 'Tests failed\nFAIL: test_example'
@@ -1860,6 +1865,8 @@ class TaskAdvancePublishTests(unittest.TestCase):
                 self.published = []
             def get(self, _task_id):
                 return self.record
+            def task_ids(self):
+                return [self.record['task_id']]
             def record_published_pr(self, task_id, pr, head):
                 self.published.append((task_id, pr, head))
 

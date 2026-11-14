@@ -18,7 +18,8 @@ from argparse import Namespace
 
 from . import active_pm_inbox, github_events, remote_test, review_dispatch, review_repair
 from . import github_identity, review_result, sensitive_paths, task_completion
-from . import mac_full_suite, repair_policy, review_transcript, task_submission_cli
+from . import lineage_counts, mac_full_suite, repair_policy, review_transcript
+from . import task_submission_cli
 from .ai_github_exec import AiIdentityError, verified_ai_env
 from .errors import LLMToolError
 from .task_store import TaskStore, _json_bytes, external_action_refusal
@@ -794,35 +795,41 @@ def _newest_check_run(head, name, github_get):
     return _read_check_run(head, name, newest['id'], github_get)
 
 
-def _test_fail_count(record, number):
-    """EC2 and CI repairs used on this PR, counted as review_repair counts them."""
+def _test_fail_count(record, number, store=None):
+    """EC2 and CI repairs used, counted as review_repair counts them.
+
+    #1502 WP-D L1 (I2, F1): a Task alone in its chain (no continues and no
+    successor) counts its repairs on this PR; a Task in a chain counts every
+    EC2 and CI repair of every chain Task, predecessors and successors and its
+    own, on any PR, as review_repair does under the chain lock. A chain link or
+    store scan in doubt (or no store) gives repair_policy.UNKNOWN, never 0.
+    """
+    return lineage_counts.lineage_counts(
+        store, record, base_family=f'pr-{number}', include_successors=True)['test_fails']
+
+
+def _live_repair_claim(record, head):
+    """True when this Task holds a live repair claim on head (review_repair replays it)."""
     claims = record.get('review_repair_claims', [])
-    if type(claims) is not list or any(type(item) is not dict for item in claims):
-        return repair_policy.UNKNOWN
-    base = f'pr-{number}'
-    return sum(1 for claim in claims
-               if claim.get('family') == base + review_repair.EC2_FAMILY_SUFFIX or
-               (claim.get('family') == base and
-                review_repair.ec2_claim_kind(claim) == 'LEGACY'))
+    return type(claims) is list and any(
+        type(item) is dict and item.get('head_sha') == head and
+        item.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN') for item in claims)
 
 
-def _test_family_used_up(record, number, head):
+def _test_family_used_up(record, number, head, store=None):
     """True when policy test_fail_max stops a new EC2 or CI repair on this head.
 
     A live claim on the head replays in review_repair, so it is left to that
     path. A policy that cannot be read is left to review_repair's own refusal.
     """
-    claims = record.get('review_repair_claims', [])
-    if type(claims) is list and any(
-            type(item) is dict and item.get('head_sha') == head and
-            item.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN') for item in claims):
+    if _live_repair_claim(record, head):
         return False
     try:
         policy = repair_policy.load_policy()
     except Exception:
         return False
     return repair_policy.test_failure_action(
-        test_fail_count=_test_fail_count(record, number), policy=policy) == 'STOPPED'
+        test_fail_count=_test_fail_count(record, number, store), policy=policy) == 'STOPPED'
 
 
 def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, related,
@@ -857,7 +864,7 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
         retry_claim_id = retry.get('repair_task_id') if type(retry) is dict else None
         if type(retry_claim_id) is not str:
             return 'CI_FAILED', [fail_code, 'REPAIR_CLAIM_UNAVAILABLE'], None
-    elif _test_family_used_up(record, number, head):
+    elif _test_family_used_up(record, number, head, store):
         return 'STOPPED', ['TEST_FAIL_LIMIT_REACHED'], None
     if type(d6.get('root')) is not str:
         return 'REFUSED', ['D6_BINDING_UNAVAILABLE'], None
@@ -3253,7 +3260,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                         step, codes = 'REFUSED', ['REPAIR_CLAIM_UNAVAILABLE']
                 remote_status, _, failure_receipt = _remote_test_status(record, d6)
                 if (step == 'REPAIR_REVIEW' and remote_status == 'FAIL' and
-                        _test_family_used_up(record, number, d6['result_head'])):
+                        _test_family_used_up(record, number, d6['result_head'], store)):
                     # #1502 WP-D D11: the shared EC2/CI count is used up.
                     step, codes = 'STOPPED', ['TEST_FAIL_LIMIT_REACHED']
                 if step in ('REPAIR_REVIEW', 'REPAIR_RETRY'):

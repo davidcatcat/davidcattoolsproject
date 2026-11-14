@@ -504,7 +504,7 @@ def _policy():
         _refuse('REPAIR_POLICY_INVALID')
 
 
-def _review_gate(task, attempts, packet, family, policy):
+def _review_gate(task, attempts, packet, family, policy, counts=None):
     """#1502 WP-D (O2, D1, D3): admit one review repair from the valid FAILs per HEAD.
 
     Each earlier review repair claim stands for a valid FAIL on its HEAD and the
@@ -516,6 +516,10 @@ def _review_gate(task, attempts, packet, family, policy):
     repair_max repairs are used escalates by kind at its next valid FAIL (ROOT
     SPLIT, child PM_DECIDE, REPLAN FAILED_FINAL); a re-review of a HEAD already
     counted adds no valid FAIL and is refused REPAIR_LIMIT_REACHED.
+
+    L1 (I1-I3, I6): counts, from lineage_counts, gives the repairs used and the
+    failed HEADs of the whole continuation chain. UNKNOWN counts as the limit.
+    Without counts the Task's own attempts are used.
     """
     from . import repair_policy
     text = packet['reviewer_text_excerpt_untrusted_data']
@@ -530,11 +534,22 @@ def _review_gate(task, attempts, packet, family, policy):
                     if severity not in REVIEW_DISPUTE_DEFERRABLE}
         if blocking <= withdrawn:
             _refuse('REPAIR_NO_BLOCKING_FINDING')
-    spent = len(attempts) >= policy['repair_max']
-    heads = {claim.get('head_sha'): 'FAIL' for claim in attempts}
-    new_fail = packet['failed_head'] not in heads
-    heads[packet['failed_head']] = 'FAIL'
-    fail_count = repair_policy.review_fail_count(heads)
+    if counts is None:
+        repair_count = len(attempts)
+        known_heads = {claim.get('head_sha'): 'FAIL' for claim in attempts}
+    else:
+        repair_count = counts.get('review_repairs', repair_policy.UNKNOWN)
+        known_heads = counts.get('review_heads', repair_policy.UNKNOWN)
+    used = (repair_count if type(repair_count) is int and repair_count >= 0
+            else policy['repair_max'])
+    spent = used >= policy['repair_max']
+    if type(known_heads) is dict:
+        heads = dict(known_heads)
+        new_fail = packet['failed_head'] not in heads
+        heads[packet['failed_head']] = 'FAIL'
+        fail_count = repair_policy.review_fail_count(heads)
+    else:
+        new_fail, fail_count = True, repair_policy.UNKNOWN
     if spent and new_fail and type(fail_count) is int:
         # No repair is left, so this new valid FAIL is at least the escalation FAIL.
         fail_count = max(fail_count, policy['review_fail_max'])
@@ -558,11 +573,11 @@ def _review_gate(task, attempts, packet, family, policy):
     if action != 'REPAIR':
         _refuse(f'REPAIR_{action}_REQUIRED')
     confirmed = entry is not None and entry['status'] == 'RCA_CONFIRMED'
-    code = repair_policy.admit_repair(repair_count=len(attempts), rca_confirmed=confirmed,
+    code = repair_policy.admit_repair(repair_count=repair_count, rca_confirmed=confirmed,
                                       policy=policy)
     if code is not None:
         _refuse(code)
-    return entry if attempts else None
+    return entry if used else None
 
 
 def repair_review(*, store, task_id, executor_task, pr_number, family=None, github_get=None,
@@ -707,80 +722,106 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                 'next_action': (f"review-dispatch --version {packet_version + 1}"
                                 if dispatched else f"task delegate {task_id_for_repair}")}
     # #1502 WP-D: limits from policy.json; review repairs pass the counting gate.
-    rca_entry = None
-    if not test_failure:
-        rca_entry = _review_gate(task, attempts, packet, family, _policy())
-        if rca_entry is not None:
-            packet = dict(packet,
-                          high_debug_report_untrusted_data=rca_entry['report'][:6000],
-                          high_debug_report_sha256=rca_entry['report_sha256'])
-    elif len(attempts) >= _policy()['test_fail_max']:
-        _refuse('REPAIR_LIMIT_REACHED')
-    # The store numbers attempts within the stored family only.
-    attempt = len(stored) + 1
-    identity = (pr_number, packet['failed_head'], claim_version, attempt)
-    if any(type(item) is dict and
-           (item.get('pr'), item.get('head_sha'), item.get('version'),
-            item.get('attempt')) == identity for item in claims):
-        # A review and an EC2 claim in different families can share this
-        # identity, which the store refuses; refuse before any write.
-        _refuse('REPAIR_CLAIM_UNAVAILABLE')
-    repair_task_id = new_id()
-    claim = {
-        'executor_task': executor_task, 'pr': pr_number,
-        'head_sha': packet['failed_head'], 'version': claim_version,
-        'attempt': attempt, 'family': family, 'state': 'CLAIMED',
-        'repair_task_id': repair_task_id,
-        'comment_id': (None if packet_version == 0 else packet.get('verdict_comment_id')),
-        'packet_sha256': packet_sha,
-        'claimed_at': _now(),
-    }
-    if rca_entry is not None:
-        claim['high_debug_report_sha256'] = rca_entry['report_sha256']
-    next_claims = list(claims)
-    if retry_claim is not None:
-        retry_index = next((index for index, item in enumerate(next_claims)
-                            if item.get('repair_task_id') == retry_claim_id and
-                            item.get('state') == 'DISPATCHED'), None)
-        if retry_index is None:
-            _refuse('REPAIR_CLAIM_UNAVAILABLE')
-        next_claims[retry_index] = dict(next_claims[retry_index], state='FAILED')
-    next_claims.append(claim)
-
-    # #1502 WP-D D11 repair 1: no counted claim exists until the repair Task is
-    # recorded and validated and the final authority recheck passes. Every
-    # refusal from here to the CAS leaves the claims, and so the counts,
-    # unchanged; a Task it may have left is surfaced for PM reconciliation.
-    recorder = repair_task_recorder
+    # L1 (I1, I2, I6): the counts cover the whole continuation chain; a link in
+    # doubt makes them UNKNOWN, which counts as the limit. The replay above
+    # still looks only at this Task's own claims.
+    # L1 phase 2: the counts are read and the claim is written under the chain
+    # lock of the chain's oldest Task (a Task without continues is its own
+    # key), so two repairs in one chain cannot both spend the last repair. The
+    # counts also cover later Tasks of the chain. A lock that cannot be taken
+    # refuses REPAIR_CHAIN_LOCK_UNAVAILABLE before any count or write; the lock
+    # is released on every path, before the provider call.
+    from . import lineage_counts
+    key = lineage_counts.chain_key(store, task)
     try:
-        if recorder is None:
-            repair_task = _record_repair_task(
-                task=task, developer=developer, packet=packet,
-                attempt=attempt, store=store, repair_task_id=repair_task_id)
+        release_chain = lineage_counts.acquire_chain_lock(store, key)
+    except Exception:
+        _refuse('REPAIR_CHAIN_LOCK_UNAVAILABLE')
+    try:
+        # The chain is write-once, so a key that changed is a read in doubt.
+        if lineage_counts.chain_key(store, task) != key:
+            _refuse('REPAIR_COUNT_UNAVAILABLE')
+        counts = lineage_counts.lineage_counts(store, task, base_family=base_family,
+                                               include_successors=True)
+        rca_entry = None
+        if not test_failure:
+            rca_entry = _review_gate(task, attempts, packet, family, _policy(), counts=counts)
+            if rca_entry is not None:
+                packet = dict(packet,
+                              high_debug_report_untrusted_data=rca_entry['report'][:6000],
+                              high_debug_report_sha256=rca_entry['report_sha256'])
         else:
-            repair_task = recorder(task=task, developer=developer, packet=packet,
-                                   attempt=attempt, store=store,
-                                   repair_task_id=repair_task_id)
-    except LLMToolError as error:
-        error.review_repair_unclaimed_task_id = repair_task_id
-        raise
-    except Exception:
-        _refuse_unclaimed('REPAIR_TASK_RECORD_UNAVAILABLE', repair_task_id)
-    if (type(repair_task) is not dict or
-            repair_task.get('task_id') != repair_task_id):
-        _refuse_unclaimed('REPAIR_TASK_RECORD_UNAVAILABLE', repair_task_id)
+            test_policy = _policy()
+            used = counts['test_fails']
+            if type(used) is not int or used < 0 or used >= test_policy['test_fail_max']:
+                _refuse('REPAIR_LIMIT_REACHED')
+        # The store numbers attempts within the stored family only.
+        attempt = len(stored) + 1
+        identity = (pr_number, packet['failed_head'], claim_version, attempt)
+        if any(type(item) is dict and
+               (item.get('pr'), item.get('head_sha'), item.get('version'),
+                item.get('attempt')) == identity for item in claims):
+            # A review and an EC2 claim in different families can share this
+            # identity, which the store refuses; refuse before any write.
+            _refuse('REPAIR_CLAIM_UNAVAILABLE')
+        repair_task_id = new_id()
+        claim = {
+            'executor_task': executor_task, 'pr': pr_number,
+            'head_sha': packet['failed_head'], 'version': claim_version,
+            'attempt': attempt, 'family': family, 'state': 'CLAIMED',
+            'repair_task_id': repair_task_id,
+            'comment_id': (None if packet_version == 0 else packet.get('verdict_comment_id')),
+            'packet_sha256': packet_sha,
+            'claimed_at': _now(),
+        }
+        if rca_entry is not None:
+            claim['high_debug_report_sha256'] = rca_entry['report_sha256']
+        next_claims = list(claims)
+        if retry_claim is not None:
+            retry_index = next((index for index, item in enumerate(next_claims)
+                                if item.get('repair_task_id') == retry_claim_id and
+                                item.get('state') == 'DISPATCHED'), None)
+            if retry_index is None:
+                _refuse('REPAIR_CLAIM_UNAVAILABLE')
+            next_claims[retry_index] = dict(next_claims[retry_index], state='FAILED')
+        next_claims.append(claim)
 
-    # Re-read the Owner switch immediately before the claim and the provider side effect.
-    decision = worker_dispatch.evaluate(
-        worker, developer.get('owner_assignment_ref'), policy_task)
-    if not decision.allowed:
-        _refuse_unclaimed(decision.reason_code, repair_task_id)
-    try:
-        store.compare_and_update(
-            task_id, expected={'record_sha256': task['record_sha256']},
-            review_repair_claims=next_claims)
-    except Exception:
-        _refuse_unclaimed('REPAIR_CLAIM_UNAVAILABLE', repair_task_id)
+        # #1502 WP-D D11 repair 1: no counted claim exists until the repair Task is
+        # recorded and validated and the final authority recheck passes. Every
+        # refusal from here to the CAS leaves the claims, and so the counts,
+        # unchanged; a Task it may have left is surfaced for PM reconciliation.
+        recorder = repair_task_recorder
+        try:
+            if recorder is None:
+                repair_task = _record_repair_task(
+                    task=task, developer=developer, packet=packet,
+                    attempt=attempt, store=store, repair_task_id=repair_task_id)
+            else:
+                repair_task = recorder(task=task, developer=developer, packet=packet,
+                                       attempt=attempt, store=store,
+                                       repair_task_id=repair_task_id)
+        except LLMToolError as error:
+            error.review_repair_unclaimed_task_id = repair_task_id
+            raise
+        except Exception:
+            _refuse_unclaimed('REPAIR_TASK_RECORD_UNAVAILABLE', repair_task_id)
+        if (type(repair_task) is not dict or
+                repair_task.get('task_id') != repair_task_id):
+            _refuse_unclaimed('REPAIR_TASK_RECORD_UNAVAILABLE', repair_task_id)
+
+        # Re-read the Owner switch immediately before the claim and the provider side effect.
+        decision = worker_dispatch.evaluate(
+            worker, developer.get('owner_assignment_ref'), policy_task)
+        if not decision.allowed:
+            _refuse_unclaimed(decision.reason_code, repair_task_id)
+        try:
+            store.compare_and_update(
+                task_id, expected={'record_sha256': task['record_sha256']},
+                review_repair_claims=next_claims)
+        except Exception:
+            _refuse_unclaimed('REPAIR_CLAIM_UNAVAILABLE', repair_task_id)
+    finally:
+        release_chain()
 
     # The provider is called only after the claim CAS succeeded.
     adapter = dispatch_adapter
