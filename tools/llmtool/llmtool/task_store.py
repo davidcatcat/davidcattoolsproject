@@ -4581,8 +4581,14 @@ class TaskStore:
 
     @contextlib.contextmanager
     def advance_lease(self, task_id):
-        """Hold this Task's advance lease shared; a holder past the wait is BUSY."""
-        directory = self._dirfd()
+        """Hold this Task's advance lease shared; a holder past the wait is BUSY.
+
+        #1837 P3: an absent store root is not created; the Task is not found.
+        The lease lock itself is still created: it coordinates with a split.
+        """
+        directory = self._dirfd(create=False)
+        if directory is None:
+            raise _TaskNotFound('task not found')
         try:
             lock_fd = self._lock_sidecar(directory, self._advance_lease_name(task_id),
                                          exclusive=False, code='TASK_ADVANCE_LEASE')
@@ -4671,9 +4677,18 @@ class TaskStore:
         (TASK_LINEAGE_PENDING, #1781), PARKED (TASK_LINEAGE_PARKED), an end state
         (TASK_LINEAGE_ENDED, PR #1789) and any other state (TASK_LINEAGE_UNKNOWN)
         are refused. Read-only; returns the record read under the lock.
+        #1837 P3: an absent root or record creates nothing (no root, no lock).
         """
-        directory = self._dirfd()
+        directory = self._dirfd(create=False)
+        if directory is None:
+            raise _TaskNotFound('task not found')
         try:
+            try:
+                os.stat(self._name(task_id), dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                raise _TaskNotFound('task not found') from None
+            except OSError:
+                pass  # _read_at below applies every file check under the lock
             lock_fd = self._lock_sidecar(directory, '.' + self._name(task_id) + '.lock',
                                          exclusive=True, code='TASK_STORE')
             try:
