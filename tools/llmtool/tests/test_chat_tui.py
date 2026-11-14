@@ -1786,14 +1786,26 @@ class TaskModeTests(Base):
                 await asyncio.sleep(0.01)
             raise AssertionError('list read did not finish')
 
+        def listed_in_chat(ui):
+            # #1838: /task list prints the rows into the visible conversation; no pane.
+            text = ui.conversation.text
+            self.assertIn('Tasks, newest first (1 read, 0 unreadable', text)
+            self.assertIn('  ' + task_id + '  ', text)
+            self.assertNotIn(chat_tui.TASK_READING['list'], text)   # replaced by the rows
+            self.assertFalse(ui.show_list)
+
+        def events_in_chat(ui):
+            text = ui.conversation.text
+            self.assertIn('Recent events across 1 Tasks (0 unreadable', text)
+            self.assertIn(task_id[:8] + '  [TASK] Task recorded', text)
+            self.assertNotIn(chat_tui.TASK_READING['events'], text)
+            self.assertFalse(ui.show_events)
+
         before, calls = snapshot(), self.pm.complete.call_count
-        ui, _ = self.drive(['/task list\r', listed,
-                            lambda ui: self.assertTrue(ui.show_list),
-                            '\x1bOR', lambda ui: self.assertFalse(ui.show_list),
+        ui, _ = self.drive(['/task list\r', listed, listed_in_chat,
                             '\x1bOR', listed, lambda ui: self.assertTrue(ui.show_list),
-                            '\x1bOR', '/task events\r',
-                            lambda ui: self.assertTrue(ui.show_events),
-                            '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
+                            '\x1bOR', lambda ui: self.assertFalse(ui.show_list),
+                            '/task events\r', listed, events_in_chat,
                             '\x1bOS', listed, lambda ui: self.assertTrue(ui.show_events),
                             '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
                             '/task show ' + task_id + '\r', self.idle,
@@ -1840,6 +1852,18 @@ class TaskModeTests(Base):
             self.assertTrue(ui.show_events)
             self.assertIn('no events in TaskStore', ui.events_view.text)
 
+        def empty_list_chat(ui):
+            # #1838: the commands print into the conversation; F3/F4 open the panes.
+            self.assertFalse(ui.show_list)
+            self.assertIn('Tasks, newest first (0 read, 0 unreadable', ui.conversation.text)
+            self.assertIn('  no Tasks in TaskStore', ui.conversation.text)
+            self.assertNotIn(chat_tui.TASK_READING['list'], ui.conversation.text)
+
+        def empty_events_chat(ui):
+            self.assertFalse(ui.show_events)
+            self.assertIn('  no events in TaskStore', ui.conversation.text)
+            self.assertNotIn(chat_tui.TASK_READING['events'], ui.conversation.text)
+
         def not_found(ui):
             self.assertIn(chat_tui.TASK_NOT_FOUND % task_id, ui.conversation.text)
             self.assertFalse(ui.show_detail)
@@ -1850,12 +1874,12 @@ class TaskModeTests(Base):
                              side_effect=AssertionError('no TaskStore read')) as load, \
                 patch('llmtool.task_submission_cli.run_task_show',
                       side_effect=AssertionError('no Core show')) as show:
-            ui, _ = self.drive(['/task list\r', listed, empty_list,
+            ui, _ = self.drive(['/task list\r', listed, empty_list_chat,
+                                '\x1bOR', listed, empty_list,
                                 '\x1bOR', lambda ui: self.assertFalse(ui.show_list),
-                                '\x1bOR', listed, empty_list, '\x1bOR',
-                                '/task events\r', listed, empty_events,
+                                '/task events\r', listed, empty_events_chat,
+                                '\x1bOS', listed, empty_events,
                                 '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
-                                '\x1bOS', listed, empty_events, '\x1bOS',
                                 '/task show ' + task_id + '\r', self.idle, not_found,
                                 '\x1bOQ', lambda ui: self.assertFalse(ui.show_detail)],
                                dev=False)
@@ -1884,8 +1908,9 @@ class TaskModeTests(Base):
         with patch('llmtool.task_store.TaskStore') as store, \
                 patch.object(chat_tui_status, 'load_records', return_value=([], 0)) as load, \
                 patch('llmtool.task_submission_cli.run_task_show', return_value=1) as show:
-            ui, _ = self.drive(['/task list\r', listed, '\x1bOR',
-                                '/task events\r', listed, '\x1bOS',
+            # #1838: the commands print into the conversation and open no pane to close.
+            ui, _ = self.drive(['/task list\r', listed,
+                                '/task events\r', listed,
                                 '/task show ' + 'a' * 32 + '\r', self.idle], dev=True)
         self.assertTrue(ui.dev)
         self.assertEqual(load.call_count, 2)
@@ -1894,6 +1919,111 @@ class TaskModeTests(Base):
         self.assertNotIn('task not found', ui.conversation.text)
         self.assertIn('llmtool task command failed', ui.conversation.text)   # Core's answer
         self.assertFalse(state.exists())   # every TaskStore and Core call was a mock
+
+    def test_1838_owner_read_only_sequence_without_dev_prints_visible_results(self):
+        # #1838 Owner sequence without --dev: /task show, /task list, /task show, /task
+        # events. Each prints into the visible conversation (no pane covers it): a loading
+        # line while the TaskStore read runs, replaced by the result when it finishes, with
+        # no further key; never TASK_HIDDEN. The read is held by a gate, not a sleep.
+        self.drive(['/task mode profile first\r', 'first task\r', self.idle])
+        task_id = self.store_records()[0]['task_id']
+        calls = self.pm.complete.call_count
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        original = chat_tui_status.load_list
+
+        def held(store):
+            gate.wait(10)
+            return original(store)   # the real status-index read, after the gate
+
+        def visible(ui):
+            for shown in (ui.show_list, ui.show_events, ui.show_detail, ui.show_help,
+                          ui.task_view_visible()):
+                self.assertFalse(shown)
+            self.assertTrue(ui.app.layout.has_focus(ui.input))
+
+        def loading(kind):
+            def check(ui):
+                self.assertTrue(ui.conversation.text.endswith(
+                    '> /task ' + kind + '\n\n' + chat_tui.TASK_READING[kind]),
+                    ui.conversation.text[-200:])
+                self.assertIsNotNone(ui.list_reader)   # the gate holds the read
+                visible(ui)
+            return check
+
+        async def printed(ui):
+            await WidgetTests.until(ui, lambda ui: ui.list_loaded is not None
+                                    and ui.list_reader is None and not ui._task_prints,
+                                    'Task read printed')
+
+        def usage_only(ui):
+            self.assertTrue(ui.conversation.text.endswith(
+                '> /task show\n\n' + chat_tui.TASK_SHOW_USAGE), ui.conversation.text[-200:])
+            visible(ui)
+
+        def rows(ui):
+            text = ui.conversation.text
+            self.assertNotIn(chat_tui.TASK_READING['list'], text)   # replaced, not kept
+            start = text.index('Tasks, newest first (1 read, 0 unreadable',
+                               text.rindex('> /task list'))
+            self.assertIn('\n  ' + task_id + '  ', text[start:])
+            visible(ui)
+
+        def newest(ui):
+            self.assertTrue(ui.conversation.text.endswith(
+                '> /task show\n\n' + chat_tui.TASK_SHOW_USAGE + '\n  newest Task: ' + task_id
+                + ' (/task show ' + task_id + ')'), ui.conversation.text[-300:])
+
+        def events(ui):
+            text = ui.conversation.text
+            self.assertNotIn(chat_tui.TASK_READING['events'], text)
+            start = text.index('Recent events across 1 Tasks (0 unreadable',
+                               text.rindex('> /task events'))
+            self.assertIn('  ' + task_id[:8] + '  [TASK] Task recorded', text[start:])
+            visible(ui)
+
+        with patch.object(chat_tui_status, 'load_list', side_effect=held) as load:
+            ui, _ = self.drive(['/task show\r', usage_only,
+                                '/task list\r', loading('list'), lambda ui: gate.set(),
+                                printed, rows,
+                                '/task show\r', newest,
+                                lambda ui: gate.clear(),
+                                '/task events\r', loading('events'), lambda ui: gate.set(),
+                                printed, events], dev=False)
+        self.assertFalse(ui.dev)
+        self.assertEqual(load.call_count, 2)
+        self.assertNotIn(chat_tui.TASK_HIDDEN, ui.conversation.text)
+        self.assertEqual(self.pm.complete.call_count, calls)
+        self.assertEqual(len(self.store_records()), 1)
+        self.factory.assert_not_called()
+
+    def test_1838_task_read_lines_are_kept_when_other_output_follows(self):
+        # A loading line is replaced only while it is still the conversation's tail; with
+        # other output after it, it stays and the result follows (nothing else is cut).
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+
+        def held(store):
+            gate.wait(10)
+            return [], 0, None
+
+        async def printed(ui):
+            await WidgetTests.until(ui, lambda ui: ui.list_reader is None
+                                    and not ui._task_prints, 'Task read printed')
+
+        def check(ui):
+            text = ui.conversation.text
+            self.assertEqual(text.count(chat_tui.TASK_READING['list']), 1)
+            self.assertLess(text.index(chat_tui.TASK_READING['list']),
+                            text.index('llmtool: later notice'))
+            self.assertLess(text.index('llmtool: later notice'),
+                            text.index('  no Tasks in TaskStore'))
+
+        with patch.object(chat_tui, 'task_store_absent', return_value=False), \
+                patch('llmtool.task_store.TaskStore'), \
+                patch.object(chat_tui_status, 'load_list', side_effect=held):
+            self.drive(['/task list\r', lambda ui: ui.append('llmtool: later notice'),
+                        lambda ui: gate.set(), printed, check], dev=False)
 
     def test_task_submit_shows_core_receipt_and_opens_core_detail(self):
         request = '請新增測試\n第二行：多行需求'
@@ -2149,9 +2279,11 @@ class W57ChatTests(Base):
         # #1819: without --dev only the exact read-only forms run. A bare /task (the case the
         # advisory pre-review found uncovered) and every other /task form print TASK_HIDDEN
         # and do nothing else: no usage, no pane, no Task read, no Task mode, no submit.
+        # #1838: a bare /task show is a read-only form and prints its usage instead
+        # (test_1838_bare_task_show_prints_usage_never_task_hidden).
         os.environ.pop(chat_tui.DEV_ENV, None)
         forms = ['/task', '/task ', '/task mode off', '/task mode profile first',
-                 '/task submit --provider first request', '/task show', '/task show a b',
+                 '/task submit --provider first request', '/task show a b',
                  '/task list --all', '/task events now', '/task bogus']
 
         def enter(form):
@@ -2695,7 +2827,9 @@ class TaskListTests(Base):
             self.assertNotIn('Next responsible', '\n'.join(rows))
             self.assertEqual(sum('已建立／待派工' in row for row in rows), 1)
             self.assertEqual(sum('UNAVAILABLE' in row for row in rows), 1)
-            self.assertTrue(rows[2].startswith('▶ '))
+            # No task status index in this home: the fallback note, then the rows.
+            self.assertIn('read every TaskStore record', rows[2])
+            self.assertTrue(rows[3].startswith('▶ '))
             ui.list_index = next(index for index, record in enumerate(ui.list_records)
                                  if chat_tui_status.row(record)['stage'] == '已建立／待派工')
 
@@ -2737,7 +2871,7 @@ class TaskListTests(Base):
         ui, _ = self.drive(['/task mode profile first\r', 'first task\r', self.idle,
                             '/task mode profile missing\r', 'second task\r', self.idle,
                             lambda ui: setattr(self, 'calls', self.pm.complete.call_count),
-                            '/task list\r', self.listed, list_open,
+                            '\x1bOR', self.listed, list_open,   # #1838: F3 opens the pane
                             lambda ui: self.assertEqual(
                                 chat_tui_status.row(ui.list_records[ui.list_index])['stage'],
                                 '已建立／待派工'),
@@ -2791,10 +2925,10 @@ class TaskListTests(Base):
             self.assertIs(ui._mouse_view(), ui.list_view)
             self.assertIn('拖曳即複製', ui.status_text())
             seen['copies'] = copies = self.w60_copier(ui.list_view)
-            await self.w60_drag_row(ui, 2)
+            await self.w60_drag_row(ui, 3)   # row 2 is the status index fallback note
             await self.until(ui, lambda _ui: bool(copies), 'drag copy')
             self.assertTrue(ui.list_view.wait_copy())
-            row = ui.list_view.text.splitlines()[2]
+            row = ui.list_view.text.splitlines()[3]
             self.assertTrue(copies and row.startswith(copies[-1]), (copies, row))
             self.assertIn('Cmd+V 貼上', ui.status_text())
             self.assertNotIn('Cmd+C', ui.status_text())
@@ -2820,7 +2954,7 @@ class TaskListTests(Base):
 
         self.drive(['/task mode profile first\r', 'first task\r', self.idle,
                     '/task mode profile first\r', 'second task\r', self.idle,
-                    '/task list\r', self.listed, render, dragged, copied_all])
+                    '\x1bOR', self.listed, render, dragged, copied_all])
 
     def test_w60_detail_opened_from_the_f3_list_drags_and_copies_like_the_panel(self):
         async def detail(ui):
@@ -2849,7 +2983,7 @@ class TaskListTests(Base):
             self.assertFalse(ui.detail_view.selected_range())
 
         self.drive(['/task mode profile first\r', 'first task\r', self.idle,
-                    '/task list\r', self.listed, '\r', self.idle, detail, '\x1b', back])
+                    '\x1bOR', self.listed, '\r', self.idle, detail, '\x1b', back])
 
     def test_w60_f4_events_drag_and_shift_c(self):
         async def events(ui):
@@ -2899,12 +3033,13 @@ class TaskListTests(Base):
 
         async def first(ui):
             await wait_for(ui, lambda: (
-                len(ui.list_view.text.splitlines()) == 2 + 40
+                len(ui.list_view.text.splitlines()) == 3 + 40
                 and ui.app.layout.has_focus(ui.list_window)
                 and ids[39][:8] not in '\n'.join(shown(ui))
             ))
             self.assertTrue(ui.app.layout.has_focus(ui.list_window))
-            self.assertEqual(len(ui.list_view.text.splitlines()), 2 + 40)   # every row
+            # Two header rows and the status index fallback note (no index here), every row.
+            self.assertEqual(len(ui.list_view.text.splitlines()), 3 + 40)
             self.assertNotIn(ids[39][:8], '\n'.join(shown(ui)))         # beyond the screen
             seen['copies'] = self.w60_copier(ui.list_view)
 
@@ -2953,11 +3088,11 @@ class TaskListTests(Base):
             text = seen['copies'][-1]
             for task in ids:
                 self.assertIn(task, text)                                # all 40, full IDs
-            self.assertEqual(len(text.splitlines()), 2 + 40)
+            self.assertEqual(len(text.splitlines()), 3 + 40)
             self.assertNotIn('\x1b', text)
 
         with patch('llmtool.chat_tui_status.load_records', return_value=(records, 0)):
-            self.drive(['/task list\r', self.listed, first, down_past_edge, page_down, wheel,
+            self.drive(['\x1bOR', self.listed, first, down_past_edge, page_down, wheel,
                         copy_all], size=size)
 
     def test_refresh_on_key_and_interval_only(self):
@@ -2981,7 +3116,7 @@ class TaskListTests(Base):
 
         with patch('llmtool.chat_tui_status.load_records', side_effect=counting):
             ui, _ = self.drive(['/task mode profile first\r', 'a task\r', self.idle,
-                                '/task list\r', self.listed, redraw,
+                                '\x1bOR', self.listed, redraw,
                                 lambda ui: self.assertEqual(len(reads), 1),
                                 'r', self.listed, lambda ui: self.assertEqual(len(reads), 2),
                                 '\x1b[15~', self.listed, lambda ui: self.assertEqual(len(reads), 3),
@@ -3013,7 +3148,7 @@ class TaskListTests(Base):
 
         with patch('llmtool.chat_tui_status.load_records', side_effect=counting):
             ui, _ = self.drive(['/task mode profile first\r', 'a task\r', self.idle,
-                                '/task list\r', self.listed,
+                                '\x1bOR', self.listed,
                                 lambda ui: self.assertEqual(len(reads), 1),
                                 '\r', self.idle, hidden, stale_wait,
                                 lambda ui: self.assertEqual(len(reads), 1),  # detail open
@@ -3042,7 +3177,7 @@ class TaskListTests(Base):
             self.assertTrue(ui.show_list)
             self.assertIn('new conversation output', '\n'.join(self.list_rows(ui)))
 
-        ui, _ = self.drive(['/task list\r', self.listed, resize, check,
+        ui, _ = self.drive(['\x1bOR', self.listed, resize, check,
                             '\x1b', self.esc_settled,
                             lambda ui: self.assertFalse(ui.unseen_output)], size=size)
         self.assertIn('late reply', ui.conversation.text)
@@ -3155,6 +3290,369 @@ class EventTimelineTests(unittest.TestCase):
                          2 + self.events.RECENT_LIMIT)
 
 
+class _IndexStore:
+    """TaskStore stand-in: a private root, its Task IDs and a get that tests watch."""
+
+    def __init__(self, root, records):
+        self.root = root
+        self.records = records
+        self.get = Mock(side_effect=lambda task_id: copy.deepcopy(self.records[task_id]))
+
+    def task_ids(self):
+        return sorted(self.records)
+
+
+_PARITY_BASE = datetime(2026, 11, 14, tzinfo=timezone.utc)
+_PARITY_MANY = 'a' * 32
+
+
+def _parity_stamp(n):
+    return (_PARITY_BASE + timedelta(seconds=n)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _parity_audit(*seconds, reason=None):
+    """Dispatch-gate entries at the given seconds (labelled synthetic; no real Task data)."""
+    return [{'at': _parity_stamp(n), 'action': 'DISPATCH', 'decision': 'ALLOWED',
+             'reason_code': reason or 'SYNTHETIC_%d' % n} for n in seconds]
+
+
+def _parity_records():
+    """Labelled synthetic Tasks for recent-events parity (#1838 repair).
+
+    Task 'a'*32 has nine events: eight (seconds 2000-2007) newer than any other Task's,
+    and its oldest, Task recorded at 1205, falls among the other Tasks' events. Forty
+    Tasks n=0..39 have four events each in their own older block (1000+10n .. +3).
+
+    The full read's newest 100 are: its eight newest, the Task recorded at 1205, every
+    event of n=18..39 and the three newest of n=17. The status index keeps three per
+    Task, so it alone gives a different selection.
+    """
+    records = {_PARITY_MANY: _record(
+        task_id=_PARITY_MANY, request='synthetic many-event Task',
+        created_at=_parity_stamp(1205), updated_at=_parity_stamp(2007),
+        dispatch_audit=_parity_audit(*range(2000, 2008)))}
+    for n in range(40):
+        task_id = '%032x' % n
+        start = 1000 + 10 * n
+        records[task_id] = _record(
+            task_id=task_id, request='synthetic block Task %d' % n,
+            created_at=_parity_stamp(start), updated_at=_parity_stamp(start + 3),
+            dispatch_audit=_parity_audit(start + 1, start + 2, start + 3))
+    return records
+
+
+def _fresh_index_store(state, records):
+    """A private TaskStore stand-in under ``state`` with one file per Task, and a fresh
+    task status index whose entries index_summary builds from the same records."""
+    import json
+    from llmtool import task_index
+    root = state / 'tasks'
+    root.mkdir(parents=True)
+    os.chmod(state, 0o700)
+    os.chmod(root, 0o700)
+    for task_id in records:
+        (root / (task_id + '.json')).write_text('{}')
+    store = _IndexStore(root, records)
+    entries = {task_id: {'stat': task_index.record_key(store, task_id), 'readable': True,
+                         'created_at': record['created_at'],
+                         'pm_session_id': record.get('pm_session_id'),
+                         'tui': chat_tui_status.index_summary(record)}
+               for task_id, record in records.items()}
+    path = state / 'task-status-index.json'
+    path.write_text(json.dumps({'schema_version': task_index._SCHEMA_VERSION,
+                                'fingerprint': task_index.validator_fingerprint(),
+                                'entries': entries}))
+    os.chmod(path, 0o600)
+    return store
+
+
+class TaskStatusIndexListTests(unittest.TestCase):
+    """#1838: the Task list and events read the task status index; read only."""
+
+    BASE = datetime(2026, 11, 14, tzinfo=timezone.utc)
+
+    def setUp(self):
+        from llmtool import chat_tui_events, task_index
+        self.events, self.index = chat_tui_events, task_index
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.home = Path(temp.name).resolve()
+        self.state = self.home / 'state'
+        self.root = self.state / 'tasks'
+        self.root.mkdir(parents=True)
+        os.chmod(self.state, 0o700)
+        os.chmod(self.root, 0o700)
+
+    def stamp(self, n):
+        return (self.BASE + timedelta(seconds=n)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def summary(self, n, **fields):
+        """A synthetic index projection (labelled synthetic; no real Task data)."""
+        base = {'updated_at': self.stamp(n), 'stage': 'RUNNING',
+                'name': 'synthetic row %d' % n, 'executor': None, 'prs': [], 'owner': False,
+                'terminal': False, 'event_count': 5,
+                'events': [[self.stamp(n), 'TASK', 'synthetic event %d' % n, True]]}
+        base.update(fields)
+        return base
+
+    def store(self, count):
+        records = {}
+        for n in range(count):
+            task_id = '%032x' % n
+            records[task_id] = _record(task_id=task_id, request='full record %d' % n,
+                                       created_at=self.stamp(n), updated_at=self.stamp(n))
+            (self.root / (task_id + '.json')).write_text('{}')
+        return _IndexStore(self.root, records)
+
+    def write_index(self, store, entries=None, fingerprint=None, raw=None):
+        import json
+        if entries is None:
+            entries = {task_id: {'stat': self.index.record_key(store, task_id),
+                                 'readable': True, 'created_at': self.stamp(n),
+                                 'pm_session_id': None, 'tui': self.summary(n)}
+                       for n, task_id in enumerate(store.task_ids())}
+        path = self.state / 'task-status-index.json'
+        path.write_text(raw if raw is not None else json.dumps({
+            'schema_version': self.index._SCHEMA_VERSION,
+            'fingerprint': fingerprint or self.index.validator_fingerprint(),
+            'entries': entries}))
+        os.chmod(path, 0o600)
+        return entries
+
+    def snapshot(self):
+        return sorted((str(p.relative_to(self.home)), p.is_dir(), p.stat().st_size,
+                       p.stat().st_mtime_ns, p.stat().st_mode) for p in self.home.rglob('*'))
+
+    def test_3000_index_entries_render_the_first_page_without_any_get(self):
+        store = self.store(3000)
+        self.write_index(store)
+        before = self.snapshot()
+        # Deterministic cost checks only (no wall-clock threshold): no full read, no
+        # per-record get, and the expected first page and events.
+        with patch.object(chat_tui_status, 'load_records',
+                          side_effect=AssertionError('no full read')):
+            records, unreadable, note = chat_tui_status.load_list(store)
+        groups, hidden = chat_tui_status.group_rows(
+            records, self.BASE + timedelta(seconds=3000), False)
+        page = [chat_tui_status.row(group['record']) for group in groups[:20]]
+        events = self.events.recent_text(records, unreadable, 'now', note)
+        store.get.assert_not_called()
+        self.assertIsNone(note)
+        self.assertEqual((unreadable, hidden), (0, 0))
+        self.assertEqual(len(records), chat_tui_status.LIST_LIMIT)
+        self.assertEqual([item['task_id'] for item in page[:2]], ['%032x' % 2999, '%032x' % 2998])
+        self.assertEqual(page[0]['stage'], 'RUNNING')
+        self.assertEqual(page[0]['name'], 'synthetic row 2999')
+        lines = events.splitlines()
+        self.assertIn('newest 100 shown, status index keeps 3 per Task', lines[0])
+        self.assertTrue(lines[2].startswith(self.stamp(2999) + '  ' + ('%032x' % 2999)[:8]
+                                            + '  [TASK] synthetic event 2999'))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_missing_unreadable_stale_or_unavailable_index_falls_back_with_a_note(self):
+        cases = {
+            'missing': ('status index not found', lambda store: None),
+            'unreadable': ('status index unreadable',
+                           lambda store: self.write_index(store, raw='{not json')),
+            'stale': ('status index out of date (validator fingerprint)',
+                      lambda store: self.write_index(store, fingerprint='0' * 64)),
+            'unavailable': ('status index unavailable',
+                            lambda store: os.chmod(self.state, 0o777)),
+        }
+        for name, (text, prepare) in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                store = self.store(2)
+                prepare(store)
+                before = self.snapshot()
+                with patch.object(chat_tui_status, 'load_records',
+                                  wraps=chat_tui_status.load_records) as load:
+                    records, unreadable, note = chat_tui_status.load_list(store)
+                load.assert_called_once_with(store)
+                self.assertEqual(note, text + '; read every TaskStore record')
+                self.assertEqual([r['request'] for r in records],
+                                 ['full record 1', 'full record 0'])
+                self.assertEqual(store.get.call_count, 2)
+                self.assertEqual(self.snapshot(), before)   # nothing written or created
+                os.chmod(self.state, 0o700)
+
+    def test_out_of_date_entry_reads_only_that_record(self):
+        store = self.store(3)
+        entries = dict(self.write_index(store))
+        (self.root / ('%032x' % 1 + '.json')).write_text('{"changed": true}')
+        unreadable_id = '%032x' % 2
+        entries[unreadable_id] = {
+            'stat': self.index.record_key(store, unreadable_id), 'readable': False,
+            'created_at': None, 'pm_session_id': None}
+        self.write_index(store, entries)
+        before = self.snapshot()
+        records, unreadable, note = chat_tui_status.load_list(store)
+        store.get.assert_called_once_with('%032x' % 1)   # the changed record only
+        self.assertEqual(unreadable, 1)                   # known unreadable: no get
+        self.assertEqual(note, 'status index out of date for 1 Tasks; read those TaskStore records')
+        self.assertEqual([chat_tui_status.row(r)['name'] for r in records],
+                         ['full record 1', 'synthetic row 0'])
+        self.assertNotIn(chat_tui_status.INDEX_KEY, records[0])
+        self.assertIn(chat_tui_status.INDEX_KEY, records[1])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_index_rows_project_like_full_records(self):
+        now = datetime(2026, 10, 28, 8, tzinfo=timezone.utc)
+        shared = _developer(executor_task_id='shared-d6', state='DEVELOPER_PENDING')
+        full = [
+            _record(task_id='a' * 32, updated_at='2026-10-28T07:00:00Z', developer=shared,
+                    review_dispatch_claim=[{'pr': 510, 'version': 1, 'state': 'DISPATCHED'}],
+                    owner_decision='synthetic decision'),
+            _record(task_id='b' * 32, updated_at='2026-10-28T06:00:00Z', developer=shared,
+                    created_at='2026-10-27T00:00:00Z',
+                    review_repair_claims=[{'pr': 511, 'version': 1, 'state': 'CLAIMED'}]),
+            dict(_event_record(), task_id='c' * 32, updated_at='2026-10-28T05:00:00Z'),
+            _record(task_id='f' * 32, updated_at='2026-10-28T04:00:00Z',
+                    completion={'state': 'PM_RETURNED',
+                                'pm_recommendation': {'decision': 'ACCEPT'}},
+                    developer=_developer()),
+        ]
+        indexed = [chat_tui_status._index_record(
+            record['task_id'], {'created_at': record['created_at']},
+            chat_tui_status.index_summary(record)) for record in full]
+        for summary in (record[chat_tui_status.INDEX_KEY] for record in indexed):
+            self.assertTrue(self.index._valid_tui(summary))
+        for show_all in (False, True):
+            want, want_hidden = chat_tui_status.group_rows(full, now, show_all)
+            got, got_hidden = chat_tui_status.group_rows(indexed, now, show_all)
+            self.assertEqual(got_hidden, want_hidden)
+            self.assertEqual(
+                [(chat_tui_status.row(g['record']), g['rounds'], g['pr'], g['owner'])
+                 for g in got],
+                [(chat_tui_status.row(g['record']), g['rounds'], g['pr'], g['owner'])
+                 for g in want])
+        events = indexed[2][chat_tui_status.INDEX_KEY]['events']
+        self.assertEqual(events, [[e['time'], e['kind'], e['text'], e['recorded']]
+                                  for e in self.events.task_events(full[2])[:3]])
+
+    def parity_store(self, records):
+        store = _fresh_index_store(self.home / 'parity', records)
+        for record in records.values():
+            self.assertTrue(self.index._valid_tui(chat_tui_status.index_summary(record)))
+        return store
+
+    def full_read(self, store):
+        """The full-record read the index must match: every record via TaskStore.get."""
+        records, unreadable = chat_tui_status.load_records(store)
+        store.get.reset_mock()
+        return (records, unreadable,
+                self.events.recent_text(records, unreadable, 'now'),
+                self.events.conversation_text(records, unreadable, 'now'))
+
+    def test_recent_events_from_a_fresh_index_equal_the_full_record_read(self):
+        records = _parity_records()
+        store = self.parity_store(records)
+        full, full_unreadable, want_pane, want_chat = self.full_read(store)
+        self.assertEqual(len(want_pane.splitlines()), 2 + self.events.RECENT_LIMIT)
+        self.assertNotIn('INCOMPLETE', want_pane + want_chat)
+        many = '  ' + _PARITY_MANY[:8] + '  '
+        # The full read's newest 100 hold the many-event Task's oldest event (1205) and
+        # its eighth newest (2000); the index keeps only its three newest.
+        self.assertIn(_parity_stamp(1205) + many + '[TASK] Task recorded', want_pane)
+        self.assertIn(_parity_stamp(2000) + many + '[DISPATCH]', want_pane)
+
+        indexed, unreadable, note = chat_tui_status.load_list(store)
+        self.assertIsNone(note)
+        store.get.assert_not_called()                       # the list itself: index only
+        self.assertEqual(unreadable, full_unreadable)
+        self.assertTrue(all(chat_tui_status.INDEX_KEY in record for record in indexed))
+        # Index rows alone: a different selection, never presented as complete.
+        partial_pane = self.events.recent_text(indexed, unreadable, 'now', note)
+        partial_chat = self.events.conversation_text(indexed, unreadable, 'now', note)
+        self.assertIn('status index keeps 3 per Task; INCOMPLETE: 33 Tasks not read in full',
+                      partial_pane.splitlines()[0])
+        # The conversation's newest 20 index events: the many-event Task's 2007-2005, all
+        # three kept events of n=39..35, and 1343/1342 of n=34. Open: the many-event Task
+        # and n=35..39 (their last kept event is shown). n=34's last kept event (1341) is
+        # not shown, so its dropped event (1340) cannot enter the selection: 6 open Tasks.
+        self.assertEqual(
+            sorted(indexed[position]['task_id'] for position in
+                   self.events.open_rows(indexed, self.events.CONVERSATION_LIMIT)),
+            sorted([_PARITY_MANY] + ['%032x' % n for n in range(35, 40)]))
+        self.assertTrue(partial_chat.splitlines()[1].startswith(
+            '  INCOMPLETE: 6 Tasks not read in full (status index keeps 3 per Task)'),
+            partial_chat)
+        self.assertNotIn(_parity_stamp(1205) + many, partial_pane)
+
+        completed = chat_tui_status.complete_recent_events(store, indexed)
+        # Only the rows whose dropped events could be among the newest 100 are read: the
+        # many-event Task and blocks n=8..39; n=0..7 stay index rows.
+        read = sorted(call.args[0] for call in store.get.call_args_list)
+        self.assertEqual(read, sorted([_PARITY_MANY] + ['%032x' % n for n in range(8, 40)]))
+        self.assertEqual(sum(chat_tui_status.INDEX_KEY in record for record in completed), 8)
+        self.assertEqual(self.events.recent_text(completed, unreadable, 'now', note), want_pane)
+        self.assertEqual(self.events.conversation_text(completed, unreadable, 'now', note),
+                         want_chat)
+        self.assertEqual(self.events.open_rows(completed), [])
+        # The Task list rows are unchanged by the event reads.
+        self.assertEqual([chat_tui_status.row(record) for record in completed],
+                         [chat_tui_status.row(record) for record in full])
+        self.assertEqual([chat_tui_status.row(record) for record in completed],
+                         [chat_tui_status.row(record) for record in indexed])
+
+    def test_nothing_to_complete_reads_no_record(self):
+        # Every Task within the kept events (three or fewer): no read, the same list.
+        records = {'%032x' % n: _record(task_id='%032x' % n, created_at=_parity_stamp(10 * n),
+                                        updated_at=_parity_stamp(10 * n + 1),
+                                        dispatch_audit=_parity_audit(10 * n + 1))
+                   for n in range(5)}
+        store = self.parity_store(records)
+        _full, _unreadable, want_pane, want_chat = self.full_read(store)
+        indexed, unreadable, note = chat_tui_status.load_list(store)
+        self.assertIs(chat_tui_status.complete_recent_events(store, indexed), indexed)
+        store.get.assert_not_called()
+        self.assertEqual(self.events.recent_text(indexed, unreadable, 'now', note), want_pane)
+        self.assertEqual(self.events.conversation_text(indexed, unreadable, 'now', note),
+                         want_chat)
+
+    def test_a_failed_completing_read_keeps_the_result_marked_incomplete(self):
+        records = _parity_records()
+        store = self.parity_store(records)
+        _full, _unreadable, want_pane, want_chat = self.full_read(store)
+        indexed, unreadable, note = chat_tui_status.load_list(store)
+
+        def get(task_id):
+            if task_id == _PARITY_MANY:
+                raise OSError('synthetic read failure')
+            return copy.deepcopy(records[task_id])
+
+        store.get.side_effect = get
+        completed = chat_tui_status.complete_recent_events(store, indexed)
+        pane = self.events.recent_text(completed, unreadable, 'now', note)
+        chat = self.events.conversation_text(completed, unreadable, 'now', note)
+        self.assertIn('INCOMPLETE: 1 Tasks not read in full', pane.splitlines()[0])
+        self.assertTrue(chat.splitlines()[1].startswith('  INCOMPLETE: 1 Tasks not read'))
+        self.assertNotEqual(pane, want_pane)
+        self.assertNotEqual(chat, want_chat)
+        self.assertEqual(self.events.open_rows(completed),
+                         [[r.get('task_id') for r in completed].index(_PARITY_MANY)])
+
+    def test_a_shortened_event_text_is_read_in_full(self):
+        # The index cuts event text to TUI_TEXT_LIMIT; a shown cut text is read in full.
+        long_reason = 'SYNTHETIC_REASON_' + 'x' * self.index.TUI_TEXT_LIMIT
+        records = {'b' * 32: _record(task_id='b' * 32, created_at=_parity_stamp(1),
+                                     updated_at=_parity_stamp(2),
+                                     dispatch_audit=_parity_audit(2, reason=long_reason)),
+                   'c' * 32: _record(task_id='c' * 32, created_at=_parity_stamp(0),
+                                     updated_at=_parity_stamp(0))}
+        store = self.parity_store(records)
+        _full, _unreadable, want_pane, want_chat = self.full_read(store)
+        self.assertIn(long_reason, want_pane)
+        indexed, unreadable, note = chat_tui_status.load_list(store)
+        self.assertIn('INCOMPLETE: 1 Tasks not read in full',
+                      self.events.recent_text(indexed, unreadable, 'now', note))
+        completed = chat_tui_status.complete_recent_events(store, indexed)
+        store.get.assert_called_once_with('b' * 32)
+        self.assertEqual(self.events.recent_text(completed, unreadable, 'now', note), want_pane)
+        self.assertEqual(self.events.conversation_text(completed, unreadable, 'now', note),
+                         want_chat)
+
+
 @unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
 class TaskEventsPaneTests(Base):
     """F4 / /task events over the real isolated TaskStore; no inbox write path is used."""
@@ -3254,7 +3752,7 @@ class TaskEventsPaneTests(Base):
                 patch('llmtool.chat_tui_status.load_records', side_effect=counting):
             ui, _ = self.drive(['/task mode profile first\r', 'event task\r', self.idle,
                                 detail_loaded, timeline_loaded,
-                                '/task events\r', self.listed, shown, unseen,
+                                '\x1bOS', self.listed, shown, unseen,   # #1838: F4 pane
                                 one_read,
                                 'r', self.listed, refreshed,
                                 # Help hides the pane: no interval read while it is hidden.
@@ -4609,6 +5107,81 @@ class PMConversationTests(BoundedPMTest):
 
     def connect(self):
         return '/pm connect\r'   # uses the saved dedicated binding
+
+    def test_1838_read_only_task_commands_print_while_pm_connected_without_dev(self):
+        # #1838 Owner sequence in /pm connect state without --dev: /task list, /task show,
+        # /task events print into the visible conversation, are never sent to the PM and
+        # never print TASK_HIDDEN. The TaskStore read is held by a gate (no sleep); the
+        # store is mocked only after the connect, so the PM path is the real one.
+        os.environ.pop(chat_tui.DEV_ENV, None)
+        task_id = 'c' * 32
+        record = {'task_id': task_id, 'state': 'PM_RESPONDED', 'request': '1838 connected row',
+                  'created_at': '2026-11-14T01:00:00Z', 'updated_at': '2026-11-14T01:05:00Z'}
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        seen = {}
+
+        def held(store):
+            gate.wait(10)
+            return [record], 0, None
+
+        def reads(ui):
+            patch.object(chat_tui, 'task_store_absent', return_value=False).start()
+            seen['store'] = patch('llmtool.task_store.TaskStore').start()
+            seen['load'] = patch.object(chat_tui_status, 'load_list', side_effect=held).start()
+
+        def visible(ui):
+            self.assertTrue(ui.pm_mode)
+            self.assertIsNotNone(ui.pm_runtime)
+            for shown in (ui.show_list, ui.show_events, ui.show_detail, ui.show_help,
+                          ui.task_view_visible()):
+                self.assertFalse(shown)
+
+        def loading(kind):
+            def check(ui):
+                self.assertIn('> /task ' + kind + '\n\n' + chat_tui.TASK_READING[kind],
+                              ui.conversation.text)
+                self.assertIsNotNone(ui.list_reader)   # the gate holds the read
+                visible(ui)
+            return check
+
+        async def printed(ui):
+            await self.until(ui, lambda ui: ui.list_loaded is not None
+                             and ui.list_reader is None and not ui._task_prints,
+                             'Task read printed')
+
+        def rows(ui):
+            text = ui.conversation.text
+            start = text.index('Tasks, newest first (1 read, 0 unreadable',
+                               text.rindex('> /task list'))
+            self.assertIn('\n  ' + task_id + '  ', text[start:])
+            visible(ui)
+
+        def newest(ui):
+            text = ui.conversation.text
+            self.assertIn(chat_tui.TASK_SHOW_USAGE + '\n  newest Task: ' + task_id,
+                          text[text.rindex('> /task show'):])
+            visible(ui)
+
+        def events(ui):
+            text = ui.conversation.text
+            start = text.index('Recent events across 1 Tasks (0 unreadable',
+                               text.rindex('> /task events'))
+            self.assertIn('2026-11-14T01:00:00Z  ' + task_id[:8] + '  [TASK] Task recorded',
+                          text[start:])
+            visible(ui)
+
+        ui, _ = self.drive([self.connect(), self.connected, reads,
+                            '/task list\r', loading('list'), lambda ui: gate.set(),
+                            printed, rows,
+                            '/task show\r', newest,
+                            lambda ui: gate.clear(),
+                            '/task events\r', loading('events'), lambda ui: gate.set(),
+                            printed, events])
+        self.assertFalse(ui.dev)
+        self.assertEqual(seen['load'].call_count, 2)
+        self.assertNotIn(chat_tui.TASK_HIDDEN, ui.conversation.text)
+        self.assertFalse(any(fake.users() for fake in self.fakes))   # nothing went to the PM
 
     def test_connect_auto_resumes_once_when_taskstore_has_in_flight_work(self):
         self.turns = [_full_turn()]
@@ -8175,6 +8748,17 @@ class ScrollSelectTests(Base):
         ui.app.invalidate()
         await asyncio.sleep(seconds)
 
+    async def answered(self, ui):
+        """Explicit ready condition (not a sleep) for one sent chat line.
+
+        ``idle`` alone returns at once when the Enter has not been read from the pipe yet:
+        busy is still False before the request starts. The reply is in history and the
+        request is finished only when both hold; busy is cleared in the same loop callback
+        that renders the reply.
+        """
+        await self.until(ui, lambda ui: not ui.busy and len(self.session.history) >= 2,
+                         'chat reply')
+
     def test_wheel_up_moves_wrapped_cjk_lines_one_row_per_event_and_back(self):
         # Owner simulation 1: 120 wrapped CJK/English lines, 12 wheel-ups left the view
         # stuck (vertical_scroll 121 throughout); short lines moved one line per event.
@@ -8406,6 +8990,18 @@ class ScrollSelectTests(Base):
         long_reply = '\n'.join('row %d' % i for i in range(200))
         self.client.complete.return_value = Reply(long_reply, {})
 
+        async def laid_out(ui):
+            # macOS CI: PageUp reached a pane holding only the banner when 'question\r' was
+            # still unread at the old idle check, so it scrolled 0 rows and the reply then
+            # arrived following the bottom. Page only once the reply is laid out for two pages.
+            await self.answered(ui)
+
+            def two_pages(ui):
+                ui.app.invalidate()
+                return (ui.view.height > 1
+                        and ui.view.max_top() >= 2 * (ui.view.height - 1))
+            await self.until(ui, two_pages, 'reply laid out')
+
         async def paged_up(ui):
             for _ in range(40):
                 await self.settle(ui)
@@ -8436,7 +9032,7 @@ class ScrollSelectTests(Base):
             ui.app.key_processor.process_keys()
             self.assertTrue(ui.view.following)
 
-        ui, _ = self.drive(['question\r', self.idle, '\x1b[5~\x1b[5~', paged_up,
+        ui, _ = self.drive(['question\r', laid_out, '\x1b[5~\x1b[5~', paged_up,
                             '\t', focused_rows, '\t', '\x1b[5~', '\x1b[6~' * 60,
                             lambda ui: self.assertTrue(ui.view.following)])
         self.assertTrue(ui.app.layout.has_focus(ui.input))
@@ -8538,7 +9134,7 @@ class ScrollSelectTests(Base):
             self.assertEqual(ui.input.text, 'draft')
             self.assertIsNone(ui.view.selected_range())
 
-        self.drive(['first\r', self.idle, 'draft', press(3, 2), release(3, 2),
+        self.drive(['first\r', self.answered, 'draft', press(3, 2), release(3, 2),
                     WHEEL_UP * 3, WHEEL_DOWN * 3, check])
 
 
@@ -8640,9 +9236,13 @@ class TaskGroupListUiTests(Base):
     drive = WidgetTests.drive
 
     @staticmethod
-    async def listed(ui):
-        for _ in range(200):
-            if ui.list_loaded is not None and ui.list_reader is None:
+    async def listed(ui, shown=None):
+        """Explicit list-ready condition (not a sleep): the pane key was handled (``shown``,
+        default the list pane), and the TaskStore read it started has finished."""
+        shown = shown or (lambda ui: ui.list_visible())
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if shown(ui) and ui.list_loaded is not None and ui.list_reader is None:
                 return
             await asyncio.sleep(0.01)
         raise AssertionError('list read did not finish')
@@ -8693,6 +9293,197 @@ class TaskGroupListUiTests(Base):
         with patch.object(chat_tui_status, 'load_records', return_value=(records, 0)):
             self.drive(['\x1bOR', initial, 'a', toggled_on, 'a', toggled_off,
                         refreshed, 'c', copied, '\r', opened])
+
+    def test_status_index_rows_render_without_note_and_enter_opens_the_full_record(self):
+        # #1838: rows from the task status index; Enter still opens the Task through Core
+        # task show (the full TaskStore record). No fallback note when the index is current.
+        now = datetime.now(timezone.utc)
+        full = _record(task_id='d' * 32, request='index row request',
+                       created_at=(now - timedelta(minutes=5)).isoformat(),
+                       updated_at=(now - timedelta(minutes=1)).isoformat(),
+                       developer={'state': 'DEVELOPER_PENDING'})
+        summary = chat_tui_status.index_summary(full)
+        # The projection itself: a running, non-terminal row (shown without 'a').
+        self.assertEqual((summary['stage'], summary['name'], summary['terminal']),
+                         ('RUNNING', 'index row request', False))
+        indexed = chat_tui_status._index_record(
+            full['task_id'], {'created_at': full['created_at']}, summary)
+
+        async def shown(ui):
+            await self.listed(ui)
+            self.assertIsNone(ui.list_error)
+            self.assertFalse(ui.list_note)                       # current index: no fallback
+            rows = ''.join(text for _style, text in ui.list_text()).splitlines()
+            # Width- and layout-independent: find the selected Task row by its leading
+            # fields; the terminal is set wide enough that the request column is not cut,
+            # and the name is also checked on the listed row's data.
+            selected = [line for line in rows if line.startswith('▶ ')]
+            self.assertEqual(len(selected), 1, rows)
+            self.assertTrue(selected[0].startswith('▶ dddddddd  RUNNING'), rows)
+            self.assertTrue(selected[0].rstrip().endswith('index row request'), rows)
+            self.assertFalse([line for line in rows[:rows.index(selected[0])]
+                              if 'status index' in line or 'read every TaskStore' in line],
+                             rows)                               # no fallback note row
+            self.assertEqual(len(ui.list_records), 1)
+            self.assertIn(chat_tui_status.INDEX_KEY, ui.list_records[0])   # the index row
+            self.assertIs(ui.list_records[0][chat_tui_status.INDEX_KEY], summary)
+            item = chat_tui_status.row(ui.list_records[0])
+            self.assertEqual(item['task_id'], 'd' * 32)
+            self.assertEqual(item['name'], 'index row request')
+            self.assertEqual(item['stage'], 'RUNNING')
+            ui.start_task = Mock()
+
+        async def opened(ui):
+            for _ in range(200):                                  # Enter is handled async
+                if ui.start_task.called:
+                    break
+                await asyncio.sleep(0.01)
+            ui.start_task.assert_called_once_with('show', 'd' * 32, None)
+
+        # Environment-independent: the list read never builds a TaskStore over the
+        # runner's real HOME; the stand-in store goes straight to the patched load_list.
+        store = object()
+        with patch('llmtool.task_store.TaskStore', return_value=store), \
+                patch.object(chat_tui_status, 'load_list',
+                             return_value=([indexed], 0, None)) as load, \
+                patch.object(chat_tui_status, 'load_records',
+                             side_effect=AssertionError('no full read')):
+            self.drive(['\x1bOR', shown, '\r', opened], size=[Size(rows=40, columns=200)])
+        load.assert_called_once_with(store)
+
+    def test_status_index_fallback_note_shows_in_list_and_events(self):
+        note = 'status index not found; read every TaskStore record'
+        record = _record(task_id='d' * 32, updated_at=datetime.now(timezone.utc).isoformat())
+
+        async def list_note(ui):
+            await self.listed(ui)
+            rows = ''.join(text for _style, text in ui.list_text()).splitlines()
+            self.assertEqual(rows[2], ' ' + note)
+            self.assertTrue(rows[3].startswith('▶ dddddddd'))
+
+        async def events_note(ui):
+            # F4 handled first: else the finished F3 read already satisfies the wait.
+            await self.listed(ui, lambda ui: ui.events_visible())
+            self.assertEqual(ui.events_view.text.splitlines()[2], note)
+
+        with patch.object(chat_tui_status, 'load_list', return_value=([record], 0, note)):
+            self.drive(['\x1bOR', list_note, '\x1bOR', '\x1bOS', events_note])
+
+    def test_list_ready_wait_holds_for_a_held_status_index_read(self):
+        # The index read is held by an explicit release event (no sleep), past the drive's
+        # key pause: while it is held the list-ready condition is not met; after release
+        # the wait sees the finished read, then the rows are checked as usual.
+        note = 'status index not found; read every TaskStore record'
+        record = _record(task_id='d' * 32, updated_at=datetime.now(timezone.utc).isoformat())
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def held_load(store):
+            started.set()
+            if not release.wait(10):
+                raise AssertionError('status index read was never released')
+            finished.set()
+            return [record], 0, note
+
+        async def held(ui):
+            await WidgetTests.until(ui, lambda ui: started.is_set() and ui.list_visible(),
+                                    'status index read started')
+            self.assertFalse(finished.is_set())
+            self.assertIsNotNone(ui.list_reader)    # list-ready condition not met yet
+            release.set()
+
+        async def list_note(ui):
+            await self.listed(ui)
+            self.assertTrue(finished.is_set())
+            rows = ''.join(text for _style, text in ui.list_text()).splitlines()
+            self.assertEqual(rows[2], ' ' + note)
+            self.assertTrue(rows[3].startswith('▶ dddddddd'))
+
+        with patch('llmtool.task_store.TaskStore', return_value=object()), \
+                patch.object(chat_tui_status, 'load_list', side_effect=held_load):
+            self.drive(['\x1bOR', held, list_note])
+
+    def test_1838_owner_sequence_events_from_a_fresh_index_equal_the_full_read(self):
+        # #1838 repair, without --dev: /task list, /task show, /task events over a fresh
+        # status index (the real load_list and the real reader). /task events prints the
+        # same newest events as a full read of every record, with no INCOMPLETE note; the
+        # Task list rows come from the index. Explicit ready conditions, no sleeps.
+        os.environ.pop(chat_tui.DEV_ENV, None)
+        records = _parity_records()
+        store = _fresh_index_store(self.temp_root.resolve() / 'parity-state', records)
+        full, unreadable = chat_tui_status.load_records(store)
+        want = self.events_text(full, unreadable)
+        store.get.reset_mock()
+
+        def printed(command, header):
+            async def wait(ui):
+                def ready(ui):
+                    text = ui.conversation.text
+                    return (command in text and header in text[text.rindex(command):]
+                            and ui.list_reader is None and not ui._task_prints)
+                await WidgetTests.until(ui, ready, command + ' printed')
+            return wait
+
+        def segment(ui, command):
+            text = ui.conversation.text
+            return text[text.rindex(command):]
+
+        def visible(ui):
+            for shown in (ui.show_list, ui.show_events, ui.show_detail, ui.show_help,
+                          ui.task_view_visible()):
+                self.assertFalse(shown)
+
+        def rows(ui):
+            text = segment(ui, '> /task list')
+            self.assertIn('Tasks, newest first (41 read, 0 unreadable', text)
+            self.assertIn('\n  ' + _PARITY_MANY + '  ', text)
+            self.assertNotIn(chat_tui.TASK_READING['list'], text)
+            index_rows = {record['task_id'] for record in ui.list_records_all
+                          if chat_tui_status.INDEX_KEY in record}
+            self.assertLessEqual({'%032x' % n for n in range(8)}, index_rows)
+            visible(ui)
+
+        newest_line = chat_tui.TASK_SHOW_USAGE + '\n  newest Task: ' + _PARITY_MANY
+
+        async def newest(ui):
+            await WidgetTests.until(
+                ui, lambda ui: '> /task show' in ui.conversation.text
+                and newest_line in segment(ui, '> /task show'), '/task show usage printed')
+            visible(ui)
+
+        def events(ui):
+            text = segment(ui, '> /task events')
+            self.assertNotIn(chat_tui.TASK_READING['events'], text)
+            self.assertNotIn('INCOMPLETE', text)
+            self.assertIn(want, text)
+            # The eighth newest event of the many-event Task: the index alone keeps three.
+            self.assertIn(_parity_stamp(2000) + '  ' + _PARITY_MANY[:8] + '  [DISPATCH]', text)
+            visible(ui)
+
+        with patch.object(chat_tui, 'task_store_absent', return_value=False), \
+                patch('llmtool.task_store.TaskStore', return_value=store), \
+                patch.object(chat_tui_status, 'load_records',
+                             side_effect=AssertionError('no full read')):
+            ui, _ = self.drive(['/task list\r', printed('> /task list', 'Tasks, newest first'),
+                                rows,
+                                '/task show\r', newest,
+                                '/task events\r',
+                                printed('> /task events', 'Recent events across'), events],
+                               dev=False)
+        self.assertFalse(ui.dev)
+        self.assertNotIn(chat_tui.TASK_HIDDEN, ui.conversation.text)
+        # Full reads only of the rows the newest events need; blocks n=0..7 never read.
+        read = {call.args[0] for call in store.get.call_args_list}
+        self.assertIn(_PARITY_MANY, read)
+        self.assertFalse(read & {'%032x' % n for n in range(8)})
+
+    @staticmethod
+    def events_text(records, unreadable):
+        """The event lines /task events prints for a full read (header and read time
+        excluded, as the read time differs)."""
+        from llmtool import chat_tui_events
+        lines = chat_tui_events.conversation_text(records, unreadable, 'now').splitlines()
+        return '\n'.join(lines[1:])
 
 
 if __name__ == '__main__':
