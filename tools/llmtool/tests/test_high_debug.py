@@ -223,7 +223,8 @@ class HighDebugTests(unittest.TestCase):
         return caught.exception.high_debug_code, created
 
     def test_failed_codex_attempts_are_recorded_and_retry_uses_a_new_d6(self):
-        store = _Store()
+        # #1502 WP-D O7: a started attempt that failed uses the Debug, so each
+        # case gets a fresh store and a retry on the same store is refused.
         root = self._repo()
         cases = (
             ({'returncode': 1}, 'HIGH_DEBUG_RUN_FAILED'),
@@ -231,17 +232,20 @@ class HighDebugTests(unittest.TestCase):
              'HIGH_DEBUG_RUN_FAILED'),
             ({'dirty': True}, 'HIGH_DEBUG_WROTE_FILES'),
         )
-        for attempt, (kwargs, code) in enumerate(cases, 1):
-            with self.subTest(code=code, attempt=attempt):
+        for kwargs, code in cases:
+            with self.subTest(code=code):
+                store = _Store()
                 observed, created = self._failing_case(store, root, **kwargs)
                 self.assertEqual(observed, code)
-                self.assertEqual(created, [f'executor-hd{attempt}-aaaaaaa'])
+                self.assertEqual(created, ['executor-hd1-aaaaaaa'])
                 entry = store.entries[-1]
                 self.assertEqual((entry['status'], entry['report'], entry['d6']),
                                  ('RUN_FAILED', code, created[0]))
                 (root / 'unexpected.txt').unlink(missing_ok=True)
-        self.assertEqual(len(store.entries), len(cases))
-        self.assertEqual(store.events, [])
+                self.assertEqual(self._failing_case(store, root),
+                                 ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
+                self.assertEqual(len(store.entries), 1)
+                self.assertEqual(store.events, [])
 
     def _failed_report(self, report):
         store = _Store()
@@ -593,24 +597,32 @@ class HighDebugTests(unittest.TestCase):
             raise subprocess.CalledProcessError(1, 'lifecycle')
         def leaves_nothing(**_kwargs):
             raise subprocess.CalledProcessError(1, 'lifecycle')
+        # #1502 WP-D O7: each failed create finalizes one not-used entry, so
+        # attempts advance; a leftover hd2 branch is still skipped.
+        subprocess.run(['git', '-C', str(root), 'branch',
+                        'llmtool/high-debug-executor-hd2-aaaaaaa'], check=True)
         expected = (
             (leaves_branch, 'executor-hd1-aaaaaaa'),
-            (leaves_record, 'executor-hd2-aaaaaaa'),
-            (leaves_nothing, 'executor-hd3-aaaaaaa'),
-            (leaves_nothing, 'executor-hd3-aaaaaaa'),
+            (leaves_record, 'executor-hd3-aaaaaaa'),
+            (leaves_nothing, 'executor-hd4-aaaaaaa'),
+            (leaves_nothing, 'executor-hd4-aaaaaaa'),
         )
         for create, name in expected:
             with self.subTest(name=name):
                 observed, created = self._failing_case(store, root, create=create)
                 self.assertEqual(observed, 'HIGH_DEBUG_D6_CREATE_FAILED')
                 self.assertEqual(created, [name])
-        self.assertEqual(store.entries, [])
+        self.assertEqual([(entry['status'], entry['report'], entry['d6'])
+                          for entry in store.entries],
+                         [('RUN_FAILED', 'HIGH_DEBUG_D6_CREATE_FAILED', name)
+                          for _create, name in expected])
+        self.assertFalse(any(high_debug._debug_entry_used(entry) for entry in store.entries))
 
     def test_failed_attempt_keeps_its_code_when_recording_fails(self):
         store = _Store()
-        def refuse(_task_id, _entry):
+        def refuse(_task_id, _index, _entry):
             raise LLMToolError('limit')
-        store.append_high_debug = refuse
+        store.finalize_high_debug = refuse
         observed, _created = self._failing_case(store, self._repo(), returncode=1)
         self.assertEqual(observed, 'HIGH_DEBUG_RUN_FAILED')
 
@@ -661,7 +673,8 @@ class HighDebugTests(unittest.TestCase):
     def test_a_failed_launch_does_not_use_up_the_parent_debug(self):
         report = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS)
         (_result, invoke, store) = self._run_case(report + 'RCA_UNCONFIRMED')
-        store.entries[0] = dict(store.entries[0], status='RUN_FAILED')
+        store.entries[0] = dict(store.entries[0], status='RUN_FAILED',
+                                report='HIGH_DEBUG_QUOTA_EXHAUSTED')
         self.assertIsNone(invoke())
         self.assertEqual([entry['status'] for entry in store.entries],
                          ['RUN_FAILED', 'RCA_UNCONFIRMED'])
@@ -2145,7 +2158,13 @@ class _Store:
     def __init__(self):
         self.entries = []
         self.events = []
+        self.served = set()
+    def task_ids(self):
+        return sorted(self.served)
+    def finalize_high_debug(self, _task_id, index, entry):
+        self.entries[index] = entry
     def get(self, task_id):
+        self.served.add(task_id)
         return {'task_id': task_id, 'run_id': 'b' * 32,
                 'review_repair_claims': [
                     {'family': 'family', 'pr': 17},

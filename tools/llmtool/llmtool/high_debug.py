@@ -1242,6 +1242,23 @@ def _require_screen_cleared(task_id, family):
 # #1502 WP-D: Debug outcomes that use up a Debug; a launch that recorded
 # RUN_FAILED did not run one, so a fallback route may still run.
 _DEBUG_USED_STATUSES = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID')
+# #1502 WP-D O7: RUN_FAILED reports confirming that no Debug started.
+_DEBUG_NOT_STARTED = ('HIGH_DEBUG_QUOTA_EXHAUSTED', 'HIGH_DEBUG_AUTH_FAILED',
+                      'HIGH_DEBUG_D6_CREATE_FAILED')
+
+
+def _debug_entry_used(entry):
+    """True unless entry is a RUN_FAILED confirmed not started; any doubt is used.
+
+    _DEBUG_USED_STATUSES, RESERVED and any unknown status are used. RUN_FAILED
+    is used unless its report is exactly one of _DEBUG_NOT_STARTED.
+    """
+    if type(entry) is not dict:
+        return True
+    if entry.get('status') == 'RUN_FAILED':
+        report = entry.get('report')
+        return not (type(report) is str and report in _DEBUG_NOT_STARTED)
+    return True
 
 
 def _admit_debug(task, entries):
@@ -1253,8 +1270,7 @@ def _admit_debug(task, entries):
         _refuse('HIGH_DEBUG_POLICY_INVALID')
     lineage = task.get('lineage')
     kind = lineage.get('kind') if type(lineage) is dict else 'root'
-    used = sum(1 for entry in entries
-               if type(entry) is not dict or entry.get('status') in _DEBUG_USED_STATUSES)
+    used = sum(1 for entry in entries if _debug_entry_used(entry))
     try:
         code = repair_policy.admit_debug(kind=kind, parent_debug_used=used,
                                          group_debug_used=used, policy=policy)
@@ -1262,6 +1278,113 @@ def _admit_debug(task, entries):
         _refuse('HIGH_DEBUG_LINEAGE_INVALID')
     if code is not None:
         _refuse('HIGH_DEBUG_' + code)
+
+
+def _debug_kind_and_key(store, task):
+    """(lineage kind, lock key): a split child locks on its ROOT, others on their chain."""
+    from . import lineage_counts
+    lineage = task.get('lineage')
+    kind = lineage.get('kind') if type(lineage) is dict else 'root'
+    if kind == 'child':
+        return kind, lineage.get('lineage_id')
+    return kind, lineage_counts.chain_key(store, task)
+
+
+def _group_debug_used(store, task, entries):
+    """Debugs used by a split child's group, or UNKNOWN on any doubt.
+
+    The child's own entries plus each other child listed in its ROOT's lineage
+    splits, each child's own high_debug entries. A missing or unreadable ROOT
+    or sibling is UNKNOWN.
+    """
+    from .repair_policy import UNKNOWN
+    root_id = task['lineage'].get('lineage_id')
+    try:
+        root = store.get(root_id)
+    except Exception:
+        return UNKNOWN
+    line = root.get('lineage') if type(root) is dict else None
+    if (type(root) is not dict or root.get('task_id') != root_id or type(line) is not dict or
+            type(line.get('splits', [])) is not list or type(entries) is not list):
+        return UNKNOWN
+    used = sum(1 for entry in entries if _debug_entry_used(entry))
+    seen = {task.get('task_id')}
+    for split in line.get('splits', []):
+        children = split.get('children') if type(split) is dict else None
+        if type(children) is not list:
+            return UNKNOWN
+        for child_id in children:
+            if child_id in seen:
+                continue
+            seen.add(child_id)
+            try:
+                child = store.get(child_id)
+            except Exception:
+                return UNKNOWN
+            if type(child) is not dict or child.get('task_id') != child_id:
+                return UNKNOWN
+            other = child.get('high_debug', [])
+            if type(other) is not list:
+                return UNKNOWN
+            used += sum(1 for entry in other if _debug_entry_used(entry))
+    return used
+
+
+def _reserve_debug(store, task_id, entries, reservation):
+    """#1502 WP-D O7: count and reserve one AI Debug under the lineage lock.
+
+    Like review_repair's chain lock: take the lock (else
+    HIGH_DEBUG_CHAIN_LOCK_UNAVAILABLE), reread the Task (HIGH_DEBUG_BUSY when
+    its key or high_debug list is no longer entries), count chain-wide or
+    group-wide (UNKNOWN counts as used), refuse with the admit_debug code, then
+    append the RESERVED entry (else HIGH_DEBUG_RESERVATION_FAILED). The lock is
+    released on every path. Returns the entry's index, len(entries).
+    """
+    from . import lineage_counts, repair_policy
+    try:
+        policy = repair_policy.load_policy()
+    except LLMToolError:
+        _refuse('HIGH_DEBUG_POLICY_INVALID')
+    try:
+        task = store.get(task_id)
+    except Exception:
+        task = None
+    if type(task) is not dict or task.get('task_id') != task_id:
+        _refuse('HIGH_DEBUG_BUSY')
+    _kind, key = _debug_kind_and_key(store, task)
+    try:
+        release = lineage_counts.acquire_chain_lock(store, key)
+    except Exception:
+        _refuse('HIGH_DEBUG_CHAIN_LOCK_UNAVAILABLE')
+    try:
+        try:
+            current = store.get(task_id)
+        except Exception:
+            current = None
+        if (type(current) is not dict or current.get('task_id') != task_id or
+                _debug_kind_and_key(store, current)[1] != key or
+                current.get('high_debug', []) != entries):
+            _refuse('HIGH_DEBUG_BUSY')
+        kind = _debug_kind_and_key(store, current)[0]
+        if kind == 'child':
+            used = _group_debug_used(store, current, entries)
+        else:
+            used, _group = lineage_counts.chain_debug_used(store, current, entries,
+                                                           _debug_entry_used)
+        try:
+            code = repair_policy.admit_debug(kind=kind, parent_debug_used=used,
+                                             group_debug_used=used, policy=policy)
+        except LLMToolError:
+            _refuse('HIGH_DEBUG_LINEAGE_INVALID')
+        if code is not None:
+            _refuse('HIGH_DEBUG_' + code)
+        try:
+            store.append_high_debug(task_id, reservation)
+        except Exception:
+            _refuse('HIGH_DEBUG_RESERVATION_FAILED')
+        return len(entries)
+    finally:
+        release()
 
 
 def run_high_debug(*, store, task_id, executor_task, pr_number, family,
@@ -1397,12 +1520,27 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
     model_requested = debug_model
+    # #1502 WP-D O7: one RESERVED entry, counted chain-wide under the lineage
+    # lock, is persisted before any D6 create or provider call. Every outcome
+    # finalizes that entry in place; a crash leaves it RESERVED (used).
+    try:
+        reserved_at = store._completion_now()
+    except Exception:
+        reserved_at = None
+    reservation = _failed_entry(
+        family=family, failed_corrections=failed_corrections, early_reason=early_reason,
+        head=head, d6=d6, code='HIGH_DEBUG_RESERVED', observed='UNKNOWN', effort='UNKNOWN',
+        usage='UNKNOWN', recorded_at=reserved_at, model_requested=model_requested,
+        rules_sha256=rules_sha256)
+    reservation['status'] = 'RESERVED'
+    index = _reserve_debug(store, task_id, entries, reservation)
 
     def failed(code, observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN', report=None,
-               detail=None, screen_hits=None):
-        # A diagnosis attempt that started but did not finish is recorded: it
-        # counts toward the entry limit and keeps its D6 traceable. Recording
-        # is best effort: the original refusal code is what the caller sees.
+               detail=None, screen_hits=None, post=True):
+        # A diagnosis attempt that started but did not finish finalizes its
+        # reservation: it counts toward the entry limit and keeps its D6
+        # traceable. A failed finalize leaves it RESERVED (used); the original
+        # refusal code is what the caller sees.
         try:
             recorded_at = store._completion_now()
         except Exception:
@@ -1414,11 +1552,11 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                 recorded_at=recorded_at, model_requested=model_requested,
                 rules_sha256=rules_sha256)
         try:
-            store.append_high_debug(task_id, entry)
+            store.finalize_high_debug(task_id, index, entry)
         except Exception:
-            pass
-        posted = _post_record(entry, pr_number, repo_root, task_id, code, account=account)
-        if not posted:
+            detail = (detail + ' ' if detail else '') + 'reservation=UNFINALIZED'
+        if post and not _post_record(entry, pr_number, repo_root, task_id, code,
+                                     account=account):
             detail = (detail + ' ' if detail else '') + 'github_record=UNPOSTED'
         if screen_hits is not None:
             detail = _screen_detail(
@@ -1436,7 +1574,9 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         else:
             diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root,
                                     executor_task=executor_task)
-    except Exception: _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
+    except Exception:
+        # No provider call happened: the only cancel path, finalized not used.
+        failed('HIGH_DEBUG_D6_CREATE_FAILED', post=False)
     reason = f'failed corrections: {failed_corrections}' if failed_corrections is not None else f'early reason: {early_reason}'
     prompt = rules_prefix + (f'Task: {task_id}\nPR: {pr_number}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'
               f'Evidence:\n{evidence_text}\n\nRequired report sections, each exactly as its own line:\n'
@@ -1543,7 +1683,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
        'effort_observed':effort,'status':status,'report_sha256':hashlib.sha256(report.encode()).hexdigest(),
        'report':report,'usage':usage,'recorded_at':store._completion_now(),
        'rules_sha256':rules_sha256}
-    store.append_high_debug(task_id, entry)
+    store.finalize_high_debug(task_id, index, entry)
     posted = _post_record(entry, pr_number, repo_root, task_id, account=account)
     payload=entry['report_sha256'].encode()
     event_id=hashlib.sha256(('HIGH_DEBUG\0'+task_id+'\0'+head+'\0'+entry['report_sha256']).encode()).hexdigest()[:32]

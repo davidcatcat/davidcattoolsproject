@@ -237,6 +237,34 @@ def chain_review_repairs(store, task):
     return count
 
 
+def chain_debug_used(store, task, entries, is_used):
+    """AI Debugs used over task's whole chain: (used, used), each a count or UNKNOWN.
+
+    #1502 WP-D O7: the Task's own entries (the argument) plus the high_debug
+    list of every other chain Task, predecessors and successors (at most
+    MAX_CHAIN), each counted with is_used. A Task with no continues link and
+    no successor counts only its own entries. Any read, link, fork, shape or
+    non-list doubt is (UNKNOWN, UNKNOWN). Run it under the chain lock.
+    """
+    if type(task) is not dict or type(entries) is not list or store is None:
+        return UNKNOWN, UNKNOWN
+    records = chain_records(store, task)
+    if records is None:
+        return UNKNOWN, UNKNOWN
+    later = successor_records(store, task, {record.get('task_id') for record in records})
+    if later is None or len(records) + len(later) > MAX_CHAIN:
+        return UNKNOWN, UNKNOWN
+    used = 0
+    for items in [entries] + [record.get('high_debug', []) for record in records[1:] + later]:
+        if type(items) is not list:
+            return UNKNOWN, UNKNOWN
+        try:
+            used += sum(1 for item in items if is_used(item))
+        except Exception:
+            return UNKNOWN, UNKNOWN
+    return used, used
+
+
 def check_continues(store, task_id, predecessor):
     """Refuse, with a fixed code, a --continues link that breaks the chain shape.
 

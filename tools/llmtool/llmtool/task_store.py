@@ -158,6 +158,26 @@ _REPAIR_CAP_OVERRIDE_VALID_SHAPES = tuple(
 _HIGH_DEBUG_FIELDS = frozenset(('family', 'failed_corrections', 'early_reason', 'examined_sha',
     'd6', 'model_requested', 'model_observed', 'effort_observed', 'status',
     'report_sha256', 'report', 'usage', 'recorded_at'))
+# #1502 WP-D O7: a RESERVED AI Debug entry keeps these values when finalized.
+_HIGH_DEBUG_IDENTITY = ('family', 'failed_corrections', 'early_reason', 'examined_sha',
+                        'd6', 'model_requested', 'rules_sha256')
+
+
+def _check_high_debug_finalize(old, new, index):
+    """Only entries[index] changes, from RESERVED to a final entry of the same identity."""
+    if (type(old) is not list or type(new) is not list or len(new) != len(old) or
+            type(index) is not int or not 0 <= index < len(old) or
+            new[:index] != old[:index] or new[index + 1:] != old[index + 1:]):
+        _fail('HIGH_DEBUG_IMMUTABLE')
+    before, after = old[index], new[index]
+    missing = object()
+    if (type(before) is not dict or before.get('status') != 'RESERVED' or
+            type(after) is not dict or after.get('status') in (None, 'RESERVED') or
+            any(before.get(key, missing) != after.get(key, missing)
+                for key in _HIGH_DEBUG_IDENTITY)):
+        _fail('HIGH_DEBUG_IMMUTABLE')
+
+
 MAX_COMPLETION_EVENTS = 32
 # Retention: when the event list is full, the oldest ACKED event is compacted
 # into a tombstone that keeps its identity and stream position, so an acked
@@ -1975,7 +1995,7 @@ def _validate(record, *, strict=True):
                 (item.get('usage') != 'UNKNOWN' and type(item.get('usage')) is not dict) or
                 type(item.get('recorded_at')) is not str or
                 item.get('status') not in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID',
-                                        'RUN_FAILED')):
+                                        'RUN_FAILED', 'RESERVED')):
                 _fail('HIGH_DEBUG_INVALID')
     if 'repair_cap_override' in record:
         # #1502 WP-D D7: nothing writes this field any more and nothing reads
@@ -4095,6 +4115,27 @@ class TaskStore:
                 continue
         _fail('HIGH_DEBUG_BUSY')
 
+    def finalize_high_debug(self, task_id, index, entry):
+        """#1502 WP-D O7: replace the RESERVED entry at index with its final entry, once.
+
+        Written through the compare-and-update path; the store refuses
+        HIGH_DEBUG_IMMUTABLE unless entries[index] is RESERVED, entry has
+        another status and the same identity, and every other entry is unchanged.
+        """
+        for _ in range(5):
+            current = self.get(task_id)
+            entries = current.get('high_debug', [])
+            if type(entries) is not list or type(index) is not int or not 0 <= index < len(entries):
+                _fail('HIGH_DEBUG_IMMUTABLE')
+            changed = list(entries)
+            changed[index] = entry
+            try:
+                return self._update(task_id, expected={'high_debug': current.get('high_debug')},
+                                    changes={'high_debug': changed}, high_debug_finalize=index)
+            except TaskStoreConflict:
+                continue
+        _fail('HIGH_DEBUG_BUSY')
+
     @staticmethod
     def _completion_now():
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
@@ -5226,11 +5267,13 @@ class TaskStore:
                        trusted_completion_events=False, trusted_abandonment=False,
                        abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
                        trusted_codex_launch=False, trusted_opencode_launch=False,
-                       trusted_split=None, split_child_max=None):
+                       trusted_split=None, split_child_max=None, high_debug_finalize=None):
         # Refused here, not by the writable-field check: the dispatch gate
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
             _fail()
+        if high_debug_finalize is not None and set(changes) != {'high_debug'}:
+            _fail('HIGH_DEBUG_IMMUTABLE')
         if 'continues' in changes:
             # #1502 WP-D L1: continues is written once, when record-pm creates the Task.
             _fail('TASK_CONTINUES_IMMUTABLE')
@@ -5508,7 +5551,9 @@ class TaskStore:
             if 'high_debug' in changes:
                 old_entries = current.get('high_debug', [])
                 new_entries = changes['high_debug']
-                if (type(new_entries) is not list or len(new_entries) != len(old_entries) + 1 or
+                if high_debug_finalize is not None:
+                    _check_high_debug_finalize(old_entries, new_entries, high_debug_finalize)
+                elif (type(new_entries) is not list or len(new_entries) != len(old_entries) + 1 or
                         new_entries[:-1] != old_entries):
                     _fail('HIGH_DEBUG_IMMUTABLE')
             from . import worker_dispatch
