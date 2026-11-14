@@ -185,17 +185,36 @@ def timeline_text(record):
     return "\n".join(lines)
 
 
-def recent_text(records, unreadable, refreshed):
-    """Cross-Task recent events pane text."""
-    rows = []
+def _row_events(record):
+    """(events, kept only the newest few) of a list row: a TaskStore record, or a row
+    built from the task status index, which keeps each Task's newest events only."""
+    from .chat_tui_status import INDEX_KEY
+    summary = record.get(INDEX_KEY) if type(record) is dict else None
+    if type(summary) is not dict:
+        return task_events(record), False
+    events = [_event(when, kind, text, recorded)
+              for when, kind, text, recorded in summary["events"]]
+    return events, summary["event_count"] > len(events)
+
+
+def recent_text(records, unreadable, refreshed, note=None):
+    """Cross-Task recent events pane text; ``note`` (status index fallback) follows the
+    header lines."""
+    from .task_index import TUI_EVENT_LIMIT
+    rows, partial = [], False
     for record in records:
         task_id = value(record, "task_id")
-        rows += [(event, task_id) for event in task_events(record)]
+        events, cut = _row_events(record)
+        partial = partial or cut
+        rows += [(event, task_id) for event in events]
     timed = sorted((r for r in rows if r[0]["time"]), key=lambda r: r[0]["time"], reverse=True)
     rows = (timed + [r for r in rows if not r[0]["time"]])[:RECENT_LIMIT]
-    lines = ["Recent events across %d Tasks (%d unreadable; refreshed %s; newest %d shown)"
-             % (len(records), unreadable, refreshed, RECENT_LIMIT),
+    lines = ["Recent events across %d Tasks (%d unreadable; refreshed %s; newest %d shown%s)"
+             % (len(records), unreadable, refreshed, RECENT_LIMIT,
+                ", status index keeps %d per Task" % TUI_EVENT_LIMIT if partial else ""),
              "F5 or r refreshes, Esc closes, Tab focuses for scrolling; read only, no inbox ack/poll"]
+    if note:
+        lines.append(note)
     lines += [format_event(event, task_id) for event, task_id in rows]
     if not rows:
         lines.append("no events in TaskStore")

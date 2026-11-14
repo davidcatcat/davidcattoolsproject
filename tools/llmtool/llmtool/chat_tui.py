@@ -855,6 +855,7 @@ class ChatTUI:
         self.list_index = 0
         self.list_unreadable = 0
         self.list_error = None
+        self.list_note = None    # status index fallback note of the last read, else None
         self.list_loaded = None  # (monotonic, local clock text) of the last finished read
         self.list_reader = None
         self.unseen_output = False
@@ -2413,7 +2414,7 @@ class ChatTUI:
             text = "Recent events: llmtool: " + self.list_error
         else:
             text = chat_tui_events.recent_text(self.list_records_all, self.list_unreadable,
-                                               self.list_loaded[1])
+                                               self.list_loaded[1], self.list_note)
         if self.unseen_output:
             text = "new conversation output — Esc shows it\n" + text
         self._set_read_text(self.events_view, terminal_safe_text(text))
@@ -2434,8 +2435,10 @@ class ChatTUI:
                 outcome = ([], 0, None)
             else:
                 from .task_store import TaskStore
-                records, unreadable = chat_tui_status.load_records(TaskStore())
-                outcome = (records, unreadable, None)
+                # The task status index first (read only); a missing, unreadable or stale
+                # index falls back to reading every record, and the note says so.
+                records, unreadable, note = chat_tui_status.load_list(TaskStore())
+                outcome = (records, unreadable, None, note)
         except LLMToolError as exc:
             outcome = ([], 0, str(exc))
         except Exception:
@@ -2446,11 +2449,13 @@ class ChatTUI:
             pass
 
     def finish_list(self, outcome):
-        records, unreadable, error = outcome
+        """``outcome``: (records, unreadable, error[, status index note])."""
+        records, unreadable, error = outcome[:3]
         selected = self.selected_task_id()
         self.list_reader = None
         self.list_records_all = records
         self.list_unreadable, self.list_error = unreadable, error
+        self.list_note = outcome[3] if len(outcome) > 3 else None
         self._project_list_records(selected)
         self.list_loaded = (time.monotonic(), time.strftime("%H:%M:%S"))
         if self.show_events:
@@ -2533,6 +2538,8 @@ class ChatTUI:
                 ("class:menu.header", cut("  " + "Task ID".ljust(8) + "  " + "Stage (derived)".ljust(26)
                                           + "Rounds".ljust(12) + "PR".ljust(12) + "Owner".ljust(8)
                                           + "Request (Core, first line) — Enter detail; F5/r refresh; Esc close"))]
+        if self.list_note and self.list_error is None:
+            rows.append(("class:menu.header", cut(" " + self.list_note)))
         if self.unseen_output:
             rows.append(("class:menu.header", cut(" new conversation output — Esc shows it")))
         if self.list_error is not None:

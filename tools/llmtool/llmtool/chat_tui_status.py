@@ -16,6 +16,9 @@ from . import trust
 from .chat_tui_task import NOT_AVAILABLE, PENDING_DISPATCH, UNKNOWN, retry_condition, value
 
 LIST_LIMIT = 200  # Newest Tasks shown; matches the task status upper bound.
+# Key of a list row built from the task status index (task_index) instead of a TaskStore
+# record; its value is the index's "tui" projection. Core records never use this key.
+INDEX_KEY = "_status_index"
 REFRESH_SECONDS = 15  # Task list re-read interval while shown (local files only).
 NAME_WIDTH = 60
 
@@ -369,8 +372,20 @@ def last_event(record):
             + value(event, "received_at") + (" (acked)" if event.get("acked_at") else " (not acked)"))
 
 
+def _indexed(record):
+    """The status-index projection of a list row, or None for a full TaskStore record."""
+    if type(record) is not dict:
+        return None
+    summary = record.get(INDEX_KEY)
+    return summary if type(summary) is dict else None
+
+
 def row(record):
     """One list row's fields (all strings); an unexpected shape is UNKNOWN, never a crash."""
+    summary = _indexed(record)
+    if summary is not None:
+        return {"task_id": value(record, "task_id"), "stage": summary["stage"],
+                "updated": value(record, "updated_at"), "name": summary["name"]}
     try:
         current, _reason = stage(record)
         name = task_name(record)
@@ -428,6 +443,86 @@ def load_records(store):
             unreadable += 1
     records.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
     return records[:LIST_LIMIT], unreadable
+
+
+_INDEX_FALLBACK = {
+    "unavailable": "status index unavailable",
+    "missing": "status index not found",
+    "unreadable": "status index unreadable",
+    "stale": "status index out of date (validator fingerprint)",
+}
+
+
+def index_summary(record):
+    """The list row and newest events of one record, as task status stores them in its
+    index (task_index "tui"). Raises on a record shape the list cannot project."""
+    from .chat_tui_events import task_events
+    from .task_index import TUI_EVENT_LIMIT, TUI_TEXT_LIMIT
+    current, _reason = stage(record)
+    item = row(record)
+    developer = _dict(record.get("developer")) or {}
+    executor = developer.get("executor_task_id")
+    prs = []
+    for number, _label in _pr_sources(record):
+        if number not in prs:
+            prs.append(number)
+    events = task_events(record)
+    cut = lambda text: (text if len(text) <= TUI_TEXT_LIMIT
+                        else text[:TUI_TEXT_LIMIT - 1] + "…")
+    updated = record.get("updated_at")
+    return {"updated_at": updated if type(updated) is str else None,
+            "stage": item["stage"], "name": item["name"],
+            "executor": executor if type(executor) is str and executor else None,
+            "prs": prs, "owner": _owner_decision(record) is not None,
+            "terminal": _terminal(record, current),
+            "events": [[event["time"], event["kind"], cut(event["text"]), event["recorded"]]
+                       for event in events[:TUI_EVENT_LIMIT]],
+            "event_count": len(events)}
+
+
+def _index_record(task_id, entry, summary):
+    record = {"task_id": task_id, "created_at": entry["created_at"], INDEX_KEY: summary}
+    if summary["updated_at"] is not None:
+        record["updated_at"] = summary["updated_at"]
+    return record
+
+
+def load_list(store):
+    """(rows newest first, unreadable count, note or None) for the Task list and events.
+
+    Rows come from the task status index when it is current: no per-record TaskStore.get.
+    A record whose index entry is absent or out of date (file stat changed) is read from
+    TaskStore. A missing, unreadable or stale index falls back to load_records; the note
+    says so. Read only: the index is never written, created or repaired here.
+    """
+    from . import task_index
+    entries, reason = task_index.display_entries(store)
+    if entries is None:
+        records, unreadable = load_records(store)
+        return (records, unreadable, _INDEX_FALLBACK.get(reason, "status index unavailable")
+                + "; read every TaskStore record")
+    records, unreadable, stale = [], 0, []
+    for task_id in store.task_ids():
+        entry = entries.get(task_id)
+        if entry is not None and entry["stat"] == task_index.record_key(store, task_id):
+            if not entry["readable"]:
+                unreadable += 1
+                continue
+            if "tui" in entry:
+                records.append(_index_record(task_id, entry, entry["tui"]))
+                continue
+        stale.append(task_id)
+    for task_id in stale:
+        try:
+            records.append(store.get(task_id))
+        except Exception:
+            unreadable += 1
+    records.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
+    note = None
+    if stale:
+        note = ("status index out of date for %d Tasks; read those TaskStore records"
+                % len(stale))
+    return records[:LIST_LIMIT], unreadable, note
 
 
 # Stages in which PM-dispatched work is running in the background, and who is at work.
@@ -507,8 +602,12 @@ def group_rows(records, now, show_all):
     grouped, order = {}, []
     for index, record in enumerate(records):
         record_dict = _dict(record) or {}
-        developer = _dict(record_dict.get("developer")) or {}
-        executor = developer.get("executor_task_id")
+        summary = _indexed(record_dict)
+        if summary is not None:
+            executor = summary["executor"]
+        else:
+            developer = _dict(record_dict.get("developer")) or {}
+            executor = developer.get("executor_task_id")
         key = ("d6", executor) if type(executor) is str and executor else ("task", index)
         if key not in grouped:
             grouped[key] = []
@@ -516,8 +615,6 @@ def group_rows(records, now, show_all):
         grouped[key].append(record)
 
     visible, hidden = [], 0
-    terminal = {"DONE", "COMPLETED", "ABANDONED", "FAILED"}
-    from . import task_status
 
     def timestamp(record, field):
         try:
@@ -541,15 +638,14 @@ def group_rows(records, now, show_all):
             if created is not None and (newest_created is None or created > newest_created):
                 head, newest_created = member, created
         head_dict = _dict(head) or {}
-        # F3 can briefly render placeholder rows while the list is being replaced.
-        # Keep those rows independent and render their unknown stage without raising.
-        current, _reason = stage(head_dict)
-        completion = _dict(head_dict.get("completion")) or {}
-        developer = _dict(head_dict.get("developer")) or {}
-        terminal_state = (current in terminal or task_status.derive_state(head_dict) in terminal
-                          or head_dict.get("state") in terminal
-                          or completion.get("state") in terminal
-                          or developer.get("state") in terminal)
+        head_summary = _indexed(head_dict)
+        if head_summary is not None:
+            terminal_state = head_summary["terminal"]
+        else:
+            # F3 can briefly render placeholder rows while the list is being replaced.
+            # Keep those rows independent and render their unknown stage without raising.
+            current, _reason = stage(head_dict)
+            terminal_state = _terminal(head_dict, current)
         updates = [stamp for stamp in (timestamp(member, "updated_at") for member in members)
                    if stamp is not None]
         latest_update = max(updates) if updates else None
@@ -564,13 +660,32 @@ def group_rows(records, now, show_all):
         numbers = []
         for member in members:
             member_dict = _dict(member) or {}
-            for number, _label in _pr_sources(member_dict):
+            member_summary = _indexed(member_dict)
+            found = (member_summary["prs"] if member_summary is not None
+                     else [number for number, _label in _pr_sources(member_dict)])
+            for number in found:
                 if number not in numbers:
                     numbers.append(number)
         pr = "CONFLICT" if len(numbers) > 1 else ("#%d" % numbers[0] if numbers else "")
+        owner = (head_summary["owner"] if head_summary is not None
+                 else _owner_decision(head_dict) is not None)
         visible.append({"record": head, "rounds": len(members) - 1, "pr": pr,
-                        "owner": _owner_decision(head_dict) is not None})
+                        "owner": owner})
     return visible, hidden
+
+
+_TERMINAL = {"DONE", "COMPLETED", "ABANDONED", "FAILED"}
+
+
+def _terminal(record, current):
+    """A finished Task (group_rows hides it unless every Task is shown)."""
+    from . import task_status
+    completion = _dict(record.get("completion")) or {}
+    developer = _dict(record.get("developer")) or {}
+    return (current in _TERMINAL or task_status.derive_state(record) in _TERMINAL
+            or record.get("state") in _TERMINAL
+            or completion.get("state") in _TERMINAL
+            or developer.get("state") in _TERMINAL)
 
 
 def read_background(pm_session, store=None):
