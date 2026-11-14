@@ -1333,17 +1333,22 @@ def _debug_kind_and_key(store, task):
     return kind, lineage_counts.chain_key(store, task)
 
 
+def _read_task(store, task_id):
+    """The stored Task task_id, or None when unreadable or another Task."""
+    try:
+        task = store.get(task_id)
+    except Exception:
+        return None
+    return task if type(task) is dict and task.get('task_id') == task_id else None
+
+
 def _group_debug_used(store, task, entries):
     """Debugs used by the child and every child in its ROOT's splits; doubt is UNKNOWN."""
     from .repair_policy import UNKNOWN
-    root_id = task['lineage'].get('lineage_id')
-    try:
-        root = store.get(root_id)
-    except Exception:
-        return UNKNOWN
-    line = root.get('lineage') if type(root) is dict else None
-    if (type(root) is not dict or root.get('task_id') != root_id or type(line) is not dict or
-            type(line.get('splits', [])) is not list or type(entries) is not list):
+    root = _read_task(store, task['lineage'].get('lineage_id'))
+    line = root.get('lineage') if root else None
+    if (type(line) is not dict or type(line.get('splits', [])) is not list or
+            type(entries) is not list):
         return UNKNOWN
     used = sum(1 for entry in entries if _debug_entry_used(entry))
     seen = {task.get('task_id')}
@@ -1355,13 +1360,8 @@ def _group_debug_used(store, task, entries):
             if child_id in seen:
                 continue
             seen.add(child_id)
-            try:
-                child = store.get(child_id)
-            except Exception:
-                return UNKNOWN
-            if type(child) is not dict or child.get('task_id') != child_id:
-                return UNKNOWN
-            other = child.get('high_debug', [])
+            child = _read_task(store, child_id)
+            other = child.get('high_debug', []) if child else None
             if type(other) is not list:
                 return UNKNOWN
             used += sum(1 for entry in other if _debug_entry_used(entry))
@@ -1375,11 +1375,8 @@ def _reserve_debug(store, task_id, entries, reservation):
         policy = repair_policy.load_policy()
     except LLMToolError:
         _refuse('HIGH_DEBUG_POLICY_INVALID')
-    try:
-        task = store.get(task_id)
-    except Exception:
-        task = None
-    if type(task) is not dict or task.get('task_id') != task_id:
+    task = _read_task(store, task_id)
+    if task is None:
         _refuse('HIGH_DEBUG_BUSY')
     _kind, key = _debug_kind_and_key(store, task)
     try:
@@ -1387,20 +1384,13 @@ def _reserve_debug(store, task_id, entries, reservation):
     except Exception:
         _refuse('HIGH_DEBUG_CHAIN_LOCK_UNAVAILABLE')
     try:
-        try:
-            current = store.get(task_id)
-        except Exception:
-            current = None
-        if (type(current) is not dict or current.get('task_id') != task_id or
-                _debug_kind_and_key(store, current)[1] != key or
+        current = _read_task(store, task_id)
+        if (current is None or _debug_kind_and_key(store, current)[1] != key or
                 current.get('high_debug', []) != entries):
             _refuse('HIGH_DEBUG_BUSY')
         kind = _debug_kind_and_key(store, current)[0]
-        if kind == 'child':
-            used = _group_debug_used(store, current, entries)
-        else:
-            used, _group = lineage_counts.chain_debug_used(store, current, entries,
-                                                           _debug_entry_used)
+        used = (_group_debug_used(store, current, entries) if kind == 'child' else
+                lineage_counts.chain_debug_used(store, current, entries, _debug_entry_used)[0])
         try:
             code = repair_policy.admit_debug(kind=kind, parent_debug_used=used,
                                              group_debug_used=used, policy=policy)

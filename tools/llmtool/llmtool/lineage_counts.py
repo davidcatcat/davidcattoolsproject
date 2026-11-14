@@ -238,10 +238,7 @@ def chain_review_repairs(store, task):
 
 
 def chain_debug_used(store, task, entries, is_used):
-    """O7: is_used count of entries plus every other chain Task's high_debug, as (used, used).
-
-    Any doubt is (UNKNOWN, UNKNOWN). Run it under the chain lock.
-    """
+    """O7: (used, used) over entries and the other chain Tasks' high_debug; doubt is UNKNOWN."""
     if type(task) is not dict or type(entries) is not list or store is None:
         return UNKNOWN, UNKNOWN
     records = chain_records(store, task)

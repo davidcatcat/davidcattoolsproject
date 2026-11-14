@@ -223,7 +223,7 @@ class HighDebugTests(unittest.TestCase):
         return caught.exception.high_debug_code, created
 
     def test_failed_codex_attempts_are_recorded_and_retry_uses_a_new_d6(self):
-        # O7: a failed started attempt uses the Debug; each case gets a fresh store.
+        # O7: a started attempt is used; one fresh store per case.
         root = self._repo()
         cases = (
             ({'returncode': 1}, 'HIGH_DEBUG_RUN_FAILED'),
@@ -592,8 +592,7 @@ class HighDebugTests(unittest.TestCase):
             raise high_debug._D6CreateRejected('D6_TEST_REJECTED')
         def leaves_nothing(**_kwargs):
             raise high_debug._D6CreateRejected('D6_TEST_REJECTED')
-        # O7: a confirmed failed create finalizes one not-used entry; one leaving
-        # its D6 behind stays RESERVED. A leftover hd2 branch is skipped.
+        # O7: a confirmed failed create is not used; a leftover D6 stays RESERVED.
         subprocess.run(['git', '-C', str(root), 'branch',
                         'llmtool/high-debug-executor-hd2-aaaaaaa'], check=True)
         (root / 'd6s').mkdir()
