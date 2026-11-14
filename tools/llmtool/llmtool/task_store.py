@@ -532,12 +532,14 @@ _TASK_STORE_CONTENTION_ERRNOS = frozenset(
     value for value in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EBUSY, errno.EINTR,
                         errno.ENOLCK)
     if value is not None)
+# #1816: gw-agent is a worker key; 'quota' holds Developer outcome observations
+# (worker_availability.observe). company-gw stays readable but is never written.
 WORKER_KEYS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
-    'company-gw', 'claude-reviewer',
+    'company-gw', 'gw-agent', 'claude-reviewer',
 ))
 WORKER_LAYERS = frozenset((
-    'runtime', 'endpoint', 'authentication', 'inference', 'task_acceptance',
+    'runtime', 'endpoint', 'authentication', 'inference', 'task_acceptance', 'quota',
 ))
 WORKER_OBSERVATION_STATUSES = frozenset(('PASS', 'FAIL', 'UNKNOWN'))
 WORKER_OBSERVATION_SOURCES = frozenset((
