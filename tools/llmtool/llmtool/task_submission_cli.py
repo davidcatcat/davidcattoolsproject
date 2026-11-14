@@ -27,7 +27,8 @@ from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
-                         _DIRECT_EXECUTION_FIELDS)
+                         _DIRECT_EXECUTION_FIELDS, _NO_CHANGES_MAX_TURNS,
+                         _NO_CHANGES_REASON_MAX_CHARS)
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
@@ -5350,6 +5351,73 @@ class _ClaudeCommittedCarry(Exception):
     """The finished run's committed-result carry was stored (#1148)."""
 
 
+# #1824: Claude CLI tools that write files; a permission denial for one is a refused write.
+_CLAUDE_WRITE_TOOLS = frozenset(('Write', 'Edit', 'MultiEdit', 'NotebookEdit'))
+
+
+class _DiagnosedClaudeRoute(ClaudeRoute):
+    """#1824: ClaudeRoute that keeps its run's parsed CLI result object.
+
+    Parsing, validation and errors stay ClaudeRoute's. Only a parsed object of
+    type "result" is kept, and only for the CLAUDE_NO_CHANGES diagnosis."""
+
+    parsed_cli_result = None
+
+    def parse_output(self, stdout, stderr, log_text):
+        self.parsed_cli_result = None
+        parsed = super().parse_output(stdout, stderr, log_text)
+        raw = parsed.get('raw') if type(parsed) is dict else None
+        if type(raw) is dict and raw.get('type') == 'result':
+            self.parsed_cli_result = raw
+        return parsed
+
+
+def _claude_no_changes_reason(text):
+    """Last non-empty line of the CLI result text, screened and cut; else UNKNOWN.
+
+    A screen hit or non-printable text gives UNKNOWN; provider text is never
+    reworded to pass the screen."""
+    if type(text) is not str:
+        return 'UNKNOWN'
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return 'UNKNOWN'
+    line = lines[-1]
+    reason = line[:_NO_CHANGES_REASON_MAX_CHARS].rstrip()
+    for value in (line, reason):
+        if not value or not value.isprintable():
+            return 'UNKNOWN'
+        try:
+            _screen_text(value, 4 * 1024 * 1024)
+        except LLMToolError:
+            return 'UNKNOWN'
+    return reason
+
+
+def _claude_no_changes_diagnosis(route):
+    """#1824: {reason, write_attempted, num_turns} from structured CLI fields only."""
+    try:
+        raw = getattr(route, 'parsed_cli_result', None)
+        if type(raw) is not dict:
+            raw = {}
+        denials = raw.get('permission_denials')
+        if (type(denials) is not list or
+                any(type(item) is not dict or type(item.get('tool_name')) is not str
+                    for item in denials)):
+            write_attempted = 'UNKNOWN'
+        elif any(item['tool_name'] in _CLAUDE_WRITE_TOOLS for item in denials):
+            write_attempted = 'YES'
+        else:
+            write_attempted = 'NO'
+        turns = raw.get('num_turns')
+        if type(turns) is not int or not 0 <= turns <= _NO_CHANGES_MAX_TURNS:
+            turns = 'UNKNOWN'
+        return {'reason': _claude_no_changes_reason(raw.get('result')),
+                'write_attempted': write_attempted, 'num_turns': turns}
+    except Exception:
+        return {'reason': 'UNKNOWN', 'write_attempted': 'UNKNOWN', 'num_turns': 'UNKNOWN'}
+
+
 def _claude_committed_carry(task, store, registration, snapshot, developer, completion,
                             result, write_paths, test_policy):
     """#1148/#1279: return (developer, completion) that carry the D6's committed head.
@@ -5456,7 +5524,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
     if executable is None:
         raise LLMToolError('Claude executable is unavailable')
     route_config.update(executable=executable, config_dir=config_dir)
-    route = ClaudeRoute(route_config)
+    route = _DiagnosedClaudeRoute(route_config)
     try:
         # #1002's kernel log observed Claude writing <target>.tmp.<pid>.<12 hex>.
         boundary_impl = for_platform(denied_dirs=route_config['denied_dirs'],
@@ -5640,6 +5708,9 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None}, usage=usage)
+        if result is not None and error_code == 'CLAUDE_NO_CHANGES':
+            # #1824: bounded, screened diagnosis from the parsed CLI result only.
+            developer['no_changes_diagnosis'] = _claude_no_changes_diagnosis(route)
         if owner_gate_denied:
             developer['blocked_reason'] = 'OWNER_DISPATCH_DENIED'
         elif exc.blocked_reason is not None:
