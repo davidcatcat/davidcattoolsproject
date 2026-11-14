@@ -26,6 +26,16 @@ class ClaimRecoveryOrchestratorTests(unittest.TestCase):
         self.assertEqual(self.run_recover(), {'recovered': False, 'claim': claim})
         self.assertEqual(self.store.get(self.task_id), saved)
         self.assertEqual(verify.call_count, 1)
+        # A repeat is reported only while E1 still holds: here another Task names the repair.
+        other = base.test_task_store.TaskStoreTests._codex_dispatch_task(self)
+        self.store.create(other)
+        sha = self.store.get(other['task_id'])['record_sha256']
+        self.store.compare_and_update(other['task_id'], expected={'record_sha256': sha},
+                                      review_repair_claims=[dict(self.claims[1], state='CLAIMED')])
+        with self.assertRaises(LLMToolError) as caught:
+            self.run_recover()
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_RECOVERY_CLAIM_INVALID')
+        self.assertEqual(self.store.get(self.task_id), saved)
 
     @mock.patch.object(rec, 'verify_recovery', side_effect=LLMToolError('evidence'))
     def test_refusals_leave_the_claim_unknown(self, verify):

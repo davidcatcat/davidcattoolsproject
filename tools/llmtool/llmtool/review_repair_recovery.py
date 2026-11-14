@@ -230,10 +230,18 @@ def recover_unknown_claim(*, store, task_id, executor_task, pr_number, repair_ta
             refuse('REPAIR_CLAIM_UNAVAILABLE')
         found = [item for item in current.get('review_repair_claims') or ()
                  if type(item) is dict and item.get('repair_task_id') == repair_task_id]
-        if (len(found) == 1 and found[0].get('state') == 'DISPATCHED' and
-                found[0].get('executor_task') == executor_task and
-                found[0].get('pr') == pr_number):
-            return {'recovered': False, 'claim': dict(found[0])}
+        if len(found) == 1 and found[0].get('state') == 'DISPATCHED':
+            # A repeat still passes E1 (fields, root, uniqueness) before it is reported.
+            try:
+                others = [store.get(other_id) for other_id in store.task_ids()]
+            except Exception:
+                refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+            as_unknown = [dict(item, state='UNKNOWN') if item is found[0] else item
+                          for item in current['review_repair_claims']]
+            claim = check_claim(dict(current, review_repair_claims=as_unknown), repair_task_id,
+                                executor_task=executor_task, pr_number=pr_number,
+                                others=others)
+            return {'recovered': False, 'claim': dict(claim, state='DISPATCHED')}
         try:
             saved = store.recover_review_repair_claim(
                 task_id, repair_task_id, executor_task=executor_task, pr_number=pr_number,
