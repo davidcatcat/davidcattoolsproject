@@ -9,7 +9,11 @@ Four steps, each small and explicit:
   tree, expands each op to concrete tracked files and checks the whole batch.
   Any failure refuses the whole batch; nothing changes.
 * ``apply(root, plan)``: re-runs the plan checks, then one ``git rm`` or
-  ``git mv`` per concrete file with argument lists. It never commits, pushes,
+  ``git mv`` per concrete file with argument lists. Right before each call
+  every existing component of source and destination is re-checked (lstat,
+  no symlink, realpath inside the root) and destination parents are created
+  one level at a time with ``os.mkdir``; after each call the result paths are
+  checked the same way. It never commits, pushes,
   resets, cleans or checks out. A mid-run failure stops at once and returns
   ``FAILED`` with ``isolate=True``: the caller must not run a Developer or
   publish, and recovery is to recreate the D6. Re-applying an already
@@ -42,6 +46,7 @@ D6_NOT_CLEAN = 'FILE_OPS_D6_NOT_CLEAN'
 PRECHECK_FAILED = 'FILE_OPS_PRECHECK_FAILED'
 PARTIAL_STATE = 'FILE_OPS_PARTIAL_STATE'
 VERIFY_FAILED = 'FILE_OPS_VERIFY_FAILED'
+_GUARD = 'FILE_OPS_APPLY_GUARD'  # internal: becomes a FAILED/isolate result, never raised
 
 _HEAD_RE = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')
 _REGULAR_MODES = frozenset({'100644', '100755'})
@@ -420,21 +425,72 @@ def _failed(sealed, completed, reason):
             'head': sealed['head'], 'plan_sha256': sealed['sha256']}
 
 
+def _inside(root, path):
+    real = os.path.realpath(path)
+    return real != root and os.path.commonpath([root, real]) == root
+
+
+def _make_parents(root, rel):
+    """Create the parents of ``rel`` one level at a time; never follow a symlink.
+
+    Each level is lstat-checked (created with ``os.mkdir`` only when absent)
+    and must be a real directory, not a symlink, resolving inside ``root``.
+    """
+    parent = posixpath.dirname(rel)
+    if not parent:
+        return
+    current = root
+    for part in parent.split('/'):
+        current = os.path.join(current, part)
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            os.mkdir(current)  # raises if anything (even a dangling symlink) appeared
+            st = os.lstat(current)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise _error(_GUARD, f'{rel}: parent is a symlink or not a directory')
+        if not _inside(root, current):
+            raise _error(_GUARD, f'{rel}: parent resolves outside the worktree')
+
+
+def _guard_before(root, f):
+    """Re-validate every existing component right before the git call."""
+    if f['op'] == 'delete':
+        _fs_check(root, f['path'], True, _GUARD)
+        return
+    _fs_check(root, f['from'], True, _GUARD)
+    _make_parents(root, f['to'])
+    _fs_check(root, f['to'], False, _GUARD)
+
+
+def _guard_after(root, f):
+    """The result path is inside the root and no component is a symlink."""
+    if f['op'] == 'delete':
+        _fs_check(root, f['path'], False, _GUARD)
+        return
+    _fs_check(root, f['from'], False, _GUARD)
+    _fs_check(root, f['to'], True, _GUARD)
+
+
 def _execute(root, sealed):
     for index, f in enumerate(sealed['files']):
         verb = 'rm' if f['op'] == 'delete' else 'mv'
+        done = index
         try:
+            _guard_before(root, f)
             if verb == 'rm':
                 ok = _mutate(root, ['rm', '-q', '--', f['path']])
             else:
-                parent = posixpath.dirname(f['to'])
-                if parent:
-                    os.makedirs(os.path.join(root, *parent.split('/')), exist_ok=True)
                 ok = _mutate(root, ['mv', '--', f['from'], f['to']])
+            if ok:
+                done = index + 1
+                _guard_after(root, f)
+        except LLMToolError as exc:
+            return _failed(sealed, done, f'path check failed on file {index + 1}: {exc.reason}')
         except OSError:
             ok = False
         if not ok:
-            return _failed(sealed, index, f'git {verb} failed on file {index + 1}')
+            return _failed(sealed, done, f'git {verb} failed on file {index + 1}')
     try:
         evidence = verify(root, sealed)
     except LLMToolError as exc:

@@ -366,6 +366,116 @@ class ApplyTests(_RepoCase):
         self.assertEqual(self.head, self.rev('HEAD'))
         self.assertCode('FILE_OPS_PARTIAL_STATE', file_ops.apply, self.root, p)
 
+    # -- TOCTOU: a parent is swapped for a symlink after the plan checks ran.
+
+    def swap_after_recheck(self, swap):
+        """Run ``swap`` right after apply's own re-run of the plan checks."""
+        real_make_plan = file_ops._make_plan
+
+        def wrapped(*args, **kwargs):
+            result = real_make_plan(*args, **kwargs)
+            swap()
+            return result
+
+        return mock.patch.object(file_ops, '_make_plan', side_effect=wrapped)
+
+    def spy_mutate(self, after=None):
+        real_mutate = file_ops._mutate
+        calls = []
+
+        def spy(root, args):
+            calls.append(list(args))
+            ok = real_mutate(root, args)
+            if after:
+                after(len(calls))
+            return ok
+
+        return calls, mock.patch.object(file_ops, '_mutate', side_effect=spy)
+
+    def assertIsolated(self, result, completed):
+        self.assertEqual('FAILED', result['status'])
+        self.assertTrue(result['isolate'])
+        self.assertEqual(completed, result['completed'])
+        self.assertEqual(self.head, self.rev('HEAD'))
+
+    def test_existing_destination_parent_swapped_for_symlink(self):
+        p = self.make_plan([{'op': 'move', 'from': 'README.txt', 'to': 'docs/README.txt'}])
+
+        def swap():
+            os.rename(os.path.join(self.root, 'docs'), os.path.join(self.root, 'docs-aside'))
+            os.symlink(self.outside, os.path.join(self.root, 'docs'))
+
+        calls, spy = self.spy_mutate()
+        with self.swap_after_recheck(swap), spy:
+            result = file_ops.apply(self.root, p)
+        self.assertIsolated(result, 0)
+        self.assertEqual([], calls)
+        self.assertEqual([], os.listdir(self.outside))
+        self.assertTrue(self.exists('README.txt'))
+
+    def test_new_destination_parent_swapped_for_symlink_mid_run(self):
+        p = self.make_plan([{'op': 'delete', 'path': 'README.txt'},
+                            {'op': 'move', 'from': 'src/tool.py', 'to': 'lib/new/tool.py'}])
+
+        def after(count):
+            if count == 1:
+                os.symlink(self.outside, os.path.join(self.root, 'lib'))
+
+        calls, spy = self.spy_mutate(after)
+        with spy:
+            result = file_ops.apply(self.root, p)
+        self.assertIsolated(result, 1)
+        self.assertEqual(1, len(calls))
+        self.assertEqual([], os.listdir(self.outside))
+        self.assertTrue(self.exists('src/tool.py'))
+        self.assertTrue(os.path.islink(os.path.join(self.root, 'lib')))
+
+    def test_source_parent_swapped_for_symlink(self):
+        p = self.make_plan([{'op': 'delete', 'path': 'docs/a.txt'}])
+        moved_aside = os.path.join(self.outside, 'docs')
+
+        def swap():
+            os.rename(os.path.join(self.root, 'docs'), moved_aside)
+            os.symlink(moved_aside, os.path.join(self.root, 'docs'))
+
+        calls, spy = self.spy_mutate()
+        with self.swap_after_recheck(swap), spy:
+            result = file_ops.apply(self.root, p)
+        self.assertIsolated(result, 0)
+        self.assertEqual([], calls)
+        self.assertTrue(os.path.isfile(os.path.join(moved_aside, 'a.txt')))
+
+    def test_result_path_checked_after_each_op(self):
+        p = self.make_plan([{'op': 'move', 'from': 'README.txt', 'to': 'moved/README.txt'},
+                            {'op': 'delete', 'path': 'src/tool.py'}])
+
+        def after(count):
+            if count == 1:  # result parent becomes a symlink (still inside the root)
+                os.rename(os.path.join(self.root, 'moved'), os.path.join(self.root, 'aside'))
+                os.symlink(os.path.join(self.root, 'aside'), os.path.join(self.root, 'moved'))
+
+        calls, spy = self.spy_mutate(after)
+        with spy:
+            result = file_ops.apply(self.root, p)
+        self.assertIsolated(result, 1)
+        self.assertIn('symlink', result['reason'])
+        self.assertEqual(1, len(calls))
+        self.assertTrue(self.exists('src/tool.py'))
+
+    def test_destination_parents_created_one_level_at_a_time(self):
+        made = []
+        real_mkdir = os.mkdir
+
+        def spy_mkdir(path, *args, **kwargs):
+            made.append(os.path.relpath(path, self.root))
+            return real_mkdir(path, *args, **kwargs)
+
+        p = self.make_plan([{'op': 'move', 'from': 'README.txt', 'to': 'a/b/c/README.txt'}])
+        with mock.patch.object(file_ops.os, 'mkdir', side_effect=spy_mkdir), \
+                mock.patch.object(file_ops.os, 'makedirs', side_effect=AssertionError('makedirs')):
+            self.assertEqual('APPLIED', file_ops.apply(self.root, p)['status'])
+        self.assertEqual([os.path.join('a'), os.path.join('a', 'b'), os.path.join('a', 'b', 'c')], made)
+
     def test_git_runs_as_argument_lists_without_forbidden_verbs(self):
         real_run = subprocess.run
         seen = []
