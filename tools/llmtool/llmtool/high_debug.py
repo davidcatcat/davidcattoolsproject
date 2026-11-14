@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 import functools
 
 from .errors import LLMToolError
-from . import ai_github_exec, role_config, skill_manifest, task_completion, task_store, worker_dispatch
+from . import (ai_github_exec, role_config, skill_manifest, task_completion, task_store, trust,
+               worker_dispatch)
 from .test_output_excerpts import (
     _CLOUD_KEY, _SENSITIVE, _emitted_sensitive, _sensitive_jwt, _sensitive_url,
 )
@@ -1070,6 +1071,27 @@ def _d6_taken(repo_root, common_dir, d6):
         return True
 
 
+def _d6_path_absent(d6):
+    """True only when the trusted D6 path (trust tasks_root / d6) is confirmed absent.
+
+    #1502 WP-D O7 F1: an orphan D6 directory, an unreadable trust config or any
+    other doubt is not absent.
+    """
+    try:
+        tasks_root = Path(trust.load_trust().tasks_root)
+    except Exception:
+        return False
+    if not tasks_root.is_absolute():
+        return False
+    try:
+        (tasks_root / d6).lstat()
+    except FileNotFoundError:
+        return True
+    except Exception:
+        return False
+    return False
+
+
 _D6_NAME_PROBES = 16
 
 
@@ -1599,11 +1621,12 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                                     executor_task=executor_task)
     except Exception as error:
         # No provider call happened. Only a classified rejection (the
-        # lifecycle exited by itself naming its rejection, and no branch or
-        # registry record of this D6 exists) is the cancel path, finalized not
-        # used. A signal kill, an unclassified exit, a timeout, any other error
-        # or a D6 left behind is unclear: the entry stays RESERVED (used).
-        if (isinstance(error, _D6CreateRejected) and
+        # lifecycle exited by itself naming its rejection, the trusted D6 path
+        # is absent and no branch or registry record of this D6 exists) is the
+        # cancel path, finalized not used. A signal kill, an unclassified exit,
+        # a timeout, any other error or a D6 left behind (an orphan directory
+        # included) is unclear: the entry stays RESERVED (used).
+        if (isinstance(error, _D6CreateRejected) and _d6_path_absent(d6) and
                 not _d6_taken(repo_root, registration.common_dir, d6)):
             failed('HIGH_DEBUG_D6_CREATE_FAILED', post=False)
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED', 'reservation=RESERVED')

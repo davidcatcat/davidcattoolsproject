@@ -70,6 +70,12 @@ class ReservationCase(unittest.TestCase):
                                return_value=self.base / 'tasks')
         patcher.start()
         self.addCleanup(patcher.stop)
+        # The trusted D6 parent: no D6 directory exists there unless a test makes one.
+        self.d6s = self.base / 'd6s'
+        patcher = patch.object(high_debug, 'trust', SimpleNamespace(
+            load_trust=lambda: SimpleNamespace(tasks_root=str(self.d6s))))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def task(self, continues=None, completion=False):
         task = cli._record(new_id(), new_id(), PM, 'pm-profile', REQUEST,
@@ -297,6 +303,8 @@ class FinalizeTests(ReservationCase):
         self.assertEqual(self.reserve(task_id), 0)
         for changed in (dict(entry('RUN_FAILED'), d6='executor-hd9-aaaaaaa'),
                         dict(entry('RUN_FAILED'), early_reason='Another reason.'),
+                        dict(entry('RUN_FAILED'), status='NOT_A_STATUS'),
+                        dict(entry('RUN_FAILED'), status=None),
                         entry()):
             with self.subTest(changed=changed['status']):
                 self.assertEqual(self.code(lambda: self.store.finalize_high_debug(
@@ -427,6 +435,13 @@ class RunTests(ReservationCase):
             ('exit_1', 'import sys\nsys.exit(1)\n', 'RESERVED'),
             ('traceback', f'raise RuntimeError({MARKER!r})\n', 'RESERVED'),
             ('classified', f'import sys\nsys.exit({MARKER!r})\n', 'RUN_FAILED'),
+            # F1: the lifecycle names its own rejection but leaves an orphan D6
+            # directory at the trusted path; that is not a confirmed cancel.
+            ('orphan_dir', 'import os, sys\n'
+                           f'os.makedirs(os.path.join({str(self.d6s)!r}, '
+                           'sys.argv[sys.argv.index("--task-id") + 1]))\n'
+                           'sys.exit("D6 lifecycle rejected (D6_TASK_ALREADY_EXISTS)")\n',
+             'RESERVED'),
         )
         for name, source, status in cases:
             with self.subTest(case=name):
@@ -447,6 +462,29 @@ class RunTests(ReservationCase):
                 else:
                     self.assertEqual(stored[0]['report'], 'HIGH_DEBUG_D6_CREATE_FAILED')
                     self.assertFalse(high_debug._debug_entry_used(stored[0]))
+        self.assertTrue((self.d6s / stored[0]['d6']).is_dir())
+
+    def test_g_only_a_confirmed_absent_trusted_d6_path_is_absent(self):
+        d6 = 'executor-hd1-aaaaaaa'
+        self.assertTrue(high_debug._d6_path_absent(d6))
+        (self.d6s / d6).mkdir(parents=True)
+        self.assertFalse(high_debug._d6_path_absent(d6))
+        (self.d6s / d6).rmdir()
+        (self.d6s / d6).symlink_to(self.base / 'missing')
+        self.assertFalse(high_debug._d6_path_absent(d6))
+
+        def broken():
+            raise OSError('trust unreadable')
+        for loader in (broken, lambda: SimpleNamespace(tasks_root='relative/tasks')):
+            with self.subTest(loader=loader), \
+                 patch.object(high_debug, 'trust', SimpleNamespace(load_trust=loader)):
+                self.assertFalse(high_debug._d6_path_absent('executor-hd2-aaaaaaa'))
+        with patch.object(high_debug, 'trust', SimpleNamespace(load_trust=broken)):
+            task_id = self.task(completion=True)
+            self.assertEqual(self.run_debug(task_id, Mock(), create=rejected)[0],
+                             'HIGH_DEBUG_D6_CREATE_FAILED')
+        self.assertEqual(self.last_error.high_debug_detail, 'reservation=RESERVED')
+        self.assertEqual([item['status'] for item in self.entries(task_id)], ['RESERVED'])
 
     def test_g_a_failed_codex_finalize_makes_the_claude_admission_refuse(self):
         task_id = self.task(completion=True)

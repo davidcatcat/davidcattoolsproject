@@ -161,6 +161,9 @@ _HIGH_DEBUG_FIELDS = frozenset(('family', 'failed_corrections', 'early_reason', 
 # #1502 WP-D O7: a RESERVED AI Debug entry keeps these values when finalized.
 _HIGH_DEBUG_IDENTITY = ('family', 'failed_corrections', 'early_reason', 'examined_sha',
                         'd6', 'model_requested', 'rules_sha256')
+# The only statuses a RESERVED entry may be finalized to; anything else refuses.
+_HIGH_DEBUG_FINAL_STATUSES = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED',
+                              'REPORT_INVALID', 'RUN_FAILED')
 
 
 def _check_high_debug_finalize(old, new, index):
@@ -172,7 +175,9 @@ def _check_high_debug_finalize(old, new, index):
     before, after = old[index], new[index]
     missing = object()
     if (type(before) is not dict or before.get('status') != 'RESERVED' or
-            type(after) is not dict or after.get('status') in (None, 'RESERVED') or
+            type(after) is not dict or
+            type(after.get('status')) is not str or
+            after['status'] not in _HIGH_DEBUG_FINAL_STATUSES or
             any(before.get(key, missing) != after.get(key, missing)
                 for key in _HIGH_DEBUG_IDENTITY)):
         _fail('HIGH_DEBUG_IMMUTABLE')

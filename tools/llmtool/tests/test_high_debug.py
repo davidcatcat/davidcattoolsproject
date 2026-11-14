@@ -598,6 +598,11 @@ class HighDebugTests(unittest.TestCase):
         # A create that leaves its D6 behind is unclear and stays RESERVED.
         subprocess.run(['git', '-C', str(root), 'branch',
                         'llmtool/high-debug-executor-hd2-aaaaaaa'], check=True)
+        # F1: the trusted D6 path must be confirmed absent; no D6 exists there.
+        trusted = patch.object(high_debug, 'trust', SimpleNamespace(
+            load_trust=lambda: SimpleNamespace(tasks_root=str(root / 'd6s'))))
+        trusted.start()
+        self.addCleanup(trusted.stop)
         expected = (
             (leaves_nothing, 'executor-hd1-aaaaaaa', 'RUN_FAILED', 'HIGH_DEBUG_D6_CREATE_FAILED'),
             (leaves_nothing, 'executor-hd3-aaaaaaa', 'RUN_FAILED', 'HIGH_DEBUG_D6_CREATE_FAILED'),
