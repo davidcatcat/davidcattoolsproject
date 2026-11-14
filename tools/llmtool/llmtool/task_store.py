@@ -3699,6 +3699,24 @@ class TaskStore:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
 
+    def recover_review_repair_claim(self, task_id, repair_task_id, *, executor_task, pr_number,
+                                    expected_sha256):
+        """#1928: one CAS setting one UNKNOWN review repair claim DISPATCHED.
+
+        review_repair_recovery.verify_recovery (E1-E5) runs inside the locked update on
+        the record read there; a failed check refuses and nothing is written.
+        """
+        return self._update(task_id, expected={'record_sha256': expected_sha256}, changes={},
+                            claim_recovery=(repair_task_id, executor_task, pr_number))
+
+    @staticmethod
+    def _claim_recovered(old, new, recovery):
+        """#1928: under a claim recovery the one change is UNKNOWN -> DISPATCHED."""
+        if recovery and (old.get('state') != 'UNKNOWN' or new.get('state') != 'DISPATCHED' or
+                         set(old) != set(new)):
+            _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+        return recovery
+
     @staticmethod
     def _claude_d6_holds(record, executor_task_id):
         if record.get('abandonment') is not None:
@@ -5221,7 +5239,7 @@ class TaskStore:
                 task_id, expected=expected, changes=changes,
                 d6_claims=authorized, **trusted))
 
-    def _update_record(self, task_id, *, expected, changes, d6_claims,
+    def _update_record(self, task_id, *, expected, changes, d6_claims, claim_recovery=None,
                        trusted_dispatch_audit=False,
                        trusted_completion_events=False, trusted_abandonment=False,
                        abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
@@ -5234,6 +5252,9 @@ class TaskStore:
         if 'continues' in changes:
             # #1502 WP-D L1: continues is written once, when record-pm creates the Task.
             _fail('TASK_CONTINUES_IMMUTABLE')
+        if claim_recovery is not None and changes:
+            # #1928: a claim recovery builds its one change under the lock.
+            _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
         if (trusted_split is not None or split_child_max is not None) and (
                 trusted_split not in SPLIT_ACTIONS or set(changes) != {'lineage'} or
                 (split_child_max is not None) != (trusted_split == 'COMMIT') or
@@ -5336,6 +5357,15 @@ class TaskStore:
             if expected is not None and any(current.get(key) != value
                                             for key, value in expected.items()):
                 raise TaskStoreConflict() from None
+            if claim_recovery is not None:
+                # #1928: E1-E5 on the record read under this lock; the change is built here.
+                from . import review_repair_recovery
+                repair_id, executor, pr_number = claim_recovery
+                review_repair_recovery.verify_recovery(
+                    self, current, repair_id, executor_task=executor, pr_number=pr_number)
+                changes = {'review_repair_claims': [
+                    dict(item, state='DISPATCHED') if item.get('repair_task_id') == repair_id
+                    else item for item in current['review_repair_claims']]}
             if trusted_codex_launch or trusted_opencode_launch:
                 proposed = changes.get('developer')
                 old = current.get('developer')
@@ -5498,7 +5528,8 @@ class TaskStore:
                         _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
                     i = changed[0]
                     old, new = old_claims[i], new_claims[i]
-                    if (not ((old.get('state') == 'CLAIMED' and
+                    recovered = self._claim_recovered(old, new, claim_recovery is not None)
+                    if (not (recovered or (old.get('state') == 'CLAIMED' and
                               new.get('state') in ('DISPATCHED', 'UNKNOWN')) or
                              (old.get('state') == 'DISPATCHED' and
                               new.get('state') == 'FAILED')) or
