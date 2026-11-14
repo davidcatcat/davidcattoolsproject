@@ -177,15 +177,19 @@ class LoaderTimeoutTests(unittest.TestCase):
                     self.assert_invalid(route, lambda entry, maximum=maximum: entry.update(
                         max_timeout=maximum))
 
+    # Bad limit values that JSON can hold: bool, float, str, list, object,
+    # null, zero, negative and above the 1800 hard cap.
+    JSON_BAD_VALUES = (True, False, 600.0, 1.5, '600', [600], {'s': 600}, None,
+                       0, -1, -600, HARD_CAP + 1, 3600)
+    # Bad values JSON cannot hold; checked through the resolver only.
+    RESOLVER_ONLY_BAD_VALUES = (b'600',)
+
     def bad_limit_values(self, route, key):
-        """Bad values for one key; each breaks the 1 <= default <= max <= 1800 rule."""
+        """JSON-safe bad values for one key; each breaks 1 <= default <= max <= 1800."""
         entry = self.shipped['routes'][route]
-        values = NOT_INT + (None, 0, -1, -600, HARD_CAP + 1, 3600)
         if key == 'default_timeout':
-            values += (entry['max_timeout'] + 1,)
-        else:
-            values += (entry['default_timeout'] - 1,)
-        return values
+            return self.JSON_BAD_VALUES + (entry['max_timeout'] + 1,)  # default > max
+        return self.JSON_BAD_VALUES + (entry['default_timeout'] - 1,)  # max < default
 
     def assert_resolver_refuses(self, route, key, value):
         config = copy.deepcopy(load_route_config())
@@ -194,27 +198,43 @@ class LoaderTimeoutTests(unittest.TestCase):
             resolve_route_timeout(route, config=config)
         self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
 
+    def assert_file_refuses(self, route, key, value):
+        data = copy.deepcopy(self.shipped)
+        data['routes'][route][key] = value
+        self.path.write_text(json.dumps(data), encoding='utf-8')
+        # The file is valid JSON and still holds the exact bad value.
+        written = json.loads(self.path.read_text(encoding='utf-8'))
+        self.assertIs(type(written['routes'][route][key]), type(value))
+        self.assertEqual(written['routes'][route][key], value)
+        with self.assertRaises(RouteError) as caught:
+            load_route_config(self.path)
+        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+
     def test_bad_values_refused(self):
         for route in ROUTE_NAMES:
             for key in ('default_timeout', 'max_timeout'):
                 for value in self.bad_limit_values(route, key):
                     with self.subTest(route=route, key=key, value=value):
-                        # The resolver refuses every bad value in a hand-built config.
                         self.assert_resolver_refuses(route, key, value)
-                        try:
-                            json.dumps(value)
-                        except TypeError:
-                            continue  # not JSON (bytes); covered by the resolver only
-                        data = copy.deepcopy(self.shipped)
-                        data['routes'][route][key] = value
-                        self.path.write_text(json.dumps(data), encoding='utf-8')
-                        written = json.loads(self.path.read_text(encoding='utf-8'))
-                        # The file is valid JSON and still holds the bad value.
-                        self.assertIs(type(written['routes'][route][key]), type(value))
-                        self.assertEqual(written['routes'][route][key], value)
-                        with self.assertRaises(RouteError) as caught:
-                            load_route_config(self.path)
-                        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+                        self.assert_file_refuses(route, key, value)
+                for value in self.RESOLVER_ONLY_BAD_VALUES:
+                    with self.subTest(route=route, key=key, value=value):
+                        self.assert_resolver_refuses(route, key, value)
+
+    def test_bad_value_lists_cover_every_class(self):
+        values = self.JSON_BAD_VALUES
+        for value in values:
+            json.dumps(value)  # every listed value is valid JSON
+        for value in self.RESOLVER_ONLY_BAD_VALUES:
+            with self.assertRaises(TypeError):
+                json.dumps(value)
+        self.assertTrue(any(type(v) is bool for v in values))
+        self.assertTrue(any(type(v) is float for v in values))
+        self.assertTrue(any(type(v) is str for v in values))
+        self.assertIn(None, values)
+        self.assertTrue(any(type(v) is int and v == 0 for v in values))
+        self.assertTrue(any(type(v) is int and v < 0 for v in values))
+        self.assertTrue(any(type(v) is int and v > HARD_CAP for v in values))
 
     def test_only_one_key_refused(self):
         for route in ROUTE_NAMES:
