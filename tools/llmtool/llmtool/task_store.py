@@ -453,10 +453,13 @@ _TASK_STORE_CONTENTION_ERRNOS = frozenset(
     if value is not None)
 WORKER_KEYS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
-    'company-gw', 'claude-reviewer',
+    'company-gw', 'gw-agent', 'claude-reviewer',
 ))
+# #1816: 'quota' holds the last observed Developer quota outcome. It is read
+# by worker_availability.quota_gate and never changes worker-dispatch.json.
 WORKER_LAYERS = frozenset((
     'runtime', 'endpoint', 'authentication', 'inference', 'task_acceptance',
+    'quota',
 ))
 WORKER_OBSERVATION_STATUSES = frozenset(('PASS', 'FAIL', 'UNKNOWN'))
 WORKER_OBSERVATION_SOURCES = frozenset((
@@ -466,6 +469,10 @@ _WORKER_OBSERVATION_FIELDS = frozenset((
     'worker_key', 'layer', 'status', 'observed_at', 'fresh_until', 'source',
     'evidence_sha256',
 ))
+# #1816: optional, both-or-neither, quota layer FAIL only. A reset time exists
+# only when the provider reported it; it is then the observation's fresh_until.
+_WORKER_QUOTA_RESET_FIELDS = frozenset(('reset_at', 'reset_source'))
+WORKER_QUOTA_RESET_SOURCES = frozenset(('PROVIDER_REPORTED',))
 _WORKER_AVAILABILITY_FIELDS = frozenset((
     'schema_version', 'observations', 'record_sha256',
 ))
@@ -4308,8 +4315,16 @@ class TaskStore:
             _fail('WORKER_AVAILABILITY_INVALID')
         seen = set()
         for observation in record['observations']:
-            if (type(observation) is not dict or
-                    set(observation) != _WORKER_OBSERVATION_FIELDS or
+            if type(observation) is not dict:
+                _fail('WORKER_AVAILABILITY_INVALID')
+            optional = set(observation) - _WORKER_OBSERVATION_FIELDS
+            if (not _WORKER_OBSERVATION_FIELDS <= set(observation) or
+                    (optional and (
+                        optional != _WORKER_QUOTA_RESET_FIELDS or
+                        observation.get('layer') != 'quota' or
+                        observation.get('status') != 'FAIL' or
+                        type(observation.get('reset_source')) is not str or
+                        observation['reset_source'] not in WORKER_QUOTA_RESET_SOURCES)) or
                     type(observation.get('worker_key')) is not str or
                     observation['worker_key'] not in WORKER_KEYS or
                     type(observation.get('layer')) is not str or
@@ -4332,6 +4347,11 @@ class TaskStore:
                     fresh_until - observed_at > timedelta(
                         days=WORKER_AVAILABILITY_MAX_AGE_DAYS)):
                 _fail('WORKER_AVAILABILITY_INVALID')
+            if optional:
+                reset_at = cls._worker_timestamp(observation['reset_at'], now=now,
+                                                 allow_future=True)
+                if reset_at != fresh_until:
+                    _fail('WORKER_AVAILABILITY_INVALID')
         expected_digest = _digest(record)
         if (type(record.get('record_sha256')) is not str or
                 record['record_sha256'] != expected_digest):
@@ -4601,13 +4621,19 @@ class TaskStore:
 
     def record_worker_observation(self, *, worker_key, layer, status,
                                   observed_at, fresh_until, source,
-                                  evidence_sha256):
-        """Persist one bounded technical observation without granting authority."""
+                                  evidence_sha256, reset_at=None, reset_source=None):
+        """Persist one bounded technical observation without granting authority.
+
+        reset_at/reset_source (#1816) are given together, on a quota FAIL only,
+        when the provider reported its reset time; validation refuses the rest.
+        """
         candidate = {
             'worker_key': worker_key, 'layer': layer, 'status': status,
             'observed_at': observed_at, 'fresh_until': fresh_until,
             'source': source, 'evidence_sha256': evidence_sha256,
         }
+        if reset_at is not None or reset_source is not None:
+            candidate.update(reset_at=reset_at, reset_source=reset_source)
         # Validate the public input before acquiring the shared metadata lock.
         now = datetime.now(timezone.utc)
         self._validate_worker_availability({

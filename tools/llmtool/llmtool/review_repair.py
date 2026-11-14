@@ -8,7 +8,7 @@ import re
 import shutil
 from argparse import Namespace
 
-from . import review_result, run_budget, task_completion, worker_dispatch
+from . import review_result, run_budget, task_completion, worker_availability, worker_dispatch
 from .errors import LLMToolError
 from .task_store import REVIEW_DISPUTE_DEFERRABLE, REVIEW_DISPUTE_SEVERITIES, _json_bytes, new_id
 
@@ -222,7 +222,12 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
         egress_basis=developer.get('egress_basis'), repair_packet=packet,
         data_class=data_class,
     )
-    return invoke(args, store=store)
+    # #1816: this internal delegate skips the CLI wrapper, so record here too.
+    quota_before = worker_availability.developer_snapshot(store, task['task_id'])
+    try:
+        return invoke(args, store=store)
+    finally:
+        worker_availability.record_task_outcome(store, task['task_id'], quota_before)
 
 
 def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_id=None,
@@ -621,6 +626,12 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         worker, developer.get('owner_assignment_ref'), policy_task)
     if not decision.allowed:
         _refuse(decision.reason_code)
+    # #1816: a fresh quota FAIL refuses before any repair Task, claim or count.
+    quota = worker_availability.quota_gate(
+        store, worker, owner_assignment_ref=developer.get('owner_assignment_ref'),
+        policy_task_id=policy_task)
+    if quota.refused:
+        _refuse(quota.reason_code)
     base_family = f'pr-{pr_number}' if family is None else family
     if (type(base_family) is not str or
             re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or

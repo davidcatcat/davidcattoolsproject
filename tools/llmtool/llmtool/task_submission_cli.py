@@ -35,6 +35,7 @@ from . import task_completion
 from . import opencode_direct_developer
 from . import codex_direct_developer
 from . import worker_dispatch
+from . import worker_availability
 from . import gateway_profiles
 from . import repair_policy
 from .developer_output_normalize import _HUNK
@@ -168,10 +169,24 @@ def _background_read(fd):
     return value
 
 
+def _background_delegate_body(args, *, provider, store, d6_binding, quota_before):
+    """Run the detached delegate, then record its quota outcome (#1816).
+
+    The invoking process returns at launch, so only the child sees the result.
+    """
+    try:
+        return (run_task_codex_delegate(args, store=store, d6_binding=d6_binding)
+                if provider == 'codex' else
+                run_task_opencode_delegate(args, store=store, d6_binding=d6_binding))
+    finally:
+        worker_availability.record_task_outcome(store, args.task_id, quota_before)
+
+
 def _run_background_delegate(args, *, provider, store, d6_binding):
     """Run the existing direct delegate path in a detached, double-forked child."""
     if not hasattr(os, 'fork') or not hasattr(os, 'setsid'):
         raise LLMToolError('background Developer execution is unavailable on this platform')
+    quota_before = worker_availability.developer_snapshot(store, args.task_id)
     read_fd, write_fd = os.pipe()
     try:
         launcher_pid = os.fork()
@@ -204,11 +219,9 @@ def _run_background_delegate(args, *, provider, store, d6_binding):
                 write_fd, {'kind': 'launched', 'pid': pid})
             try:
                 with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                    result = (run_task_codex_delegate(
-                        args, store=store, d6_binding=d6_binding)
-                        if provider == 'codex' else
-                        run_task_opencode_delegate(
-                            args, store=store, d6_binding=d6_binding))
+                    result = _background_delegate_body(
+                        args, provider=provider, store=store, d6_binding=d6_binding,
+                        quota_before=quota_before)
                 _background_send(write_fd, {'kind': 'finished', 'return_code': result,
                                             'output': output.getvalue()})
             except BaseException as exc:
@@ -7433,7 +7446,26 @@ def run_task_delegate_checked(args, *, store=None):
     except pm_caller.PMCallerRefused as exc:
         _print(pm_caller.refusal(args.task_id, exc.code), None)
         return 1
-    return run_task_delegate(args, store=store)
+    # #1816: after the caller check and before any Task or D6 write, a fresh
+    # quota FAIL refuses a dispatch the Owner switch allows. The switch itself
+    # is only read; a policy refusal stays with the route's own check.
+    provider = getattr(args, 'provider', None)
+    gate = worker_availability.quota_gate(
+        store, worker_availability.worker_key_for_provider(provider),
+        owner_assignment_ref=getattr(args, 'owner_ref', None),
+        policy_task_id=(getattr(args, 'executor_task', None) if provider == 'claude'
+                        else args.task_id))
+    if gate.refused:
+        _print(worker_availability.refusal_view(args.task_id, gate))
+        return 1
+    if getattr(args, 'background', False):
+        # The detached child records the outcome (_background_delegate_body).
+        return run_task_delegate(args, store=store)
+    quota_before = worker_availability.developer_snapshot(store, args.task_id)
+    try:
+        return run_task_delegate(args, store=store)
+    finally:
+        worker_availability.record_task_outcome(store, args.task_id, quota_before)
 
 
 def run_task_submit(args, *, store=None, stdout=None):
