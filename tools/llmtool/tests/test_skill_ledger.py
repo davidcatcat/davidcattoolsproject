@@ -1258,14 +1258,18 @@ class SkillLedgerTests(unittest.TestCase):
 
     def test_existing_entries_and_new_entries_share_one_chain(self):
         older = self.record()
+        # The legacy row keeps the digest it was written with; card_repo()
+        # (via pin) switches self.entry to the pinned-prefix digest that only
+        # the card receipt binds, so the legacy check must send its own digest.
+        legacy_digest = self.entry['manifest_sha256']
         self.pin(run_id='run-card')
         self.record_cards(self.card_entry(run_id='run-card'))
         ledger.record_not_delivered(self.not_delivered_entry())
         self.assertEqual(ledger.verify_chain(), (True, None))
-        self.assertEqual(self.check()['status'], 'VERIFIED')
+        self.assertEqual(self.check(manifest_sha256=legacy_digest)['status'], 'VERIFIED')
         self.assertEqual(self.check(run_id='run-card')['status'], 'VERIFIED')
         ledger.revoke(older, 'withdrawn')
-        self.assertEqual(self.check()['reason'], 'REVOKED')
+        self.assertEqual(self.check(manifest_sha256=legacy_digest)['reason'], 'REVOKED')
         self.assertEqual(self.check(run_id='run-card')['status'], 'VERIFIED')
         rows = [json.loads(line) for line in self.path.read_text().splitlines()]
         self.assertNotIn('cards', rows[0])
