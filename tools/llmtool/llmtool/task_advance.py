@@ -453,6 +453,89 @@ def _mac_ci_runs(paths):
     return any(hit(path) for path in paths)
 
 
+# #1502 WP-G gate 1: GitHub lists a PR's files 100 per page and at most 3000
+# in total. Every page is read; a short page ends the list. A full last page
+# (3000 files) cannot prove the list is complete, so the gate fails closed with
+# PR_FILES_TOO_MANY instead of treating a partial list as the whole PR.
+_PR_FILES_PER_PAGE = 100
+_PR_FILES_MAX_PAGES = 30
+PR_FILES_TOO_MANY = 'PR_FILES_TOO_MANY'
+_PR_FILES_UNAVAILABLE = 'PR_FILES_UNAVAILABLE'
+
+
+def _pr_files(number, github_get):
+    """Return (files, None) for every changed file, or (None, code).
+
+    Page 1 keeps the historical read path; page N > 1 adds ``&page=N``. At
+    most 30 reads, so it never loops. A read error or a malformed page gives
+    PR_FILES_UNAVAILABLE; a full page 30 gives PR_FILES_TOO_MANY.
+    """
+    files = []
+    for page in range(1, _PR_FILES_MAX_PAGES + 1):
+        path = f'pulls/{number}/files?per_page={_PR_FILES_PER_PAGE}'
+        if page > 1:
+            path += f'&page={page}'
+        try:
+            batch = github_get(path)
+        except Exception:
+            return None, _PR_FILES_UNAVAILABLE
+        if type(batch) is not list or len(batch) > _PR_FILES_PER_PAGE:
+            return None, _PR_FILES_UNAVAILABLE
+        files.extend(batch)
+        if len(batch) < _PR_FILES_PER_PAGE:
+            return files, None
+    return None, PR_FILES_TOO_MANY
+
+
+# #1502 WP-G gate 2 (sec v93): llmtool-linux-ci.yml's 'changes' job sets four
+# independent flags (code, docs, gateway, ai_loop) with linux_flags() from
+# tools/llmtool/scripts/ci_path_classes.py, and each enabled flag runs its own
+# check. The gates load that same classifier (never a local copy) and require
+# the union of the checks: a code PR that also changes docs, the gateway or
+# ai-loop still needs those checks. Never a check that cannot appear.
+_AI_LOOP_CHECK = 'ai-loop helper tests (Python 3.14)'
+_GATEWAY_CHECK = 'gateway tests (Linux 3.14)'
+# In linux_flags() order: code, docs, gateway, ai_loop.
+_LINUX_FLAG_CHECKS = ('check (Linux 3.14)', 'check (docs)', _GATEWAY_CHECK, _AI_LOOP_CHECK)
+_CI_PATH_CLASSES = []
+
+
+def _ci_path_classes():
+    """The canonical CI path classifier module, loaded once from scripts/."""
+    if not _CI_PATH_CLASSES:
+        path = Path(__file__).resolve().parents[1] / 'scripts' / 'ci_path_classes.py'
+        spec = importlib.util.spec_from_file_location('_llmtool_ci_path_classes', path)
+        if spec is None or spec.loader is None:
+            raise ImportError('ci_path_classes.py unavailable')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _CI_PATH_CLASSES.append(module)
+    return _CI_PATH_CLASSES[0]
+
+
+def _required_linux_checks(paths, old_paths=()):
+    """The exact-head Linux workflow check names a PR with these paths needs.
+
+    CI diffs with --no-renames, so a rename's old path is classified exactly
+    like a changed path: both sides of a rename add their checks. Returns
+    None (fail closed) when the paths cannot be classified the way CI does.
+    """
+    if not paths:
+        return ['check (Linux 3.14)']
+    names = list(paths) + list(old_paths)
+    if any(type(name) is not str or '\0' in name for name in names):
+        return None
+    try:
+        data = b''.join(name.encode('utf-8', 'surrogateescape') + b'\0' for name in names)
+        flags = _ci_path_classes().linux_flags(data)
+    except Exception:
+        return None
+    if type(flags) is not tuple or len(flags) != len(_LINUX_FLAG_CHECKS):
+        return None
+    required = [name for flag, name in zip(flags, _LINUX_FLAG_CHECKS) if flag is True]
+    return required or None
+
+
 def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False,
                   owner_acceptance=None, acceptance_out=None, skip_owner_acceptance=False):
     """Check every exact-head merge gate; return None or one refusal code.
@@ -462,13 +545,16 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     """
     try:
         checks = github_get(f'commits/{head}/check-runs?per_page=100')
-        files = github_get(f'pulls/{number}/files?per_page=100')
     except Exception:
         return 'MERGE_CHECKS_UNAVAILABLE'
-    if (type(checks) is not dict or type(checks.get('check_runs')) is not list or
+    files, files_code = _pr_files(number, github_get)
+    if files_code == PR_FILES_TOO_MANY:
+        return 'MERGE_PR_FILES_TOO_MANY'
+    if (files_code is not None or type(checks) is not dict or
+            type(checks.get('check_runs')) is not list or
             type(checks.get('total_count')) is not int or
             checks['total_count'] != len(checks['check_runs']) or
-            len(checks['check_runs']) > 100 or type(files) is not list or len(files) >= 100):
+            len(checks['check_runs']) > 100):
         return 'MERGE_CHECKS_UNAVAILABLE'
     check_runs = checks['check_runs']
     if not check_runs:
@@ -493,15 +579,14 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     paths = [item.get('filename') for item in files if type(item) is dict]
     if len(paths) != len(files) or any(type(path) is not str for path in paths):
         return 'MERGE_CHECKS_UNAVAILABLE'
-    docs_only = task_completion._docs_only_ci(paths)
-    if docs_only:
-        required_checks = ['check (docs)']
-    else:
-        required_checks = ['check (Linux 3.14)']
     old_paths = [item.get('previous_filename') for item in files
                  if type(item) is dict and item.get('previous_filename') is not None]
     if any(type(path) is not str for path in old_paths):
         return 'MERGE_CHECKS_UNAVAILABLE'
+    required_checks = _required_linux_checks(paths, old_paths)
+    if required_checks is None:
+        return 'MERGE_CHECKS_UNAVAILABLE'
+    docs_only = required_checks == ['check (docs)']
     requires_macos = not docs_only and _mac_ci_runs(paths + old_paths)
     if requires_macos:
         required_checks.append('check (macOS 3.13)')
@@ -584,51 +669,72 @@ def _merge_main_gate(head, github_get, pr):
 
 
 def _review_ci_gate(number, head, github_get, latest_out=None):
-    """Require the newest exact-head Linux CI check to pass before review.
+    """Require every required exact-head Linux workflow check to pass before review.
 
     latest_out, when a dict, gets the newest completed non-success run so a
-    CI_FAILED result can be routed (#1502 WP-D D11).
+    CI_FAILED result can be routed (#1502 WP-D D11). A PR whose file list
+    cannot be read completely (more than GitHub's 3000-file limit) returns
+    STOPPED with PR_FILES_TOO_MANY instead of waiting forever (#1502 WP-G).
     """
     try:
         checks = github_get(f'commits/{head}/check-runs?per_page=100')
-        files = github_get(f'pulls/{number}/files?per_page=100')
     except Exception:
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    if (type(checks) is not dict or type(checks.get('check_runs')) is not list or
+    files, files_code = _pr_files(number, github_get)
+    if files_code == PR_FILES_TOO_MANY:
+        return 'STOPPED', PR_FILES_TOO_MANY
+    if (files_code is not None or type(checks) is not dict or
+            type(checks.get('check_runs')) is not list or
             type(checks.get('total_count')) is not int or
             checks['total_count'] < len(checks['check_runs']) or
-            checks['total_count'] < 0 or len(checks['check_runs']) > 100 or
-            type(files) is not list or len(files) >= 100):
+            checks['total_count'] < 0 or len(checks['check_runs']) > 100):
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    paths = []
+    paths, old_paths = [], []
     for item in files:
         path = item.get('filename') if type(item) is dict else None
         if type(path) is not str:
             return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
         paths.append(path)
-    docs_only = task_completion._docs_only_ci(paths)
-    required_name = 'check (docs)' if docs_only else 'check (Linux 3.14)'
+        old = item.get('previous_filename')
+        if old is not None:
+            if type(old) is not str:
+                return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+            old_paths.append(old)
     runs = checks['check_runs']
     if any(type(item) is not dict for item in runs):
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    candidates = [item for item in runs if item.get('head_sha') == head and
-                  item.get('name') == required_name]
-    for item in candidates:
-        if (type(item.get('id')) is not int or item['id'] < 1 or
-                type(item.get('status')) is not str):
-            return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    if not candidates:
-        return 'WAITING_CI', 'LINUX_CI_PENDING'
-    latest = max(candidates, key=lambda item: item['id'])
-    if latest['status'] != 'completed':
-        return 'WAITING_CI', 'LINUX_CI_PENDING'
-    if type(latest.get('conclusion')) is not str:
+    required_checks = _required_linux_checks(paths, old_paths)
+    if required_checks is None:
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
-    if latest['conclusion'] == 'success':
-        return None, None
-    if type(latest_out) is dict:
-        latest_out.update(latest)
-    return 'CI_FAILED', 'LINUX_CI_FAILED'
+    # Every required check must pass (a docs + ai-loop PR needs both). A
+    # malformed run beats a failure, and a failure beats a pending check.
+    failed = None
+    pending = False
+    for required_name in required_checks:
+        candidates = [item for item in runs if item.get('head_sha') == head and
+                      item.get('name') == required_name]
+        for item in candidates:
+            if (type(item.get('id')) is not int or item['id'] < 1 or
+                    type(item.get('status')) is not str):
+                return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+        if not candidates:
+            pending = True
+            continue
+        latest = max(candidates, key=lambda item: item['id'])
+        if latest['status'] != 'completed':
+            pending = True
+            continue
+        if type(latest.get('conclusion')) is not str:
+            return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+        if latest['conclusion'] != 'success' and failed is None:
+            failed = latest
+    if failed is not None:
+        if type(latest_out) is dict:
+            latest_out.update(failed)
+        return 'CI_FAILED', 'LINUX_CI_FAILED'
+    if pending:
+        return 'WAITING_CI', 'LINUX_CI_PENDING'
+    return None, None
 
 
 # #1502 WP-D D11: required exact-head CI checks a CI repair may answer.
