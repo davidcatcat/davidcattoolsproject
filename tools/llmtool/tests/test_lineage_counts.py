@@ -1,15 +1,18 @@
 """#1502 WP-D L1: Task continuations (continues) and chain-wide repair counts."""
+import contextlib
 import hashlib
 import io
 import json
 import tempfile
+import threading
+import time
 import unittest
 from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
 from llmtool import (lineage_counts, repair_policy, review_repair, task_advance, task_drive,
-                     task_submission_cli as cli)
+                     task_store as task_store_module, task_submission_cli as cli)
 from llmtool.errors import LLMToolError
 from llmtool.repair_policy import UNKNOWN
 from llmtool.task_store import TaskStore, new_id, record_lineage
@@ -235,7 +238,7 @@ class StoreShapeTests(StoreCase):
                 self.assertEqual(self.store.get(task_id), record)
 
 
-class RecordPmContinuesTests(StoreCase):
+class RecordPmCase(StoreCase):
     def record_pm(self, continues=None, task_id=None):
         args = Namespace(stdin_json=True, pm_session_id=None, pm_runtime=None,
                          pm_cwd=None, continues=continues)
@@ -252,6 +255,32 @@ class RecordPmContinuesTests(StoreCase):
         self.assertEqual(str(caught.exception), code)
         self.assertEqual(self.store.task_ids(), before)
 
+
+def run_concurrently(*calls):
+    """Start every call at one barrier in its own thread; return (kind, value) each."""
+    barrier = threading.Barrier(len(calls))
+    results = [None] * len(calls)
+
+    def worker(index, call):
+        try:
+            barrier.wait(timeout=5)
+            results[index] = ('ok', call())
+        except LLMToolError as error:
+            results[index] = ('refused', error)
+        except Exception as error:   # surfaced by the caller's assertions
+            results[index] = ('error', error)
+    threads = [threading.Thread(target=worker, args=(index, call), daemon=True)
+               for index, call in enumerate(calls)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    if any(thread.is_alive() for thread in threads):
+        raise AssertionError('a concurrent call did not finish')
+    return results
+
+
+class RecordPmContinuesTests(RecordPmCase):
     def test_record_pm_sets_the_link_and_without_it_records_as_before(self):
         plain = self.record_pm()
         self.assertNotIn('continues', plain)
@@ -311,6 +340,69 @@ class RecordPmContinuesTests(StoreCase):
         self.assertEqual(self.record_pm(continues=root)['continues'], root)
 
 
+class ContinuesLockTests(RecordPmCase):
+    """Phase 2: check_continues and the create run under one store-wide lock."""
+
+    def slow_check(self, calls):
+        real = lineage_counts.check_continues
+
+        def check(store, task_id, predecessor):
+            calls.append(task_id)
+            real(store, task_id, predecessor)
+            time.sleep(0.3)   # widen the gap between the check and the create
+        return patch.object(lineage_counts, 'check_continues', side_effect=check)
+
+    def successors(self, predecessor):
+        return [task_id for task_id in self.store.task_ids()
+                if self.store.get(task_id).get('continues') == predecessor]
+
+    def test_two_concurrent_record_pm_give_exactly_one_successor(self):
+        first = self.task()
+        calls = []
+        with self.slow_check(calls):
+            results = run_concurrently(lambda: self.record_pm(continues=first),
+                                       lambda: self.record_pm(continues=first))
+        kinds = sorted(kind for kind, _value in results)
+        self.assertEqual(kinds, ['ok', 'refused'], results)
+        refusal = next(value for kind, value in results if kind == 'refused')
+        self.assertEqual(getattr(refusal, 'continues_code', None),
+                         'CONTINUES_PREDECESSOR_HAS_SUCCESSOR')
+        created = next(value for kind, value in results if kind == 'ok')
+        self.assertEqual(self.successors(first), [created['task_id']])
+        self.assertEqual(len(calls), 2)   # both ran the check; neither skipped it
+
+    def test_a_lock_that_cannot_be_taken_refuses_and_never_skips_the_check(self):
+        first = self.task()
+        calls = []
+        with patch.object(task_store_module, 'LINEAGE_LOCK_TIMEOUT_SECONDS', 0.2), \
+             self.slow_check(calls):
+            with self.store.continues_lock():   # another holder past the bounded wait
+                self.refused('CONTINUES_LOCK_UNAVAILABLE', first)
+            with patch.object(TaskStore, 'continues_lock',
+                              side_effect=LLMToolError('lock unavailable')):
+                self.refused('CONTINUES_LOCK_UNAVAILABLE', first)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.successors(first), [])
+
+    def test_the_lock_is_released_on_every_path(self):
+        first = self.task()
+        with patch.object(task_store_module, 'LINEAGE_LOCK_TIMEOUT_SECONDS', 0.2):
+            self.refused('CONTINUES_TASK_UNKNOWN', new_id())
+            with patch.object(self.store, 'create', side_effect=OSError('disk')):
+                with self.assertRaises(LLMToolError):
+                    self.record_pm(continues=first)
+            self.assertEqual(self.record_pm(continues=first)['continues'], first)
+            self.refused('CONTINUES_PREDECESSOR_HAS_SUCCESSOR', first)
+            with self.store.continues_lock():
+                pass
+
+    def test_a_task_without_continues_takes_no_lock(self):
+        with patch.object(task_store_module, 'LINEAGE_LOCK_TIMEOUT_SECONDS', 0.2), \
+             self.store.continues_lock():
+            plain = self.record_pm()
+        self.assertNotIn('continues', plain)
+
+
 # review_repair through a continuation chain (I1-I3, I6).
 
 TASK, RUN, PRED = 'a' * 32, 'b' * 32, 'd' * 32
@@ -356,9 +448,9 @@ def _current(**changes):
     return record
 
 
-def _receipt(head=HEAD):
+def _receipt(head=HEAD, task_id=TASK):
     from llmtool import task_store
-    receipt = {'task_id': TASK, 'run_id': RUN, 'executor_task': EXECUTOR,
+    receipt = {'task_id': task_id, 'run_id': RUN, 'executor_task': EXECUTOR,
                'source_sha': head, 'result': 'FAIL', 'modules': ['test_remote'],
                'failure_excerpt': 'FAIL: test_remote\nAssertionError'}
     receipt['receipt_digest'] = hashlib.sha256(task_store._json_bytes(receipt)).hexdigest()
@@ -496,6 +588,229 @@ class ReviewRepairChainTests(unittest.TestCase):
             dict(task, high_debug=self.rca()), [], packet, family, self.policy,
             counts={'review_repairs': 1, 'review_heads': {OLD_HEAD: 'FAIL'}})
         self.assertEqual(entry['status'], 'RCA_CONFIRMED')
+
+
+class LockedMemoryStore(TaskStore):
+    """A real TaskStore root (its chain lock files are real flocks in a temp dir)
+    whose Task records are held in memory with an atomic compare-and-update."""
+
+    def __init__(self, root, *records):
+        super().__init__(root)
+        self.memory = MemoryStore(*records)
+        self.guard = threading.Lock()
+
+    def get(self, task_id):
+        with self.guard:
+            return self.memory.get(task_id)
+
+    def task_ids(self):
+        with self.guard:
+            return self.memory.task_ids()
+
+    def compare_and_update(self, task_id, *, expected, **changes):
+        with self.guard:
+            return json.loads(json.dumps(self.memory.compare_and_update(
+                task_id, expected=expected, **changes)))
+
+
+OLDEST, MIDDLE, NEWEST = tid(0x71), tid(0x72), tid(0x73)
+
+
+class ChainLockTests(unittest.TestCase):
+    """Phase 2: chain counts and the claim write run under the chain lock."""
+
+    def setUp(self):
+        worker_policy_fixture.install(self)
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve() / 'tasks'
+        self.policy = repair_policy.load_policy()
+        self.calls = []
+        self.recorded = []
+
+    def chain_store(self, oldest_claims):
+        """OLDEST (claims only) <- MIDDLE <- NEWEST; both later Tasks can repair."""
+        middle = _current(task_id=MIDDLE, continues=OLDEST, high_debug=self.rca())
+        newest = _current(task_id=NEWEST, continues=MIDDLE, high_debug=self.rca())
+        return LockedMemoryStore(self.root, {'task_id': OLDEST,
+                                             'review_repair_claims': oldest_claims},
+                                 middle, newest)
+
+    rca = staticmethod(ReviewRepairChainTests.rca)
+
+    def dispatch(self, store, task_id, *, test_failure, hold=0.0):
+        def adapter(**request):
+            self.calls.append(request)
+            return {'status': 'DISPATCHED'}
+
+        def recorder(**request):
+            self.recorded.append(request['repair_task_id'])
+            time.sleep(hold)   # widen the gap between the counts and the claim write
+            return {'task_id': request['repair_task_id'],
+                    'pm_assignment': {'acceptance': ['Repair the reported issue.']}}
+        extra = {'remote_test_receipt': _receipt(task_id=task_id)} if test_failure else {}
+        return review_repair.repair_review(
+            store=store, task_id=task_id, executor_task=EXECUTOR, pr_number=PR,
+            github_get=lambda _path: [_comment()], dispatch_adapter=adapter,
+            current_head=lambda _task, _executor: HEAD, repair_task_recorder=recorder,
+            **extra)
+
+    def patched(self):
+        allowed = type('Decision', (), {'allowed': True})()
+        stack = contextlib.ExitStack()
+        stack.enter_context(patch.object(review_repair.worker_dispatch, 'evaluate',
+                                         return_value=allowed))
+        stack.enter_context(patch.object(review_repair.shutil, 'which',
+                                         return_value='/usr/bin/agy'))
+        return stack
+
+    @staticmethod
+    def new_claims(store):
+        return [item for task_id in (MIDDLE, NEWEST)
+                for item in store.get(task_id).get('review_repair_claims', [])]
+
+    def one_left(self, test_failure):
+        if test_failure:
+            limit = self.policy['test_fail_max']
+            return [ec2_claim('pr-5-ec2', f'{n:040x}', pr=5, attempt=n)
+                    for n in range(1, limit)]
+        limit = self.policy['repair_max']
+        return [claim('pr-5', f'{n:040x}', pr=5, attempt=n) for n in range(1, limit)]
+
+    def refusal_codes(self, test_failure):
+        return (('REPAIR_LIMIT_REACHED',) if test_failure else
+                ('REPAIR_LIMIT_REACHED', 'REPAIR_SPLIT_REQUIRED'))
+
+    def test_chain_key_is_the_oldest_task_or_the_task_itself(self):
+        store = self.chain_store([])
+        for task_id in (OLDEST, MIDDLE, NEWEST):
+            with self.subTest(task_id=task_id):
+                self.assertEqual(lineage_counts.chain_key(store, store.get(task_id)), OLDEST)
+        plain = {'task_id': tid(0x99), 'review_repair_claims': []}
+        self.assertEqual(lineage_counts.chain_key(store, plain), tid(0x99))
+        broken = {'task_id': tid(0x98), 'continues': tid(0x97)}
+        self.assertEqual(lineage_counts.chain_key(store, broken), tid(0x98))
+
+    def test_counts_with_successors_see_claims_of_later_tasks(self):
+        later = _current(task_id=NEWEST, continues=MIDDLE,
+                         review_repair_claims=[ec2_claim('pr-9-ec2', OLD_HEAD, pr=9),
+                                               claim('pr-9', OTHER_HEAD, pr=9)])
+        store = LockedMemoryStore(self.root, {'task_id': OLDEST, 'review_repair_claims': []},
+                                  _current(task_id=MIDDLE, continues=OLDEST), later)
+        middle = store.get(MIDDLE)
+        before = lineage_counts.lineage_counts(store, middle, base_family=f'pr-{PR}')
+        self.assertEqual((before['review_repairs'], before['test_fails']), (0, 0))
+        after = lineage_counts.lineage_counts(store, middle, base_family=f'pr-{PR}',
+                                              include_successors=True)
+        self.assertEqual(after['chain'], [MIDDLE, OLDEST, NEWEST])
+        self.assertEqual((after['review_repairs'], after['test_fails']), (1, 1))
+        # Two Tasks continuing one predecessor are a chain in doubt.
+        store.memory.records[tid(0x74)] = {'task_id': tid(0x74), 'continues': MIDDLE}
+        doubt = lineage_counts.lineage_counts(store, middle, base_family=f'pr-{PR}',
+                                              include_successors=True)
+        self.assertEqual(doubt['test_fails'], UNKNOWN)
+
+    def test_two_concurrent_repairs_in_one_chain_admit_exactly_one(self):
+        for test_failure in (True, False):
+            with self.subTest(test_failure=test_failure):
+                self.calls.clear()
+                store = self.chain_store(self.one_left(test_failure))
+                with self.patched():
+                    results = run_concurrently(
+                        lambda: self.dispatch(store, MIDDLE, test_failure=test_failure,
+                                              hold=0.3),
+                        lambda: self.dispatch(store, NEWEST, test_failure=test_failure,
+                                              hold=0.3))
+                kinds = sorted(kind for kind, _value in results)
+                self.assertEqual(kinds, ['ok', 'refused'], results)
+                refusal = next(value for kind, value in results if kind == 'refused')
+                self.assertIn(getattr(refusal, 'review_repair_code', None),
+                              self.refusal_codes(test_failure))
+                self.assertEqual(len(self.new_claims(store)), 1)
+                self.assertEqual(len(self.calls), 1)
+
+    def test_a_repair_on_an_earlier_task_sees_a_later_tasks_claim(self):
+        for test_failure in (True, False):
+            with self.subTest(test_failure=test_failure):
+                store = self.chain_store(self.one_left(test_failure))
+                with self.patched():
+                    self.dispatch(store, NEWEST, test_failure=test_failure)
+                    with self.assertRaises(LLMToolError) as caught:
+                        self.dispatch(store, MIDDLE, test_failure=test_failure)
+                self.assertIn(caught.exception.review_repair_code,
+                              self.refusal_codes(test_failure))
+                self.assertEqual(store.get(MIDDLE).get('review_repair_claims', []), [])
+
+    def test_a_chain_lock_that_cannot_be_taken_refuses_before_any_count(self):
+        store = self.chain_store([])
+        self.recorded.clear()
+        with patch.object(task_store_module, 'LINEAGE_LOCK_TIMEOUT_SECONDS', 0.2), \
+             self.patched(), \
+             patch.object(lineage_counts, 'lineage_counts',
+                          side_effect=AssertionError('counted without the lock')):
+            for test_failure in (True, False):
+                with self.subTest(test_failure=test_failure, holder='busy'):
+                    with store.chain_lock(OLDEST):
+                        with self.assertRaises(LLMToolError) as caught:
+                            self.dispatch(store, NEWEST, test_failure=test_failure)
+                    self.assertEqual(caught.exception.review_repair_code,
+                                     'REPAIR_CHAIN_LOCK_UNAVAILABLE')
+                with self.subTest(test_failure=test_failure, holder='error'):
+                    with patch.object(TaskStore, 'chain_lock',
+                                      side_effect=LLMToolError('lock unavailable')):
+                        with self.assertRaises(LLMToolError) as caught:
+                            self.dispatch(store, NEWEST, test_failure=test_failure)
+                    self.assertEqual(caught.exception.review_repair_code,
+                                     'REPAIR_CHAIN_LOCK_UNAVAILABLE')
+        self.assertEqual(self.new_claims(store), [])
+        self.assertEqual((self.recorded, self.calls), ([], []))
+
+    def test_the_chain_lock_is_released_on_every_path(self):
+        store = self.chain_store(self.one_left(True))
+        keys = []
+        real = lineage_counts.acquire_chain_lock
+
+        def acquire(lock_store, key):
+            keys.append(key)
+            return real(lock_store, key)
+        with patch.object(task_store_module, 'LINEAGE_LOCK_TIMEOUT_SECONDS', 0.2), \
+             self.patched(), \
+             patch.object(lineage_counts, 'acquire_chain_lock', side_effect=acquire):
+            self.dispatch(store, NEWEST, test_failure=True)            # admitted
+            with self.assertRaises(LLMToolError):                     # refused under lock
+                self.dispatch(store, MIDDLE, test_failure=True)
+
+            def failing_recorder(**_request):
+                raise RuntimeError('record failed')
+            with self.assertRaises(LLMToolError) as caught:           # recorder failure
+                review_repair.repair_review(
+                    store=store, task_id=MIDDLE, executor_task=EXECUTOR, pr_number=PR,
+                    github_get=lambda _path: [_comment()], dispatch_adapter=lambda **_r: {},
+                    current_head=lambda _task, _executor: HEAD,
+                    repair_task_recorder=failing_recorder)
+            # The predecessors hold only test repairs, so the review gate admits.
+            self.assertEqual(caught.exception.review_repair_code,
+                             'REPAIR_TASK_RECORD_UNAVAILABLE')
+            with store.chain_lock(OLDEST):
+                pass
+        self.assertEqual(keys, [OLDEST, OLDEST, OLDEST])
+
+    def test_a_task_without_continues_locks_its_own_id(self):
+        plain = _current()
+        del plain['continues']
+        store = LockedMemoryStore(self.root, plain)
+        keys = []
+        real = lineage_counts.acquire_chain_lock
+
+        def acquire(lock_store, key):
+            keys.append(key)
+            return real(lock_store, key)
+        with self.patched(), \
+             patch.object(lineage_counts, 'acquire_chain_lock', side_effect=acquire):
+            result = self.dispatch(store, TASK, test_failure=False)
+        self.assertEqual(keys, [TASK])
+        self.assertEqual((result['claim']['family'], result['claim']['attempt']),
+                         (f'pr-{PR}', 1))
 
 
 # task advance / drive through a continuation chain (I2, I4).

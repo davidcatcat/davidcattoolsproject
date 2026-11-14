@@ -494,6 +494,12 @@ ASSIGNMENTS_NAME = '.developer-assignments.json'
 ASSIGNMENTS_LOCK_NAME = '.developer-assignments.lock'
 # #1781: per-Task advance lease sidecar, '.<task_id>.json.advance.lock'.
 ADVANCE_LEASE_SUFFIX = '.advance.lock'
+# #1502 WP-D L1 phase 2: record-pm --continues checks and creates under one
+# store-wide lock; a review repair reads chain counts and writes its claim
+# under the chain lock '.<oldest_task_id>.json.chain.lock'.
+CONTINUES_LOCK_NAME = '.task-continues.lock'
+CHAIN_LOCK_SUFFIX = '.chain.lock'
+LINEAGE_LOCK_TIMEOUT_SECONDS = 10.0
 ASSIGNMENTS_MAX_BYTES = 256 * 1024
 MAX_ASSIGNMENTS = 128
 MAX_ASSIGNMENT_AUDIT = 16
@@ -4386,13 +4392,15 @@ class TaskStore:
             _fail('WORKER_AVAILABILITY_INVALID')
 
     @staticmethod
-    def _lock_sidecar(directory, lock_name, *, exclusive, code):
+    def _lock_sidecar(directory, lock_name, *, exclusive, code, timeout=None):
         """Take a shared or exclusive flock on a sidecar lock file in the store root.
 
         Both the open and the flock are bounded by the TaskStore update-lock
-        deadline; a holder past it fails closed with ``<code>_BUSY``.
+        deadline (or ``timeout`` seconds); a holder past it fails closed with
+        ``<code>_BUSY``.
         """
-        deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+        deadline = time.monotonic() + (TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+                                       if timeout is None else timeout)
         lock_fd = None
         try:
             while True:
@@ -4463,6 +4471,38 @@ class TaskStore:
             yield
         finally:
             self._unlock_sidecar(lock_fd)
+
+    @contextlib.contextmanager
+    def _exclusive_sidecar(self, name, code):
+        directory = self._dirfd()
+        try:
+            lock_fd = self._lock_sidecar(directory, name, exclusive=True, code=code,
+                                         timeout=LINEAGE_LOCK_TIMEOUT_SECONDS)
+        finally:
+            os.close(directory)
+        try:
+            yield
+        finally:
+            self._unlock_sidecar(lock_fd)
+
+    def continues_lock(self):
+        """#1502 WP-D L1: hold the store-wide continues lock exclusively.
+
+        record-pm --continues holds it across check_continues and the create,
+        so a predecessor gets at most one successor. A holder past the bounded
+        wait is TASK_CONTINUES_LOCK_BUSY.
+        """
+        return self._exclusive_sidecar(CONTINUES_LOCK_NAME, 'TASK_CONTINUES_LOCK')
+
+    def chain_lock(self, chain_key):
+        """#1502 WP-D L1: hold one continuation chain's lock exclusively.
+
+        chain_key is the chain's oldest Task ID. review_repair holds it across
+        the chain counts and its claim write. A holder past the bounded wait is
+        TASK_CHAIN_LOCK_BUSY; a malformed key refuses before any file is opened.
+        """
+        name = '.' + self._name(chain_key) + CHAIN_LOCK_SUFFIX
+        return self._exclusive_sidecar(name, 'TASK_CHAIN_LOCK')
 
     def _take_advance_lease_exclusive(self, task_id, *, busy_code='SPLIT_CHILD_ADVANCING'):
         """Take the advance lease exclusively without waiting; return its fd.

@@ -7485,10 +7485,23 @@ def run_task_record_pm(args, *, store=None, input_stream=None, return_record=Fal
     prompt, response, assignment = _read_pm_record_input(input_stream)
     task_id, run_id = (new_id() if task_id is None else task_id), new_id()
     # #1502 WP-D L1: an optional write-once link to the Task this one continues.
+    # The check and the create run under one store-wide continues lock, so two
+    # concurrent record-pm --continues X give X at most one successor. A lock
+    # that cannot be taken refuses CONTINUES_LOCK_UNAVAILABLE; a Task without
+    # continues takes no lock and records as before.
     continues = getattr(args, 'continues', None)
-    if continues is not None:
-        from . import lineage_counts
+    if continues is None:
+        return _record_pm_create(store, task_id, run_id, prompt, response, assignment,
+                                 session, continues, return_record)
+    from . import lineage_counts
+    with lineage_counts.continues_lock(store):
         lineage_counts.check_continues(store, task_id, continues)
+        return _record_pm_create(store, task_id, run_id, prompt, response, assignment,
+                                 session, continues, return_record)
+
+
+def _record_pm_create(store, task_id, run_id, prompt, response, assignment, session,
+                      continues, return_record):
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
     contract = _contract(task_id, digest)
     record = _record(
