@@ -175,3 +175,29 @@ def check_d6(root, repair, claim, *, registered_d6, is_ancestor):
         valid = False
     if not valid:
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+
+
+def verify_recovery(store, root, repair_task_id, *, executor_task, pr_number):
+    """E1-E5 on records read now from store; return the claim or refuse. Never writes.
+
+    root is the root record the caller read under its lock. D6 and Git evidence come
+    from review_repair._registered_d6 and task_completion._is_ancestor; nothing is injected.
+    """
+    from . import review_repair, task_completion
+    try:
+        others = [store.get(task_id) for task_id in store.task_ids()]
+    except Exception:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    claim = check_claim(root, repair_task_id, executor_task=executor_task,
+                        pr_number=pr_number, others=others)
+    try:
+        repair = store.get(repair_task_id)
+    except Exception:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    if type(repair) is not dict or repair.get('task_id') != repair_task_id:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    for check in (check_identity, check_authorization, check_execution):
+        check(root, repair, claim)
+    check_d6(root, repair, claim, registered_d6=review_repair._registered_d6,
+             is_ancestor=task_completion._is_ancestor)
+    return claim

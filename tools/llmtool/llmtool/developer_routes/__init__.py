@@ -1,9 +1,10 @@
 """Provider-neutral execution contracts for direct CLI Developer routes."""
 
 from .base import (
-    DEFAULT_TIMEOUT_SECONDS, HARD_TIMEOUT_CAP_SECONDS, TIMEOUT_KEYS as _TIMEOUT_KEYS,
-    DeveloperRoute, RouteError, RouteResult, capture_snapshot, resolve_route_timeout,
-    run_route, timeout_limits_ok as _timeout_limits_ok,
+    DEFAULT_TIMEOUT_SECONDS, HARD_TIMEOUT_CAP_SECONDS, ROUTE_LIMIT_KEYS,
+    TIMEOUT_KEYS as _TIMEOUT_KEYS, DeveloperRoute, RouteError, RouteResult,
+    capture_snapshot, max_diff_bytes_ok, resolve_route_max_diff_bytes,
+    resolve_route_timeout, run_route, timeout_limits_ok as _timeout_limits_ok,
 )
 from .agy import AgyRoute, owner_assignment_gate
 from .claude import ClaudeRoute
@@ -19,7 +20,8 @@ __all__ = [
     'DeveloperRoute', 'RouteError', 'RouteResult', 'capture_snapshot', 'run_route',
     'AgyRoute', 'ClaudeRoute', 'GwAgentRoute', 'owner_assignment_gate', 'load_route_config',
     'check_route_model', 'check_registry_role_model', 'REGISTRY_ROLES',
-    'resolve_route_timeout', 'DEFAULT_TIMEOUT_SECONDS', 'HARD_TIMEOUT_CAP_SECONDS',
+    'resolve_route_timeout', 'resolve_route_max_diff_bytes',
+    'DEFAULT_TIMEOUT_SECONDS', 'HARD_TIMEOUT_CAP_SECONDS',
     'SandboxExecBoundary', 'UnsupportedBoundary', 'WriteBoundary',
     'for_platform',
 ]
@@ -223,10 +225,13 @@ def load_route_config(path=None):
         raise RouteError('ROUTE_CONFIG_INVALID')
     if not all(_route_timeouts_ok(item) for item in routes.values()):
         raise RouteError('ROUTE_CONFIG_INVALID')
+    if not all(max_diff_bytes_ok(item['max_diff_bytes'])
+               for item in routes.values() if 'max_diff_bytes' in item):
+        raise RouteError('ROUTE_CONFIG_INVALID')
     entry = routes['agy']
     expected = {'executable', 'default_model', 'allowed_models', 'default_effort',
                 'denied_dirs', 'state_dirs'}
-    if set(entry) - _TIMEOUT_KEYS != expected:
+    if set(entry) - ROUTE_LIMIT_KEYS != expected:
         raise RouteError('ROUTE_CONFIG_INVALID')
     if (entry['executable'] != 'agy' or type(entry['default_model']) is not str or
             '://' in entry['default_model'] or
@@ -243,7 +248,7 @@ def load_route_config(path=None):
         claude = routes['claude']
         expected_claude = {'executable', 'default_model', 'allowed_models', 'default_effort',
                            'denied_dirs', 'state_dirs'}
-        if (set(claude) - _TIMEOUT_KEYS != expected_claude or claude.get('executable') != 'claude' or
+        if (set(claude) - ROUTE_LIMIT_KEYS != expected_claude or claude.get('executable') != 'claude' or
                 type(claude.get('default_model')) is not str or
                 re.fullmatch(r'claude-[a-z0-9][a-z0-9.-]{0,120}',
                              claude['default_model']) is None or
@@ -262,7 +267,7 @@ def load_route_config(path=None):
         expected_gw = {'package_path', 'default_model', 'allowed_models', 'default_effort',
                        'profile_name', 'profile', 'authorization_ref',
                        'allowed_data_classes'}
-        if (set(gw) - _TIMEOUT_KEYS != expected_gw or
+        if (set(gw) - ROUTE_LIMIT_KEYS != expected_gw or
                 type(gw.get('package_path')) is not str or
                 not (gw['package_path'].startswith('/') or
                      gw['package_path'].startswith('~/')) or
@@ -288,8 +293,8 @@ def load_route_config(path=None):
         normalized['gw-agent']['allowed_models'] = list(gw['allowed_models'])
     if 'opencode' in routes:
         opencode = routes['opencode']
-        if (set(opencode) - _TIMEOUT_KEYS != {'executable', 'default_model',
-                                              'allowed_models', 'default_effort'} or
+        if (set(opencode) - ROUTE_LIMIT_KEYS != {'executable', 'default_model',
+                                                 'allowed_models', 'default_effort'} or
                 opencode.get('executable') != 'opencode' or
                 not _opencode_model_ok(opencode.get('default_model')) or
                 type(opencode.get('default_effort')) is not str or
