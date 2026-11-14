@@ -26,6 +26,8 @@ OWNER_SETTLED = frozenset({
     "RESOLVED", "DONE", "CLOSED", "CANCELLED", "WITHDRAWN", "AUTHORIZED",
     "ACCEPTED", "ACKNOWLEDGED", "SUPERSEDED",
 })
+# #1943 WP-1c: mirrors scripts/llmtool_monitor.py OWNER_INFORMATION_STATUSES; information neither asks nor settles.
+OWNER_INFORMATION_STATUSES = frozenset({"NOTICE", "INFO", "TRACKING"})
 WAITING_OWNER_DIRECTIONS = {
     ("integrator", "owner"): frozenset({"BLOCKED", "WAITING", "UNKNOWN"}),
     ("pm", "owner"): frozenset({"BLOCKED", "WAITING", "UNKNOWN"}),
@@ -204,6 +206,8 @@ def _waiting_markers(comments: list) -> dict[str, tuple[int, int, str, str]]:
             continue
         kind, actor = fields.get("type", ""), fields.get("actor", "")
         target, status = fields.get("target", ""), fields.get("status", "")
+        if status.upper() in OWNER_INFORMATION_STATUSES and actor != "owner":
+            continue
         settles = actor == "owner" or (target == "owner" and status.upper() in OWNER_SETTLED)
         if (settles and kind.casefold() == "waiting_owner" and
                 status.upper() not in WAITING_OWNER_DIRECTIONS.get((actor, target), frozenset())):

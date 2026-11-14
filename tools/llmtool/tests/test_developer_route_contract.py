@@ -165,6 +165,55 @@ class DeveloperRouteContractTests(unittest.TestCase):
                     capture_snapshot(root)
         self.assertEqual(caught.exception.code, 'ROUTE_GIT_INSPECTION_FAILED')
 
+    def test_runner_stage_failures_name_their_code(self):
+        # #1230 refusal-code pin: each run_route stage failure carries one fixed code.
+        with mock.patch('llmtool.developer_routes.base.task_completion.collect_git_snapshot',
+                        side_effect=OSError('synthetic')):
+            with self.assertRaises(RouteError) as caught:
+                run_route(self.route, self.request, gate=lambda: True,
+                          runner=lambda *args: self.fail('runner must not start'),
+                          boundary=FakeBoundary(), snapshot=lambda root: self.before)
+        self.assertEqual(caught.exception.code, 'FAKE_D6_BINDING_INVALID')
+        with mock.patch.object(self.route, 'configure_boundary', return_value=None):
+            with self.assertRaises(RouteError) as caught:
+                self.run_case()
+        self.assertEqual(caught.exception.code, 'BLOCKED_WRITE_ISOLATION')
+        self.assertEqual(caught.exception.blocked_reason, 'UNSUPPORTED_BOUNDARY')
+        with mock.patch.object(self.route, 'collect', side_effect=ValueError('synthetic')):
+            with self.assertRaises(RouteError) as caught:
+                self.run_case()
+        self.assertEqual(caught.exception.code, 'FAKE_COLLECT_FAILED')
+        for code, stdout in (('0', b'output'), (0, 'output')):
+            with self.subTest(code=code, stdout=stdout):
+                with self.assertRaises(RouteError) as caught:
+                    self.run_case(code=code, stdout=stdout)
+                self.assertEqual(caught.exception.code, 'FAKE_RUNNER_RESULT_INVALID')
+
+    def test_runner_exception_names_only_its_type(self):
+        def runner(*args):
+            raise RuntimeError('synthetic runner detail')
+        with mock.patch('llmtool.developer_routes.base.task_completion.collect_git_snapshot',
+                        return_value=self.git):
+            with mock.patch('llmtool.developer_routes.base._git_status_paths', return_value=()):
+                with self.assertRaises(RouteError) as caught:
+                    run_route(self.route, self.request, gate=lambda: True, runner=runner,
+                              boundary=FakeBoundary(), snapshot=lambda root: self.before)
+        self.assertEqual(caught.exception.code, 'FAKE_RUNNER_FAILED')
+        self.assertEqual(caught.exception.facts, {'exception_type': 'RuntimeError'})
+        self.assertNotIn('synthetic', str(caught.exception))
+
+    def test_bad_status_record_and_bad_code_use_fixed_codes(self):
+        from llmtool.developer_routes import base as route_base
+        for raw in (b'??x\0', b'R  new.txt\0'):
+            with self.subTest(raw=raw):
+                with mock.patch.object(route_base.task_completion, '_git', return_value=raw):
+                    with self.assertRaises(RouteError) as caught:
+                        route_base._git_status_paths('/root')
+                self.assertEqual(caught.exception.code, 'ROUTE_GIT_STATUS_INVALID')
+        for code in ('lower_case', '', 'X' * 65, None):
+            with self.subTest(code=code):
+                self.assertEqual(RouteError(code).code, 'ROUTE_ERROR')
+
     def test_post_run_git_mutation_classified_before_dirty_state(self):
         changed = {'files': self.after['files'],
                    'git_state': {'head': 'b' * 40}}

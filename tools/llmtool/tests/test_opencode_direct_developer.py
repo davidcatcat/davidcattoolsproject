@@ -1224,6 +1224,32 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                 adapter.resolved_timeout(1200)
         self.assertEqual(caught.exception.direct_opencode_code, 'TIMEOUT_OVER_ROUTE_MAX')
 
+    def test_prompt_home_and_budget_refusals_name_their_code(self):
+        # #1230 refusal-code pin: prompt, home and budget refusals carry fixed codes.
+        from llmtool import opencode_direct_developer as adapter
+        for prompt in (None, b'bytes', '', '   \n', 'lone \ud800 surrogate'):
+            with self.subTest(prompt=prompt):
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    adapter._screen_prompt(prompt)
+                self.assertEqual(caught.exception.direct_opencode_code, 'OPENCODE_PROMPT_INVALID')
+        limit = adapter.MAX_PROMPT_BYTES
+        self.assertEqual(adapter._screen_prompt('x' * limit), b'x' * limit)
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            adapter._screen_prompt('x' * (limit + 1))
+        self.assertEqual(caught.exception.direct_opencode_code, 'OPENCODE_PROMPT_TOO_LARGE')
+        for value in (0, True, '600', adapter.MAX_WALL_CLOCK_SECONDS + 1):
+            with self.subTest(value=value):
+                with patch('llmtool.developer_routes.resolve_route_timeout', return_value=value):
+                    with self.assertRaises(DirectOpenCodeError) as caught:
+                        adapter.resolved_timeout()
+                self.assertEqual(caught.exception.direct_opencode_code, 'OPENCODE_BUDGET_INVALID')
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, 'missing-home')
+            with patch.object(adapter.os.path, 'expanduser', return_value=missing):
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    adapter._safe_environment(Path(tmp) / 'config.json', Path(tmp))
+        self.assertEqual(caught.exception.direct_opencode_code, 'OPENCODE_HOME_UNAVAILABLE')
+
 
 if __name__ == '__main__':
     unittest.main()
