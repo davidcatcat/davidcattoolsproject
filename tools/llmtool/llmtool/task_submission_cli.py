@@ -27,8 +27,10 @@ from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
-                         _DIRECT_EXECUTION_FIELDS)
+                         _DIRECT_EXECUTION_FIELDS, FILE_OPS_CONTRACT_MARK,
+                         file_ops_result_paths)
 from . import active_pm_inbox
+from . import file_ops
 from . import remote_test
 from . import task_completion
 from . import opencode_direct_developer
@@ -305,8 +307,16 @@ def _provider_route_binding(provider):
     return {'type': provider_type, 'model': model, 'base_url': normalized_url}
 
 
-def _pm_assignment(response):
-    """Parse an optional structured recommendation; never infer it from prose."""
+_ASSIGNMENT_KEYS = frozenset(('route', 'risk', 'goal', 'acceptance'))
+_ASSIGNMENT_FILE_OPS_KEYS = _ASSIGNMENT_KEYS | frozenset(('file_ops',))
+
+
+def _pm_assignment(response, *, allow_file_ops=False):
+    """Parse an optional structured recommendation; never infer it from prose.
+
+    ``file_ops`` (#1502) is accepted only for record-pm and only as the exact
+    normalized ``file_ops.parse_ops`` list; anything else is not an assignment.
+    """
     try:
         value = _strict_json_object(response)
         if (type(value) is not dict or
@@ -317,8 +327,13 @@ def _pm_assignment(response):
         assignment = value['developer_assignment']
         if assignment is None:
             return None
+        if (type(assignment) is dict and allow_file_ops and 'file_ops' in assignment and
+                (type(assignment['file_ops']) is not list or
+                 file_ops.parse_ops(assignment['file_ops']) != assignment['file_ops'])):
+            return None
         if (type(assignment) is not dict or
-                set(assignment) != {'route', 'risk', 'goal', 'acceptance'} or
+                set(assignment) not in ((_ASSIGNMENT_KEYS, _ASSIGNMENT_FILE_OPS_KEYS)
+                                        if allow_file_ops else (_ASSIGNMENT_KEYS,)) or
                 assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                 assignment['risk'] not in ('LOW', 'OTHER') or
                 type(assignment['goal']) is not str or
@@ -341,7 +356,7 @@ def _pm_assignment_limit_error(response):
         if (type(value) is not dict or value.get('schema_version') != 1 or
                 type(value.get('schema_version')) is not int or
                 type(assignment) is not dict or
-                set(assignment) != {'route', 'risk', 'goal', 'acceptance'} or
+                set(assignment) not in (_ASSIGNMENT_KEYS, _ASSIGNMENT_FILE_OPS_KEYS) or
                 assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                 assignment['risk'] not in ('LOW', 'OTHER') or
                 type(assignment['goal']) is not str or
@@ -403,6 +418,22 @@ def _strict_json_object(raw):
     return value
 
 
+def _check_record_file_ops(parsed):
+    """#1502: refuse record-pm when developer_assignment.file_ops is not valid ops.
+
+    The ops must be a JSON list that ``file_ops.parse_ops`` accepts unchanged
+    (already normalized), so the stored assignment equals the PM response.
+    """
+    assignment = parsed.get('developer_assignment')
+    if type(assignment) is not dict or 'file_ops' not in assignment:
+        return
+    ops = assignment['file_ops']
+    if type(ops) is not list:
+        raise LLMToolError(f'{file_ops.INVALID}: file_ops must be a JSON list')
+    if file_ops.parse_ops(ops) != ops:  # raises the parse_ops refusal code
+        raise LLMToolError(f'{file_ops.INVALID}: file_ops must be normalized ops')
+
+
 def _read_pm_record_input(stream=None):
     stream = sys.stdin if stream is None else stream
     source = getattr(stream, 'buffer', stream)
@@ -423,10 +454,11 @@ def _read_pm_record_input(stream=None):
     request = _screen_text(envelope['request'], REQUEST_LIMIT)
     response = _screen_text(envelope['response'], RESPONSE_LIMIT)
     try:
-        _strict_json_object(response)
+        parsed = _strict_json_object(response)
     except (ValueError, TypeError):
         raise LLMToolError('PM response must be one strict JSON object') from None
-    assignment = _pm_assignment(response)
+    _check_record_file_ops(parsed)
+    assignment = _pm_assignment(response, allow_file_ops=True)
     if (assignment is None or assignment['route'] not in ('gw-agent', 'opencode', 'codex', 'agy', 'claude') or
             assignment['risk'] != 'LOW'):
         limit_error = _pm_assignment_limit_error(response)
@@ -468,10 +500,13 @@ def _review_pm_recommendation(response):
         return None
 
 
-def _contract(task_id, request_sha256=None):
+def _contract(task_id, request_sha256=None, file_ops_sha256=None):
     goal = ('PM intake rejected; original request was not stored.'
             if request_sha256 is None else
             'PM intake for development request sha256:' + request_sha256)
+    if file_ops_sha256 is not None:
+        # #1502: the assigned file_ops are bound into the Task contract digest.
+        goal += FILE_OPS_CONTRACT_MARK + file_ops_sha256
     return TaskContract(
         schema_version=1,
         task_id=task_id,
@@ -536,9 +571,14 @@ def _active_pm_runtime(task):
 
 def _pm_assignment_packet(task):
     assignment = task['pm_assignment']
-    return None if assignment is None else {
+    if assignment is None:
+        return None
+    packet = {
         'route': assignment['route'], 'risk': assignment['risk'],
         'goal': assignment['goal'], 'acceptance': assignment['acceptance']}
+    if 'file_ops' in assignment:
+        packet['file_ops'] = assignment['file_ops']
+    return packet
 
 
 def _attributed_paths(result):
@@ -673,6 +713,8 @@ def _task_view(record):
         if 'completion' in record:
             view['completion'] = record['completion']
         view['pm_assignment'] = record['pm_assignment']
+        if 'file_ops_evidence' in record:
+            view['file_ops_evidence'] = record['file_ops_evidence']
         if record['developer'] is None:
             view['developer'] = None
         else:
@@ -5275,7 +5317,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         changed_paths, raw = task_completion._worktree_diff(registration.root, snapshot.head)
         if len(raw) > 64 * 1024:
             raise RouteError('AGY_OUTPUT_TOO_LARGE')
-        if any(path not in write_paths for path in changed_paths):
+        if not _d6_scope_ok(store, task['task_id'], write_paths, changed_paths):
             raise RouteError('AGY_WRITE_SCOPE_VIOLATION')
         artifact = raw.decode('utf-8', 'strict')
         usage = _normalize_agy_usage(result.usage)
@@ -5478,6 +5520,9 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
         'goal': pm_goal, 'acceptance': acceptance, 'read_paths': read_paths,
         'write_paths': write_paths,
     }
+    if 'file_ops' in assignment:
+        # #1502: already applied by llmtool before this run; listed for context only.
+        prompt_packet['file_ops_applied'] = assignment['file_ops']
     repair_packet = getattr(args, 'repair_packet', None)
     if repair_packet is not None:
         prompt_packet['untrusted_repair_reference'] = _validate_repair_packet(repair_packet)
@@ -5610,7 +5655,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
             raise _ClaudeCommittedCarry()
         if len(raw) > 64 * 1024:
             raise RouteError('CLAUDE_OUTPUT_TOO_LARGE')
-        if any(path not in write_paths for path in changed_paths):
+        if not _d6_scope_ok(store, task['task_id'], write_paths, changed_paths):
             raise RouteError('CLAUDE_WRITE_SCOPE_VIOLATION')
         artifact = raw.decode('utf-8', 'strict')
         usage = _normalize_agy_usage(result.usage)
@@ -5971,7 +6016,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         changed_paths, raw = task_completion._worktree_diff(registration.root, snapshot.head)
         if len(raw) > 64 * 1024:
             raise RouteError('GW_AGENT_OUTPUT_TOO_LARGE')
-        if any(path not in write_paths for path in changed_paths):
+        if not _d6_scope_ok(store, task['task_id'], write_paths, changed_paths):
             raise RouteError('GW_AGENT_WRITE_SCOPE_VIOLATION')
         if not route.audit_copy_path or not route._result:
             raise RouteError('GW_AGENT_AUDIT_INVALID')
@@ -7052,6 +7097,109 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             f'the current D6 head {head_prefix}; examined SHA {examined_prefix}')
 
 
+def _d6_scope(record, write_paths):
+    """#1502: a D6 result may change exactly write_paths plus the VERIFIED file_ops paths."""
+    return frozenset(write_paths) | file_ops_result_paths(record)
+
+
+def _d6_scope_ok(store, task_id, write_paths, changed_paths):
+    allowed = _d6_scope(store.get(task_id), write_paths)
+    return all(path in allowed for path in changed_paths)
+
+
+def _file_ops_now():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _file_ops_gate(args, store):
+    """#1502: apply the PM-assigned file_ops once, before any Developer, and record evidence.
+
+    Runs on the bound D6 at its registered HEAD. The first apply needs a clean
+    tree; ``file_ops.plan`` refuses the whole batch before any change. A
+    VERIFIED Task re-verifies (no-op) and reuses its evidence. A mid-run
+    failure records FAILED with isolate=True and refuses: the store then takes
+    no Developer, merge claim or published PR for the Task. file_ops never
+    commits, pushes or resets.
+
+    An unreadable Task is left to the route's own refusal: nothing is applied,
+    and the store refuses any Developer for a file_ops Task without VERIFIED
+    evidence (FILE_OPS_EVIDENCE_REQUIRED).
+    """
+    try:
+        task = store.get(args.task_id)
+    except Exception:
+        return None
+    if type(task) is not dict:
+        return None
+    task_id = task.get('task_id')
+    evidence = task.get('file_ops_evidence')
+    if type(evidence) is dict and evidence.get('status') == 'FAILED':
+        raise LLMToolError('FILE_OPS_ISOLATED: file_ops failed mid-run on this Task; '
+                           'no Developer or publish; recreate the D6 under a new Task')
+    assignment = task.get('pm_assignment')
+    ops = assignment.get('file_ops') if type(assignment) is dict else None
+    if ops is None or task.get('developer') is not None:
+        return evidence
+    if task.get('schema_version') != 2 or task.get('state') != 'PM_RESPONDED':
+        raise LLMToolError('task has no successful PM response')
+    if task.get('abandonment') is not None or _split_pending(task):
+        raise LLMToolError('FILE_OPS_TASK_NOT_DISPATCHABLE')
+    try:
+        registration, snapshot = _delegate_d6_binding(args)
+    except Exception:
+        raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
+    if registration.task_id != getattr(args, 'executor_task', None):
+        raise LLMToolError('D6_SOURCE_BINDING_MISMATCH')
+    head = snapshot.head
+    if evidence is not None:
+        if evidence.get('executor_task') != registration.task_id or evidence.get('head') != head:
+            raise LLMToolError('FILE_OPS_EVIDENCE_MISMATCH: recorded file_ops evidence is '
+                               'for another D6 or HEAD')
+        sealed = {'head': evidence['head'], 'ops': ops, 'files': evidence['files'],
+                  'sha256': evidence['plan_sha256']}
+    else:
+        if snapshot.clean is not True:
+            raise LLMToolError(f'{file_ops.D6_NOT_CLEAN}: file_ops need a clean D6')
+        sealed = file_ops.plan(registration.root, head, ops)  # read-only; refusal changes nothing
+    result = file_ops.apply(registration.root, sealed)  # raises before any change on refusal
+    common = {'executor_task': registration.task_id, 'head': sealed['head'],
+              'ops_sha256': file_ops.ops_digest(ops), 'plan_sha256': sealed['sha256'],
+              'recorded_at': _file_ops_now()}
+    if result['status'] == 'FAILED':
+        failed = {'status': 'FAILED', 'isolate': True, 'completed': result['completed'],
+                  'total': result['total'],
+                  'reason': _file_ops_reason(result.get('reason')), **common}
+        try:
+            store.compare_and_update(task_id,
+                                     expected={'file_ops_evidence': evidence, 'developer': None},
+                                     file_ops_evidence=failed)
+        except Exception:
+            raise LLMToolError('FILE_OPS_FAILED: file_ops failed mid-run and the evidence '
+                               'could not be saved; recreate the D6') from None
+        raise LLMToolError('FILE_OPS_FAILED: file_ops failed mid-run; Developer and publish '
+                           'are blocked; recreate the D6')
+    if evidence is not None:
+        return evidence  # idempotent: the tree holds the recorded result
+    verified = {'status': 'VERIFIED', 'files': result['evidence']['files'], **common}
+    try:
+        saved = store.compare_and_update(
+            task_id, expected={'file_ops_evidence': None, 'developer': None},
+            file_ops_evidence=verified)
+    except Exception:
+        raise LLMToolError('FILE_OPS_EVIDENCE_UNSAVED: file_ops were applied but their '
+                           'evidence could not be saved; recreate the D6') from None
+    return saved['file_ops_evidence']
+
+
+def _file_ops_reason(value):
+    """A bounded, printable-ASCII failure reason for the stored evidence."""
+    text = value if type(value) is str else ''
+    text = ''.join(char if ' ' <= char <= '~' else '?' for char in text)[:512]
+    if not text or _emitted_sensitive(text):
+        return 'file_ops apply failed'
+    return text
+
+
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
     if getattr(args, 'provider', None) == 'company-gw':
@@ -7068,6 +7216,8 @@ def run_task_delegate(args, *, store=None):
     elif getattr(args, 'timeout', None) is not None:
         raise LLMToolError('TIMEOUT_ROUTE_UNSUPPORTED: --timeout applies only to the '
                            'Claude, OpenCode, AGY and gw-agent Developer routes')
+    # #1502: PM-assigned file_ops run once, before any Developer of every route.
+    _file_ops_gate(args, store)
     if getattr(args, 'background', False):
         provider = getattr(args, 'provider', None)
         if provider == 'codex' and getattr(args, 'mode', 'proposal') != 'direct':
@@ -7482,7 +7632,8 @@ def run_task_record_pm(args, *, store=None, input_stream=None, return_record=Fal
     prompt, response, assignment = _read_pm_record_input(input_stream)
     task_id, run_id = (new_id() if task_id is None else task_id), new_id()
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
-    contract = _contract(task_id, digest)
+    contract = _contract(task_id, digest, file_ops_sha256=(
+        file_ops.ops_digest(assignment['file_ops']) if 'file_ops' in assignment else None))
     record = _record(
         task_id, run_id,
         'pm-' + (new_id() if session is None else session['pm_native_session_id']),

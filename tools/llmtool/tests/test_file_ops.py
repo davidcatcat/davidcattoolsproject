@@ -100,6 +100,22 @@ class ParseOpsTests(unittest.TestCase):
         for path in ok:
             self.assertEqual(path, file_ops.parse_ops([{'op': 'delete', 'path': path}])[0]['path'])
 
+    def test_ops_digest_is_canonical_and_refuses_bad_ops(self):
+        ops = [{'op': 'move', 'from': 'a.txt', 'to': 'b/a.txt'}]
+        canonical = json.dumps(ops, sort_keys=True, separators=(',', ':')).encode('ascii')
+        self.assertEqual(hashlib.sha256(canonical).hexdigest(), file_ops.ops_digest(ops))
+        self.assertEqual(file_ops.ops_digest(ops), file_ops.ops_digest(json.dumps(ops)))
+        self.assertNotEqual(file_ops.ops_digest(ops),
+                            file_ops.ops_digest([{'op': 'delete', 'path': 'a.txt'}]))
+        self.assertCode('FILE_OPS_PATH_INVALID', [{'op': 'delete', 'path': '../x'}])
+        with self.assertRaises(LLMToolError):
+            file_ops.ops_digest([{'op': 'delete', 'path': '../x'}])
+
+    def test_result_paths_are_deleted_moved_from_and_moved_to(self):
+        files = [{'op': 'delete', 'path': 'a.txt'},
+                 {'op': 'move', 'from': 'd/b.txt', 'to': 'e/b.txt'}]
+        self.assertEqual(frozenset({'a.txt', 'd/b.txt', 'e/b.txt'}), file_ops.result_paths(files))
+
 
 @unittest.skipUnless(GIT, 'git is required')
 class _RepoCase(unittest.TestCase):
@@ -156,6 +172,17 @@ class _RepoCase(unittest.TestCase):
 
 
 class PlanTests(_RepoCase):
+    def test_check_plan_is_strict_without_a_tree(self):
+        p = self.make_plan([{'op': 'move', 'from': 'docs/', 'to': 'archive/'}])
+        self.assertIs(p, file_ops.check_plan(p))
+        for field, value in (('to', '../escape.txt'), ('mode', '120000'), ('blob', 'abc')):
+            with self.subTest(field=field):
+                files = json.loads(json.dumps(p['files']))
+                files[0][field] = value
+                resealed = file_ops._seal(p['head'], p['ops'], files)
+                self.assertCode('FILE_OPS_INVALID', file_ops.check_plan, resealed)
+        self.assertCode('FILE_OPS_INVALID', file_ops.check_plan, dict(p, sha256='0' * 64))
+
     def test_plan_is_read_only_and_expands_directories(self):
         p = self.make_plan([{'op': 'delete', 'path': 'docs/'}])
         self.assertEqual(['docs/a.txt', 'docs/b.txt', 'docs/sub/c.txt'],

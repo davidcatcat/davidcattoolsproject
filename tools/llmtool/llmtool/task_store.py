@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 from .action_contract import TaskBinding
 from .diagnostics import validate_provider_usage
 from .errors import LLMToolError
+from . import file_ops as file_ops_module
 from .opencode_direct_developer import is_free_model
 from .role_config import _NAME
 from .task_verification import parse_task_contract
@@ -100,7 +101,17 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'review_dispatch_claim', 'review_repair_claims', 'high_debug',
     'abandonment', 'pm_session_adoptions', 'pm_provenance', 'merge_attempt',
     'published_pr', 'repair_cap_override', 'publish_operations',
-    'review_exception', 'lineage', 'review_disputes', 'waiting'))
+    'review_exception', 'lineage', 'review_disputes', 'waiting', 'file_ops_evidence'))
+# #1502 file_ops: evidence of the PM-assigned delete/move ops applied before the
+# Developer. VERIFIED is the file_ops.verify() result; FAILED (isolate) blocks
+# any Developer and publish on the Task.
+_FILE_OPS_VERIFIED_FIELDS = frozenset((
+    'status', 'executor_task', 'head', 'ops_sha256', 'plan_sha256', 'files', 'recorded_at'))
+_FILE_OPS_FAILED_FIELDS = frozenset((
+    'status', 'isolate', 'executor_task', 'head', 'ops_sha256', 'plan_sha256',
+    'completed', 'total', 'reason', 'recorded_at'))
+_FILE_OPS_REASON_MAX = 512
+FILE_OPS_CONTRACT_MARK = '; file_ops sha256:'
 # Owner-exception merge evidence (#1253, #1519). Only this one exception type
 # is persisted; its evidence is the exact owner_exception.verify() result.
 _REVIEW_EXCEPTION_TYPE = 'OWNER_EXCEPTION_DETERMINISTIC_REDACTION'
@@ -375,6 +386,7 @@ _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_APPLY_FAILED',
 ))
 _PM_ASSIGNMENT_FIELDS = frozenset(('schema_version', 'route', 'risk', 'goal', 'acceptance'))
+_PM_ASSIGNMENT_FILE_OPS_FIELDS = _PM_ASSIGNMENT_FIELDS | frozenset(('file_ops',))
 _PM_PROVENANCE_FIELDS = frozenset((
     'source', 'provider_invoked', 'native_session_id_status', 'usage_status',
     'session_restored', 'automatic_callback',
@@ -1476,6 +1488,88 @@ def valid_waiting(item):
     return True
 
 
+def file_ops_result_paths(record):
+    """Op paths of a Task's VERIFIED file_ops evidence; empty without it."""
+    evidence = record.get('file_ops_evidence') if type(record) is dict else None
+    if type(evidence) is not dict or evidence.get('status') != 'VERIFIED':
+        return frozenset()
+    return file_ops_module.result_paths(evidence['files'])
+
+
+def _validate_file_ops(record):
+    """#1502: file_ops evidence is strict, bound to the assignment, and gates the Developer.
+
+    Without file_ops in pm_assignment there is no evidence (legacy unchanged).
+    With them, a Developer exists only after VERIFIED evidence at its source
+    HEAD and D6; FAILED (isolate) allows no Developer, merge or published PR.
+    """
+    assignment = record.get('pm_assignment')
+    ops = assignment.get('file_ops') if type(assignment) is dict else None
+    developer = record.get('developer')
+    if 'file_ops_evidence' not in record:
+        if ops is not None and developer is not None:
+            _fail('FILE_OPS_EVIDENCE_REQUIRED')
+        return
+    evidence = record['file_ops_evidence']
+    if record.get('schema_version') != 2 or ops is None or type(evidence) is not dict:
+        _fail('FILE_OPS_EVIDENCE_INVALID')
+    try:
+        digest = file_ops_module.ops_digest(ops)
+    except LLMToolError:
+        _fail('FILE_OPS_EVIDENCE_INVALID')
+    status = evidence.get('status')
+    shape = {'VERIFIED': _FILE_OPS_VERIFIED_FIELDS,
+             'FAILED': _FILE_OPS_FAILED_FIELDS}.get(status) if type(status) is str else None
+    if (shape is None or set(evidence) != shape or
+            not _safe_identifier(evidence['executor_task'], D6_TASK_ID) or
+            type(evidence['head']) is not str or
+            re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', evidence['head']) is None or
+            evidence['ops_sha256'] != digest or
+            type(evidence['plan_sha256']) is not str or
+            re.fullmatch(r'[0-9a-f]{64}', evidence['plan_sha256']) is None or
+            not _valid_utc_seconds(evidence['recorded_at'])):
+        _fail('FILE_OPS_EVIDENCE_INVALID')
+    if status == 'VERIFIED':
+        try:
+            file_ops_module.check_plan({
+                'head': evidence['head'], 'ops': ops, 'files': evidence['files'],
+                'sha256': evidence['plan_sha256']})
+        except LLMToolError:
+            _fail('FILE_OPS_EVIDENCE_INVALID')
+        if type(developer) is dict and (
+                developer.get('source_sha') != evidence['head'] or
+                developer.get('executor_task_id', evidence['executor_task']) !=
+                evidence['executor_task']):
+            _fail('FILE_OPS_EVIDENCE_INVALID')
+        return
+    total, completed, reason = evidence['total'], evidence['completed'], evidence['reason']
+    if (evidence['isolate'] is not True or
+            type(total) is not int or not 1 <= total <= file_ops_module.MAX_FILES or
+            type(completed) is not int or not 0 <= completed <= total or
+            type(reason) is not str or not 1 <= len(reason) <= _FILE_OPS_REASON_MAX or
+            any(not ' ' <= char <= '~' for char in reason) or _emitted_sensitive(reason)):
+        _fail('FILE_OPS_EVIDENCE_INVALID')
+    if (developer is not None or record.get('published_pr') is not None or
+            record.get('merge_attempt') is not None):
+        _fail('FILE_OPS_ISOLATED')
+
+
+def _check_file_ops_transition(old, new):
+    """Evidence is written once; only a VERIFIED re-apply may turn into FAILED."""
+    if old == new:
+        return
+    if type(new) is not dict:
+        _fail('FILE_OPS_EVIDENCE_TRANSITION_INVALID')
+    if old is None:
+        return
+    if (type(old) is dict and old.get('status') == 'VERIFIED' and
+            new.get('status') == 'FAILED' and
+            all(old.get(key) == new.get(key) for key in
+                ('executor_task', 'head', 'ops_sha256', 'plan_sha256'))):
+        return
+    _fail('FILE_OPS_EVIDENCE_TRANSITION_INVALID')
+
+
 def _check_waiting_transition(old, new):
     """While a Task stays WAITING its clock never moves; only a clear restarts it."""
     if (type(old) is dict and type(new) is dict and
@@ -1768,6 +1862,7 @@ def _validate(record, *, strict=True):
     if 'waiting' in keys:
         keys.discard('waiting')
         _validate_waiting(record['waiting'])
+    keys.discard('file_ops_evidence')  # checked by _validate_file_ops below
     if type(record) is dict and 'pm_session_adoptions' in record:
         keys.discard('pm_session_adoptions')
     if (type(record) is not dict or
@@ -1777,6 +1872,7 @@ def _validate(record, *, strict=True):
              *_REPAIR_CAP_OVERRIDE_VALID_SHAPES)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
+    _validate_file_ops(record)
     if merge_attempt is not None:
         if (type(merge_attempt) is not dict or
                 set(merge_attempt) != frozenset(('pr', 'head_sha', 'state', 'claimed_at')) or
@@ -2190,7 +2286,8 @@ def _validate(record, *, strict=True):
     if record['schema_version'] == 2:
         assignment = record['pm_assignment']
         if assignment is not None:
-            if (type(assignment) is not dict or set(assignment) != _PM_ASSIGNMENT_FIELDS or
+            if (type(assignment) is not dict or
+                    set(assignment) not in (_PM_ASSIGNMENT_FIELDS, _PM_ASSIGNMENT_FILE_OPS_FIELDS) or
                     type(assignment['schema_version']) is not int or assignment['schema_version'] != 1 or
                     assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                     assignment['risk'] not in ('LOW', 'OTHER') or
@@ -2202,6 +2299,19 @@ def _validate(record, *, strict=True):
                     any(type(item) is not str or not item or len(item.encode('utf-8')) > 512 or
                         _emitted_sensitive(item) for item in assignment['acceptance'])):
                 _fail()
+            if 'file_ops' in assignment:
+                # #1502: only normalized parse_ops output, bound into the contract digest.
+                ops = assignment['file_ops']
+                try:
+                    valid_ops = (type(ops) is list and
+                                 file_ops_module.parse_ops(ops) == ops and
+                                 type(getattr(contract, 'goal', None)) is str and
+                                 contract.goal.endswith(FILE_OPS_CONTRACT_MARK +
+                                                        file_ops_module.ops_digest(ops)))
+                except LLMToolError:
+                    valid_ops = False
+                if not valid_ops:
+                    _fail()
         if 'pm_provenance' in record:
             provenance = record['pm_provenance']
             def unique_response_pairs(pairs):
@@ -2820,7 +2930,8 @@ def _validate(record, *, strict=True):
                         _fail()
                     paths = result.get('changed_paths')
                     if (type(paths) is not list or not paths or paths != sorted(set(paths)) or
-                            not set(paths).issubset(set(developer['write_paths'])) or
+                            not set(paths).issubset(set(developer['write_paths']) |
+                                                    file_ops_result_paths(record)) or
                             any(type(test) is not dict or
                                 (test.get('status') == 'NOT_APPLICABLE_DOCS_ONLY' and
                                  (test.get('docs_only') is not True or
@@ -5089,6 +5200,10 @@ class TaskStore:
             if 'waiting' in changes:
                 # #1502 WP-D D12: the WAITING clock restarts only through a clear.
                 _check_waiting_transition(current.get('waiting'), changes['waiting'])
+            if 'file_ops_evidence' in changes:
+                # #1502 file_ops: write-once evidence, under the task lock.
+                _check_file_ops_transition(current.get('file_ops_evidence'),
+                                           changes['file_ops_evidence'])
             if trusted_abandonment:
                 item = changes['abandonment']
                 if (current.get('pm_session_id') != abandonment_pm_session_id or

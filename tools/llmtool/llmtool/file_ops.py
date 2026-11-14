@@ -155,6 +155,24 @@ def parse_ops(value):
     return ops
 
 
+def ops_digest(ops):
+    """sha256 of the canonical JSON of the parsed ops; binds them into a Task contract."""
+    canonical = json.dumps(parse_ops(ops), sort_keys=True, separators=(',', ':'),
+                           ensure_ascii=True)
+    return hashlib.sha256(canonical.encode('ascii')).hexdigest()
+
+
+def result_paths(files):
+    """Every path a plan's ``git rm`` / ``git mv`` changes: deleted, moved-from, moved-to."""
+    paths = set()
+    for f in files:
+        if f['op'] == 'delete':
+            paths.add(f['path'])
+        else:
+            paths.update((f['from'], f['to']))
+    return frozenset(paths)
+
+
 # ---------------------------------------------------------------- git access
 
 def _git_env():
@@ -401,6 +419,25 @@ def _open_plan(value):
     if value['sha256'] != _digest(head, ops, files):
         raise _error(INVALID, 'plan digest does not match its content')
     return head, ops, files
+
+
+_BLOB_RE = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')
+
+
+def check_plan(value):
+    """Strictly check a sealed plan without touching any tree; return ``value``.
+
+    Besides the shape and digest that ``apply`` checks, every planned path must
+    be an allowed repo-relative file path, every mode a regular-file mode and
+    every blob a full object id. Used to validate persisted evidence.
+    """
+    _, _, files = _open_plan(value)
+    for f in files:
+        paths = [f['path']] if f['op'] == 'delete' else [f['from'], f['to']]
+        if (any(_path_problem(p) or p.endswith('/') for p in paths) or
+                f['mode'] not in _REGULAR_MODES or not _BLOB_RE.fullmatch(f['blob'])):
+            raise _error(INVALID, 'plan files are malformed')
+    return value
 
 
 # ---------------------------------------------------------------- verify
