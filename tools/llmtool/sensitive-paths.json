@@ -24,6 +24,7 @@
     "tools/llmtool/llmtool/review_dispatch.py",
     "tools/llmtool/llmtool/review_result.py",
     "tools/llmtool/llmtool/review_repair.py",
+    "tools/llmtool/llmtool/review_repair_recovery.py",
     "tools/llmtool/llmtool/github_identity.py",
     "tools/llmtool/llmtool/ai_github_exec.py",
     "tools/llmtool/llmtool/action_contract.py",
