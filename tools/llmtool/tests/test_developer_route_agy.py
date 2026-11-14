@@ -102,6 +102,22 @@ class AgyRouteTests(unittest.TestCase):
             self.route.validate_request(request)
         self.assertEqual(ctx.exception.code, 'AGY_REQUEST_INVALID')
 
+    def test_bad_profile_and_missing_executable_config_name_their_code(self):
+        # Refusal-code pin: a bad model or effort, and a route config without
+        # a string executable, each carry one fixed code.
+        for model, effort in ((None, 'medium'), ('', 'medium'), ('-model', 'medium'),
+                              (MODEL, 'max'), (MODEL, None)):
+            with self.subTest(model=model, effort=effort):
+                with self.assertRaises(RouteError) as caught:
+                    self.route.validate_profile(model, effort)
+                self.assertEqual(caught.exception.code, 'AGY_PROFILE_INVALID')
+        self.assertEqual(self.route.validate_profile(MODEL, 'low'), (MODEL, 'low'))
+        for config in ({}, {'executable': None}, {'executable': ['agy']}):
+            with self.subTest(config=config):
+                with self.assertRaises(RouteError) as caught:
+                    AgyRoute(config).validate_request(self.request())
+                self.assertEqual(caught.exception.code, 'AGY_CONFIG_INVALID')
+
     def test_owner_gate_and_unverified_boundary_start_nothing(self):
         for boundary, gate in ((Boundary(), False), (Boundary(False), True)):
             calls = []

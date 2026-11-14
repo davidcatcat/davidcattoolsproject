@@ -11,6 +11,13 @@ from pathlib import Path
 _INDEX_NAME = 'task-status-index.json'
 _MAX_INDEX_BYTES = 4 * 1024 * 1024
 _SCHEMA_VERSION = 1
+_BASE_KEYS = frozenset({'stat', 'readable', 'created_at', 'pm_session_id'})
+# Optional 'tui' projection of a readable record: the chat TUI's Task list row and its
+# newest events, so the list and events views need no per-record TaskStore.get.
+TUI_EVENT_LIMIT = 3     # newest events kept per Task
+TUI_TEXT_LIMIT = 200    # characters kept per event text
+_TUI_KEYS = frozenset({'updated_at', 'stage', 'name', 'executor', 'prs', 'owner',
+                       'terminal', 'events', 'event_count'})
 
 
 def validator_fingerprint():
@@ -35,9 +42,33 @@ def _stat_key(path):
             info.st_mtime_ns, info.st_ctime_ns)
 
 
+def _valid_tui(value):
+    """The optional TUI projection: exact keys and JSON types only."""
+    if type(value) is not dict or set(value) != _TUI_KEYS:
+        return False
+    if (not (value['updated_at'] is None or type(value['updated_at']) is str) or
+            type(value['stage']) is not str or type(value['name']) is not str or
+            not (value['executor'] is None or type(value['executor']) is str) or
+            type(value['prs']) is not list or
+            any(type(number) is not int for number in value['prs']) or
+            type(value['owner']) is not bool or type(value['terminal']) is not bool or
+            type(value['events']) is not list or
+            len(value['events']) > TUI_EVENT_LIMIT or
+            type(value['event_count']) is not int or
+            value['event_count'] < len(value['events'])):
+        return False
+    for event in value['events']:
+        if (type(event) is not list or len(event) != 4 or
+                not (event[0] is None or type(event[0]) is str) or
+                type(event[1]) is not str or type(event[2]) is not str or
+                len(event[2]) > TUI_TEXT_LIMIT or type(event[3]) is not bool):
+            return False
+    return True
+
+
 def _valid_entry(task_id, value):
-    if type(value) is not dict or set(value) != {
-            'stat', 'readable', 'created_at', 'pm_session_id'}:
+    if type(value) is not dict or not (set(value) == _BASE_KEYS or
+                                       set(value) == _BASE_KEYS | {'tui'}):
         return False
     key = value['stat']
     if (type(key) is not list or len(key) != 5 or
@@ -47,8 +78,111 @@ def _valid_entry(task_id, value):
     if value['readable']:
         return (type(value['created_at']) is str and
                 (value['pm_session_id'] is None or
-                 type(value['pm_session_id']) is str))
-    return value['created_at'] is None and value['pm_session_id'] is None
+                 type(value['pm_session_id']) is str) and
+                ('tui' not in value or _valid_tui(value['tui'])))
+    return ('tui' not in value and value['created_at'] is None and
+            value['pm_session_id'] is None)
+
+
+def _tui_summary(record):
+    """The TUI projection of one record, or None when it cannot be built."""
+    try:
+        from .chat_tui_status import index_summary
+        summary = index_summary(record)
+    except Exception:
+        return None
+    return summary if _valid_tui(summary) else None
+
+
+def _index_path(store):
+    """The index path beside a private TaskStore root, else None. Only stats paths."""
+    root = Path(store.root)
+    if not root.is_absolute():
+        return None
+    root_info = os.stat(root, follow_symlinks=False)
+    parent_info = os.stat(root.parent, follow_symlinks=False)
+    if (not stat.S_ISDIR(root_info.st_mode) or
+            root_info.st_uid != os.getuid() or
+            stat.S_IMODE(root_info.st_mode) != 0o700 or
+            not stat.S_ISDIR(parent_info.st_mode) or
+            parent_info.st_uid != os.getuid() or
+            parent_info.st_mode & 0o022):
+        return None
+    return root.parent / _INDEX_NAME
+
+
+def _load(path, fingerprint):
+    """(entries, None) or (None, reason); reason is missing, unreadable or stale."""
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None, 'missing'
+    except Exception:
+        return None, 'unreadable'
+    try:
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                stat.S_IMODE(info.st_mode) != 0o600 or
+                info.st_size > _MAX_INDEX_BYTES):
+            return None, 'unreadable'
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None, 'missing'
+    except Exception:
+        return None, 'unreadable'
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid() or
+                stat.S_IMODE(opened.st_mode) != 0o600 or
+                opened.st_size > _MAX_INDEX_BYTES):
+            return None, 'unreadable'
+        with os.fdopen(descriptor, 'rb', closefd=False) as stream:
+            raw = stream.read(_MAX_INDEX_BYTES + 1)
+    except Exception:
+        return None, 'unreadable'
+    finally:
+        os.close(descriptor)
+    if len(raw) > _MAX_INDEX_BYTES:
+        return None, 'unreadable'
+    try:
+        data = json.loads(raw.decode('utf-8'))
+    except Exception:
+        return None, 'unreadable'
+    if (type(data) is not dict or set(data) !=
+            {'schema_version', 'fingerprint', 'entries'} or
+            type(data['schema_version']) is not int or
+            type(data['entries']) is not dict):
+        return None, 'unreadable'
+    if data['schema_version'] != _SCHEMA_VERSION or data['fingerprint'] != fingerprint:
+        return None, 'stale'
+    entries = data['entries']
+    if any(type(task_id) is not str or not _valid_entry(task_id, value)
+           for task_id, value in entries.items()):
+        return None, 'unreadable'
+    return entries, None
+
+
+def display_entries(store):
+    """Read-only index read for display: (entries, None) or (None, reason).
+
+    reason: unavailable (store root not private or not found), missing, unreadable or
+    stale (schema or validator fingerprint differs). Never writes, creates or repairs.
+    """
+    try:
+        path = _index_path(store)
+        if path is None:
+            return None, 'unavailable'
+        return _load(path, validator_fingerprint())
+    except Exception:
+        return None, 'unavailable'
+
+
+def record_key(store, task_id):
+    """The index stat key of one record file as a list, or None. Only stats the file."""
+    try:
+        return list(_stat_key(Path(store.root) / (task_id + '.json')))
+    except Exception:
+        return None
 
 
 class TaskStatusIndex:
@@ -62,19 +196,10 @@ class TaskStatusIndex:
         self.enabled = False
         self.changed = False
         try:
-            root = Path(store.root)
-            if not root.is_absolute():
+            path = _index_path(store)
+            if path is None:
                 return
-            root_info = os.stat(root, follow_symlinks=False)
-            parent_info = os.stat(root.parent, follow_symlinks=False)
-            if (not stat.S_ISDIR(root_info.st_mode) or
-                    root_info.st_uid != os.getuid() or
-                    stat.S_IMODE(root_info.st_mode) != 0o700 or
-                    not stat.S_ISDIR(parent_info.st_mode) or
-                    parent_info.st_uid != os.getuid() or
-                    parent_info.st_mode & 0o022):
-                return
-            self.path = root.parent / _INDEX_NAME
+            self.path = path
             self.fingerprint = validator_fingerprint()
             try:
                 self.entries = self._read()
@@ -86,50 +211,18 @@ class TaskStatusIndex:
             self.entries = {}
 
     def _read(self):
-        try:
-            info = os.stat(self.path, follow_symlinks=False)
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
-                    stat.S_IMODE(info.st_mode) != 0o600 or
-                    info.st_size > _MAX_INDEX_BYTES):
-                return {}
-            flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
-            descriptor = os.open(self.path, flags)
-        except Exception:
-            return {}
-        try:
-            opened = os.fstat(descriptor)
-            if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid() or
-                    stat.S_IMODE(opened.st_mode) != 0o600 or
-                    opened.st_size > _MAX_INDEX_BYTES):
-                return {}
-            with os.fdopen(descriptor, 'rb', closefd=False) as stream:
-                raw = stream.read(_MAX_INDEX_BYTES + 1)
-        finally:
-            os.close(descriptor)
-        if len(raw) > _MAX_INDEX_BYTES:
-            return {}
-        data = json.loads(raw.decode('utf-8'))
-        if (type(data) is not dict or set(data) !=
-                {'schema_version', 'fingerprint', 'entries'} or
-                type(data['schema_version']) is not int or
-                data['schema_version'] != _SCHEMA_VERSION or
-                data['fingerprint'] != self.fingerprint or
-                type(data['entries']) is not dict):
-            return {}
-        entries = data['entries']
-        if any(type(task_id) is not str or not _valid_entry(task_id, value)
-               for task_id, value in entries.items()):
-            return {}
-        return entries
+        entries, _reason = _load(self.path, self.fingerprint)
+        return {} if entries is None else entries
 
     def _save(self):
         if not self.enabled or self.path is None:
             return
-        payload = json.dumps({
-            'schema_version': _SCHEMA_VERSION,
-            'fingerprint': self.fingerprint,
-            'entries': self.entries,
-        }, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        payload = self._payload(self.entries)
+        if len(payload) > _MAX_INDEX_BYTES:
+            # The TUI projection is optional: keep the status metadata within the bound.
+            payload = self._payload({
+                task_id: {key: item for key, item in value.items() if key != 'tui'}
+                for task_id, value in self.entries.items()})
         if len(payload) > _MAX_INDEX_BYTES:
             return
         temp_path = self.path.parent / ('.task-status-index-' + uuid.uuid4().hex)
@@ -160,18 +253,29 @@ class TaskStatusIndex:
             except OSError:
                 pass
 
+    def _payload(self, entries):
+        return json.dumps({
+            'schema_version': _SCHEMA_VERSION,
+            'fingerprint': self.fingerprint,
+            'entries': entries,
+        }, sort_keys=True, separators=(',', ':')).encode('utf-8')
+
     def flush(self):
         """Persist refreshed entries once after the status selection."""
         if self.changed:
             self._save()
 
     def _record_entry(self, task_id, key, record):
-        self.entries[task_id] = {
+        entry = {
             'stat': list(key),
             'readable': True,
             'created_at': record.get('created_at', ''),
             'pm_session_id': record.get('pm_session_id'),
         }
+        summary = _tui_summary(record)
+        if summary is not None:
+            entry['tui'] = summary
+        self.entries[task_id] = entry
         self.changed = True
 
     def remember_full_scan(self, task_id):

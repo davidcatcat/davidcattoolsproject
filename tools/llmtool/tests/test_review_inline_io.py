@@ -101,6 +101,28 @@ class ReviewInlineIOTests(unittest.TestCase):
                 file_lister(9)
         self.assertEqual(len(fake.calls), review_inline_io.MAX_PAGES)
 
+    def test_each_failure_raises_its_fixed_code(self):
+        # #1235 C6a 2a: every failure carries one fixed code and nothing else.
+        full = json.dumps([{'filename': 'docs/x.md'}] * 100).encode('utf-8')
+        cases = [
+            ([completed(b'[]', returncode=1)], 'INLINE_IO_COMMAND_FAILED'),
+            ([subprocess.TimeoutExpired('gh', 1)], 'INLINE_IO_COMMAND_FAILED'),
+            ([OSError('synthetic')], 'INLINE_IO_COMMAND_FAILED'),
+            ([completed(b'{}')], 'INLINE_IO_BAD_PAGE'),
+            ([completed(b'\xff')], 'INLINE_IO_BAD_PAGE'),
+            ([completed(full)] * review_inline_io.MAX_PAGES, 'INLINE_IO_TOO_MANY_PAGES'),
+        ]
+        for replies, code in cases:
+            with self.subTest(code=code, first=replies[0]):
+                file_lister = self.make_io()[0]
+                with self.assertRaises(review_inline_io.InlineIOError) as caught:
+                    self.call(replies, lambda: file_lister(9))
+                self.assertEqual(caught.exception.args, (code,))
+        with self.assertRaises(review_inline_io.InlineIOError) as caught:
+            review_inline_io.github_io(ROOT, '', ENV)
+        self.assertEqual(caught.exception.args, ('INLINE_IO_INVALID',))
+
+
     def test_invalid_arguments_raise_without_subprocess(self):
         fake = FakeRun([])
         with mock.patch.object(review_inline_io.subprocess, 'run', fake):

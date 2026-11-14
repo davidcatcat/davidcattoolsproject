@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -81,6 +82,45 @@ def _developer_record(family):
     }
 
 
+def _bind_reviewer(base, reviewer_task=REVIEWER, native_session_id='review-session',
+                   session_ref='claude-reviewer-session'):
+    common = os.path.join(os.path.realpath(base), 'repo', '.git')
+    worktrees = os.path.join(common, 'llmtool-worktrees')
+    os.makedirs(worktrees, mode=0o700, exist_ok=True)
+    os.chmod(worktrees, 0o700)
+    root = os.path.join(os.path.realpath(base), 'd6-' + reviewer_task)
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    os.chmod(root, 0o700)
+    root_stat = os.stat(root)
+    record = {
+        'schema_version': 1,
+        'task_id': reviewer_task,
+        'trusted_agent_id': 'claude-reviewer',
+        'session_ref': session_ref,
+        'root_realpath': root,
+        'physical_identity': {
+            'device': root_stat.st_dev,
+            'inode': root_stat.st_ino,
+            'uid': root_stat.st_uid,
+            'mode': '0o700',
+        },
+        'git_common_dir': common,
+        'branch': 'review/' + TASK,
+        'base_sha': HEAD,
+        'head_sha': HEAD,
+        'state': 'ACTIVE',
+        'lock_state': 'LOCKED',
+        'native_session_id': native_session_id,
+    }
+    record_path = os.path.join(worktrees, f'{reviewer_task}.json')
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(record_path, flags, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump(record, f)
+    os.chmod(record_path, 0o600)
+    return common
+
+
 class FamilyStore:
     def __init__(self, store, family):
         self.store, self.family = store, family
@@ -151,6 +191,28 @@ class ReviewResultTests(unittest.TestCase):
                              ({'reviewer_session_done': 1}, 'REVIEW_RESULT_ARGUMENT_INVALID')):
             with self.subTest(change=sorted(change)):
                 args = dict(store=self.store, task_id=TASK, executor_task=EXECUTOR,
+                            pr_number=PR, github_get=lambda path: [])
+                args.update(change)
+                with self.assertRaises(LLMToolError) as raised:
+                    review_result.record_review_result(**args)
+                self.assertEqual(raised.exception.review_dispatch_code, code)
+        self.assertEqual(self.store.get(TASK).get('completion_events') or [], [])
+
+    def test_unknown_task_or_claim_names_its_code(self):
+        # #1235: no Task, no matching claim or a bad claim head is refused by code.
+        other_id = FamilyStore(self.store, 'codex')
+        other_id.get = lambda task_id: dict(self.store.get(task_id), task_id='e' * 32)
+        bad_head = FamilyStore(self.store, 'codex')
+        bad_head.get = lambda task_id: dict(self.store.get(task_id), review_dispatch_claim=[
+            dict(self.store.get(task_id)['review_dispatch_claim'][0], head_sha='x')])
+        for store, change, code in (
+                (other_id, {}, 'REVIEW_RESULT_TASK_INVALID'),
+                (self.store, {'executor_task': 'other-d6'}, 'REVIEW_RESULT_CLAIM_MISSING'),
+                (self.store, {'pr_number': PR + 1}, 'REVIEW_RESULT_CLAIM_MISSING'),
+                (self.store, {'version': 2}, 'REVIEW_RESULT_CLAIM_MISSING'),
+                (bad_head, {}, 'REVIEW_RESULT_CLAIM_INVALID')):
+            with self.subTest(code=code, change=sorted(change)):
+                args = dict(store=store, task_id=TASK, executor_task=EXECUTOR,
                             pr_number=PR, github_get=lambda path: [])
                 args.update(change)
                 with self.assertRaises(LLMToolError) as raised:
@@ -291,11 +353,14 @@ class ReconcileStore(FamilyStore):
 class UnknownClaimReconcileTests(unittest.TestCase):
     """#1636: only one bound Claude PASS after the claim settles an UNKNOWN claim."""
 
-    run_result = ReviewResultTests.run_result
+    def run_result(self, comments, **kwargs):
+        kwargs.setdefault('common_dir', self.common)
+        return ReviewResultTests.run_result(self, comments, **kwargs)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        self.common = _bind_reviewer(self.temp.name)
         self.store = ReconcileStore(_store(self.temp.name, claim_state='UNKNOWN'), 'gw-agent')
 
     def state(self, version=1):
@@ -324,7 +389,7 @@ class UnknownClaimReconcileTests(unittest.TestCase):
 class UnknownClaimReconcileShapeTests(unittest.TestCase):
     """#1636: claim shape, another claim, same family and a store conflict."""
 
-    run_result = ReviewResultTests.run_result
+    run_result = UnknownClaimReconcileTests.run_result
     setUp = UnknownClaimReconcileTests.setUp
     state = UnknownClaimReconcileTests.state
 
@@ -344,6 +409,7 @@ class UnknownClaimReconcileShapeTests(unittest.TestCase):
                 self.assertEqual(self.state(), 'UNKNOWN')
 
     def test_pass_for_another_reviewer_claim_settles_only_that_claim(self):
+        _bind_reviewer(self.temp.name, 'reviewer-other', 'other')
         first = self.store.get(TASK)['review_dispatch_claim'][0]
         second = dict(first, version=2, reviewer_task='reviewer-other', state='CLAIMED',
                       native_session_id=None)

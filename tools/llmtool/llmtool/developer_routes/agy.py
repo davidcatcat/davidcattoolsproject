@@ -102,6 +102,28 @@ class AgyRoute(DeveloperRoute):
             return None
         return names[0] if all(name == names[0] for name in names) else '\0'
 
+    def provider_basis(self, parsed):
+        """AGY_STATUS only for parsed status SUCCESS with a valid conversation_id."""
+        raw = parsed.get('raw')
+        if (type(raw) is dict and raw.get('status') == 'SUCCESS' and
+                type(raw.get('conversation_id')) is str and
+                _CONVERSATION.fullmatch(raw['conversation_id']) is not None and
+                parsed.get('session_id') == raw['conversation_id']):
+            return 'AGY_STATUS'
+        return None
+
+    def provider_quota_reported(self, parsed):
+        """Only a parsed status RESOURCE_EXHAUSTED with a valid conversation_id.
+
+        Stderr text, the synthetic stderr-fallback result and the error field
+        are never evidence; quota_exhausted still classifies them as before.
+        """
+        raw = parsed.get('raw')
+        return (type(raw) is dict and raw.get('status') == 'RESOURCE_EXHAUSTED' and
+                type(raw.get('conversation_id')) is str and
+                _CONVERSATION.fullmatch(raw['conversation_id']) is not None and
+                parsed.get('session_id') == raw['conversation_id'])
+
     def quota_exhausted(self, parsed, stderr):
         raw = parsed.get('raw', {})
         fields = (raw.get('status'), raw.get('error'), stderr.decode('utf-8', 'replace'))

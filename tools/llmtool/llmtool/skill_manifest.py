@@ -26,6 +26,8 @@ SKILL_MANIFEST_ROUTE_INVALID = 'SKILL_MANIFEST_ROUTE_INVALID'
 SKILL_MANIFEST_PREFIX_TOO_LARGE = 'SKILL_MANIFEST_PREFIX_TOO_LARGE'
 SKILL_MANIFEST_MAIN_REF_INVALID = 'SKILL_MANIFEST_MAIN_REF_INVALID'
 SKILL_MANIFEST_COMMIT_NOT_ON_MAIN = 'SKILL_MANIFEST_COMMIT_NOT_ON_MAIN'
+# #1931: a well-formed commit id whose object is absent from this repository.
+SKILL_MANIFEST_COMMIT_NOT_LOCAL = 'SKILL_MANIFEST_COMMIT_NOT_LOCAL'
 
 # Role cards are read only from a commit on main as seen at dispatch.
 DEFAULT_MAIN_REF = 'refs/remotes/origin/main'
@@ -287,6 +289,13 @@ def _verify_commit_object(git_runner, repo_root, commit):
             or getattr(checked_commit, 'returncode', 1) != 0
             or _stdout(checked_commit).strip().lower()
             != commit.lower().encode('ascii')):
+        # #1931: an absent object (for example a main commit not fetched yet)
+        # has its own code, so the caller can fetch and retry. cat-file -e
+        # exits 1 only for a missing object; anything else stays INVALID.
+        if checked_commit is not None and _COMMIT_RE.fullmatch(commit) is not None:
+            present = _run_git(git_runner, repo_root, ['cat-file', '-e', commit.lower()])
+            if present is not None and getattr(present, 'returncode', None) == 1:
+                _raise(SKILL_MANIFEST_COMMIT_NOT_LOCAL)
         _raise(SKILL_MANIFEST_COMMIT_INVALID)
 
 
