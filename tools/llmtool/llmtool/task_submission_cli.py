@@ -28,7 +28,8 @@ from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
-                         _DIRECT_EXECUTION_FIELDS)
+                         _DIRECT_EXECUTION_FIELDS, _NO_CHANGES_MAX_TURNS,
+                         _NO_CHANGES_REASON_MAX_CHARS)
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
@@ -5411,6 +5412,142 @@ class _ClaudeCommittedCarry(Exception):
     """The finished run's committed-result carry was stored (#1148)."""
 
 
+# #1824: Claude CLI tools that write files; a permission denial for one is a refused write.
+_CLAUDE_WRITE_TOOLS = frozenset(('Write', 'Edit', 'MultiEdit', 'NotebookEdit'))
+
+
+class _DiagnosedClaudeRoute(ClaudeRoute):
+    """#1824: ClaudeRoute that keeps its run's parsed CLI result object.
+
+    Parsing, validation and errors stay ClaudeRoute's. Only a parsed object of
+    type "result" is kept, and only for the CLAUDE_NO_CHANGES diagnosis."""
+
+    parsed_cli_result = None
+
+    def parse_output(self, stdout, stderr, log_text):
+        self.parsed_cli_result = None
+        parsed = super().parse_output(stdout, stderr, log_text)
+        raw = parsed.get('raw') if type(parsed) is dict else None
+        if type(raw) is dict and raw.get('type') == 'result':
+            self.parsed_cli_result = raw
+        return parsed
+
+
+# v93: a reason that repeats this many normalized characters of sent text is refused.
+_NO_CHANGES_ECHO_RUN = 20
+
+
+def _echo_normalize(text):
+    """Whitespace runs to one space, case folded (v93 echo comparison only)."""
+    return ' '.join(text.split()).casefold()
+
+
+def _claude_sent_texts(prompt, prompt_packet):
+    """v93: the prompt as sent plus every decoded string of its TASK_JSON packet.
+
+    The packet is JSON-escaped inside the prompt, so its strings are also kept
+    decoded; an echo of either form is then found."""
+    texts = [prompt]
+    pending = [prompt_packet]
+    while pending:
+        value = pending.pop()
+        if type(value) is str:
+            texts.append(value)
+        elif type(value) is dict:
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif type(value) in (list, tuple):
+            pending.extend(value)
+    return tuple(texts)
+
+
+class _SentTextIndex:
+    """v93: normalized prompt/context text and all its _NO_CHANGES_ECHO_RUN-character runs."""
+
+    def __init__(self, sent_texts):
+        if (type(sent_texts) is not tuple or not sent_texts or
+                any(type(text) is not str for text in sent_texts)):
+            raise ValueError('sent text is unavailable')
+        self.texts = tuple(_echo_normalize(text) for text in sent_texts)
+        self.runs = {text[i:i + _NO_CHANGES_ECHO_RUN] for text in self.texts
+                     for i in range(len(text) - _NO_CHANGES_ECHO_RUN + 1)}
+
+    def echoes(self, candidate):
+        """True if the whole candidate, or any 20+ character run of it, was sent."""
+        value = _echo_normalize(candidate)
+        if not value or any(value in text for text in self.texts):
+            return True
+        return any(value[i:i + _NO_CHANGES_ECHO_RUN] in self.runs
+                   for i in range(len(value) - _NO_CHANGES_ECHO_RUN + 1))
+
+
+def _claude_no_changes_reason(text, sent_texts):
+    """Last non-empty line of the CLI result text, screened and cut; else UNKNOWN.
+
+    Any C0/C1 control character other than CR or LF, a screen hit or other
+    non-printable text gives UNKNOWN. Control characters are refused before the
+    text is split or stripped; provider text is never reworded to pass the screen.
+    v93: a line that repeats the prompt or context sent to Claude (whole, or any
+    20+ character run after whitespace/case normalization) gives UNKNOWN; missing
+    sent text also gives UNKNOWN (fail closed)."""
+    if type(text) is not str:
+        return 'UNKNOWN'
+    if any((ord(char) < 0x20 and char not in '\r\n') or 0x7f <= ord(char) <= 0x9f
+           for char in text):
+        return 'UNKNOWN'
+    lines = [line.strip() for line in
+             text.replace('\r\n', '\n').replace('\r', '\n').split('\n') if line.strip()]
+    if not lines:
+        return 'UNKNOWN'
+    line = lines[-1]
+    reason = line[:_NO_CHANGES_REASON_MAX_CHARS].rstrip()
+    for value in (line, reason):
+        if not value or not value.isprintable():
+            return 'UNKNOWN'
+        try:
+            _screen_text(value, 4 * 1024 * 1024)
+        except LLMToolError:
+            return 'UNKNOWN'
+    try:
+        index = _SentTextIndex(sent_texts)
+        if index.echoes(line) or index.echoes(reason):
+            return 'UNKNOWN'
+    except Exception:
+        return 'UNKNOWN'
+    return reason
+
+
+def _claude_no_changes_diagnosis(raw, sent_texts):
+    """#1824: {reason, write_attempted, num_turns} from structured CLI fields only.
+
+    write_attempted is YES only on a well-formed permission denial for a write
+    tool. It is NO only when the structured fields prove no tool ran at all: a
+    successful, non-error result of at most one model turn (any tool call needs a
+    further turn) with an empty denial list. An absent denial alone proves nothing
+    (an allowed write is not denied), so anything else is UNKNOWN. The result text
+    never decides the value."""
+    try:
+        denials = raw.get('permission_denials')
+        turns = raw.get('num_turns')
+        if type(turns) is not int or not 0 <= turns <= _NO_CHANGES_MAX_TURNS:
+            turns = 'UNKNOWN'
+        if (type(denials) is not list or
+                any(type(item) is not dict or type(item.get('tool_name')) is not str
+                    for item in denials)):
+            write_attempted = 'UNKNOWN'
+        elif any(item['tool_name'] in _CLAUDE_WRITE_TOOLS for item in denials):
+            write_attempted = 'YES'
+        elif (not denials and type(turns) is int and turns <= 1 and
+              raw.get('subtype') == 'success' and raw.get('is_error') is False):
+            write_attempted = 'NO'
+        else:
+            write_attempted = 'UNKNOWN'
+        return {'reason': _claude_no_changes_reason(raw.get('result'), sent_texts),
+                'write_attempted': write_attempted, 'num_turns': turns}
+    except Exception:
+        return {'reason': 'UNKNOWN', 'write_attempted': 'UNKNOWN', 'num_turns': 'UNKNOWN'}
+
+
 def _claude_committed_carry(task, store, registration, snapshot, developer, completion,
                             result, write_paths, test_policy):
     """#1148/#1279: return (developer, completion) that carry the D6's committed head.
@@ -5517,7 +5654,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
     if executable is None:
         raise LLMToolError('Claude executable is unavailable')
     route_config.update(executable=executable, config_dir=config_dir)
-    route = ClaudeRoute(route_config)
+    route = _DiagnosedClaudeRoute(route_config)
     try:
         # #1002's kernel log observed Claude writing <target>.tmp.<pid>.<12 hex>.
         boundary_impl = for_platform(denied_dirs=route_config['denied_dirs'],
@@ -5701,6 +5838,13 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None}, usage=usage)
+        parsed_cli_result = getattr(route, 'parsed_cli_result', None)
+        if (result is not None and error_code == 'CLAUDE_NO_CHANGES' and
+                type(parsed_cli_result) is dict):
+            # #1824: bounded, screened diagnosis only from this run's parsed CLI result.
+            # v93: a reason that repeats the sent prompt or context is UNKNOWN.
+            developer['no_changes_diagnosis'] = _claude_no_changes_diagnosis(
+                parsed_cli_result, _claude_sent_texts(prompt, prompt_packet))
         if owner_gate_denied:
             developer['blocked_reason'] = 'OWNER_DISPATCH_DENIED'
         elif exc.blocked_reason is not None:
