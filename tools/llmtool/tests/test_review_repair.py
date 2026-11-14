@@ -241,6 +241,55 @@ class ReviewRepairTests(unittest.TestCase):
                 self.assertEqual(caught.exception.review_repair_code,
                                  'REPAIR_DATA_CLASS_INVALID')
 
+    def test_gw_agent_repair_uses_the_data_class_stored_at_delegate_time(self):
+        # #1830: the delegate stores data_class on the developer record; a repair
+        # reuses it. A legacy record written before the field is still refused.
+        stored = {
+            'assignment_id': 'f' * 32, 'selection_source': 'PM',
+            'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'gw-agent',
+            'provider_type': 'gw-agent-cli', 'model': 'fake-model',
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'session_id': 'dev-' + 'f' * 32, 'source_sha': HEAD,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+            'read_paths': ['tools/llmtool/llmtool'],
+            'write_paths': ['tools/llmtool/llmtool/review_repair.py'],
+            'acceptance': ['Fix it.'], 'context_sha256': '0' * 64,
+            'egress_basis': 'Task authorized source files only.', 'input_bytes': 10,
+            'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
+            'artifact_sha256': None, 'usage': None, 'error_code': None,
+            'execution': None, 'created_at': '2026-11-14T00:00:00Z',
+            'timeout_seconds': 600, 'direct_result_callback': None,
+            'data_class': 'PUBLIC_REPO',
+        }
+        legacy = {key: value for key, value in stored.items() if key != 'data_class'}
+        # Both key sets are ones the strict store accepts.
+        for record in (stored, legacy):
+            self.assertIn(frozenset(record) - task_store._DEVELOPER_DATA_CLASS_FIELDS,
+                          task_store._DEVELOPER_RECORD_SHAPES)
+        task = {'task_id': TASK, 'pm_assignment': {'acceptance': ['Fix it.']}}
+        packet = {'verdict_comment_id': 9, 'task': TASK, 'failed_head': HEAD,
+                  'version': 1, 'findings_count': 1,
+                  'reviewer_text_excerpt_untrusted_data': 'Fix the reported issue.'}
+        store = type('S', (), {'get': lambda _self, _task_id: _record()})()
+        registered = (type('Registration', (), {'root': '/registered/d6'})(), object())
+        captured = []
+        with patch.object(review_repair, '_registered_d6', return_value=registered):
+            result = review_repair._delegate_repair(
+                task=task, developer=stored, packet=packet, executor_task=EXECUTOR,
+                delegate=lambda args, store: captured.append(args) or 0, store=store)
+        self.assertEqual(result, 0)
+        self.assertEqual(captured[0].provider, 'gw-agent')
+        self.assertEqual(captured[0].data_class, 'PUBLIC_REPO')
+        legacy_calls = []
+        with patch.object(review_repair, '_registered_d6', return_value=registered):
+            with self.assertRaises(LLMToolError) as caught:
+                review_repair._delegate_repair(
+                    task=task, developer=legacy, packet=packet, executor_task=EXECUTOR,
+                    delegate=lambda args, store: legacy_calls.append(args) or 0,
+                    store=store)
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_DATA_CLASS_INVALID')
+        self.assertEqual(legacy_calls, [])
+
     def test_repair_delegate_refuses_unregistered_or_moved_d6_before_provider(self):
         original = _record()
         repair_task = {'task_id': 'f' * 32,
