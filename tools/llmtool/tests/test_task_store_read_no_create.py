@@ -48,7 +48,8 @@ class ReadNoCreateTests(unittest.TestCase):
                     state.mkdir(mode=0o700)
                 self.assertEqual(self.store.task_ids(), [])
                 self.assertEqual(self.store.completion_d6_task_ids('member-one'), [])
-                self.assertUnavailable(lambda: self.store.get(TASK_ID))
+                with self.assertRaises(task_store._TaskNotFound):
+                    self.store.get(TASK_ID)
                 self.assertFalse(self.root.exists())
                 self.assertEqual(sorted(path.name for path in self.base.iterdir()),
                                  ['state'] if make_state else [])
@@ -57,7 +58,8 @@ class ReadNoCreateTests(unittest.TestCase):
         (self.base / 'state').mkdir(mode=0o700)
         self.root.mkdir(mode=0o700)
         self.assertEqual(self.store.task_ids(), [])
-        self.assertUnavailable(lambda: self.store.get(TASK_ID))
+        with self.assertRaises(task_store._TaskNotFound):
+            self.store.get(TASK_ID)
 
     def test_dirfd_creates_the_root_and_ensure_root_still_works(self):
         os.close(self.store._dirfd())
