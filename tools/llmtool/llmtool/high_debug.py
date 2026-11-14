@@ -1244,17 +1244,24 @@ def _require_screen_cleared(task_id, family):
 _DEBUG_USED_STATUSES = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID')
 
 
-def _admit_debug(task, entries):
-    """O2, D3: one AI Debug per ROOT or REPLAN Task; children share one per lineage."""
-    from . import repair_policy
+def _admit_debug(task, entries, store=None):
+    """O2, D3: one AI Debug per ROOT or REPLAN Task; children share one per lineage.
+
+    #1502 WP-D L1 phase 2: the parent and group Debug counts are taken over
+    the Task's whole continuation chain (predecessors and successors), so a
+    continuation never resets the Debug: a second parent Debug anywhere in the
+    chain is refused. The new entry is still recorded on this Task, at its
+    failed HEAD. A chain or read in doubt (no store included) is UNKNOWN,
+    which refuses as used.
+    """
+    from . import lineage_counts, repair_policy
     try:
         policy = repair_policy.load_policy()
     except LLMToolError:
         _refuse('HIGH_DEBUG_POLICY_INVALID')
     lineage = task.get('lineage')
     kind = lineage.get('kind') if type(lineage) is dict else 'root'
-    used = sum(1 for entry in entries
-               if type(entry) is not dict or entry.get('status') in _DEBUG_USED_STATUSES)
+    used = lineage_counts.chain_debug_used(store, task, entries, _DEBUG_USED_STATUSES)
     try:
         code = repair_policy.admit_debug(kind=kind, parent_debug_used=used,
                                          group_debug_used=used, policy=policy)
@@ -1382,7 +1389,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         _refuse('DEBUG_DISPUTE_OPEN')
     entries = task.get('high_debug', [])
     if type(entries) is not list or len(entries) >= 8: _refuse('HIGH_DEBUG_LIMIT')
-    _admit_debug(task, entries)
+    _admit_debug(task, entries, store)
     repo_root = repo_root or str(Path(registration.common_dir).parent)
     # #1502 WP-F: rules from main before any D6 or provider call; a refusal
     # records no entry, so it uses no Debug.
