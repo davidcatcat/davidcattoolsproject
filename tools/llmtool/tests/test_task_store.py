@@ -4750,6 +4750,38 @@ class TaskStoreTests(unittest.TestCase):
             value['task_id'], event_id, pm_session_id=pm,
             pm_decision_sha256='c' * 64)['created'])
 
+    def test_completion_event_refusals_name_their_code(self):
+        # #120: an unknown event or a step out of order keeps its own code.
+        value = self._active_pm_record()
+        self.store.create(value)
+        args = self._completion_event(value)
+        pm = value['pm_session_id']
+        self.store.record_completion_event(value['task_id'], **args)
+        with self.assertRaises(LLMToolError) as missing:
+            self.store.consume_completion_event(value['task_id'], new_id(),
+                pm_session_id=pm, pm_decision_sha256='c' * 64)
+        self.assertEqual(missing.exception.task_store_error_code,
+                         'COMPLETION_EVENT_NOT_FOUND')
+        with self.assertRaises(LLMToolError) as not_consumed:
+            self.store.prepare_completion_dispatch_intent(
+                value['task_id'], args['event_id'], intent_id=new_id(),
+                intent_sha256='d' * 64, pm_session_id=pm)
+        self.assertEqual(not_consumed.exception.task_store_error_code,
+                         'COMPLETION_EVENT_STATE_INVALID')
+        self.store.consume_completion_event(value['task_id'], args['event_id'],
+                                            pm_session_id=pm,
+                                            pm_decision_sha256='c' * 64)
+        self.store.prepare_completion_dispatch_intent(
+            value['task_id'], args['event_id'], intent_id=new_id(),
+            intent_sha256='d' * 64, pm_session_id=pm)
+        with self.assertRaises(LLMToolError) as unconfirmed:
+            self.store.ack_completion_event(value['task_id'], args['event_id'],
+                pm_session_id=pm, pm_decision_sha256='c' * 64)
+        self.assertEqual(unconfirmed.exception.task_store_error_code,
+                         'COMPLETION_EVENT_STATE_INVALID')
+        self.assertEqual(TaskStore(self.root).unacked_completion_events(
+            value['task_id'])[0]['state'], 'PM_CONSUMED')
+
     def test_completion_persist_failures_preserve_previous_transition(self):
         value = self._active_pm_record()
         self.store.create(value)
