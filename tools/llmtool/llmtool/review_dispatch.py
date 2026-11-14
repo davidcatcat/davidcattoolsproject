@@ -1449,7 +1449,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     store=store, task_id=task_id, pr_number=pr_number, head=head,
                     version=version, reviewer_task=reviewer_task, reason=reason,
                     excerpt_key=excerpt_key, excerpt_val=excerpt_val)
-                refusal['receipt_path'] = receipt_path
+                # #1927: task advance accepts only a str receipt path or None.
+                refusal['receipt_path'] = (None if receipt_path is None
+                                           else str(receipt_path))
             except Exception:
                 pass
             exc.review_refusal = refusal

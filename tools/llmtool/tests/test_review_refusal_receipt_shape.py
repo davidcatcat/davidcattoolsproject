@@ -1,10 +1,11 @@
 """#1907: a review refusal receipt holds a fixed-word shape, never model text."""
 import json
 import unittest
+from pathlib import Path
 
 from unittest.mock import patch
 
-from llmtool import review_dispatch, task_submission_cli
+from llmtool import review_dispatch, task_advance, task_submission_cli
 from llmtool.errors import LLMToolError
 import test_review_dispatch as base
 from test_review_dispatch import _codex_event_stream, HEAD, setUpModule, tearDownModule  # noqa: F401
@@ -39,6 +40,12 @@ class RefusalReceiptShapeTests(unittest.TestCase):
                          'OUTPUT_SHAPE line=1 of %s bytes=3 first=letter' % digit):
                 self.assertIsNone(review_dispatch._OUTPUT_SHAPE.fullmatch(text), text)
 
+    def test_written_receipt_refusal_is_kept_by_task_advance(self):
+        # #1927: the receipt path is a str, so task advance keeps the refusal.
+        refusal = self.check_reply(MARKER, 'REPLY_SHAPE bytes=27 lines=1 first=letter')
+        self.assertIs(type(refusal['receipt_path']), str)
+        self.assertIs(task_advance._well_formed_review_refusal(refusal), refusal)
+
     def check_reply(self, reply, shape):
         raw = _codex_event_stream(reply)
         task = self.store.get(self.task_id)
@@ -54,9 +61,10 @@ class RefusalReceiptShapeTests(unittest.TestCase):
             self._invoke_refusal(runner=runner)
         refusal = raised.exception.review_refusal
         self.assertEqual(refusal['excerpt'], shape)
-        text = refusal['receipt_path'].read_text(encoding='utf-8')
+        text = Path(refusal['receipt_path']).read_text(encoding='utf-8')
         self.assertNotIn('synthetic', text)
         self.assertEqual(json.loads(text)['excerpt'], refusal['excerpt'])
+        return refusal
 
     def test_shape_words_only(self):
         self.assertEqual(review_dispatch._reply_shape(' {x\ny'), 'REPLY_SHAPE bytes=5 lines=2 first=brace')
