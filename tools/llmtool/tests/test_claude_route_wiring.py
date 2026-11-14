@@ -592,13 +592,16 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             self.assertFalse(ledger_path.exists())
         self.assertEqual(caught.exception.skill_ledger_code, 'CONTROLLER_DELIVERED_REFUSED')
 
-    def test_only_claude_and_agy_card_rows_use_the_common_core_card(self):
+    def test_every_developer_card_row_uses_the_common_core_and_developer_card(self):
         table = skill_manifest._ROLE_CARD_TABLE
-        self.assertEqual(table['claude-developer'], (_CORE, _DEV_CARD))
-        self.assertEqual(table['agy'], (_CORE, _DEV_CARD))
-        # OpenCode and gw-agent are unchanged by this piece.
-        self.assertEqual(table['opencode-developer'], ('AGENTS.md', _DEV_CARD))
-        self.assertEqual(table['gw-agent'], ('AGENTS.md', _DEV_CARD))
+        routes = ('agy', 'claude-developer', 'gw-agent', 'opencode-developer')
+        self.assertEqual(skill_manifest.role_card_routes(), routes)
+        self.assertEqual(tuple(sorted(table)), routes)
+        for route in routes:
+            with self.subTest(route=route):
+                self.assertEqual(table[route], (_CORE, _DEV_CARD))
+                self.assertNotIn('AGENTS.md', table[route])
+                self.assertNotIn('CLAUDE.md', table[route])
 
     def test_ledger_failure_keeps_the_finished_run_and_reports_the_code(self):
         cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = self._setup()
