@@ -1263,6 +1263,90 @@ class GwAgentRouteTests(unittest.TestCase):
             self.assertEqual(cm.exception.code, 'GW_AGENT_SESSION_PERSIST_FAILED')
 
 
+class GwAgentDelegateDataClassTests(unittest.TestCase):
+    """#1830: the delegate keeps its validated --data-class on the developer record."""
+
+    def _delegate(self, data_class):
+        from argparse import Namespace
+        import copy
+        from types import SimpleNamespace
+        from llmtool import gw_agent_sessions, task_submission_cli
+        from llmtool.errors import LLMToolError
+
+        task = {'task_id': 'a' * 32, 'run_id': 'b' * 32, 'state': 'PM_RESPONDED',
+                'schema_version': 2, 'request': 'Edit one file.',
+                'response': 'Use the gw-agent route.', 'developer': None,
+                'task_binding': {'contract_digest': 'd' * 64},
+                'pm_assignment': {'route': 'gw-agent', 'risk': 'LOW',
+                                  'goal': 'Edit one file', 'acceptance': ['source changes']}}
+        claimed = []
+
+        class Store:
+            root = '/unused-store-root'
+
+            def get(self, _task_id):
+                return copy.deepcopy(task)
+
+            def d6_bind_compare_and_update(self, _task_id, *, executor_task_id, expected,
+                                           **changes):
+                claimed.append(changes['developer'])
+                # Stop at the claim: nothing past it is under test here.
+                raise task_store.TaskStoreConflict()
+
+        registration = SimpleNamespace(
+            task_id='executor-d6', root='/registered/d6', common_dir='/registered/.git',
+            branch='feat/task', trusted_agent_id='agent', session_ref='session',
+            native_session_id=None)
+        snapshot = SimpleNamespace(head='c' * 40)
+        route_config = {'routes': {'gw-agent': {
+            'allowed_data_classes': ['synthetic', 'public_repo'],
+            'profile': {'context_cap_tokens': 10000, 'max_output_tokens': 1000}}}}
+        args = Namespace(task_id=task['task_id'], mode='direct', context_stdin=False,
+                         egress_basis='Task authorized source files only.',
+                         data_class=data_class, read_path=['source.py'],
+                         write_path=['source.py'], acceptance=['source changes'],
+                         selection_source='PM', timeout=None)
+        cli = task_submission_cli
+        with ExitStack() as stack:
+            def patch(target, name, **kwargs):
+                return stack.enter_context(mock.patch.object(target, name, **kwargs))
+            patch(gw_agent_sessions, 'sweep_quietly')
+            patch(cli, '_delegate_timeout', return_value=600)
+            patch(cli.task_completion, 'validate_task_binding')
+            patch(cli, '_delegate_d6_binding', return_value=(registration, snapshot))
+            patch(cli, '_reject_claude_reserved_d6')
+            patch(cli, '_assignment_paths', return_value=(['source.py'], ['source.py']))
+            patch(cli, 'load_route_config', return_value=route_config)
+            patch(cli, '_gw_agent_endpoint', return_value=(
+                {'type': 'openai-compatible', 'model': 'fake-model',
+                 'base_url': 'http://127.0.0.1:9'}, {'max_tokens': 1000}))
+            patch(cli, '_gw_agent_developer_profile', return_value=('fake-model', 'low'))
+            patch(cli, '_remote_receipt_test_policy', return_value=None)
+            patch(cli, '_direct_result_callback', return_value=None)
+            with self.assertRaises(LLMToolError) as caught:
+                cli.run_task_gw_agent_delegate(args, store=Store())
+        return claimed, str(caught.exception)
+
+    def test_delegate_records_the_validated_data_class(self):
+        for data_class in ('PUBLIC_REPO', 'SYNTHETIC'):
+            with self.subTest(data_class=data_class):
+                claimed, _message = self._delegate(data_class)
+                self.assertEqual(len(claimed), 1)
+                developer = claimed[0]
+                self.assertEqual(developer['provider_profile'], 'gw-agent')
+                self.assertEqual(developer['data_class'], data_class)
+                # The stored key set is one the strict store shape accepts.
+                self.assertIn(frozenset(developer) - task_store._DEVELOPER_DATA_CLASS_FIELDS,
+                              task_store._DEVELOPER_RECORD_SHAPES)
+
+    def test_unknown_data_class_is_refused_before_any_claim(self):
+        for data_class in ('INTERNAL', 'public_repo'):
+            with self.subTest(data_class=data_class):
+                claimed, message = self._delegate(data_class)
+                self.assertEqual(claimed, [])
+                self.assertIn('data class is not allowed', message)
+
+
 class GatewayCredentialConfigTests(unittest.TestCase):
     def test_null_key_env_gives_no_credential_and_skips_company_config(self):
         with mock.patch.object(gw_agent.gateway_profiles, 'load_gateway_profile',
