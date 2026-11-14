@@ -27,7 +27,13 @@ from .. import task_completion
 
 MAX_STDOUT_BYTES = 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
-MAX_TIMEOUT_SECONDS = 600
+# Route timeouts come from developer-routes.json (default_timeout and
+# max_timeout per route). A route without registry limits keeps the former
+# fixed 600-second default and maximum. No route may exceed the hard cap.
+DEFAULT_TIMEOUT_SECONDS = 600
+HARD_TIMEOUT_CAP_SECONDS = 1800
+MAX_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS
+TIMEOUT_KEYS = frozenset({'default_timeout', 'max_timeout'})
 
 
 class RouteError(LLMToolError):
@@ -150,12 +156,88 @@ class DeveloperRoute(ABC):
         if (type(branch) is not str or not branch or type(head) is not str or
                 re.fullmatch(r'[0-9a-f]{40}', head) is None):
             raise RouteError(f'{self.name.upper()}_REQUEST_INVALID')
-        timeout = value.get('timeout', MAX_TIMEOUT_SECONDS)
-        if type(timeout) not in (int, float) or not 0 < timeout <= MAX_TIMEOUT_SECONDS:
+        requested = value.get('timeout')
+        if 'timeout' in value and requested is None:
             raise RouteError(f'{self.name.upper()}_REQUEST_INVALID')
+        try:
+            timeout = resolve_route_timeout(self, requested)
+        except RouteError as exc:
+            raise RouteError(f'{self.name.upper()}_REQUEST_INVALID',
+                             facts={'timeout_refusal': exc.code}) from None
         value.update(root=str(root), model=model, effort=effort, timeout=timeout,
                      write_paths=tuple(paths))
         return value
+
+
+def timeout_limits_ok(default: Any, maximum: Any) -> bool:
+    """Return True for int limits with 1 <= default <= maximum <= hard cap."""
+    return (type(default) is int and type(maximum) is int and
+            1 <= default <= maximum <= HARD_TIMEOUT_CAP_SECONDS)
+
+
+def _route_timeout_limits(route: Any, config: Any) -> tuple[int, int]:
+    """Return (default, maximum) seconds for route, or raise ROUTE_CONFIG_INVALID.
+
+    A route name (str) must be registered. A DeveloperRoute is looked up by
+    its name (case-folded, '_' read as '-'); an unregistered adapter keeps the
+    600-second baseline. The registry is authoritative; adapter config cannot
+    raise a registered route's limits.
+    """
+    if isinstance(route, DeveloperRoute):
+        name = getattr(route, 'name', None)
+        if type(name) is not str:
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        key, registered_only = name.lower().replace('_', '-'), False
+    elif type(route) is str:
+        key, registered_only = route, True
+    else:
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    if config is None:
+        from . import load_route_config
+        config = load_route_config()
+    routes = config.get('routes') if isinstance(config, Mapping) else None
+    if not isinstance(routes, Mapping):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    entry = routes.get(key)
+    if entry is None:
+        if registered_only:
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        return DEFAULT_TIMEOUT_SECONDS, DEFAULT_TIMEOUT_SECONDS
+    if not isinstance(entry, Mapping):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    present = TIMEOUT_KEYS & set(entry)
+    if not present:
+        return DEFAULT_TIMEOUT_SECONDS, DEFAULT_TIMEOUT_SECONDS
+    if (present != TIMEOUT_KEYS or
+            not timeout_limits_ok(entry['default_timeout'], entry['max_timeout'])):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    return entry['default_timeout'], entry['max_timeout']
+
+
+def resolve_route_timeout(route: Any, requested: Any = None, *,
+                          config: Mapping[str, Any] | None = None) -> int:
+    """Return the effective timeout in seconds for one route run.
+
+    route is a registered route name or a DeveloperRoute; config is a
+    load_route_config() result (None loads the repository file). requested
+    None gives the route's default_timeout. Refusals (RouteError code):
+
+    * TIMEOUT_INVALID: requested is not an int (bool and float included) or
+      is below 1;
+    * TIMEOUT_OVER_HARD_CAP: requested is above 1800, for every route;
+    * TIMEOUT_OVER_ROUTE_MAX: requested is above the route's max_timeout;
+    * ROUTE_CONFIG_INVALID: unknown route name or invalid timeout limits.
+    """
+    default, maximum = _route_timeout_limits(route, config)
+    if requested is None:
+        return default
+    if type(requested) is not int or requested < 1:
+        raise RouteError('TIMEOUT_INVALID')
+    if requested > HARD_TIMEOUT_CAP_SECONDS:
+        raise RouteError('TIMEOUT_OVER_HARD_CAP')
+    if requested > maximum:
+        raise RouteError('TIMEOUT_OVER_ROUTE_MAX')
+    return requested
 
 
 def _default_runner(argv, cwd, env, timeout):

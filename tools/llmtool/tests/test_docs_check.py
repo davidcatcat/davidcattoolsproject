@@ -29,13 +29,16 @@ class DocsCheckTests(unittest.TestCase):
         config.parent.mkdir(parents=True)
         config.write_text(json.dumps({"schema_version": 1, "hashes": hashes, "codex_only": []}), encoding="utf-8")
         # Minimal valid model allowlist (#1502 WP-G); the guidance check reads it
-        # from the checked repository root. The model name is fictional.
+        # from the checked repository root. The model name is fictional. The
+        # rule-file schema requires the route timeout pair (#1815).
         (config.parent / "developer-routes.json").write_text(json.dumps({
             "schema_version": 1,
             "routes": {"fixture": {
                 "default_model": "gpt-6-luna",
                 "allowed_models": ["gpt-6-luna"],
                 "default_effort": "medium",
+                "default_timeout": 600,
+                "max_timeout": 1800,
             }},
         }), encoding="utf-8")
         subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)

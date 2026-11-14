@@ -7,7 +7,9 @@
       "allowed_models": ["gemini-3.8-flash-medium"],
       "default_effort": "medium",
       "denied_dirs": [".gemini"],
-      "state_dirs": {"policy": "private-temp-only"}
+      "state_dirs": {"policy": "private-temp-only"},
+      "default_timeout": 600,
+      "max_timeout": 600
     },
     "claude": {
       "executable": "claude",
@@ -15,7 +17,9 @@
       "allowed_models": ["claude-opus-5-5"],
       "default_effort": "high",
       "denied_dirs": [".claude"],
-      "state_dirs": {"policy": "private-temp-only"}
+      "state_dirs": {"policy": "private-temp-only"},
+      "default_timeout": 600,
+      "max_timeout": 1800
     },
     "gw-agent": {
       "package_path": "~/.local/lib/api-agent-gateway",
@@ -33,13 +37,17 @@
         "data_class_map": {"SYNTHETIC": "synthetic", "PUBLIC_REPO": "public_repo"}
       },
       "authorization_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6760670167",
-      "allowed_data_classes": ["synthetic", "public_repo"]
+      "allowed_data_classes": ["synthetic", "public_repo"],
+      "default_timeout": 600,
+      "max_timeout": 600
     },
     "opencode": {
       "executable": "opencode",
       "default_model": "opencode/deepseek-v4.1-flash-free",
       "allowed_models": ["opencode/deepseek-v4.1-flash-free"],
-      "default_effort": "high"
+      "default_effort": "high",
+      "default_timeout": 600,
+      "max_timeout": 1800
     }
   },
   "roles": {
