@@ -7075,17 +7075,21 @@ def _check_repair_packet_rca(packet, store, executor_task):
 
 
 def _delegate_chain_view(store, current_task_id, executor_task, *, with_runs):
-    """The chain view of one delegate: keys, members and (with_runs) counted runs.
+    """The chain view of one delegate: keys, members, records and (with_runs) runs.
 
     #1502 WP-D L1 phase 2. Seeds are the delegated Task and every Task whose
     stored completion names its D6; members are every Task of their chains
-    (predecessors and successors, lineage_counts.delegate_chain). runs maps
-    each other Task whose completion names a chain D6 (the delegated D6 or the
-    completion D6 of any member) to (record, d6): a PM follow-up or repair
-    Task on a chain D6 is counted. A store read that fails refuses
-    DELEGATE_REPAIR_COUNT_UNAVAILABLE as before; a chain in doubt is UNKNOWN
-    and refuses DELEGATE_REPAIR_LIMIT_REACHED, as at the cap. A delegated Task
-    that cannot be read raises the store's own error, as the route would.
+    (predecessors and successors, lineage_counts.delegate_chain), found in one
+    scan of the store (lineage_counts.store_records, kept as records for the
+    continuation link check). runs maps each other Task whose completion names
+    a counted D6 to (record, d6): the delegated D6 and, for each seed chain of
+    more than one Task, the completion D6 of every Task of that chain, so a PM
+    follow-up or repair Task on a chain D6 is counted. A Task alone in its
+    chain counts exactly as before: only the runs on the delegated D6.
+
+    The D6 listing and the reads of its Tasks come first; a failure there
+    refuses DELEGATE_REPAIR_COUNT_UNAVAILABLE as before. A chain scan or chain
+    in doubt is UNKNOWN and refuses DELEGATE_REPAIR_LIMIT_REACHED, as at the cap.
     """
     from . import lineage_counts
 
@@ -7095,27 +7099,26 @@ def _delegate_chain_view(store, current_task_id, executor_task, *, with_runs):
         on_d6 = list(store.completion_d6_task_ids(executor_task))
     except Exception:
         raise unavailable(current_task_id) from None
-    current = store.get(current_task_id)
     read = {}
-    seeds = [current]
     for task_id in on_d6:
         if task_id == current_task_id:
             continue
         try:
-            record = store.get(task_id)
+            read[task_id] = store.get(task_id)
         except Exception:
             raise unavailable(task_id) from None
-        read[task_id] = record
-        seeds.append(record)
-    chain = lineage_counts.delegate_chain(store, seeds)
+    records = lineage_counts.store_records(store)
+    seeds = [current_task_id] + [task_id for task_id in on_d6 if task_id != current_task_id]
+    chain = lineage_counts.delegate_chain(records, seeds)
     if chain is None:
         raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
-    view = {'keys': chain['keys'], 'members': chain['members'], 'runs': {}}
+    view = {'keys': chain['keys'], 'members': chain['members'], 'records': records,
+            'runs': {}}
     if not with_runs:
         return view
     d6s = {executor_task}
-    for record in chain['members'].values():
-        completion = record.get('completion')
+    for task_id in sorted(chain['linked']):
+        completion = chain['members'][task_id].get('completion')
         if completion is None:
             continue
         d6 = completion.get('executor_task_id') if type(completion) is dict else None
@@ -7136,14 +7139,14 @@ def _delegate_chain_view(store, current_task_id, executor_task, *, with_runs):
         for task_id in task_ids:
             if task_id == current_task_id or task_id in runs:
                 continue
-            record = read.get(task_id)
+            record = read.get(task_id, records.get(task_id))
             if record is None:
                 try:
                     record = store.get(task_id)
                 except Exception:
                     raise unavailable(task_id) from None
                 read[task_id] = record
-            completion = record.get('completion')
+            completion = record.get('completion') if type(record) is dict else None
             if type(completion) is dict and completion.get('executor_task_id') == d6:
                 runs[task_id] = (record, d6)
     view['runs'] = runs
@@ -7155,7 +7158,8 @@ def _check_delegate_repair_cap(args, store, d6_binding=None, claim=None):
 
     #1502 WP-D L1 phase 2: runs are counted over every D6 of the chain view
     (_delegate_chain_view), not only this D6, so a continuation never resets
-    the cap. The counts are read under the chain locks of that view
+    the cap; a Task alone in its chain counts exactly as before, on this D6
+    only. The counts are read under the chain locks of that view
     (lineage_counts.acquire_chain_locks); a claim callable, when given, writes
     the run claim under the same locks, so two delegates in one chain cannot
     both spend the last run. A lock that cannot be taken refuses
@@ -7193,7 +7197,7 @@ def _check_delegate_repair_cap(args, store, d6_binding=None, claim=None):
             registration = d6_binding[0]
             lineage_counts.check_continuation_link(
                 store, set(view['members']) | set(view['runs']),
-                getattr(registration, 'source_sha', None))
+                getattr(registration, 'source_sha', None), records=view['records'])
         _check_delegate_run_count(args, store, d6_binding, policy, view)
         return claim() if claim is not None else None
     finally:

@@ -42,6 +42,10 @@ class _Store:
             }
             for number in range(count)
         }
+        # #1502 WP-D phase 2: the cap reads the delegated Task's chain, so the
+        # store holds the delegated Task, as a real store always does.
+        self.records[_CURRENT_TASK] = {'task_id': _CURRENT_TASK, 'developer': None,
+                                       'completion': None}
         if diagnosis is not None:
             self.records[_HIGH_DEBUG_TASK] = diagnosis
         elif unreadable:
@@ -256,8 +260,20 @@ class DelegateRepairCapTests(unittest.TestCase):
             self.assertEqual(store.writes, [])
 
     def test_unrelated_unreadable_record_does_not_refuse(self):
+        # Before repair #2 the High Debug Task named by the arguments is never
+        # read: one the store does not hold does not refuse.
         store = _Store(count=1, unreadable=True)
+        store.records.pop(_HIGH_DEBUG_TASK)
         task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.writes, [])
+
+    def test_a_stored_record_that_cannot_be_read_is_a_count_in_doubt(self):
+        # #1502 WP-D phase 2: any stored Task may continue this one, so the
+        # chain scan reads every stored Task; a read that fails is a real
+        # doubt, UNKNOWN, and refuses as at the cap before any write.
+        store = _Store(count=1, unreadable=True)
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.writes, [])
 
     def test_failing_scan_refuses(self):
@@ -314,10 +330,19 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertEqual(store.writes, [])
 
     def test_unreadable_high_debug_task_is_refused(self):
+        # A High Debug Task that cannot be read and that the store does not
+        # list refuses as invalid.
         store = self._at_repair_two(diagnosis=None, unreadable=True)
+        store.records.pop(_HIGH_DEBUG_TASK)
 
         with self.assertRaisesRegex(
                 LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.writes, [])
+        # #1502 WP-D phase 2: a listed one is read by the chain scan first; its
+        # failed read is a count in doubt and refuses as at the cap.
+        store = self._at_repair_two(diagnosis=None, unreadable=True)
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.writes, [])
 

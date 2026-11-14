@@ -225,6 +225,33 @@ class DelegateRepairCapTests(Case):
         self.assertEqual(self.claims, [])
         self.assertIsNone(store.get(B)['developer'])
 
+    def test_an_unlinked_task_counts_exactly_as_before(self):
+        # C and F have no continues and no successor: only the runs on the
+        # delegated D6 Y count, as before phase 2. C's own earlier run on Z,
+        # R's run on Z and the unrelated chain A <- B on X are not counted.
+        store = self.store(task(A, d6=D6_X), task(B, continues=A, d6=D6_X),
+                           task(F, d6=D6_Y), task(C, d6=D6_Z), task(R, d6=D6_Z))
+        view = cli._delegate_chain_view(store, C, D6_Y, with_runs=True)
+        self.assertEqual(sorted(view['runs']), [F])
+        self.assertEqual(sorted(view['members']), sorted([C, F]))
+        self.assertEqual(view['keys'], sorted([C, F]))
+        self.assertIsNone(self.cap(store, C, D6_Y))
+
+    def test_a_stored_record_that_cannot_be_read_refuses_as_at_the_cap(self):
+        # Any stored Task may continue C: a failed read is a real doubt.
+        store = self.store(task(A, d6=D6_X), task(C))
+        real_get = store.get
+
+        def get(task_id):
+            if task_id == A:
+                raise OSError('unreadable')
+            return real_get(task_id)
+        with patch.object(store, 'get', side_effect=get):
+            error = self.refused(lambda: self.cap(store, C, D6_Y, claim=self.claim))
+        self.assertEqual(str(error), 'DELEGATE_REPAIR_LIMIT_REACHED')
+        self.assertEqual(self.claims, [])
+        self.assertIsNone(store.get(C)['developer'])
+
     def test_the_lock_is_held_around_the_count_and_the_claim(self):
         store = self.store(task(A, d6=D6_X), task(B, continues=A))
         seen = []
@@ -344,7 +371,27 @@ class ChainDebugAdmissionTests(Case):
         self.assertEqual(lineage_counts.chain_debug_used(
             store, store.get(B), [], high_debug._DEBUG_USED_STATUSES), 0)
 
+    def test_an_unlinked_task_counts_its_own_entries_as_before(self):
+        statuses = high_debug._DEBUG_USED_STATUSES
+        store = self.store(task(A, high_debug_entries=self.used()), task(C))
+        self.assertIsNone(self.admit(store, C))
+        self.assertEqual(self.refused_code(store, A), 'HIGH_DEBUG_DEBUG_PARENT_USED')
+        # The Task's own fresh entries are counted, not its stored ones.
+        self.assertEqual(lineage_counts.chain_debug_used(
+            store, store.get(C), self.used(), statuses), self.policy['parent_debug_max'])
+        self.assertEqual(lineage_counts.chain_debug_used(
+            store, store.get(A), [], statuses), 0)
+
+    def test_admission_takes_the_store_from_every_caller(self):
+        import inspect
+        parameter = inspect.signature(high_debug._admit_debug).parameters['store']
+        self.assertIs(parameter.default, inspect.Parameter.empty)
+
     def test_a_chain_in_doubt_refuses(self):
+        store = self.store(task(A), task(C))
+        with patch.object(store, 'get', side_effect=OSError('unreadable')):
+            self.assertEqual(lineage_counts.chain_debug_used(
+                store, task(C), [], high_debug._DEBUG_USED_STATUSES), UNKNOWN)
         cases = {
             'missing predecessor': (self.store(task(B, continues=A)), B),
             'malformed predecessor entries': (

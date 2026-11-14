@@ -1244,15 +1244,16 @@ def _require_screen_cleared(task_id, family):
 _DEBUG_USED_STATUSES = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID')
 
 
-def _admit_debug(task, entries, store=None):
+def _admit_debug(task, entries, store):
     """O2, D3: one AI Debug per ROOT or REPLAN Task; children share one per lineage.
 
     #1502 WP-D L1 phase 2: the parent and group Debug counts are taken over
     the Task's whole continuation chain (predecessors and successors), so a
     continuation never resets the Debug: a second parent Debug anywhere in the
-    chain is refused. The new entry is still recorded on this Task, at its
-    failed HEAD. A chain or read in doubt (no store included) is UNKNOWN,
-    which refuses as used.
+    chain is refused. A Task alone in its chain counts its own entries as
+    before. The new entry is still recorded on this Task, at its failed HEAD.
+    Every caller passes the real store (no default); a chain or read in doubt,
+    no store included, is UNKNOWN, which refuses as used.
     """
     from . import lineage_counts, repair_policy
     try:

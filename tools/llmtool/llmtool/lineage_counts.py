@@ -24,6 +24,9 @@ view (delegate_chain) and writes its run claim under those chain locks
 (acquire_chain_locks); AI Debug admission counts Debugs over the chain
 (chain_debug_used); a delegate whose D6 base is another chain's recorded
 result HEAD refuses CONTINUATION_LINK_REQUIRED (check_continuation_link).
+They read the store once (store_records) and walk chains in that scan
+(chain_in). A Task alone in its chain (no continues, no successor) counts
+exactly as before; only a real read doubt makes a count UNKNOWN.
 """
 
 import contextlib
@@ -39,6 +42,9 @@ MAX_CHAIN = 16
 MAX_DELEGATE_MEMBERS = 2 * MAX_CHAIN
 # The continuation link scan reads at most this many Task records, else in doubt.
 LINK_SCAN_MAX = 20000
+# The chain scan of a delegate or a Debug admission (store_records) reads at
+# most this many Task records, else in doubt.
+STORE_SCAN_MAX = 20000
 _HEX32 = re.compile(r'[0-9a-f]{32}')
 _HEX40 = re.compile(r'[0-9a-f]{40}')
 _EC2_SUFFIX = '-ec2'   # review_repair.EC2_FAMILY_SUFFIX
@@ -249,82 +255,143 @@ def chain_review_repairs(store, task):
     return count
 
 
-def chain_members(store, task):
-    """(records, key) for task's whole chain, or None when anything is in doubt.
+def store_records(store):
+    """{task_id: record} of every stored Task, each read once through get().
 
-    records: the Task, its predecessors (nearest first), then its successors
-    (nearest first), at most MAX_CHAIN. key: the chain's oldest Task ID, the
-    chain lock key. A fork anywhere in the chain, a cycle, a read in doubt or
-    no store is None.
+    The phase 2 chain view (delegate_chain), Debug admission (chain_debug_used)
+    and the continuation link check share this one scan. Records are keyed by
+    the store's listing; chain_in checks the IDs of linked chain records.
+    None, in doubt, only on a real read doubt: no store, a listing or a read
+    that fails, a record that is not a dict, a repeated or malformed ID, or
+    more than STORE_SCAN_MAX Tasks.
     """
-    if type(task) is not dict or store is None:
+    if store is None:
         return None
-    records = chain_records(store, task)
-    if not records:
+    try:
+        task_ids = list(store.task_ids())
+    except Exception:
         return None
-    later = successor_records(store, task, {record.get('task_id') for record in records})
-    if later is None or len(records) + len(later) > MAX_CHAIN:
+    if len(task_ids) > STORE_SCAN_MAX:
         return None
-    key = records[-1].get('task_id')
-    if type(key) is not str or not key:
-        return None
-    return records + later, key
+    records = {}
+    for task_id in task_ids:
+        if type(task_id) is not str or not task_id or task_id in records:
+            return None
+        try:
+            record = store.get(task_id)
+        except Exception:
+            return None
+        if type(record) is not dict:
+            return None
+        records[task_id] = record
+    return records
 
 
-def delegate_chain(store, seeds):
+def chain_in(records, task_id):
+    """(chain_ids, key) of task_id's whole continuation chain, or None in doubt.
+
+    records: store_records of the store. chain_ids: the Task, its predecessors
+    (nearest first), then its successors (nearest first), at most MAX_CHAIN.
+    key: the chain's oldest Task ID, the chain lock key. A Task without
+    continues and without successors is a chain of one keyed by its own ID.
+
+    In doubt: a Task or predecessor not in records, a predecessor or successor
+    record naming another Task, a malformed link on a chain Task, a cycle, a
+    fork anywhere in the chain (a predecessor, the Task or a later Task
+    continued by two records) or a chain over MAX_CHAIN Tasks.
+    """
+    if type(records) is not dict or type(task_id) is not str or task_id not in records:
+        return None
+    successors_of = {}
+    for other_id, record in records.items():
+        link = record.get('continues')
+        if type(link) is str:
+            successors_of.setdefault(link, []).append(other_id)
+
+    def own(record_id):
+        return records[record_id].get('task_id', record_id) == record_id
+    # As in chain_records, the Task's own record ID is not checked: a Task
+    # alone in its chain counts as before. Every other chain record is.
+    chain_ids, seen, current = [task_id], {task_id}, task_id
+    while 'continues' in records[current]:
+        previous = records[current]['continues']
+        # Each predecessor's one successor is the chain Task before it; any
+        # other record continuing it is a fork (review F1 v2).
+        if (not _hex32(previous) or previous in seen or previous not in records or
+                len(chain_ids) >= MAX_CHAIN or not own(previous) or
+                successors_of.get(previous) != [current]):
+            return None
+        chain_ids.append(previous)
+        seen.add(previous)
+        current = previous
+    key = current
+    current = task_id
+    while current in successors_of:
+        found = successors_of[current]
+        if (len(found) != 1 or found[0] in seen or len(chain_ids) >= MAX_CHAIN or
+                not own(found[0])):
+            return None
+        current = found[0]
+        chain_ids.append(current)
+        seen.add(current)
+    return chain_ids, key
+
+
+def delegate_chain(records, seed_ids):
     """The chain view a Developer delegate counts and locks, or None in doubt.
 
-    seeds: the delegated Task first, then every Task whose stored completion
-    names the delegated D6 (a PM follow-up or repair Task on a chain D6 joins
-    that D6's chain). members: {task_id: record} of every Task of every seed's
-    chain (predecessors and successors), at most MAX_DELEGATE_MEMBERS. keys:
-    the sorted chain keys of those chains. Any seed or chain in doubt, or two
-    chains that share a Task, is None.
+    records: store_records of the store. seed_ids: the delegated Task first,
+    then every Task whose stored completion names the delegated D6 (a PM
+    follow-up or repair Task on a chain D6 joins that D6's chain).
+
+    members: {task_id: record} of every Task of every seed's chain
+    (predecessors and successors), at most MAX_DELEGATE_MEMBERS. keys: the
+    sorted chain keys of those chains. linked: the members whose chain holds
+    more than one Task; a Task alone in its chain is not linked and counts as
+    before. Any seed or chain in doubt, or two chains sharing a Task, is None.
     """
-    if type(seeds) is not list or not seeds:
+    if type(records) is not dict or type(seed_ids) is not list or not seed_ids:
         return None
-    members, keys = {}, set()
-    for seed in seeds:
-        if type(seed) is not dict:
-            return None
-        seed_id = seed.get('task_id')
-        if type(seed_id) is not str or not seed_id:
-            return None
+    members, keys, linked = {}, set(), set()
+    for seed_id in seed_ids:
         if seed_id in members:
             continue
-        found = chain_members(store, seed)
+        found = chain_in(records, seed_id)
         if found is None:
             return None
-        records, key = found
-        for record in records:
-            record_id = record.get('task_id')
-            if type(record_id) is not str or not record_id or record_id in members:
+        chain_ids, key = found
+        for record_id in chain_ids:
+            if record_id in members:
                 return None
-            members[record_id] = record
+            members[record_id] = records[record_id]
+            if len(chain_ids) > 1:
+                linked.add(record_id)
         keys.add(key)
         if len(members) > MAX_DELEGATE_MEMBERS:
             return None
-    return {'members': members, 'keys': sorted(keys)}
+    return {'members': members, 'keys': sorted(keys), 'linked': linked}
 
 
 def chain_debug_used(store, task, entries, used_statuses):
     """AI Debugs used over task's whole chain: a count or UNKNOWN.
 
-    entries is the Task's own fresh high_debug list; every other chain Task
-    (predecessors and successors) adds each of its stored entries that is not
-    a dict or whose status is in used_statuses. A chain, a list or a read in
-    doubt is UNKNOWN, which admission treats as the limit.
+    entries is the Task's own fresh high_debug list, counted as before; every
+    other chain Task (predecessors and successors) adds each of its stored
+    entries that is not a dict or whose status is in used_statuses. A Task
+    alone in its chain counts only its own entries. A chain, a list or a read
+    in doubt (no store included) is UNKNOWN, which admission treats as the
+    limit.
     """
     if type(task) is not dict or type(entries) is not list:
         return UNKNOWN
-    found = chain_members(store, task)
+    own_id = task.get('task_id')
+    records = store_records(store)
+    found = chain_in(records, own_id)
     if found is None:
         return UNKNOWN
-    records, _key = found
-    own_id = task.get('task_id')
     used = 0
-    for record in records:
-        listed = entries if record.get('task_id') == own_id else record.get('high_debug', [])
+    for record_id in found[0]:
+        listed = entries if record_id == own_id else records[record_id].get('high_debug', [])
         if type(listed) is not list:
             return UNKNOWN
         used += sum(1 for entry in listed
@@ -375,7 +442,7 @@ def _refuse_link(reason):
     raise error from None
 
 
-def check_continuation_link(store, member_ids, base_sha):
+def check_continuation_link(store, member_ids, base_sha, records=None):
     """Refuse CONTINUATION_LINK_REQUIRED when a D6 builds on another chain's result.
 
     base_sha is the delegated D6's registered base. When it equals a recorded
@@ -384,13 +451,18 @@ def check_continuation_link(store, member_ids, base_sha):
     continues it (record-pm --continues) has it in its chain and passes. The
     scan reads at most LINK_SCAN_MAX records; a malformed base, a scan over the
     bound or any read or record in doubt refuses too. There is no override.
+
+    records, when given, is the store_records scan the caller took under the
+    chain locks; the check then reads no record again.
     """
     if type(base_sha) is not str or _HEX40.fullmatch(base_sha) is None:
         _refuse_link('SCAN_IN_DOUBT')
     if not isinstance(member_ids, (set, frozenset, dict, list, tuple)):
         _refuse_link('SCAN_IN_DOUBT')
+    if records is not None and type(records) is not dict:
+        _refuse_link('SCAN_IN_DOUBT')
     try:
-        task_ids = list(store.task_ids())
+        task_ids = list(store.task_ids() if records is None else records)
     except Exception:
         _refuse_link('SCAN_IN_DOUBT')
     if len(task_ids) > LINK_SCAN_MAX:
@@ -399,7 +471,7 @@ def check_continuation_link(store, member_ids, base_sha):
         if task_id in member_ids:
             continue
         try:
-            record = store.get(task_id)
+            record = store.get(task_id) if records is None else records[task_id]
         except Exception:
             _refuse_link('SCAN_IN_DOUBT')
         heads = recorded_result_heads(record)

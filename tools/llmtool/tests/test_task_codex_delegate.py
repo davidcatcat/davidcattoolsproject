@@ -405,6 +405,16 @@ class CodexDelegateTests(unittest.TestCase):
             def get(self, _task_id):
                 return self.value
 
+            # #1502 WP-D phase 2: the run claim counts the chain under its
+            # lock, which lists the store; this store holds the one Task.
+            def task_ids(self):
+                return [self.value['task_id']]
+
+            def completion_d6_task_ids(self, executor_task_id):
+                completion = self.value.get('completion')
+                return ([self.value['task_id']] if type(completion) is dict and
+                        completion.get('executor_task_id') == executor_task_id else [])
+
             def update(self, _task_id, **changes):
                 self.value.update(changes)
                 return self.value
@@ -1073,6 +1083,16 @@ class CodexDelegateTests(unittest.TestCase):
             def get(self, _task_id):
                 return self.value
 
+            # #1502 WP-D phase 2: the run claim counts the chain under its
+            # lock, which lists the store; this store holds the one Task.
+            def task_ids(self):
+                return [self.value['task_id']]
+
+            def completion_d6_task_ids(self, executor_task_id):
+                completion = self.value.get('completion')
+                return ([self.value['task_id']] if type(completion) is dict and
+                        completion.get('executor_task_id') == executor_task_id else [])
+
             def update(self, _task_id, **changes):
                 self.value.update(changes)
                 return self.value
@@ -1168,6 +1188,16 @@ class CodexDelegateTests(unittest.TestCase):
 
             def get(self, _task_id):
                 return self.value
+
+            # #1502 WP-D phase 2: the run claim counts the chain under its
+            # lock, which lists the store; this store holds the one Task.
+            def task_ids(self):
+                return [self.value['task_id']]
+
+            def completion_d6_task_ids(self, executor_task_id):
+                completion = self.value.get('completion')
+                return ([self.value['task_id']] if type(completion) is dict and
+                        completion.get('executor_task_id') == executor_task_id else [])
 
             def update(self, _task_id, **changes):
                 self.value.update(changes)
