@@ -154,6 +154,7 @@ TASK_HIDDEN = "Task 模式是開發測試用；要派工請用 /pm connect 和 P
 # developer-only and print TASK_HIDDEN.
 READ_ONLY_TASK_COMMANDS = ("/task list", "/task show", "/task events")
 READ_TASK_HELP = """
+
 Task views (read-only, local TaskStore; nothing is submitted or dispatched)
   /task show TASK_ID    Open a Task's detail
   /task list            Open the Task list (stage, update time, request) from TaskStore

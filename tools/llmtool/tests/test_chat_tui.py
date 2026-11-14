@@ -868,10 +868,10 @@ class WidgetTests(Base):
 
     def test_tab_does_not_offer_dev_commands_without_dev_mode(self):
         def unchanged(ui):
-            self.assertEqual(ui.input.text, '/ta')
+            self.assertEqual(ui.input.text, '/task su')
             self.assertEqual(ui.menu_items, [])
 
-        self.drive(['/ta', '\t', unchanged], dev=False)
+        self.drive(['/task su', '\t', unchanged], dev=False)
         self.factory.assert_not_called()
 
     def test_tab_without_match_keeps_slash_draft_and_non_slash_tab_behavior(self):
