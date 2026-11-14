@@ -84,6 +84,14 @@ class IntakeTests(unittest.TestCase):
         self.assertEqual((live.status, live.reason),
                          ('BLOCKED', 'LIVE_SESSION_TRANSPORT_NOT_ADMITTED'))
 
+    def test_unencodable_packet_is_refused(self):
+        # #367: a packet body that cannot be encoded is refused, never prepared.
+        from unittest import mock
+        with mock.patch.object(TaskBinding, 'to_dict', side_effect=TypeError('bad')):
+            result = self.prepare()
+        self.assertEqual((result.status, result.reason), ('BLOCKED', 'INTAKE_PACKET_INVALID'))
+        self.assertIsNone(result.packet_digest)
+
     def test_registered_previous_task_must_have_matching_terminal_receipt(self):
         self.assertEqual(self.prepare(previous=None).status, 'BLOCKED')
         self.assertEqual(self.prepare(registration=replace(
