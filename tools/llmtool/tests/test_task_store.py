@@ -3192,6 +3192,62 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(saved['developer']['execution']['native_session_binding'], 'BOUND')
         self.assertEqual(saved['developer']['usage']['total_tokens'], 21)
 
+    def test_developer_artifact_256_kib_round_trips(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+        self.store.update(task['task_id'], developer=dispatching)
+        header = ('diff --git a/src.py b/src.py\n'
+                  '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n')
+        artifact = header + '+y = 1\n' * ((256 * 1024 - len(header)) // 7)
+        execution = {'status': 'DONE',
+            'native_session_id': '12345678-1234-4234-8234-123456789abc',
+            'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
+            'cleanup_status': 'CONFIRMED', 'usage_source': 'CLI_REPORTED',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None, 'native_session_binding': 'BOUND'}
+        responded = {**dispatching, 'state': 'DEVELOPER_RESPONDED',
+            'artifact': artifact, 'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+            'execution': execution,
+            'usage': {'prompt_tokens': 13, 'completion_tokens': 8, 'total_tokens': 21}}
+        self.store.update(task['task_id'], developer=responded)
+        self.assertEqual(self.store.get(task['task_id'])['developer']['artifact'], artifact)
+
+    def test_developer_artifact_over_512_kib_is_refused(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+        self.store.update(task['task_id'], developer=dispatching)
+        header = ('diff --git a/src.py b/src.py\n'
+                  '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n')
+        artifact = header + '+y = 1\n' * ((512 * 1024 - len(header)) // 7 + 1)
+        execution = {'status': 'DONE',
+            'native_session_id': '12345678-1234-4234-8234-123456789abc',
+            'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
+            'cleanup_status': 'CONFIRMED', 'usage_source': 'CLI_REPORTED',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None, 'native_session_binding': 'BOUND'}
+        responded = {**dispatching, 'state': 'DEVELOPER_RESPONDED',
+            'artifact': artifact, 'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+            'execution': execution,
+            'usage': {'prompt_tokens': 13, 'completion_tokens': 8, 'total_tokens': 21}}
+        with self.assertRaises(LLMToolError):
+            self.store.update(task['task_id'], developer=responded)
+        self.assertEqual(
+            self.store.get(task['task_id'])['developer']['state'],
+            'DEVELOPER_DISPATCHING',
+        )
+
     def test_native_session_binding_rejected_for_opencode_and_invalid_values(self):
         artifact = ('diff --git a/src.py b/src.py\n'
                     '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')

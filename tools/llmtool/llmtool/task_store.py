@@ -52,6 +52,8 @@ def _added_diff_content(value):
 
 SCHEMA_VERSION = 2
 MAX_RECORD_BYTES = 1024 * 1024
+# #1815: a Developer diff is stored whole; the 1 MiB record limit is the ceiling, so artifacts stay at or below half of it. Same value as developer_routes.base.HARD_MAX_DIFF_BYTES.
+MAX_ARTIFACT_BYTES = 512 * 1024
 TASK_ID = re.compile(r'[0-9a-f]{32}')
 D6_TASK_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}')
 SESSION_ID = re.compile(r'pm-[a-z0-9-]{1,60}')
@@ -2704,7 +2706,7 @@ def _validate(record, *, strict=True):
             artifact = developer['artifact']
             artifact_sha = developer['artifact_sha256']
             if artifact is not None:
-                if (type(artifact) is not str or len(artifact.encode('utf-8')) > 64 * 1024 or
+                if (type(artifact) is not str or len(artifact.encode('utf-8')) > MAX_ARTIFACT_BYTES or
                         type(artifact_sha) is not str or
                         hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha or
                         _emitted_sensitive(_added_diff_content(artifact))):

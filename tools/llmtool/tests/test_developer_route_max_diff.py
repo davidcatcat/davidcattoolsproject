@@ -7,6 +7,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from llmtool import developer_routes, task_store
+import llmtool.developer_routes.base
 from llmtool.developer_routes import (
     RouteError,
     load_route_config,
@@ -26,7 +28,7 @@ class ResolveRouteMaxDiffTests(unittest.TestCase):
 
     def test_injected_config_validation(self):
         base_cfg = load_route_config()
-        for bad in (True, 1.5, 0, 1023, 16 * 1024 * 1024 + 1):
+        for bad in (True, 1.5, 0, 1023, 512 * 1024 + 1):
             with self.subTest(bad=bad):
                 cfg = copy.deepcopy(base_cfg)
                 cfg['routes']['agy']['max_diff_bytes'] = bad
@@ -34,7 +36,7 @@ class ResolveRouteMaxDiffTests(unittest.TestCase):
                     resolve_route_max_diff_bytes('agy', config=cfg)
                 self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
 
-        for ok in (1024, 16 * 1024 * 1024):
+        for ok in (1024, 512 * 1024):
             with self.subTest(ok=ok):
                 cfg = copy.deepcopy(base_cfg)
                 cfg['routes']['agy']['max_diff_bytes'] = ok
@@ -83,6 +85,19 @@ class GuidanceDriftSchemaTests(unittest.TestCase):
 
         bad_data = copy.deepcopy(real_data)
         bad_data['routes']['agy']['max_diff_bytes'] = 1023
+        self.assertEqual(len(drift_mod.RULE_SCHEMAS['developer-routes.json'].errors(bad_data, '$')), 1)
+
+    def test_task_store_artifact_limit_matches_route_hard_limit_and_drift_schema(self):
+        self.assertEqual(task_store.MAX_ARTIFACT_BYTES, developer_routes.base.HARD_MAX_DIFF_BYTES)
+        spec = importlib.util.spec_from_file_location(
+            'guidance_drift_check', DRIFT_SCRIPT)
+        drift_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(drift_mod)
+
+        with open(ROUTES_FILE, encoding='utf-8') as f:
+            real_data = json.load(f)
+        bad_data = copy.deepcopy(real_data)
+        bad_data['routes']['agy']['max_diff_bytes'] = 512 * 1024 + 1
         self.assertEqual(len(drift_mod.RULE_SCHEMAS['developer-routes.json'].errors(bad_data, '$')), 1)
 
 
