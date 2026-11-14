@@ -439,6 +439,18 @@ class DeveloperAssignmentInboxTests(unittest.TestCase):
             self.assert_refused('ASSIGNMENT_EXPIRY_INVALID', self.assign, expires_in=value)
         self.assertEqual(self.assign(expires_in=900)['state'], 'ASSIGNED')
 
+    def test_account_and_common_dir_refusals_name_their_code(self):
+        # #367: an unusable account or Git common directory is refused with its own code.
+        for environ in ({}, {'CLAUDE_CONFIG_DIR': 'relative/claude'}):
+            with self.subTest(environ=environ):
+                self.assert_refused('ASSIGNMENT_ACCOUNT_DIR_UNAVAILABLE',
+                                    inbox.account_dir_label, environ)
+        run = 'llmtool.developer_assignment_inbox.subprocess.run'
+        with patch(run, side_effect=OSError('no git')):
+            self.assert_refused('ASSIGNMENT_COMMON_DIR_UNAVAILABLE', inbox.discover_common_dir)
+        with patch(run, return_value=Namespace(stdout=b'/plain/checkout\n')):
+            self.assert_refused('ASSIGNMENT_COMMON_DIR_UNAVAILABLE', inbox.discover_common_dir)
+
     def test_lock_wait_is_bounded_with_busy_code(self):
         self.assign()
         lock = os.open(self.store_root / task_store_module.ASSIGNMENTS_LOCK_NAME, os.O_RDWR)
