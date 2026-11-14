@@ -4647,7 +4647,8 @@ def _record_gw_agent_skill_not_delivered(task):
     """Record that this launched gw-agent run received no role cards.
 
     gw-agent has no rule-delivery field yet (#1502 WP-F), so each launched run
-    appends one NOT_DELIVERED ROUTE_NOT_SUPPORTED event. It is never evidence,
+    appends one NOT_DELIVERED ROUTE_NOT_SUPPORTED event. run_route calls this
+    as its on_launch callback, so no pre-launch refusal records it. It is never evidence,
     so a ledger failure must not block the run; the append can fail after its
     line persists, so the outcome is unknown.
     """
@@ -5997,16 +5998,16 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         if site.is_repair:
             task_input = dict(task_input, task_id=site.gateway_task_id, findings=site.findings)
             site.check_scope(task_input)
-        # #1502 WP-F: gw-agent receives no role cards; record that once per
-        # launched run, right before the gateway run starts.
-        _record_gw_agent_skill_not_delivered(task)
+        # #1502 WP-F: gw-agent receives no role cards. run_route records that
+        # once per launched run, at the launch boundary after every refusal check.
         try:
             result = execute(route, {'root': registration.root, 'model': model, 'effort': effort,
                 'expected_branch': registration.branch, 'expected_head': snapshot.head,
                 'write_paths': write_paths, 'executable': sys.executable,
                 'prompt': prompt, 'task': task_input, 'timeout': timeout,
                 'state_dirs': (), **site.route_fields()}, gate=route_gate, boundary=for_platform(),
-                snapshot=capture_snapshot)
+                snapshot=capture_snapshot,
+                on_launch=lambda: _record_gw_agent_skill_not_delivered(task))
         finally:
             cleanup_audit_copies()
         after_registration = task_completion.read_d6_registration(
