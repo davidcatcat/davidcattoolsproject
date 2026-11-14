@@ -270,8 +270,9 @@ def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_
         'route': route, 'risk': 'LOW', 'goal': pm_assignment['goal'],
         'acceptance': list(original_acceptance) + [bounded_acceptance],
     }
+    # #2006: no room for the bounded repair item (PM record limit is 16 items).
     if len(assignment['acceptance']) > 16:
-        _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
+        _refuse('REPAIR_ACCEPTANCE_FULL')
     response = json.dumps({
         'schema_version': 1,
         'summary': (f"LLMTOOL_RUNTIME recorded bounded repair continuation "
