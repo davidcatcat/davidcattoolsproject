@@ -100,7 +100,15 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'review_dispatch_claim', 'review_repair_claims', 'high_debug',
     'abandonment', 'pm_session_adoptions', 'pm_provenance', 'merge_attempt',
     'published_pr', 'repair_cap_override', 'publish_operations',
-    'review_exception', 'lineage', 'review_disputes', 'waiting'))
+    'review_exception', 'lineage', 'review_disputes', 'waiting',
+    'file_ops', 'file_ops_evidence'))
+# #1502 file ops: optional top-level fields. file_ops is written once by record-pm,
+# bound to the Task contract and the stored PM response; file_ops_evidence only by
+# ``task file-ops`` through TaskStore.record_file_ops_evidence.
+_FILE_OPS_FIELDS = frozenset(('ops', 'ops_sha256', 'contract_digest'))
+_FILE_OPS_EVIDENCE_FIELDS = frozenset((
+    'state', 'isolate', 'task_id', 'run_id', 'executor_task', 'root', 'branch', 'head',
+    'ops_sha256', 'plan_sha256', 'status_sha256', 'recorded_at'))
 # Owner-exception merge evidence (#1253, #1519). Only this one exception type
 # is persisted; its evidence is the exact owner_exception.verify() result.
 _REVIEW_EXCEPTION_TYPE = 'OWNER_EXCEPTION_DETERMINISTIC_REDACTION'
@@ -1751,8 +1759,67 @@ def release_split_child(store, task_id, *, op_id):
         store._unlock_sidecar(root_lock)
 
 
+def _file_ops_text(value, limit):
+    return (type(value) is str and 1 <= len(value) <= limit and
+            not any(ord(char) < 0x20 or ord(char) == 0x7f for char in value))
+
+
+def _file_ops_hex64(value):
+    return type(value) is str and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+
+
+def _file_ops_matches(value, ops):
+    """True when ``value`` parses to exactly the normalized ``ops`` list."""
+    from . import file_ops
+    try:
+        return type(ops) is list and file_ops.parse_ops(value) == ops
+    except LLMToolError:
+        return False
+
+
+def _validate_file_ops(record):
+    from . import file_ops
+    item = record.get('file_ops')
+    binding = record.get('task_binding')
+    if (type(item) is not dict or set(item) != _FILE_OPS_FIELDS or
+            type(item['ops']) is not list or not _file_ops_matches(item['ops'], item['ops']) or
+            item['ops_sha256'] != file_ops.ops_sha256(item['ops']) or
+            type(binding) is not dict or
+            not _file_ops_hex64(item['contract_digest']) or
+            item['contract_digest'] != binding.get('contract_digest') or
+            'pm_provenance' not in record):
+        _fail('TASK_FILE_OPS_INVALID')
+
+
+def _validate_file_ops_evidence(record):
+    item = record.get('file_ops_evidence')
+    bound = record.get('file_ops')
+    if (type(item) is not dict or set(item) != _FILE_OPS_EVIDENCE_FIELDS or
+            type(bound) is not dict or
+            item['state'] not in ('VERIFIED', 'FAILED') or
+            item['isolate'] is not (item['state'] == 'FAILED') or
+            item['task_id'] != record.get('task_id') or
+            item['run_id'] != record.get('run_id') or
+            not _safe_identifier(item['executor_task'], D6_TASK_ID) or
+            not _file_ops_text(item['root'], 4096) or not item['root'].startswith('/') or
+            not _file_ops_text(item['branch'], 255) or
+            type(item['head']) is not str or
+            re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', item['head']) is None or
+            item['ops_sha256'] != bound.get('ops_sha256') or
+            not _file_ops_hex64(item['plan_sha256']) or
+            not (_file_ops_hex64(item['status_sha256']) or
+                 (item['state'] == 'FAILED' and item['status_sha256'] is None)) or
+            not _valid_utc_seconds(item['recorded_at'])):
+        _fail('TASK_FILE_OPS_EVIDENCE_INVALID')
+
+
 def _validate(record, *, strict=True):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
+    for name, check in (('file_ops', _validate_file_ops),
+                        ('file_ops_evidence', _validate_file_ops_evidence)):
+        if name in keys:
+            keys.discard(name)
+            check(record)
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
     published_pr = record.get('published_pr') if type(record) is dict else None
     keys.discard('merge_attempt')
@@ -2250,8 +2317,15 @@ def _validate(record, *, strict=True):
                     type(response_object['summary']) is not str or
                     _emitted_sensitive(response_object['summary']) or
                     type(response_assignment) is not dict or
-                    assignment != {'schema_version': 1, **_current_route(response_assignment)}):
+                    assignment != {'schema_version': 1, **_current_route(
+                        {key: value for key, value in response_assignment.items()
+                         if key != 'file_ops'})}):
                 _fail()
+            # #1502: file_ops in the PM response and the stored field bind each other.
+            if ('file_ops' in response_assignment) != ('file_ops' in record) or (
+                    'file_ops' in record and not _file_ops_matches(
+                        response_assignment['file_ops'], record['file_ops'].get('ops'))):
+                _fail('TASK_FILE_OPS_INVALID')
         elif record['backend_session_semantics'] == 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL':
             _fail()
         developer = record['developer']
@@ -3411,6 +3485,9 @@ class TaskStore:
                 'completion_events' in record or 'completion_event_tombstones' in record or
                 'pm_session_adoptions' in record):
             _fail()
+        if 'file_ops_evidence' in record:
+            # #1502: evidence is written only by ``task file-ops``, never at create.
+            _fail('TASK_FILE_OPS_EVIDENCE_FORBIDDEN')
         record = dict(record)
         # The owner gate runs first: a denied developer is cleared, so the
         # record gains no D6 and its audited denial never waits on, or is
@@ -3499,6 +3576,14 @@ class TaskStore:
         if type(expected) is not dict or not expected:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
+
+    def record_file_ops_evidence(self, task_id, evidence, *, expected):
+        """Write sealed file-ops evidence once, compare-and-update (``task file-ops`` only)."""
+        if type(expected) is not dict or not expected:
+            _fail()
+        return self._update(task_id, expected=expected,
+                            changes={'file_ops_evidence': evidence},
+                            trusted_file_ops_evidence=True)
 
     @staticmethod
     def _claude_d6_holds(record, executor_task_id):
@@ -4924,11 +5009,17 @@ class TaskStore:
                        trusted_completion_events=False, trusted_abandonment=False,
                        abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
                        trusted_codex_launch=False, trusted_opencode_launch=False,
-                       trusted_split=None, split_child_max=None):
+                       trusted_split=None, split_child_max=None,
+                       trusted_file_ops_evidence=False):
         # Refused here, not by the writable-field check: the dispatch gate
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
             _fail()
+        if 'file_ops' in changes:
+            _fail('TASK_FILE_OPS_IMMUTABLE')
+        if (('file_ops_evidence' in changes) != trusted_file_ops_evidence or
+                (trusted_file_ops_evidence and set(changes) != {'file_ops_evidence'})):
+            _fail('TASK_FILE_OPS_EVIDENCE_FORBIDDEN')
         if (trusted_split is not None or split_child_max is not None) and (
                 trusted_split not in SPLIT_ACTIONS or set(changes) != {'lineage'} or
                 (split_child_max is not None) != (trusted_split == 'COMMIT') or
@@ -5098,6 +5189,10 @@ class TaskStore:
                     _fail('TASK_PM_SESSION_DENIED')
             if trusted_pm_session_adoption and current.get('abandonment') is not None:
                 _fail('PM_SESSION_ADOPTION_ABANDONED')
+            if trusted_file_ops_evidence and (
+                    'file_ops_evidence' in current or current.get('abandonment') is not None):
+                # #1502: one sealed result per Task; a FAILED result stays.
+                _fail('TASK_FILE_OPS_EVIDENCE_IMMUTABLE')
             if 'review_dispatch_claim' in changes:
                 old_claim = current.get('review_dispatch_claim')
                 new_claim = changes['review_dispatch_claim']

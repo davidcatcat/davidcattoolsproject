@@ -59,6 +59,8 @@ TASK_ACTIONS = {
     'dispute': ('run_task_dispute', False),
     'drive': ('run_task_drive', True),
     'drop': ('run_task_drop', False),
+    # #1502: delete/move tracked files on a registered D6 before any Developer.
+    'file-ops': ('run_task_file_ops', True),
     'github-events': ('run_task_github_events', False),
     'high-debug': ('run_task_high_debug', True),
     'inbox': ('run_task_inbox', False),

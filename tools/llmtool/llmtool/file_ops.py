@@ -155,6 +155,13 @@ def parse_ops(value):
     return ops
 
 
+def ops_sha256(ops):
+    """SHA-256 of the canonical JSON of the parsed ops (sorted keys, compact, ASCII)."""
+    canonical = json.dumps(parse_ops(ops), sort_keys=True, separators=(',', ':'),
+                           ensure_ascii=True)
+    return hashlib.sha256(canonical.encode('ascii')).hexdigest()
+
+
 # ---------------------------------------------------------------- git access
 
 def _git_env():
@@ -223,6 +230,14 @@ def _status(root):
     out = _git(root, ['status', '--porcelain=v1', '--untracked-files=all', '--no-renames', '-z'],
                PRECHECK_FAILED)
     return [(rec[:2], rec[3:]) for rec in out.split('\0') if rec]
+
+
+def status_sha256(root):
+    """Read-only: SHA-256 of the exact ``git status`` porcelain output of ``root``."""
+    root = _resolve_root(root)
+    out = _git(root, ['status', '--porcelain=v1', '--untracked-files=all', '--no-renames', '-z'],
+               PRECHECK_FAILED)
+    return hashlib.sha256(out.encode('utf-8', 'surrogateescape')).hexdigest()
 
 
 def _ls_files(root):
@@ -384,6 +399,21 @@ def _make_plan(root, head, ops):
 def plan(root, head, ops):
     """Read-only whole-batch precheck; return the sealed plan or raise."""
     return _make_plan(root, head, ops)
+
+
+def expected_plan(root, head, ops):
+    """Read-only: rebuild the sealed plan from the HEAD tree alone.
+
+    Used to check a re-run against stored evidence, when the tree already
+    holds the staged result and ``plan`` would refuse it as not clean. It is
+    the same rebuild ``verify`` uses; pass the result to ``verify``.
+    """
+    root = _resolve_root(root)
+    head = _check_head_value(head)
+    ops = parse_ops(ops)
+    _require_head(root, head)
+    head_blobs = _ls_tree(root, head, VERIFY_FAILED)
+    return _seal(head, ops, _with_blobs(_expand(ops, head_blobs), head_blobs))
 
 
 def _open_plan(value):
