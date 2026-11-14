@@ -5317,7 +5317,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         changed_paths, raw = task_completion._worktree_diff(registration.root, snapshot.head)
         if len(raw) > 64 * 1024:
             raise RouteError('AGY_OUTPUT_TOO_LARGE')
-        if not _d6_scope_ok(store, task['task_id'], write_paths, changed_paths):
+        if not _d6_scope_ok(task, write_paths, changed_paths):
             raise RouteError('AGY_WRITE_SCOPE_VIOLATION')
         artifact = raw.decode('utf-8', 'strict')
         usage = _normalize_agy_usage(result.usage)
@@ -5655,7 +5655,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
             raise _ClaudeCommittedCarry()
         if len(raw) > 64 * 1024:
             raise RouteError('CLAUDE_OUTPUT_TOO_LARGE')
-        if not _d6_scope_ok(store, task['task_id'], write_paths, changed_paths):
+        if not _d6_scope_ok(task, write_paths, changed_paths):
             raise RouteError('CLAUDE_WRITE_SCOPE_VIOLATION')
         artifact = raw.decode('utf-8', 'strict')
         usage = _normalize_agy_usage(result.usage)
@@ -6016,7 +6016,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         changed_paths, raw = task_completion._worktree_diff(registration.root, snapshot.head)
         if len(raw) > 64 * 1024:
             raise RouteError('GW_AGENT_OUTPUT_TOO_LARGE')
-        if not _d6_scope_ok(store, task['task_id'], write_paths, changed_paths):
+        if not _d6_scope_ok(task, write_paths, changed_paths):
             raise RouteError('GW_AGENT_WRITE_SCOPE_VIOLATION')
         if not route.audit_copy_path or not route._result:
             raise RouteError('GW_AGENT_AUDIT_INVALID')
@@ -7102,8 +7102,13 @@ def _d6_scope(record, write_paths):
     return frozenset(write_paths) | file_ops_result_paths(record)
 
 
-def _d6_scope_ok(store, task_id, write_paths, changed_paths):
-    allowed = _d6_scope(store.get(task_id), write_paths)
+def _d6_scope_ok(record, write_paths, changed_paths):
+    """Scope check on the Task record the route already holds; no extra store read.
+
+    The route reads its Task after the file_ops gate, so the record carries any
+    VERIFIED evidence. The evidence is write-once and FAILED widens no scope.
+    """
+    allowed = _d6_scope(record, write_paths)
     return all(path in allowed for path in changed_paths)
 
 

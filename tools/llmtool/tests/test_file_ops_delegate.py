@@ -344,11 +344,13 @@ class DelegateFileOpsTests(_DelegateCase):
         ops_paths = {'README.txt', 'docs/a.txt', 'docs/sub/b.txt',
                      'archive/docs/a.txt', 'archive/docs/sub/b.txt'}
         self.assertEqual(frozenset(write_paths) | ops_paths, cli._d6_scope(saved, write_paths))
-        self.assertTrue(cli._d6_scope_ok(self.store, task['task_id'], write_paths,
+        self.assertTrue(cli._d6_scope_ok(saved, write_paths,
                                          sorted(ops_paths | {'src/tool.py'})))
+        # Without VERIFIED evidence the scope is write_paths only.
+        self.assertFalse(cli._d6_scope_ok(task, write_paths, ['src/tool.py', 'README.txt']))
         for outside in ('docs/new.txt', 'archive/docs/c.txt', 'src/other.py', 'docs/'):
             with self.subTest(path=outside):
-                self.assertFalse(cli._d6_scope_ok(self.store, task['task_id'], write_paths,
+                self.assertFalse(cli._d6_scope_ok(saved, write_paths,
                                                   ['src/tool.py', outside]))
 
     def test_failed_evidence_widens_no_scope(self):
