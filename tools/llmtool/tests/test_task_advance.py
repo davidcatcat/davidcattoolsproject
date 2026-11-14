@@ -4093,6 +4093,17 @@ class ClaimStore:
         return self.record
 
 
+# #1502 WP-F: a fixed rule prefix stands in for the main-pinned Reviewer cards,
+# so no dispatch_review here reads GitHub or Git for rules.
+_STUB_RULES_PREFIX = 'RULES stub for task advance tests\nRULES_END\n\n'
+_STUB_RULES_SHA256 = hashlib.sha256(_STUB_RULES_PREFIX.encode('utf-8')).hexdigest()
+
+
+def _stub_review_rules():
+    return patch.object(review_dispatch, '_review_rules',
+                        return_value=(_STUB_RULES_PREFIX, _STUB_RULES_SHA256))
+
+
 class CodexReviewFailureReasonTests(unittest.TestCase):
     """#1105: each refusal of a finished Codex run names its fixed check."""
 
@@ -4155,7 +4166,8 @@ class CodexReviewFailureReasonTests(unittest.TestCase):
              patch('llmtool.codex_direct_developer.validate_profile'), \
              patch.object(review_dispatch, '_resolve_github_login', return_value='login'), \
              patch.object(review_dispatch.task_completion, 'read_d6_registration',
-                          return_value=reviewer):
+                          return_value=reviewer), \
+             _stub_review_rules():
             with self.assertRaises(LLMToolError) as caught:
                 review_dispatch.dispatch_review(
                     store=store, task_id=TASK, executor_task='executor-1', pr_number=17,
@@ -4177,6 +4189,7 @@ class CodexReviewFailureReasonTests(unittest.TestCase):
         self.assertEqual(len(claims), 1)
         self.assertEqual(claims[0]['state'], 'UNKNOWN')
         self.assertEqual(claims[0]['failure_reason'], 'VERDICT_NOT_JSON')
+        self.assertEqual(claims[0]['rules_sha256'], _STUB_RULES_SHA256)
         stored = json.dumps(claims)
         self.assertNotIn('SECRET-MODEL-TEXT', stored)
         self.assertNotIn('/Users/someone', stored)
@@ -4281,6 +4294,7 @@ class TaskAdvanceRepeatedVerdictPostTests(unittest.TestCase):
                              return_value=self.LOGIN), \
                 patch.object(review_dispatch.task_completion, 'read_d6_registration',
                              return_value=reviewer), \
+                _stub_review_rules(), \
                 patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
                 patch.object(task_advance, '_review_outcomes', return_value=[]), \
                 patch.object(task_advance, 'decide', return_value='DISPATCH_REVIEW'):
