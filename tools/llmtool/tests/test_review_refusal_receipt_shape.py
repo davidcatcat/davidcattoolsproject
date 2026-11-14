@@ -25,6 +25,20 @@ class RefusalReceiptShapeTests(unittest.TestCase):
         self.check_reply('OUTPUT_SHAPE synthetic leaked words',
                          'REPLY_SHAPE bytes=35 lines=1 first=letter')
 
+    def test_unicode_digit_imitation_is_still_shaped(self):
+        # Security v91 F1: Arabic-Indic one is a Unicode decimal, not an ASCII digit.
+        self.check_reply('OUTPUT_SHAPE no_bad_line lines=\u0661',
+                         'REPLY_SHAPE bytes=33 lines=1 first=letter')
+
+    def test_output_shape_accepts_ascii_digits_only(self):
+        self.assertTrue(review_dispatch._OUTPUT_SHAPE.fullmatch(
+            'OUTPUT_SHAPE line=2 of 10 bytes=345 first=brace'))
+        for digit in ('\u0661', '\uff13', '\u07c1', '\u0e52'):
+            for text in ('OUTPUT_SHAPE utf8=invalid bytes=' + digit,
+                         'OUTPUT_SHAPE no_bad_line lines=' + digit,
+                         'OUTPUT_SHAPE line=1 of %s bytes=3 first=letter' % digit):
+                self.assertIsNone(review_dispatch._OUTPUT_SHAPE.fullmatch(text), text)
+
     def check_reply(self, reply, shape):
         raw = _codex_event_stream(reply)
         task = self.store.get(self.task_id)

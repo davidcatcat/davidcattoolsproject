@@ -407,9 +407,10 @@ def _jsonl_shape(raw):
 
 
 # #1907 pre-review F1: only an exact _jsonl_shape value keeps its words.
+# Security v91 F1: [0-9] only; %d writes ASCII digits, Unicode \d is wider.
 _OUTPUT_SHAPE = re.compile(
-    r'OUTPUT_SHAPE (?:unavailable|utf8=invalid bytes=\d+|no_bad_line lines=\d+|'
-    r'line=\d+ of \d+ bytes=\d+ first=(?:blank|brace|letter|digit|other))')
+    r'OUTPUT_SHAPE (?:unavailable|utf8=invalid bytes=[0-9]+|no_bad_line lines=[0-9]+|'
+    r'line=[0-9]+ of [0-9]+ bytes=[0-9]+ first=(?:blank|brace|letter|digit|other))')
 
 
 def _reply_shape(text):
