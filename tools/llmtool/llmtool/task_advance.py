@@ -586,7 +586,7 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     required_checks = _required_linux_checks(paths, old_paths)
     if required_checks is None:
         return 'MERGE_CHECKS_UNAVAILABLE'
-    docs_only =required_checks == ['check (docs)']
+    docs_only = required_checks == ['check (docs)']
     requires_macos = not docs_only and _mac_ci_runs(paths + old_paths)
     if requires_macos:
         required_checks.append('check (macOS 3.13)')
