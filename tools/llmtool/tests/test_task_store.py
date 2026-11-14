@@ -1462,6 +1462,37 @@ class TaskStoreTests(unittest.TestCase):
                         task['task_id'], expected={'developer': None},
                         developer=developer)
 
+    def test_developer_timeout_seconds_is_optional_and_bounded(self):
+        # #1815: legacy records without the field stay valid.
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None},
+            developer=self._developer_assignment())
+        self.assertNotIn('timeout_seconds', saved['developer'])
+        for timeout in (1, 600, 1200, 1800):
+            with self.subTest(timeout=timeout):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                developer = dict(self._developer_assignment(), timeout_seconds=timeout)
+                saved = self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=developer)
+                self.assertEqual(saved['developer']['timeout_seconds'], timeout)
+                self.assertEqual(
+                    self.store.get(task['task_id'])['developer']['timeout_seconds'], timeout)
+
+    def test_developer_timeout_seconds_rejects_invalid_values(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        for timeout in (0, -1, 1801, True, 600.0, '600', None):
+            with self.subTest(timeout=timeout):
+                developer = dict(self._developer_assignment(), timeout_seconds=timeout)
+                with self.assertRaises(LLMToolError):
+                    self.store.compare_and_update(
+                        task['task_id'], expected={'developer': None},
+                        developer=developer)
+        self.assertIsNone(self.store.get(task['task_id'])['developer'])
+
     def test_real_store_accepts_reviewer_accounts_and_preserves_them_on_transition(self):
         for account in ('claude-reviewer', 'codex-reviewer'):
             with self.subTest(account=account):

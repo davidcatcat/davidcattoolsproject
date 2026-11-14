@@ -339,6 +339,9 @@ _DEVELOPER_ALL_SHAPES = (*_DEVELOPER_BASE_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
                          *_DEVELOPER_REPORTED_SHAPES)
 _DEVELOPER_REJECTION_DETAIL_SHAPES = tuple(
     shape | frozenset(('rejection_detail',)) for shape in _DEVELOPER_ALL_SHAPES)
+# #1815: resolved Developer run timeout, optional on every developer shape.
+_DEVELOPER_TIMEOUT_FIELDS = frozenset(('timeout_seconds',))
+_DEVELOPER_TIMEOUT_MAX_SECONDS = 1800
 _DIRECT_EXECUTION_FIELDS = frozenset((
     'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
     'elapsed_ms', 'cleanup_status', 'usage_source', 'source_bytes',
@@ -2253,7 +2256,13 @@ def _validate(record, *, strict=True):
                                  *_DEVELOPER_INVALID_FINAL_SHAPES,
                                  *_DEVELOPER_REPORTED_SHAPES,
                                  *_DEVELOPER_REJECTION_DETAIL_SHAPES)
-            if type(developer) is not dict or set(developer) not in assignment_shapes:
+            # #1815: optional resolved run timeout; legacy records omit it.
+            if (type(developer) is not dict or
+                    set(developer) - _DEVELOPER_TIMEOUT_FIELDS not in assignment_shapes):
+                _fail()
+            if ('timeout_seconds' in developer and
+                    (type(developer['timeout_seconds']) is not int or
+                     not 1 <= developer['timeout_seconds'] <= _DEVELOPER_TIMEOUT_MAX_SECONDS)):
                 _fail()
             if ('account' in developer and
                     (type(developer['account']) is not str or
