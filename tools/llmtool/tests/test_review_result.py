@@ -158,6 +158,28 @@ class ReviewResultTests(unittest.TestCase):
                 self.assertEqual(raised.exception.review_dispatch_code, code)
         self.assertEqual(self.store.get(TASK).get('completion_events') or [], [])
 
+    def test_unknown_task_or_claim_names_its_code(self):
+        # #1235: no Task, no matching claim or a bad claim head is refused by code.
+        other_id = FamilyStore(self.store, 'codex')
+        other_id.get = lambda task_id: dict(self.store.get(task_id), task_id='e' * 32)
+        bad_head = FamilyStore(self.store, 'codex')
+        bad_head.get = lambda task_id: dict(self.store.get(task_id), review_dispatch_claim=[
+            dict(self.store.get(task_id)['review_dispatch_claim'][0], head_sha='x')])
+        for store, change, code in (
+                (other_id, {}, 'REVIEW_RESULT_TASK_INVALID'),
+                (self.store, {'executor_task': 'other-d6'}, 'REVIEW_RESULT_CLAIM_MISSING'),
+                (self.store, {'pr_number': PR + 1}, 'REVIEW_RESULT_CLAIM_MISSING'),
+                (self.store, {'version': 2}, 'REVIEW_RESULT_CLAIM_MISSING'),
+                (bad_head, {}, 'REVIEW_RESULT_CLAIM_INVALID')):
+            with self.subTest(code=code, change=sorted(change)):
+                args = dict(store=store, task_id=TASK, executor_task=EXECUTOR,
+                            pr_number=PR, github_get=lambda path: [])
+                args.update(change)
+                with self.assertRaises(LLMToolError) as raised:
+                    review_result.record_review_result(**args)
+                self.assertEqual(raised.exception.review_dispatch_code, code)
+        self.assertEqual(self.store.get(TASK).get('completion_events') or [], [])
+
     def test_claude_pass_is_rejected_for_claude_developer_task(self):
         self.store = FamilyStore(self.store, 'claude')
         self.assertEqual(self.run_result([_comment(actor='Claude')])['state'], 'NOT_READY')

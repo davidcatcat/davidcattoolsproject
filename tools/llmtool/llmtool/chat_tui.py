@@ -153,18 +153,25 @@ TASK_HIDDEN = "Task 模式是開發測試用；要派工請用 /pm connect 和 P
 # their F2/F3/F4 panes) work without developer mode; /task submit and /task mode stay
 # developer-only and print TASK_HIDDEN.
 READ_ONLY_TASK_COMMANDS = ("/task list", "/task show", "/task events")
+# #1838: /task list and /task events print into the conversation (F3/F4 are the panes): a
+# loading line at once, replaced by the result when the background TaskStore read ends.
+# /task show without an ID prints its usage (and the newest Task when one has been read).
+TASK_SHOW_USAGE = "usage: /task show TASK_ID"
+TASK_READING = {"list": "Tasks: reading TaskStore…",
+                "events": "Recent events: reading TaskStore…"}
+TASK_LIST_PRINTED = 20   # Newest Tasks /task list prints; F3 shows every listed Task.
 READ_TASK_HELP = """
 
 Task views (read-only, local TaskStore; nothing is submitted or dispatched)
   /task show TASK_ID    Open a Task's detail
-  /task list            Open the Task list (stage, update time, request) from TaskStore
-  /task events          Open recent events across Tasks (inbox, GitHub, tests, reviews)"""
+  /task list            Print the newest Tasks (stage, update time, request) from TaskStore
+  /task events          Print recent events across Tasks (inbox, GitHub, tests, reviews)"""
 DEV_KEY_HELP = """  F2                    Toggle the last Task detail (Esc also closes it)
-  F3                    Toggle the Task list (/task list): Up/Down choose, Enter opens the
+  F3                    Toggle the Task list: Up/Down choose, Enter opens the
                         detail, a shows all / hides completed or idle groups, F5 or r refreshes,
                         Esc closes; refreshes itself every
                         %d s while shown (local TaskStore read only, no AI call)
-  F4                    Toggle recent events across Tasks (/task events): newest first;
+  F4                    Toggle recent events across Tasks: newest first;
                         F5 or r refreshes, Esc closes; never acknowledges or polls
 """ % chat_tui_status.REFRESH_SECONDS
 DEV_EXIT_HELP = "A Task submit in progress cannot be cancelled; exit waits for it to finish or time out.\n"
@@ -181,8 +188,8 @@ only from llmtool Core and nothing is dispatched)
                         Task to PM provider PROFILE (no implicit default); "task>" prompt
   /task mode off        Back to chat mode: Enter sends to the chat provider again
   /task show TASK_ID    Open a Task's detail
-  /task list            Open the Task list (stage, update time, request) from TaskStore
-  /task events          Open recent events across Tasks (inbox, GitHub, tests, reviews)
+  /task list            Print the newest Tasks (stage, update time, request) from TaskStore
+  /task events          Print recent events across Tasks (inbox, GitHub, tests, reviews)
 A PM turn and a Task request never run together either: after /task mode, Enter during a
 PM turn keeps the draft and submits nothing until the turn ends.
 A Task receipt shows the PM provider, Task ID, Run ID and state recorded by Core;
@@ -855,8 +862,12 @@ class ChatTUI:
         self.list_index = 0
         self.list_unreadable = 0
         self.list_error = None
+        self.list_note = None    # status index fallback note of the last read, else None
         self.list_loaded = None  # (monotonic, local clock text) of the last finished read
         self.list_reader = None
+        # #1838: /task list and /task events waiting for the read: (kind, start and end of
+        # the loading line in the conversation, loading text).
+        self._task_prints = []
         self.unseen_output = False
         self.show_events = False
         # Real-time PM: every call goes through pm_runtime S2 (chat_tui_pm.PMRuntimeAPI).
@@ -2413,7 +2424,7 @@ class ChatTUI:
             text = "Recent events: llmtool: " + self.list_error
         else:
             text = chat_tui_events.recent_text(self.list_records_all, self.list_unreadable,
-                                               self.list_loaded[1])
+                                               self.list_loaded[1], self.list_note)
         if self.unseen_output:
             text = "new conversation output — Esc shows it\n" + text
         self._set_read_text(self.events_view, terminal_safe_text(text))
@@ -2434,8 +2445,14 @@ class ChatTUI:
                 outcome = ([], 0, None)
             else:
                 from .task_store import TaskStore
-                records, unreadable = chat_tui_status.load_records(TaskStore())
-                outcome = (records, unreadable, None)
+                # The task status index first (read only); a missing, unreadable or stale
+                # index falls back to reading every record, and the note says so.
+                store = TaskStore()
+                records, unreadable, note = chat_tui_status.load_list(store)
+                # Full reads only of the index rows the recent events need, so F4 and
+                # /task events show the same newest events as a full read.
+                records = chat_tui_status.complete_recent_events(store, records)
+                outcome = (records, unreadable, None, note)
         except LLMToolError as exc:
             outcome = ([], 0, str(exc))
         except Exception:
@@ -2446,16 +2463,93 @@ class ChatTUI:
             pass
 
     def finish_list(self, outcome):
-        records, unreadable, error = outcome
+        """``outcome``: (records, unreadable, error[, status index note])."""
+        records, unreadable, error = outcome[:3]
         selected = self.selected_task_id()
         self.list_reader = None
         self.list_records_all = records
         self.list_unreadable, self.list_error = unreadable, error
+        self.list_note = outcome[3] if len(outcome) > 3 else None
         self._project_list_records(selected)
         self.list_loaded = (time.monotonic(), time.strftime("%H:%M:%S"))
         if self.show_events:
             self.render_events()
+        if self._task_prints:
+            self._print_task_reads()
         self.app.invalidate()
+
+    # -- #1838: /task list, /task events and a bare /task show print into the conversation
+    def print_task_read(self, kind):
+        """``kind`` "list" or "events": a loading line now; the TaskStore read (status index
+        first, the same reader as F3/F4) replaces it with the result when it finishes, with
+        no further key. The conversation is brought on screen so the result is seen."""
+        if self.show_help:
+            self.toggle_help()
+        if self.show_list:
+            self.toggle_list(False)
+        if self.show_events:
+            self.toggle_events(False)
+        if self.show_task_view:
+            self.close_task_view()
+        loading = TASK_READING[kind]
+        start = len(self.conversation.text)
+        self.append(loading)
+        end = len(self.conversation.text)
+        if self.conversation.text[start:end].lstrip("\n") != loading:
+            end = -1   # placed elsewhere (below a streaming PM block): never cut, only kept
+        self._task_prints.append((kind, start, end, loading))
+        self.refresh_list()   # joins a read already running; its result is printed too
+
+    def _print_task_reads(self):
+        """Replace the waiting loading lines that are still the conversation's tail, then
+        print each result (below a streaming PM block, like any other notice)."""
+        prints, self._task_prints = self._task_prints, []
+        text = self.conversation.text
+        cut = len(text)
+        if self.pm_block_raw is None and self.stream_raw is None:
+            for _kind, start, end, loading in reversed(prints):
+                if end != cut or text[start:end].lstrip("\n") != loading:
+                    break
+                cut = start
+        if cut < len(text):
+            self.conversation.set_text(text[:cut])
+        for kind, _start, _end, _loading in prints:
+            self._pm_notice(self.task_read_text(kind))
+
+    def task_read_text(self, kind):
+        """The finished read as conversation text: Tasks newest first, or recent events."""
+        title = "Tasks" if kind == "list" else "Recent events"
+        if self.list_error is not None:
+            return title + ": llmtool: " + self.list_error
+        read_at = self.list_loaded[1] if self.list_loaded is not None else chat_tui_task.UNKNOWN
+        if kind == "events":
+            return chat_tui_events.conversation_text(self.list_records_all, self.list_unreadable,
+                                                     read_at, self.list_note)
+        records = self.list_records_all
+        shown = records[:TASK_LIST_PRINTED]
+        lines = ["Tasks, newest first (%d read, %d unreadable; read %s; stage derived by the "
+                 "TUI; F3 opens the list)" % (len(records), self.list_unreadable, read_at)]
+        if self.list_note:
+            lines.append("  " + self.list_note)
+        for record in shown:
+            item = chat_tui_status.row(record)
+            lines.append("  " + "  ".join((item["task_id"], item["stage"], item["updated"],
+                                           item["name"].replace("\n", " "))))
+        if not records:
+            lines.append("  no Tasks in TaskStore")
+        elif len(records) > len(shown):
+            lines.append("  %d older Tasks not printed; F3 lists them"
+                         % (len(records) - len(shown)))
+        return "\n".join(lines)
+
+    def task_show_usage(self):
+        """A bare /task show: its usage, plus the newest Task when a read has listed one."""
+        text = TASK_SHOW_USAGE
+        if self.list_loaded is not None and self.list_error is None and self.list_records_all:
+            newest = chat_tui_task.value(self.list_records_all[0], "task_id")
+            if newest not in (chat_tui_task.UNKNOWN, chat_tui_task.NOT_AVAILABLE):
+                text += "\n  newest Task: " + newest + " (/task show " + newest + ")"
+        self.append(text)
 
     def _project_list_records(self, selected=None):
         """Keep F3 selection and actions bound to each visible group's newest Task."""
@@ -2533,6 +2627,8 @@ class ChatTUI:
                 ("class:menu.header", cut("  " + "Task ID".ljust(8) + "  " + "Stage (derived)".ljust(26)
                                           + "Rounds".ljust(12) + "PR".ljust(12) + "Owner".ljust(8)
                                           + "Request (Core, first line) — Enter detail; F5/r refresh; Esc close"))]
+        if self.list_note and self.list_error is None:
+            rows.append(("class:menu.header", cut(" " + self.list_note)))
         if self.unseen_output:
             rows.append(("class:menu.header", cut(" new conversation output — Esc shows it")))
         if self.list_error is not None:
@@ -2694,6 +2790,8 @@ class ChatTUI:
         if text.strip().split(maxsplit=1)[0] == "/task":
             if self.dev or read_only_task_command(text):
                 self.run_task_command(text)
+            elif text.split() == ["/task", "show"]:
+                self.task_show_usage()   # #1838: a read-only form, never TASK_HIDDEN
             else:
                 self.append("llmtool: " + TASK_HIDDEN)
             return
@@ -2765,11 +2863,8 @@ class ChatTUI:
         if len(parts) == 3 and parts[1] == "show":
             self.start_task("show", parts[2], None)
             return
-        if len(parts) == 2 and parts[1] == "list":
-            self.toggle_list(True)
-            return
-        if len(parts) == 2 and parts[1] == "events":
-            self.toggle_events(True)
+        if len(parts) == 2 and parts[1] in ("list", "events"):
+            self.print_task_read(parts[1])   # #1838: into the conversation; F3/F4 are the panes
             return
         words = text.split()
         if words[1:] == ["mode", "off"]:
