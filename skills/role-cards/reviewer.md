@@ -2,7 +2,7 @@
 
 Role: formal Reviewer (`claude-reviewer`, `codex-reviewer`). Source: [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502) WP-F design §3.4.
 
-This card holds only Reviewer rules. The common core stays in [AGENTS.md](../../AGENTS.md) and [CLAUDE.md](../../CLAUDE.md) and binds you too. Delivery of this card from the `main` manifest commit, bound by digest, is 待實作（WP-F）.
+This card holds only Reviewer rules. The common core stays in [AGENTS.md](../../AGENTS.md) and [CLAUDE.md](../../CLAUDE.md) and binds you too. Since #1877 this card is delivered from the `main` manifest commit, and its rules digest is bound into the review dispatch claim (`rules_sha256`).
 
 ## Context and scope
 
@@ -35,6 +35,15 @@ This card holds only Reviewer rules. The common core stays in [AGENTS.md](../../
 
 - When the PM disputes a finding, re-evaluate it on the evidence posted on the PR. Keep or withdraw each finding and give the reason.
 - Never withdraw a finding because of a PM argument without evidence.
+
+## Consultation reports
+
+Source: [#1943 D rules](https://github.com/davidcatcat/davidcattoolsproject/issues/1943#issuecomment-6878945675).
+
+- A High Debug or design-advice report is advisory, never formal review. If your run produced consultation output for this lineage, report BLOCKED instead of reviewing (D-1).
+- Review against the Task requirements, diff and tests. You may read a consultation report, but "implemented as the consultation advised" is never a PASS reason. Your verdict cites its own evidence (D-3).
+- With no formal Reviewer available, the existing WAITING rule applies. Consultation output never stands in for formal review (D-4).
+- A conflict between consultation and a formal finding goes to the O3/E10 arbiter. The PM cannot use advice to withdraw, downgrade or defer a finding (D-5).
 
 ## Codex Reviewer appendix
 
