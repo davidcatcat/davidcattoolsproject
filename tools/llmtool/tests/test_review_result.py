@@ -208,6 +208,21 @@ class ReviewResultTests(unittest.TestCase):
         comment['body'] = comment['body'].replace(f'task={TASK}', 'task=wrong')
         self.assertEqual(self.run_result([comment])['state'], 'NOT_READY')
 
+    def test_claude_verdict_bound_to_another_task_is_ignored(self):
+        # #1898: another Task's or run's Claude verdict at this head is never this Task's FAIL.
+        self.store = FamilyStore(self.store, 'codex')
+        other_task = _comment()
+        other_task['body'] = other_task['body'].replace(f'task={TASK}', 'task=' + 'e' * 32)
+        other_run = _comment('FAIL', comment_id=8)
+        other_run['body'] = other_run['body'].replace(f'run={RUN}', 'run=' + 'f' * 32)
+        self.assertEqual(self.run_result([other_task, other_run])['state'], 'NOT_READY')
+        own = _comment(comment_id=9, created='2026-10-27T02:00:00Z')
+        self.assertEqual(self.run_result([other_task, own])['state'], 'REVIEW_PASS')
+        unbound = _comment(comment_id=10, created='2026-10-27T03:00:00Z')
+        unbound['body'] = '\n'.join(line for line in unbound['body'].splitlines()
+                                    if not line.startswith('LLMTOOL-REVIEW-BINDING'))
+        self.assertEqual(self.run_result([other_task, own, unbound])['state'], 'REVIEW_FAIL')
+
     def test_bound_codex_nonpass_is_recorded_only_for_claude_task(self):
         self.store = FamilyStore(self.store, 'claude')
         self.assertEqual(self.run_result([_comment('FIX', actor='Codex')])['state'],
