@@ -159,8 +159,10 @@ class ChainCountTests(unittest.TestCase):
             ec2_claim('pr-17', HEAD, attempt=2), ec2_claim('pr-18-ec2', HEAD, pr=18)]}
         counts = lineage_counts.lineage_counts(None, own, base_family='pr-17')
         self.assertEqual((counts['review_repairs'], counts['test_fails']), (2, 1))
-        # task_advance's legacy count is unchanged for a Task without continues.
-        self.assertEqual(task_advance._test_fail_count(own, 17), 1)
+        # task_advance's legacy count is unchanged for a Task alone in its chain.
+        self.assertEqual(task_advance._test_fail_count(own, 17, DictStore(own)), 1)
+        # Without a store the successors cannot be read: never 0 by doubt.
+        self.assertEqual(task_advance._test_fail_count(own, 17), UNKNOWN)
 
     def test_a_continuation_counts_its_own_claims_on_every_pr(self):
         # F1: a Task with continues keeps its own claims on another PR in the counts.
@@ -179,7 +181,28 @@ class ChainCountTests(unittest.TestCase):
         plain = lineage_counts.lineage_counts(None, alone, base_family='pr-17')
         self.assertEqual((plain['review_repairs'], plain['test_fails'],
                           plain['review_heads']), (0, 0, {}))
-        self.assertEqual(task_advance._test_fail_count(alone, 17), 0)
+        self.assertEqual(task_advance._test_fail_count(alone, 17, DictStore(alone)), 0)
+
+    def test_advance_test_fail_count_includes_successors(self):
+        # Review F1 (v1): A <- B <- C; only C holds claims (two EC2 repairs).
+        # Counting B must see C, as the locked review_repair gate does.
+        first = {'task_id': tid(1), 'review_repair_claims': []}
+        middle = {'task_id': tid(2), 'continues': tid(1), 'review_repair_claims': []}
+        last = {'task_id': tid(3), 'continues': tid(2), 'review_repair_claims': [
+            ec2_claim('pr-17-ec2', OLD_HEAD), ec2_claim('pr-17-ec2', HEAD, attempt=2)]}
+        store = DictStore(first, middle, last)
+        for record in (first, middle, last):
+            with self.subTest(task_id=record['task_id']):
+                self.assertEqual(task_advance._test_fail_count(record, 17, store), 2)
+                locked = lineage_counts.lineage_counts(
+                    store, record, base_family='pr-17', include_successors=True)
+                self.assertEqual(locked['test_fails'], 2)
+        # A Task without continues that has a successor is in a chain too.
+        self.assertEqual(task_advance._test_fail_count(first, 18, store), 2)
+        # Two successors of one Task are a chain in doubt: never 0.
+        store.records[tid(4)] = {'task_id': tid(4), 'continues': tid(2),
+                                 'review_repair_claims': []}
+        self.assertEqual(task_advance._test_fail_count(middle, 17, store), UNKNOWN)
 
     def test_one_head_failed_in_two_tasks_counts_once(self):
         first = {'task_id': tid(1), 'review_repair_claims': [claim('pr-5', OLD_HEAD, pr=5)]}

@@ -798,13 +798,14 @@ def _newest_check_run(head, name, github_get):
 def _test_fail_count(record, number, store=None):
     """EC2 and CI repairs used, counted as review_repair counts them.
 
-    #1502 WP-D L1 (I2, F1): a Task without continues counts its repairs on this
-    PR; a continuation counts every EC2 and CI repair of every chain Task, its
-    own included, on any PR. A chain link in doubt (or a continuation read
-    without a store) gives repair_policy.UNKNOWN, never 0.
+    #1502 WP-D L1 (I2, F1): a Task alone in its chain (no continues and no
+    successor) counts its repairs on this PR; a Task in a chain counts every
+    EC2 and CI repair of every chain Task, predecessors and successors and its
+    own, on any PR, as review_repair does under the chain lock. A chain link or
+    store scan in doubt (or no store) gives repair_policy.UNKNOWN, never 0.
     """
     return lineage_counts.lineage_counts(
-        store, record, base_family=f'pr-{number}')['test_fails']
+        store, record, base_family=f'pr-{number}', include_successors=True)['test_fails']
 
 
 def _live_repair_claim(record, head):

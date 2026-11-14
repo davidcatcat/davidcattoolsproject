@@ -136,7 +136,8 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
     successor) counts as before: only its claims in the stored base_family
     (review) and '<base>-ec2' plus legacy EC2 claims in base_family (tests).
 
-    include_successors (review_repair, under the chain lock): every Task that
+    include_successors (review_repair under the chain lock, and
+    task_advance._test_fail_count so both agree): every Task that
     continues this one is counted like a predecessor and listed after the
     predecessors, so a repair on an earlier Task of the chain sees the claims
     of later ones. A store scan in doubt makes every count UNKNOWN.
