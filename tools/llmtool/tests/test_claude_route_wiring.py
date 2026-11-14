@@ -24,10 +24,75 @@ import review_trust_fixture
 import worker_policy_fixture
 
 
-_SKILL_MANIFEST = {'commit': 'd' * 40, 'role': 'developer', 'gate': 'develop',
-                   'entries': [], 'manifest_sha256': '7' * 64}
-_SKILL_FILES = [('CLAUDE.md', 'Claude repository rules.\n'),
-                ('skills/ai-team-delivery/SKILL.md', 'Delivery skill rules.\n')]
+_MAIN_PIN = '9' * 40
+_CORE = skill_manifest.COMMON_CORE_CARD_PATH
+_DEV_CARD = skill_manifest.DEVELOPER_CARD_PATH
+# Insertion order is prompt order: common core, then the Developer card.
+_CARDS = {_CORE: 'Common core rules.\n', _DEV_CARD: 'Developer card rules.\n'}
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_CARD_LIMIT = 6 * 1024
+
+
+def _filler(size):
+    return ('Developer rule line.\n' * (size // 21 + 1))[:size]
+
+
+def _wrapped(cards):
+    return ''.join('\nREQUIRED_SKILL_BEGIN path=' + path + '\n' + text +
+                   '\nREQUIRED_SKILL_END path=' + path for path, text in cards.items())
+
+
+def _sent_prefix(prompt):
+    """The card prefix exactly as sent: first card marker up to TASK_JSON."""
+    return prompt[prompt.index('\nREQUIRED_SKILL_BEGIN path='):prompt.index('\nTASK_JSON=')]
+
+
+class _CardGit:
+    """In-memory stand-in for skill_manifest._run_git; no subprocess runs.
+
+    It serves role-card blobs at one main commit, so build_role_cards() and
+    role_card_prefix() run for real.
+    """
+
+    def __init__(self, cards, *, main=_MAIN_PIN, modes=None):
+        self.main = main
+        self.modes = dict(modes or {})
+        self.blobs = {}
+        for path, text in cards.items():
+            data = text if type(text) is bytes else text.encode('utf-8')
+            self.blobs[path] = (hashlib.sha1(data).hexdigest(), data)
+        self.calls = []
+
+    def __call__(self, _runner, repo_root, args):
+        args = list(args)
+        self.calls.append(args)
+
+        def ok(stdout, returncode=0):
+            return SimpleNamespace(returncode=returncode, stdout=stdout)
+        by_oid = {oid: data for oid, data in self.blobs.values()}
+        if args[:2] == ['rev-parse', '--show-toplevel']:
+            return ok(str(repo_root).encode('utf-8'))
+        if args[:3] == ['rev-parse', '--verify', '--quiet']:
+            return ok(self.main.encode('ascii'))
+        if args[:2] == ['rev-parse', '--verify']:
+            return ok(args[2].split('^')[0].encode('ascii'))
+        if args[:2] == ['merge-base', '--is-ancestor']:
+            return ok(b'', 0 if args[2] == self.main else 1)
+        if args[:1] == ['ls-tree']:
+            path = args[-1]
+            if path not in self.blobs:
+                return ok(b'')
+            mode = self.modes.get(path, '100644')
+            return ok((mode + ' blob ' + self.blobs[path][0] + '\t' + path +
+                       '\0').encode('utf-8'))
+        if args[:2] == ['cat-file', '-s'] and args[2] in by_oid:
+            return ok(str(len(by_oid[args[2]])).encode('ascii'))
+        if args[:2] == ['cat-file', 'blob'] and args[2] in by_oid:
+            return ok(by_oid[args[2]])
+        return ok(b'', 1)
+
+    def card_reads(self):
+        return [args for args in self.calls if args[:1] == ['ls-tree']]
 
 
 def setUpModule():
@@ -151,11 +216,17 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             patch.object(task_submission_cli, 'for_platform', return_value=PolicyBoundary()),
             patch.object(task_submission_cli, '_task_view', return_value={}),
             patch.object(task_submission_cli, 'run_task_direct_result_event', return_value=0),
-            patch.object(task_submission_cli.skill_manifest, 'build_manifest',
-                         return_value=_SKILL_MANIFEST),
-            patch.object(task_submission_cli.skill_manifest, 'read_manifest_files',
-                         return_value=_SKILL_FILES),
-            patch.object(task_submission_cli.skill_ledger, 'record', return_value='receipt'),
+            # #1502 WP-F: role cards are read through the real
+            # build_role_cards(); only its Git object reads are served in memory.
+            patch.object(task_submission_cli.skill_manifest, '_run_git', _CardGit(_CARDS)),
+            # #1502 WP-F: the dispatch pin and card delivery are the only
+            # CONTROLLER_DELIVERED path; no test here reads GitHub main.
+            patch.object(task_submission_cli.skill_ledger, 'pin_dispatch',
+                         return_value=_MAIN_PIN),
+            patch.object(task_submission_cli.skill_ledger, 'record_card_delivery',
+                         return_value='receipt'),
+            patch.object(task_submission_cli.skill_ledger, 'record',
+                         side_effect=AssertionError('generic ledger record used')),
         ]
         return task_submission_cli, store, args, registration, evaluations, prompts, requests, patches, route_runner
 
@@ -282,22 +353,48 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         self.assertTrue(all('log_path' not in request for request in requests))
         self.assertIn('Claude Developer', prompts[0])
 
-    def test_success_embeds_manifest_skill_text_and_records_delivery(self):
+    def _run_with_cards(self, cards, **git_kwargs):
+        """One successful run whose cards come from real build_role_cards()."""
+        cli, store, args, _reg, _evaluations, prompts, _requests, patches, runner = self._setup()
+        patches.append(patch.object(cli.skill_manifest, '_run_git',
+                                    _CardGit(cards, **git_kwargs)))
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            self.assertEqual(cli.run_task_claude_delegate(
+                args, store=store, route_runner=runner), 0)
+        return prompts[0]
+
+    def test_success_sends_pinned_role_cards_and_records_the_prefix_digest(self):
         cli, store, args, registration, _evaluations, prompts, _requests, patches, runner = self._setup()
-        build, read, record = (next(item for item in patches if item.attribute == name)
-                               for name in ('build_manifest', 'read_manifest_files', 'record'))
+        pin, record, generic, git_patch = (
+            next(item for item in patches if item.attribute == name)
+            for name in ('pin_dispatch', 'record_card_delivery', 'record', '_run_git'))
+        git_calls_at_pin = []
         with contextlib.ExitStack() as stack:
             entered = {id(item): stack.enter_context(item) for item in patches}
+            git = entered[id(git_patch)]
+            entered[id(pin)].side_effect = (
+                lambda *_a: git_calls_at_pin.append(len(git.calls)) or _MAIN_PIN)
             status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
         self.assertEqual(status, 0)
-        entered[id(build)].assert_called_once_with(
-            registration.root, 'd' * 40, 'developer', 'develop', provider='claude')
-        entered[id(read)].assert_called_once_with(registration.root, _SKILL_MANIFEST)
+        # The run is pinned before any card is read, and every card is read
+        # from the pinned main commit, never from the D6 head.
+        self.assertEqual(git_calls_at_pin, [0])
+        entered[id(pin)].assert_called_once_with('a' * 32, 'b' * 32, 'claude-developer')
+        reads = git.card_reads()
+        self.assertEqual([args[-1] for args in reads], [_CORE, _DEV_CARD])
+        self.assertTrue(all(args[3] == _MAIN_PIN for args in reads))
+        entered[id(generic)].assert_not_called()
         prompt = prompts[0]
         raw = prompt.encode('utf-8')
-        for path, text in _SKILL_FILES:
-            self.assertIn('REQUIRED_SKILL_BEGIN path=' + path + '\n' + text, prompt)
-            self.assertLess(prompt.index(text), prompt.index('\nTASK_JSON='))
+        prefix = _sent_prefix(prompt)
+        # Exactly common core + Developer card; no legacy whole-file manifest.
+        self.assertEqual(prefix, _wrapped(_CARDS))
+        self.assertTrue(prompt.startswith('You are the Claude Developer'))
+        self.assertNotIn('path=CLAUDE.md', prompt)
+        self.assertNotIn('path=skills/ai-team-delivery/SKILL.md', prompt)
+        self.assertLessEqual(len(prefix.encode('utf-8')), skill_manifest.MAX_DEVELOPER_PREFIX_SIZE)
         self.assertLess(len(raw), 64 * 1024)
         developer = store.task['developer']
         self.assertEqual(developer['input_bytes'], len(raw))
@@ -307,63 +404,161 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             'session_id': '12345678-1234-4234-8234-123456789abc',
             'agent_id': 'claude-developer', 'role': 'developer', 'provider': 'claude',
             'model': developer['model'], 'repo': '/repo/.git', 'head': 'd' * 40,
-            'manifest_sha256': '7' * 64, 'evidence_level': 'CONTROLLER_DELIVERED',
-        })
+            'manifest_sha256': hashlib.sha256(prefix.encode('utf-8')).hexdigest(),
+            'route': 'claude-developer',
+        }, repo_root=registration.root)
+        self.assertNotIn('base_commit', entered[id(record)].call_args.args[0])
 
-    def test_real_ledger_entry_matches_the_run(self):
-        cli, store, args, registration, _evaluations, _prompts, _requests, patches, runner = self._setup()
-        patches = [item for item in patches if item.attribute != 'record']
+    def _real_ledger_run(self, main_reads, *, expect_error=None):
+        """Run with the real ledger and real card build; GitHub main and Git reads are faked."""
+        cli, store, args, registration, _evaluations, prompts, requests, patches, runner = self._setup()
+        patches = [item for item in patches
+                   if item.attribute not in ('pin_dispatch', 'record_card_delivery')]
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         ledger_path = Path(temp.name) / 'ledger.jsonl'
+        verified = chain = status = None
         with contextlib.ExitStack() as stack:
             for item in patches:
                 stack.enter_context(item)
             stack.enter_context(patch.object(skill_ledger, '_path', return_value=ledger_path))
-            status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
-            native_session = store.task['developer']['execution']['native_session_id']
-            verified = skill_ledger.check(
-                store.task['task_id'], store.task['run_id'], native_session,
-                registration.trusted_agent_id, 'developer', 'claude',
-                store.task['developer']['model'], registration.common_dir,
-                store.task['developer']['source_sha'], _SKILL_MANIFEST['manifest_sha256'])
+            main_read = stack.enter_context(patch.object(
+                cli.task_completion, 'read_authenticated_main_sha', side_effect=main_reads))
+            if expect_error is not None:
+                with self.assertRaisesRegex(LLMToolError, expect_error):
+                    cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+            else:
+                status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
+                native_session = store.task['developer']['execution']['native_session_id']
+                prefix_digest = hashlib.sha256(
+                    _sent_prefix(prompts[0]).encode('utf-8')).hexdigest()
+                verified = skill_ledger.check(
+                    store.task['task_id'], store.task['run_id'], native_session,
+                    registration.trusted_agent_id, 'developer', 'claude',
+                    store.task['developer']['model'], registration.common_dir,
+                    store.task['developer']['source_sha'], prefix_digest)
             chain = skill_ledger.verify_chain()
-        self.assertEqual(status, 0)
-        self.assertEqual(chain, (True, None))
-        self.assertEqual(verified['status'], 'VERIFIED')
-        self.assertEqual(verified['evidence_level'], 'CONTROLLER_DELIVERED')
-        self.assertEqual(len(ledger_path.read_text(encoding='utf-8').splitlines()), 1)
+        rows = ([json.loads(line) for line in
+                 ledger_path.read_text(encoding='utf-8').splitlines()]
+                if ledger_path.exists() else [])
+        return SimpleNamespace(status=status, verified=verified, chain=chain, rows=rows,
+                               main_read=main_read, prompts=prompts, requests=requests,
+                               store=store)
 
-    def test_missing_or_unreadable_skill_refuses_before_provider_call(self):
-        for target, code in (
-                ('build_manifest', skill_manifest.SKILL_MANIFEST_PATH_MISSING),
-                ('build_manifest', skill_manifest.SKILL_MANIFEST_NOT_FILE),
-                ('build_manifest', skill_manifest.SKILL_MANIFEST_NOT_UTF8),
-                ('read_manifest_files', skill_manifest.SKILL_MANIFEST_PATH_MISSING)):
-            with self.subTest(target=target, code=code):
-                def configure(cli, _store, _args, patches, target=target, code=code):
-                    patches.append(patch.object(cli.skill_manifest, target,
-                        side_effect=skill_manifest.SkillManifestError(code)))
+    def test_real_ledger_receipt_binds_the_sent_prefix_and_the_pin(self):
+        run = self._real_ledger_run([_MAIN_PIN])
+        self.assertEqual(run.status, 0)
+        self.assertEqual(run.chain, (True, None))
+        self.assertEqual(run.verified['status'], 'VERIFIED')
+        self.assertEqual(run.verified['evidence_level'], 'CONTROLLER_DELIVERED')
+        run.main_read.assert_called_once_with()
+        self.assertEqual([row.get('entry_type') for row in run.rows], ['DISPATCH_PIN', None])
+        pin, receipt = run.rows
+        self.assertEqual((pin['task_id'], pin['run_id'], pin['route'], pin['base_commit']),
+                         ('a' * 32, 'b' * 32, 'claude-developer', _MAIN_PIN))
+        self.assertEqual(receipt['base_commit'], _MAIN_PIN)
+        self.assertEqual(receipt['pin_id'], pin['receipt_id'])
+        self.assertEqual(receipt['evidence_level'], 'CONTROLLER_DELIVERED')
+        # The provider prompt prefix hashes to the digest the receipt records.
+        sent = _sent_prefix(run.prompts[0]).encode('utf-8')
+        self.assertEqual(receipt['manifest_sha256'], hashlib.sha256(sent).hexdigest())
+        self.assertEqual(receipt['cards'], [
+            {'path': path, 'sha256': hashlib.sha256(text.encode('utf-8')).hexdigest()}
+            for path, text in _CARDS.items()])
+        self.assertEqual(receipt['prefix_size'],
+                         sum(len(text.encode('utf-8')) for text in _CARDS.values()))
+
+    def test_failed_main_read_refuses_the_dispatch_before_any_write(self):
+        run = self._real_ledger_run(LLMToolError('MAIN_REF_PIN_INVALID'),
+                                    expect_error='CLAUDE_SKILL_PIN_FAILED: MAIN_REF_PIN_INVALID')
+        self.assertEqual(run.chain, (True, None))
+        self.assertEqual(run.rows, [])
+        self.assertEqual(run.requests, [])
+        self.assertEqual(run.store.writes, 0)
+
+    def test_failed_pin_refuses_before_store_write_and_provider_call(self):
+        def configure(cli, _store, _args, patches):
+            patches.append(patch.object(cli.skill_ledger, 'pin_dispatch',
+                side_effect=skill_ledger.SkillLedgerError('CHAIN_BROKEN')))
+        self._assert_prewrite_refusal(configure, message='CLAUDE_SKILL_PIN_FAILED: CHAIN_BROKEN')
+
+    def test_missing_card_at_the_pin_refuses_with_a_distinct_code(self):
+        for missing in (_CORE, _DEV_CARD):
+            with self.subTest(missing=missing):
+                cards = {path: text for path, text in _CARDS.items() if path != missing}
+
+                def configure(cli, _store, _args, patches, cards=cards):
+                    patches.append(patch.object(cli.skill_manifest, '_run_git',
+                                                _CardGit(cards)))
+                self._assert_prewrite_refusal(configure, message='CLAUDE_ROLE_CARD_MISSING')
+
+    def test_unreadable_or_off_main_cards_refuse_before_provider_call(self):
+        cases = (
+            (skill_manifest.SKILL_MANIFEST_NOT_FILE, {'modes': {_DEV_CARD: '120000'}}, _CARDS),
+            (skill_manifest.SKILL_MANIFEST_NOT_UTF8, {}, {**_CARDS, _CORE: b'\xff\xfe\n'}),
+            (skill_manifest.SKILL_MANIFEST_COMMIT_NOT_ON_MAIN, {'main': 'e' * 40}, _CARDS),
+        )
+        for code, git_kwargs, cards in cases:
+            with self.subTest(code=code):
+                def configure(cli, _store, _args, patches, cards=cards, git_kwargs=git_kwargs):
+                    patches.append(patch.object(cli.skill_manifest, '_run_git',
+                                                _CardGit(cards, **git_kwargs)))
                 self._assert_prewrite_refusal(configure, message=code)
 
-    def test_unsafe_skill_text_refuses_before_provider_call(self):
+    def test_unsafe_card_text_refuses_before_provider_call(self):
         for text in (' \n', 'rules\x01\n'):
             with self.subTest(text=text):
                 def configure(cli, _store, _args, patches, text=text):
-                    patches.append(patch.object(cli.skill_manifest, 'read_manifest_files',
-                        return_value=[('CLAUDE.md', text)]))
+                    patches.append(patch.object(cli.skill_manifest, '_run_git',
+                                                _CardGit({**_CARDS, _CORE: text})))
                 self._assert_prewrite_refusal(configure, message='CLAUDE_SKILL_TEXT_REFUSED')
 
-    def test_skill_prompt_limit_refuses_and_never_truncates(self):
-        def files(extra):
-            path, text = _SKILL_FILES[1]
-            padding = ('skill rule ' * (extra // 11 + 1))[:extra]
-            return [_SKILL_FILES[0], (path, text + padding)]
+    def test_production_sized_cards_fit_the_14_kib_prefix(self):
+        # Real card files where the checkout has them; a card not yet on this
+        # checkout is taken at the 6 KiB production ceiling instead.
+        real = {}
+        for path in (_CORE, _DEV_CARD):
+            file = _REPO_ROOT / path
+            real[path] = (file.read_text(encoding='utf-8') if file.is_file()
+                          else _filler(_CARD_LIMIT))
+        for name, cards in (('real files', real),
+                            ('6 KiB ceiling', {_CORE: _filler(_CARD_LIMIT),
+                                               _DEV_CARD: _filler(_CARD_LIMIT)})):
+            with self.subTest(cards=name):
+                for text in cards.values():
+                    self.assertLessEqual(len(text.encode('utf-8')), _CARD_LIMIT)
+                prefix = _sent_prefix(self._run_with_cards(cards))
+                self.assertEqual(prefix, _wrapped(cards))
+                self.assertLessEqual(len(prefix.encode('utf-8')),
+                                     skill_manifest.MAX_DEVELOPER_PREFIX_SIZE)
+        self.assertEqual(skill_manifest.MAX_DEVELOPER_PREFIX_SIZE, 14 * 1024)
+
+    def test_prefix_cap_counts_the_exact_wrapped_prefix_and_never_truncates(self):
+        cap = skill_manifest.MAX_DEVELOPER_PREFIX_SIZE
+        core = _filler(_CARD_LIMIT)
+        overhead = len(_wrapped({_CORE: '', _DEV_CARD: ''}).encode('utf-8'))
+        fitted = {_CORE: core, _DEV_CARD: _filler(cap - overhead - len(core))}
+        prefix = _sent_prefix(self._run_with_cards(fitted))
+        self.assertEqual(len(prefix.encode('utf-8')), cap)
+        self.assertEqual(prefix, _wrapped(fitted))
+        # One more byte: the card bytes alone are still under the cap, but the
+        # wrapped prefix is not, so the dispatch is refused.
+        over = {_CORE: core, _DEV_CARD: _filler(cap - overhead - len(core) + 1)}
+        self.assertLess(sum(len(text) for text in over.values()), cap)
+
+        def configure(cli, _store, _args, patches):
+            patches.append(patch.object(cli.skill_manifest, '_run_git', _CardGit(over)))
+        self._assert_prewrite_refusal(
+            configure, message=skill_manifest.SKILL_MANIFEST_PREFIX_TOO_LARGE)
+
+    def test_whole_prompt_limit_refuses_and_never_truncates(self):
+        def padding(size):
+            # No newline: TASK_JSON escapes it to two bytes.
+            return (' goal rule' * (size // 10 + 1))[:size]
 
         def run(extra):
             cli, store, args, _reg, _evaluations, prompts, _requests, patches, runner = self._setup()
-            patches.append(patch.object(cli.skill_manifest, 'read_manifest_files',
-                                        return_value=files(extra)))
+            store.task['pm_assignment']['goal'] = 'Claude goal' + padding(extra)
             with contextlib.ExitStack() as stack:
                 for item in patches:
                     stack.enter_context(item)
@@ -377,16 +572,37 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         self.assertGreater(room, 0)
         fitted = run(room)
         self.assertEqual(len(fitted.encode('utf-8')), limit)
-        self.assertIn(files(room)[1][1], fitted)
+        self.assertEqual(_sent_prefix(fitted), _wrapped(_CARDS))
 
-        def configure(cli, _store, _args, patches):
-            patches.append(patch.object(cli.skill_manifest, 'read_manifest_files',
-                                        return_value=files(room + 1)))
+        def configure(_cli, store, _args, _patches):
+            store.task['pm_assignment']['goal'] = 'Claude goal' + padding(room + 1)
         self._assert_prewrite_refusal(configure, message='CLAUDE_SKILL_PROMPT_TOO_LARGE')
+
+    def test_generic_record_still_refuses_controller_delivered(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ledger_path = Path(temp) / 'ledger.jsonl'
+            with patch.object(skill_ledger, '_path', return_value=ledger_path):
+                with self.assertRaises(skill_ledger.SkillLedgerError) as caught:
+                    skill_ledger.record({
+                        'task_id': 'a' * 32, 'run_id': 'b' * 32, 'session_id': 'session',
+                        'agent_id': 'claude-developer', 'role': 'developer',
+                        'provider': 'claude', 'model': 'claude-test-1', 'repo': '/repo/.git',
+                        'head': 'd' * 40, 'manifest_sha256': '7' * 64,
+                        'evidence_level': 'CONTROLLER_DELIVERED'})
+            self.assertFalse(ledger_path.exists())
+        self.assertEqual(caught.exception.skill_ledger_code, 'CONTROLLER_DELIVERED_REFUSED')
+
+    def test_only_claude_and_agy_card_rows_use_the_common_core_card(self):
+        table = skill_manifest._ROLE_CARD_TABLE
+        self.assertEqual(table['claude-developer'], (_CORE, _DEV_CARD))
+        self.assertEqual(table['agy'], (_CORE, _DEV_CARD))
+        # OpenCode and gw-agent are unchanged by this piece.
+        self.assertEqual(table['opencode-developer'], ('AGENTS.md', _DEV_CARD))
+        self.assertEqual(table['gw-agent'], ('AGENTS.md', _DEV_CARD))
 
     def test_ledger_failure_keeps_the_finished_run_and_reports_the_code(self):
         cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = self._setup()
-        patches.append(patch.object(cli.skill_ledger, 'record',
+        patches.append(patch.object(cli.skill_ledger, 'record_card_delivery',
             side_effect=skill_ledger.SkillLedgerError('CHAIN_BROKEN')))
         stderr = io.StringIO()
         with contextlib.ExitStack() as stack:
@@ -402,7 +618,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         error = RouteError('BLOCKED_WRITE_ISOLATION', blocked_reason='BLOCKED_WRITE_ISOLATION')
         cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = self._setup(
             runner_error=error)
-        record = next(item for item in patches if item.attribute == 'record')
+        record = next(item for item in patches if item.attribute == 'record_card_delivery')
         with contextlib.ExitStack() as stack:
             entered = {id(item): stack.enter_context(item) for item in patches}
             status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)

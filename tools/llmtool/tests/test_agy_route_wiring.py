@@ -22,10 +22,75 @@ import review_trust_fixture
 import worker_policy_fixture
 
 
-_SKILL_MANIFEST = {'commit': 'd' * 40, 'role': 'developer', 'gate': 'develop',
-                   'entries': [], 'manifest_sha256': '7' * 64}
-_SKILL_FILES = [('AGENTS.md', 'AGENTS repository rules.\n'),
-                ('skills/ai-team-delivery/SKILL.md', 'Delivery skill rules.\n')]
+_MAIN_PIN = '9' * 40
+_CORE = skill_manifest.COMMON_CORE_CARD_PATH
+_DEV_CARD = skill_manifest.DEVELOPER_CARD_PATH
+# Insertion order is prompt order: common core, then the Developer card.
+_CARDS = {_CORE: 'Common core rules.\n', _DEV_CARD: 'Developer card rules.\n'}
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_CARD_LIMIT = 6 * 1024
+
+
+def _filler(size):
+    return ('Developer rule line.\n' * (size // 21 + 1))[:size]
+
+
+def _wrapped(cards):
+    return ''.join('\nREQUIRED_SKILL_BEGIN path=' + path + '\n' + text +
+                   '\nREQUIRED_SKILL_END path=' + path for path, text in cards.items())
+
+
+def _sent_prefix(prompt):
+    """The card prefix exactly as sent: first card marker up to TASK_JSON."""
+    return prompt[prompt.index('\nREQUIRED_SKILL_BEGIN path='):prompt.index('\nTASK_JSON=')]
+
+
+class _CardGit:
+    """In-memory stand-in for skill_manifest._run_git; no subprocess runs.
+
+    It serves role-card blobs at one main commit, so build_role_cards() and
+    role_card_prefix() run for real.
+    """
+
+    def __init__(self, cards, *, main=_MAIN_PIN, modes=None):
+        self.main = main
+        self.modes = dict(modes or {})
+        self.blobs = {}
+        for path, text in cards.items():
+            data = text if type(text) is bytes else text.encode('utf-8')
+            self.blobs[path] = (hashlib.sha1(data).hexdigest(), data)
+        self.calls = []
+
+    def __call__(self, _runner, repo_root, args):
+        args = list(args)
+        self.calls.append(args)
+
+        def ok(stdout, returncode=0):
+            return SimpleNamespace(returncode=returncode, stdout=stdout)
+        by_oid = {oid: data for oid, data in self.blobs.values()}
+        if args[:2] == ['rev-parse', '--show-toplevel']:
+            return ok(str(repo_root).encode('utf-8'))
+        if args[:3] == ['rev-parse', '--verify', '--quiet']:
+            return ok(self.main.encode('ascii'))
+        if args[:2] == ['rev-parse', '--verify']:
+            return ok(args[2].split('^')[0].encode('ascii'))
+        if args[:2] == ['merge-base', '--is-ancestor']:
+            return ok(b'', 0 if args[2] == self.main else 1)
+        if args[:1] == ['ls-tree']:
+            path = args[-1]
+            if path not in self.blobs:
+                return ok(b'')
+            mode = self.modes.get(path, '100644')
+            return ok((mode + ' blob ' + self.blobs[path][0] + '\t' + path +
+                       '\0').encode('utf-8'))
+        if args[:2] == ['cat-file', '-s'] and args[2] in by_oid:
+            return ok(str(len(by_oid[args[2]])).encode('ascii'))
+        if args[:2] == ['cat-file', 'blob'] and args[2] in by_oid:
+            return ok(by_oid[args[2]])
+        return ok(b'', 1)
+
+    def card_reads(self):
+        return [args for args in self.calls if args[:1] == ['ls-tree']]
 
 
 def setUpModule():
@@ -47,16 +112,23 @@ class AgyRouteWiringTests(unittest.TestCase):
                           goal='AGY goal', session_id='conversation_12345678',
                           bind_result='BOUND', initial_native_session_id=None,
                           bound_registration_mutation=False, audit=None,
-                          store=None, verified_model='gemini-test', build_manifest=None,
-                          read_manifest_files=None, ledger_record=None,
+                          store=None, verified_model='gemini-test', card_git=None,
+                          ledger_record=None, pin_dispatch=None,
                           owner_ref=('https://github.com/davidcatcat/davidcattoolsproject/'
                                      'issues/289#issuecomment-1')):
-        if build_manifest is None:
-            build_manifest = Mock(return_value=_SKILL_MANIFEST)
-        if read_manifest_files is None:
-            read_manifest_files = Mock(return_value=_SKILL_FILES)
+        # #1502 WP-F: role cards go through the real build_role_cards(); only
+        # its Git object reads are served in memory.
+        if card_git is None:
+            card_git = _CardGit(_CARDS)
+        # #1502 WP-F: ledger_record stands in for record_card_delivery, the
+        # only CONTROLLER_DELIVERED path; pin_dispatch never reads GitHub here.
         if ledger_record is None:
             ledger_record = Mock(return_value='receipt')
+        if pin_dispatch is None:
+            pin_dispatch = Mock(return_value=_MAIN_PIN)
+        generic_record = Mock(side_effect=AssertionError('generic ledger record used'))
+        if audit is not None:
+            audit['generic_record'] = generic_record
         store_writes = [] if audit is None else audit.setdefault('store_writes', [])
         task_id = 'a' * 32
         task = {
@@ -220,10 +292,11 @@ class AgyRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli.shutil, 'which', return_value='/usr/bin/agy'), \
              patch.object(task_submission_cli, 'for_platform', return_value=boundary), \
              patch.object(task_submission_cli, '_task_view', return_value={}), \
-             patch.object(task_submission_cli.skill_manifest, 'build_manifest', build_manifest), \
-             patch.object(task_submission_cli.skill_manifest, 'read_manifest_files',
-                          read_manifest_files), \
-             patch.object(task_submission_cli.skill_ledger, 'record', ledger_record), \
+             patch.object(task_submission_cli.skill_manifest, '_run_git', card_git), \
+             patch.object(task_submission_cli.skill_ledger, 'record_card_delivery',
+                          ledger_record), \
+             patch.object(task_submission_cli.skill_ledger, 'pin_dispatch', pin_dispatch), \
+             patch.object(task_submission_cli.skill_ledger, 'record', generic_record), \
              patch.object(task_submission_cli, 'run_task_direct_result_event',
                           side_effect=direct_event):
             status = task_submission_cli.run_task_agy_delegate(
@@ -948,38 +1021,44 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(audit['prompts'], [])
         record.assert_not_called()
 
-    def test_agy_provider_selects_agents_file_from_the_manifest(self):
-        commit = 'd' * 40
-        with tempfile.TemporaryDirectory() as root:
-            def git(argv, **_kwargs):
-                return SimpleNamespace(
-                    returncode=0, stdout=root if '--show-toplevel' in argv else commit)
+    def test_agy_route_selects_common_core_and_developer_card(self):
+        git = _CardGit(_CARDS)
+        with patch.object(skill_manifest, '_run_git', git):
+            built = skill_manifest.build_role_cards('/registered/root', _MAIN_PIN, 'agy')
+        self.assertEqual([card['path'] for card in built['cards']], [_CORE, _DEV_CARD])
+        self.assertEqual(built['commit'], _MAIN_PIN)
+        self.assertEqual(skill_manifest.role_card_prefix(built), _wrapped(_CARDS))
 
-            with patch.object(skill_manifest, '_read_blob', return_value=b'rules\n'):
-                manifest = skill_manifest.build_manifest(
-                    root, commit, 'developer', 'develop', git_runner=git, provider='agy')
-        self.assertEqual([entry['path'] for entry in manifest['entries']],
-                         ['AGENTS.md', 'skills/ai-team-delivery/SKILL.md'])
-
-    def test_success_embeds_manifest_skill_text_and_records_delivery(self):
-        build = Mock(return_value=_SKILL_MANIFEST)
-        read = Mock(return_value=_SKILL_FILES)
+    def test_success_sends_pinned_role_cards_and_records_the_prefix_digest(self):
         record = Mock(return_value='receipt')
+        git = _CardGit(_CARDS)
+        git_calls_at_pin = []
+        pin = Mock(side_effect=lambda *_a: git_calls_at_pin.append(len(git.calls)) or _MAIN_PIN)
+        audit = {}
         with patch.object(task_submission_cli, '_agy_developer_profile',
                           return_value=('gemini-requested', 'high')):
             status, task, _events, prompts = self._run_agy_delegate(
-                verified_model='gemini-verified', build_manifest=build,
-                read_manifest_files=read, ledger_record=record)
+                verified_model='gemini-verified', card_git=git, ledger_record=record,
+                pin_dispatch=pin, audit=audit)
         self.assertEqual(status, 0)
-        build.assert_called_once_with('/registered/root', 'd' * 40, 'developer', 'develop',
-                                      provider='agy')
-        read.assert_called_once_with('/registered/root', _SKILL_MANIFEST)
+        # The run is pinned before any card is read, and every card is read
+        # from the pinned main commit, never from the D6 head.
+        self.assertEqual(git_calls_at_pin, [0])
+        pin.assert_called_once_with('a' * 32, 'b' * 32, 'agy')
+        reads = git.card_reads()
+        self.assertEqual([call[-1] for call in reads], [_CORE, _DEV_CARD])
+        self.assertTrue(all(call[3] == _MAIN_PIN for call in reads))
+        audit['generic_record'].assert_not_called()
         prompt = prompts[0]
         raw = prompt.encode('utf-8')
+        prefix = _sent_prefix(prompt)
         self.assertIn('these limits override any conflicting skill text', prompt)
-        for path, text in _SKILL_FILES:
-            self.assertIn('REQUIRED_SKILL_BEGIN path=' + path + '\n' + text, prompt)
-            self.assertLess(prompt.index(text), prompt.index('\nTASK_JSON='))
+        # Exactly common core + Developer card; no legacy whole-file manifest.
+        self.assertEqual(prefix, _wrapped(_CARDS))
+        self.assertTrue(prompt.startswith('You are the AGY Developer'))
+        self.assertNotIn('path=AGENTS.md', prompt)
+        self.assertNotIn('path=skills/ai-team-delivery/SKILL.md', prompt)
+        self.assertLessEqual(len(prefix.encode('utf-8')), skill_manifest.MAX_DEVELOPER_PREFIX_SIZE)
         self.assertLess(len(raw), 64 * 1024)
         developer = task['developer']
         self.assertEqual(developer['model'], 'gemini-requested')
@@ -991,20 +1070,28 @@ class AgyRouteWiringTests(unittest.TestCase):
             'session_id': 'conversation_12345678',
             'agent_id': evidence['executor_identity'], 'role': 'developer',
             'provider': 'agy', 'model': 'gemini-verified', 'repo': '/repo/.git',
-            'head': 'd' * 40, 'manifest_sha256': '7' * 64,
-            'evidence_level': 'CONTROLLER_DELIVERED',
-        })
+            'head': 'd' * 40,
+            'manifest_sha256': hashlib.sha256(prefix.encode('utf-8')).hexdigest(),
+            'route': 'agy',
+        }, repo_root='/registered/root')
+        self.assertNotIn('base_commit', record.call_args.args[0])
 
-    def test_real_ledger_entry_matches_the_run(self):
+    def test_real_ledger_receipt_binds_the_sent_prefix_and_the_pin(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         ledger_path = Path(temp.name) / 'ledger.jsonl'
         with patch.object(skill_ledger, '_path', return_value=ledger_path), \
+                patch.object(task_completion, 'read_authenticated_main_sha',
+                             return_value=_MAIN_PIN) as main_read, \
                 patch.object(task_submission_cli, '_agy_developer_profile',
                              return_value=('gemini-requested', 'high')):
-            status, task, _events, _prompts = self._run_agy_delegate(
-                verified_model='gemini-verified', ledger_record=skill_ledger.record)
+            status, task, _events, prompts = self._run_agy_delegate(
+                verified_model='gemini-verified',
+                ledger_record=skill_ledger.record_card_delivery,
+                pin_dispatch=skill_ledger.pin_dispatch)
             evidence = task['completion']['evidence']
+            prefix_digest = hashlib.sha256(
+                _sent_prefix(prompts[0]).encode('utf-8')).hexdigest()
 
             def lookup(model):
                 return skill_ledger.check(
@@ -1012,7 +1099,7 @@ class AgyRouteWiringTests(unittest.TestCase):
                     task['developer']['execution']['native_session_id'],
                     evidence['executor_identity'], 'developer', 'agy', model,
                     evidence['common_dir'], task['developer']['source_sha'],
-                    _SKILL_MANIFEST['manifest_sha256'])
+                    prefix_digest)
 
             verified = lookup('gemini-verified')
             requested = lookup('gemini-requested')
@@ -1022,42 +1109,108 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(verified['status'], 'VERIFIED')
         self.assertEqual(verified['evidence_level'], 'CONTROLLER_DELIVERED')
         self.assertEqual(requested, {'status': 'UNVERIFIED', 'reason': 'WRONG_MODEL'})
-        self.assertEqual(len(ledger_path.read_text(encoding='utf-8').splitlines()), 1)
+        main_read.assert_called_once_with()
+        rows = [json.loads(line) for line in
+                ledger_path.read_text(encoding='utf-8').splitlines()]
+        self.assertEqual([row.get('entry_type') for row in rows], ['DISPATCH_PIN', None])
+        pin, receipt = rows
+        self.assertEqual((pin['route'], pin['base_commit']), ('agy', _MAIN_PIN))
+        self.assertEqual(receipt['base_commit'], _MAIN_PIN)
+        self.assertEqual(receipt['pin_id'], pin['receipt_id'])
+        # The provider prompt prefix hashes to the digest the receipt records.
+        self.assertEqual(receipt['manifest_sha256'], prefix_digest)
+        self.assertEqual(receipt['cards'], [
+            {'path': path, 'sha256': hashlib.sha256(text.encode('utf-8')).hexdigest()}
+            for path, text in _CARDS.items()])
 
-    def test_missing_or_unreadable_skill_refuses_before_provider_call(self):
-        for target, code in (
-                ('build_manifest', skill_manifest.SKILL_MANIFEST_PATH_MISSING),
-                ('build_manifest', skill_manifest.SKILL_MANIFEST_NOT_FILE),
-                ('build_manifest', skill_manifest.SKILL_MANIFEST_NOT_UTF8),
-                ('read_manifest_files', skill_manifest.SKILL_MANIFEST_PATH_MISSING)):
-            with self.subTest(target=target, code=code):
-                failing = Mock(side_effect=skill_manifest.SkillManifestError(code))
-                self._assert_skill_refusal(code, **{target: failing})
+    def test_failed_pin_refuses_before_store_write_and_provider_call(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        ledger_path = Path(temp.name) / 'ledger.jsonl'
+        with patch.object(skill_ledger, '_path', return_value=ledger_path), \
+                patch.object(task_completion, 'read_authenticated_main_sha',
+                             side_effect=LLMToolError('MAIN_REF_PIN_INVALID')):
+            self._assert_skill_refusal('AGY_SKILL_PIN_FAILED: MAIN_REF_PIN_INVALID',
+                                       pin_dispatch=skill_ledger.pin_dispatch)
+        self.assertFalse(ledger_path.exists())
+
+    def test_missing_card_at_the_pin_refuses_with_a_distinct_code(self):
+        for missing in (_CORE, _DEV_CARD):
+            with self.subTest(missing=missing):
+                cards = {path: text for path, text in _CARDS.items() if path != missing}
+                self._assert_skill_refusal('AGY_ROLE_CARD_MISSING', card_git=_CardGit(cards))
+
+    def test_unreadable_or_off_main_cards_refuse_before_provider_call(self):
+        cases = (
+            (skill_manifest.SKILL_MANIFEST_NOT_FILE, {'modes': {_DEV_CARD: '120000'}}, _CARDS),
+            (skill_manifest.SKILL_MANIFEST_NOT_UTF8, {}, {**_CARDS, _CORE: b'\xff\xfe\n'}),
+            (skill_manifest.SKILL_MANIFEST_COMMIT_NOT_ON_MAIN, {'main': 'e' * 40}, _CARDS),
+        )
+        for code, git_kwargs, cards in cases:
+            with self.subTest(code=code):
+                self._assert_skill_refusal(code, card_git=_CardGit(cards, **git_kwargs))
 
     def test_unsafe_skill_text_refuses_before_provider_call(self):
         for text in (' \n', 'rules\x01\n', 'rules​\n'):
             with self.subTest(text=text):
                 self._assert_skill_refusal(
-                    'AGY_SKILL_TEXT_REFUSED',
-                    read_manifest_files=Mock(return_value=[('AGENTS.md', text)]))
+                    'AGY_SKILL_TEXT_REFUSED', card_git=_CardGit({**_CARDS, _CORE: text}))
 
     def test_sensitive_skill_text_refuses_before_provider_call(self):
         flagged = 'flagged skill rule\n'
         with patch.object(task_submission_cli, '_emitted_sensitive',
                           side_effect=lambda value: flagged in value):
             self._assert_skill_refusal(
-                'AGY_SKILL_TEXT_REFUSED',
-                read_manifest_files=Mock(return_value=[('AGENTS.md', flagged)]))
+                'AGY_SKILL_TEXT_REFUSED', card_git=_CardGit({**_CARDS, _DEV_CARD: flagged}))
 
-    def test_skill_prompt_limit_refuses_and_never_truncates(self):
-        def files(extra):
-            path, text = _SKILL_FILES[1]
-            padding = ('skill rule ' * (extra // 11 + 1))[:extra]
-            return [_SKILL_FILES[0], (path, text + padding)]
+    def _prefix_with_cards(self, cards):
+        status, _task, _events, prompts = self._run_agy_delegate(card_git=_CardGit(cards))
+        self.assertEqual(status, 0)
+        return _sent_prefix(prompts[0])
+
+    def test_production_sized_cards_fit_the_14_kib_prefix(self):
+        # Real card files where the checkout has them; a card not yet on this
+        # checkout is taken at the 6 KiB production ceiling instead.
+        real = {}
+        for path in (_CORE, _DEV_CARD):
+            file = _REPO_ROOT / path
+            real[path] = (file.read_text(encoding='utf-8') if file.is_file()
+                          else _filler(_CARD_LIMIT))
+        for name, cards in (('real files', real),
+                            ('6 KiB ceiling', {_CORE: _filler(_CARD_LIMIT),
+                                               _DEV_CARD: _filler(_CARD_LIMIT)})):
+            with self.subTest(cards=name):
+                for text in cards.values():
+                    self.assertLessEqual(len(text.encode('utf-8')), _CARD_LIMIT)
+                prefix = self._prefix_with_cards(cards)
+                self.assertEqual(prefix, _wrapped(cards))
+                self.assertLessEqual(len(prefix.encode('utf-8')),
+                                     skill_manifest.MAX_DEVELOPER_PREFIX_SIZE)
+        self.assertEqual(skill_manifest.MAX_DEVELOPER_PREFIX_SIZE, 14 * 1024)
+
+    def test_prefix_cap_counts_the_exact_wrapped_prefix_and_never_truncates(self):
+        cap = skill_manifest.MAX_DEVELOPER_PREFIX_SIZE
+        core = _filler(_CARD_LIMIT)
+        overhead = len(_wrapped({_CORE: '', _DEV_CARD: ''}).encode('utf-8'))
+        fitted = {_CORE: core, _DEV_CARD: _filler(cap - overhead - len(core))}
+        prefix = self._prefix_with_cards(fitted)
+        self.assertEqual(len(prefix.encode('utf-8')), cap)
+        self.assertEqual(prefix, _wrapped(fitted))
+        # One more byte: the card bytes alone are still under the cap, but the
+        # wrapped prefix is not, so the dispatch is refused.
+        over = {_CORE: core, _DEV_CARD: _filler(cap - overhead - len(core) + 1)}
+        self.assertLess(sum(len(text) for text in over.values()), cap)
+        self._assert_skill_refusal(skill_manifest.SKILL_MANIFEST_PREFIX_TOO_LARGE,
+                                   card_git=_CardGit(over))
+
+    def test_whole_prompt_limit_refuses_and_never_truncates(self):
+        def padding(size):
+            # No newline: TASK_JSON escapes it to two bytes.
+            return (' goal rule' * (size // 10 + 1))[:size]
 
         def run(extra):
             status, _task, _events, prompts = self._run_agy_delegate(
-                read_manifest_files=Mock(return_value=files(extra)))
+                goal='AGY goal' + padding(extra))
             self.assertEqual(status, 0)
             return prompts[0]
 
@@ -1067,10 +1220,23 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertGreater(room, 0)
         fitted = run(room)
         self.assertEqual(len(fitted.encode('utf-8')), limit)
-        self.assertIn(files(room)[1][1], fitted)
-        self._assert_skill_refusal(
-            'AGY_SKILL_PROMPT_TOO_LARGE',
-            read_manifest_files=Mock(return_value=files(room + 1)))
+        self.assertEqual(_sent_prefix(fitted), _wrapped(_CARDS))
+        self._assert_skill_refusal('AGY_SKILL_PROMPT_TOO_LARGE',
+                                   goal='AGY goal' + padding(room + 1))
+
+    def test_generic_record_still_refuses_controller_delivered(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ledger_path = Path(temp) / 'ledger.jsonl'
+            with patch.object(skill_ledger, '_path', return_value=ledger_path):
+                with self.assertRaises(skill_ledger.SkillLedgerError) as caught:
+                    skill_ledger.record({
+                        'task_id': 'a' * 32, 'run_id': 'b' * 32, 'session_id': 'session',
+                        'agent_id': 'agy-developer', 'role': 'developer',
+                        'provider': 'agy', 'model': 'gemini-test', 'repo': '/repo/.git',
+                        'head': 'd' * 40, 'manifest_sha256': '7' * 64,
+                        'evidence_level': 'CONTROLLER_DELIVERED'})
+            self.assertFalse(ledger_path.exists())
+        self.assertEqual(caught.exception.skill_ledger_code, 'CONTROLLER_DELIVERED_REFUSED')
 
     def test_ledger_failure_keeps_the_finished_run_and_reports_the_code(self):
         stderr = io.StringIO()
