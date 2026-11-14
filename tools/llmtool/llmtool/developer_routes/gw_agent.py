@@ -18,7 +18,7 @@ import sys
 import tempfile
 from urllib.parse import urlsplit
 
-from .base import DeveloperRoute, RouteError
+from .base import DeveloperRoute, RouteError, usage_reported
 from .write_boundary import SandboxExecBoundary
 from .. import config as llm_config
 from .. import gateway_profiles
@@ -588,6 +588,26 @@ class GwAgentRoute(DeveloperRoute):
 
     def quota_exhausted(self, parsed, stderr):
         return self._gateway_code == 'HTTP_429'
+
+    def provider_quota_reported(self, parsed):
+        """Only the parsed gateway result code HTTP_429 on a non-DONE status."""
+        result = self._result
+        return (type(result) is dict and result.get('code') == 'HTTP_429' and
+                result.get('status') != 'DONE' and
+                getattr(self, '_status', None) == result.get('status') and
+                self._gateway_code == 'HTTP_429')
+
+    def provider_basis(self, parsed):
+        """GATEWAY_USAGE only for a parsed result with usage and a real served_model."""
+        result = self._result
+        if type(result) is not dict:
+            return None
+        model = result.get('served_model')
+        if (type(model) is str and _MODEL.fullmatch(model) is not None and
+                model != 'UNKNOWN' and model not in _ROUTING_ALIASES and
+                usage_reported(parsed.get('usage'))):
+            return 'GATEWAY_USAGE'
+        return None
 
     def collect(self, tmpdir, request):
         root = Path(request['root']).resolve(strict=True)

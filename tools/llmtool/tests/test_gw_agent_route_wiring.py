@@ -2009,11 +2009,16 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self._set_d6_session(held)
         calls, writes = [], []
 
+        answers = list(answer) if type(answer) is list else None
+
         def lifecycle(_registration, value):
             calls.append(value)
-            if answer == 'BOUND':
+            step = answers.pop(0) if answers is not None else answer
+            if step in ('BOUND', 'BOUND_THEN_KILLED'):
                 self._set_d6_session(value if stored is None else stored)
-            return answer
+            # BOUND_THEN_KILLED: the helper bound, then hit the timeout.
+            return ('D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE'
+                    if step == 'BOUND_THEN_KILLED' else step)
 
         def recording(base):
             class RecordingStore:
@@ -2236,7 +2241,7 @@ class GwAgentRealStoreTests(unittest.TestCase):
                 ('helper-refused', {'answer': 'D6_BIND_NATIVE_SESSION_REFUSED'},
                  [_BIND_SESSION], None),
                 ('helper-unavailable', {'answer': 'D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE'},
-                 [_BIND_SESSION], None),
+                 [_BIND_SESSION, _BIND_SESSION], None),
                 ('read-back-differs', {'stored': _OTHER_SESSION},
                  [_BIND_SESSION], _OTHER_SESSION)):
             with self.subTest(case=name):
@@ -2257,6 +2262,36 @@ class GwAgentRealStoreTests(unittest.TestCase):
                 # No evidence names the reported session; the D6 value stands.
                 self._assert_gw_evidence_names(
                     run['saved'], _EARLIER_SESSION if name == 'd6-holds-another' else None)
+
+    def test_gw_agent_bind_helper_timeout_is_retried_exactly_once(self):
+        # #1895 item 2: one retry; ALREADY_SET passes only when the D6 holds this session.
+        unavailable = 'D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE'
+        already = 'D6_BIND_NATIVE_SESSION_ALREADY_SET'
+        for name, answers in (('retry-binds', [unavailable, 'BOUND']),
+                              ('bound-then-killed', ['BOUND_THEN_KILLED', already])):
+            with self.subTest(case=name):
+                run = self._bind_run(f'gw-agent-retry-{name}.md', answer=answers)
+                self.assertEqual(run['code'], 0)
+                self.assertEqual(run['calls'], [_BIND_SESSION, _BIND_SESSION])
+                self.assertEqual(run['d6'], _BIND_SESSION)
+                self.assertEqual(run['saved']['developer']['state'], 'DEVELOPER_RESPONDED')
+                self._assert_gw_evidence_names(run['saved'], _BIND_SESSION)
+        for name, options, code, d6 in (
+                ('read-back-differs', {'answer': ['BOUND_THEN_KILLED', already],
+                                       'stored': _OTHER_SESSION},
+                 'DEVELOPER_GW_AGENT_D6_SESSION_REFUSED', _OTHER_SESSION),
+                ('no-second-retry', {'answer': [unavailable, unavailable, 'BOUND']},
+                 'DEVELOPER_GW_AGENT_' + unavailable, None)):
+            with self.subTest(case=name):
+                run = self._bind_run(f'gw-agent-retry-{name}.md', **options)
+                developer = run['saved']['developer']
+                self.assertEqual(run['code'], 1)
+                self.assertEqual(run['calls'], [_BIND_SESSION, _BIND_SESSION])
+                self.assertEqual(run['d6'], d6)
+                self.assertEqual((developer['state'], developer['error_code']),
+                                 ('DEVELOPER_OUTCOME_UNKNOWN', code))
+                self.assertEqual(run['event_calls'], 0)
+                self._assert_gw_evidence_names(run['saved'], None)
 
     # #1535: the D6 keeps the first gw-agent session it took (the lifecycle
     # helper refuses a second one). A later PM Task or repair round on that
