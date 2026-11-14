@@ -371,6 +371,19 @@ class StateFailClosedTests(SyncTestCase):
             os.chmod(self.dir, 0o700)
         self.assertEqual(self.snapshot(), before)
 
+    def test_write_refuses_state_changed_or_removed_since_load(self):
+        # #1157: a state file changed or removed after load is never overwritten.
+        sync.init_state(self.path, 5)
+        state, identity = sync._load(self.path)
+        os.utime(self.path, ns=(1, 1))
+        before = self.snapshot()
+        self.assertCode('SYNC_STATE_CHANGED', sync._write, self.path, state, identity)
+        self.assertEqual(self.snapshot(), before)
+        os.unlink(self.path)
+        self.assertCode('SYNC_STATE_CHANGED', sync._write, self.path, state, identity)
+        self.assertFalse(os.path.lexists(self.path))
+        self.assertNoTempFiles()
+
     def test_hard_linked_state_fails_closed(self):
         sync.init_state(self.path, 5)
         os.link(self.path, os.path.join(self.dir, 'second-name.json'))

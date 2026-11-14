@@ -209,7 +209,8 @@ def _post_record(entry, pr_number, repo_root, task_id, refusal_code=None, accoun
 
 def _thread_id_from_events(events_raw):
     thread_id = None
-    for line in events_raw.decode('utf-8', 'replace').splitlines():
+    # #1893: JSONL lines end only at '\n'; splitlines() also cuts at a raw U+2028.
+    for line in events_raw.decode('utf-8', 'replace').split('\n'):
         try:
             event = json.loads(line)
         except (TypeError, ValueError):
@@ -225,7 +226,7 @@ def _thread_id_from_events(events_raw):
 
 def _usage_from_events(events_raw):
     last_usage = None
-    for line in events_raw.decode('utf-8', 'replace').splitlines():
+    for line in events_raw.decode('utf-8', 'replace').split('\n'):
         try:
             event = json.loads(line)
         except (TypeError, ValueError):
@@ -292,7 +293,7 @@ def _session_observed(thread_id, sessions_dir=None):
                 if len(raw) > _SESSION_READ_LIMIT:
                     return 'UNKNOWN', 'UNKNOWN'
                 matched = True
-                for line in raw.decode('utf-8', 'replace').splitlines():
+                for line in raw.decode('utf-8', 'replace').split('\n'):
                     try:
                         record = json.loads(line)
                     except (TypeError, ValueError):
