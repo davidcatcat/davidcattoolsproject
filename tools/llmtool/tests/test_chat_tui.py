@@ -1786,14 +1786,26 @@ class TaskModeTests(Base):
                 await asyncio.sleep(0.01)
             raise AssertionError('list read did not finish')
 
+        def listed_in_chat(ui):
+            # #1838: /task list prints the rows into the visible conversation; no pane.
+            text = ui.conversation.text
+            self.assertIn('Tasks, newest first (1 read, 0 unreadable', text)
+            self.assertIn('  ' + task_id + '  ', text)
+            self.assertNotIn(chat_tui.TASK_READING['list'], text)   # replaced by the rows
+            self.assertFalse(ui.show_list)
+
+        def events_in_chat(ui):
+            text = ui.conversation.text
+            self.assertIn('Recent events across 1 Tasks (0 unreadable', text)
+            self.assertIn(task_id[:8] + '  [TASK] Task recorded', text)
+            self.assertNotIn(chat_tui.TASK_READING['events'], text)
+            self.assertFalse(ui.show_events)
+
         before, calls = snapshot(), self.pm.complete.call_count
-        ui, _ = self.drive(['/task list\r', listed,
-                            lambda ui: self.assertTrue(ui.show_list),
-                            '\x1bOR', lambda ui: self.assertFalse(ui.show_list),
+        ui, _ = self.drive(['/task list\r', listed, listed_in_chat,
                             '\x1bOR', listed, lambda ui: self.assertTrue(ui.show_list),
-                            '\x1bOR', '/task events\r',
-                            lambda ui: self.assertTrue(ui.show_events),
-                            '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
+                            '\x1bOR', lambda ui: self.assertFalse(ui.show_list),
+                            '/task events\r', listed, events_in_chat,
                             '\x1bOS', listed, lambda ui: self.assertTrue(ui.show_events),
                             '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
                             '/task show ' + task_id + '\r', self.idle,
@@ -1840,6 +1852,18 @@ class TaskModeTests(Base):
             self.assertTrue(ui.show_events)
             self.assertIn('no events in TaskStore', ui.events_view.text)
 
+        def empty_list_chat(ui):
+            # #1838: the commands print into the conversation; F3/F4 open the panes.
+            self.assertFalse(ui.show_list)
+            self.assertIn('Tasks, newest first (0 read, 0 unreadable', ui.conversation.text)
+            self.assertIn('  no Tasks in TaskStore', ui.conversation.text)
+            self.assertNotIn(chat_tui.TASK_READING['list'], ui.conversation.text)
+
+        def empty_events_chat(ui):
+            self.assertFalse(ui.show_events)
+            self.assertIn('  no events in TaskStore', ui.conversation.text)
+            self.assertNotIn(chat_tui.TASK_READING['events'], ui.conversation.text)
+
         def not_found(ui):
             self.assertIn(chat_tui.TASK_NOT_FOUND % task_id, ui.conversation.text)
             self.assertFalse(ui.show_detail)
@@ -1850,12 +1874,12 @@ class TaskModeTests(Base):
                              side_effect=AssertionError('no TaskStore read')) as load, \
                 patch('llmtool.task_submission_cli.run_task_show',
                       side_effect=AssertionError('no Core show')) as show:
-            ui, _ = self.drive(['/task list\r', listed, empty_list,
+            ui, _ = self.drive(['/task list\r', listed, empty_list_chat,
+                                '\x1bOR', listed, empty_list,
                                 '\x1bOR', lambda ui: self.assertFalse(ui.show_list),
-                                '\x1bOR', listed, empty_list, '\x1bOR',
-                                '/task events\r', listed, empty_events,
+                                '/task events\r', listed, empty_events_chat,
+                                '\x1bOS', listed, empty_events,
                                 '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
-                                '\x1bOS', listed, empty_events, '\x1bOS',
                                 '/task show ' + task_id + '\r', self.idle, not_found,
                                 '\x1bOQ', lambda ui: self.assertFalse(ui.show_detail)],
                                dev=False)
@@ -1884,8 +1908,9 @@ class TaskModeTests(Base):
         with patch('llmtool.task_store.TaskStore') as store, \
                 patch.object(chat_tui_status, 'load_records', return_value=([], 0)) as load, \
                 patch('llmtool.task_submission_cli.run_task_show', return_value=1) as show:
-            ui, _ = self.drive(['/task list\r', listed, '\x1bOR',
-                                '/task events\r', listed, '\x1bOS',
+            # #1838: the commands print into the conversation and open no pane to close.
+            ui, _ = self.drive(['/task list\r', listed,
+                                '/task events\r', listed,
                                 '/task show ' + 'a' * 32 + '\r', self.idle], dev=True)
         self.assertTrue(ui.dev)
         self.assertEqual(load.call_count, 2)
@@ -1894,6 +1919,111 @@ class TaskModeTests(Base):
         self.assertNotIn('task not found', ui.conversation.text)
         self.assertIn('llmtool task command failed', ui.conversation.text)   # Core's answer
         self.assertFalse(state.exists())   # every TaskStore and Core call was a mock
+
+    def test_1838_owner_read_only_sequence_without_dev_prints_visible_results(self):
+        # #1838 Owner sequence without --dev: /task show, /task list, /task show, /task
+        # events. Each prints into the visible conversation (no pane covers it): a loading
+        # line while the TaskStore read runs, replaced by the result when it finishes, with
+        # no further key; never TASK_HIDDEN. The read is held by a gate, not a sleep.
+        self.drive(['/task mode profile first\r', 'first task\r', self.idle])
+        task_id = self.store_records()[0]['task_id']
+        calls = self.pm.complete.call_count
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        original = chat_tui_status.load_list
+
+        def held(store):
+            gate.wait(10)
+            return original(store)   # the real status-index read, after the gate
+
+        def visible(ui):
+            for shown in (ui.show_list, ui.show_events, ui.show_detail, ui.show_help,
+                          ui.task_view_visible()):
+                self.assertFalse(shown)
+            self.assertTrue(ui.app.layout.has_focus(ui.input))
+
+        def loading(kind):
+            def check(ui):
+                self.assertTrue(ui.conversation.text.endswith(
+                    '> /task ' + kind + '\n\n' + chat_tui.TASK_READING[kind]),
+                    ui.conversation.text[-200:])
+                self.assertIsNotNone(ui.list_reader)   # the gate holds the read
+                visible(ui)
+            return check
+
+        async def printed(ui):
+            await WidgetTests.until(ui, lambda ui: ui.list_loaded is not None
+                                    and ui.list_reader is None and not ui._task_prints,
+                                    'Task read printed')
+
+        def usage_only(ui):
+            self.assertTrue(ui.conversation.text.endswith(
+                '> /task show\n\n' + chat_tui.TASK_SHOW_USAGE), ui.conversation.text[-200:])
+            visible(ui)
+
+        def rows(ui):
+            text = ui.conversation.text
+            self.assertNotIn(chat_tui.TASK_READING['list'], text)   # replaced, not kept
+            start = text.index('Tasks, newest first (1 read, 0 unreadable',
+                               text.rindex('> /task list'))
+            self.assertIn('\n  ' + task_id + '  ', text[start:])
+            visible(ui)
+
+        def newest(ui):
+            self.assertTrue(ui.conversation.text.endswith(
+                '> /task show\n\n' + chat_tui.TASK_SHOW_USAGE + '\n  newest Task: ' + task_id
+                + ' (/task show ' + task_id + ')'), ui.conversation.text[-300:])
+
+        def events(ui):
+            text = ui.conversation.text
+            self.assertNotIn(chat_tui.TASK_READING['events'], text)
+            start = text.index('Recent events across 1 Tasks (0 unreadable',
+                               text.rindex('> /task events'))
+            self.assertIn('  ' + task_id[:8] + '  [TASK] Task recorded', text[start:])
+            visible(ui)
+
+        with patch.object(chat_tui_status, 'load_list', side_effect=held) as load:
+            ui, _ = self.drive(['/task show\r', usage_only,
+                                '/task list\r', loading('list'), lambda ui: gate.set(),
+                                printed, rows,
+                                '/task show\r', newest,
+                                lambda ui: gate.clear(),
+                                '/task events\r', loading('events'), lambda ui: gate.set(),
+                                printed, events], dev=False)
+        self.assertFalse(ui.dev)
+        self.assertEqual(load.call_count, 2)
+        self.assertNotIn(chat_tui.TASK_HIDDEN, ui.conversation.text)
+        self.assertEqual(self.pm.complete.call_count, calls)
+        self.assertEqual(len(self.store_records()), 1)
+        self.factory.assert_not_called()
+
+    def test_1838_task_read_lines_are_kept_when_other_output_follows(self):
+        # A loading line is replaced only while it is still the conversation's tail; with
+        # other output after it, it stays and the result follows (nothing else is cut).
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+
+        def held(store):
+            gate.wait(10)
+            return [], 0, None
+
+        async def printed(ui):
+            await WidgetTests.until(ui, lambda ui: ui.list_reader is None
+                                    and not ui._task_prints, 'Task read printed')
+
+        def check(ui):
+            text = ui.conversation.text
+            self.assertEqual(text.count(chat_tui.TASK_READING['list']), 1)
+            self.assertLess(text.index(chat_tui.TASK_READING['list']),
+                            text.index('llmtool: later notice'))
+            self.assertLess(text.index('llmtool: later notice'),
+                            text.index('  no Tasks in TaskStore'))
+
+        with patch.object(chat_tui, 'task_store_absent', return_value=False), \
+                patch('llmtool.task_store.TaskStore'), \
+                patch.object(chat_tui_status, 'load_list', side_effect=held):
+            self.drive(['/task list\r', lambda ui: ui.append('llmtool: later notice'),
+                        lambda ui: gate.set(), printed, check], dev=False)
 
     def test_task_submit_shows_core_receipt_and_opens_core_detail(self):
         request = '請新增測試\n第二行：多行需求'
@@ -2149,9 +2279,11 @@ class W57ChatTests(Base):
         # #1819: without --dev only the exact read-only forms run. A bare /task (the case the
         # advisory pre-review found uncovered) and every other /task form print TASK_HIDDEN
         # and do nothing else: no usage, no pane, no Task read, no Task mode, no submit.
+        # #1838: a bare /task show is a read-only form and prints its usage instead
+        # (test_1838_bare_task_show_prints_usage_never_task_hidden).
         os.environ.pop(chat_tui.DEV_ENV, None)
         forms = ['/task', '/task ', '/task mode off', '/task mode profile first',
-                 '/task submit --provider first request', '/task show', '/task show a b',
+                 '/task submit --provider first request', '/task show a b',
                  '/task list --all', '/task events now', '/task bogus']
 
         def enter(form):
@@ -2739,7 +2871,7 @@ class TaskListTests(Base):
         ui, _ = self.drive(['/task mode profile first\r', 'first task\r', self.idle,
                             '/task mode profile missing\r', 'second task\r', self.idle,
                             lambda ui: setattr(self, 'calls', self.pm.complete.call_count),
-                            '/task list\r', self.listed, list_open,
+                            '\x1bOR', self.listed, list_open,   # #1838: F3 opens the pane
                             lambda ui: self.assertEqual(
                                 chat_tui_status.row(ui.list_records[ui.list_index])['stage'],
                                 '已建立／待派工'),
@@ -2822,7 +2954,7 @@ class TaskListTests(Base):
 
         self.drive(['/task mode profile first\r', 'first task\r', self.idle,
                     '/task mode profile first\r', 'second task\r', self.idle,
-                    '/task list\r', self.listed, render, dragged, copied_all])
+                    '\x1bOR', self.listed, render, dragged, copied_all])
 
     def test_w60_detail_opened_from_the_f3_list_drags_and_copies_like_the_panel(self):
         async def detail(ui):
@@ -2851,7 +2983,7 @@ class TaskListTests(Base):
             self.assertFalse(ui.detail_view.selected_range())
 
         self.drive(['/task mode profile first\r', 'first task\r', self.idle,
-                    '/task list\r', self.listed, '\r', self.idle, detail, '\x1b', back])
+                    '\x1bOR', self.listed, '\r', self.idle, detail, '\x1b', back])
 
     def test_w60_f4_events_drag_and_shift_c(self):
         async def events(ui):
@@ -2960,7 +3092,7 @@ class TaskListTests(Base):
             self.assertNotIn('\x1b', text)
 
         with patch('llmtool.chat_tui_status.load_records', return_value=(records, 0)):
-            self.drive(['/task list\r', self.listed, first, down_past_edge, page_down, wheel,
+            self.drive(['\x1bOR', self.listed, first, down_past_edge, page_down, wheel,
                         copy_all], size=size)
 
     def test_refresh_on_key_and_interval_only(self):
@@ -2984,7 +3116,7 @@ class TaskListTests(Base):
 
         with patch('llmtool.chat_tui_status.load_records', side_effect=counting):
             ui, _ = self.drive(['/task mode profile first\r', 'a task\r', self.idle,
-                                '/task list\r', self.listed, redraw,
+                                '\x1bOR', self.listed, redraw,
                                 lambda ui: self.assertEqual(len(reads), 1),
                                 'r', self.listed, lambda ui: self.assertEqual(len(reads), 2),
                                 '\x1b[15~', self.listed, lambda ui: self.assertEqual(len(reads), 3),
@@ -3016,7 +3148,7 @@ class TaskListTests(Base):
 
         with patch('llmtool.chat_tui_status.load_records', side_effect=counting):
             ui, _ = self.drive(['/task mode profile first\r', 'a task\r', self.idle,
-                                '/task list\r', self.listed,
+                                '\x1bOR', self.listed,
                                 lambda ui: self.assertEqual(len(reads), 1),
                                 '\r', self.idle, hidden, stale_wait,
                                 lambda ui: self.assertEqual(len(reads), 1),  # detail open
@@ -3045,7 +3177,7 @@ class TaskListTests(Base):
             self.assertTrue(ui.show_list)
             self.assertIn('new conversation output', '\n'.join(self.list_rows(ui)))
 
-        ui, _ = self.drive(['/task list\r', self.listed, resize, check,
+        ui, _ = self.drive(['\x1bOR', self.listed, resize, check,
                             '\x1b', self.esc_settled,
                             lambda ui: self.assertFalse(ui.unseen_output)], size=size)
         self.assertIn('late reply', ui.conversation.text)
@@ -3435,7 +3567,7 @@ class TaskEventsPaneTests(Base):
                 patch('llmtool.chat_tui_status.load_records', side_effect=counting):
             ui, _ = self.drive(['/task mode profile first\r', 'event task\r', self.idle,
                                 detail_loaded, timeline_loaded,
-                                '/task events\r', self.listed, shown, unseen,
+                                '\x1bOS', self.listed, shown, unseen,   # #1838: F4 pane
                                 one_read,
                                 'r', self.listed, refreshed,
                                 # Help hides the pane: no interval read while it is hidden.
@@ -4790,6 +4922,81 @@ class PMConversationTests(BoundedPMTest):
 
     def connect(self):
         return '/pm connect\r'   # uses the saved dedicated binding
+
+    def test_1838_read_only_task_commands_print_while_pm_connected_without_dev(self):
+        # #1838 Owner sequence in /pm connect state without --dev: /task list, /task show,
+        # /task events print into the visible conversation, are never sent to the PM and
+        # never print TASK_HIDDEN. The TaskStore read is held by a gate (no sleep); the
+        # store is mocked only after the connect, so the PM path is the real one.
+        os.environ.pop(chat_tui.DEV_ENV, None)
+        task_id = 'c' * 32
+        record = {'task_id': task_id, 'state': 'PM_RESPONDED', 'request': '1838 connected row',
+                  'created_at': '2026-11-14T01:00:00Z', 'updated_at': '2026-11-14T01:05:00Z'}
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        seen = {}
+
+        def held(store):
+            gate.wait(10)
+            return [record], 0, None
+
+        def reads(ui):
+            patch.object(chat_tui, 'task_store_absent', return_value=False).start()
+            seen['store'] = patch('llmtool.task_store.TaskStore').start()
+            seen['load'] = patch.object(chat_tui_status, 'load_list', side_effect=held).start()
+
+        def visible(ui):
+            self.assertTrue(ui.pm_mode)
+            self.assertIsNotNone(ui.pm_runtime)
+            for shown in (ui.show_list, ui.show_events, ui.show_detail, ui.show_help,
+                          ui.task_view_visible()):
+                self.assertFalse(shown)
+
+        def loading(kind):
+            def check(ui):
+                self.assertIn('> /task ' + kind + '\n\n' + chat_tui.TASK_READING[kind],
+                              ui.conversation.text)
+                self.assertIsNotNone(ui.list_reader)   # the gate holds the read
+                visible(ui)
+            return check
+
+        async def printed(ui):
+            await self.until(ui, lambda ui: ui.list_loaded is not None
+                             and ui.list_reader is None and not ui._task_prints,
+                             'Task read printed')
+
+        def rows(ui):
+            text = ui.conversation.text
+            start = text.index('Tasks, newest first (1 read, 0 unreadable',
+                               text.rindex('> /task list'))
+            self.assertIn('\n  ' + task_id + '  ', text[start:])
+            visible(ui)
+
+        def newest(ui):
+            text = ui.conversation.text
+            self.assertIn(chat_tui.TASK_SHOW_USAGE + '\n  newest Task: ' + task_id,
+                          text[text.rindex('> /task show'):])
+            visible(ui)
+
+        def events(ui):
+            text = ui.conversation.text
+            start = text.index('Recent events across 1 Tasks (0 unreadable',
+                               text.rindex('> /task events'))
+            self.assertIn('2026-11-14T01:00:00Z  ' + task_id[:8] + '  [TASK] Task recorded',
+                          text[start:])
+            visible(ui)
+
+        ui, _ = self.drive([self.connect(), self.connected, reads,
+                            '/task list\r', loading('list'), lambda ui: gate.set(),
+                            printed, rows,
+                            '/task show\r', newest,
+                            lambda ui: gate.clear(),
+                            '/task events\r', loading('events'), lambda ui: gate.set(),
+                            printed, events])
+        self.assertFalse(ui.dev)
+        self.assertEqual(seen['load'].call_count, 2)
+        self.assertNotIn(chat_tui.TASK_HIDDEN, ui.conversation.text)
+        self.assertFalse(any(fake.users() for fake in self.fakes))   # nothing went to the PM
 
     def test_connect_auto_resumes_once_when_taskstore_has_in_flight_work(self):
         self.turns = [_full_turn()]

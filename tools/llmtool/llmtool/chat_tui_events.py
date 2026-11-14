@@ -197,10 +197,9 @@ def _row_events(record):
     return events, summary["event_count"] > len(events)
 
 
-def recent_text(records, unreadable, refreshed, note=None):
-    """Cross-Task recent events pane text; ``note`` (status index fallback) follows the
-    header lines."""
-    from .task_index import TUI_EVENT_LIMIT
+def _recent_rows(records, limit):
+    """([(event, task_id)] newest first, untimed last, at most ``limit``; whether the
+    status index kept only each Task's newest events)."""
     rows, partial = [], False
     for record in records:
         task_id = value(record, "task_id")
@@ -208,7 +207,31 @@ def recent_text(records, unreadable, refreshed, note=None):
         partial = partial or cut
         rows += [(event, task_id) for event in events]
     timed = sorted((r for r in rows if r[0]["time"]), key=lambda r: r[0]["time"], reverse=True)
-    rows = (timed + [r for r in rows if not r[0]["time"]])[:RECENT_LIMIT]
+    return (timed + [r for r in rows if not r[0]["time"]])[:limit], partial
+
+
+CONVERSATION_LIMIT = 20  # Events /task events prints into the conversation (#1838).
+
+
+def conversation_text(records, unreadable, read_at, note=None, limit=CONVERSATION_LIMIT):
+    """#1838: what /task events prints into the conversation: the newest events across
+    Tasks, or "no events in TaskStore". Read only, like the F4 pane."""
+    rows, _partial = _recent_rows(records, limit)
+    lines = ["Recent events across %d Tasks (%d unreadable; read %s; newest %d shown; "
+             "F4 opens the events pane)" % (len(records), unreadable, read_at, len(rows))]
+    if note:
+        lines.append("  " + note)
+    lines += ["  " + format_event(event, task_id) for event, task_id in rows]
+    if not rows:
+        lines.append("  no events in TaskStore")
+    return "\n".join(lines)
+
+
+def recent_text(records, unreadable, refreshed, note=None):
+    """Cross-Task recent events pane text; ``note`` (status index fallback) follows the
+    header lines."""
+    from .task_index import TUI_EVENT_LIMIT
+    rows, partial = _recent_rows(records, RECENT_LIMIT)
     lines = ["Recent events across %d Tasks (%d unreadable; refreshed %s; newest %d shown%s)"
              % (len(records), unreadable, refreshed, RECENT_LIMIT,
                 ", status index keeps %d per Task" % TUI_EVENT_LIMIT if partial else ""),
