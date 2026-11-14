@@ -478,6 +478,95 @@ class FileOpsCommandTests(unittest.TestCase):
         self.assertNotIn('file_ops_evidence', self.store.get(task['task_id']))
         self.assert_binding_lock_free()
 
+    @staticmethod
+    def adopt(store, task_id):
+        """Move the Task to a new PM session through the real TaskStore adoption."""
+        current = store.get(task_id)
+        return store.adopt_pm_session(
+            task_id, old_session_key=current['pm_session_id'],
+            new_session_key='pm-' + task_store.new_id(), at='2026-11-14T00:00:00Z',
+            expected_record_sha256=current['record_sha256'],
+            old_runtime='claude-code', new_runtime='claude-code', new_account=None,
+            liveness=['PROCESS_CLEAN', 'LOCK_FREE', 'REGISTRY_CLEAN'])
+
+    def test_adoption_between_caller_check_and_lock_refuses_as_non_owner(self):
+        # v93 (CWE-367): the caller check passes, then a separate worker adopts
+        # the Task to a new PM session before file-ops takes the binding lock.
+        task = self.record_pm()
+        rc, out = self.run_cmd(task, pm_session='pm-other-session')
+        non_owner = out['code']
+        self.assertEqual((rc, non_owner), (1, 'PM_CALLER_NOT_OWNER'))
+        adopter = TaskStore(root=self.store.root)
+        checked, adopted = threading.Event(), threading.Event()
+        calls, results, checks = [], [], []
+        real_lock, real_check = self.store.d6_binding_lock, self._check_caller
+
+        def counted_check(store, task_id, pm_session):
+            checks.append(pm_session)
+            return real_check(store, task_id, pm_session)
+
+        def lock_after_adoption():
+            calls.append(len(checks))
+            checked.set()
+            self.assertTrue(adopted.wait(10))
+            return real_lock()
+
+        def adopt_after_check():
+            if checked.wait(10):
+                results.append(self.adopt(adopter, task['task_id']))
+            adopted.set()
+
+        worker = threading.Thread(target=adopt_after_check)
+        with mock.patch.object(pm_caller, 'check_caller', side_effect=counted_check), \
+                mock.patch.object(self.store, 'd6_binding_lock',
+                                  side_effect=lock_after_adoption), \
+                mock.patch.object(file_ops, 'plan', side_effect=AssertionError('plan ran')), \
+                mock.patch.object(file_ops, 'apply', side_effect=AssertionError('apply ran')), \
+                mock.patch.object(self.store, '_reserve_file_ops_d6',
+                                  side_effect=AssertionError('reservation written')):
+            worker.start()
+            rc, out = self.run_cmd(task)
+            worker.join(10)
+        self.assertFalse(worker.is_alive())
+        # The first check ran before the lock and passed; the recheck under it refused.
+        self.assertEqual(calls, [1])
+        self.assertEqual(len(checks), 2)
+        self.assertEqual(len(results), 1)
+        self.assertEqual((rc, out['status'], out['code']), (1, 'REFUSED', non_owner))
+        current = self.store.get(task['task_id'])
+        self.assertEqual(current, results[0])
+        self.assertNotEqual(current['pm_session_id'], task['pm_session_id'])
+        self.assertNotIn('file_ops_reservation', current)
+        self.assertNotIn('file_ops_evidence', current)
+        self.assertEqual(self.journal_epoch(), 0)
+        self.assertEqual(self.status(), '')
+        self.assertTrue(os.path.exists(os.path.join(self.root, 'a.txt')))
+        self.assert_binding_lock_free()
+
+    def test_adoption_after_reservation_refuses_before_apply(self):
+        # An adoption after admission is caught by the recheck just before apply.
+        task = self.record_pm()
+        real_reserve = self.store._reserve_file_ops_d6
+        adopted = []
+
+        def reserve_then_adopt(task_id, executor_task_id, *, expected):
+            saved = real_reserve(task_id, executor_task_id, expected=expected)
+            adopted.append(self.adopt(TaskStore(root=self.store.root), task_id))
+            return saved
+
+        with mock.patch.object(self.store, '_reserve_file_ops_d6',
+                               side_effect=reserve_then_adopt), \
+                mock.patch.object(file_ops, 'apply', side_effect=AssertionError('apply ran')):
+            rc, out = self.run_cmd(task)
+        self.assertEqual((rc, out['status'], out['code']),
+                         (1, 'REFUSED', 'PM_CALLER_NOT_OWNER'))
+        current = self.store.get(task['task_id'])
+        self.assertEqual(current, adopted[0])
+        self.assertEqual(current['file_ops_reservation']['executor_task'], D6)
+        self.assertNotIn('file_ops_evidence', current)
+        self.assertEqual(self.status(), '')
+        self.assert_binding_lock_free()
+
     def test_binding_lock_released_on_every_path(self):
         task = self.record_pm()
         real_get = self.store.get

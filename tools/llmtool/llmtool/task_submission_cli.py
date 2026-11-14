@@ -2358,12 +2358,50 @@ def _file_ops_caller(store, args):
         raise _FileOpsRefused('FILE_OPS_TASK_UNAVAILABLE') from None
 
 
+def _file_ops_read(store, task_id):
+    try:
+        task = store.get(task_id)
+    except Exception:
+        raise _FileOpsRefused('FILE_OPS_TASK_UNAVAILABLE') from None
+    if type(task) is not dict:
+        raise _FileOpsRefused('FILE_OPS_TASK_UNAVAILABLE')
+    return task
+
+
+def _file_ops_owned_task(store, args):
+    """Under the D6 binding lock: read the Task, then recheck its caller (v93, CWE-367).
+
+    The caller check before the lock is not enough: an ``adopt_pm_session``
+    between it and the lock would let a stale PM session apply ops. So the
+    caller check runs again here, and the Task is read once more to confirm
+    the record it passed on is the one returned (its ``record_sha256`` is the
+    reservation and evidence compare input). A Task adopted at any point
+    before the re-read refuses with the same code as a non-owner.
+    """
+    for _ in range(3):
+        task = _file_ops_read(store, args.task_id)
+        _file_ops_caller(store, args)
+        if _file_ops_read(store, args.task_id).get('record_sha256') == task.get(
+                'record_sha256'):
+            return task
+    raise _FileOpsRefused('FILE_OPS_TASK_UNAVAILABLE')
+
+
+def _file_ops_confirm_owned(store, args, task):
+    """Just before apply: the caller still owns the unchanged Task (v93)."""
+    _file_ops_caller(store, args)
+    if _file_ops_read(store, args.task_id).get('record_sha256') != task['record_sha256']:
+        _file_ops_caller(store, args)
+        raise _FileOpsRefused('FILE_OPS_TASK_UNAVAILABLE')
+
+
 def _file_ops_admission(store, args):
     """The rest of the one admission for ``task file-ops`` (#1502); changes nothing.
 
     Runs after ``_file_ops_caller`` and under the D6 binding lock, so the Task
-    read here is the one the evidence write compares against. Order: Task
-    schema, state, file_ops, no Developer, not abandoned, lineage; D6
+    read here is the one the evidence write compares against. Order: the
+    caller still owns that freshly read Task (v93, rechecked under the lock);
+    Task schema, state, file_ops, no Developer, not abandoned, lineage; D6
     registered ACTIVE with root, branch and HEAD from the registry, matching
     any recorded completion or file-ops reservation, not held by another live
     Task (another Task's reservation included), tree clean at HEAD; no FAILED
@@ -2372,10 +2410,7 @@ def _file_ops_admission(store, args):
     re-run, which the caller then checks read-only). Returns (task, registration).
     """
     from .task_store import external_action_refusal
-    try:
-        task = store.get(args.task_id)
-    except Exception:
-        raise _FileOpsRefused('FILE_OPS_TASK_UNAVAILABLE') from None
+    task = _file_ops_owned_task(store, args)
     for refused, code in (
             (task.get('schema_version') != 2, 'FILE_OPS_TASK_SCHEMA'),
             (task.get('state') != 'PM_RESPONDED', 'FILE_OPS_TASK_STATE'),
@@ -2440,7 +2475,10 @@ def run_task_file_ops(args, *, store=None, stdout=None):
     After the caller check, the D6 binding lock (the one ``TaskStore._d6_commit``
     takes) is held exclusively from the holder check through plan, the
     reservation, apply, verify and the evidence write, and released on every
-    path. Before any mutation the Task records a persistent reservation of the
+    path. Under the lock the caller check runs again on the freshly read Task
+    and once more just before apply (v93), so a PM session adoption after the
+    first check refuses with the non-owner code before any change. Before any
+    mutation the Task records a persistent reservation of the
     D6 (a binding-journal entry, then ``file_ops_reservation`` on the record),
     which both binding predicates treat as a holder. So a concurrent binder of
     this D6 waits, and then refuses ``TASK_D6_ALREADY_BOUND`` (past the lock
@@ -2507,6 +2545,11 @@ def _run_file_ops_locked(store, args, refuse, task_id, stdout, reserve):
                            expected={'record_sha256': task['record_sha256']})
         except Exception:
             return refuse('FILE_OPS_D6_UNAVAILABLE')
+    try:
+        # v93: an adoption after admission refuses here, before any change.
+        _file_ops_confirm_owned(store, args, task)
+    except _FileOpsRefused as exc:
+        return refuse(exc.code)
     try:
         result = file_ops.apply(root, sealed)
     except LLMToolError as exc:
