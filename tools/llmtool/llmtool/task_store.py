@@ -4713,13 +4713,32 @@ class TaskStore:
             os.close(directory)
         return result
 
+    @staticmethod
+    def _sidecar_lock_absent(directory, lock_name):
+        """#1837 P2: a read takes no lock that is not there; writers create it first."""
+        try:
+            os.stat(lock_name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            _fail('TASK_STORE_UNAVAILABLE')
+        return False
+
     def get_worker_observations(self):
-        """Read a complete worker/layer view; absent or expired results are UNKNOWN."""
-        directory = self._dirfd()
+        """Read a complete worker/layer view; absent or expired results are UNKNOWN.
+
+        #1837 P2: the read creates nothing; an absent root or lock reads as empty.
+        """
+        record = {'schema_version': WORKER_AVAILABILITY_SCHEMA_VERSION,
+                  'observations': [], 'record_sha256': None}
+        directory = self._dirfd(create=False)
+        if directory is None:
+            return self._worker_availability_view(record)
         lock_fd = None
         try:
-            lock_fd = self._lock_worker_availability(directory, exclusive=False)
-            record = self._read_worker_availability_at(directory)
+            if not self._sidecar_lock_absent(directory, WORKER_AVAILABILITY_LOCK_NAME):
+                lock_fd = self._lock_worker_availability(directory, exclusive=False)
+                record = self._read_worker_availability_at(directory)
         finally:
             if lock_fd is not None:
                 try:
@@ -4746,9 +4765,14 @@ class TaskStore:
         self._write_sidecar_at(directory, ASSIGNMENTS_NAME, raw, code='ASSIGNMENTS')
 
     def _with_assignments(self, *, exclusive, change=None):
-        directory = self._dirfd()
+        # #1837 P2: a read (no change) creates nothing; an absent root or lock is empty.
+        directory = self._dirfd(create=change is not None)
+        if directory is None:
+            return []
         lock_fd = None
         try:
+            if change is None and self._sidecar_lock_absent(directory, ASSIGNMENTS_LOCK_NAME):
+                return []
             lock_fd = self._lock_sidecar(directory, ASSIGNMENTS_LOCK_NAME,
                                          exclusive=exclusive, code='ASSIGNMENTS')
             assignments = self._read_assignments_at(directory)

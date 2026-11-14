@@ -166,6 +166,7 @@ class WorkerAvailabilityStoreTests(unittest.TestCase):
                 opened.append(fd)
             return fd
 
+        self._observation()  # #1837 P2: a read takes the lock only once a write made it
         with patch('llmtool.task_store.os.open', side_effect=tracking_open):
             with patch('llmtool.task_store.fcntl.flock', side_effect=OSError('synthetic')):
                 with self.assertRaises(LLMToolError):
