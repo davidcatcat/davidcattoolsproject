@@ -704,10 +704,16 @@ class RouteRemoteTestTests(_Base):
 
     def test_mixed_scripts_and_docs_member_without_receipt_refuses(self):
         # Neither docs-only nor scripts-only: the full code route needs a receipt.
-        routes = _routes(**{FILES: [{'filename': 'scripts/tool.sh'},
+        # The canonical linux_flags() set code and docs, so every required
+        # check is green and only the missing receipt refuses.
+        routes = _routes(**{CHECKS: _checks(_run(101, LINUX), _run(120, MACOS),
+                                            _run(55, DOCS)),
+                            FILES: [{'filename': 'scripts/tool.sh'},
                                     {'filename': 'docs/guide.md'}]})
         self.assertRefused(self.check(record=_record(remote_test_receipts=[]), routes=routes),
                            'TRAIN_MEMBER_REMOTE_TEST_MISSING')
+        # Control: the same routes with a PASS receipt are eligible.
+        self.assertTrue(self.check(routes=routes)['eligible'])
 
     def test_scripts_only_helper(self):
         self.assertTrue(eligibility._scripts_only(['scripts/a.py']))
