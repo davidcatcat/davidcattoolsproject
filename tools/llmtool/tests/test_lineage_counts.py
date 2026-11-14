@@ -104,9 +104,13 @@ class ChainWalkTests(unittest.TestCase):
         cases = {'over sixteen': (DictStore(*records), records[-1])}
         missing = {'task_id': tid(2), 'continues': tid(1), 'review_repair_claims': []}
         cases['missing predecessor'] = (DictStore(missing), missing)
-        for value in (None, 'x' * 32, tid(1).upper(), 7):
+        # An uppercase link: tid(0xab) has letters, so upper() really changes it.
+        upper = tid(0xAB).upper()
+        for value in (None, 'x' * 32, upper, 7):
             bad = {'task_id': tid(2), 'continues': value, 'review_repair_claims': []}
-            cases[f'malformed link {value!r}'] = (DictStore(bad, {'task_id': tid(1)}), bad)
+            # The store holds the uppercase ID too: only the link's shape refuses it.
+            cases[f'malformed link {value!r}'] = (
+                DictStore(bad, {'task_id': tid(1)}, {'task_id': upper}), bad)
         first = {'task_id': tid(1), 'continues': tid(2), 'review_repair_claims': []}
         second = {'task_id': tid(2), 'continues': tid(1), 'review_repair_claims': []}
         cases['cycle'] = (DictStore(first, second), second)
