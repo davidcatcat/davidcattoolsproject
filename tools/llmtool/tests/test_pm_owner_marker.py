@@ -365,12 +365,40 @@ class AskRecordGateTests(unittest.TestCase):
         self.assertRefused("OWNER_ASK_FIELD_INVALID reserved_row",
                            *record_args(reserved_row="R-SCOPE\nR-SPEND"))
 
+    def test_leading_or_trailing_newline_in_single_line_field_is_refused(self):
+        # The newline check runs on the supplied value, before any strip.
+        cases = (
+            ("blocked_action", "Merge the PR\n"),
+            ("blocked_action", "\nMerge the PR"),
+            ("blocked_action", "Merge the PR\r\n"),
+            ("reserved_row", "R-SCOPE\n"),
+            ("reserved_row", "\nR-SCOPE"),
+        )
+        for name, value in cases:
+            with self.subTest(field=name, value=value):
+                self.assertRefused(f"OWNER_ASK_FIELD_INVALID {name}",
+                                   *record_args(**{name: value}))
+
     def test_over_long_field_is_refused(self):
         self.assertRefused("OWNER_ASK_FIELD_INVALID evidence",
                            *record_args(evidence="x" * 2001))
 
+    def test_field_over_limit_only_with_surrounding_whitespace_is_refused(self):
+        # The length check runs on the supplied value, before any strip.
+        for option, name in RECORD_FIELDS:
+            base = "R-SCOPE" if name == "reserved_row" else "x" * 2000
+            for value in (base.ljust(2001), base.rjust(2001)):
+                with self.subTest(field=name, padded_at="end" if value[0] != " " else "start"):
+                    self.assertRefused(f"OWNER_ASK_FIELD_INVALID {name}",
+                                       *record_args(**{option[2:].replace("-", "_"): value}))
+
+    def test_other_reason_over_limit_only_with_trailing_whitespace_is_refused(self):
+        self.assertRefused("OWNER_ASK_FIELD_INVALID other_reason", *record_args(
+            reserved_row="R-OTHER", other_reason="y" * 2000 + " "))
+
     def test_field_at_length_limit_is_accepted(self):
         self.assertPosted("R-SCOPE", *record_args(evidence="x" * 2000))
+        self.assertPosted("R-SCOPE", *record_args(evidence="x" * 1999 + " "))
 
     def test_r_other_without_reason_is_refused(self):
         self.assertRefused("OWNER_ASK_OTHER_REASON_REQUIRED",

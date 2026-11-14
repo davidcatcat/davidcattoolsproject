@@ -243,21 +243,23 @@ def ask_record(reserved_row, blocked_action, authority_check, evidence,
     """
     given = dict(zip(ASK_REQUIRED_FIELDS, (reserved_row, blocked_action, authority_check,
                                            evidence, not_defect_not_harness)))
-    values = {}
     for name in ASK_REQUIRED_FIELDS:
         value = given[name]
         if type(value) is not str or not value.strip():
             raise MarkerError(f"OWNER_ASK_FIELD_MISSING {name}")
-        values[name] = value.strip()
     if other_reason is not None and type(other_reason) is not str:
         raise MarkerError("OWNER_ASK_FIELD_INVALID other_reason")
-    other = (other_reason or "").strip()
-    for name, value in (*values.items(), ("other_reason", other)):
+    # Check the strings exactly as supplied, before any strip: stripping would
+    # hide a leading or trailing newline and would shorten an over-long field.
+    supplied = (*given.items(), ("other_reason", other_reason or ""))
+    for name, value in supplied:
         if "<!--" in value or "-->" in value or len(value) > ASK_FIELD_MAX:
             raise MarkerError(f"OWNER_ASK_FIELD_INVALID {name}")
     for name in ASK_SINGLE_LINE_FIELDS:
-        if values[name].splitlines() != [values[name]]:
+        if given[name].splitlines() != [given[name]]:
             raise MarkerError(f"OWNER_ASK_FIELD_INVALID {name}")
+    values = {name: given[name].strip() for name in ASK_REQUIRED_FIELDS}
+    other = (other_reason or "").strip()
     row = values["reserved_row"]
     if row not in RESERVED_ROWS:
         raise MarkerError("OWNER_ASK_ROW_UNKNOWN")
