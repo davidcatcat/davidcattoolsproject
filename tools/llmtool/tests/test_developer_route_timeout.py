@@ -521,6 +521,8 @@ class DelegateTimeoutTests(unittest.TestCase):
                                   executor_task='executor-task-1')
         with mock.patch.object(submission_cli, '_opencode_developer_profile',
                                return_value=('opencode/sample-model-free', 12)), \
+                mock.patch.object(submission_cli, '_developer_card_prefix',
+                                  return_value=('\nFixture rules.', 'e' * 64)), \
                 mock.patch.object(submission_cli.opencode_direct_developer, 'run') as launch, \
                 self.assertRaises(LLMToolError) as raised:
             submission_cli.run_task_opencode_delegate(
