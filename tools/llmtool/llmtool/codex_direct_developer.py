@@ -114,7 +114,8 @@ def _thread_from_events(raw):
     found = None
     first = True
     try:
-        for line in raw.decode('utf-8').splitlines():
+        # #1893: JSONL lines end only at '\n'; splitlines() also cuts at a raw U+2028.
+        for line in raw.decode('utf-8').split('\n'):
             if not line:
                 continue
             event = json.loads(line, object_pairs_hook=_unique_keys,
@@ -144,7 +145,7 @@ def _result_from_events(raw):
     tool_calls_recognized = False
     first = True
     try:
-        for line in raw.decode('utf-8').splitlines():
+        for line in raw.decode('utf-8').split('\n'):
             if not line:
                 continue
             event = json.loads(line, object_pairs_hook=_unique_keys,
@@ -258,7 +259,7 @@ def _usage_from_events(raw):
     tool_calls = 0
     tool_calls_recognized = False
     try:
-        for line in raw.decode('utf-8').splitlines():
+        for line in raw.decode('utf-8').split('\n'):
             if not line:
                 continue
             event = json.loads(line, object_pairs_hook=_unique_keys,
