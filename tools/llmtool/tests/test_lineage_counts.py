@@ -82,6 +82,15 @@ def linked(count, *, claims=None):
     return records
 
 
+def forked_chain():
+    """{number: record}: B=tid(2) continues A=tid(1); C=tid(3) and D=tid(4) both continue B."""
+    records = {1: {'task_id': tid(1), 'review_repair_claims': []}}
+    for number, link in ((2, 1), (3, 2), (4, 2)):
+        records[number] = {'task_id': tid(number), 'continues': tid(link),
+                           'review_repair_claims': []}
+    return records
+
+
 class ChainWalkTests(unittest.TestCase):
     def test_task_without_continues_is_its_own_chain(self):
         own = {'task_id': tid(1), 'review_repair_claims': [claim('pr-17', OLD_HEAD)]}
@@ -203,6 +212,38 @@ class ChainCountTests(unittest.TestCase):
         store.records[tid(4)] = {'task_id': tid(4), 'continues': tid(2),
                                  'review_repair_claims': []}
         self.assertEqual(task_advance._test_fail_count(middle, 17, store), UNKNOWN)
+
+    def test_an_ancestor_fork_is_in_doubt_from_every_member(self):
+        # Review F1 (v2): B continues A; C and D both continue B. Counted from
+        # any of the four, the chain is in doubt: every count UNKNOWN, never a
+        # known count that leaves out the other branch's spent repairs.
+        unknown = {'chain': UNKNOWN, 'review_repairs': UNKNOWN,
+                   'review_heads': UNKNOWN, 'test_fails': UNKNOWN}
+        spent = [ec2_claim('pr-17-ec2', OLD_HEAD), ec2_claim('pr-17-ec2', HEAD, attempt=2),
+                 claim('pr-17', OTHER_HEAD, attempt=3), claim('pr-17', HEAD, attempt=4)]
+        for start, opposite in ((1, 3), (1, 4), (2, 3), (2, 4), (3, 4), (4, 3)):
+            records = forked_chain()
+            records[opposite]['review_repair_claims'] = list(spent)
+            store = DictStore(*records.values())
+            with self.subTest(start=start, opposite=opposite):
+                record = store.get(tid(start))
+                self.assertEqual(lineage_counts.lineage_counts(
+                    store, record, base_family='pr-17', include_successors=True), unknown)
+                self.assertEqual(task_advance._test_fail_count(record, 17, store), UNKNOWN)
+        # Without D the same chain is linear: root, middle and leaf all count C's claims.
+        records = forked_chain()
+        del records[4]
+        records[3]['review_repair_claims'] = list(spent)
+        store = DictStore(*records.values())
+        for start in (1, 2, 3):
+            with self.subTest(linear_start=start):
+                counts = lineage_counts.lineage_counts(
+                    store, store.get(tid(start)), base_family='pr-17',
+                    include_successors=True)
+                self.assertEqual(counts['chain'], {
+                    1: [tid(1), tid(2), tid(3)], 2: [tid(2), tid(1), tid(3)],
+                    3: [tid(3), tid(2), tid(1)]}[start])
+                self.assertEqual((counts['review_repairs'], counts['test_fails']), (2, 2))
 
     def test_one_head_failed_in_two_tasks_counts_once(self):
         first = {'task_id': tid(1), 'review_repair_claims': [claim('pr-5', OLD_HEAD, pr=5)]}
@@ -828,6 +869,39 @@ class ChainLockTests(unittest.TestCase):
                               self.refusal_codes(test_failure))
                 self.assertEqual(store.get(MIDDLE).get('review_repair_claims', []), [])
 
+    def test_an_ancestor_fork_refuses_before_any_claim_or_dispatch(self):
+        # Review F1 (v2): OLDEST <- MIDDLE <- NEWEST and FORK <- MIDDLE. The other
+        # branch holds every spent repair; this branch holds none. A repair from
+        # NEWEST, FORK or MIDDLE refuses: the chain is in doubt (UNKNOWN).
+        fork = tid(0x74)
+        for test_failure in (True, False):
+            if test_failure:
+                spent = [ec2_claim('pr-5-ec2', f'{n:040x}', pr=5, attempt=n)
+                         for n in range(1, self.policy['test_fail_max'] + 1)]
+            else:
+                spent = [claim('pr-5', f'{n:040x}', pr=5, attempt=n)
+                         for n in range(1, self.policy['repair_max'] + 1)]
+            for start, opposite in ((NEWEST, fork), (fork, NEWEST), (MIDDLE, fork)):
+                with self.subTest(test_failure=test_failure, start=start):
+                    self.calls.clear()
+                    self.recorded.clear()
+                    branches = {task_id: _current(task_id=task_id, continues=MIDDLE,
+                                                  high_debug=self.rca())
+                                for task_id in (NEWEST, fork)}
+                    branches[opposite]['review_repair_claims'] = list(spent)
+                    store = LockedMemoryStore(
+                        self.root, {'task_id': OLDEST, 'review_repair_claims': []},
+                        _current(task_id=MIDDLE, continues=OLDEST, high_debug=self.rca()),
+                        *branches.values())
+                    before = store.get(start).get('review_repair_claims', [])
+                    with self.patched():
+                        with self.assertRaises(LLMToolError) as caught:
+                            self.dispatch(store, start, test_failure=test_failure)
+                    self.assertIn(caught.exception.review_repair_code,
+                                  self.refusal_codes(test_failure))
+                    self.assertEqual(store.get(start).get('review_repair_claims', []), before)
+                    self.assertEqual((self.recorded, self.calls), ([], []))
+
     def test_a_chain_lock_that_cannot_be_taken_refuses_before_any_count(self):
         store = self.chain_store([])
         self.recorded.clear()
@@ -977,6 +1051,34 @@ class AdvanceChainTests(unittest.TestCase):
                 count = task_advance._test_fail_count(record, 17, store)
                 self.assertEqual(count, {'predecessor used one': 2, 'broken link': UNKNOWN,
                                          'fresh predecessor': 1, 'legacy task': 1}[name])
+
+    def test_an_ancestor_fork_stops_the_test_repair_from_every_member(self):
+        # Review F1 (v2): B continues A; C and D both continue B. The other
+        # branch holds the spent EC2 repairs; from any member advance stops.
+        spent = [ec2_claim('pr-17-ec2', OLD_HEAD), ec2_claim('pr-17-ec2', OTHER_HEAD,
+                                                             attempt=2)]
+        for start, opposite in ((1, 4), (2, 3), (3, 4), (4, 3)):
+            with self.subTest(start=start, opposite=opposite):
+                records = forked_chain()
+                record = _advance_record(task_id=tid(start))
+                if 'continues' in records[start]:
+                    record['continues'] = records[start]['continues']
+                records[start] = record
+                records[opposite]['review_repair_claims'] = list(spent)
+                store = DictStore(*records.values())
+                calls, repaired = [], []
+                with patch.object(task_advance, '_d6_snapshot', return_value=_d6()), \
+                     patch.object(task_advance, '_review_outcomes', return_value=[]):
+                    result = task_advance.advance(
+                        task_id=tid(start), store=store, pr_number=17,
+                        github_get=_linux_failure_get(calls),
+                        dispatch_review_call=lambda **_kw: self.fail('no review'),
+                        repair_review_call=lambda **kw: repaired.append(kw) or {'r': 1})
+                self.assertEqual((result['step'], result['codes']),
+                                 ('STOPPED', ['TEST_FAIL_LIMIT_REACHED']))
+                self.assertEqual(repaired, [])
+                self.assertEqual(task_advance._test_fail_count(
+                    store.get(tid(start)), 17, store), UNKNOWN)
 
     def review_fail(self, store):
         repaired = []

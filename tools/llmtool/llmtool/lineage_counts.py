@@ -6,9 +6,11 @@ its predecessor, that Task's predecessor and so on: at most MAX_CHAIN Tasks.
 Review repairs, failed review HEADs and test failures are summed over the
 chain, so a continuation never resets a limit.
 
-Fail closed (spec section 7): an unreadable or malformed predecessor, a cycle
-or a chain over MAX_CHAIN makes every count repair_policy.UNKNOWN, which the
-policy treats as the limit. A count is never 0 by doubt.
+Fail closed (spec section 7): an unreadable or malformed predecessor, a cycle,
+a fork (one Task continued by two records; with successors counted, anywhere
+in the chain) or a chain over MAX_CHAIN makes every count
+repair_policy.UNKNOWN, which the policy treats as the limit. A count is never
+0 by doubt.
 
 Atomicity (phase 2): record-pm runs check_continues and the create under one
 store-wide continues lock, so a predecessor gets at most one successor. A
@@ -67,13 +69,18 @@ def successor_records(store, task, members):
     """The Tasks that continue task, nearest first, or None when any read is in doubt.
 
     members holds the IDs already in the chain (the Task and its predecessors);
-    their records are not read again. A Task continued by two records, a cycle
-    or a chain over MAX_CHAIN is in doubt.
+    their records are not read again. Every member, the Task's predecessors
+    included, must have at most one successor: each predecessor's one successor
+    is the member before it, so any other record continuing a predecessor is a
+    fork (review F1 v2). A fork anywhere in the chain (at a predecessor, the
+    Task or a later Task), a cycle or a chain over MAX_CHAIN is in doubt, from
+    whichever chain Task the walk starts.
     """
     try:
         task_ids = list(store.task_ids())
     except Exception:
         return None
+    own_id = task.get('task_id')
     by_link = {}
     for other_id in task_ids:
         if other_id in members:
@@ -86,6 +93,9 @@ def successor_records(store, task, members):
             return None
         link = other.get('continues')
         if type(link) is str:
+            if link in members and link != own_id:
+                # An off-path successor of a predecessor: the chain forks.
+                return None
             by_link.setdefault(link, {})[other.get('task_id')] = other
     successors, seen, current = [], set(members), task.get('task_id')
     while current in by_link:
@@ -140,7 +150,9 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
     task_advance._test_fail_count so both agree): every Task that
     continues this one is counted like a predecessor and listed after the
     predecessors, so a repair on an earlier Task of the chain sees the claims
-    of later ones. A store scan in doubt makes every count UNKNOWN.
+    of later ones. A store scan in doubt, or a fork anywhere in the chain
+    (a predecessor, the Task or a later Task continued by two records), makes
+    every count UNKNOWN: an ambiguous chain is never counted from one branch.
     """
     from .review_repair import ec2_claim_kind
     if type(base_family) is not str:
