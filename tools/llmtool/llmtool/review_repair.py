@@ -8,7 +8,7 @@ import re
 import shutil
 from argparse import Namespace
 
-from . import review_result, run_budget, task_completion, worker_dispatch
+from . import review_result, run_budget, task_completion, worker_availability, worker_dispatch
 from .errors import LLMToolError
 from .task_store import REVIEW_DISPUTE_DEFERRABLE, REVIEW_DISPUTE_SEVERITIES, _json_bytes, new_id
 
@@ -693,6 +693,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         worker, developer.get('owner_assignment_ref'), policy_task)
     if not decision.allowed:
         _refuse(decision.reason_code)
+    # #1816: after the Owner policy, before any claim, Task or D6 write.
+    if worker_availability.fresh_quota_fail(store, worker):
+        _refuse(worker_availability.REFUSAL_CODE)
     base_family = f'pr-{pr_number}' if family is None else family
     if (type(base_family) is not str or
             re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or

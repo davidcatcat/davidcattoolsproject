@@ -9,6 +9,7 @@ This is the operational decision boundary for the Integrator/PM. [AGENTS.md](../
 | Ordinary defect, CI/test failure, Reviewer FAIL | Diagnose, bounded fix, relevant retest and exact-HEAD rereview. Do not weaken a gate. |
 | Worker quota, login, VPN, availability or temporary tool failure | Consult current Owner dispatch policy and real availability. Retry safely within task budget, isolate affected Task, or reassign only to an already-authorized qualified route after D6 Writer release. Keep independent work moving. |
 | Task splitting, review sequencing, compliant low-risk change, nonblocking LOW issue | Make and record the decision and next responsible Agent. |
+| Lineage ended `FAILED_FINAL` and a High Debug confirmed a design root cause (Owner O7, #1943) | At most one redesign per root lineage: all counts carry over, no repair budget, no SPLIT, full original acceptance, Owner NOTICE first; an Owner stop command wins. [NOT LIVE] (#1943 WP-8): the `kind=redesign` gate. |
 | Reviewer route unavailable or pairing cannot be staffed | Under [Owner D6 (#846)](https://github.com/davidcatcat/davidcattoolsproject/issues/846), select any already-authorized, qualified formal Reviewer from a different model family. If none is qualified and authorized, mark only that review WAITING and ask the Owner to authorize an eligible pairing. Continue unrelated work; never use a same-family Reviewer or self-review. |
 | Existing eligible reviewed PR | May merge only after all review, exact-head CI, runtime and scope checks are satisfied. |
 
@@ -62,7 +63,8 @@ Each ask carries one structured record with these fields:
 
 `R-OTHER` is the safety valve: never skip a real safety concern because no row fits, and never pick a row just to ask. If `R-OTHER` exceeds 10% of asks, the rules are reviewed. Stopping a dangerous action never needs an Owner question first.
 `pm_owner_marker.py ask` refuses an incomplete or mismatched record before any GitHub call (#1943 WP-1b).
-[NOT LIVE] (#1943): the monitor flag `UNGATED_OWNER_ASK` and the weekly cross-family audit. Until they are live, the PM checks those by hand.
+The weekly audit runs `python3 tools/llmtool/scripts/owner_ask_audit.py --since ISO --until ISO` (#1943 WP-1d). It is read-only and reports the week's asks, gated and ungated asks, the count per row and the `R-OTHER` ratio. A Reviewer from another family than the PM's checks `R-OTHER` asks and at least 20% of the others.
+[NOT LIVE] (#1943): the monitor flag `UNGATED_OWNER_ASK`. Until it is live, the weekly audit's `ungated` count is the check.
 
 ## Standing PM cleanup (Owner O2, #1943)
 

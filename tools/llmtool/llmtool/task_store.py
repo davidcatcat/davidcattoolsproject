@@ -6,6 +6,7 @@ that the selected provider exposes a resumable native session.
 """
 
 import contextlib
+import copy
 import errno
 import fcntl
 import hashlib
@@ -532,12 +533,14 @@ _TASK_STORE_CONTENTION_ERRNOS = frozenset(
     value for value in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EBUSY, errno.EINTR,
                         errno.ENOLCK)
     if value is not None)
+# #1816: gw-agent is a worker key; 'quota' holds Developer outcome observations
+# (worker_availability.observe). company-gw stays readable but is never written.
 WORKER_KEYS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
-    'company-gw', 'claude-reviewer',
+    'company-gw', 'gw-agent', 'claude-reviewer',
 ))
 WORKER_LAYERS = frozenset((
-    'runtime', 'endpoint', 'authentication', 'inference', 'task_acceptance',
+    'runtime', 'endpoint', 'authentication', 'inference', 'task_acceptance', 'quota',
 ))
 WORKER_OBSERVATION_STATUSES = frozenset(('PASS', 'FAIL', 'UNKNOWN'))
 WORKER_OBSERVATION_SOURCES = frozenset((
@@ -3671,6 +3674,22 @@ class TaskStore:
         finally:
             os.close(directory)
 
+    def _note_developer_write(self, task_id, record):
+        writes = self.__dict__.setdefault('_developer_writes', {})
+        count, _record = writes.get(task_id, (0, None))
+        writes[task_id] = (count + 1, copy.deepcopy(record))
+
+    def developer_write(self, task_id):
+        """#1816: (count, record) for this instance's Developer changes to task_id.
+
+        In memory only: it reads no Task file, so the quota layer observes the
+        outcome a run wrote without adding a Task read. count is how many
+        committed writes by this instance changed the Developer record; record
+        is a copy of the last such committed record, or None.
+        """
+        count, record = self.__dict__.get('_developer_writes', {}).get(task_id, (0, None))
+        return count, copy.deepcopy(record)
+
     def update(self, task_id, **changes):
         return self._update(task_id, expected=None, changes=changes)
 
@@ -5567,6 +5586,8 @@ class TaskStore:
                           self._d6_live_ids(current))
                 if not gained <= d6_claims:
                     raise _D6ClaimRequired(gained)
+            developer_changed = ('developer' in changes and
+                                 changes['developer'] != current.get('developer'))
             current.update(changes)
             if trusted_split == 'RELEASE':
                 # An uncommitted reservation leaves no lineage at all behind.
@@ -5574,7 +5595,10 @@ class TaskStore:
             current['updated_at'] = datetime.now(timezone.utc).replace(
                 microsecond=0).isoformat().replace('+00:00', 'Z')
             current['record_sha256'] = _digest(current)
-            return self._write(current, create=False)
+            saved = self._write(current, create=False)
+            if developer_changed:
+                self._note_developer_write(task_id, saved)
+            return saved
         finally:
             try:
                 if locked:

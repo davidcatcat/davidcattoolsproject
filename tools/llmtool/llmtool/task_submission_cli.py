@@ -36,6 +36,7 @@ from . import task_completion
 from . import opencode_direct_developer
 from . import codex_direct_developer
 from . import worker_dispatch
+from . import worker_availability
 from . import gateway_profiles
 from . import repair_policy
 from .developer_output_normalize import _HUNK
@@ -169,6 +170,64 @@ def _background_read(fd):
     return value
 
 
+_UNREAD = object()
+
+
+def _developer_of(store, task_id):
+    try:
+        record = store.get(task_id)
+    except Exception:
+        return _UNREAD
+    return copy.deepcopy(record.get('developer')) if type(record) is dict else _UNREAD
+
+
+def _store_implements(store, name):
+    """Whether the store's class defines ``name``; never consults the instance."""
+    try:
+        return callable(getattr(type(store), name, None))
+    except Exception:
+        return False
+
+
+def _with_quota_observation(store, task_id, call):
+    """#1816: run one delegate, then record its outcome in the quota layer.
+
+    Only a Developer record this run changed is observed. Recording is evidence
+    only; its failure never changes the delegate's result or exception.
+
+    It adds no Task read, so the route's own validations (a supplied owner ref
+    first) still come before any store read. A TaskStore reports in memory the
+    record its own committed Developer writes left (developer_write). A store
+    whose class has no record_worker_observation is never touched; only one
+    that records observations but cannot report its writes falls back to get().
+    """
+    if not _store_implements(store, 'record_worker_observation'):
+        return call()
+    counted = _store_implements(store, 'developer_write')
+    try:
+        before = (store.developer_write(task_id)[0] if counted
+                  else _developer_of(store, task_id))
+        observable = True
+    except Exception:
+        observable = False
+    try:
+        return call()
+    finally:
+        try:
+            if not observable:
+                pass
+            elif counted:
+                count, record = store.developer_write(task_id)
+                if count != before and type(record) is dict:
+                    worker_availability.observe(store, record)
+            else:
+                record = store.get(task_id)
+                if type(record) is dict and record.get('developer') != before:
+                    worker_availability.observe(store, record)
+        except Exception:
+            pass
+
+
 def _run_background_delegate(args, *, provider, store, d6_binding):
     """Run the existing direct delegate path in a detached, double-forked child."""
     if not hasattr(os, 'fork') or not hasattr(os, 'setsid'):
@@ -208,8 +267,9 @@ def _run_background_delegate(args, *, provider, store, d6_binding):
                     result = (run_task_codex_delegate(
                         args, store=store, d6_binding=d6_binding)
                         if provider == 'codex' else
-                        run_task_opencode_delegate(
-                            args, store=store, d6_binding=d6_binding))
+                        _with_quota_observation(
+                            store, args.task_id, lambda: run_task_opencode_delegate(
+                                args, store=store, d6_binding=d6_binding)))
                 _background_send(write_fd, {'kind': 'finished', 'return_code': result,
                                             'output': output.getvalue()})
             except BaseException as exc:
@@ -7435,7 +7495,8 @@ def run_task_delegate(args, *, store=None):
         # (None accepted) before any store read or Task mutation.
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         _check_delegate_repair_cap(args, store)
-        return run_task_agy_delegate(args, store=store)
+        return _with_quota_observation(
+            store, args.task_id, lambda: run_task_agy_delegate(args, store=store))
     if args.provider == 'claude':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider claude requires --mode direct')
@@ -7443,12 +7504,14 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('--provider claude does not support --background')
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         _check_delegate_repair_cap(args, store)
-        return run_task_claude_delegate(args, store=store)
+        return _with_quota_observation(
+            store, args.task_id, lambda: run_task_claude_delegate(args, store=store))
     if args.provider == 'gw-agent':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider gw-agent requires --mode direct')
         _check_delegate_repair_cap(args, store)
-        return run_task_gw_agent_delegate(args, store=store)
+        return _with_quota_observation(
+            store, args.task_id, lambda: run_task_gw_agent_delegate(args, store=store))
     _validate_acceptance_scope(args.acceptance)
     if getattr(args, 'mode', 'proposal') == 'direct':
         if args.provider != 'codex':
@@ -7457,7 +7520,8 @@ def run_task_delegate(args, *, store=None):
         return run_task_codex_delegate(args, store=store)
     if args.provider == 'opencode':
         _check_delegate_repair_cap(args, store)
-        return run_task_opencode_delegate(args, store=store)
+        return _with_quota_observation(
+            store, args.task_id, lambda: run_task_opencode_delegate(args, store=store))
     if args.provider != 'codex':
         raise LLMToolError('unsupported Developer route')
     if not getattr(args, 'context_stdin', False) and not hasattr(args, 'context'):
@@ -7672,6 +7736,17 @@ def run_task_delegate_checked(args, *, store=None):
     except pm_caller.PMCallerRefused as exc:
         _print(pm_caller.refusal(args.task_id, exc.code), None)
         return 1
+    # #1816: a fresh quota FAIL refuses before any Task or D6 write. An Owner
+    # policy refusal comes first (quota_refusal then defers to the route).
+    worker = worker_dispatch.worker_key_for(getattr(args, 'provider', None))
+    policy_task = (getattr(args, 'executor_task', None) if worker == 'claude-developer'
+                   else args.task_id)
+    code = worker_availability.quota_refusal(
+        store, worker, owner_assignment_ref=getattr(args, 'owner_ref', None),
+        policy_task_id=policy_task)
+    if code is not None:
+        raise LLMToolError(f'{code}: a fresh quota observation for {worker} is FAIL; '
+                           'no Task or D6 write was made')
     return run_task_delegate(args, store=store)
 
 
