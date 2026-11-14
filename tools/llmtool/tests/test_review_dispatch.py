@@ -807,7 +807,8 @@ class ReviewDispatchTests(unittest.TestCase):
             command_path='/bin:/usr/bin')
         self.assertEqual(argv[1:5], developer_argv[1:5])
 
-    def test_nonzero_codex_exit_keeps_only_screened_bounded_stderr(self):
+    def test_nonzero_codex_exit_message_holds_no_stderr_text(self):
+        # #1946: the refusal names no stderr text, screened or not.
         fake_stderr = b'codex reviewer failed safely'
         result = SimpleNamespace(returncode=2, stdout=b'', stderr=fake_stderr)
         with patch.object(review_dispatch.shutil, 'which', return_value='/bin/codex'), \
@@ -818,9 +819,11 @@ class ReviewDispatchTests(unittest.TestCase):
                 review_dispatch._dispatch_codex(
                     reviewer_root='/repo/reviewer-d6', prompt='review prompt',
                     task={'task_id': TASK}, head=HEAD)
-        screen.assert_called_once_with(fake_stderr.decode('utf-8'), 65536)
+        screen.assert_not_called()
         self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
-        self.assertIn(fake_stderr.decode('utf-8'), str(raised.exception))
+        self.assertEqual(str(raised.exception),
+                         'Codex Reviewer exited unsuccessfully; details omitted')
+        self.assertNotIn('failed safely', str(raised.exception))
 
     def test_codex_review_parser_requires_standard_bound_review_text(self):
         raw = _codex_event_stream(_codex_review_text(version=2))
