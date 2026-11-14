@@ -181,6 +181,18 @@ def _update_claim_state(store, task_id, claim, state):
     _refuse('REPAIR_CLAIM_UNAVAILABLE')
 
 
+def _quota_gate(store, worker):
+    """#1816: refuse a repair while the worker has a fresh quota FAIL."""
+    from . import worker_availability
+
+    try:
+        worker_availability.quota_gate(store, worker)
+    except worker_availability.WorkerQuotaUnavailable as exc:
+        _refuse(exc.code)
+    except worker_dispatch.WorkerDispatchDenied as exc:
+        _refuse(exc.dispatch_code)
+
+
 def _worker_key(profile):
     return {'company-gw': 'company-gw', 'gw-agent': 'gw-agent',
             'opencode': 'opencode-developer', 'claude': 'claude-developer',
@@ -621,6 +633,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         worker, developer.get('owner_assignment_ref'), policy_task)
     if not decision.allowed:
         _refuse(decision.reason_code)
+    # #1816: a fresh quota FAIL refuses before any repair Task, claim or count.
+    _quota_gate(store, worker)
     base_family = f'pr-{pr_number}' if family is None else family
     if (type(base_family) is not str or
             re.fullmatch(r'[a-z0-9._-]{1,64}', base_family) is None or
@@ -787,6 +801,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if adapter is None:
         adapter = lambda **request: _delegate_repair(
             **request, delegate=delegate_callable, store=store)
+    from . import worker_availability
+    before_developer = worker_availability.developer_snapshot(
+        store, repair_task['task_id'])
     try:
         # Revalidate after recording so a D6 moved during repair Task creation
         # cannot redirect the provider; the pre-write head check above ensures
@@ -796,7 +813,11 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                          model=developer.get('model'))
     except Exception:
         _update_claim_state(store, task_id, claim, 'UNKNOWN')
+        worker_availability.record_delegate_outcome(
+            store, worker, repair_task['task_id'], before_developer)
         raise
+    worker_availability.record_delegate_outcome(
+        store, worker, repair_task['task_id'], before_developer)
     _update_claim_state(store, task_id, claim, 'DISPATCHED')
     claim['state'] = 'DISPATCHED'
     response = {'result': result, 'attempt': claim['attempt'],

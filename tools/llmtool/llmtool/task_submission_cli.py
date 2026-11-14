@@ -7370,15 +7370,29 @@ def run_task_delegate_checked(args, *, store=None):
     #1230 A1 (#1124 rest, item 2): only the CLI checks the caller.
     ``review_repair`` makes its internal delegate by calling ``run_task_delegate``
     directly, so that call is not checked here.
+
+    #1816: after the caller check, a fresh quota FAIL for the route's worker
+    refuses WORKER_QUOTA_UNAVAILABLE before any Task or D6 write; the quota
+    outcome is recorded after the delegate returns.
     """
     from . import pm_caller
+    from . import worker_availability
     store = TaskStore() if store is None else store
     try:
         pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
     except pm_caller.PMCallerRefused as exc:
         _print(pm_caller.refusal(args.task_id, exc.code), None)
         return 1
-    return run_task_delegate(args, store=store)
+    worker_key = worker_availability.delegate_worker_key(getattr(args, 'provider', None))
+    if worker_key is None:
+        return run_task_delegate(args, store=store)
+    worker_availability.quota_gate(store, worker_key)
+    before = worker_availability.developer_snapshot(store, args.task_id)
+    try:
+        return run_task_delegate(args, store=store)
+    finally:
+        worker_availability.record_delegate_outcome(
+            store, worker_key, args.task_id, before)
 
 
 def run_task_submit(args, *, store=None, stdout=None):
