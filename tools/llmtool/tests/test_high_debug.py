@@ -2145,6 +2145,10 @@ class _Store:
     def __init__(self):
         self.entries = []
         self.events = []
+    def task_ids(self):
+        # #1502 WP-D phase 2: Debug admission scans the store for the chain;
+        # this store holds only the one Task every test debugs.
+        return ['a' * 32]
     def get(self, task_id):
         return {'task_id': task_id, 'run_id': 'b' * 32,
                 'review_repair_claims': [
