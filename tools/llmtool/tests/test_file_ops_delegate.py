@@ -194,7 +194,10 @@ class _DelegateCase(_StoreCase):
                                acceptance=['Docs are archived'], cwd=self.root)
         for name, value in changes.items():
             setattr(args, name, value)
-        with mock.patch.object(cli, '_delegate_d6_binding', side_effect=self.binding), \
+        # The agy/opencode/claude/gw-agent timeout default comes from the host
+        # route config, which a CI runner may not have; it is not under test here.
+        with mock.patch.object(cli, '_delegate_timeout', return_value=600), \
+                mock.patch.object(cli, '_delegate_d6_binding', side_effect=self.binding), \
                 mock.patch.object(cli, '_check_delegate_repair_cap', return_value=None,
                                   side_effect=repair_cap), \
                 mock.patch.object(cli, 'run_task_codex_delegate',
@@ -411,10 +414,12 @@ class DelegateRefusalLeavesD6UntouchedTests(_DelegateCase):
         task = self.record_pm(MOVE_AND_DELETE)
         order = []
         real_plan = file_ops.plan
+        real_evaluate = cli.worker_dispatch.evaluate
 
         def evaluate(*args, **kwargs):
+            # The real (fixture all-ALLOWED) decision; only the call order is recorded.
             order.append('dispatch-gate')
-            return SimpleNamespace(allowed=True, reason_code='OWNER_POLICY_ALLOWED')
+            return real_evaluate(*args, **kwargs)
 
         def plan(*args, **kwargs):
             order.append('file_ops')
@@ -423,7 +428,10 @@ class DelegateRefusalLeavesD6UntouchedTests(_DelegateCase):
         with mock.patch.object(cli.worker_dispatch, 'evaluate', side_effect=evaluate), \
                 mock.patch.object(file_ops, 'plan', side_effect=plan):
             self.assertEqual(0, self.delegate(task['task_id']))
-        self.assertEqual(['dispatch-gate', 'file_ops'], order)
+        # The dispatch gate decides before file_ops plan; later store writes may
+        # consult the policy again, so only the leading order is fixed.
+        self.assertEqual(['dispatch-gate', 'file_ops'], order[:2])
+        self.assertEqual(1, order.count('file_ops'))
         self.assertEqual(1, len(self.route_calls))
         self.assertEqual('VERIFIED', self.route_calls[0]['evidence']['status'])
 
