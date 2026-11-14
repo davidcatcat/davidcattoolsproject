@@ -106,8 +106,18 @@ class ClaudeNoChangesDiagnosisRouteTests(unittest.TestCase):
         status, developer = self._run(_cli_stdout(
             result='Read the files.\nNo edit was needed.\n\n   \n', num_turns=4))
         self._assert_no_changes_evidence(status, developer)
+        # Four turns with no denial does not prove no write was tried: UNKNOWN.
         self.assertEqual(developer['no_changes_diagnosis'], {
-            'reason': 'No edit was needed.', 'write_attempted': 'NO', 'num_turns': 4})
+            'reason': 'No edit was needed.', 'write_attempted': 'UNKNOWN', 'num_turns': 4})
+
+    def test_ordinary_line_endings_are_kept(self):
+        for text in ('Read the files.\r\nNo edit was needed.\r\n',
+                     'Read the files.\rNo edit was needed.'):
+            with self.subTest(text=repr(text)):
+                status, developer = self._run(_cli_stdout(result=text))
+                self._assert_no_changes_evidence(status, developer)
+                self.assertEqual(developer['no_changes_diagnosis']['reason'],
+                                 'No edit was needed.')
 
     def test_screen_hit_gives_unknown_and_keeps_no_provider_text(self):
         for text in (f'First line.\nThe {_MARKER} line.',
@@ -130,6 +140,24 @@ class ClaudeNoChangesDiagnosisRouteTests(unittest.TestCase):
                 self._assert_no_changes_evidence(status, developer)
                 self.assertEqual(developer['no_changes_diagnosis']['reason'], 'UNKNOWN')
 
+    def test_control_characters_are_refused_before_normalizing(self):
+        # Each would otherwise be split away or stripped and leave a clean line.
+        for text in ('Earlier line\x1bpart.\nNo edit was needed.',
+                     'Part one\x1cNo edit was needed.',
+                     'Part one\x1eNo edit was needed.',
+                     'Part one\x85No edit was needed.',
+                     'Part one\x0bNo edit was needed.',
+                     'Part one\x0cNo edit was needed.',
+                     '\tNo edit was needed.',
+                     'No edit was needed.\x00',
+                     'No edit was needed.\x7f',
+                     '\x9bNo edit was needed.',
+                     'Part one No edit was needed.'):
+            with self.subTest(text=repr(text)):
+                status, developer = self._run(_cli_stdout(result=text))
+                self._assert_no_changes_evidence(status, developer)
+                self.assertEqual(developer['no_changes_diagnosis']['reason'], 'UNKNOWN')
+
     def test_long_line_is_cut_to_200_characters(self):
         line = 'The requested change was already present in the file. ' * 8
         status, developer = self._run(_cli_stdout(result='Intro.\n' + line))
@@ -139,23 +167,39 @@ class ClaudeNoChangesDiagnosisRouteTests(unittest.TestCase):
         self.assertEqual(reason, line.strip()[:200].rstrip())
         self.assertNotIn('\n', reason)
 
-    def test_write_attempted_comes_only_from_permission_denials(self):
+    def test_write_attempted_comes_only_from_structured_fields(self):
+        write = {'tool_name': 'Write', 'tool_input': {'file_path': 'src.py'}}
+        edit = {'tool_name': 'Edit', 'tool_input': {'file_path': 'src.py'}}
+        read = {'tool_name': 'Read', 'tool_input': {}}
         cases = (
-            ([{'tool_name': 'Write', 'tool_input': {'file_path': 'src.py'}}], 'YES'),
-            ([{'tool_name': 'Read', 'tool_input': {}},
-              {'tool_name': 'Edit', 'tool_input': {'file_path': 'src.py'}}], 'YES'),
-            ([{'tool_name': 'Read', 'tool_input': {}}], 'NO'),
-            ([], 'NO'),
-            (_DROP, 'UNKNOWN'),
-            ('Write', 'UNKNOWN'),
-            ([{'tool_name': 5}], 'UNKNOWN'),
-            ([{'tool_name': 'Write'}, 'Edit'], 'UNKNOWN'),
+            # YES: an explicit write-tool permission denial.
+            ({'permission_denials': [write]}, 'YES'),
+            ({'permission_denials': [read, edit]}, 'YES'),
+            ({'permission_denials': [write], 'num_turns': 1}, 'YES'),
+            ({'permission_denials': [write], 'num_turns': _DROP}, 'YES'),
+            # NO: a successful result of at most one turn and no denial.
+            ({'permission_denials': [], 'num_turns': 1}, 'NO'),
+            ({'permission_denials': [], 'num_turns': 0}, 'NO'),
+            # UNKNOWN: absent denials alone do not prove no write was tried.
+            ({'permission_denials': []}, 'UNKNOWN'),
+            ({'permission_denials': [read]}, 'UNKNOWN'),
+            ({'permission_denials': [read], 'num_turns': 1}, 'UNKNOWN'),
+            ({'permission_denials': [], 'num_turns': _DROP}, 'UNKNOWN'),
+            ({'permission_denials': [], 'num_turns': '1'}, 'UNKNOWN'),
+            ({'permission_denials': [], 'num_turns': True}, 'UNKNOWN'),
+            ({'permission_denials': [], 'num_turns': 1,
+              'subtype': 'error_max_turns'}, 'UNKNOWN'),
+            ({'permission_denials': [], 'num_turns': 1, 'is_error': True}, 'UNKNOWN'),
+            ({'permission_denials': _DROP, 'num_turns': 1}, 'UNKNOWN'),
+            ({'permission_denials': 'Write'}, 'UNKNOWN'),
+            ({'permission_denials': [{'tool_name': 5}]}, 'UNKNOWN'),
+            ({'permission_denials': [{'tool_name': 'Write'}, 'Edit']}, 'UNKNOWN'),
         )
-        for denials, expected in cases:
-            with self.subTest(denials=repr(denials)):
+        for fields, expected in cases:
+            with self.subTest(fields=repr(fields)):
                 # The result text never decides the value.
                 status, developer = self._run(_cli_stdout(
-                    result='I could not write the file.', permission_denials=denials))
+                    result='I could not write the file.', **fields))
                 self._assert_no_changes_evidence(status, developer)
                 self.assertEqual(
                     developer['no_changes_diagnosis']['write_attempted'], expected)
@@ -168,11 +212,11 @@ class ClaudeNoChangesDiagnosisRouteTests(unittest.TestCase):
                 self._assert_no_changes_evidence(status, developer)
                 self.assertEqual(developer['no_changes_diagnosis']['num_turns'], expected)
 
-    def test_result_without_parsed_cli_object_is_all_unknown(self):
+    def test_result_without_parsed_cli_object_gets_no_diagnosis(self):
+        # The run returned a result but the route kept no parsed CLI object.
         status, developer = self._run(None)
         self._assert_no_changes_evidence(status, developer)
-        self.assertEqual(developer['no_changes_diagnosis'], {
-            'reason': 'UNKNOWN', 'write_attempted': 'UNKNOWN', 'num_turns': 'UNKNOWN'})
+        self.assertNotIn('no_changes_diagnosis', developer)
 
     def test_other_outcomes_get_no_diagnosis(self):
         stdout = _cli_stdout(result='Edited the file.')

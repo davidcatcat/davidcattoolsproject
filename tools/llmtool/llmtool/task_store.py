@@ -316,6 +316,8 @@ def _valid_no_changes_diagnosis(developer):
     turns = diagnosis['num_turns']
     return (turns == 'UNKNOWN' if type(turns) is str else
             type(turns) is int and 0 <= turns <= _NO_CHANGES_MAX_TURNS)
+
+
 _DEVELOPER_UNTIMED_SHAPES = (
     _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
     _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),

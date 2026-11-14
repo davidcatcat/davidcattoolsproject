@@ -5375,11 +5375,16 @@ class _DiagnosedClaudeRoute(ClaudeRoute):
 def _claude_no_changes_reason(text):
     """Last non-empty line of the CLI result text, screened and cut; else UNKNOWN.
 
-    A screen hit or non-printable text gives UNKNOWN; provider text is never
-    reworded to pass the screen."""
+    Any C0/C1 control character other than CR or LF, a screen hit or other
+    non-printable text gives UNKNOWN. Control characters are refused before the
+    text is split or stripped; provider text is never reworded to pass the screen."""
     if type(text) is not str:
         return 'UNKNOWN'
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if any((ord(char) < 0x20 and char not in '\r\n') or 0x7f <= ord(char) <= 0x9f
+           for char in text):
+        return 'UNKNOWN'
+    lines = [line.strip() for line in
+             text.replace('\r\n', '\n').replace('\r', '\n').split('\n') if line.strip()]
     if not lines:
         return 'UNKNOWN'
     line = lines[-1]
@@ -5394,24 +5399,31 @@ def _claude_no_changes_reason(text):
     return reason
 
 
-def _claude_no_changes_diagnosis(route):
-    """#1824: {reason, write_attempted, num_turns} from structured CLI fields only."""
+def _claude_no_changes_diagnosis(raw):
+    """#1824: {reason, write_attempted, num_turns} from structured CLI fields only.
+
+    write_attempted is YES only on a well-formed permission denial for a write
+    tool. It is NO only when the structured fields prove no tool ran at all: a
+    successful, non-error result of at most one model turn (any tool call needs a
+    further turn) with an empty denial list. An absent denial alone proves nothing
+    (an allowed write is not denied), so anything else is UNKNOWN. The result text
+    never decides the value."""
     try:
-        raw = getattr(route, 'parsed_cli_result', None)
-        if type(raw) is not dict:
-            raw = {}
         denials = raw.get('permission_denials')
+        turns = raw.get('num_turns')
+        if type(turns) is not int or not 0 <= turns <= _NO_CHANGES_MAX_TURNS:
+            turns = 'UNKNOWN'
         if (type(denials) is not list or
                 any(type(item) is not dict or type(item.get('tool_name')) is not str
                     for item in denials)):
             write_attempted = 'UNKNOWN'
         elif any(item['tool_name'] in _CLAUDE_WRITE_TOOLS for item in denials):
             write_attempted = 'YES'
-        else:
+        elif (not denials and type(turns) is int and turns <= 1 and
+              raw.get('subtype') == 'success' and raw.get('is_error') is False):
             write_attempted = 'NO'
-        turns = raw.get('num_turns')
-        if type(turns) is not int or not 0 <= turns <= _NO_CHANGES_MAX_TURNS:
-            turns = 'UNKNOWN'
+        else:
+            write_attempted = 'UNKNOWN'
         return {'reason': _claude_no_changes_reason(raw.get('result')),
                 'write_attempted': write_attempted, 'num_turns': turns}
     except Exception:
@@ -5708,9 +5720,12 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None}, usage=usage)
-        if result is not None and error_code == 'CLAUDE_NO_CHANGES':
-            # #1824: bounded, screened diagnosis from the parsed CLI result only.
-            developer['no_changes_diagnosis'] = _claude_no_changes_diagnosis(route)
+        parsed_cli_result = getattr(route, 'parsed_cli_result', None)
+        if (result is not None and error_code == 'CLAUDE_NO_CHANGES' and
+                type(parsed_cli_result) is dict):
+            # #1824: bounded, screened diagnosis only from this run's parsed CLI result.
+            developer['no_changes_diagnosis'] = _claude_no_changes_diagnosis(
+                parsed_cli_result)
         if owner_gate_denied:
             developer['blocked_reason'] = 'OWNER_DISPATCH_DENIED'
         elif exc.blocked_reason is not None:
