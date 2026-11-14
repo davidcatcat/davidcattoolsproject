@@ -149,6 +149,15 @@ A chat reply is never a Task: to dispatch work, /pm connect and tell the PM.%s""
 # llmtool chat --tui --dev; without it /task prints TASK_HIDDEN and nothing else.
 DEV_ENV = "LLMTOOL_TUI_DEV"
 TASK_HIDDEN = "Task 模式是開發測試用；要派工請用 /pm connect 和 PM 說"
+# #1819 (Owner B): the read-only Task views (/task list, /task show TASK_ID, /task events and
+# their F2/F3/F4 panes) work without developer mode; /task submit and /task mode stay
+# developer-only and print TASK_HIDDEN.
+READ_ONLY_TASK_COMMANDS = ("/task list", "/task show", "/task events")
+READ_TASK_HELP = """
+Task views (read-only, local TaskStore; nothing is submitted or dispatched)
+  /task show TASK_ID    Open a Task's detail
+  /task list            Open the Task list (stage, update time, request) from TaskStore
+  /task events          Open recent events across Tasks (inbox, GitHub, tests, reviews)"""
 DEV_KEY_HELP = """  F2                    Toggle the last Task detail (Esc also closes it)
   F3                    Toggle the Task list (/task list): Up/Down choose, Enter opens the
                         detail, a shows all / hides completed or idle groups, F5 or r refreshes,
@@ -187,11 +196,18 @@ def dev_enabled(environ=None):
 
 
 def key_help(dev):
-    """The key and command help; the Task (developer/test) parts only with the dev flag."""
+    """The key and command help; Task submit and mode help only with the dev flag (#1819)."""
     if dev:
         return KEY_HELP % (DEV_KEY_HELP, DEV_EXIT_HELP, chat_tui_status.REFRESH_SECONDS,
                            DEV_TASK_HELP)
-    return KEY_HELP % ("", "", chat_tui_status.REFRESH_SECONDS, "")
+    return KEY_HELP % (DEV_KEY_HELP, "", chat_tui_status.REFRESH_SECONDS, READ_TASK_HELP)
+
+
+def read_only_task_command(text):
+    """#1819: True for exactly /task list, /task events or /task show TASK_ID."""
+    words = text.split()
+    return (words in (["/task", "list"], ["/task", "events"]) or
+            (len(words) == 3 and words[:2] == ["/task", "show"]))
 
 
 # Existing commands only: (label shown, text a completion puts in the draft, summary).
@@ -329,11 +345,12 @@ def _enable_mouse_drag_reporting(output):
 
 def slash_matches(text, dev=True):
     """Commands matching a one-line slash draft: prefix matches first, then substring.
-    Without the dev flag the /task commands are not offered."""
+    Without the dev flag only the read-only /task commands are offered (#1819)."""
     if "\n" in text or not text.startswith("/"):
         return []
     query = text.lower()
-    commands = [c for c in SLASH_COMMANDS if dev or not c[0].startswith("/task")]
+    commands = [c for c in SLASH_COMMANDS if dev or not c[0].startswith("/task")
+                or c[0] in READ_ONLY_TASK_COMMANDS]
     # Keep the command table's order: new commands are appended there so they do
     # not move existing picker entries when they happen to share a prefix.
     ordered = commands
@@ -1293,15 +1310,15 @@ class ChatTUI:
         def _help(event):
             self.toggle_help()
 
-        @keys.add("f2", filter=Condition(lambda: self.dev))
+        @keys.add("f2")
         def _detail(event):
             self.toggle_detail(not self.show_detail)
 
-        @keys.add("f3", filter=Condition(lambda: self.dev))
+        @keys.add("f3")
         def _list(event):
             self.toggle_list(not self.show_list)
 
-        @keys.add("f4", filter=Condition(lambda: self.dev))
+        @keys.add("f4")
         def _events(event):
             self.toggle_events(not self.show_events)
 
@@ -1606,6 +1623,9 @@ class ChatTUI:
         ]
         if self.dev:
             lines.extend(("Developer tools", "  /task ...               Developer and test commands"))
+        else:
+            lines.extend(("Task views (read-only)",
+                          "  /task list, /task show TASK_ID, /task events  (F3, F2, F4)"))
         return "\n".join(lines)
 
     def status_report(self):
@@ -1862,7 +1882,8 @@ class ChatTUI:
         # Tab completion is narrower than the interactive picker's fuzzy search:
         # only commands whose full label starts with the typed draft are candidates.
         commands = [command for command in SLASH_COMMANDS
-                    if self.dev or not command[0].startswith("/task")]
+                    if self.dev or not command[0].startswith("/task")
+                    or command[0] in READ_ONLY_TASK_COMMANDS]
         matches = [command for command in commands if command[0].startswith(text)]
         if not matches:
             self.close_menu()
@@ -2648,7 +2669,7 @@ class ChatTUI:
             self.run_pm_command(text)
             return
         if text.strip().split(maxsplit=1)[0] == "/task":
-            if self.dev:
+            if self.dev or read_only_task_command(text):
                 self.run_task_command(text)
             else:
                 self.append("llmtool: " + TASK_HIDDEN)
@@ -3443,8 +3464,7 @@ class ChatTUI:
             hint = "llmtool: 沒有背景 Task；PM 派工後 ↓ 可看"
         else:
             hint = "llmtool: 沒有 Task 面板；/pm connect 連 PM 後 ↓ 看背景 Task"
-        if self.dev:
-            hint += "；F3 看 Task 清單"
+        hint += "；F3 看 Task 清單"
         if not self.conversation.text.rstrip("\n").endswith(hint):
             self.append(hint)
 
