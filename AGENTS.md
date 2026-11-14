@@ -60,7 +60,7 @@
   - Never buy points or enable a paid fallback.
 
 - **AI Debug (Owner 2026-10-27, [decision](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6437493012); [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502) O2, D1, D3, D4):**
-  - Today the PM assigns a separate, bounded, read-only diagnostic Task to Codex CLI `gpt-6.1-sol` through the `codex-developer` dispatch key (現行), under all dispatch, availability, data/D6 and budget gates. Separate `codex-debug` and `claude-debug` keys, switching to Claude Debug only when Codex reports quota exhausted or login failed, are 待實作（WP-B）.
+  - The PM runs a separate, bounded, read-only AI Debug with `llmtool task high-debug`, under all dispatch, availability, data/D6 and budget gates. It uses Codex CLI `gpt-6.1-sol` under the `codex-debug` dispatch key and switches to Claude Debug (`claude-debug`) only when Codex reports quota exhausted or login failed (WP-B).
   - The second valid review FAIL triggers AI Debug. Repairs are two in total: one after the first FAIL and one after Debug confirms the cause (D1). A third valid FAIL splits the Task into at most 3 child Tasks, then one PM REPLAN or a DROP with a recorded reason (D3). The counting gates are 待實作（WP-D）.
   - A Task that does not end successfully notifies the Owner; a successful one does not (D4). Debug grants no model default change, write authority, provider fallback or formal Reviewer acceptance. Follow the [High Debug report](skills/ai-team-delivery/high-debug-report.md), [PM continuation](skills/ai-team-delivery/pm-continuation.md) and [defect triage](skills/ai-team-delivery/defect-triage.md).
 

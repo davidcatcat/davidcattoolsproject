@@ -6,7 +6,7 @@ This report is mandatory for a PM-assigned High Debug Task. Follow the [PM Conti
 
 ## Trigger, identity and authority
 
-The trigger is an ordinary repair failure in the same confirmed root-cause/finding family before the 2nd repair 待實作（WP-D）, following the [repair cap](pm-continuation-reference.md#repair-cap). High-risk or deep technical uncertainty may trigger earlier when the PM records its evidence. The preferred diagnostic Worker is **`codex-developer` / Codex CLI / `gpt-6.1-sol`**, with high reasoning when supported. Use it only when existing dispatch, model availability, evidence/egress, D6 and task-budget gates permit, in a verified read-only context. Do not purchase or silently substitute a provider or model. A Debug report authorizes no mutation and does not replace independent review.
+The trigger is an ordinary repair failure in the same confirmed root-cause/finding family before the 2nd repair 待實作（WP-D）, following the [repair cap](pm-continuation-reference.md#repair-cap). High-risk or deep technical uncertainty may trigger earlier when the PM records its evidence. The diagnostic Worker is **`codex-debug` / Codex CLI / `gpt-6.1-sol`**, run with `llmtool task high-debug`, with high reasoning when supported. It falls back to `claude-debug` only when Codex reports quota exhausted or login failed (WP-B). Use it only when existing dispatch, model availability, evidence/egress, D6 and task-budget gates permit, in a verified read-only context. Do not purchase or silently substitute a provider or model. A Debug report authorizes no mutation and does not replace independent review.
 
 ## Mandatory report
 
@@ -24,7 +24,7 @@ The trigger is an ordinary repair failure in the same confirmed root-cause/findi
 
 ```text
 HIGH DEBUG / Task: <id> / PR: <url> / examined SHA: <40-hex>
-Worker: codex-developer | CLI/model: Codex / gpt-6.1-sol | reasoning: <verified or UNKNOWN>
+Worker: codex-debug | CLI/model: Codex / gpt-6.1-sol | reasoning: <verified or UNKNOWN>
 Failure family: <id> | failed corrections: 1 | evidence: <references>
 
 Root Cause: CONFIRMED | HYPOTHESIS | UNKNOWN
