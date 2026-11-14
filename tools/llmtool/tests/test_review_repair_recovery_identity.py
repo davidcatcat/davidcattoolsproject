@@ -104,10 +104,16 @@ class RecoveryRepairIdentityTests(unittest.TestCase):
                  recorded(failed_head='e' * 40), recorded(verdict_comment_id=10),
                  recorded(version=2), dict(good, pm_provenance={'pm_native_session_id': 'pm-2'}),
                  dict(good, response=None), dict(good, pm_assignment={'acceptance': []}),
-                 dict(good, pm_provenance={'pm_native_session_id': None}), 'not a record']
+                 dict(good, pm_provenance={'pm_native_session_id': None}), 'not a record',
+                 dict(good, pm_assignment={'acceptance': [
+                     good['pm_assignment']['acceptance'][-1].replace('count 3.', 'count 03.')]})]
         for repair in cases:
             with self.subTest(repair=repair):
                 self.assertEqual(self.code(rec.check_identity, identity_root(), repair, CLAIM),
+                                 'REPAIR_RECOVERY_EVIDENCE_INVALID')
+        for root, claim in ((None, CLAIM), (identity_root(), {}), (identity_root(), None)):
+            with self.subTest(root=root, claim=claim):
+                self.assertEqual(self.code(rec.check_identity, root, good, claim),
                                  'REPAIR_RECOVERY_EVIDENCE_INVALID')
 
 

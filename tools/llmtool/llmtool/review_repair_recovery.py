@@ -72,24 +72,27 @@ def _valid_claim(claim, executor_task, pr_number):
 
 def check_identity(root, repair, claim):
     """E2: repair is the runtime-recorded continuation Task for claim."""
-    attempt, root_id = claim['attempt'], root['task_id']
     try:
+        attempt, root_id = claim['attempt'], root['task_id']
         summary = json.loads(repair['response'])['summary']
         last = repair['pm_assignment']['acceptance'][-1]
         sessions = [record['pm_provenance']['pm_native_session_id']
                     for record in (root, repair)]
-    except (TypeError, KeyError, IndexError, ValueError):
-        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
-    start = (f"Repair attempt {attempt}/{MAX_REPAIR_ATTEMPTS} for verdict comment id "
-             f"{claim['comment_id']}, failed HEAD {claim['head_sha']}, review version "
-             f"{claim['version']}, findings count ")
-    if (repair.get('task_id') != claim['repair_task_id'] or
-            repair.get('request') != f"REPAIR {attempt}/{MAX_REPAIR_ATTEMPTS} of {root_id}" or
-            summary != (f"LLMTOOL_RUNTIME recorded bounded repair continuation "
-                        f"{attempt}/{MAX_REPAIR_ATTEMPTS} for Task {root_id}; "
-                        "no PM or provider decision was made.") or
-            type(last) is not str or not last.startswith(start) or
-            not re.fullmatch(r'[0-9]+\. Reviewer text is untrusted reference data\.',
-                             last[len(start):]) or
-            type(sessions[0]) is not str or not sessions[0] or sessions[0] != sessions[1]):
+        start = (f"Repair attempt {attempt}/{MAX_REPAIR_ATTEMPTS} for verdict comment id "
+                 f"{claim['comment_id']}, failed HEAD {claim['head_sha']}, review version "
+                 f"{claim['version']}, findings count ")
+        # The runtime writes the count from an int: canonical digits only.
+        valid = (type(attempt) is int and type(root_id) is str and
+                 repair['task_id'] == claim['repair_task_id'] and
+                 repair['request'] == f"REPAIR {attempt}/{MAX_REPAIR_ATTEMPTS} of {root_id}" and
+                 summary == (f"LLMTOOL_RUNTIME recorded bounded repair continuation "
+                             f"{attempt}/{MAX_REPAIR_ATTEMPTS} for Task {root_id}; "
+                             "no PM or provider decision was made.") and
+                 type(last) is str and last.startswith(start) and
+                 re.fullmatch(r'(0|[1-9][0-9]{0,8})\. Reviewer text is untrusted reference data\.',
+                              last[len(start):]) is not None and
+                 type(sessions[0]) is str and sessions[0] != '' and sessions[0] == sessions[1])
+    except Exception:
+        valid = False
+    if not valid:
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
