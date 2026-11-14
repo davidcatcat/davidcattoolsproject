@@ -22,19 +22,19 @@ class OwnerAcceptanceTuiTestOnlyTestCase(unittest.TestCase):
         ]
         self.assertFalse(task_advance._owner_acceptance_required(files))
 
-    def test_owner_acceptance_false_for_test_files_plus_non_tui_module(self):
+    def test_owner_acceptance_true_for_test_files_plus_non_tui_module(self):
         files_single = [
             {'filename': 'tools/llmtool/tests/test_chat_tui.py'},
             {'filename': 'tools/llmtool/llmtool/task_advance.py'},
         ]
-        self.assertFalse(task_advance._owner_acceptance_required(files_single))
+        self.assertTrue(task_advance._owner_acceptance_required(files_single))
 
         files_both = [
             {'filename': 'tools/llmtool/tests/test_chat_tui.py'},
             {'filename': 'tools/llmtool/tests/test_tui_markdown.py'},
             {'filename': 'tools/llmtool/llmtool/task_advance.py'},
         ]
-        self.assertFalse(task_advance._owner_acceptance_required(files_both))
+        self.assertTrue(task_advance._owner_acceptance_required(files_both))
 
     def test_owner_acceptance_true_for_chat_tui_product_code(self):
         files = [{'filename': 'tools/llmtool/llmtool/chat_tui.py'}]
@@ -54,6 +54,40 @@ class OwnerAcceptanceTuiTestOnlyTestCase(unittest.TestCase):
             {'filename': 'tools/llmtool/llmtool/chat_tui.py'},
         ]
         self.assertTrue(task_advance._owner_acceptance_required(files))
+
+    def test_owner_acceptance_true_for_rename_from_product_tui(self):
+        files = [{
+            'filename': 'tools/llmtool/tests/test_tui_renamed.py',
+            'previous_filename': 'tools/llmtool/llmtool/tui_markdown_editor.py',
+        }]
+        self.assertTrue(task_advance._owner_acceptance_required(files))
+
+    def test_owner_acceptance_true_for_rename_from_tui_pty_driver(self):
+        files = [{
+            'filename': 'tools/llmtool/tests/test_tui_driver.py',
+            'previous_filename': 'tools/llmtool/tests/tui_pty_driver.py',
+        }]
+        self.assertTrue(task_advance._owner_acceptance_required(files))
+
+    def test_owner_acceptance_true_for_non_str_previous_filename(self):
+        for candidate in (None, 123, ['not-a-str'], {'not': 'a-str'}):
+            with self.subTest(candidate=candidate):
+                files = [{
+                    'filename': 'tools/llmtool/tests/test_chat_tui.py',
+                    'previous_filename': candidate,
+                }]
+                self.assertTrue(task_advance._owner_acceptance_required(files))
+
+    def test_owner_acceptance_false_for_rename_between_two_tui_test_files(self):
+        files = [{
+            'filename': 'tools/llmtool/tests/test_tui_renamed.py',
+            'previous_filename': 'tools/llmtool/tests/test_chat_tui.py',
+        }]
+        self.assertFalse(task_advance._owner_acceptance_required(files))
+
+    def test_owner_acceptance_false_for_pr_with_only_non_tui_files(self):
+        files = [{'filename': 'tools/llmtool/llmtool/task_advance.py'}]
+        self.assertFalse(task_advance._owner_acceptance_required(files))
 
     def test_owner_acceptance_true_for_non_list(self):
         for candidate in (None, 'not a list', 123, {'filename': 'tools/llmtool/tests/test_chat_tui.py'}):
