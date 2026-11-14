@@ -264,6 +264,24 @@ class ReplayTests(unittest.TestCase):
         with self.assertRaises((LLMToolError, ValueError)):
             replace(self.expect.agents[0], root='/repo/api_key=SECRET')
 
+    def test_record_construction_refusals_name_their_code(self):
+        # #367: building an expectation or event keeps its own lifecycle code.
+        dev, reviewer = self.expect.agents
+        same_author = replace(reviewer, agent_id=dev.agent_id)
+        cases = (
+            (lambda: replace(self.expect, initial_state=t.State.RUNNING), 'TASK_STATE_INVALID'),
+            (lambda: replace(self.expect, agents=(dev, same_author)),
+             'TASK_REVIEW_NOT_INDEPENDENT'),
+            (lambda: replace(self.events[0], kind='OTHER'), 'TASK_STATE_INVALID'),
+            (lambda: replace(self.events[0], timestamp='2026-10-12 12:00:00'),
+             'TASK_CLOCK_INVALID'),
+        )
+        for build, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(LLMToolError) as raised:
+                    build()
+                self.assertEqual(raised.exception.lifecycle_code, code)
+
     def test_empty_replay_is_incomplete(self):
         result = self.inspect(())
         self.assertEqual(result.exit_code, 1)

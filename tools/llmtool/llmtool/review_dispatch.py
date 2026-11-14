@@ -304,7 +304,9 @@ def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, ve
     final = None
     thread_id = None
     try:
-        for line in raw.decode('utf-8').splitlines():
+        # #1893: JSONL lines end only at '\n'; splitlines() would also cut a
+        # valid event at a raw U+2028 inside a JSON string.
+        for line in raw.decode('utf-8').split('\n'):
             if not line:
                 continue
             event = json.loads(line, object_pairs_hook=_unique_json_object)
@@ -385,7 +387,9 @@ def _jsonl_shape(raw):
     if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_MAX_OUTPUT:
         return 'OUTPUT_SHAPE unavailable'
     try:
-        lines = raw.decode('utf-8').splitlines()
+        lines = raw.decode('utf-8').split('\n')
+        if lines and not lines[-1]:
+            lines.pop()
     except UnicodeError:
         return 'OUTPUT_SHAPE utf8=invalid bytes=%d' % len(raw)
     for index, line in enumerate(lines, 1):
@@ -408,7 +412,7 @@ def _codex_final_message(raw):
         return None
     final = None
     try:
-        for line in raw.decode('utf-8').splitlines():
+        for line in raw.decode('utf-8').split('\n'):
             if not line:
                 continue
             event = json.loads(line, object_pairs_hook=_unique_json_object)

@@ -67,6 +67,14 @@ def _comment_verdict(comment, *, head, version, task):
             binding.group(4) == head)
         if not codex_bound:
             return None
+    if marker is not None and marker.group(1) == 'Claude':
+        # #1898: a Claude verdict bound to another Task or run is not this Task's
+        # verdict, so it is ignored as the Codex branch does, never a REVIEW_FAIL.
+        binding = next((match for line in lines[1:]
+                        if (match := _CODEX_BINDING.fullmatch(line.strip())) is not None), None)
+        if binding is not None and (binding.group(1) != task.get('task_id') or
+                                    binding.group(2) != task.get('run_id')):
+            return None
     status_line = _VERDICT_VERSION_HEAD.fullmatch(lines[1])
     if status_line is None:
         return None
