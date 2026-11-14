@@ -1895,6 +1895,9 @@ OWNER_SETTLED = frozenset({"APPROVED", "DECLINED", "DENIED", "GRANTED", "REJECTE
                            "ACCEPTED", "ACKNOWLEDGED", "SUPERSEDED"})
 # #1943 Owner O1: a target=Owner record with one of these statuses is information (for example the D4 NOTICE); it neither asks nor settles.
 OWNER_INFORMATION_STATUSES = frozenset({"NOTICE", "INFO", "TRACKING"})
+# #1943 WP-1c: the ask gate (PR #1958) merged at 2026-11-14T16:27:18Z; earlier asks are not flagged.
+OWNER_ASK_GATE_SINCE = 1794673638.0
+OWNER_ASK_VALID = re.compile(r"<!-- owner-ask: v=1 reserved_row=R-[A-Z]{2,12} -->")
 OWNER_SHOWN = 5   # at most this many ★ lines; the rest are counted
 
 
@@ -1906,6 +1909,7 @@ class OwnerPending:
     summary: str
     kind: str = ""
     needs_owner_approval: bool = False
+    ungated: bool = False
 
 
 _MARKER_ROLES = {name.casefold(): name for name in ("PM", "Integrator", "Owner")}
@@ -1971,10 +1975,18 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
         if settles:
             open_requests.pop(number, None)
         elif fields.get("target") == "owner" and when:
+            kind = fields.get("type", "").casefold()
+            body_lines = body.splitlines()
+            line2 = body_lines[1] if len(body_lines) > 1 else ""
+            ungated = (kind == "waiting_owner"
+                       and status in _WAITING_ASK
+                       and when >= OWNER_ASK_GATE_SINCE
+                       and OWNER_ASK_VALID.fullmatch(line2) is None)
             open_requests[number] = OwnerPending(when, f"#{number}", status, _headline(body),
-                                                fields.get("type", "").casefold(),
-                                                fields.get("type", "").casefold() == "waiting_owner"
-                                                and "owner-approval" in body.casefold())
+                                                kind,
+                                                kind == "waiting_owner"
+                                                and "owner-approval" in body.casefold(),
+                                                ungated=ungated)
     return sorted((item for number, item in open_requests.items()
                    if closed.get(number, 0.0) <= item.when), key=lambda item: item.when)
 
@@ -9533,6 +9545,7 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
                 enumerate(_wrap(text, max(10, width - 2)) if width else [text])]
     pending = list(pending or [])
     texts = [f"★ 等你決定：GitHub {item.reference}（{_short_ago(max(0.0, now - item.when))}）"
+             + ("（UNGATED_OWNER_ASK：未經提問閘門）" if getattr(item, "ungated", False) else "")
              + (f" — {item.summary}" if item.summary else "")
              for item in pending[-OWNER_SHOWN:]]
     if len(pending) > OWNER_SHOWN:
