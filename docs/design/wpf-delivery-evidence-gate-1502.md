@@ -2,8 +2,8 @@
 
 Status: **proposal** (docs only). Not a review, an acceptance or runtime evidence.
 
-- Source: `main` at `a2b6f4d891d89f16f3411122e25f307a54538a01`. Repair 3 reads Task source `ec3492656843909ccb55f89b97e82c388311d1d4` (merges `origin/main`); lines spot-checked there. Python paths are under `tools/llmtool/llmtool/`.
-- Marks per `CLAUDE.md:5`: `現行`, `待實作（WP-F）`, `待後續`, plus `UNVERIFIED` (not readable here: `review_dispatch.py`, `high_debug.py`, `task_completion.py`, `task_store.py`, the route runner, tests).
+- Source: `main` at `a2b6f4d891d89f16f3411122e25f307a54538a01`. Repair 4 reads Task source `5e31590c` (merges `origin/main`); lines spot-checked there. Python paths are under `tools/llmtool/llmtool/`.
+- Marks per `CLAUDE.md:5`: `現行`, `待實作（WP-F）`, `待後續`, plus `UNVERIFIED` (not readable here: `review_dispatch.py`, `high_debug.py`, `task_store.py`, the route runner, tests).
 
 ## 1. Today
 
@@ -27,7 +27,7 @@ Ledger (`現行`):
 | Reviewer, Debug | Card builders (`skill_manifest.py:467-494`); callers `UNVERIFIED` | No ledger row (`skill_ledger.py:598-599`) |
 | PM, sub-agents | No llmtool path | None (`待後續`) |
 
-Gaps (`現行`): a failed receipt write only prints `<PROVIDER>_SKILL_LEDGER_OUTCOME_UNKNOWN` ("No gate reads this entry yet", `task_submission_cli.py:4750-4764`). No completion path reads the ledger (`:8216`, `:9056`). The creating store write (`:4898-4903`, `:5855-5858`) is today's claim. TaskStore checks Developer fields by exact shape (`task_store.py:2372-2375` at `437451aa`, per the v2 review; `UNVERIFIED` here). The hook (`claude_skill_hook.py:484-488`, observe mode `:47-48`) stays defence in depth (`CLAUDE.md:10`).
+Gaps (`現行`): a failed receipt write only prints `<PROVIDER>_SKILL_LEDGER_OUTCOME_UNKNOWN` ("No gate reads this entry yet", `task_submission_cli.py:4750-4764`). No completion path reads the ledger (`:8216`, `:9056`). The creating store write (`:4898-4903`, `:5855-5858`) is today's claim. TaskStore checks Developer fields by exact shape and the whole record on every write (`task_store.py:2372-2375`, `:3513-3525`, per reviews; `UNVERIFIED` here). The hook (`claude_skill_hook.py:484-488`, observe mode `:47-48`) stays defence in depth (`CLAUDE.md:10`).
 
 ## 2. Gate design (`待實作（WP-F）`)
 
@@ -46,15 +46,15 @@ Codes: `SKILL_DELIVERY_RECORD_MISSING` (no binding after the epoch), `_CLAIM_UNC
 
 ### 2.2 Developer lifecycle: reserve, hand off, then claim
 
-The creating write becomes a reservation. The dispatch claim is a later compare-and-set that reads the receipt first.
+The creating write only reserves; the claim is step 6.
 
 1. Pin and cards, fail closed (`現行`, `:4711-4738`). The record gets `session_id` (`:4865`, `:5356`, `:5827`) and `card_delivery = {route, pin_commit, prefix_sha256, session_id, state: PREPARED}`.
 2. **New** `prepare_card_delivery()`: today's checks (`skill_ledger.py:583-630`) append a `CARD_PREPARED` row, level `UNVERIFIED`.
 3. **Reservation.** `card_preparation_status()` must match the binding, else `SKILL_DELIVERY_PREPARATION_MISSING` with no store write or launch. The creating write stores `state: PREPARED`. It keeps the duplicate-dispatch refusal (`:4904-4906`) but is not a claim; every protected transition refuses it.
 4. Existing pre-launch checks, unchanged: `route_gate` (Claude `:5877-5889`, AGY `:5407-5426`), OpenCode `prelaunch_validate` (`:4915-4921`).
-5. **Handoff.** Only after the provider process starts, `confirm_card_delivery()` (refactored `record_card_delivery()`, still the only writer) appends `CONTROLLER_DELIVERED` from the prepared row and pin (no caller digest, no Git read): OpenCode in `launch_callback` (`:4936-4953`), Claude and AGY in a post-spawn callback (Q8). It means a started provider got this prompt, not that the model read it. The post-run writes (`:4961-4968`, `:5440`, `:5908-5909`) go.
+5. **Handoff.** Only after the provider process starts, `confirm_card_delivery()` (refactored `record_card_delivery()`, still the only writer) appends `CONTROLLER_DELIVERED` from the prepared row and pin: OpenCode in `launch_callback` (`:4936-4953`), Claude and AGY in a post-spawn callback (Q8). It means a started provider got this prompt, not that the model read it. The post-run writes (`:4961-4968`, `:5440`, `:5908-5909`) go.
 6. **Claim.** In the same callback `card_receipt_status()` must be `VERIFIED` for the stored binding; only then does TaskStore `commit_card_delivery()` move `PREPARED` to `DELIVERED` by compare-and-set. That write is the dispatch claim. A missing or mismatched receipt or a conflict commits nothing: the controller stops the provider where it can (Q8), the record goes `DEVELOPER_OUTCOME_UNKNOWN` with the code, `state` stays `PREPARED`.
-7. **Result check.** Before any result is stored, the record must be `DELIVERED` and the receipt still `VERIFIED` (revocation), else `DEVELOPER_OUTCOME_UNKNOWN`, no artifact.
+7. **Result check.** Before any result is stored, the record must be `DELIVERED` and the receipt still `VERIFIED` (revocation), else `DEVELOPER_OUTCOME_UNKNOWN`, no artifact. Either write leaves the binding unchanged.
 
 A refusal before handoff leaves at most `CARD_PREPARED` and a `PREPARED` record. `gw-agent` skips 2, 5, 6, 7: its creating write stores the exemption; its row stays on `on_launch` (`:6309`). Orphan rows (lost duplicate race) carry a session no record stores.
 
@@ -78,7 +78,7 @@ Refusals precede any store write or PM, Reviewer or provider call, except steps 
 ### 2.5 Debug entry binding
 
 - At the Debug claim, before launch, the controller makes a fresh `debug_run_id` and stores `debug_delivery = {debug_run_id, route: debug, status: NOT_DELIVERED}`, plus a `NOT_DELIVERED` row at launch, role `debug`. With Debug ledger delivery (later) it follows §2.2, route and role `debug`.
-- At entry, `debug_run_id` must equal the claim's (`_DEBUG_RUN_MISMATCH`), then its row is checked. Report digests are ignored; one copied from another Debug run refuses `_WRONG_RUN`. The second repair is a new Developer run with its own gate.
+- At entry, `debug_run_id` must equal the claim's (`_DEBUG_RUN_MISMATCH`), then its row is checked. Report digests are ignored; one copied from another Debug run refuses `_WRONG_RUN`.
 
 ### 2.6 Routes without delivery
 
@@ -97,7 +97,7 @@ An exemption is metadata, never evidence; it turns fail-closed when that route's
 
 - **Legacy.** Pre-epoch Tasks pass as `LEGACY_UNGATED`; a post-epoch record without a binding refuses. Merged work is never re-checked; replay is refused (`:8261-8262`, `:9136-9137`).
 - **Idempotence.** Verifiers never append; a repeat gives the same code. Duplicate dispatch is refused (`:4904-4906`); pins are immutable (`skill_ledger.py:526-528`); a repeat `commit_card_delivery()` conflicts and changes nothing.
-- **Invariant.** A record reaches `DELIVERED` (the dispatch claim) only through `commit_card_delivery()`, after reading a non-revoked `CONTROLLER_DELIVERED` row written after provider start and matching the stored Task, run, role, route, session, digest and pin; TaskStore refuses `DELIVERED` on any other write. Results, `task complete`, Reviewer claims and Debug entries need a §2.1 pass.
+- **Invariant.** A record reaches `DELIVERED` (the dispatch claim) only through `commit_card_delivery()`, after reading a non-revoked `CONTROLLER_DELIVERED` row written after provider start and matching the stored Task, run, role, route, session, digest and pin. Other TaskStore writes keep the binding unchanged, so result and completion writes pass. Results, `task complete`, Reviewer claims and Debug entries need a §2.1 pass.
 
 ### 2.8 PM view and limits
 
@@ -107,8 +107,8 @@ An exemption is metadata, never evidence; it turns fail-closed when that route's
 ## 3. Implementation plan (≤ 4 files per PR; tests in `tools/llmtool/tests/`)
 
 1. **Ledger.** `skill_ledger.py` + test. Prepare then confirm verifies; `CARD_PREPARED` alone never does; confirm without it refuses; missing; wrong digest, run, session, role, pin; revoked; repeat changes no bytes.
-2. **TaskStore schema, before any producer.** `task_store.py` + test. Optional `developer.card_delivery` in the exact-shape check: `{route, pin_commit, prefix_sha256, session_id, state}` (§2.1 route, hex pin and digest, `developer.session_id`, `PREPARED` or `DELIVERED`) or the `gw-agent` exemption. Create and update accept only `PREPARED` or the exemption and never change a stored binding; new `commit_card_delivery()` is the only path to `DELIVERED`. Tests: both shapes pass; unknown key, wrong type, session mismatch, `DELIVERED` on create or update refused; commit once, repeat conflicts; **legacy record without the field round-trips unchanged**.
-3. **Dispatch claim.** `task_submission_cli.py` + test (+ route runner for a post-spawn hook, `UNVERIFIED`). Claim commits only after the receipt; **missing reservation: no record, no launch**; **missing receipt (started, append fails): no claim, `PREPARED`, `DEVELOPER_OUTCOME_UNKNOWN`, no artifact**; other run's or session's receipt; wrong digest; wrong role; refusal before handoff; commit conflict; `gw-agent` exemption; orphan; repeat dispatch refused.
+2. **TaskStore schema, before any producer.** `task_store.py` + test. Optional `developer.card_delivery` in the exact-shape check: `{route, pin_commit, prefix_sha256, session_id, state}` (§2.1 route, hex pin and digest, `developer.session_id`, `PREPARED` or `DELIVERED`) or the `gw-agent` exemption. Create accepts only `PREPARED` or the exemption. New `commit_card_delivery()` alone moves `PREPARED` to `DELIVERED`; any other update must keep the stored binding (or its absence) unchanged. Tests: both shapes pass; unknown key, wrong type, session mismatch, `DELIVERED` on create or plain update, downgrade, binding change refused; **commit, then result and completion updates pass with `DELIVERED` kept**; repeat commit conflicts; **legacy record without the field round-trips unchanged**.
+3. **Dispatch claim.** `task_submission_cli.py` + test (+ route runner for a post-spawn hook, `UNVERIFIED`). Claim commits only after the receipt, then the result write passes; **missing reservation: no record, no launch**; **missing receipt (started, append fails): no claim, `PREPARED`, `DEVELOPER_OUTCOME_UNKNOWN`, no artifact**; other run's or session's receipt; wrong digest; wrong role; refusal before handoff; commit conflict; `gw-agent` exemption; orphan; repeat dispatch refused.
 4. **Completion.** `task_submission_cli.py` + test; `SKILL_GATE_EPOCH`. Positive; missing; wrong digest, run, role; `PREPARED`; legacy; post-epoch without binding; `gw-agent` with and without row; Codex; **both early returns (`:8237`, `:8246`) refuse with no PM or Reviewer call**; auto-callback; repeat.
 5. **Reviewer claim.** `review_dispatch.py` + test. Receipt passes; missing, wrong run, digest, role refuse; **`gw-agent` row passes, none refuses; legacy passes**; repeat.
 6. **Debug ledger.** `skill_ledger.py`, `skill_manifest.py` + test. `debug` route, fixed pairing; mismatch refused.
