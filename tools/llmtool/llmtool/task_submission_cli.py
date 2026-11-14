@@ -2076,6 +2076,8 @@ def run_task_review_dispatch(args, *, store=None):
 # #1519: (step, code) pairs that still exit 0; every other code exits 1.
 _ADVANCE_EXIT_ZERO = frozenset({('MERGED', 'MERGE_RECONCILED'),
                                 ('READY_FOR_INTEGRATION', 'WAITING_INTEGRATION')})
+# #2002 security v91: a drive with no codes exits 0 only at a successful stop.
+_DRIVE_EMPTY_CODES_EXIT_ZERO_STEPS = frozenset({'CLOSED', 'MERGED', 'READY_FOR_INTEGRATION'})
 
 
 def _advance_exit_code(result):
@@ -2242,7 +2244,10 @@ def _run_task_drive_leased(args, store, caller_key, sleep, advance_call, adapter
         from . import gw_agent_sessions
         gw_agent_sessions.sweep_quietly(store)
     _print(result)
-    return 1 if result.get('codes') else 0
+    codes = result.get('codes')
+    if not codes and result.get('step') not in _DRIVE_EMPTY_CODES_EXIT_ZERO_STEPS:
+        return 1
+    return _advance_exit_code(result)
 
 
 def run_task_claude_result(args, *, store=None, stdout=None):
