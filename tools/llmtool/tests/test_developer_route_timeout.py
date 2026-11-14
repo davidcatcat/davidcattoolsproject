@@ -18,6 +18,7 @@ SHORT_ROUTES = ('agy', 'gw-agent')
 EXPECTED_LIMITS = {'agy': (600, 600), 'claude': (600, 1800),
                    'gw-agent': (600, 600), 'opencode': (600, 1800)}
 NOT_INT = ('600', 600.0, 1.5, True, False, [600], {'s': 600}, b'600')
+HARD_CAP = developer_routes.HARD_TIMEOUT_CAP_SECONDS
 
 
 class NamedRoute(DeveloperRoute):
@@ -176,13 +177,44 @@ class LoaderTimeoutTests(unittest.TestCase):
                     self.assert_invalid(route, lambda entry, maximum=maximum: entry.update(
                         max_timeout=maximum))
 
+    def bad_limit_values(self, route, key):
+        """Bad values for one key; each breaks the 1 <= default <= max <= 1800 rule."""
+        entry = self.shipped['routes'][route]
+        values = NOT_INT + (None, 0, -1, -600, HARD_CAP + 1, 3600)
+        if key == 'default_timeout':
+            values += (entry['max_timeout'] + 1,)
+        else:
+            values += (entry['default_timeout'] - 1,)
+        return values
+
+    def assert_resolver_refuses(self, route, key, value):
+        config = copy.deepcopy(load_route_config())
+        config['routes'][route][key] = value
+        with self.assertRaises(RouteError) as caught:
+            resolve_route_timeout(route, config=config)
+        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+
     def test_bad_values_refused(self):
         for route in ROUTE_NAMES:
             for key in ('default_timeout', 'max_timeout'):
-                for value in NOT_INT + (None, 0, -1):
+                for value in self.bad_limit_values(route, key):
                     with self.subTest(route=route, key=key, value=value):
-                        self.assert_invalid(route, lambda entry, key=key, value=value:
-                                            entry.update({key: value}))
+                        # The resolver refuses every bad value in a hand-built config.
+                        self.assert_resolver_refuses(route, key, value)
+                        try:
+                            json.dumps(value)
+                        except TypeError:
+                            continue  # not JSON (bytes); covered by the resolver only
+                        data = copy.deepcopy(self.shipped)
+                        data['routes'][route][key] = value
+                        self.path.write_text(json.dumps(data), encoding='utf-8')
+                        written = json.loads(self.path.read_text(encoding='utf-8'))
+                        # The file is valid JSON and still holds the bad value.
+                        self.assertIs(type(written['routes'][route][key]), type(value))
+                        self.assertEqual(written['routes'][route][key], value)
+                        with self.assertRaises(RouteError) as caught:
+                            load_route_config(self.path)
+                        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
 
     def test_only_one_key_refused(self):
         for route in ROUTE_NAMES:
