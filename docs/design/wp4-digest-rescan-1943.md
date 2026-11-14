@@ -1,6 +1,6 @@
 # WP-4 design: digest-bound rescan of refused Developer output (#1943)
 
-**Proposal only; not a review or acceptance.** Source SHA: `0223f7df61523bc4e21776f15cad62ff93759544` (this branch with `main` merged); `path:line` is at that SHA, code under `tools/llmtool/llmtool/`. Unread is UNVERIFIED. Design: 待實作（WP-4）.
+**Proposal only; not a review or acceptance.** Source main SHA: `2b1f4e2494efef85e22b7bfb7fbbe2cea0ad51b3` (the `main` commit merged into this branch); `path:line` is at that SHA, code under `tools/llmtool/llmtool/`. Unread is UNVERIFIED. Design: 待實作（WP-4）.
 
 ## 1. Today (現行)
 
@@ -8,7 +8,7 @@
 - The strict check returns `DEVELOPER_OUTPUT_SENSITIVE` (`:3181-3182`). It is used by text normalization (`:3206`, `:3216`, `:3253`), the text route (`:7696-7702`) and the cumulative D6 diff with base-revision pre-images (`:3338-3340`, `:6967-6969`).
 - OpenCode passes pre-images at the snapshot head (`:5036-5037`). AGY passes none (`:5456`).
 
-**Record.** Written before the Task update (`task_submission_cli.py:3519-3522`): code, source `DEVELOPER_OUTPUT`, up to 32 `rule:line` hits, total, `omitted`, hit-list digest, byte count, SHA-256 of the screened output, `d6` (the completion's `executor_task_id`), `refusal_id`, and an append-only refusal event. No text (`:3432-3458`; `high_debug.py:471-511`); hits are rule names and lines (`task_submission_cli.py:3416-3429`). A separate redacted capture goes to `rejected-developer-output/`, or a marker if it still trips the screen (`:3356-3399`).
+**Record.** Written before the Task update (`task_submission_cli.py:3519-3522`): code, source `DEVELOPER_OUTPUT`, up to 32 `rule:line` hits, total, `omitted`, hit-list digest, byte count, SHA-256 of the screened output, `d6` (the completion's `executor_task_id`), `refusal_id`, and an append-only refusal event. No text (`:3432-3458`; `high_debug.py:471-511`); hits are rule names and lines (`task_submission_cli.py:3416-3429`). Redacted diagnostic captures are separate (`:3356-3399`).
 
 **Block.** The delegate gate checks every Task on the same executor D6 (`:7264-7270`). Any stored disposition clears it (`:3504`):
 - `FALSE_POSITIVE` from `screen-disposition` (`high_debug.py:640-671`), which checks only the stored hits (`:664-665`): no digest, D6 or history check;
@@ -22,7 +22,7 @@
 - G3. `FALSE_POSITIVE` and `BATCH_CONFIRMED` release the D6 block (`:3504`); Route 2 says no opinion releases it.
 - G4. The block is keyed to the old D6 (`:7264-7270`); a guard against a second new Task on a new D6 is UNVERIFIED, so the limit is manual.
 - G5. AGY diffs against `snapshot.head` (`:5449`), the rebuild against `developer.source_sha` (`:3475`); equality and `task_completion.py` (not read) are UNVERIFIED.
-- G6. Empty-diff and text-route refusals digest a message, not a D6 diff (`:6980-6982`, `:7699-7700`).
+- G6. A text-route refusal digests the model message (`:7699-7702`), which no D6 holds. Empty-diff capture is diagnostic only (`:6973-6982`): its code is `DEVELOPER_OUTPUT_INVALID_ENVELOPE` (`:3169-3170`) or an ignored-file code (`:6975-6976`), and only `DEVELOPER_OUTPUT_SENSITIVE` writes a record (`:3519-3522`).
 
 ## 2. Requirements (quoted, `skills/ai-team-delivery/pm-continuation.md`)
 
@@ -94,11 +94,11 @@ The new Task's refusal record stores `route2_parent`, so step 5 stops a third Ta
 
 ### 3.5 Rule-family ledger
 
-`high-debug-screen-route2/rule-<rule>/<fix SHA>.json` is created once per hit rule and fix SHA at step 8, **before** the rescan result, so a HIT, a later release or a crash all leave the fix on record. It holds the rule, fix SHA, `refusal_id`, Task ID and time. After writing, the command relists the rule; another fix SHA there (a concurrent call) refuses `_RESCAN_OWNER_REQUIRED` before the screen runs. So if fix A's rescan hits, fix B later refuses at step 5 (Q7).
+`high-debug-screen-route2/rule-<rule>/<fix SHA>.json` is created once per hit rule and fix SHA at step 8, **before** the rescan result, so a HIT, a later release or a crash all leave the fix on record. It holds the rule, fix SHA, `refusal_id`, Task ID and time. After writing, the command relists the rule; another fix SHA there (a concurrent call) refuses `_RESCAN_OWNER_REQUIRED` before the screen runs.
 
 ### 3.6 Manual
 
-Manual: the Route 1 fix, review and CI; classification and the metadata-only `--ref` comment; installing; judging the new Task is the same item; the Owner question; Route 1 fixes never rescanned (the ledger cannot see them; the PM checks Route 1 history); the efficiency log. G6 and legacy records stay blocked, 待後續.
+Manual: the Route 1 fix, review and CI; classification and the metadata-only `--ref` comment; installing; judging the new Task is the same item; the Owner question; Route 1 fixes never rescanned (the ledger cannot see them; the PM checks Route 1 history); the efficiency log. Text-route refusals (G6) and legacy records stay blocked, 待後續.
 
 ## 4. Implementation plan (待實作（WP-4）)
 
@@ -122,7 +122,7 @@ At most 4 files per PR; test files are new, except PR 4 flips PR 1 pins. Under #
 - **Q2. Screen digest:** installed `developer_diff_screen.py` and `test_output_excerpts.py` (`developer_diff_screen.py:50`); other inputs UNVERIFIED.
 - **Q3. Legacy records:** refuse `_RECOVERY_LEGACY`; the item stays blocked. Missing bindings may later come only from existing evidence proven trustworthy (whether any exists is UNVERIFIED), 待後續.
 - **Q4. "No hit":** the gate decision is False. The hit locator cannot clear a Python-release fix.
-- **Q5. G6 refusals:** stay blocked (`SOURCE_MISSING`), 待後續.
+- **Q5. Text-route refusals (G6):** no D6 holds the message, so they stay blocked (`_SOURCE_MISSING`), 待後續.
 - **Q6. Redacted capture** (`task_submission_cli.py:3356-3399`): never a rescan source; unchanged here, 待後續.
 - **Q7. Owner trigger:** a family is a screen rule name. A second fix SHA refuses until the PM passes a relayed Owner decision URL (`--owner-ref`), stored in the ledger. The tool never decides.
 - **Q8. Reuse of the refused output:** no. Only one new Task from latest `main`.
