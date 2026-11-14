@@ -876,7 +876,9 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertLessEqual(len(excerpt.encode('utf-8')), 2048)
         self.assertLessEqual(len(excerpt.splitlines()), 40)
         self.assertTrue(final_bytes.startswith(excerpt))
-        self.assertEqual(str(raised.exception), 'Reviewer dispatch refused: ' + excerpt)
+        self.assertEqual(str(raised.exception), 'Reviewer dispatch refused: VERDICT_NOT_JSON; '
+                         + review_dispatch._reply_shape(excerpt))
+        self.assertNotIn('not a review object', str(raised.exception))
 
         final_lines = '\n'.join(f'line {i:02d} content' for i in range(60))
         raw_lines = ('\n'.join((
@@ -894,7 +896,9 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertLessEqual(len(excerpt_lines.encode('utf-8')), 2048)
         self.assertTrue(final_lines.startswith(excerpt_lines))
         self.assertEqual(excerpt_lines, '\n'.join(f'line {i:02d} content' for i in range(40)))
-        self.assertEqual(str(raised.exception), 'Reviewer dispatch refused: ' + excerpt_lines)
+        self.assertEqual(str(raised.exception), 'Reviewer dispatch refused: VERDICT_NOT_JSON; '
+                         + review_dispatch._reply_shape(excerpt_lines))
+        self.assertNotIn('content', str(raised.exception))
 
         hidden = _runtime_parts(
             'not a review object: ', 'api', '_key', ' = ', 'abcdefghijkl', 'mnop')
@@ -1009,7 +1013,7 @@ class ReviewDispatchTests(unittest.TestCase):
 
     def assert_screened_excerpt_only(self, exc, screen, raw):
         # The whole reply is screened first, then the cut excerpt is screened,
-        # and only the screened text reaches the message.
+        # and the message holds only fixed words and the shape (#1938).
         self.assertEqual(screen.call_count, 2)
         final = review_dispatch._codex_final_message(raw)
         (first_text, first_limit), _ = screen.call_args_list[0]
@@ -1019,7 +1023,9 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(second_limit, 2048)
         self.assertTrue(final.startswith(second_text))
         self.assertEqual(exc.review_excerpt, SCREENED_EXCERPT)
-        self.assertEqual(str(exc), 'Reviewer dispatch refused: ' + SCREENED_EXCERPT)
+        self.assertEqual(str(exc), 'Reviewer dispatch refused: %s; %s' % (
+            exc.review_failure_reason, review_dispatch._reply_shape(SCREENED_EXCERPT)))
+        self.assertNotIn(SCREENED_EXCERPT, str(exc))
 
     def test_wrong_or_missing_binding_line_refuses_with_a_right_json_reply(self):
         text = _codex_review_text()
