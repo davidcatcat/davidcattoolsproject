@@ -211,6 +211,20 @@ elif len(args) >= 2 and args[:2] == ['issue', 'comment']:
         self.assertEqual(settled, {})
         self.assertEqual(marker.open_rows_from_latest(settled, []), [])
 
+    def test_pm_acknowledged_record_settles_open_waiting_row(self):
+        # #1943: a later PM record to the Owner with status ACKNOWLEDGED settles the row.
+        issue_url = "https://api.github.com/repos/a/b/issues/17"
+        asked = {"id": 10, "issue_url": issue_url, "created_at": "2026-11-03T00:00:00Z",
+                 "author_association": "MEMBER", "body": MARKER_ASK_LINE + "\nQuestion?"}
+        self.assertEqual(list(marker._waiting_markers([asked])), ["17"])
+        acked = {"id": 11, "issue_url": issue_url, "created_at": "2026-11-04T00:00:00Z",
+                 "author_association": "MEMBER",
+                 "body": "<!-- activity: type=pm_progress actor=PM target=Owner "
+                         "status=ACKNOWLEDGED -->\nNoted."}
+        self.assertEqual(marker._waiting_markers([asked, acked]), {})
+        earlier = dict(acked, created_at="2026-11-02T00:00:00Z")
+        self.assertEqual(list(marker._waiting_markers([earlier, asked])), ["17"])
+
     def test_answer_quotes_owner_as_pm_relay(self):
         result = self.run_cli("answer", "17", "--owner-words", "Proceed now.",
                               "--pm-reading", "The task may continue.")
