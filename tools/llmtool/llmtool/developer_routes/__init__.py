@@ -176,13 +176,17 @@ def check_registry_role_model(config, role, model):
     * role is not one of the canonical ids (aliases are mapped by the caller);
     * model is not a str, or its full identifier is not of the role's model
       family (no provider-prefix stripping, no case folding);
-    * model is not exactly one of the role's allowed_models.
+    * model is not exactly one of the role's allowed_models;
+    * an unloadable repository file refuses ROUTE_CONFIG_UNAVAILABLE (#2027).
 
     There is no owner_override exemption and no other bypass.
     """
-    try:
-        if config is None:
+    if config is None:
+        try:
             config = load_route_config()
+        except RouteError:
+            raise RouteError('ROUTE_CONFIG_UNAVAILABLE') from None
+    try:
         roles = config.get('roles') if type(config) is dict else None
         registry = _role_models(roles)
     except RouteError:

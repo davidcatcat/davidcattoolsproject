@@ -40,6 +40,7 @@ KNOWN_ROLES = (
     "opencode-developer", "pm",
 )
 ROLE_MODEL_NOT_ALLOWED = "ROLE_MODEL_NOT_ALLOWED"
+ROUTE_CONFIG_UNAVAILABLE = "ROUTE_CONFIG_UNAVAILABLE"
 
 
 def _fail(message="role configuration: invalid configuration", code="ROLE_CONFIG_INVALID"):
@@ -216,7 +217,9 @@ def check_registry_model(role, model, role_registry=None):
     from .developer_routes import RouteError, check_registry_role_model
     try:
         return check_registry_role_model(role_registry, registry_role(role), model)
-    except RouteError:
+    except RouteError as exc:
+        if getattr(exc, 'code', None) == ROUTE_CONFIG_UNAVAILABLE:
+            _fail("role configuration: route config unavailable", ROUTE_CONFIG_UNAVAILABLE)
         _fail_registry_model()
 
 

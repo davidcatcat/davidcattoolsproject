@@ -131,13 +131,15 @@ def _review_rules(repo_root):
 
 
 def _admit_review_model(reviewer_key, model):
-    """#1502 WP-E R1: return model only when the shared registry check admits it.
+    """#1502 WP-E R1 (#2027): return model only when the shared registry check admits it.
 
     Refuses with REVIEW_DISPATCH code ROLE_MODEL_NOT_ALLOWED; never a fallback.
     """
     try:
         return role_config.check_registry_model(reviewer_key, model)
-    except LLMToolError:
+    except LLMToolError as error:
+        if getattr(error, 'role_config_code', None) == role_config.ROUTE_CONFIG_UNAVAILABLE:
+            _refuse('ROUTE_CONFIG_UNAVAILABLE')
         _refuse('ROLE_MODEL_NOT_ALLOWED')
 
 
