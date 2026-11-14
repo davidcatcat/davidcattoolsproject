@@ -614,7 +614,8 @@ class MergeTrainCliTest(unittest.TestCase):
 
     @staticmethod
     def _member_pr_comment():
-        return (f'Closed by llmtool merge train {TRAIN_ID}: this change was merged in '
+        return ('<!-- activity: type=task actor=PM target=PR status=TRACKING -->\n'
+                f'Closed by llmtool merge train {TRAIN_ID}: this change was merged in '
                 f'train PR #{TRAIN_PR} as squash commit {"f" * 40}.')
 
     def test_close_wiring_reports_a_failed_member_pr_close(self):
