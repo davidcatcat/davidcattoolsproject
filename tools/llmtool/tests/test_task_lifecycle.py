@@ -178,6 +178,23 @@ class ReplayTests(unittest.TestCase):
         self.assertIn('HEARTBEAT_EXPIRED', result.findings)
         self.assertEqual(self.inspect(now='2026-10-12T12:05:03Z').exit_code, 0)
 
+    def test_sequence_and_clock_refusals_name_their_code(self):
+        # #367: replay refusals keep TASK_SEQUENCE_INVALID and TASK_CLOCK_INVALID.
+        late = replace(self.events[1], timestamp='2026-10-12T11:59:59Z')
+        cases = (
+            ((self.events[0], self.events[0]), NOW, 'TASK_SEQUENCE_INVALID'),
+            (self.events[:1] + self.events[2:], NOW, 'TASK_SEQUENCE_INVALID'),
+            (None, '2026-10-12T12:00:10+00:00', 'TASK_CLOCK_INVALID'),
+            (None, '2026-02-30T12:00:10Z', 'TASK_CLOCK_INVALID'),
+            (None, '2026-10-12T12:00:00Z', 'TASK_CLOCK_INVALID'),
+            ((self.events[0], late), NOW, 'TASK_CLOCK_INVALID'),
+        )
+        for events, now, code in cases:
+            with self.subTest(code=code, now=now):
+                with self.assertRaises(LLMToolError) as raised:
+                    self.inspect(events, now=now)
+                self.assertEqual(raised.exception.lifecycle_code, code)
+
     def test_handoff_all_pins_and_outstanding_evidence_are_checked(self):
         h = self.events[3].handoff
         changes = dict(source_sha='2'*40, epoch=8, task=self.contract.binding('b'*32),
