@@ -96,3 +96,35 @@ def check_identity(root, repair, claim):
         valid = False
     if not valid:
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+
+
+# Delegates that also record an adapter authorization (worker_dispatch.authorize_dispatch).
+_ADAPTER_PROFILES = ('gw-agent', 'opencode')
+
+
+def _dicts(*values):
+    if any(type(value) is not dict for value in values):
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+
+
+def check_authorization(root, repair, claim):
+    """E3: the Owner policy allowed this repair dispatch for its exact binding."""
+    from .review_repair import _worker_key
+    from .worker_dispatch import stored_worker_id
+    _dicts(root.get('developer'), repair.get('developer'), repair.get('task_binding'))
+    profile = root['developer'].get('provider_profile')
+    worker, audit = _worker_key(profile), repair.get('dispatch_audit')
+    binding = (repair['developer'].get('assignment_id'), claim['head_sha'],
+               repair['task_binding'].get('contract_digest'))
+    if worker is None or type(audit) is not list or any(type(v) is not str for v in binding):
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    allowed = [entry for entry in audit if type(entry) is dict and
+               entry.get('action') == 'DISPATCH' and entry.get('decision') == 'ALLOWED' and
+               stored_worker_id(entry.get('worker_key')) == worker and
+               (entry.get('assignment_id'), entry.get('source_sha'),
+                entry.get('contract_digest')) == binding]
+    transitions = {entry.get('attempt_id') for entry in allowed
+                   if 'authorization_id' not in entry} - {None}
+    adapted = any(entry.get('authorization_id') in transitions for entry in allowed)
+    if not transitions or (profile in _ADAPTER_PROFILES and not adapted):
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
