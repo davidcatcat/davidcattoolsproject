@@ -1631,6 +1631,7 @@ def activity_events(tasks: list[Task]) -> list[ActivityEvent]:
 GITHUB_REPO = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 MARKER = re.compile(r"<!--\s*activity:([^<>]{0,300}?)-->")
 MARKER_LIKE = re.compile(r"^<!--\s*activity\b")
+OWNER_ASK_RECORD = re.compile(r"^<!--\s*owner-ask:[^<>]{0,300}-->$")
 MARKER_FIELD = re.compile(r"([a-z_]{1,16})=([A-Za-z0-9_-]{1,32})\Z")
 MAX_MARKERS = 4
 MARKER_TYPES = frozenset({
@@ -1750,7 +1751,7 @@ def _headline(text) -> str:
         candidate = line.strip()
         while candidate.startswith(">"):
             candidate = candidate[1:].lstrip()
-        if MARKER_LIKE.match(candidate):
+        if MARKER_LIKE.match(candidate) or OWNER_ASK_RECORD.match(candidate):
             continue
         safe_lines.append(line)
     text = "\n".join(safe_lines)
@@ -1892,6 +1893,8 @@ OWNER_FIELD = re.compile(r"(?:(?<=\s)|(?<=activity:))(type|actor|target|status)=
 OWNER_SETTLED = frozenset({"APPROVED", "DECLINED", "DENIED", "GRANTED", "REJECTED", "ANSWERED",
                            "RESOLVED", "DONE", "CLOSED", "CANCELLED", "WITHDRAWN", "AUTHORIZED",
                            "ACCEPTED", "ACKNOWLEDGED", "SUPERSEDED"})
+# #1943 Owner O1: a target=Owner record with one of these statuses is information (for example the D4 NOTICE); it neither asks nor settles.
+OWNER_INFORMATION_STATUSES = frozenset({"NOTICE", "INFO", "TRACKING"})
 OWNER_SHOWN = 5   # at most this many ★ lines; the rest are counted
 
 
@@ -1953,6 +1956,8 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
     open_requests = {item.reference[1:]: item for item in earlier}
     for when, _, number, fields, body, login in sorted(marked, key=lambda item: item[:2]):
         status = fields.get("status", "")
+        if status in OWNER_INFORMATION_STATUSES and fields.get("actor") != "owner":
+            continue
         held = open_requests.get(number)
         if held is not None and when < held.when:
             continue   # older than the open request: neither asks nor settles again
