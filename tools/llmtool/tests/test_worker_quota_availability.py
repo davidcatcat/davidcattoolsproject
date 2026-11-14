@@ -444,8 +444,10 @@ class ReviewRepairGateTests(_Base):
         self._patch(review_repair, 'dispute_open_on', lambda *args: False)
         self.recorded = []
         self.dispatched = []
+        self.count_reads = []
 
         def task_ids():
+            self.count_reads.append(True)
             raise _ReachedCount()
 
         self.store.task_ids = task_ids
@@ -472,9 +474,14 @@ class ReviewRepairGateTests(_Base):
         self.assertEqual(self.store.tasks[TASK]['review_repair_claims'], [])
 
     def test_review_repair_passes_gate_when_available(self):
-        # Past the gate the repair reads its counts; the stub stops it there.
-        with self.assertRaises(_ReachedCount):
+        # Past the gate the repair reads its counts; the stub stops it there and
+        # repair_review reports that read failure as REPAIR_COUNT_UNAVAILABLE.
+        with self.assertRaises(LLMToolError) as caught:
             self._run()
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_COUNT_UNAVAILABLE')
+        self.assertEqual(self.count_reads, [True])
+        self.assertEqual(self.recorded, [])
+        self.assertEqual(self.dispatched, [])
         self.assertEqual(self.store.task_writes, [])
 
     def test_review_repair_paused_refused_by_policy(self):
