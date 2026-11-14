@@ -28,6 +28,7 @@ _SKILL_MANIFEST = {'commit': 'd' * 40, 'role': 'developer', 'gate': 'develop',
                    'entries': [], 'manifest_sha256': '7' * 64}
 _SKILL_FILES = [('CLAUDE.md', 'Claude repository rules.\n'),
                 ('skills/ai-team-delivery/SKILL.md', 'Delivery skill rules.\n')]
+_MAIN_PIN = '9' * 40
 
 
 def setUpModule():
@@ -155,7 +156,14 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                          return_value=_SKILL_MANIFEST),
             patch.object(task_submission_cli.skill_manifest, 'read_manifest_files',
                          return_value=_SKILL_FILES),
-            patch.object(task_submission_cli.skill_ledger, 'record', return_value='receipt'),
+            # #1502 WP-F: the dispatch pin and card delivery are the only
+            # CONTROLLER_DELIVERED path; no test here reads GitHub main.
+            patch.object(task_submission_cli.skill_ledger, 'pin_dispatch',
+                         return_value=_MAIN_PIN),
+            patch.object(task_submission_cli.skill_ledger, 'record_card_delivery',
+                         return_value='receipt'),
+            patch.object(task_submission_cli.skill_ledger, 'record',
+                         side_effect=AssertionError('generic ledger record used')),
         ]
         return task_submission_cli, store, args, registration, evaluations, prompts, requests, patches, route_runner
 
@@ -284,12 +292,22 @@ class ClaudeRouteWiringTests(unittest.TestCase):
 
     def test_success_embeds_manifest_skill_text_and_records_delivery(self):
         cli, store, args, registration, _evaluations, prompts, _requests, patches, runner = self._setup()
-        build, read, record = (next(item for item in patches if item.attribute == name)
-                               for name in ('build_manifest', 'read_manifest_files', 'record'))
+        build, read, pin, record, generic = (
+            next(item for item in patches if item.attribute == name)
+            for name in ('build_manifest', 'read_manifest_files', 'pin_dispatch',
+                         'record_card_delivery', 'record'))
+        order = []
         with contextlib.ExitStack() as stack:
             entered = {id(item): stack.enter_context(item) for item in patches}
+            entered[id(pin)].side_effect = lambda *_a: order.append('pin') or _MAIN_PIN
+            entered[id(build)].side_effect = (
+                lambda *_a, **_k: order.append('build') or _SKILL_MANIFEST)
             status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
         self.assertEqual(status, 0)
+        # The run is pinned before any skill or card text is built.
+        self.assertEqual(order, ['pin', 'build'])
+        entered[id(pin)].assert_called_once_with('a' * 32, 'b' * 32, 'claude-developer')
+        entered[id(generic)].assert_not_called()
         entered[id(build)].assert_called_once_with(
             registration.root, 'd' * 40, 'developer', 'develop', provider='claude')
         entered[id(read)].assert_called_once_with(registration.root, _SKILL_MANIFEST)
@@ -307,19 +325,34 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             'session_id': '12345678-1234-4234-8234-123456789abc',
             'agent_id': 'claude-developer', 'role': 'developer', 'provider': 'claude',
             'model': developer['model'], 'repo': '/repo/.git', 'head': 'd' * 40,
-            'manifest_sha256': '7' * 64, 'evidence_level': 'CONTROLLER_DELIVERED',
-        })
+            'manifest_sha256': '7' * 64, 'route': 'claude-developer',
+        }, repo_root=registration.root)
+        self.assertNotIn('base_commit', entered[id(record)].call_args.args[0])
 
-    def test_real_ledger_entry_matches_the_run(self):
+    def _real_ledger_run(self, main_reads):
+        """Run with the real ledger; only GitHub main and the card Git read are faked."""
         cli, store, args, registration, _evaluations, _prompts, _requests, patches, runner = self._setup()
-        patches = [item for item in patches if item.attribute != 'record']
+        patches = [item for item in patches
+                   if item.attribute not in ('pin_dispatch', 'record_card_delivery')]
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         ledger_path = Path(temp.name) / 'ledger.jsonl'
+        card_builds = []
+
+        def build_cards(repo_root, commit, route, **kwargs):
+            card_builds.append((repo_root, commit, route, kwargs))
+            return {'schema_version': 1, 'commit': commit, 'role': 'developer',
+                    'route': route, 'prefix_size': 12, 'cards_sha256': '8' * 64,
+                    'cards': [{'path': 'CLAUDE.md', 'sha256': '6' * 64, 'size': 12,
+                               'text': 'card text\n'}]}
         with contextlib.ExitStack() as stack:
             for item in patches:
                 stack.enter_context(item)
             stack.enter_context(patch.object(skill_ledger, '_path', return_value=ledger_path))
+            main_read = stack.enter_context(patch.object(
+                cli.task_completion, 'read_authenticated_main_sha', side_effect=main_reads))
+            stack.enter_context(patch.object(skill_ledger.skill_manifest, 'build_role_cards',
+                                             side_effect=build_cards))
             status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)
             native_session = store.task['developer']['execution']['native_session_id']
             verified = skill_ledger.check(
@@ -328,11 +361,43 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                 store.task['developer']['model'], registration.common_dir,
                 store.task['developer']['source_sha'], _SKILL_MANIFEST['manifest_sha256'])
             chain = skill_ledger.verify_chain()
+        rows = ([json.loads(line) for line in
+                 ledger_path.read_text(encoding='utf-8').splitlines()]
+                if ledger_path.exists() else [])
+        return status, verified, chain, rows, main_read, card_builds, registration
+
+    def test_real_ledger_entry_matches_the_run(self):
+        status, verified, chain, rows, main_read, builds, registration = (
+            self._real_ledger_run([_MAIN_PIN]))
         self.assertEqual(status, 0)
         self.assertEqual(chain, (True, None))
         self.assertEqual(verified['status'], 'VERIFIED')
         self.assertEqual(verified['evidence_level'], 'CONTROLLER_DELIVERED')
-        self.assertEqual(len(ledger_path.read_text(encoding='utf-8').splitlines()), 1)
+        main_read.assert_called_once_with()
+        # Cards come from the dispatch pin, never from the D6 head.
+        self.assertEqual(builds, [(registration.root, _MAIN_PIN, 'claude-developer',
+                                   {'main_ref': skill_manifest.DEFAULT_MAIN_REF})])
+        self.assertEqual([row.get('entry_type') for row in rows], ['DISPATCH_PIN', None])
+        pin, receipt = rows
+        self.assertEqual((pin['task_id'], pin['run_id'], pin['route'], pin['base_commit']),
+                         ('a' * 32, 'b' * 32, 'claude-developer', _MAIN_PIN))
+        self.assertEqual(receipt['base_commit'], _MAIN_PIN)
+        self.assertEqual(receipt['pin_id'], pin['receipt_id'])
+        self.assertEqual(receipt['evidence_level'], 'CONTROLLER_DELIVERED')
+
+    def test_failed_main_read_keeps_the_run_and_records_no_delivery(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            status, verified, chain, rows, _main_read, builds, _reg = self._real_ledger_run(
+                LLMToolError('MAIN_REF_PIN_INVALID'))
+        self.assertEqual(status, 0)
+        self.assertEqual(chain, (True, None))
+        self.assertEqual(rows, [])
+        self.assertEqual(builds, [])
+        self.assertEqual(verified, {'status': 'UNVERIFIED', 'reason': 'NOT_FOUND'})
+        self.assertIn('CLAUDE_SKILL_PIN_FAILED: MAIN_REF_PIN_INVALID', stderr.getvalue())
+        self.assertIn('CLAUDE_SKILL_LEDGER_OUTCOME_UNKNOWN: DISPATCH_PIN_MISSING',
+                      stderr.getvalue())
 
     def test_missing_or_unreadable_skill_refuses_before_provider_call(self):
         for target, code in (
@@ -386,7 +451,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
 
     def test_ledger_failure_keeps_the_finished_run_and_reports_the_code(self):
         cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = self._setup()
-        patches.append(patch.object(cli.skill_ledger, 'record',
+        patches.append(patch.object(cli.skill_ledger, 'record_card_delivery',
             side_effect=skill_ledger.SkillLedgerError('CHAIN_BROKEN')))
         stderr = io.StringIO()
         with contextlib.ExitStack() as stack:
@@ -402,7 +467,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         error = RouteError('BLOCKED_WRITE_ISOLATION', blocked_reason='BLOCKED_WRITE_ISOLATION')
         cli, store, args, _registration, _evaluations, _prompts, _requests, patches, runner = self._setup(
             runner_error=error)
-        record = next(item for item in patches if item.attribute == 'record')
+        record = next(item for item in patches if item.attribute == 'record_card_delivery')
         with contextlib.ExitStack() as stack:
             entered = {id(item): stack.enter_context(item) for item in patches}
             status = cli.run_task_claude_delegate(args, store=store, route_runner=runner)

@@ -26,6 +26,7 @@ _SKILL_MANIFEST = {'commit': 'd' * 40, 'role': 'developer', 'gate': 'develop',
                    'entries': [], 'manifest_sha256': '7' * 64}
 _SKILL_FILES = [('AGENTS.md', 'AGENTS repository rules.\n'),
                 ('skills/ai-team-delivery/SKILL.md', 'Delivery skill rules.\n')]
+_MAIN_PIN = '9' * 40
 
 
 def setUpModule():
@@ -48,15 +49,22 @@ class AgyRouteWiringTests(unittest.TestCase):
                           bind_result='BOUND', initial_native_session_id=None,
                           bound_registration_mutation=False, audit=None,
                           store=None, verified_model='gemini-test', build_manifest=None,
-                          read_manifest_files=None, ledger_record=None,
+                          read_manifest_files=None, ledger_record=None, pin_dispatch=None,
                           owner_ref=('https://github.com/davidcatcat/davidcattoolsproject/'
                                      'issues/289#issuecomment-1')):
         if build_manifest is None:
             build_manifest = Mock(return_value=_SKILL_MANIFEST)
         if read_manifest_files is None:
             read_manifest_files = Mock(return_value=_SKILL_FILES)
+        # #1502 WP-F: ledger_record stands in for record_card_delivery, the
+        # only CONTROLLER_DELIVERED path; pin_dispatch never reads GitHub here.
         if ledger_record is None:
             ledger_record = Mock(return_value='receipt')
+        if pin_dispatch is None:
+            pin_dispatch = Mock(return_value=_MAIN_PIN)
+        generic_record = Mock(side_effect=AssertionError('generic ledger record used'))
+        if audit is not None:
+            audit['generic_record'] = generic_record
         store_writes = [] if audit is None else audit.setdefault('store_writes', [])
         task_id = 'a' * 32
         task = {
@@ -223,7 +231,10 @@ class AgyRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli.skill_manifest, 'build_manifest', build_manifest), \
              patch.object(task_submission_cli.skill_manifest, 'read_manifest_files',
                           read_manifest_files), \
-             patch.object(task_submission_cli.skill_ledger, 'record', ledger_record), \
+             patch.object(task_submission_cli.skill_ledger, 'record_card_delivery',
+                          ledger_record), \
+             patch.object(task_submission_cli.skill_ledger, 'pin_dispatch', pin_dispatch), \
+             patch.object(task_submission_cli.skill_ledger, 'record', generic_record), \
              patch.object(task_submission_cli, 'run_task_direct_result_event',
                           side_effect=direct_event):
             status = task_submission_cli.run_task_agy_delegate(
@@ -954,12 +965,21 @@ class AgyRouteWiringTests(unittest.TestCase):
         build = Mock(return_value=_SKILL_MANIFEST)
         read = Mock(return_value=_SKILL_FILES)
         record = Mock(return_value='receipt')
+        order = []
+        pin = Mock(side_effect=lambda *_a: order.append('pin') or _MAIN_PIN)
+        build.side_effect = lambda *_a, **_k: order.append('build') or _SKILL_MANIFEST
+        audit = {}
         with patch.object(task_submission_cli, '_agy_developer_profile',
                           return_value=('gemini-requested', 'high')):
             status, task, _events, prompts = self._run_agy_delegate(
                 verified_model='gemini-verified', build_manifest=build,
-                read_manifest_files=read, ledger_record=record)
+                read_manifest_files=read, ledger_record=record, pin_dispatch=pin,
+                audit=audit)
         self.assertEqual(status, 0)
+        # The run is pinned before any skill or card text is built.
+        self.assertEqual(order, ['pin', 'build'])
+        pin.assert_called_once_with('a' * 32, 'b' * 32, 'agy')
+        audit['generic_record'].assert_not_called()
         build.assert_called_once_with('/registered/root', 'd' * 40, 'developer', 'develop',
                                       provider='agy')
         read.assert_called_once_with('/registered/root', _SKILL_MANIFEST)
@@ -980,19 +1000,33 @@ class AgyRouteWiringTests(unittest.TestCase):
             'session_id': 'conversation_12345678',
             'agent_id': evidence['executor_identity'], 'role': 'developer',
             'provider': 'agy', 'model': 'gemini-verified', 'repo': '/repo/.git',
-            'head': 'd' * 40, 'manifest_sha256': '7' * 64,
-            'evidence_level': 'CONTROLLER_DELIVERED',
-        })
+            'head': 'd' * 40, 'manifest_sha256': '7' * 64, 'route': 'agy',
+        }, repo_root='/registered/root')
+        self.assertNotIn('base_commit', record.call_args.args[0])
 
     def test_real_ledger_entry_matches_the_run(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         ledger_path = Path(temp.name) / 'ledger.jsonl'
+        builds = []
+
+        def build_cards(repo_root, commit, route, **kwargs):
+            builds.append((repo_root, commit, route, kwargs))
+            return {'schema_version': 1, 'commit': commit, 'role': 'developer',
+                    'route': route, 'prefix_size': 12, 'cards_sha256': '8' * 64,
+                    'cards': [{'path': 'AGENTS.md', 'sha256': '6' * 64, 'size': 12,
+                               'text': 'card text\n'}]}
         with patch.object(skill_ledger, '_path', return_value=ledger_path), \
+                patch.object(task_completion, 'read_authenticated_main_sha',
+                             return_value=_MAIN_PIN) as main_read, \
+                patch.object(skill_ledger.skill_manifest, 'build_role_cards',
+                             side_effect=build_cards), \
                 patch.object(task_submission_cli, '_agy_developer_profile',
                              return_value=('gemini-requested', 'high')):
             status, task, _events, _prompts = self._run_agy_delegate(
-                verified_model='gemini-verified', ledger_record=skill_ledger.record)
+                verified_model='gemini-verified',
+                ledger_record=skill_ledger.record_card_delivery,
+                pin_dispatch=skill_ledger.pin_dispatch)
             evidence = task['completion']['evidence']
 
             def lookup(model):
@@ -1011,7 +1045,15 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(verified['status'], 'VERIFIED')
         self.assertEqual(verified['evidence_level'], 'CONTROLLER_DELIVERED')
         self.assertEqual(requested, {'status': 'UNVERIFIED', 'reason': 'WRONG_MODEL'})
-        self.assertEqual(len(ledger_path.read_text(encoding='utf-8').splitlines()), 1)
+        main_read.assert_called_once_with()
+        # Cards come from the dispatch pin, never from the D6 head.
+        self.assertEqual(builds, [('/registered/root', _MAIN_PIN, 'agy',
+                                   {'main_ref': skill_manifest.DEFAULT_MAIN_REF})])
+        rows = [json.loads(line) for line in
+                ledger_path.read_text(encoding='utf-8').splitlines()]
+        self.assertEqual([row.get('entry_type') for row in rows], ['DISPATCH_PIN', None])
+        self.assertEqual(rows[1]['base_commit'], _MAIN_PIN)
+        self.assertEqual(rows[1]['pin_id'], rows[0]['receipt_id'])
 
     def test_missing_or_unreadable_skill_refuses_before_provider_call(self):
         for target, code in (

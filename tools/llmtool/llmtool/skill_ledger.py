@@ -10,11 +10,16 @@ also write .head. record() can raise after its line persists,
 so callers must treat that result as outcome unknown. The ledger is limited to
 16 MiB and uses an untimed exclusive flock.
 
-Role-card delivery (#1502 WP-F design 3.7): record_card_delivery() is the only
-writer of CONTROLLER_DELIVERED. It derives the route cards and their sha256
-itself from a base commit on origin/main and binds them to the Task/run
-binding; record() refuses that level. check() verifies it like any other
-receipt. Rows written before this rule are not re-validated. record_not_delivered()
+Role-card delivery (#1502 WP-F design 3.7): pin_dispatch() appends one
+immutable DISPATCH_PIN row per Task/run/route holding the authenticated main
+commit, read by the controller itself (task_completion.read_authenticated_main_sha)
+before the run's cards are built. record_card_delivery() is the only writer of
+CONTROLLER_DELIVERED: it takes no base commit or digests from its caller, reads
+the pin for the entry's Task/run/route, derives the cards and their sha256
+from that pinned commit and refuses unless they equal the pin; record() refuses
+that level. check() verifies a card receipt only while its pin is in the chain.
+A pin is never evidence. Rows written before this rule (no route) are not
+re-validated. record_not_delivered()
 appends a NOT_DELIVERED event with a fixed reason code; it is never verified
 evidence, check() ignores it and task_summary() reads it as UNVERIFIED.
 """
@@ -42,6 +47,7 @@ _MAX_BYTES = 16 * 1024 * 1024
 
 CONTROLLER_DELIVERED = 'CONTROLLER_DELIVERED'
 NOT_DELIVERED = 'NOT_DELIVERED'
+DISPATCH_PIN = 'DISPATCH_PIN'
 # Fixed reason codes for a route run that did not receive its role cards.
 NOT_DELIVERED_REASONS = frozenset((
     'ROUTE_NOT_SUPPORTED',  # the route has no rule-delivery field yet (gw-agent)
@@ -56,7 +62,9 @@ _COMMIT_RE = re.compile(r'[0-9a-fA-F]{40}')
 _SHA256_RE = re.compile(r'[0-9a-f]{64}')
 # record_card_delivery() derives these itself; a caller may never supply them.
 _CALLER_DIGEST_KEYS = ('cards', 'cards_sha256', 'prefix_size')
-_CARD_ENTRY_KEYS = frozenset(_BINDING_FIELDS + ('route', 'base_commit', 'evidence_level'))
+# The base commit comes only from the run's dispatch pin.
+_CALLER_PIN_KEYS = ('base_commit', 'pin_id')
+_CARD_ENTRY_KEYS = frozenset(_BINDING_FIELDS + ('route', 'evidence_level'))
 
 
 class SkillLedgerError(LLMToolError):
@@ -482,25 +490,98 @@ def record(entry, *, ttl_seconds=86400):
     return _append_new(value)
 
 
-def record_card_delivery(entry, *, repo_root, ttl_seconds=86400):
-    """Append a CONTROLLER_DELIVERED receipt bound to role-card digests.
+def _find_pin(records, task_id, run_id, route):
+    """Return the first DISPATCH_PIN row for one Task/run/route, or None.
 
-    ``entry`` holds every binding field plus ``route`` and ``base_commit``
-    (the 40-hex dispatch base). The cards, their sha256 and the cards digest
-    are derived here by skill_manifest.build_role_cards() from Git objects in
-    ``repo_root`` at ``base_commit``, which must be on origin/main; the Git
-    reader is not injectable. Caller-supplied ``cards``, ``cards_sha256`` or
-    ``prefix_size`` are refused (CALLER_DIGESTS_REFUSED); any other unknown
-    field is INVALID_ENTRY. A card build failure is refused with its
-    SKILL_MANIFEST_* code. ``role`` must be the Developer role the cards are
-    for (ROLE_MISMATCH). ``evidence_level`` may be omitted; any value other
-    than CONTROLLER_DELIVERED is refused. ``repo_root`` is trusted caller
-    input: a same-user caller can still point it at a repository it controls.
+    Pins are immutable: a later row for the same key never replaces the first.
+    """
+    for item in records:
+        if (type(item) is dict and item.get('entry_type') == DISPATCH_PIN and
+                item.get('task_id') == task_id and item.get('run_id') == run_id and
+                item.get('route') == route):
+            commit = item.get('base_commit')
+            if (type(commit) is not str or _COMMIT_RE.fullmatch(commit) is None or
+                    commit != commit.lower() or type(item.get('receipt_id')) is not str):
+                _fail('PIN_INVALID')
+            return item
+    return None
+
+
+def _pin_key(task_id, run_id, route):
+    if (any(type(value) is not str or not value for value in (task_id, run_id)) or
+            not _valid_route(route) or route not in skill_manifest.role_card_routes()):
+        _fail('INVALID_ENTRY')
+    try:
+        _canonical({'task_id': task_id, 'run_id': run_id})
+    except (TypeError, ValueError, UnicodeError, OverflowError):
+        _fail('INVALID_ENTRY')
+
+
+def pin_dispatch(task_id, run_id, route):
+    """Pin the authenticated main commit for one Task/run/route; return it.
+
+    Called by the controller before the run's role cards are built. The commit
+    is read here from GitHub through task_completion.read_authenticated_main_sha;
+    no caller can supply it. The first pin for a Task/run/route is immutable:
+    a later call returns it without reading main again, so a run pinned to A
+    stays pinned to A after main advances. A failed main read is refused as
+    MAIN_REF_PIN_INVALID and appends nothing.
+    """
+    _pin_key(task_id, run_id, route)
+    existing = _locked_records(lambda _path, records: _find_pin(records, task_id, run_id, route))
+    if existing is not None:
+        return existing['base_commit']
+    # Imported here so the skill hook does not load the completion module.
+    from . import task_completion
+    try:
+        main_sha = task_completion.read_authenticated_main_sha()
+    except Exception:
+        _fail('MAIN_REF_PIN_INVALID')
+    if type(main_sha) is not str or _COMMIT_RE.fullmatch(main_sha) is None:
+        _fail('MAIN_REF_PIN_INVALID')
+    value = {
+        'schema_version': SCHEMA_VERSION, 'entry_type': DISPATCH_PIN,
+        'receipt_id': secrets.token_hex(16), 'status': 'PINNED',
+        'created_at': _now_text(), 'task_id': task_id, 'run_id': run_id,
+        'route': route, 'base_commit': main_sha.lower(),
+    }
+
+    def append(path, records):
+        # A concurrent dispatch of the same run may have pinned first.
+        current = _find_pin(records, task_id, run_id, route)
+        if current is not None:
+            return current['base_commit']
+        _append_locked(path, records, value)
+        return value['base_commit']
+    return _locked_records(append)
+
+
+def record_card_delivery(entry, *, repo_root, ttl_seconds=86400):
+    """Append a CONTROLLER_DELIVERED receipt bound to the run's pinned cards.
+
+    ``entry`` holds every binding field plus ``route``. The base commit is
+    never taken from the caller: it is the DISPATCH_PIN that pin_dispatch()
+    wrote for this ``task_id``/``run_id``/``route`` (DISPATCH_PIN_MISSING if
+    none, so another run's pin cannot be replayed). The cards, their sha256
+    and the cards digest are derived here by skill_manifest.build_role_cards()
+    from Git objects in ``repo_root`` at the pinned commit, which must still be
+    on origin/main; the Git reader is not injectable. The derived commit must
+    equal the pin (PIN_MISMATCH), and the pin is re-read under the append lock.
+    Caller-supplied ``cards``, ``cards_sha256`` or ``prefix_size`` are refused
+    (CALLER_DIGESTS_REFUSED), as are ``base_commit`` and ``pin_id``
+    (CALLER_BASE_REFUSED); any other unknown field is INVALID_ENTRY. A card
+    build failure is refused with its SKILL_MANIFEST_* code. ``role`` must be
+    the Developer role the cards are for (ROLE_MISMATCH). ``evidence_level``
+    may be omitted; any value other than CONTROLLER_DELIVERED is refused.
+    ``repo_root`` is trusted caller input: a same-user caller can still point
+    it at a repository it controls.
     """
     if type(entry) is not dict:
         _fail('INVALID_ENTRY')
     if any(key in entry for key in _CALLER_DIGEST_KEYS):
         _fail('CALLER_DIGESTS_REFUSED')
+    if any(key in entry for key in _CALLER_PIN_KEYS):
+        _fail('CALLER_BASE_REFUSED')
     if any(key not in _CARD_ENTRY_KEYS for key in entry):
         _fail('INVALID_ENTRY')
     level = entry.get('evidence_level', CONTROLLER_DELIVERED)
@@ -508,28 +589,39 @@ def record_card_delivery(entry, *, repo_root, ttl_seconds=86400):
         _fail('INVALID_EVIDENCE_LEVEL')
     value = _binding_value({**entry, 'evidence_level': level}, ttl_seconds)
     route = entry.get('route')
-    base_commit = entry.get('base_commit')
-    if (not _valid_route(route) or type(base_commit) is not str or
-            _COMMIT_RE.fullmatch(base_commit) is None or
-            not isinstance(repo_root, (str, os.PathLike))):
+    if not _valid_route(route) or not isinstance(repo_root, (str, os.PathLike)):
         _fail('INVALID_ENTRY')
     if value['role'].lower() != 'developer':
         _fail('ROLE_MISMATCH')
     # Validate that the stamped value encodes before any Git or ledger access.
     value = _stamped(value, ttl_seconds)
+    task_id, run_id = value['task_id'], value['run_id']
+    pin = _locked_records(lambda _path, records: _find_pin(records, task_id, run_id, route))
+    if pin is None:
+        _fail('DISPATCH_PIN_MISSING')
+    base_commit = pin['base_commit']
     try:
         built = skill_manifest.build_role_cards(
             repo_root, base_commit, route, main_ref=skill_manifest.DEFAULT_MAIN_REF)
     except skill_manifest.SkillManifestError as exc:
         _fail(exc.code)
-    if built.get('route') != route or built.get('commit') != base_commit.lower():
+    if type(built) is not dict or built.get('route') != route:
         _fail('INVALID_ENTRY')
+    if built.get('commit') != base_commit:
+        _fail('PIN_MISMATCH')
     value.update(
-        route=route, base_commit=built['commit'],
+        route=route, base_commit=base_commit, pin_id=pin['receipt_id'],
         cards=_card_digests([{'path': card['path'], 'sha256': card['sha256']}
                              for card in built['cards']]),
         cards_sha256=built['cards_sha256'], prefix_size=built['prefix_size'])
-    return _append_new(value)
+
+    def append(path, records):
+        current = _find_pin(records, task_id, run_id, route)
+        if (current is None or current['receipt_id'] != pin['receipt_id'] or
+                current['base_commit'] != base_commit):
+            _fail('PIN_MISMATCH')
+        return _append_locked(path, records, value)
+    return _locked_records(append)
 
 
 def record_not_delivered(entry, *, ttl_seconds=86400):
@@ -562,18 +654,39 @@ def record_not_delivered(entry, *, ttl_seconds=86400):
 
 
 def _append_new(value):
+    return _locked_records(lambda path, records: _append_locked(path, records, value))
+
+
+def _locked_records(operation):
+    """Run operation(path, records) on the verified chain under the ledger lock."""
     path = _path()
     lock_fd = _locked(path)
     try:
         records = _read(path, recover_torn=True)
         if not _chain(records) or not _recover_anchor(path, records):
             _fail('CHAIN_BROKEN')
-        return _append_locked(path, records, value)
+        return operation(path, records)
     except (TypeError, ValueError, UnicodeError, OverflowError):
         _fail('INVALID_ENTRY')
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
+
+
+def _card_receipt_pinned(records, item):
+    """A CONTROLLER_DELIVERED card receipt verifies only with its own pin.
+
+    Rows written before role-card pinning carry no ``route`` and are not
+    re-validated.
+    """
+    if item.get('evidence_level') != CONTROLLER_DELIVERED or 'route' not in item:
+        return True
+    try:
+        pin = _find_pin(records, item.get('task_id'), item.get('run_id'), item.get('route'))
+    except SkillLedgerError:
+        return False
+    return (pin is not None and pin['receipt_id'] == item.get('pin_id') and
+            pin['base_commit'] == item.get('base_commit'))
 
 
 def _revoked(records, receipt_id):
@@ -602,10 +715,10 @@ def check(task_id, run_id, session_id, agent_id, role, provider, model, repo,
             return {'status': 'UNVERIFIED', 'reason': 'LEDGER_UNREADABLE'}
         if not recovered:
             return {'status': 'UNVERIFIED', 'reason': 'CHAIN_BROKEN'}
-        # NOT_DELIVERED events are never receipts, so they never verify and
-        # never steer the mismatch reason.
+        # NOT_DELIVERED events and dispatch pins are never receipts, so they
+        # never verify and never steer the mismatch reason.
         by_id = [item for item in records if item.get('receipt_id') and
-                 item.get('entry_type') not in ('REVOCATION', NOT_DELIVERED)]
+                 item.get('entry_type') not in ('REVOCATION', NOT_DELIVERED, DISPATCH_PIN)]
         supplied = (task_id, run_id, session_id, agent_id, role, provider,
                     model, repo, head, manifest_sha256)
         fields = _BINDING_FIELDS
@@ -624,6 +737,8 @@ def check(task_id, run_id, session_id, agent_id, role, provider, model, repo,
                     return {'status': 'UNVERIFIED', 'reason': 'EXPIRED'}
                 if item.get('evidence_level') == 'UNVERIFIED':
                     return {'status': 'UNVERIFIED', 'reason': 'NOT_FOUND'}
+                if not _card_receipt_pinned(records, item):
+                    return {'status': 'UNVERIFIED', 'reason': 'PIN_MISMATCH'}
                 return {'status': 'VERIFIED', 'reason': None,
                         'receipt_id': item['receipt_id'],
                         'evidence_level': item['evidence_level']}
@@ -667,8 +782,10 @@ def revoke(receipt_id, reason):
         records = _read(path, recover_torn=True)
         if not _chain(records) or not _recover_anchor(path, records):
             _fail('CHAIN_BROKEN')
+        # A dispatch pin is controller state, not a receipt; it is never revoked.
         target = next((item for item in records if item.get('receipt_id') == receipt_id
-                       and item.get('entry_type') != 'REVOCATION'), None)
+                       and item.get('entry_type') not in ('REVOCATION', DISPATCH_PIN)),
+                      None)
         if target is None:
             _fail('NOT_FOUND')
         if _revoked(records, receipt_id):

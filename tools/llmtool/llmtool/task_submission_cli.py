@@ -4577,21 +4577,43 @@ def _required_skills(registration, snapshot, provider):
     return manifest, ''.join(sections)
 
 
+# Provider profile -> role-card route of its Developer run (#1502 WP-F).
+_SKILL_CARD_ROUTES = {'agy': 'agy', 'claude': 'claude-developer'}
+
+
+def _pin_skill_dispatch(task, provider):
+    """Pin authenticated main for this run's role cards before they are built.
+
+    skill_ledger.pin_dispatch() reads the commit itself through
+    task_completion.read_authenticated_main_sha(); nothing here supplies it.
+    No gate reads delivery evidence yet, so a failed pin does not stop the
+    dispatch: the later delivery record is refused as DISPATCH_PIN_MISSING.
+    """
+    try:
+        skill_ledger.pin_dispatch(task['task_id'], task['run_id'],
+                                  _SKILL_CARD_ROUTES[provider])
+    except Exception as exc:
+        code = getattr(exc, 'skill_ledger_code', 'LEDGER_UNREADABLE')
+        print(provider.upper() + '_SKILL_PIN_FAILED: ' + code, file=sys.stderr)
+
+
 def _record_skill_delivery(task, registration, snapshot, provider, model, manifest, result):
     """Record delivery evidence for a run the provider returned from.
 
+    Only the trusted path writes CONTROLLER_DELIVERED: the role cards come
+    from this run's dispatch pin, never from a base commit given here.
     No gate reads this entry yet, so a ledger failure must not discard the
-    finished run. record() can fail after its line persists: outcome unknown.
+    finished run. The append can fail after its line persists: outcome unknown.
     """
     try:
-        skill_ledger.record({
+        skill_ledger.record_card_delivery({
             'task_id': task['task_id'], 'run_id': task['run_id'],
             'session_id': result.session_id,
             'agent_id': registration.trusted_agent_id, 'role': manifest['role'],
             'provider': provider, 'model': model, 'repo': registration.common_dir,
             'head': snapshot.head, 'manifest_sha256': manifest['manifest_sha256'],
-            'evidence_level': 'CONTROLLER_DELIVERED',
-        })
+            'route': _SKILL_CARD_ROUTES[provider],
+        }, repo_root=registration.root)
     except Exception as exc:
         code = getattr(exc, 'skill_ledger_code', 'LEDGER_UNREADABLE')
         print(provider.upper() + '_SKILL_LEDGER_OUTCOME_UNKNOWN: ' + code, file=sys.stderr)
@@ -5109,6 +5131,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     _screen_text(prompt, AGY_MAX_PROMPT_BYTES)
     if len(prompt.encode('utf-8')) > AGY_MAX_PROMPT_BYTES:
         raise LLMToolError('request or response exceeds the supported size')
+    _pin_skill_dispatch(task, 'agy')
     manifest, skill_text = _required_skills(registration, snapshot, 'agy')
     prompt = instructions + skill_text + task_json
     if len(prompt.encode('utf-8')) > _AGY_PROMPT_MAX_BYTES:
@@ -5434,6 +5457,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
     _screen_text(prompt, CLAUDE_MAX_PROMPT_BYTES)
     if len(prompt.encode('utf-8')) > CLAUDE_MAX_PROMPT_BYTES:
         raise LLMToolError('request or response exceeds the supported size')
+    _pin_skill_dispatch(task, 'claude')
     manifest, skill_text = _required_skills(registration, snapshot, 'claude')
     prompt = instructions + skill_text + task_json
     if len(prompt.encode('utf-8')) > _CLAUDE_PROMPT_MAX_BYTES:
