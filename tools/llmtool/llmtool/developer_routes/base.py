@@ -34,6 +34,15 @@ DEFAULT_TIMEOUT_SECONDS = 600
 HARD_TIMEOUT_CAP_SECONDS = 1800
 MAX_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS
 TIMEOUT_KEYS = frozenset({'default_timeout', 'max_timeout'})
+DEFAULT_MAX_DIFF_BYTES = 64 * 1024
+MIN_MAX_DIFF_BYTES = 1024
+HARD_MAX_DIFF_BYTES = 16 * 1024 * 1024
+ROUTE_LIMIT_KEYS = TIMEOUT_KEYS | {'max_diff_bytes'}
+
+
+def max_diff_bytes_ok(value: Any) -> bool:
+    """Return True only for an int (not bool) with MIN_MAX_DIFF_BYTES <= value <= HARD_MAX_DIFF_BYTES."""
+    return type(value) is int and MIN_MAX_DIFF_BYTES <= value <= HARD_MAX_DIFF_BYTES
 
 
 class RouteError(LLMToolError):
@@ -281,6 +290,45 @@ def resolve_route_timeout(route: Any, requested: Any = None, *,
     if requested > maximum:
         raise RouteError('TIMEOUT_OVER_ROUTE_MAX')
     return requested
+
+
+def resolve_route_max_diff_bytes(route: Any, *,
+                                 config: Mapping[str, Any] | None = None) -> int:
+    """Return the effective max diff bytes for route (#1815).
+
+    route is a registered route name or a DeveloperRoute; config is a
+    load_route_config() result (None loads the repository file). A route
+    without max_diff_bytes returns DEFAULT_MAX_DIFF_BYTES. An invalid value,
+    unknown str route or bad config raises RouteError('ROUTE_CONFIG_INVALID').
+    """
+    if isinstance(route, DeveloperRoute):
+        name = getattr(route, 'name', None)
+        if type(name) is not str:
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        key, registered_only = name.lower().replace('_', '-'), False
+    elif type(route) is str:
+        key, registered_only = route, True
+    else:
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    if config is None:
+        from . import load_route_config
+        config = load_route_config()
+    routes = config.get('routes') if isinstance(config, Mapping) else None
+    if not isinstance(routes, Mapping):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    entry = routes.get(key)
+    if entry is None:
+        if registered_only:
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        return DEFAULT_MAX_DIFF_BYTES
+    if not isinstance(entry, Mapping):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    if 'max_diff_bytes' not in entry:
+        return DEFAULT_MAX_DIFF_BYTES
+    val = entry['max_diff_bytes']
+    if not max_diff_bytes_ok(val):
+        raise RouteError('ROUTE_CONFIG_INVALID')
+    return val
 
 
 def _default_runner(argv, cwd, env, timeout):

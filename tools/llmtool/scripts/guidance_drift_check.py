@@ -198,6 +198,8 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
         "profile": ROUTE_PROFILE,
         "authorization_ref": Str(r"https://\S+"),
         "allowed_data_classes": ListOf(Str(r"[a-z_]+"), min_items=1),
+        # #1815: same bounds as developer_routes.base max_diff_bytes_ok.
+        "max_diff_bytes": Int(1024, 16 * 1024 * 1024),
     },
 ))
 # Review/AI Debug role model registry (#1502 WP-E). The route loader checks
