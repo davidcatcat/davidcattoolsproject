@@ -2021,7 +2021,13 @@ class TaskSubmissionCLITests(unittest.TestCase):
 
     def test_opencode_session_the_d6_does_not_take_is_refused(self):
         for name, options, calls, d6 in (
-                ('d6-holds-another', {'held': 'ses_Earlier1'}, [], 'ses_Earlier1'),
+                ('d6-holds-another', {'held': 'thread-earlier-1'}, [], 'thread-earlier-1'),
+                ('repair-d6-holds-codex', {'held': 'thread-earlier-1', 'repair': True},
+                 [], 'thread-earlier-1'),
+                ('repair-d6-holds-gw-agent', {'held': '0123456789abcdef' * 2, 'repair': True},
+                 [], '0123456789abcdef' * 2),
+                ('d6-unknown', {'held': 'UNKNOWN'}, [], 'UNKNOWN'),
+                ('repair-d6-unknown', {'held': 'UNKNOWN', 'repair': True}, [], 'UNKNOWN'),
                 ('helper-refused', {'answer': 'D6_BIND_NATIVE_SESSION_REFUSED'},
                  ['ses_Abc123'], None),
                 ('helper-unavailable', {'answer': 'D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE'},
@@ -2038,8 +2044,22 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.assertEqual(developer['error_code'], 'OPENCODE_D6_SESSION_REFUSED')
                 self.assertIsNone(developer['artifact'])
                 self.assertEqual(run['event_calls'], 0)
-                self._assert_evidence_names(
-                    run['saved'], 'ses_Earlier1' if name == 'd6-holds-another' else None)
+                self._assert_evidence_names(run['saved'], options.get('held'))
+
+    def test_opencode_later_plain_run_keeps_the_earlier_opencode_d6_session(self):
+        # #1328: a second plain delegate (no repair packet) on a D6 that already
+        # holds an OpenCode session keeps that session instead of ending UNKNOWN.
+        run = self._opencode_bind_run(self._opencode_result(), held='ses_Earlier1')
+        self.assertEqual(run['calls'], [])
+        self.assertEqual(run['d6'], 'ses_Earlier1')
+        developer = run['saved']['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertIsNone(developer['error_code'])
+        self.assertEqual(developer['execution']['native_session_id'], 'ses_Abc123')
+        self._assert_evidence_names(run['saved'], 'ses_Earlier1')
+        self.assertEqual(run['event_calls'], 1)
+        self.assertEqual(run['collect_calls'][0]['expected_native_session_id'],
+                         'ses_Earlier1')
 
     def test_opencode_repair_run_keeps_the_earlier_d6_session(self):
         run = self._opencode_bind_run(self._opencode_result(), held='ses_Earlier1',
