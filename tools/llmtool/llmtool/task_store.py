@@ -284,6 +284,40 @@ _DEVELOPER_TIMEOUT_MAX_SECONDS = 1800
 # developer shape so a review repair can reuse it (legacy records omit it).
 _DEVELOPER_DATA_CLASS_FIELDS = frozenset(('data_class',))
 _DEVELOPER_DATA_CLASSES = frozenset(('SYNTHETIC', 'PUBLIC_REPO'))
+# #1824: a Claude CLI run that ended CLAUDE_NO_CHANGES may keep a bounded, screened
+# diagnosis. Optional on every developer shape; legacy records omit it.
+_DEVELOPER_NO_CHANGES_FIELDS = frozenset(('no_changes_diagnosis',))
+_NO_CHANGES_DIAGNOSIS_FIELDS = frozenset(('reason', 'write_attempted', 'num_turns'))
+_NO_CHANGES_REASON_MAX_CHARS = 200
+_NO_CHANGES_MAX_TURNS = 1_000_000
+_DEVELOPER_OPTIONAL_FIELDS = _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS
+
+
+def _valid_no_changes_diagnosis(developer):
+    """#1824: strict shape of developer.no_changes_diagnosis (Claude CLI, CLAUDE_NO_CHANGES)."""
+    diagnosis = developer.get('no_changes_diagnosis')
+    execution = developer.get('execution')
+    if (developer.get('provider_profile') != 'claude' or
+            developer.get('backend_session_semantics') != 'CLI_REPORTED_SESSION_ID' or
+            developer.get('state') != 'BLOCKED' or
+            developer.get('error_code') != 'CLAUDE_NO_CHANGES' or
+            type(execution) is not dict or execution.get('status') != 'BLOCKED' or
+            type(diagnosis) is not dict or set(diagnosis) != _NO_CHANGES_DIAGNOSIS_FIELDS):
+        return False
+    reason = diagnosis['reason']
+    if (type(reason) is not str or not reason or reason != reason.strip() or
+            len(reason) > _NO_CHANGES_REASON_MAX_CHARS or
+            not all(char.isprintable() for char in reason) or
+            any(unicodedata.category(char) == 'Cf' for char in reason) or
+            (reason != 'UNKNOWN' and _emitted_sensitive(reason))):
+        return False
+    if diagnosis['write_attempted'] not in ('YES', 'NO', 'UNKNOWN'):
+        return False
+    turns = diagnosis['num_turns']
+    return (turns == 'UNKNOWN' if type(turns) is str else
+            type(turns) is int and 0 <= turns <= _NO_CHANGES_MAX_TURNS)
+
+
 _DEVELOPER_UNTIMED_SHAPES = (
     _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
     _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
@@ -2283,10 +2317,14 @@ def _validate(record, *, strict=True):
         if developer is not None:
             # #1815: the shapes carry the optional run timeout; legacy records omit it.
             # The validated --data-class a gw-agent delegate stored is an optional
-            # key on every shape; legacy records omit it.
+            # key on every shape; legacy records omit it. So is the #1824
+            # Claude no_changes_diagnosis, checked strictly below.
             if (type(developer) is not dict or
-                    frozenset(developer) - _DEVELOPER_DATA_CLASS_FIELDS
+                    frozenset(developer) - _DEVELOPER_OPTIONAL_FIELDS
                     not in _DEVELOPER_RECORD_SHAPES):
+                _fail()
+            if ('no_changes_diagnosis' in developer and
+                    not _valid_no_changes_diagnosis(developer)):
                 _fail()
             if ('data_class' in developer and
                     (developer.get('provider_profile') != 'gw-agent' or
