@@ -2615,6 +2615,13 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
                    (event.get('outcome') or event.get('state')) == 'REVIEW_PASS'
                    for event in events):
             continue
+        # #1132 item 1: as in decide(), only the newest claim at this PR and head
+        # counts. A newer claim without a PASS (open, failed or blocked) keeps an
+        # older PASS from closing the Task; a newer PASS returned above.
+        if any(type(other) is dict and other.get('pr') == number and
+               other.get('head_sha') == head and type(other.get('version')) is int and
+               other['version'] > version for other in claims):
+            return None
 
         if train is not None:
             try:
