@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import uuid
 
-from .base import DeveloperRoute, RouteError
+from .base import DeveloperRoute, RouteError, usage_reported
 from .. import github_identity
 
 _MODEL = re.compile(r'claude-[a-z0-9][a-z0-9.-]{0,120}\Z')
@@ -166,6 +166,30 @@ class ClaudeRoute(DeveloperRoute):
     def validate_status(self, parsed):
         if parsed.get('status') != 'DONE':
             raise RouteError('CLAUDE_STATUS_FAILED')
+
+    def provider_basis(self, parsed):
+        """CLI_USAGE only for a parsed Claude CLI JSON result reporting token usage."""
+        raw = parsed.get('raw')
+        if (type(raw) is dict and raw.get('type') == 'result' and
+                _is_canonical_uuid(raw.get('session_id')) and
+                parsed.get('session_id') == raw['session_id'] and
+                usage_reported(parsed.get('usage'))):
+            return 'CLI_USAGE'
+        return None
+
+    def provider_quota_reported(self, parsed):
+        """Only a parsed Claude CLI JSON error result with api_error_status 429.
+
+        Stderr text, the synthetic stderr-fallback result and result text are
+        never evidence; quota_exhausted still classifies them as before.
+        """
+        raw = parsed.get('raw')
+        return (type(raw) is dict and raw.get('type') == 'result' and
+                raw.get('is_error') is True and
+                _is_canonical_uuid(raw.get('session_id')) and
+                parsed.get('session_id') == raw['session_id'] and
+                type(raw.get('api_error_status')) is int and
+                raw['api_error_status'] == 429)
 
     def quota_exhausted(self, parsed, stderr):
         if parsed.get('status') == 'DONE':

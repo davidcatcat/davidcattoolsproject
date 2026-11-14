@@ -60,7 +60,8 @@ class DirectOpenCodeError(LLMToolError):
                  process_exit_code=None, stdout_sha256=None, elapsed_ms=None,
                  source_bytes=None, source_file_count=None,
                  source_manifest_sha256=None, task_id=None, run_id=None,
-                 started_at=None, ended_at=None, native_session_id=None):
+                 started_at=None, ended_at=None, native_session_id=None,
+                 provider_evidence=None):
         super().__init__('OpenCode Developer execution unavailable; details omitted')
         self.direct_opencode_code = code
         self.attempted = attempted
@@ -77,6 +78,8 @@ class DirectOpenCodeError(LLMToolError):
         self.ended_at = ended_at
         self.native_session_id = native_session_id
         self.event_summary = None
+        # Set only from parsed CLI events (design c6876861575 items 1-2).
+        self.provider_evidence = provider_evidence
 
 
 @dataclass(frozen=True)
@@ -98,10 +101,46 @@ class DirectResult:
     started_at: str | None = None
     ended_at: str | None = None
     event_summary: dict | None = None
+    provider_evidence: dict | None = None
 
 
 def _reject(code):
     raise DirectOpenCodeError(code)
+
+
+# Structured provider conditions reported as themselves; nothing else maps.
+_CONDITION_EVIDENCE = {'OPENCODE_FREE_LIMIT': 'QUOTA_EXHAUSTED',
+                       'OPENCODE_RATE_LIMITED': 'RATE_LIMITED'}
+
+
+def condition_evidence(code):
+    """Return {condition} for a classified OpenCode quota or rate code, else None."""
+    condition = _CONDITION_EVIDENCE.get(code) if type(code) is str else None
+    return {'condition': condition} if condition is not None else None
+
+
+def exit_condition_evidence(returncode, code):
+    """Condition evidence for a nonzero exit; a signal (negative) exit gives none."""
+    if type(returncode) is not int or returncode <= 0:
+        return None
+    return condition_evidence(code)
+
+
+def step_usage_evidence(events):
+    """Return STEP_USAGE when at least one parsed step_finish reports token usage."""
+    for event in events:
+        if type(event) is not dict or event.get('type') != 'step_finish':
+            continue
+        part = event.get('part')
+        tokens = part.get('tokens') if type(part) is dict else event.get('tokens')
+        if type(tokens) is not dict:
+            continue
+        incoming, outgoing = tokens.get('input'), tokens.get('output')
+        if (type(incoming) is int and type(outgoing) is int and
+                0 <= incoming <= 10**9 and 0 <= outgoing <= 10**9 and
+                incoming + outgoing > 0):
+            return {'basis': 'STEP_USAGE', 'accepted': True}
+    return None
 
 
 def resolved_timeout(requested=None):
@@ -563,7 +602,8 @@ def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
     events, complete = _json_event_prefix(raw)
     classified = _classify_provider_events(events)
     if classified is not None:
-        _reject(classified)
+        raise DirectOpenCodeError(classified,
+                                  provider_evidence=condition_evidence(classified))
     if not complete:
         _reject('OPENCODE_OUTPUT_INVALID')
     sid = None
@@ -608,7 +648,9 @@ def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
         _reject('OPENCODE_OUTPUT_INCOMPLETE')
     output_text = ''.join(text)
     if not output_text and step_finishes >= step_limit:
-        _reject('OPENCODE_STEPS_EXHAUSTED')
+        # Parsed step usage travels with the refusal.
+        raise DirectOpenCodeError('OPENCODE_STEPS_EXHAUSTED',
+                                  provider_evidence=step_usage_evidence(events))
     usage = (None if not usage_known or step_finishes == 0 else {
         'prompt_tokens': input_tokens,
         'completion_tokens': output_tokens,
@@ -950,9 +992,12 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                                   started_at=started_at, ended_at=ended_at,
                                   native_session_id=_observed_native_session(raw))
     if process.returncode != 0:
+        failure_code = (_classify_provider_error(raw, stderr=bytes(stderr)) or
+                        'OPENCODE_PROVIDER_FAILED')
         raise DirectOpenCodeError(
-                                  _classify_provider_error(raw, stderr=bytes(stderr)) or
-                                  'OPENCODE_PROVIDER_FAILED', attempted=True,
+                                  failure_code, attempted=True,
+                                  provider_evidence=exit_condition_evidence(
+                                      process.returncode, failure_code),
                                   cleanup_status=cleanup, process_exit_code=process.returncode,
                                   stdout_sha256=(hashlib.sha256(raw).hexdigest() if raw else None),
                                   elapsed_ms=elapsed, source_bytes=source_bytes,
@@ -984,4 +1029,5 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                         hashlib.sha256(raw).hexdigest(), elapsed, cleanup, version,
                         source_bytes, source_file_count, source_manifest_sha256,
                         dispatch_task_id, run_id, started_at, ended_at,
-                        event_summary=summarize_events(raw, step_limit=steps))
+                        event_summary=summarize_events(raw, step_limit=steps),
+                        provider_evidence=step_usage_evidence(_json_event_prefix(raw)[0]))
