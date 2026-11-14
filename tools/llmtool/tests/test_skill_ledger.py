@@ -1116,7 +1116,8 @@ class SkillLedgerTests(unittest.TestCase):
         side_files['skills/role-cards/developer.md'] = b'side branch card\n'
         side = self.commit_cards(side_files, update_main=False)
         for run_id, commit, code in (
-                ('run-x', 'b' * 40, 'SKILL_MANIFEST_COMMIT_INVALID'),
+                # #1931: a pinned commit absent from the repository is NOT_LOCAL.
+                ('run-x', 'b' * 40, 'SKILL_MANIFEST_COMMIT_NOT_LOCAL'),
                 ('run-y', side, 'SKILL_MANIFEST_COMMIT_NOT_ON_MAIN')):
             with self.subTest(code=code):
                 self.pin(commit, run_id=run_id)

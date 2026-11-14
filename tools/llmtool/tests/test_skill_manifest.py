@@ -17,6 +17,7 @@ from llmtool.skill_manifest import (
     MAX_DEVELOPER_PREFIX_SIZE,
     MAX_SKILL_FILE_SIZE,
     SKILL_MANIFEST_COMMIT_INVALID,
+    SKILL_MANIFEST_COMMIT_NOT_LOCAL,
     SKILL_MANIFEST_COMMIT_NOT_ON_MAIN,
     SKILL_MANIFEST_GATE_INVALID,
     SKILL_MANIFEST_MAIN_REF_INVALID,
@@ -28,7 +29,9 @@ from llmtool.skill_manifest import (
     SKILL_MANIFEST_ROUTE_INVALID,
     SKILL_MANIFEST_TOO_LARGE,
     SkillManifestError,
+    build_debug_cards,
     build_manifest,
+    build_review_cards,
     build_role_cards,
     role_card_routes,
 )
@@ -202,10 +205,44 @@ class SkillManifestTests(unittest.TestCase):
 
     def test_invalid_commit_format_or_missing_commit_is_refused(self):
         self._assert_code(SKILL_MANIFEST_COMMIT_INVALID, 'short', 'developer', 'develop')
+        # #1931: a well-formed id with no object here is NOT_LOCAL.
         self._assert_code(
-            SKILL_MANIFEST_COMMIT_INVALID,
+            SKILL_MANIFEST_COMMIT_NOT_LOCAL,
             '0' * 40, 'developer', 'develop',
         )
+
+    def test_absent_commit_is_not_local_for_every_card_builder(self):
+        # #1931: a main commit not fetched yet is named, not a bare INVALID.
+        self.assertNotEqual(SKILL_MANIFEST_COMMIT_NOT_LOCAL, SKILL_MANIFEST_COMMIT_INVALID)
+        absent = '1' * 40
+        builders = (
+            ('role', lambda commit, **kw: build_role_cards(self.repo, commit, 'agy', **kw)),
+            ('review', lambda commit, **kw: build_review_cards(self.repo, commit, **kw)),
+            ('debug', lambda commit, **kw: build_debug_cards(self.repo, commit, **kw)),
+            ('manifest', lambda commit, **kw: build_manifest(
+                self.repo, commit, 'developer', 'develop', **kw)),
+        )
+        blob = self._git('rev-parse', self.commit + ':AGENTS.md').stdout.decode('ascii').strip()
+
+        def broken_cat_file(args, **kwargs):
+            if 'cat-file' in args and '-e' in args:
+                return SimpleNamespace(returncode=128, stdout=b'')
+            return subprocess.run(args, **kwargs)
+
+        for name, build in builders:
+            for commit, code, kwargs in (
+                    (absent, SKILL_MANIFEST_COMMIT_NOT_LOCAL, {}),
+                    (absent.upper(), SKILL_MANIFEST_COMMIT_NOT_LOCAL, {}),
+                    # A present object that is not a commit stays INVALID.
+                    (blob, SKILL_MANIFEST_COMMIT_INVALID, {}),
+                    # A cat-file error other than 'missing' stays INVALID.
+                    (absent, SKILL_MANIFEST_COMMIT_INVALID,
+                     {'git_runner': broken_cat_file})):
+                with self.subTest(builder=name, commit=commit, kwargs=sorted(kwargs)):
+                    with self.assertRaises(SkillManifestError) as caught:
+                        build(commit, **kwargs)
+                    self.assertEqual(caught.exception.code, code)
+                    self.assertEqual(str(caught.exception), code)
 
     def test_annotated_tag_object_id_is_not_a_commit(self):
         tag = self._git('tag', '-a', 'manifest-tag', '-m', 'tag')
@@ -522,9 +559,10 @@ class SkillManifestTests(unittest.TestCase):
                 self.assertTrue(build_role_cards(self.repo, self.commit, route))
 
     def test_role_cards_refuse_invalid_commit_and_missing_card(self):
-        for commit in ('short', None, '0' * 40):
+        for commit in ('short', None):
             with self.subTest(commit=commit):
                 self._assert_card_code(SKILL_MANIFEST_COMMIT_INVALID, commit, 'agy')
+        self._assert_card_code(SKILL_MANIFEST_COMMIT_NOT_LOCAL, '0' * 40, 'agy')
         # A common core missing at the commit refuses every Developer route.
         self._git('rm', '-q', COMMON_CORE_CARD_PATH)
         self.commit = self._commit()
