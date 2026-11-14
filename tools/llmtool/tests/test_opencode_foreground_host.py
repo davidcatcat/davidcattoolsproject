@@ -149,6 +149,28 @@ class CompositionTests(unittest.TestCase):
         self.assertIsNone(completion['evidence']['host_worker_receipt'])
         self.assertIn('HOST_WORKER_RECEIPT_UNAVAILABLE', completion['missing_gates'])
 
+    def test_task_worker_delivery_refusals_name_their_code(self):
+        # Refusal-code pin: a llmtool Task id needs the real TaskStore, and the
+        # stored Task must match the job and still wait for its executor.
+        job, store, record = self._task_store_for_worker_job(self.fixture()[0])
+        receipt, delivery = self._worker_delivery(job)
+        completion = record['completion']
+        evidence = dict(completion['evidence'], run_id='9' * 32)
+        for task_store, saved, code in (
+                (None, None, 'LLMTOOL_TASK_STORE_REQUIRED_FOR_HOST_COMPLETION'),
+                (object(), None, 'LLMTOOL_TASK_STORE_INVALID_FOR_HOST_COMPLETION'),
+                (store, dict(record, task_binding={}), 'LLMTOOL_HOST_TASK_BINDING_MISMATCH'),
+                (store, dict(record, completion=dict(completion, state='DONE')),
+                 'LLMTOOL_HOST_TASK_NOT_WAITING_FOR_EXECUTOR'),
+                (store, dict(record, completion=dict(completion, evidence=evidence)),
+                 'LLMTOOL_HOST_TASK_EVIDENCE_MISMATCH')):
+            with self.subTest(code=code):
+                with patch.object(store, 'get', return_value=saved or record), \
+                        self.assertRaises(h.w.WorkerError) as caught:
+                    h._persist_task_worker_delivery(job, receipt, delivery, task_store)
+                self.assertEqual(caught.exception.worker_code, code)
+        self.assertEqual(store.get(record['task_id'])['completion'], completion)
+
     def test_actual_composition_admission_consumption_and_source_checks(self):
         job, policy, a, snap = self.fixture()
         host = h.Host(policy, a, {'synthetic': 'never real'})
