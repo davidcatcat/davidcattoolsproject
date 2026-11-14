@@ -580,15 +580,72 @@ def _review_gate(task, attempts, packet, family, policy, counts=None):
     return entry if used else None
 
 
+_LIVE_CLAIM_STATES = ('CLAIMED', 'DISPATCHED', 'UNKNOWN')
+
+
+def _auto_replay_claim(store, task, task_id, existing):
+    """Admit an auto replay of a live review claim only when it is the chain's only one.
+
+    v91 F1: checked under the chain lock on fresh reads. The replayed claim
+    must still be live on a fresh read of this Task, and the whole chain (every
+    Task, every PR family; '-ec2' claims excluded) must hold exactly one review
+    repair claim. Anything else, a count in doubt included, refuses
+    REVIEW_REPAIR_PM_REQUIRED with no state change. Returns the fresh claim.
+    """
+    from . import lineage_counts
+    key = lineage_counts.chain_key(store, task)
+    try:
+        release_chain = lineage_counts.acquire_chain_lock(store, key)
+    except Exception:
+        _refuse('REPAIR_CHAIN_LOCK_UNAVAILABLE')
+    try:
+        try:
+            current = store.get(task_id)
+        except Exception:
+            current = None
+        if type(current) is not dict or current.get('task_id') != task_id:
+            _refuse('REVIEW_REPAIR_PM_REQUIRED')
+        # The chain is write-once, so a key that changed is a read in doubt.
+        if lineage_counts.chain_key(store, current) != key:
+            _refuse('REVIEW_REPAIR_PM_REQUIRED')
+        claims = current.get('review_repair_claims', [])
+        if type(claims) is not list:
+            _refuse('REVIEW_REPAIR_PM_REQUIRED')
+        fields = ('repair_task_id', 'executor_task', 'pr', 'head_sha', 'version')
+        fresh = [item for item in claims
+                 if type(item) is dict and
+                 all(item.get(name) == existing.get(name) for name in fields) and
+                 _claim_family(item) == _claim_family(existing) and
+                 item.get('state') in _LIVE_CLAIM_STATES]
+        if (len(fresh) != 1 or type(_claim_family(fresh[0])) is not str or
+                _claim_family(fresh[0]).endswith(EC2_FAMILY_SUFFIX)):
+            _refuse('REVIEW_REPAIR_PM_REQUIRED')
+        used = lineage_counts.chain_review_repairs(store, current)
+        if type(used) is not int or used != 1:
+            _refuse('REVIEW_REPAIR_PM_REQUIRED')
+        return fresh[0]
+    finally:
+        release_chain()
+
+
 def repair_review(*, store, task_id, executor_task, pr_number, family=None, github_get=None,
                   dispatch_adapter=None, current_head=None, auto_review=False,
                   review_dispatcher=None, delegate_callable=None,
                   repair_task_recorder=None, retry_claim_id=None,
-                  remote_test_receipt=None, ci_failure=None):
+                  remote_test_receipt=None, ci_failure=None, auto=False):
     """Claim and dispatch one repair for a failed review, remote test or CI check.
 
     remote_test_receipt (EC2) and ci_failure (#1502 WP-D D11) are exclusive; both
     are test failures and share one count, the '<base>-ec2' family.
+
+    auto is True only from task advance / drive. An auto review repair (a retry
+    included) is refused REVIEW_REPAIR_PM_REQUIRED, inside the chain-locked
+    admission, once any review repair claim exists anywhere in the chain (every
+    chain Task, every PR family; UNKNOWN counts as used). An auto replay of a
+    live claim is also decided under the chain lock: it is returned only when
+    that claim is the chain's only review repair claim (v91 F1). A manual task
+    repair (auto False) keeps D1 and its replay. auto has no effect on a
+    test-failure repair.
     """
     if ci_failure is not None and remote_test_receipt is not None:
         _refuse('CI_FAILURE_INVALID')
@@ -715,6 +772,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if retry_claim_id is not None and retry_claim is None:
         _refuse('REPAIR_CLAIM_UNAVAILABLE')
     if existing is not None and existing is not retry_claim:
+        if auto and not test_failure:
+            # v91 F1: an auto replay is decided under the chain lock too.
+            existing = _auto_replay_claim(store, task, task_id, existing)
         task_id_for_repair = existing.get('repair_task_id')
         dispatched = existing.get('state') == 'DISPATCHED'
         return {'claim': existing, 'repair_task_id': task_id_for_repair,
@@ -724,7 +784,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     # #1502 WP-D: limits from policy.json; review repairs pass the counting gate.
     # L1 (I1, I2, I6): the counts cover the whole continuation chain; a link in
     # doubt makes them UNKNOWN, which counts as the limit. The replay above
-    # still looks only at this Task's own claims.
+    # finds its claim among this Task's own claims; an auto review replay is
+    # then admitted only under the chain lock (_auto_replay_claim, v91 F1).
     # L1 phase 2: the counts are read and the claim is written under the chain
     # lock of the chain's oldest Task (a Task without continues is its own
     # key), so two repairs in one chain cannot both spend the last repair. The
@@ -741,6 +802,18 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         # The chain is write-once, so a key that changed is a read in doubt.
         if lineage_counts.chain_key(store, task) != key:
             _refuse('REPAIR_COUNT_UNAVAILABLE')
+        if auto and not test_failure:
+            # Checked only here, under the chain lock, on a fresh read of this
+            # Task: a claim committed since the first read is seen.
+            try:
+                current = store.get(task_id)
+            except Exception:
+                current = None
+            used = (lineage_counts.chain_review_repairs(store, current)
+                    if type(current) is dict and current.get('task_id') == task_id
+                    else None)
+            if type(used) is not int or used != 0:
+                _refuse('REVIEW_REPAIR_PM_REQUIRED')
         counts = lineage_counts.lineage_counts(store, task, base_family=base_family,
                                                include_successors=True)
         rca_entry = None
