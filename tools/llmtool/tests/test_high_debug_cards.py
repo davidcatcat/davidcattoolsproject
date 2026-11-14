@@ -43,9 +43,14 @@ def _git(root, *args):
 
 class _Store:
     def __init__(self):
-        self.entries, self.events = [], []
+        self.entries, self.events, self.ids = [], [], set()
+
+    def task_ids(self):
+        # #1502 WP-D: the one Task this store holds; the Debug chain scan reads it.
+        return sorted(self.ids)
 
     def get(self, task_id):
+        self.ids.add(task_id)
         return {'task_id': task_id, 'run_id': 'b' * 32,
                 'review_repair_claims': [{'family': 'family', 'pr': 17}] * 2,
                 'completion': {'executor_task_id': 'executor',
