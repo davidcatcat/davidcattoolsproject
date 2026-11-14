@@ -153,6 +153,7 @@ class _DelegateCase(_StoreCase):
             self.write(rel, text)
         self.head = self.commit()
         self.route_calls = []
+        self.d6_agent = None
 
     # -- fixture helpers
 
@@ -178,7 +179,7 @@ class _DelegateCase(_StoreCase):
 
     def binding(self, _args):
         head = git(self.root, 'rev-parse', 'HEAD').strip()
-        return (SimpleNamespace(task_id=D6, root=self.root),
+        return (SimpleNamespace(task_id=D6, root=self.root, trusted_agent_id=self.d6_agent),
                 SimpleNamespace(head=head, clean=self.status() == ''))
 
     def developer_route(self, args, *, store):
@@ -187,19 +188,22 @@ class _DelegateCase(_StoreCase):
                                  'evidence': store.get(args.task_id).get('file_ops_evidence')})
         return 0
 
-    def delegate(self, task_id):
+    def delegate(self, task_id, *, repair_cap=None, **changes):
         args = SimpleNamespace(task_id=task_id, provider='codex', mode='direct',
                                background=False, timeout=None, executor_task=D6,
                                acceptance=['Docs are archived'], cwd=self.root)
+        for name, value in changes.items():
+            setattr(args, name, value)
         with mock.patch.object(cli, '_delegate_d6_binding', side_effect=self.binding), \
-                mock.patch.object(cli, '_check_delegate_repair_cap', return_value=None), \
+                mock.patch.object(cli, '_check_delegate_repair_cap', return_value=None,
+                                  side_effect=repair_cap), \
                 mock.patch.object(cli, 'run_task_codex_delegate',
                                   side_effect=self.developer_route):
             return cli.run_task_delegate(args, store=self.store)
 
-    def assertRefused(self, code, task_id):
+    def assertRefused(self, code, task_id, **changes):
         with self.assertRaises(LLMToolError) as ctx:
-            self.delegate(task_id)
+            self.delegate(task_id, **changes)
         self.assertTrue(str(ctx.exception).startswith(code), str(ctx.exception))
         self.assertEqual([], self.route_calls)
 
@@ -350,6 +354,78 @@ class DelegateFileOpsTests(_DelegateCase):
             self.assertRefused('FILE_OPS_FAILED', task['task_id'])
         saved = self.store.get(task['task_id'])
         self.assertEqual(frozenset(['src/tool.py']), cli._d6_scope(saved, ['src/tool.py']))
+
+
+class DelegateRefusalLeavesD6UntouchedTests(_DelegateCase):
+    """A dispatch refusal comes before file_ops: no D6 change and no evidence."""
+
+    def assertRefusedUntouched(self, code, task_id, **changes):
+        with mock.patch.object(file_ops, 'plan', side_effect=AssertionError('plan ran')), \
+                mock.patch.object(file_ops, 'apply', side_effect=AssertionError('apply ran')):
+            self.assertRefused(code, task_id, **changes)
+        self.assertUnchanged(task_id)
+        self.assertTrue(self.exists('README.txt'))
+        self.assertTrue(self.exists('docs/a.txt'))
+
+    def test_unsupported_route_leaves_d6_unchanged(self):
+        task = self.record_pm(MOVE_AND_DELETE)
+        cases = (
+            ('unsupported Developer route', {'provider': 'nope', 'mode': 'proposal'}),
+            ('--mode direct is supported only', {'provider': 'nope', 'mode': 'direct'}),
+            ('--provider agy requires --mode direct', {'provider': 'agy', 'mode': 'proposal'}),
+            ('--background requires --mode direct',
+             {'provider': 'codex', 'mode': 'proposal', 'background': True}),
+        )
+        for code, changes in cases:
+            with self.subTest(code=code):
+                self.assertRefusedUntouched(code, task['task_id'], **changes)
+
+    def test_paused_worker_leaves_d6_unchanged(self):
+        task = self.record_pm(MOVE_AND_DELETE)
+        paused = SimpleNamespace(allowed=False, reason_code='WORKER_PAUSED')
+        for key, changes in (('codex-developer', {}),
+                             ('opencode-developer', {'provider': 'opencode',
+                                                     'mode': 'proposal'})):
+            with self.subTest(worker=key):
+                with mock.patch.object(cli.worker_dispatch, 'evaluate',
+                                       return_value=paused) as evaluate:
+                    self.assertRefusedUntouched('WORKER_PAUSED', task['task_id'], **changes)
+                self.assertEqual(key, evaluate.call_args[0][0])
+
+    def test_refused_dispatch_leaves_d6_unchanged(self):
+        task = self.record_pm(MOVE_AND_DELETE)
+        cases = (
+            ('D6_SOURCE_BINDING_MISMATCH', {'executor_task': 'd6-other'}),
+            ('no matching low-risk codex recommendation',
+             {'selection_source': 'PM', 'acceptance': ['Another acceptance item']}),
+            ('DELEGATE_REPAIR_CAP_TEST',
+             {'repair_cap': LLMToolError('DELEGATE_REPAIR_CAP_TEST')}),
+        )
+        for code, changes in cases:
+            with self.subTest(code=code):
+                self.assertRefusedUntouched(code, task['task_id'], **changes)
+        self.d6_agent = 'claude-developer'
+        self.assertRefusedUntouched('D6_CLAUDE_RESERVED', task['task_id'])
+
+    def test_file_ops_apply_after_dispatch_gate(self):
+        task = self.record_pm(MOVE_AND_DELETE)
+        order = []
+        real_plan = file_ops.plan
+
+        def evaluate(*args, **kwargs):
+            order.append('dispatch-gate')
+            return SimpleNamespace(allowed=True, reason_code='OWNER_POLICY_ALLOWED')
+
+        def plan(*args, **kwargs):
+            order.append('file_ops')
+            return real_plan(*args, **kwargs)
+
+        with mock.patch.object(cli.worker_dispatch, 'evaluate', side_effect=evaluate), \
+                mock.patch.object(file_ops, 'plan', side_effect=plan):
+            self.assertEqual(0, self.delegate(task['task_id']))
+        self.assertEqual(['dispatch-gate', 'file_ops'], order)
+        self.assertEqual(1, len(self.route_calls))
+        self.assertEqual('VERIFIED', self.route_calls[0]['evidence']['status'])
 
 
 class FileOpsEvidenceStoreTests(_DelegateCase):

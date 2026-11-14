@@ -7111,8 +7111,99 @@ def _file_ops_now():
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
-def _file_ops_gate(args, store):
-    """#1502: apply the PM-assigned file_ops once, before any Developer, and record evidence.
+# #1502: the worker-dispatch.json key each Developer route is gated by.
+_FILE_OPS_ROUTE_WORKERS = {'codex': 'codex-developer', 'opencode': 'opencode-developer',
+                           'agy': 'agy', 'claude': 'claude-developer', 'gw-agent': 'gw-agent'}
+
+
+def _file_ops_dispatch_precheck(args, task, route):
+    """#1502: the refusals a Developer route makes before its launch, run before file_ops.
+
+    Route support, the route's arguments, Task state, the Task contract and PM
+    assignment, D6 identity and the worker-dispatch.json gate. Any refusal
+    here leaves the D6 untouched. Returns the bound ``(registration, snapshot)``.
+    """
+    worker_key = _FILE_OPS_ROUTE_WORKERS.get(route)
+    if worker_key is None:
+        raise LLMToolError('unsupported Developer route')
+    direct = getattr(args, 'mode', 'proposal') == 'direct'
+    if route in ('agy', 'claude', 'gw-agent') and not direct:
+        raise LLMToolError(f'--provider {route} requires --mode direct')
+    if getattr(args, 'context_stdin', False) and (route != 'codex' or direct):
+        raise LLMToolError(f'{route} reads only its registered D6 task scope')
+    owner_ref = getattr(args, 'owner_ref', None)
+    if route == 'agy':
+        owner_ref = _optional_agy_owner_ref(args)
+    elif route == 'claude':
+        if owner_ref is not None and (type(owner_ref) is not str or
+                worker_dispatch.owner_comment_ref().fullmatch(owner_ref) is None):
+            raise LLMToolError('--provider claude requires a valid --owner-ref before Task mutation')
+        if getattr(args, 'selection_source', None) != 'PM':
+            raise LLMToolError('Claude direct requires a PM-selected assignment')
+    elif route == 'gw-agent':
+        data_class = getattr(args, 'data_class', None)
+        if type(data_class) is not str or not data_class:
+            raise LLMToolError('--provider gw-agent requires --data-class')
+    if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
+            task.get('schema_version') != 2):
+        raise LLMToolError('task has no successful PM response')
+    if task.get('abandonment') is not None or _split_pending(task):
+        raise LLMToolError('FILE_OPS_TASK_NOT_DISPATCHABLE')
+    binding = task.get('task_binding')
+    task_completion.validate_task_binding(
+        stored_binding=binding, task_id=task.get('task_id'), run_id=task.get('run_id'),
+        contract_digest=binding.get('contract_digest') if type(binding) is dict else None)
+    assignment = task.get('pm_assignment')
+    if route in ('claude', 'gw-agent') or getattr(args, 'selection_source', None) == 'PM':
+        if (type(assignment) is not dict or assignment.get('route') != route or
+                assignment.get('risk') != 'LOW' or
+                getattr(args, 'acceptance', None) != assignment.get('acceptance')):
+            raise LLMToolError(
+                f'no matching low-risk {route} recommendation from the selected PM route')
+    try:
+        registration, snapshot = _delegate_d6_binding(args)
+    except Exception:
+        raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
+    if registration.task_id != getattr(args, 'executor_task', None):
+        raise LLMToolError('D6_SOURCE_BINDING_MISMATCH')
+    if route == 'claude':
+        if getattr(registration, 'trusted_agent_id', None) != 'claude-developer':
+            raise LLMToolError('D6_CLAUDE_AGENT_REQUIRED')
+    else:
+        _reject_claude_reserved_d6(registration)
+    if route == 'gw-agent':
+        decision = worker_dispatch.evaluate('gw-agent', task_id=task.get('task_id'))
+    elif route == 'agy':
+        decision = worker_dispatch.evaluate('agy', owner_ref, task.get('task_id'))
+    elif route == 'claude':
+        decision = worker_dispatch.evaluate('claude-developer', owner_ref, registration.task_id)
+    else:
+        decision = worker_dispatch.evaluate(worker_key)
+    if getattr(decision, 'allowed', None) is not True:
+        code = getattr(decision, 'reason_code', None)
+        raise LLMToolError(code if type(code) is str and code else 'WORKER_DISPATCH_DENIED')
+    return registration, snapshot
+
+
+def _file_ops_rebind(args, before):
+    """Re-take the D6 binding after file_ops changed the tree; the HEAD must not move."""
+    try:
+        registration, snapshot = _delegate_d6_binding(args)
+    except Exception:
+        raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
+    if (registration.task_id != getattr(args, 'executor_task', None) or
+            snapshot.head != before.head):
+        raise LLMToolError('D6_SOURCE_BINDING_MISMATCH')
+    return registration, snapshot
+
+
+def _file_ops_gate(args, store, route):
+    """#1502: apply the PM-assigned file_ops once, immediately before the Developer launch.
+
+    Called by each route branch of ``run_task_delegate`` after its own checks.
+    Every route-support, dispatch-gate, Task-state, contract and D6-identity
+    refusal (``_file_ops_dispatch_precheck``) runs first, so a refused
+    dispatch never changes the D6 and records no evidence.
 
     Runs on the bound D6 at its registered HEAD. The first apply needs a clean
     tree; ``file_ops.plan`` refuses the whole batch before any change. A
@@ -7121,9 +7212,10 @@ def _file_ops_gate(args, store):
     no Developer, merge claim or published PR for the Task. file_ops never
     commits, pushes or resets.
 
-    An unreadable Task is left to the route's own refusal: nothing is applied,
-    and the store refuses any Developer for a file_ops Task without VERIFIED
-    evidence (FILE_OPS_EVIDENCE_REQUIRED).
+    Returns the evidence when this call applied or re-verified the ops, else
+    None. An unreadable Task is left to the route's own refusal: nothing is
+    applied, and the store refuses any Developer for a file_ops Task without
+    VERIFIED evidence (FILE_OPS_EVIDENCE_REQUIRED).
     """
     try:
         task = store.get(args.task_id)
@@ -7139,17 +7231,8 @@ def _file_ops_gate(args, store):
     assignment = task.get('pm_assignment')
     ops = assignment.get('file_ops') if type(assignment) is dict else None
     if ops is None or task.get('developer') is not None:
-        return evidence
-    if task.get('schema_version') != 2 or task.get('state') != 'PM_RESPONDED':
-        raise LLMToolError('task has no successful PM response')
-    if task.get('abandonment') is not None or _split_pending(task):
-        raise LLMToolError('FILE_OPS_TASK_NOT_DISPATCHABLE')
-    try:
-        registration, snapshot = _delegate_d6_binding(args)
-    except Exception:
-        raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
-    if registration.task_id != getattr(args, 'executor_task', None):
-        raise LLMToolError('D6_SOURCE_BINDING_MISMATCH')
+        return None
+    registration, snapshot = _file_ops_dispatch_precheck(args, task, route)
     head = snapshot.head
     if evidence is not None:
         if evidence.get('executor_task') != registration.task_id or evidence.get('head') != head:
@@ -7216,8 +7299,8 @@ def run_task_delegate(args, *, store=None):
     elif getattr(args, 'timeout', None) is not None:
         raise LLMToolError('TIMEOUT_ROUTE_UNSUPPORTED: --timeout applies only to the '
                            'Claude, OpenCode, AGY and gw-agent Developer routes')
-    # #1502: PM-assigned file_ops run once, before any Developer of every route.
-    _file_ops_gate(args, store)
+    # #1502: PM-assigned file_ops run once per route branch below, after every
+    # check that can refuse the dispatch and immediately before the Developer.
     if getattr(args, 'background', False):
         provider = getattr(args, 'provider', None)
         if provider == 'codex' and getattr(args, 'mode', 'proposal') != 'direct':
@@ -7278,6 +7361,8 @@ def run_task_delegate(args, *, store=None):
         if previous is None:
             _reject_claude_reserved_d6(registration)
         _check_delegate_repair_cap(args, store, (registration, _snapshot))
+        if _file_ops_gate(args, store, provider) is not None:
+            registration, _snapshot = _file_ops_rebind(args, _snapshot)
         return _run_background_delegate(
             args, provider=provider, store=store,
             d6_binding=(registration, _snapshot))
@@ -7289,6 +7374,7 @@ def run_task_delegate(args, *, store=None):
         # (None accepted) before any store read or Task mutation.
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         _check_delegate_repair_cap(args, store)
+        _file_ops_gate(args, store, 'agy')
         return run_task_agy_delegate(args, store=store)
     if args.provider == 'claude':
         if getattr(args, 'mode', 'proposal') != 'direct':
@@ -7297,20 +7383,24 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('--provider claude does not support --background')
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         _check_delegate_repair_cap(args, store)
+        _file_ops_gate(args, store, 'claude')
         return run_task_claude_delegate(args, store=store)
     if args.provider == 'gw-agent':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider gw-agent requires --mode direct')
         _check_delegate_repair_cap(args, store)
+        _file_ops_gate(args, store, 'gw-agent')
         return run_task_gw_agent_delegate(args, store=store)
     _validate_acceptance_scope(args.acceptance)
     if getattr(args, 'mode', 'proposal') == 'direct':
         if args.provider != 'codex':
             raise LLMToolError('--mode direct is supported only for the Codex Developer route')
         _check_delegate_repair_cap(args, store)
+        _file_ops_gate(args, store, 'codex')
         return run_task_codex_delegate(args, store=store)
     if args.provider == 'opencode':
         _check_delegate_repair_cap(args, store)
+        _file_ops_gate(args, store, 'opencode')
         return run_task_opencode_delegate(args, store=store)
     if args.provider != 'codex':
         raise LLMToolError('unsupported Developer route')
@@ -7341,6 +7431,8 @@ def run_task_delegate(args, *, store=None):
     if task.get('developer') is None:
         _reject_claude_reserved_d6(registration)
     _check_delegate_repair_cap(args, store, (registration, snapshot))
+    if _file_ops_gate(args, store, 'codex') is not None:
+        registration, snapshot = _file_ops_rebind(args, snapshot)
     source_sha = snapshot.head
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
