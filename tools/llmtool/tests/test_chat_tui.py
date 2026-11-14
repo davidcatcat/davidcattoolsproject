@@ -1765,6 +1765,40 @@ class TaskModeTests(Base):
         self.assertEqual(self.store_records(), [])
         self.assertIn('chat mode: Enter sends drafts', ui.conversation.text)
 
+    def test_1819_read_only_task_views_work_without_dev_and_write_nothing(self):
+        # #1819 (Owner B): list, show, events and F2/F3/F4 without --dev; TaskStore unchanged.
+        self.drive(['/task mode profile first\r', 'first task\r', self.idle])
+        task_id = self.store_records()[0]['task_id']
+        state = self.temp_root.resolve() / '.local' / 'state' / 'llmtool'
+
+        def snapshot():
+            return sorted((str(p.relative_to(state)), p.stat().st_size, p.stat().st_mtime_ns)
+                          for p in state.rglob('*') if p.is_file() and 'chat' not in p.parts)
+
+        async def listed(ui):
+            for _ in range(200):
+                if ui.list_loaded is not None and ui.list_reader is None:
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError('list read did not finish')
+
+        before, calls = snapshot(), self.pm.complete.call_count
+        ui, _ = self.drive(['/task list\r', listed,
+                            lambda ui: self.assertTrue(ui.show_list),
+                            '\x1bOR', lambda ui: self.assertFalse(ui.show_list),
+                            '\x1bOR', listed, lambda ui: self.assertTrue(ui.show_list),
+                            '\x1bOR', '/task events\r',
+                            lambda ui: self.assertTrue(ui.show_events),
+                            '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
+                            '/task show ' + task_id + '\r', self.idle,
+                            lambda ui: self.assertTrue(ui.show_detail)], dev=False)
+        self.assertFalse(ui.dev)
+        self.assertNotIn(chat_tui.TASK_HIDDEN, ui.conversation.text)
+        self.assertIn(task_id, ui.detail_view.text)
+        self.assertEqual(self.pm.complete.call_count, calls)
+        self.assertEqual(len(self.store_records()), 1)
+        self.assertEqual(snapshot(), before)
+
     def test_task_submit_shows_core_receipt_and_opens_core_detail(self):
         request = '請新增測試\n第二行：多行需求'
         ui, _ = self.drive(['/task mode profile first\r', '\x1b[200~' + request + '\x1b[201~', '\r',
