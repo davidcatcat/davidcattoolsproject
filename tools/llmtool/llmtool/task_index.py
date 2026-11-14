@@ -20,12 +20,36 @@ _TUI_KEYS = frozenset({'updated_at', 'stage', 'name', 'executor', 'prs', 'owner'
                        'terminal', 'events', 'event_count'})
 
 
-def validator_fingerprint():
-    """Hash the names and contents of the Python validators in this package."""
-    package = Path(__file__).resolve().parent
+# The package modules whose code decides what an index entry holds or whether it is valid.
+# Only these are fingerprinted, so a build that changes an unrelated module keeps a fresh
+# index; a change to any of these makes the index stale. A module added to the code paths
+# below must be added here too.
+VALIDATOR_MODULES = (
+    'task_index.py',           # entry schema and validation, the entry builder, the limits
+    'task_store.py',           # TaskStore.get: record validation decides 'readable' and the
+                               # created_at / pm_session_id copied into the entry
+    'chat_tui_status.py',      # index_summary and the stage, row, name, PR, owner and
+                               # terminal code of the 'tui' projection
+    'chat_tui_task.py',        # UNKNOWN / NOT_AVAILABLE / PENDING_DISPATCH and value(),
+                               # used in the projected stage, name and event texts
+    'chat_tui_events.py',      # task_events: the projected events and event_count
+    'worker_dispatch.py',      # stored_worker_id: dispatch-audit event text
+    'task_status.py',          # derive_state: the projected 'terminal' flag
+    'active_pm_inbox.py',      # _handoff_event: the NOT YET RECORDED event
+    'task_submission_cli.py',  # _active_pm_handoff: the NOT YET RECORDED event
+)
+
+
+def validator_fingerprint(package=None):
+    """Hash the names and contents of VALIDATOR_MODULES (this package by default).
+
+    A missing module raises, so callers treat the index as unavailable.
+    """
+    package = Path(__file__).resolve().parent if package is None else Path(package)
     digest = hashlib.sha256()
-    for source in sorted(package.glob('*.py'), key=lambda item: item.name):
-        name = source.name.encode('utf-8')
+    for module in sorted(VALIDATOR_MODULES):
+        source = package / module
+        name = module.encode('utf-8')
         contents = source.read_bytes()
         digest.update(len(name).to_bytes(4, 'big'))
         digest.update(name)

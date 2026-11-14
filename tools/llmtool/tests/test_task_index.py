@@ -123,5 +123,96 @@ class TaskIndexTuiTests(unittest.TestCase):
                          ['task-status-index.json', 'tasks'])
 
 
+_PACKAGE = Path(task_index.__file__).resolve().parent
+_UNRELATED = 'chat_tui.py'   # a package module outside the index entry code paths
+_EDIT = b'\n# synthetic edit (fingerprint scope test)\n'
+
+
+def build(base, name, edit=(), add=None, drop=()):
+    """A synthetic build: copies of the listed modules and one unrelated module, with
+    ``edit`` modules changed, an ``add`` module added and ``drop`` modules left out."""
+    directory = Path(base) / name
+    directory.mkdir()
+    for module in task_index.VALIDATOR_MODULES + (_UNRELATED,):
+        if module in drop:
+            continue
+        contents = (_PACKAGE / module).read_bytes()
+        (directory / module).write_bytes(contents + _EDIT if module in edit else contents)
+    if add is not None:
+        (directory / add).write_bytes(b'"""Synthetic unrelated module."""\n')
+    return directory
+
+
+class ValidatorFingerprintScopeTests(unittest.TestCase):
+    """The fingerprint covers exactly VALIDATOR_MODULES, so other builds keep the index."""
+
+    saved = TaskIndexTuiTests.saved
+
+    def setUp(self):
+        TaskIndexTuiTests.setUp(self)
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.builds = temp.name
+        self.real = task_index.validator_fingerprint
+
+    def fingerprint(self, directory):
+        return self.real(package=directory)
+
+    def test_listed_modules_are_package_modules(self):
+        self.assertEqual(len(task_index.VALIDATOR_MODULES), len(set(task_index.VALIDATOR_MODULES)))
+        for module in task_index.VALIDATOR_MODULES:
+            with self.subTest(module):
+                self.assertTrue((_PACKAGE / module).is_file())
+        self.assertIn('task_index.py', task_index.VALIDATOR_MODULES)
+        self.assertNotIn(_UNRELATED, task_index.VALIDATOR_MODULES)
+
+    def test_unrelated_module_changes_keep_the_fingerprint(self):
+        same = build(self.builds, 'same')
+        other = build(self.builds, 'other', edit=(_UNRELATED,), add='synthetic_unrelated.py')
+        without = build(self.builds, 'without', drop=(_UNRELATED,))
+        self.assertEqual(self.fingerprint(same), self.real())
+        self.assertEqual(self.fingerprint(other), self.real())
+        self.assertEqual(self.fingerprint(without), self.real())
+
+    def test_each_listed_module_change_changes_the_fingerprint(self):
+        seen = {self.real()}
+        for module in task_index.VALIDATOR_MODULES:
+            with self.subTest(module):
+                edited = self.fingerprint(build(self.builds, 'edit-' + module, edit=(module,)))
+                self.assertNotIn(edited, seen)
+                seen.add(edited)
+
+    def test_missing_listed_module_makes_the_index_unavailable(self):
+        missing = build(self.builds, 'missing', drop=('task_store.py',))
+        with self.assertRaises(FileNotFoundError):
+            self.fingerprint(missing)
+        self.saved()
+        with patch.object(task_index, 'validator_fingerprint',
+                          lambda: self.real(package=missing)):
+            self.assertEqual(task_index.display_entries(self.store), (None, 'unavailable'))
+            index = task_index.TaskStatusIndex(self.store)
+            self.assertFalse(index.enabled)
+            self.assertEqual(index.entries, {})
+
+    def test_index_from_another_build_with_identical_listed_modules_is_used(self):
+        writer = build(self.builds, 'writer', edit=(_UNRELATED,))
+        reader = build(self.builds, 'reader', add='synthetic_unrelated.py')
+        with patch.object(task_index, 'validator_fingerprint',
+                          lambda: self.real(package=writer)):
+            entry = self.saved()
+        with patch.object(task_index, 'validator_fingerprint',
+                          lambda: self.real(package=reader)):
+            entries, reason = task_index.display_entries(self.store)
+            self.assertIsNone(reason)
+            self.assertEqual(entries[self.task_id], entry)
+            self.assertEqual(task_index.TaskStatusIndex(self.store).entries[self.task_id], entry)
+        # Another build whose listed modules differ finds the same index stale.
+        changed = build(self.builds, 'changed', edit=('chat_tui_status.py',))
+        with patch.object(task_index, 'validator_fingerprint',
+                          lambda: self.real(package=changed)):
+            self.assertEqual(task_index.display_entries(self.store), (None, 'stale'))
+            self.assertEqual(task_index.TaskStatusIndex(self.store).entries, {})
+
+
 if __name__ == '__main__':
     unittest.main()

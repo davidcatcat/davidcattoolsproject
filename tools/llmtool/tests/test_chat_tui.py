@@ -3386,6 +3386,52 @@ class TaskStatusIndexListTests(unittest.TestCase):
         self.assertLess(elapsed, 2.0)
         self.assertEqual(self.snapshot(), before)
 
+    def other_build(self, name, edit):
+        """The validator fingerprint of a synthetic build: copies of the listed modules and
+        of chat_tui.py (outside the list), with ``edit`` changed."""
+        package = Path(self.index.__file__).resolve().parent
+        directory = self.home / name
+        directory.mkdir()
+        for module in self.index.VALIDATOR_MODULES + ('chat_tui.py',):
+            contents = (package / module).read_bytes()
+            if module == edit:
+                contents += b'\n# synthetic edit (fingerprint scope test)\n'
+            (directory / module).write_bytes(contents)
+        return self.index.validator_fingerprint(package=directory)
+
+    def test_3000_entries_from_another_build_with_the_same_listed_modules(self):
+        # A build that differs only outside the listed modules (a PR build) wrote the index.
+        fingerprint = self.other_build('writer-build', 'chat_tui.py')
+        store = self.store(3000)
+        self.write_index(store, fingerprint=fingerprint)
+        before = self.snapshot()
+        started = time.monotonic()
+        with patch.object(chat_tui_status, 'load_records',
+                          side_effect=AssertionError('no full read')):
+            records, unreadable, note = chat_tui_status.load_list(store)
+        elapsed = time.monotonic() - started
+        store.get.assert_not_called()
+        self.assertIsNone(note)
+        self.assertEqual(unreadable, 0)
+        self.assertEqual(len(records), chat_tui_status.LIST_LIMIT)
+        self.assertEqual(chat_tui_status.row(records[0])['name'], 'synthetic row 2999')
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_index_from_a_build_with_a_changed_listed_module_falls_back(self):
+        fingerprint = self.other_build('writer-build', 'chat_tui_status.py')
+        store = self.store(2)
+        self.write_index(store, fingerprint=fingerprint)
+        before = self.snapshot()
+        with patch.object(chat_tui_status, 'load_records',
+                          wraps=chat_tui_status.load_records) as load:
+            records, _unreadable, note = chat_tui_status.load_list(store)
+        load.assert_called_once_with(store)
+        self.assertEqual(note, 'status index out of date (validator fingerprint)'
+                               '; read every TaskStore record')
+        self.assertEqual([r['request'] for r in records], ['full record 1', 'full record 0'])
+        self.assertEqual(self.snapshot(), before)
+
     def test_missing_unreadable_stale_or_unavailable_index_falls_back_with_a_note(self):
         cases = {
             'missing': ('status index not found', lambda store: None),
