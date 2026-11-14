@@ -4714,15 +4714,40 @@ class TaskStore:
         return result
 
     @staticmethod
-    def _sidecar_lock_absent(directory, lock_name):
-        """#1837 P2: a read takes no lock that is not there; writers create it first."""
+    def _read_lock_sidecar(directory, lock_name, *, code):
+        """#1837 P2: a shared read lock opened without O_CREAT; None when absent.
+
+        Writers create the lock before any data, so an absent lock means empty.
+        A lock removed after the open has no link left and is refused.
+        """
+        deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
         try:
-            os.stat(lock_name, dir_fd=directory, follow_symlinks=False)
+            lock_fd = os.open(lock_name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+                              dir_fd=directory)
         except FileNotFoundError:
-            return True
+            return None
         except OSError:
-            _fail('TASK_STORE_UNAVAILABLE')
-        return False
+            _fail(code + '_UNAVAILABLE')
+        try:
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        _fail(code + '_BUSY')
+                    time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
+            info = os.fstat(lock_fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                    stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                _fail(code + '_INVALID')
+            return lock_fd
+        except LLMToolError:
+            os.close(lock_fd)
+            raise
+        except OSError:
+            os.close(lock_fd)
+            _fail(code + '_UNAVAILABLE')
 
     def get_worker_observations(self):
         """Read a complete worker/layer view; absent or expired results are UNKNOWN.
@@ -4736,8 +4761,9 @@ class TaskStore:
             return self._worker_availability_view(record)
         lock_fd = None
         try:
-            if not self._sidecar_lock_absent(directory, WORKER_AVAILABILITY_LOCK_NAME):
-                lock_fd = self._lock_worker_availability(directory, exclusive=False)
+            lock_fd = self._read_lock_sidecar(directory, WORKER_AVAILABILITY_LOCK_NAME,
+                                              code='WORKER_AVAILABILITY')
+            if lock_fd is not None:
                 record = self._read_worker_availability_at(directory)
         finally:
             if lock_fd is not None:
@@ -4771,10 +4797,14 @@ class TaskStore:
             return []
         lock_fd = None
         try:
-            if change is None and self._sidecar_lock_absent(directory, ASSIGNMENTS_LOCK_NAME):
-                return []
-            lock_fd = self._lock_sidecar(directory, ASSIGNMENTS_LOCK_NAME,
-                                         exclusive=exclusive, code='ASSIGNMENTS')
+            if change is None:
+                lock_fd = self._read_lock_sidecar(directory, ASSIGNMENTS_LOCK_NAME,
+                                                  code='ASSIGNMENTS')
+                if lock_fd is None:
+                    return []
+            else:
+                lock_fd = self._lock_sidecar(directory, ASSIGNMENTS_LOCK_NAME,
+                                             exclusive=exclusive, code='ASSIGNMENTS')
             assignments = self._read_assignments_at(directory)
             if change is None:
                 return json.loads(json.dumps(assignments))

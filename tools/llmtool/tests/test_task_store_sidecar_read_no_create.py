@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from llmtool import task_store
 from llmtool.task_store import TaskStore
@@ -39,6 +40,25 @@ class SidecarReadNoCreateTests(unittest.TestCase):
         self.store.get_worker_observations()
         self.assertEqual(self.store.get_developer_assignments(), [])
         self.assertEqual(self.names(), before)
+
+    def test_read_lock_open_never_creates_and_a_vanished_lock_is_empty(self):
+        # Security v91 F1 (CWE-367): no O_CREAT on the read path, so a lock removed
+        # between any check and the open is never recreated by a read.
+        self.root.mkdir(parents=True, mode=0o700)
+        real_open, flags = os.open, []
+
+        def vanished(name, flag, *args, **kwargs):
+            if str(name).endswith('.lock'):
+                flags.append(flag)
+                raise FileNotFoundError(name)
+            return real_open(name, flag, *args, **kwargs)
+
+        with patch('llmtool.task_store.os.open', side_effect=vanished):
+            self.store.get_worker_observations()
+            self.assertEqual(self.store.get_developer_assignments(), [])
+        self.assertEqual(len(flags), 2)
+        self.assertFalse(any(flag & os.O_CREAT for flag in flags))
+        self.assertEqual(self.names(), ['state', 'state/tasks'])
 
 
 if __name__ == '__main__':
