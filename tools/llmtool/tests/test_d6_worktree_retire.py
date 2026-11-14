@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -76,6 +78,11 @@ class D6RetireTests(unittest.TestCase):
             side_effect=lambda: original_load_trust(home=str(trust_home)))
         trust_patch.start()
         self.addCleanup(trust_patch.stop)
+        self.backup_root = self.top / "backups"
+        self.backup_root.mkdir(mode=0o700)
+        backup_patch = patch.object(lifecycle, "BACKUP_ROOT", self.backup_root)
+        backup_patch.start()
+        self.addCleanup(backup_patch.stop)
 
     def _task(self, task_id, *, parent=None, publish=True, reviewer=False):
         root = (parent or self.tasks) / task_id
@@ -121,7 +128,8 @@ class D6RetireTests(unittest.TestCase):
         return json.loads((self.registry / (task_id + ".json")).read_text())
 
     def _retire(self, task_ids, *, execute=False, squash=None, train=None, discard=(),
-                evidence=None, reviewed_pr=None, workspace_root=None):
+                evidence=None, reviewed_pr=None, workspace_root=None,
+                owner_discard=None):
         output = io.StringIO()
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
                 patch.object(lifecycle, "_process_cwds", side_effect=self._cwds), \
@@ -132,7 +140,8 @@ class D6RetireTests(unittest.TestCase):
                 discard_uncommitted=discard,
                 unknown_evidence=evidence,
                 reviewed_pr_evidence=reviewed_pr,
-                workspace_root=workspace_root or self.tasks)
+                workspace_root=workspace_root or self.tasks,
+                owner_discard=owner_discard)
         lines = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual([line["task_id"] for line in lines], task_ids)
         return ok, lines
@@ -935,6 +944,136 @@ class D6RetireTests(unittest.TestCase):
         self.assertFalse(payload["execute"])
         self.assertEqual(payload["records"][0]["result"], "RELEASE_READY")
         self.assertEqual(self._record("owner-cli-task"), before)
+
+    def _make_discard_bundle(self, task_id):
+        bundle_path = self.backup_root / (task_id + ".bundle")
+        _git(self.source, "bundle", "create", str(bundle_path), "task/" + task_id)
+        bundle_path.chmod(0o600)
+        digest = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+        return str(bundle_path), digest
+
+    def _retire_discard(self, task_ids, *, owner_discard=None, execute=False,
+                        workspace_root=None):
+        output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_process_cwds", side_effect=self._cwds), \
+                contextlib.redirect_stdout(output):
+            ok = lifecycle.retire_worktrees(
+                canonical_root=self.source, task_ids=task_ids, execute=execute,
+                owner_discard=owner_discard,
+                workspace_root=workspace_root or self.tasks)
+        lines = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([line["task_id"] for line in lines], task_ids)
+        return ok, lines
+
+    def test_owner_approved_discard_helpers(self):
+        root, head = self._task("discard-helper-task", publish=False)
+        bundle_path, digest = self._make_discard_bundle("discard-helper-task")
+        self.assertTrue(Path(bundle_path).is_file())
+        self.assertEqual(stat.S_IMODE(Path(bundle_path).stat().st_mode), 0o600)
+        self.assertEqual(len(digest), 64)
+        approval_url = OWNER_APPROVED_RETAIN_URL.replace("/issues/529", "/issues/1256")
+        ok, lines = self._retire_discard(
+            ["discard-helper-task"],
+            owner_discard={"discard-helper-task": (approval_url, bundle_path, digest)})
+        self.assertTrue(ok)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["publication"], "owner_approved_discard")
+        self.assertTrue(root.is_dir())
+        self.assertEqual(self._record("discard-helper-task")["head_sha"], head)
+
+    def test_owner_approved_discard_unpublished_task(self):
+        root, head = self._task("discard-task", publish=False)
+        # Without approval: reports D6_RETIRE_UNPUBLISHED
+        ok, (line,) = self._retire_discard(["discard-task"])
+        self.assertFalse(ok)
+        self.assertEqual(line["result"], "BLOCKED")
+        self.assertEqual(line["reasons"], ["D6_RETIRE_UNPUBLISHED"])
+        self.assertTrue(root.is_dir())
+
+        # With a valid approval (URL on Issue 1256): dry run is RETIRE_READY
+        # with publication owner_approved_discard and the tree stays
+        approval_url = OWNER_APPROVED_RETAIN_URL.replace("/issues/529", "/issues/1256")
+        bundle_path, digest = self._make_discard_bundle("discard-task")
+        owner_discard = {"discard-task": (approval_url, bundle_path, digest)}
+
+        ok, (line,) = self._retire_discard(["discard-task"], owner_discard=owner_discard)
+        self.assertTrue(ok, line)
+        self.assertEqual(line["mode"], "dry-run")
+        self.assertEqual(line["result"], "RETIRE_READY")
+        self.assertEqual(line["publication"], "owner_approved_discard")
+        self.assertTrue(root.is_dir())
+
+        # Execute gives REMOVED, the tree is gone, the bundle and branch task/<id> stay,
+        # and the last evidence_refs entry contains task=, head=, approval=, backup= and sha256= with the right values
+        ok, (line,) = self._retire_discard(
+            ["discard-task"], owner_discard=owner_discard, execute=True)
+        self.assertTrue(ok, line)
+        self.assertEqual(line["mode"], "execute")
+        self.assertEqual(line["result"], "REMOVED")
+        self.assertFalse(os.path.lexists(root))
+        self.assertTrue(Path(bundle_path).is_file())
+        self.assertEqual(
+            _git(self.source, "rev-parse", "refs/heads/task/discard-task"), head)
+        record = self._record("discard-task")
+        last_ref = record["evidence_refs"][-1]
+        self.assertIn("task=discard-task", last_ref)
+        self.assertIn("head=" + head, last_ref)
+        self.assertIn("approval=" + approval_url, last_ref)
+        self.assertIn("backup=" + bundle_path, last_ref)
+        self.assertIn("sha256=" + digest, last_ref)
+
+    def test_owner_approved_discard_refusals(self):
+        # 1. Wrong digest (64 zeros) on execute refuses D6_DISCARD_BACKUP_DIGEST_MISMATCH and keeps the tree
+        root_wrong, head_wrong = self._task("wrong-digest-task", publish=False)
+        bundle_wrong, _digest_wrong = self._make_discard_bundle("wrong-digest-task")
+        approval_url = OWNER_APPROVED_RETAIN_URL.replace("/issues/529", "/issues/1256")
+        wrong_digest = "0" * 64
+        ok, (line,) = self._retire_discard(
+            ["wrong-digest-task"],
+            owner_discard={"wrong-digest-task": (approval_url, bundle_wrong, wrong_digest)},
+            execute=True)
+        self.assertFalse(ok)
+        self.assertEqual(line["result"], "BLOCKED")
+        self.assertEqual(line["reasons"], ["D6_DISCARD_BACKUP_DIGEST_MISMATCH"])
+        self.assertTrue(root_wrong.is_dir())
+
+        # 2. Approval for a published task refuses D6_DISCARD_NOT_NEEDED
+        root_pub, head_pub = self._task("published-task", publish=True)
+        bundle_pub, digest_pub = self._make_discard_bundle("published-task")
+        ok, (line,) = self._retire_discard(
+            ["published-task"],
+            owner_discard={"published-task": (approval_url, bundle_pub, digest_pub)})
+        self.assertFalse(ok)
+        self.assertEqual(line["result"], "BLOCKED")
+        self.assertEqual(line["reasons"], ["D6_DISCARD_NOT_NEEDED"])
+        self.assertTrue(root_pub.is_dir())
+
+        # 3. An approval keyed to a task not being retired raises LifecycleError
+        root_unrelated, _head_unrelated = self._task("unrelated-task", publish=False)
+        bundle_unrelated, digest_unrelated = self._make_discard_bundle("unrelated-task")
+        with self.assertRaises(lifecycle.LifecycleError) as caught:
+            self._retire_discard(
+                ["wrong-digest-task"],
+                owner_discard={"unrelated-task": (
+                    approval_url, bundle_unrelated, digest_unrelated)})
+        self.assertEqual(caught.exception.code, "D6_TASK_INPUT_INVALID")
+        self.assertTrue(root_unrelated.is_dir())
+
+        # 4. _main(['--owner-approved-discard', ..., '--repo-root', ...]) without a retire task raises LifecycleError
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}):
+            with self.assertRaises(lifecycle.LifecycleError) as caught:
+                lifecycle._main([
+                    "--owner-approved-discard",
+                    f"wrong-digest-task={approval_url},{bundle_wrong},{wrong_digest}",
+                    "--repo-root", str(self.source),
+                ])
+            self.assertEqual(caught.exception.code, "D6_TASK_INPUT_INVALID")
+
+        # Assert that every refused tree still exists
+        self.assertTrue(root_wrong.is_dir())
+        self.assertTrue(root_pub.is_dir())
+        self.assertTrue(root_unrelated.is_dir())
 
 
 if __name__ == "__main__":
