@@ -598,6 +598,22 @@ class FakeOrStaleTaskTests(BoardCheckCase):
         result = run([{'id': 'held', 'blocker': f'lease:{TASK_UNKNOWN}'}])
         self.assertRow(result, 'held', board_check.ANOMALY, 'no such Task')
 
+    def test_lease_on_a_task_in_an_unrecognized_state_is_unknown(self):
+        # Refusal-code pin: a lease on a Task whose state cannot be derived is UNKNOWN.
+        record = dispatching(TASK_RUNNING)
+        record['developer']['state'] = 'SYNTHETIC_UNRECOGNIZED'
+        self.assertEqual(task_status.derive_state(record), 'UNKNOWN')
+        result = run([{'id': 'held', 'blocker': f'lease:{TASK_RUNNING}'}],
+                     store=FakeStore(record))
+        self.assertRow(result, 'held', board_check.UNKNOWN, 'LEASE_TASK_STATE_UNKNOWN')
+
+    def test_row_classifier_crash_is_an_internal_error_row(self):
+        with mock.patch.object(board_check, '_classify_row',
+                               side_effect=RuntimeError('synthetic detail')):
+            result = run([{'id': 'task', 'task_id': TASK_RUNNING}])
+        self.assertRow(result, 'task', board_check.UNKNOWN, 'BOARD_CHECK_INTERNAL_ERROR')
+        self.assertNotIn('synthetic', json.dumps(result))
+
     def test_process_list_failure_is_unknown(self):
         def broken():
             raise OSError('lsof failed')
