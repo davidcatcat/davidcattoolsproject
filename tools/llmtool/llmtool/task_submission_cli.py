@@ -714,7 +714,7 @@ def _task_view(record):
         view['active_pm_handoff'] = handoff
     if 'completion_events' in record:
         view['completion_events'] = record['completion_events']
-    for key in ('file_ops', 'file_ops_evidence'):
+    for key in ('file_ops', 'file_ops_evidence', 'file_ops_reservation'):
         if key in record:
             view[key] = record[key]
     pm_recovery = active_pm_inbox.recovery(record)
@@ -2364,8 +2364,10 @@ def _file_ops_admission(store, args):
     Runs after ``_file_ops_caller`` and under the D6 binding lock, so the Task
     read here is the one the evidence write compares against. Order: Task
     schema, state, file_ops, no Developer, not abandoned, lineage; D6
-    registered ACTIVE with root, branch and HEAD from the registry, not held by
-    another live Task, tree clean at HEAD; no FAILED evidence. A tree that is not
+    registered ACTIVE with root, branch and HEAD from the registry, matching
+    any recorded completion or file-ops reservation, not held by another live
+    Task (another Task's reservation included), tree clean at HEAD; no FAILED
+    evidence. A tree that is not
     clean passes only with VERIFIED evidence for this same D6 and HEAD (the
     re-run, which the caller then checks read-only). Returns (task, registration).
     """
@@ -2395,14 +2397,18 @@ def _file_ops_admission(store, args):
         raise _FileOpsRefused('FILE_OPS_D6_UNAVAILABLE') from None
     completion = task.get('completion')
     recorded = completion.get('executor_task_id') if type(completion) is dict else None
+    reservation = task.get('file_ops_reservation')
+    reserved = reservation.get('executor_task') if type(reservation) is dict else None
     if (registration.task_id != executor or recorded not in (None, executor) or
+            reserved not in (None, executor) or
             snapshot.root != registration.root or
             snapshot.common_dir != registration.common_dir or
             snapshot.branch != registration.branch or snapshot.head != registration.result_sha):
         raise _FileOpsRefused('FILE_OPS_D6_BINDING_MISMATCH')
     try:
-        # One D6, one writer: no other live Task may hold this D6. The caller
-        # holds the binding lock, so none can gain it until the evidence is stored.
+        # One D6, one writer: no other live Task (a file-ops reservation
+        # included) may hold this D6. The caller holds the binding lock, so none
+        # can gain it before this Task's reservation is written.
         holders = store._d6_scan_holders(task['task_id'], frozenset((executor,)),
                                          TaskStore._claude_bind_holds)
     except Exception:
@@ -2432,11 +2438,17 @@ def run_task_file_ops(args, *, store=None, stdout=None):
     matching tree is a no-op success; anything else refuses.
 
     After the caller check, the D6 binding lock (the one ``TaskStore._d6_commit``
-    takes) is held exclusively from the holder check through plan, apply,
-    verify and the evidence write, and released on every path. A concurrent
-    bind of any D6 waits, and past the lock deadline refuses
-    ``TASK_D6_BINDING_BUSY``. A lock that cannot be taken refuses
-    ``FILE_OPS_D6_UNAVAILABLE`` before any mutation.
+    takes) is held exclusively from the holder check through plan, the
+    reservation, apply, verify and the evidence write, and released on every
+    path. Before any mutation the Task records a persistent reservation of the
+    D6 (a binding-journal entry, then ``file_ops_reservation`` on the record),
+    which both binding predicates treat as a holder. So a concurrent binder of
+    this D6 waits, and then refuses ``TASK_D6_ALREADY_BOUND`` (past the lock
+    deadline, ``TASK_D6_BINDING_BUSY``), even if it validated or scanned
+    before the reservation. The reservation outlives a mutation failure, an
+    evidence-store failure and process exit; afterwards only this Task may
+    bind the D6. A lock that cannot be taken, or a reservation that cannot be
+    written, refuses ``FILE_OPS_D6_UNAVAILABLE`` before any mutation.
     """
     store = TaskStore() if store is None else store
     task_id = (args.task_id if type(args.task_id) is str and
@@ -2452,14 +2464,14 @@ def run_task_file_ops(args, *, store=None, stdout=None):
         return refuse(exc.code)
     with contextlib.ExitStack() as held:
         try:
-            held.enter_context(store.d6_binding_lock())
+            reserve = held.enter_context(store.d6_binding_lock())
         except Exception:
             # Nothing read under the lock, nothing applied, no evidence stored.
             return refuse('FILE_OPS_D6_UNAVAILABLE')
-        return _run_file_ops_locked(store, args, refuse, task_id, stdout)
+        return _run_file_ops_locked(store, args, refuse, task_id, stdout, reserve)
 
 
-def _run_file_ops_locked(store, args, refuse, task_id, stdout):
+def _run_file_ops_locked(store, args, refuse, task_id, stdout, reserve):
     """``task file-ops`` body; the caller holds the D6 binding lock throughout."""
     from . import file_ops
     try:
@@ -2484,9 +2496,22 @@ def _run_file_ops_locked(store, args, refuse, task_id, stdout):
         return 0
     try:
         sealed = file_ops.plan(root, head, ops)
-        result = file_ops.apply(root, sealed)
     except LLMToolError as exc:
         # Refused before any change: nothing applied, no evidence stored.
+        return refuse(_file_ops_code(exc, 'FILE_OPS_REFUSED'))
+    if task.get('file_ops_reservation') is None:
+        # The persistent D6 reservation is stored before any mutation, under
+        # the binding lock; it is never released here, on any path.
+        try:
+            task = reserve(task['task_id'], registration.task_id,
+                           expected={'record_sha256': task['record_sha256']})
+        except Exception:
+            return refuse('FILE_OPS_D6_UNAVAILABLE')
+    try:
+        result = file_ops.apply(root, sealed)
+    except LLMToolError as exc:
+        # Refused before any change: nothing applied, no evidence stored; the
+        # reservation stays.
         return refuse(_file_ops_code(exc, 'FILE_OPS_REFUSED'))
     state = 'FAILED' if result.get('status') == 'FAILED' else 'VERIFIED'
     status_sha256 = None

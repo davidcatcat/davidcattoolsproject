@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -205,12 +206,16 @@ class FileOpsCommandTests(unittest.TestCase):
             'plan_sha256': file_ops.expected_plan(self.root, self.head, OPS)['sha256'],
             'status_sha256': file_ops.status_sha256(self.root)})
         self.assertRegex(evidence['recorded_at'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+        self.assertEqual(saved['file_ops_reservation']['executor_task'], D6)
+        self.assertEqual(self.journal_epoch(), 1)
         self.assertEqual(sorted(self.status().splitlines()), ['A  docs/a.txt', 'D  a.txt'])
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD').strip(), self.head)
         rc, out = self.run_cmd(task)
         self.assertEqual((rc, out['status'], out['noop']), (0, 'VERIFIED', True))
+        # The verified re-run writes nothing: no new reservation, no journal claim.
         self.assertEqual(self.store.get(task['task_id'])['record_sha256'],
                          saved['record_sha256'])
+        self.assertEqual(self.journal_epoch(), 1)
         Path(self.root, 'stray.txt').write_text('untracked\n')
         rc, out = self.run_cmd(task)
         self.assertEqual((rc, out['code']), (1, 'FILE_OPS_EVIDENCE_MISMATCH'))
@@ -243,6 +248,22 @@ class FileOpsCommandTests(unittest.TestCase):
         with self.store.d6_binding_lock():
             pass
 
+    def journal_epoch(self):
+        path = Path(self.store.root, task_store.D6_BINDING_JOURNAL_NAME)
+        return json.loads(path.read_text())['epoch'] if path.exists() else 0
+
+    def bind_refused(self, api, task_id, executor=D6, store=None):
+        """The message a bind of ``task_id`` to ``executor`` through ``api`` refuses with."""
+        store = self.store if store is None else store
+        with self.assertRaises(LLMToolError) as ctx:
+            getattr(store, api)(task_id, executor_task_id=executor,
+                                expected={'developer': None})
+        return str(ctx.exception)
+
+    @staticmethod
+    def held_by(task):
+        return 'TASK_D6_ALREADY_BOUND: D6 is held by Task ' + task['task_id']
+
     def test_concurrent_d6_bind_during_apply_is_refused(self):
         task = self.record_pm()
         other = self.record_pm(ops=None)
@@ -266,6 +287,178 @@ class FileOpsCommandTests(unittest.TestCase):
                          'VERIFIED')
         self.assertEqual(self.store.get(other['task_id'])['record_sha256'],
                          other['record_sha256'])
+        self.assert_binding_lock_free()
+        # Past the lock the reservation still holds the D6 for this Task.
+        self.assertEqual(self.bind_refused('d6_bind_compare_and_update', other['task_id']),
+                         self.held_by(task))
+        self.assertEqual(self.store.get(other['task_id'])['record_sha256'],
+                         other['record_sha256'])
+
+    def overlapping_bind(self, api, *, pause):
+        """B, a separate worker, validates (``pause='validate'``) or also scans
+        (``pause='scan'``) before A's claim, then waits on the binding lock
+        while A reserves and mutates; A finishes well inside B's timeout."""
+        task, other = self.record_pm(), self.record_pm(ops=None)
+        binder = TaskStore(root=self.store.root)
+        paused, claimed = threading.Event(), threading.Event()
+        events = []
+        real_lock, real_scan = TaskStore._lock_sidecar, TaskStore._d6_scan_holders
+        real_apply = file_ops.apply
+
+        def lock(directory, name, **kwargs):
+            if (pause == 'validate' and name == task_store.D6_BINDING_LOCK_NAME and
+                    not paused.is_set()):
+                events.append('B validated')
+                paused.set()
+                claimed.wait(10)
+            return real_lock(directory, name, **kwargs)
+
+        def scan(task_id, claims, holds):
+            found = real_scan(binder, task_id, claims, holds)
+            if pause == 'scan' and not paused.is_set():
+                events.append('B scanned %d holders' % len(found))
+                paused.set()
+                claimed.wait(10)
+            return found
+
+        def bind():
+            try:
+                getattr(binder, api)(other['task_id'], executor_task_id=D6,
+                                     expected={'developer': None})
+                events.append('B bound')
+            except LLMToolError as exc:
+                events.append(str(exc))
+
+        def apply_after_claim(root, sealed):
+            reservation = self.store.get(task['task_id']).get('file_ops_reservation')
+            events.append('A reserved %s' % (reservation or {}).get('executor_task'))
+            claimed.set()
+            result = real_apply(root, sealed)
+            events.append('A applied')
+            return result
+
+        worker = threading.Thread(target=bind)
+        with mock.patch.object(task_store, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 30), \
+                mock.patch.object(binder, '_lock_sidecar', side_effect=lock), \
+                mock.patch.object(binder, '_d6_scan_holders', side_effect=scan), \
+                mock.patch.object(file_ops, 'apply', side_effect=apply_after_claim):
+            worker.start()
+            self.assertTrue(paused.wait(10))
+            rc, out = self.run_cmd(task)
+            worker.join(30)
+        self.assertFalse(worker.is_alive())
+        first = 'B validated' if pause == 'validate' else 'B scanned 0 holders'
+        self.assertEqual(events, [first, 'A reserved ' + D6, 'A applied', self.held_by(task)])
+        self.assertEqual((rc, out['status']), (0, 'VERIFIED'))
+        # B changed nothing and started nothing.
+        current = self.store.get(other['task_id'])
+        self.assertEqual(current['record_sha256'], other['record_sha256'])
+        self.assertIsNone(current['developer'])
+        self.assert_binding_lock_free()
+
+    def test_d6_binder_validated_before_claim_refuses_already_bound(self):
+        self.overlapping_bind('d6_bind_compare_and_update', pause='validate')
+
+    def test_claude_binder_validated_before_claim_refuses_already_bound(self):
+        self.overlapping_bind('claude_bind_compare_and_update', pause='validate')
+
+    def test_d6_binder_scanned_before_claim_refuses_already_bound(self):
+        self.overlapping_bind('d6_bind_compare_and_update', pause='scan')
+
+    def test_claude_binder_scanned_before_claim_refuses_already_bound(self):
+        self.overlapping_bind('claude_bind_compare_and_update', pause='scan')
+
+    def test_unrelated_d6_unaffected_and_only_this_task_binds_reserved_d6(self):
+        task, other = self.record_pm(), self.record_pm(ops=None)
+        binder = TaskStore(root=self.store.root)
+        events = []
+        real_apply = file_ops.apply
+
+        def bind_unrelated():
+            try:
+                binder.d6_bind_compare_and_update(
+                    other['task_id'], executor_task_id='d6-unrelated-test',
+                    expected={'developer': None})
+                events.append('B bound unrelated')
+            except LLMToolError as exc:
+                events.append(str(exc))
+
+        worker = threading.Thread(target=bind_unrelated)
+
+        def apply_with_waiter(root, sealed):
+            worker.start()
+            result = real_apply(root, sealed)
+            events.append('A applied')
+            return result
+
+        with mock.patch.object(task_store, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 30), \
+                mock.patch.object(file_ops, 'apply', side_effect=apply_with_waiter):
+            rc, out = self.run_cmd(task)
+            worker.join(30)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual((rc, out['status']), (0, 'VERIFIED'))
+        self.assertEqual(events, ['A applied', 'B bound unrelated'])
+        for api in ('d6_bind_compare_and_update', 'claude_bind_compare_and_update'):
+            with self.subTest(api=api):
+                self.assertEqual(self.bind_refused(api, other['task_id']), self.held_by(task))
+        # Only the reserving Task may later bind its D6.
+        self.store.d6_bind_compare_and_update(task['task_id'], executor_task_id=D6,
+                                              expected={'developer': None})
+        self.assert_binding_lock_free()
+
+    def assert_reservation_kept(self, task, other, saved):
+        """The reservation outlives the failure: a later worker sees it, a re-run refuses."""
+        self.assertEqual(saved['file_ops_reservation']['executor_task'], D6)
+        self.assertNotIn('file_ops_evidence', saved)
+        later = TaskStore(root=self.store.root)
+        for api in ('d6_bind_compare_and_update', 'claude_bind_compare_and_update'):
+            with self.subTest(api=api):
+                self.assertEqual(self.bind_refused(api, other['task_id'], store=later),
+                                 self.held_by(task))
+        self.assertEqual(later.get(other['task_id'])['record_sha256'], other['record_sha256'])
+        rc, out = self.run_cmd(task)
+        self.assertEqual((rc, out['code']), (1, 'FILE_OPS_D6_NOT_CLEAN'))
+        self.assertEqual(later.get(task['task_id']), saved)
+        self.assertEqual(self.journal_epoch(), 1)
+        self.assert_binding_lock_free()
+
+    def test_reservation_kept_after_interrupted_mutation(self):
+        task, other = self.record_pm(), self.record_pm(ops=None)
+        real_apply = file_ops.apply
+
+        def apply_then_stop(root, sealed):
+            real_apply(root, sealed)
+            raise RuntimeError('worker stopped before the evidence write')
+
+        with mock.patch.object(file_ops, 'apply', side_effect=apply_then_stop):
+            with self.assertRaises(RuntimeError):
+                self.run_cmd(task)
+        self.assert_binding_lock_free()
+        self.assertNotEqual(self.status(), '')
+        self.assert_reservation_kept(task, other, self.store.get(task['task_id']))
+
+    def test_reservation_kept_after_evidence_store_failure(self):
+        task, other = self.record_pm(), self.record_pm(ops=None)
+        with mock.patch.object(self.store, 'record_file_ops_evidence',
+                               side_effect=LLMToolError('not stored')):
+            rc, out = self.run_cmd(task)
+        self.assertEqual((rc, out['code'], out['isolate']),
+                         (1, 'FILE_OPS_EVIDENCE_NOT_STORED', True))
+        self.assert_binding_lock_free()
+        self.assert_reservation_kept(task, other, self.store.get(task['task_id']))
+
+    def test_reservation_write_failure_refuses_before_mutation(self):
+        task = self.record_pm()
+        with mock.patch.object(self.store, '_reserve_file_ops_d6',
+                               side_effect=LLMToolError('not stored')), \
+                mock.patch.object(file_ops, 'apply', side_effect=AssertionError('apply ran')):
+            rc, out = self.run_cmd(task)
+        self.assertEqual((rc, out['status'], out['code']),
+                         (1, 'REFUSED', 'FILE_OPS_D6_UNAVAILABLE'))
+        self.assertEqual(self.status(), '')
+        current = self.store.get(task['task_id'])
+        self.assertEqual(current['record_sha256'], task['record_sha256'])
+        self.assertNotIn('file_ops_reservation', current)
         self.assert_binding_lock_free()
 
     def test_binding_lock_unavailable_refuses_before_mutation(self):

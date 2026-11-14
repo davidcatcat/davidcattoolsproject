@@ -101,14 +101,19 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'abandonment', 'pm_session_adoptions', 'pm_provenance', 'merge_attempt',
     'published_pr', 'repair_cap_override', 'publish_operations',
     'review_exception', 'lineage', 'review_disputes', 'waiting',
-    'file_ops', 'file_ops_evidence'))
+    'file_ops', 'file_ops_evidence', 'file_ops_reservation'))
 # #1502 file ops: optional top-level fields. file_ops is written once by record-pm,
 # bound to the Task contract and the stored PM response; file_ops_evidence only by
-# ``task file-ops`` through TaskStore.record_file_ops_evidence.
+# ``task file-ops`` through TaskStore.record_file_ops_evidence;
+# file_ops_reservation once, before any mutation, only by ``task file-ops``
+# through the reserve callable of TaskStore.d6_binding_lock. A reservation holds
+# its D6 for this Task in both binding predicates and is never released
+# silently (only abandonment ends it, as for every holder).
 _FILE_OPS_FIELDS = frozenset(('ops', 'ops_sha256', 'contract_digest'))
 _FILE_OPS_EVIDENCE_FIELDS = frozenset((
     'state', 'isolate', 'task_id', 'run_id', 'executor_task', 'root', 'branch', 'head',
     'ops_sha256', 'plan_sha256', 'status_sha256', 'recorded_at'))
+_FILE_OPS_RESERVATION_FIELDS = frozenset(('executor_task', 'reserved_at'))
 # Owner-exception merge evidence (#1253, #1519). Only this one exception type
 # is persisted; its evidence is the exact owner_exception.verify() result.
 _REVIEW_EXCEPTION_TYPE = 'OWNER_EXCEPTION_DETERMINISTIC_REDACTION'
@@ -1817,10 +1822,23 @@ def _validate_file_ops_evidence(record):
         _fail('TASK_FILE_OPS_EVIDENCE_INVALID')
 
 
+def _validate_file_ops_reservation(record):
+    item = record.get('file_ops_reservation')
+    evidence = record.get('file_ops_evidence')
+    if (type(item) is not dict or set(item) != _FILE_OPS_RESERVATION_FIELDS or
+            type(record.get('file_ops')) is not dict or
+            not _safe_identifier(item['executor_task'], D6_TASK_ID) or
+            not _valid_utc_seconds(item['reserved_at']) or
+            (type(evidence) is dict and
+             evidence.get('executor_task') != item['executor_task'])):
+        _fail('TASK_FILE_OPS_RESERVATION_INVALID')
+
+
 def _validate(record, *, strict=True):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     for name, check in (('file_ops', _validate_file_ops),
-                        ('file_ops_evidence', _validate_file_ops_evidence)):
+                        ('file_ops_evidence', _validate_file_ops_evidence),
+                        ('file_ops_reservation', _validate_file_ops_reservation)):
         if name in keys:
             keys.discard(name)
             check(record)
@@ -3500,6 +3518,9 @@ class TaskStore:
         if 'file_ops_evidence' in record:
             # #1502: evidence is written only by ``task file-ops``, never at create.
             _fail('TASK_FILE_OPS_EVIDENCE_FORBIDDEN')
+        if 'file_ops_reservation' in record:
+            # #1502: a D6 reservation is written only under the binding lock.
+            _fail('TASK_FILE_OPS_RESERVATION_FORBIDDEN')
         record = dict(record)
         # The owner gate runs first: a denied developer is cleared, so the
         # record gains no D6 and its audited denial never waits on, or is
@@ -3606,6 +3627,12 @@ class TaskStore:
         update-lock deadline refuses ``TASK_D6_BINDING_BUSY``. A lock that
         cannot be taken raises ``TASK_D6_BINDING_BUSY``/``_UNAVAILABLE``. The
         holder must not bind a D6 or take this lock again until it leaves.
+
+        Yields ``reserve(task_id, executor_task_id, *, expected)``, usable only
+        while the lock is held: it records the persistent file-ops reservation
+        of that D6 for that Task (journal entry first, then the record), so a
+        binder that waited, or scanned before the claim, refuses
+        ``TASK_D6_ALREADY_BOUND`` once the lock is released.
         """
         directory = self._dirfd()
         try:
@@ -3613,10 +3640,48 @@ class TaskStore:
                                          exclusive=True, code='TASK_D6_BINDING')
         finally:
             os.close(directory)
+        held = [True]
+
+        def reserve(task_id, executor_task_id, *, expected):
+            if not held[0]:
+                _fail('TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+            return self._reserve_file_ops_d6(task_id, executor_task_id, expected=expected)
+
         try:
-            yield
+            yield reserve
         finally:
+            held[0] = False
             self._unlock_sidecar(lock_fd)
+
+    def _reserve_file_ops_d6(self, task_id, executor_task_id, *, expected):
+        """Write the file-ops D6 reservation; the caller holds the binding lock.
+
+        The caller's holder scan ran under the same lock, so it saw every
+        commit. As in ``_d6_commit`` the journal entry comes first: a binder
+        whose scan passed this Task re-reads it under the lock. An entry whose
+        record write then fails gained nothing and holds nothing.
+        """
+        self._name(task_id)
+        if (not _safe_identifier(executor_task_id, D6_TASK_ID) or
+                type(expected) is not dict or not expected):
+            _fail('TASK_FILE_OPS_RESERVATION_INVALID')
+        claims = frozenset((executor_task_id,))
+        directory = self._dirfd()
+        try:
+            journal = self._read_d6_journal_at(directory)
+            self._append_d6_journal_at(directory, journal, task_id, claims)
+        finally:
+            os.close(directory)
+        reservation = {'executor_task': executor_task_id,
+                       'reserved_at': datetime.now(timezone.utc).strftime(_UTC_SECONDS)}
+        return self._update(task_id, expected=expected,
+                            changes={'file_ops_reservation': reservation},
+                            d6_claims=claims, trusted_file_ops_reservation=True)
+
+    @staticmethod
+    def _file_ops_reserves(record, executor_task_id):
+        item = record.get('file_ops_reservation')
+        return type(item) is dict and item.get('executor_task') == executor_task_id
 
     @staticmethod
     def _claude_d6_holds(record, executor_task_id):
@@ -3627,12 +3692,16 @@ class TaskStore:
         return ((type(dev) is dict and
                  dev.get('executor_task_id') == executor_task_id) or
                 (type(completion) is dict and
-                 completion.get('executor_task_id') == executor_task_id))
+                 completion.get('executor_task_id') == executor_task_id) or
+                TaskStore._file_ops_reserves(record, executor_task_id))
 
     @staticmethod
     def _d6_bind_holds(record, executor_task_id):
         if record.get('abandonment') is not None:
             return False
+        if TaskStore._file_ops_reserves(record, executor_task_id):
+            # #1502: a file-ops reservation holds its D6 with or without a Developer.
+            return True
         dev = record.get('developer')
         if type(dev) is not dict:
             return False
@@ -3662,9 +3731,12 @@ class TaskStore:
         developer = record.get('developer')
         callback = (developer.get('direct_result_callback')
                     if type(developer) is dict else None)
-        bound = (item.get('executor_task_id')
+        bound = [item.get('executor_task_id')
                  for item in (developer, record.get('completion'), callback)
-                 if type(item) is dict)
+                 if type(item) is dict]
+        reservation = record.get('file_ops_reservation')
+        if type(reservation) is dict:
+            bound.append(reservation.get('executor_task'))
         return frozenset(value for value in bound if type(value) is str and
                          TaskStore._d6_bind_holds(record, value))
 
@@ -5043,7 +5115,8 @@ class TaskStore:
                        abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
                        trusted_codex_launch=False, trusted_opencode_launch=False,
                        trusted_split=None, split_child_max=None,
-                       trusted_file_ops_evidence=False):
+                       trusted_file_ops_evidence=False,
+                       trusted_file_ops_reservation=False):
         # Refused here, not by the writable-field check: the dispatch gate
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
@@ -5053,6 +5126,10 @@ class TaskStore:
         if (('file_ops_evidence' in changes) != trusted_file_ops_evidence or
                 (trusted_file_ops_evidence and set(changes) != {'file_ops_evidence'})):
             _fail('TASK_FILE_OPS_EVIDENCE_FORBIDDEN')
+        if (('file_ops_reservation' in changes) != trusted_file_ops_reservation or
+                (trusted_file_ops_reservation and
+                 set(changes) != {'file_ops_reservation'})):
+            _fail('TASK_FILE_OPS_RESERVATION_FORBIDDEN')
         if (trusted_split is not None or split_child_max is not None) and (
                 trusted_split not in SPLIT_ACTIONS or set(changes) != {'lineage'} or
                 (split_child_max is not None) != (trusted_split == 'COMMIT') or
@@ -5226,6 +5303,13 @@ class TaskStore:
                     'file_ops_evidence' in current or current.get('abandonment') is not None):
                 # #1502: one sealed result per Task; a FAILED result stays.
                 _fail('TASK_FILE_OPS_EVIDENCE_IMMUTABLE')
+            if trusted_file_ops_reservation and (
+                    'file_ops_reservation' in current or 'file_ops_evidence' in current or
+                    type(current.get('file_ops')) is not dict or
+                    current.get('developer') is not None or
+                    current.get('abandonment') is not None):
+                # #1502: one reservation per Task, before any Developer or evidence.
+                _fail('TASK_FILE_OPS_RESERVATION_IMMUTABLE')
             if 'review_dispatch_claim' in changes:
                 old_claim = current.get('review_dispatch_claim')
                 new_claim = changes['review_dispatch_claim']
@@ -5403,8 +5487,9 @@ class TaskStore:
             # commit (an invalid transition, a dispatch denial) is refused or
             # audited here and never takes the binding lock. The gate re-runs
             # on the locked retry against the record as it is then.
-            if 'developer' in changes or 'completion' in changes:
-                gained = (self._d6_live_ids({**current, **changes}) -
+            if ('developer' in changes or 'completion' in changes or
+                    'file_ops_reservation' in changes):
+                gained =(self._d6_live_ids({**current, **changes}) -
                           self._d6_live_ids(current))
                 if not gained <= d6_claims:
                     raise _D6ClaimRequired(gained)
