@@ -8882,28 +8882,42 @@ class TaskGroupListUiTests(Base):
         full = _record(task_id='d' * 32, request='index row request',
                        created_at=(now - timedelta(minutes=5)).isoformat(),
                        updated_at=(now - timedelta(minutes=1)).isoformat(),
-                       developer=_developer(state='DEVELOPER_PENDING'))
+                       developer={'state': 'DEVELOPER_PENDING'})
+        summary = chat_tui_status.index_summary(full)
+        # The projection itself: a running, non-terminal row (shown without 'a').
+        self.assertEqual((summary['stage'], summary['name'], summary['terminal']),
+                         ('RUNNING', 'index row request', False))
         indexed = chat_tui_status._index_record(
-            full['task_id'], {'created_at': full['created_at']},
-            chat_tui_status.index_summary(full))
+            full['task_id'], {'created_at': full['created_at']}, summary)
 
         async def shown(ui):
             await self.listed(ui)
+            self.assertIsNone(ui.list_error)
             self.assertFalse(ui.list_note)                       # current index: no fallback
             rows = ''.join(text for _style, text in ui.list_text()).splitlines()
-            # Width-independent: the leading fields always fit; the request column may be
-            # cut with … at a narrow terminal, so check it on the listed row's data.
-            self.assertTrue(rows[2].startswith('▶ dddddddd'))   # no note row before it
-            self.assertIn('RUNNING', rows[2])
+            # Width- and layout-independent: find the selected Task row by its leading
+            # fields (they always fit); the request column may be cut with … at a narrow
+            # terminal, so the name is checked on the listed row's data instead.
+            selected = [line for line in rows if line.startswith('▶ ')]
+            self.assertEqual(len(selected), 1, rows)
+            self.assertTrue(selected[0].startswith('▶ dddddddd  RUNNING'), rows)
+            self.assertFalse([line for line in rows[:rows.index(selected[0])]
+                              if 'status index' in line or 'read every TaskStore' in line],
+                             rows)                               # no fallback note row
             self.assertEqual(len(ui.list_records), 1)
             self.assertIn(chat_tui_status.INDEX_KEY, ui.list_records[0])   # the index row
+            self.assertIs(ui.list_records[0][chat_tui_status.INDEX_KEY], summary)
             item = chat_tui_status.row(ui.list_records[0])
             self.assertEqual(item['task_id'], 'd' * 32)
             self.assertEqual(item['name'], 'index row request')
-            self.assertIn('RUNNING', item['stage'])
+            self.assertEqual(item['stage'], 'RUNNING')
             ui.start_task = Mock()
 
-        def opened(ui):
+        async def opened(ui):
+            for _ in range(200):                                  # Enter is handled async
+                if ui.start_task.called:
+                    break
+                await asyncio.sleep(0.01)
             ui.start_task.assert_called_once_with('show', 'd' * 32, None)
 
         with patch.object(chat_tui_status, 'load_list',
