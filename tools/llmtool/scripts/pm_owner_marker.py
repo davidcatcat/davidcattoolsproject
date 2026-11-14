@@ -34,6 +34,38 @@ WAITING_OWNER_DIRECTIONS = {
 }
 TRUSTED_ASSOCIATION = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
+# Owner ask gate rows (#1943). Must match the Owner ask gate table in
+# skills/ai-team-delivery/owner-escalation.md.
+RESERVED_ROWS = ("R-SCOPE", "R-RELEASE", "R-SPEND", "R-EGRESS", "R-SECURITY", "R-CRED",
+                 "R-ROOT", "R-MACOS", "R-REVIEWER", "R-DISPATCH", "R-ACCEPT", "R-BUDGET",
+                 "R-STOP", "R-OTHER")
+# Line 2 of an ask. It is deliberately not an activity marker, so the marker
+# parser (here and in the monitor) stops at it and reads line 1 only.
+OWNER_ASK_LINE = "<!-- owner-ask: v=1 reserved_row={row} -->"
+ASK_REQUIRED_FIELDS = ("reserved_row", "blocked_action", "authority_check", "evidence",
+                       "not_defect_not_harness")
+ASK_SINGLE_LINE_FIELDS = ("reserved_row", "blocked_action")
+ASK_FIELD_MAX = 2000
+_NOT_WORD_BEFORE = r"(?<![A-Za-z0-9_])"
+_NOT_WORD_AFTER = r"(?![A-Za-z0-9_])"
+DISPATCH_EVIDENCE = re.compile(
+    _NOT_WORD_BEFORE + r"(?:OWNER_PAUSED|OWNER_ASSIGNMENT_REQUIRED)" + _NOT_WORD_AFTER)
+ACCEPT_CODE = re.compile(_NOT_WORD_BEFORE + r"MERGE_OWNER_ACCEPTANCE_MANUAL" + _NOT_WORD_AFTER)
+PR_REFERENCE = re.compile(r"(?<![A-Za-z0-9_&#])#[1-9][0-9]{0,6}" + _NOT_WORD_AFTER)
+HEAD_SHA = re.compile(_NOT_WORD_BEFORE + r"[0-9a-fA-F]{40}" + _NOT_WORD_AFTER)
+ISSUE_COMMENT_URL = re.compile(
+    _NOT_WORD_BEFORE + r"https://github\.com/[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}"
+    r"/issues/[1-9][0-9]{0,6}#issuecomment-[1-9][0-9]{0,19}" + _NOT_WORD_AFTER)
+REVIEWER_NAME = re.compile(r"(?<![A-Za-z0-9_-])(?:codex|claude)-reviewer(?![A-Za-z0-9_-])")
+ROW_EVIDENCE = {
+    "R-DISPATCH": lambda text: DISPATCH_EVIDENCE.search(text) is not None,
+    "R-ACCEPT": lambda text: (ACCEPT_CODE.search(text) is not None and
+                              PR_REFERENCE.search(text) is not None and
+                              HEAD_SHA.search(text) is not None),
+    "R-STOP": lambda text: ISSUE_COMMENT_URL.search(text) is not None,
+    "R-REVIEWER": lambda text: REVIEWER_NAME.search(text) is not None,
+}
+
 
 class MarkerError(Exception):
     pass
@@ -202,8 +234,53 @@ def open_rows(repo: str) -> list[tuple[str, str, str]]:
             for number in open_rows_from_latest(latest, pulls)]
 
 
-def _body_ask(question: str, sheet: str | None) -> str:
-    body = f"{MARKER_ASK}\n\n{question.strip()}"
+def ask_record(reserved_row, blocked_action, authority_check, evidence,
+               not_defect_not_harness, other_reason=None) -> tuple[tuple[str, str], ...]:
+    """Return the validated ask record as ordered (name, value) pairs.
+
+    Refusals raise MarkerError whose message starts with a fixed code and names
+    at most the field, never its value. Nothing here touches GitHub.
+    """
+    given = dict(zip(ASK_REQUIRED_FIELDS, (reserved_row, blocked_action, authority_check,
+                                           evidence, not_defect_not_harness)))
+    values = {}
+    for name in ASK_REQUIRED_FIELDS:
+        value = given[name]
+        if type(value) is not str or not value.strip():
+            raise MarkerError(f"OWNER_ASK_FIELD_MISSING {name}")
+        values[name] = value.strip()
+    if other_reason is not None and type(other_reason) is not str:
+        raise MarkerError("OWNER_ASK_FIELD_INVALID other_reason")
+    other = (other_reason or "").strip()
+    for name, value in (*values.items(), ("other_reason", other)):
+        if "<!--" in value or "-->" in value or len(value) > ASK_FIELD_MAX:
+            raise MarkerError(f"OWNER_ASK_FIELD_INVALID {name}")
+    for name in ASK_SINGLE_LINE_FIELDS:
+        if values[name].splitlines() != [values[name]]:
+            raise MarkerError(f"OWNER_ASK_FIELD_INVALID {name}")
+    row = values["reserved_row"]
+    if row not in RESERVED_ROWS:
+        raise MarkerError("OWNER_ASK_ROW_UNKNOWN")
+    if row == "R-OTHER" and not other:
+        raise MarkerError("OWNER_ASK_OTHER_REASON_REQUIRED")
+    check = ROW_EVIDENCE.get(row)
+    if check is not None and not check(values["evidence"]):
+        raise MarkerError("OWNER_ASK_EVIDENCE_MISMATCH")
+    record = [(name, values[name]) for name in ASK_REQUIRED_FIELDS]
+    if row == "R-OTHER":
+        record.append(("other_reason", other))
+    return tuple(record)
+
+
+def _body_ask(question: str, sheet: str | None, record: tuple[tuple[str, str], ...]) -> str:
+    row = dict(record)["reserved_row"]
+    if row not in RESERVED_ROWS:
+        raise MarkerError("OWNER_ASK_ROW_UNKNOWN")
+    lines = [MARKER_ASK, OWNER_ASK_LINE.format(row=row), "", question.strip(), "",
+             "Ask record:"]
+    for name, value in record:
+        lines.append(f"- {name}: " + "\n  ".join(value.splitlines()))
+    body = "\n".join(lines)
     if sheet:
         body += "\n\n" + sheet.rstrip()
     return body
@@ -223,6 +300,12 @@ def main(argv=None) -> int:
     ask.add_argument("number")
     ask.add_argument("--question", required=True)
     ask.add_argument("--sheet")
+    ask.add_argument("--reserved-row", required=True, help="one of: " + ", ".join(RESERVED_ROWS))
+    ask.add_argument("--blocked-action", required=True)
+    ask.add_argument("--authority-check", required=True)
+    ask.add_argument("--evidence", required=True)
+    ask.add_argument("--not-defect-not-harness", required=True)
+    ask.add_argument("--other-reason")
     answer = sub.add_parser("answer")
     answer.add_argument("number")
     answer.add_argument("--owner-words", required=True)
@@ -232,13 +315,17 @@ def main(argv=None) -> int:
     try:
         if args.command != "open-rows" and not ISSUE_NUMBER.fullmatch(args.number):
             raise MarkerError("issue or pull request number is invalid")
-        repo = repository_slug(args.repo)
         if args.command == "ask":
+            # Validate the whole ask before any repository or GitHub access.
             question = args.question.strip()
             if not question or question.startswith("<!--"):
                 raise MarkerError("question is required")
+            record = ask_record(args.reserved_row, args.blocked_action, args.authority_check,
+                                args.evidence, args.not_defect_not_harness, args.other_reason)
+        repo = repository_slug(args.repo)
+        if args.command == "ask":
             sheet = Path(args.sheet).read_text(encoding="utf-8") if args.sheet else None
-            print(_post(args.number, _body_ask(question, sheet), repo))
+            print(_post(args.number, _body_ask(question, sheet, record), repo))
         elif args.command == "answer":
             if not args.owner_words.strip() or not args.pm_reading.strip():
                 raise MarkerError("Owner words and PM reading are required")
