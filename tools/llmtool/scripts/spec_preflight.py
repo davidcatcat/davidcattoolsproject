@@ -22,6 +22,9 @@ from llmtool.task_submission_cli import (  # noqa: E402
     _strict_json_object,
 )
 
+# #2006: task repair adds one bounded item and record-pm allows 16, so keep one free.
+REPAIR_ROOM_MAX_ACCEPTANCE = 15
+
 
 def check(spec: dict[str, Any]) -> list[str]:
     """Return fixed failure labels; never include untrusted field values."""
@@ -270,6 +273,9 @@ def main(argv: list[str] | None = None) -> int:
     if failures:
         print("SPEC_PREFLIGHT_FAIL:" + ",".join(failures))
         return 1
+
+    if len(spec["acceptance"]) > REPAIR_ROOM_MAX_ACCEPTANCE:
+        print("SPEC_PREFLIGHT_WARN:ACCEPTANCE_NO_REPAIR_ROOM", file=sys.stderr)
 
     if "edits" in spec and spec["edits"] is not None:
         if not isinstance(spec["edits"], list):
