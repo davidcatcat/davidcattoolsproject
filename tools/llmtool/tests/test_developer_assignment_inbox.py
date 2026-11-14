@@ -451,6 +451,21 @@ class DeveloperAssignmentInboxTests(unittest.TestCase):
         with patch(run, return_value=Namespace(stdout=b'/plain/checkout\n')):
             self.assert_refused('ASSIGNMENT_COMMON_DIR_UNAVAILABLE', inbox.discover_common_dir)
 
+    def test_store_claim_input_refusals_name_their_code(self):
+        # #367: the store refuses a malformed claim input with ASSIGNMENT_CLAIM_INVALID.
+        assigned = self.assign()
+        good = dict(worker=WORKER, d6_task_id=D6, session_id=str(uuid.uuid4()),
+                    account_dir_label='0' * 16, clock=lambda: '2026-11-14T00:00:00Z',
+                    gate=lambda item: (None, None))
+        for change in ({'account_dir_label': 'not-a-hex-label'},
+                       {'clock': '2026-11-14T00:00:00Z'},
+                       {'clock': lambda: '2026-11-14 00:00:00'}):
+            with self.subTest(change=sorted(change)):
+                self.assert_refused('ASSIGNMENT_CLAIM_INVALID',
+                                    self.store.claim_developer_assignment,
+                                    assigned['assignment_id'], **dict(good, **change))
+        self.assertEqual(self.stored(assigned['assignment_id'])['state'], 'ASSIGNED')
+
     def test_lock_wait_is_bounded_with_busy_code(self):
         self.assign()
         lock = os.open(self.store_root / task_store_module.ASSIGNMENTS_LOCK_NAME, os.O_RDWR)
