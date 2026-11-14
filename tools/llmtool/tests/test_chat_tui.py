@@ -8356,6 +8356,17 @@ class ScrollSelectTests(Base):
         ui.app.invalidate()
         await asyncio.sleep(seconds)
 
+    async def answered(self, ui):
+        """Explicit ready condition (not a sleep) for one sent chat line.
+
+        ``idle`` alone returns at once when the Enter has not been read from the pipe yet:
+        busy is still False before the request starts. The reply is in history and the
+        request is finished only when both hold; busy is cleared in the same loop callback
+        that renders the reply.
+        """
+        await self.until(ui, lambda ui: not ui.busy and len(self.session.history) >= 2,
+                         'chat reply')
+
     def test_wheel_up_moves_wrapped_cjk_lines_one_row_per_event_and_back(self):
         # Owner simulation 1: 120 wrapped CJK/English lines, 12 wheel-ups left the view
         # stuck (vertical_scroll 121 throughout); short lines moved one line per event.
@@ -8587,6 +8598,18 @@ class ScrollSelectTests(Base):
         long_reply = '\n'.join('row %d' % i for i in range(200))
         self.client.complete.return_value = Reply(long_reply, {})
 
+        async def laid_out(ui):
+            # macOS CI: PageUp reached a pane holding only the banner when 'question\r' was
+            # still unread at the old idle check, so it scrolled 0 rows and the reply then
+            # arrived following the bottom. Page only once the reply is laid out for two pages.
+            await self.answered(ui)
+
+            def two_pages(ui):
+                ui.app.invalidate()
+                return (ui.view.height > 1
+                        and ui.view.max_top() >= 2 * (ui.view.height - 1))
+            await self.until(ui, two_pages, 'reply laid out')
+
         async def paged_up(ui):
             for _ in range(40):
                 await self.settle(ui)
@@ -8617,7 +8640,7 @@ class ScrollSelectTests(Base):
             ui.app.key_processor.process_keys()
             self.assertTrue(ui.view.following)
 
-        ui, _ = self.drive(['question\r', self.idle, '\x1b[5~\x1b[5~', paged_up,
+        ui, _ = self.drive(['question\r', laid_out, '\x1b[5~\x1b[5~', paged_up,
                             '\t', focused_rows, '\t', '\x1b[5~', '\x1b[6~' * 60,
                             lambda ui: self.assertTrue(ui.view.following)])
         self.assertTrue(ui.app.layout.has_focus(ui.input))
@@ -8719,7 +8742,7 @@ class ScrollSelectTests(Base):
             self.assertEqual(ui.input.text, 'draft')
             self.assertIsNone(ui.view.selected_range())
 
-        self.drive(['first\r', self.idle, 'draft', press(3, 2), release(3, 2),
+        self.drive(['first\r', self.answered, 'draft', press(3, 2), release(3, 2),
                     WHEEL_UP * 3, WHEEL_DOWN * 3, check])
 
 
@@ -8821,9 +8844,13 @@ class TaskGroupListUiTests(Base):
     drive = WidgetTests.drive
 
     @staticmethod
-    async def listed(ui):
-        for _ in range(200):
-            if ui.list_loaded is not None and ui.list_reader is None:
+    async def listed(ui, shown=None):
+        """Explicit list-ready condition (not a sleep): the pane key was handled (``shown``,
+        default the list pane), and the TaskStore read it started has finished."""
+        shown = shown or (lambda ui: ui.list_visible())
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if shown(ui) and ui.list_loaded is not None and ui.list_reader is None:
                 return
             await asyncio.sleep(0.01)
         raise AssertionError('list read did not finish')
@@ -8943,11 +8970,35 @@ class TaskGroupListUiTests(Base):
             self.assertTrue(rows[3].startswith('▶ dddddddd'))
 
         async def events_note(ui):
-            await self.listed(ui)
+            # F4 handled first: else the finished F3 read already satisfies the wait.
+            await self.listed(ui, lambda ui: ui.events_visible())
             self.assertEqual(ui.events_view.text.splitlines()[2], note)
 
         with patch.object(chat_tui_status, 'load_list', return_value=([record], 0, note)):
             self.drive(['\x1bOR', list_note, '\x1bOR', '\x1bOS', events_note])
+
+    def test_list_ready_wait_holds_for_a_slow_status_index_read(self):
+        # Artificial delay in the index read, well past the drive's 50 ms key pause: the
+        # list-ready wait still sees the finished read, then the rows are checked as usual.
+        note = 'status index not found; read every TaskStore record'
+        record = _record(task_id='d' * 32, updated_at=datetime.now(timezone.utc).isoformat())
+        finished = threading.Event()
+
+        def slow_load(store):
+            time.sleep(0.5)
+            finished.set()
+            return [record], 0, note
+
+        async def list_note(ui):
+            await self.listed(ui)
+            self.assertTrue(finished.is_set())
+            rows = ''.join(text for _style, text in ui.list_text()).splitlines()
+            self.assertEqual(rows[2], ' ' + note)
+            self.assertTrue(rows[3].startswith('▶ dddddddd'))
+
+        with patch('llmtool.task_store.TaskStore', return_value=object()), \
+                patch.object(chat_tui_status, 'load_list', side_effect=slow_load):
+            self.drive(['\x1bOR', list_note])
 
 
 if __name__ == '__main__':
