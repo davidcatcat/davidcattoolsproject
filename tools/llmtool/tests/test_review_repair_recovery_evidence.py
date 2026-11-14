@@ -1,5 +1,7 @@
 """#1928 PR2: E3 authorization (and later E4/E5) checks for repair claim recovery."""
 import unittest
+from functools import partial
+from types import SimpleNamespace
 
 from llmtool import review_repair_recovery as rec
 from llmtool.errors import LLMToolError
@@ -97,6 +99,50 @@ class RecoveryEvidenceTests(unittest.TestCase):
         for path, value in cases:
             with self.subTest(path=path):
                 self.refused(rec.check_execution, *self.changed(path, value))
+
+
+class RecoveryD6Tests(unittest.TestCase):
+    refused = RecoveryEvidenceTests.refused
+
+    def e5(self, result=HEAD, d6_root='/d6', branch='fix/x', ancestor=True, error=None):
+        root, repair = records()
+        repair['completion']['evidence'].update(root='/d6', branch='fix/x')
+        calls = []
+
+        def registered_d6(task, executor_task):
+            calls.append((task['task_id'], executor_task))
+            if error is not None:
+                raise error
+            return SimpleNamespace(root=d6_root, branch=branch, result_sha=result), None
+
+        def is_ancestor(git_root, older, newer):
+            calls.append((git_root, older, newer))
+            if isinstance(ancestor, Exception):
+                raise ancestor
+            return ancestor
+        check = partial(rec.check_d6, registered_d6=registered_d6, is_ancestor=is_ancestor)
+        return check, root, repair, calls
+
+    def test_claim_head_or_its_descendant_passes(self):
+        check, root, repair, calls = self.e5()
+        self.assertIsNone(check(root, repair, CLAIM))
+        self.assertEqual(calls, [('e' * 32, 'exec-1')])
+        check, root, repair, calls = self.e5(result='9' * 40)
+        self.assertIsNone(check(root, repair, CLAIM))
+        self.assertEqual(calls[-1], ('/d6', HEAD, '9' * 40))
+
+    def test_wrong_d6_head_or_failed_lookup_refuses(self):
+        for kwargs in ({'d6_root': '/other'}, {'branch': 'fix/y'}, {'result': None},
+                       {'result': 'X' * 40}, {'result': '9' * 40, 'ancestor': False},
+                       {'result': '9' * 40, 'ancestor': 1},
+                       {'result': '9' * 40, 'ancestor': OSError('git')},
+                       {'error': LLMToolError('REPAIR_HEAD_MOVED')}):
+            with self.subTest(kwargs=kwargs):
+                check, root, repair, _ = self.e5(**kwargs)
+                self.refused(check, root, repair)
+        check, root, repair, _ = self.e5()
+        del repair['completion']['evidence']['root']
+        self.refused(check, root, repair)
 
 
 if __name__ == '__main__':

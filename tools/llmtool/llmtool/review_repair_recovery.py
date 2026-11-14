@@ -151,3 +151,23 @@ def check_execution(root, repair, claim):
             evidence.get('contract_digest') != repair['task_binding'].get('contract_digest') or
             evidence.get('source_sha') != claim['head_sha']):
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+
+
+def check_d6(root, repair, claim, *, registered_d6, is_ancestor):
+    """E5: the root's registered D6 is the repair's D6, and its result holds the claim HEAD.
+
+    registered_d6(root, executor_task) and is_ancestor(git_root, ancestor, descendant) are
+    injected (review_repair._registered_d6, task_completion._is_ancestor in production).
+    """
+    try:
+        registration, _snapshot = registered_d6(root, claim['executor_task'])
+        evidence, result = repair['completion']['evidence'], registration.result_sha
+        valid = (registration.root == evidence['root'] and
+                 registration.branch == evidence['branch'] and
+                 type(result) is str and _HEX40.fullmatch(result) is not None and
+                 (result == claim['head_sha'] or
+                  is_ancestor(registration.root, claim['head_sha'], result) is True))
+    except Exception:
+        valid = False
+    if not valid:
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
