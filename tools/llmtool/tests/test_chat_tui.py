@@ -8889,10 +8889,18 @@ class TaskGroupListUiTests(Base):
 
         async def shown(ui):
             await self.listed(ui)
+            self.assertFalse(ui.list_note)                       # current index: no fallback
             rows = ''.join(text for _style, text in ui.list_text()).splitlines()
+            # Width-independent: the leading fields always fit; the request column may be
+            # cut with … at a narrow terminal, so check it on the listed row's data.
             self.assertTrue(rows[2].startswith('▶ dddddddd'))   # no note row before it
             self.assertIn('RUNNING', rows[2])
-            self.assertIn('index row request', rows[2])
+            self.assertEqual(len(ui.list_records), 1)
+            self.assertIn(chat_tui_status.INDEX_KEY, ui.list_records[0])   # the index row
+            item = chat_tui_status.row(ui.list_records[0])
+            self.assertEqual(item['task_id'], 'd' * 32)
+            self.assertEqual(item['name'], 'index row request')
+            self.assertIn('RUNNING', item['stage'])
             ui.start_task = Mock()
 
         def opened(ui):
