@@ -1862,8 +1862,8 @@ class ReviewRefusalReceiptTests(unittest.TestCase):
         # #1907: only the fixed-word shape of the screened excerpt is kept.
         self.assertEqual(refusal['excerpt'], review_dispatch._reply_shape(SCREENED_EXCERPT))
         self.assertNotIn('label', refusal)
-        receipt_path = refusal['receipt_path']
-        self.assertIsNotNone(receipt_path)
+        self.assertIs(type(refusal['receipt_path']), str)
+        receipt_path = Path(refusal['receipt_path'])
         self.assertEqual(receipt_path, self.receipt_dir / f'{self.task_id}-{HEAD}-1.json')
 
         # Check directory and file permissions
@@ -1909,8 +1909,8 @@ class ReviewRefusalReceiptTests(unittest.TestCase):
         self.assertEqual(refusal['failure_reason'], 'VERDICT_NOT_JSON')
         self.assertEqual(refusal['label'], 'REVIEW_OUTPUT_WITHHELD')
         self.assertNotIn('excerpt', refusal)
-        receipt_path = refusal['receipt_path']
-        self.assertIsNotNone(receipt_path)
+        self.assertIs(type(refusal['receipt_path']), str)
+        receipt_path = Path(refusal['receipt_path'])
         content = json.loads(receipt_path.read_text(encoding='utf-8'))
         self.assertEqual(content['label'], 'REVIEW_OUTPUT_WITHHELD')
         self.assertNotIn('excerpt', content)
@@ -1938,8 +1938,8 @@ class ReviewRefusalReceiptTests(unittest.TestCase):
         self.assertEqual(refusal['failure_reason'], 'NO_FINAL_MESSAGE')
         self.assertEqual(refusal['label'], 'REVIEW_OUTPUT_ABSENT')
         self.assertNotIn('excerpt', refusal)
-        receipt_path = refusal['receipt_path']
-        self.assertIsNotNone(receipt_path)
+        self.assertIs(type(refusal['receipt_path']), str)
+        receipt_path = Path(refusal['receipt_path'])
         content = json.loads(receipt_path.read_text(encoding='utf-8'))
         self.assertEqual(content['label'], 'REVIEW_OUTPUT_ABSENT')
         self.assertNotIn('excerpt', content)
