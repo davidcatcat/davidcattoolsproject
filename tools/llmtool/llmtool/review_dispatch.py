@@ -335,6 +335,28 @@ def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, ve
     return {'thread_id': thread_id, 'review_text': verdict['review'], 'verdict': status}
 
 
+def _jsonl_shape(raw):
+    """#1163: fixed-word shape of the first non-JSON line; never any output text."""
+    if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_MAX_OUTPUT:
+        return 'OUTPUT_SHAPE unavailable'
+    try:
+        lines = raw.decode('utf-8').splitlines()
+    except UnicodeError:
+        return 'OUTPUT_SHAPE utf8=invalid bytes=%d' % len(raw)
+    for index, line in enumerate(lines, 1):
+        if not line:
+            continue
+        try:
+            json.loads(line, object_pairs_hook=_unique_json_object)
+        except (ValueError, RecursionError):
+            first = line.lstrip()[:1]
+            kind = ('blank' if not first else 'brace' if first in '{[' else
+                    'letter' if first.isalpha() else 'digit' if first.isdigit() else 'other')
+            return 'OUTPUT_SHAPE line=%d of %d bytes=%d first=%s' % (
+                index, len(lines), len(line.encode('utf-8')), kind)
+    return 'OUTPUT_SHAPE no_bad_line lines=%d' % len(lines)
+
+
 def _codex_final_message(raw):
     """Return the last complete Codex agent message when its JSONL is readable."""
     if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_MAX_OUTPUT:
@@ -369,6 +391,9 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
             # The reply holds the returned values, so no excerpt is added.
             raise
         final = _codex_final_message(raw)
+        if reason == 'OUTPUT_NOT_JSONL' and (final is None or not final.strip()):
+            # #1163: keep only the fixed-word shape of the bad line, never its text.
+            _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=_jsonl_shape(raw))
         if final is None or not final.strip():
             _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_ABSENT)
         from .task_submission_cli import _screen_text
