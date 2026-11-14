@@ -463,6 +463,31 @@ class GwAgentRouteTests(unittest.TestCase):
                     self.route.validate_request(request)
             self.assertEqual(caught.exception.code, code)
 
+    def test_gateway_task_shape_refusals_name_their_code(self):
+        # Refusal-code pin: the task shape, identity, paths, egress and budget
+        # checks each refuse with one fixed code.
+        def budgets(**change):
+            return dict(self.request()['task']['budgets'], **change)
+        cases = ((None, None, 'GW_AGENT_TASK_INVALID'),
+                 ('extra', 1, 'GW_AGENT_TASK_UNKNOWN_FIELDS'),
+                 ('task_id', 'not a task id', 'GW_AGENT_TASK_TASK_ID_INVALID'),
+                 ('source_sha', 'z' * 40, 'GW_AGENT_TASK_SOURCE_SHA_INVALID'),
+                 ('read_paths', [], 'GW_AGENT_TASK_PATHS_INVALID'),
+                 ('egress_basis', ' ', 'GW_AGENT_TASK_EGRESS_BASIS_INVALID'),
+                 ('budgets', None, 'GW_AGENT_TASK_BUDGETS_INVALID'),
+                 ('budgets', budgets(extra=1), 'GW_AGENT_TASK_BUDGETS_INVALID'),
+                 ('budgets', budgets(max_turns=0), 'GW_AGENT_TASK_BUDGET_MAX_TURNS_INVALID'))
+        for field, value, code in cases:
+            request = self.request()
+            if field is None:
+                request['task'] = value
+            else:
+                request['task'][field] = value
+            with self.subTest(code=code, field=field):
+                with self.assertRaises(RouteError) as caught:
+                    self.route.validate_request(request)
+                self.assertEqual(caught.exception.code, code)
+
     def test_null_gateway_task_identity_retains_bounded_refusal_diagnostic(self):
         with tempfile.TemporaryDirectory() as temp:
             result_path = Path(temp) / 'result.json'
