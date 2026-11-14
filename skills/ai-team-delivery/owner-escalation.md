@@ -62,7 +62,8 @@ Each ask carries one structured record with these fields:
 
 `R-OTHER` is the safety valve: never skip a real safety concern because no row fits, and never pick a row just to ask. If `R-OTHER` exceeds 10% of asks, the rules are reviewed. Stopping a dangerous action never needs an Owner question first.
 `pm_owner_marker.py ask` refuses an incomplete or mismatched record before any GitHub call (#1943 WP-1b).
-[NOT LIVE] (#1943): the monitor flag `UNGATED_OWNER_ASK` and the weekly cross-family audit. Until they are live, the PM checks those by hand.
+The weekly audit runs `python3 tools/llmtool/scripts/owner_ask_audit.py --since ISO --until ISO` (#1943 WP-1d). It is read-only and reports the week's asks, gated and ungated asks, the count per row and the `R-OTHER` ratio. A Reviewer from another family than the PM's checks `R-OTHER` asks and at least 20% of the others.
+[NOT LIVE] (#1943): the monitor flag `UNGATED_OWNER_ASK`. Until it is live, the weekly audit's `ungated` count is the check.
 
 ## Standing PM cleanup (Owner O2, #1943)
 
