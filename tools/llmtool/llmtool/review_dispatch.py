@@ -1128,7 +1128,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             unknown = dict(prior, state='UNKNOWN', updated_at=_now())
             updated_claims = [unknown if claim is prior else claim for claim in claims]
             try:
-                saved = store.compare_and_update(
+                store.compare_and_update(
                     task_id, expected={'review_dispatch_claim': stored_claims},
                     review_dispatch_claim=updated_claims)
                 return unknown

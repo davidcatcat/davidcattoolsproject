@@ -1317,7 +1317,6 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     from .review_repair import dispute_open_on
     if dispute_open_on(task, pr_number, head):
         _refuse('DEBUG_DISPUTE_OPEN')
-    root = str(registration.root)
     entries = task.get('high_debug', [])
     if type(entries) is not list or len(entries) >= 8: _refuse('HIGH_DEBUG_LIMIT')
     _admit_debug(task, entries)
