@@ -149,6 +149,22 @@ class DeveloperRouteContractTests(unittest.TestCase):
             self.run_case(code=3, stderr=b'boom')
         self.assertIsNone(caught.exception.blocked_reason)
 
+    def test_snapshot_failures_name_their_code(self):
+        # Refusal-code pin: a snapshot that is not a mapping or object, and a
+        # failed Git read while fingerprinting, each carry one fixed code.
+        from llmtool.developer_routes import base as route_base
+        for value in (42, 'files', None):
+            with self.subTest(value=value):
+                with self.assertRaises(RouteError) as caught:
+                    route_base._snapshot_value(value)
+                self.assertEqual(caught.exception.code, 'ROUTE_SNAPSHOT_INVALID')
+        with tempfile.TemporaryDirectory() as root:
+            with mock.patch.object(route_base.task_completion, '_git',
+                                   side_effect=task_completion.LLMToolError('synthetic')):
+                with self.assertRaises(RouteError) as caught:
+                    capture_snapshot(root)
+        self.assertEqual(caught.exception.code, 'ROUTE_GIT_INSPECTION_FAILED')
+
     def test_post_run_git_mutation_classified_before_dirty_state(self):
         changed = {'files': self.after['files'],
                    'git_state': {'head': 'b' * 40}}
