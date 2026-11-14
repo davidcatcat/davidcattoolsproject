@@ -828,7 +828,6 @@ def _git(root, args, *, limit=_GIT_LIMIT, allow_exit_1=False,
     """Run one fixed Git read with bounded output and no inherited Git config."""
     env = {
         'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
-        'TMPDIR': os.environ.get('TMPDIR') or '/tmp',
         'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_ATTR_NOSYSTEM': '1',
         'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_LAZY_FETCH': '1',
         'GIT_NO_REPLACE_OBJECTS': '1',
