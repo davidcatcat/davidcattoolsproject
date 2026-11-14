@@ -473,7 +473,10 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
             excerpt = _screen_text(cut, 2048)
         except LLMToolError:
             _refuse('REVIEW_NOT_POSTED', reason=reason, excerpt=REVIEW_OUTPUT_WITHHELD)
-        _refuse('REVIEW_NOT_POSTED', 'Reviewer dispatch refused: ' + excerpt,
+        # #1938: the message holds fixed words and the reply shape, never reply text.
+        _refuse('REVIEW_NOT_POSTED', 'Reviewer dispatch refused: %s; %s' % (
+                    reason if reason in REVIEW_FAILURE_REASONS else 'UNKNOWN',
+                    _reply_shape(excerpt)),
                 reason=reason, excerpt=excerpt)
 
 
