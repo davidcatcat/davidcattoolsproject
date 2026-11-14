@@ -44,6 +44,21 @@ def _developer(profile='opencode', state='DEVELOPER_RESPONDED', error_code=None,
     return value
 
 
+def _opencode_attempted(error_code='OPENCODE_STEPS_EXHAUSTED', **execution):
+    """The record task_submission_cli persists for an attempted OpenCode adapter
+    error: DEVELOPER_OUTCOME_UNKNOWN with execution status UNKNOWN."""
+    value = {'status': 'UNKNOWN', 'native_session_id': 'ses_' + new_id(),
+             'process_exit_code': 0,
+             'stdout_sha256': hashlib.sha256(b'synthetic opencode output').hexdigest(),
+             'elapsed_ms': 2400, 'cleanup_status': 'CONFIRMED',
+             'usage_source': 'UNKNOWN', 'source_bytes': None,
+             'source_file_count': None, 'source_manifest_sha256': None}
+    value.update(execution)
+    return _developer(state='DEVELOPER_OUTCOME_UNKNOWN', error_code=error_code,
+                      provider_type='opencode-cli', model='synthetic-model',
+                      max_tokens=1024, execution=value)
+
+
 class _Store(TaskStore):
     """A real TaskStore for worker observations; Task records live in memory."""
 
@@ -277,6 +292,60 @@ class OutcomeClassificationTests(_Fixture):
         developer = self._claude_blocked('DEVELOPER_CLAUDE_RATE_LIMITED')
         self.assertEqual(worker_availability.classify_outcome(developer), 'FAIL')
 
+    def test_opencode_steps_exhausted_record_writes_pass(self):
+        # The persisted shape: Task outcome UNKNOWN, provider completed.
+        developer = _opencode_attempted()
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(developer['execution']['status'], 'UNKNOWN')
+        self.assertEqual(worker_availability.classify_outcome(developer), 'PASS')
+        task_id = new_id()
+        self.store.records[task_id] = {'task_id': task_id, 'developer': None}
+        before = worker_availability.developer_snapshot(self.store, task_id)
+        self.store.records[task_id]['developer'] = developer
+        self.assertEqual(worker_availability.record_task_outcome(self.store, task_id, before),
+                         'PASS')
+        self.assertEqual(self._status('opencode-developer'), 'PASS')
+        # The Developer outcome itself stays UNKNOWN; only quota reads PASS.
+        self.assertEqual(self.store.records[task_id]['developer']['state'],
+                         'DEVELOPER_OUTCOME_UNKNOWN')
+
+    def test_unknown_without_completion_evidence_records_nothing(self):
+        cases = (
+            # Missing or malformed response evidence.
+            _opencode_attempted(native_session_id=None),
+            _opencode_attempted(native_session_id=''),
+            _opencode_attempted(stdout_sha256=None),
+            _opencode_attempted(stdout_sha256='not-a-digest'),
+            # Nonzero or unknown exit.
+            _opencode_attempted(process_exit_code=1),
+            _opencode_attempted(process_exit_code=None),
+            # Cleanup not confirmed.
+            _opencode_attempted(cleanup_status='UNKNOWN'),
+            # Timeout, interruption and other incomplete runs, even with output.
+            _opencode_attempted('OPENCODE_TIMEOUT'),
+            _opencode_attempted('DEVELOPER_INTERRUPTED'),
+            _opencode_attempted('OPENCODE_ADAPTER_UNKNOWN'),
+            _opencode_attempted('OPENCODE_EVENT_STREAM_INVALID'),
+            # A timeout status is never a completion.
+            _opencode_attempted(status='TIMEOUT'),
+            # Prelaunch refusal: not attempted, no execution.
+            _developer(state='DEVELOPER_UNAVAILABLE', error_code='OPENCODE_STEPS_EXHAUSTED'),
+        )
+        for developer in cases:
+            with self.subTest(code=developer['error_code'],
+                              execution=developer.get('execution')):
+                self.assertIsNone(worker_availability.classify_outcome(developer))
+                self.assertIsNone(worker_availability.record_outcome(
+                    self.store, 'opencode-developer', developer, task_id=new_id()))
+        self.assertEqual(self._status('opencode-developer'), 'UNKNOWN')
+
+    def test_unknown_quota_code_still_writes_fail(self):
+        for developer in (_opencode_attempted('DEVELOPER_OPENCODE_QUOTA_EXHAUSTED'),
+                          _opencode_attempted('DEVELOPER_OPENCODE_QUOTA_EXHAUSTED',
+                                              process_exit_code=1, cleanup_status='UNKNOWN')):
+            with self.subTest(execution=developer['execution']):
+                self.assertEqual(worker_availability.classify_outcome(developer), 'FAIL')
+
     def test_fail_freshness_is_six_hours_without_trusted_reset(self):
         developer = _developer(state='DEVELOPER_UNAVAILABLE',
                                error_code='DEVELOPER_OPENCODE_QUOTA_EXHAUSTED')
@@ -444,6 +513,14 @@ class OwnerCaseTests(_Fixture):
         self._run(self._args(), quota_run)
         self.assertEqual(self._status('opencode-developer'), 'FAIL')
 
+    def test_steps_exhausted_run_records_pass(self):
+        def steps_run(args, store):
+            store.records[args.task_id]['developer'] = _opencode_attempted()
+            return 1
+        result, _, _ = self._run(self._args(), steps_run)
+        self.assertEqual(result, 1)
+        self.assertEqual(self._status('opencode-developer'), 'PASS')
+
     def test_refused_run_records_nothing(self):
         stale = _developer(state='DEVELOPER_UNAVAILABLE',
                            error_code='DEVELOPER_OPENCODE_QUOTA_EXHAUSTED')
@@ -491,6 +568,14 @@ class BackgroundCompletionTests(_Fixture):
         self._child(_developer(state='DEVELOPER_UNAVAILABLE',
                                error_code='DEVELOPER_OPENCODE_QUOTA_EXHAUSTED'))
         self.assertEqual(self._status('opencode-developer'), 'FAIL')
+
+    def test_detached_steps_exhausted_writes_pass(self):
+        self._child(_opencode_attempted())
+        self.assertEqual(self._status('opencode-developer'), 'PASS')
+
+    def test_detached_incomplete_unknown_records_nothing(self):
+        self._child(_opencode_attempted('OPENCODE_ADAPTER_UNKNOWN'))
+        self.assertEqual(self._status('opencode-developer'), 'UNKNOWN')
 
 
 class ReviewRepairGateTests(_Fixture):

@@ -40,6 +40,9 @@ _GATEWAY_QUOTA_CODE = re.compile(r'[A-Z0-9_]*GW_AGENT_QUOTA_EXHAUSTED_[A-Z0-9_]{
 _RATE_LIMIT_CODE = re.compile(r'[A-Z][A-Z0-9_]*_(?:RATE_LIMITED|HTTP_429)\Z')
 # States that hold a provider result (a response, or output the host rejected).
 _PROVIDER_RESULT_STATES = frozenset(('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED'))
+# Codes for a run the provider completed (exit 0, cleanup confirmed, session
+# and output digest) while the Task outcome is persisted as UNKNOWN.
+_COMPLETED_UNKNOWN_CODES = frozenset(('OPENCODE_STEPS_EXHAUSTED',))
 _SHA256_HEX = re.compile(r'[0-9a-f]{64}\Z')
 _UNREAD = object()
 
@@ -80,11 +83,21 @@ def classify_outcome(developer):
         # The provider returned and the host then blocked the result (e.g. a
         # Claude run with no changes, or a Codex run that reported BLOCKED).
         return 'PASS'
+    if (execution.get('status') == 'UNKNOWN' and
+            developer.get('error_code') in _COMPLETED_UNKNOWN_CODES and
+            execution.get('process_exit_code') == 0 and
+            execution.get('cleanup_status') == 'CONFIRMED' and
+            _evidenced_response(developer, execution)):
+        # The provider completed and responded, but the Task outcome stays
+        # UNKNOWN (e.g. OpenCode used every step without final text). Only
+        # these named completion codes count: a partial or interrupted run
+        # with some output never does.
+        return 'PASS'
     return None
 
 
 def _evidenced_response(developer, execution):
-    """A BLOCKED run counts only with a returned session and output digest.
+    """A BLOCKED or completed-UNKNOWN run counts only with a session and output digest.
 
     A prelaunch refusal has no process evidence; a timeout or interruption
     never counts, whatever its execution fields say.
