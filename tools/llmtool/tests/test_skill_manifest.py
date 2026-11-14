@@ -11,6 +11,7 @@ import unittest
 from types import SimpleNamespace
 
 from llmtool.skill_manifest import (
+    COMMON_CORE_CARD_PATH,
     DEVELOPER_CARD_PATH,
     GIT_READ_TIMEOUT_SECONDS,
     MAX_DEVELOPER_PREFIX_SIZE,
@@ -36,6 +37,7 @@ from llmtool.skill_manifest import (
 FILES = {
     'AGENTS.md': b'governance\n',
     'CLAUDE.md': b'claude governance\n',
+    'skills/role-cards/common-core.md': b'common core\n',
     'skills/role-cards/developer.md': b'developer card\n',
     'skills/ai-team-delivery/SKILL.md': b'delivery\n',
     'skills/ai-team-delivery/pm-continuation.md': b'pm\n',
@@ -44,6 +46,9 @@ FILES = {
     'skills/ai-team-delivery/formal-verdict.md': b'verdict\n',
     'skills/safe-git/SKILL.md': b'git\n',
 }
+# Routes whose common core is the common-core card (#1502 WP-F2a); the
+# others keep AGENTS.md as their core until their own delivery ships.
+COMMON_CORE_ROUTES = ('agy', 'claude-developer')
 GIT_READ_PREFIX = (
     'git', '--no-replace-objects', '-c', 'core.useReplaceRefs=false',
 )
@@ -404,7 +409,8 @@ class SkillManifestTests(unittest.TestCase):
         for route in role_card_routes():
             with self.subTest(route=route):
                 result = build_role_cards(self.repo, self.commit, route)
-                core = 'CLAUDE.md' if route == 'claude-developer' else 'AGENTS.md'
+                core = (COMMON_CORE_CARD_PATH if route in COMMON_CORE_ROUTES
+                        else 'AGENTS.md')
                 self.assertEqual(
                     [card['path'] for card in result['cards']],
                     [core, DEVELOPER_CARD_PATH],
@@ -427,6 +433,11 @@ class SkillManifestTests(unittest.TestCase):
             build_role_cards(self.repo, self.commit, 'agy')['cards_sha256'],
             build_role_cards(self.repo, self.commit, 'opencode-developer')['cards_sha256'],
         )
+        # Claude and AGY share the same cards; only the route binds the digest.
+        claude = build_role_cards(self.repo, self.commit, 'claude-developer')
+        agy = build_role_cards(self.repo, self.commit, 'agy')
+        self.assertEqual(claude['cards'], agy['cards'])
+        self.assertNotEqual(claude['cards_sha256'], agy['cards_sha256'])
 
     def test_role_cards_come_from_base_commit_not_working_tree_or_newer_head(self):
         base = build_role_cards(self.repo, self.commit, 'claude-developer')
@@ -457,7 +468,7 @@ class SkillManifestTests(unittest.TestCase):
         )
         tree_reads = [call for call in calls if 'ls-tree' in call]
         self.assertEqual(
-            [call[-1] for call in tree_reads], ['AGENTS.md', DEVELOPER_CARD_PATH],
+            [call[-1] for call in tree_reads], [COMMON_CORE_CARD_PATH, DEVELOPER_CARD_PATH],
         )
         self.assertTrue(all(self.commit in call for call in tree_reads))
 
@@ -482,18 +493,33 @@ class SkillManifestTests(unittest.TestCase):
         self.assertNotEqual(SKILL_MANIFEST_PREFIX_TOO_LARGE, SKILL_MANIFEST_ROUTE_INVALID)
         card_size = len(FILES[DEVELOPER_CARD_PATH])
 
-        self._write_files({'AGENTS.md': b'x' * (MAX_DEVELOPER_PREFIX_SIZE - card_size)})
-        self.commit = self._commit()
-        at_limit = build_role_cards(self.repo, self.commit, 'agy')
-        self.assertEqual(at_limit['prefix_size'], MAX_DEVELOPER_PREFIX_SIZE)
+        for route in COMMON_CORE_ROUTES:
+            with self.subTest(route=route):
+                self._write_files({COMMON_CORE_CARD_PATH:
+                                   b'x' * (MAX_DEVELOPER_PREFIX_SIZE - card_size)})
+                self.commit = self._commit()
+                at_limit = build_role_cards(self.repo, self.commit, route)
+                self.assertEqual(at_limit['prefix_size'], MAX_DEVELOPER_PREFIX_SIZE)
 
-        self._write_files({'AGENTS.md': b'x' * (MAX_DEVELOPER_PREFIX_SIZE - card_size + 1)})
-        self.commit = self._commit()
-        self._assert_card_code(SKILL_MANIFEST_PREFIX_TOO_LARGE, self.commit, 'agy')
+                self._write_files({COMMON_CORE_CARD_PATH:
+                                   b'x' * (MAX_DEVELOPER_PREFIX_SIZE - card_size + 1)})
+                self.commit = self._commit()
+                self._assert_card_code(SKILL_MANIFEST_PREFIX_TOO_LARGE, self.commit, route)
 
-        # The core alone over the budget is refused too; CLAUDE.md is untouched,
-        # so the Claude route at the same commit still fits.
-        self._write_files({'AGENTS.md': b'x' * (MAX_DEVELOPER_PREFIX_SIZE + 1)})
+        # The common core alone over the budget is refused too; AGENTS.md is
+        # untouched, so the OpenCode and gw-agent routes at the same commit
+        # still fit.
+        self._write_files({COMMON_CORE_CARD_PATH: b'x' * (MAX_DEVELOPER_PREFIX_SIZE + 1)})
+        self.commit = self._commit()
+        for route in COMMON_CORE_ROUTES:
+            with self.subTest(route=route, core='over budget'):
+                self._assert_card_code(SKILL_MANIFEST_PREFIX_TOO_LARGE, self.commit, route)
+        self.assertTrue(build_role_cards(self.repo, self.commit, 'gw-agent'))
+        self.assertTrue(build_role_cards(self.repo, self.commit, 'opencode-developer'))
+
+        # The AGENTS.md core still counts for the routes that keep it.
+        self._write_files({COMMON_CORE_CARD_PATH: FILES[COMMON_CORE_CARD_PATH],
+                           'AGENTS.md': b'x' * (MAX_DEVELOPER_PREFIX_SIZE + 1)})
         self.commit = self._commit()
         self._assert_card_code(SKILL_MANIFEST_PREFIX_TOO_LARGE, self.commit, 'gw-agent')
         self.assertTrue(build_role_cards(self.repo, self.commit, 'claude-developer'))
@@ -502,9 +528,19 @@ class SkillManifestTests(unittest.TestCase):
         for commit in ('short', None, '0' * 40):
             with self.subTest(commit=commit):
                 self._assert_card_code(SKILL_MANIFEST_COMMIT_INVALID, commit, 'agy')
+        # A common core missing at the commit refuses the routes that use it;
+        # the routes that keep AGENTS.md as their core are unaffected.
+        self._git('rm', '-q', COMMON_CORE_CARD_PATH)
+        self.commit = self._commit()
+        for route in COMMON_CORE_ROUTES:
+            with self.subTest(route=route, missing=COMMON_CORE_CARD_PATH):
+                self._assert_card_code(SKILL_MANIFEST_PATH_MISSING, self.commit, route)
+        self.assertTrue(build_role_cards(self.repo, self.commit, 'gw-agent'))
         self._git('rm', '-q', DEVELOPER_CARD_PATH)
         self.commit = self._commit()
-        self._assert_card_code(SKILL_MANIFEST_PATH_MISSING, self.commit, 'agy')
+        for route in role_card_routes():
+            with self.subTest(route=route, missing=DEVELOPER_CARD_PATH):
+                self._assert_card_code(SKILL_MANIFEST_PATH_MISSING, self.commit, route)
 
     def test_role_cards_refuse_non_utf8_card(self):
         self._write_files({DEVELOPER_CARD_PATH: b'\xff'})

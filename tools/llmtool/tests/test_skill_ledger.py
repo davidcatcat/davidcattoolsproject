@@ -20,11 +20,14 @@ from llmtool import skill_manifest
 from llmtool import task_completion
 from llmtool.errors import LLMToolError
 
-# Role-card fixture files; plain text only.
+# Role-card fixture files; plain text only. Claude Developer and AGY take the
+# common-core card as their core; OpenCode and gw-agent keep AGENTS.md.
+CORE_CARD = skill_manifest.COMMON_CORE_CARD_PATH
+DEV_CARD = skill_manifest.DEVELOPER_CARD_PATH
 CARD_FILES = {
     'AGENTS.md': b'core rules\n',
-    'CLAUDE.md': b'claude core rules\n',
-    'skills/role-cards/developer.md': b'developer card\n',
+    CORE_CARD: b'common core rules\n',
+    DEV_CARD: b'developer card\n',
 }
 
 
@@ -868,7 +871,7 @@ class SkillLedgerTests(unittest.TestCase):
 
     def expected_cards(self, files=CARD_FILES):
         return [{'path': path, 'sha256': hashlib.sha256(files[path]).hexdigest()}
-                for path in ('CLAUDE.md', 'skills/role-cards/developer.md')]
+                for path in (CORE_CARD, DEV_CARD)]
 
     def assert_ledger_code(self, code, operation):
         with self.assertRaises(ledger.SkillLedgerError) as caught:
@@ -928,7 +931,7 @@ class SkillLedgerTests(unittest.TestCase):
         self.assertEqual(row['cards'], self.expected_cards())
         self.assertEqual(self.check()['status'], 'VERIFIED')
         # The working tree is never the source of the digests.
-        (Path(self.repo) / 'CLAUDE.md').write_bytes(b'uncommitted edit\n')
+        (Path(self.repo) / CORE_CARD).write_bytes(b'uncommitted edit\n')
         self.record_cards(self.card_entry(session_id='session-b'))
         row = self.card_receipts()[-1]
         self.assertEqual(row['base_commit'], older)
@@ -1044,8 +1047,8 @@ class SkillLedgerTests(unittest.TestCase):
 
     def test_card_delivery_refuses_caller_supplied_digests(self):
         self.card_repo()
-        forged = [{'path': 'CLAUDE.md', 'sha256': '1' * 64},
-                  {'path': 'skills/role-cards/developer.md', 'sha256': '2' * 64}]
+        forged = [{'path': CORE_CARD, 'sha256': '1' * 64},
+                  {'path': DEV_CARD, 'sha256': '2' * 64}]
         cases = (
             {'cards': forged},
             # Even digests that happen to be correct are not accepted from a caller.
@@ -1089,12 +1092,25 @@ class SkillLedgerTests(unittest.TestCase):
         self.assertEqual(self.card_receipts(), [])
         self.assertEqual(self.check()['reason'], 'NOT_FOUND')
 
+    def test_card_delivery_refuses_a_card_missing_at_the_pin(self):
+        self.card_repo()
+        for run_id, missing in (('run-core', CORE_CARD), ('run-dev', DEV_CARD)):
+            with self.subTest(missing=missing):
+                (Path(self.repo) / missing).unlink()
+                commit = self.commit_cards({})
+                self.pin(commit, run_id=run_id)
+                self.assert_ledger_code(
+                    'SKILL_MANIFEST_PATH_MISSING',
+                    lambda: self.record_cards(self.card_entry(run_id=run_id)))
+        self.assertEqual(self.card_receipts(), [])
+        self.assertEqual(self.check(run_id='run-core')['reason'], 'NOT_FOUND')
+
     def test_generic_record_refuses_controller_delivered(self):
         self.card_repo()
         cases = (
             {},
             {'route': 'claude-developer', 'base_commit': self.main_commit,
-             'cards': [{'path': 'CLAUDE.md', 'sha256': '1' * 64}]},
+             'cards': [{'path': CORE_CARD, 'sha256': '1' * 64}]},
             {'base_commit': self.main_commit, 'cards': self.expected_cards()},
         )
         with mock.patch.object(ledger, '_path', side_effect=AssertionError(
