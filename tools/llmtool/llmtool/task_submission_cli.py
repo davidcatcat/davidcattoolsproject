@@ -4209,7 +4209,14 @@ _GW_AGENT_SESSION = re.compile(r'[0-9a-fA-F-]{16,64}')
 
 
 class _D6SessionRefused(Exception):
-    """The D6 did not take, or did not confirm, the session a run reported."""
+    """The D6 did not take, or did not confirm, the session a run reported.
+
+    code is the bind helper's own result code when the helper answered (#1895).
+    """
+
+    def __init__(self, code=None):
+        super().__init__(code)
+        self.code = code
 
 
 # The accepted execution status TaskStore expects per direct route (#1072).
@@ -4300,11 +4307,14 @@ def _bind_direct_native_session(registration, developer, completion, session_for
                 return False
             raise _D6SessionRefused()
         try:
-            if _bind_codex_native_session(registration, session) != 'BOUND':
-                raise _D6SessionRefused()
+            bind_code = _bind_codex_native_session(registration, session)
+            if bind_code != 'BOUND':
+                raise _D6SessionRefused(bind_code)
             bound = task_completion.read_d6_registration(
                 registration.task_id, registration.common_dir)
             expected = dataclasses.replace(registration, native_session_id=session)
+        except _D6SessionRefused:
+            raise
         except Exception:
             raise _D6SessionRefused() from None
         if bound != expected:
@@ -6272,7 +6282,12 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         _bind_direct_native_session(registration, developer, completion, _GW_AGENT_SESSION,
             repair=gw_agent_wiring._HEX_32.fullmatch(
                 registration.native_session_id or '') is not None)
-    except _D6SessionRefused:
+    except _D6SessionRefused as exc:
+        # #1895: a bind helper that timed out or did not start is not a session
+        # conflict, so it keeps its own code.
+        if exc.code == 'D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE':
+            return persist_failure('DEVELOPER_GW_AGENT_' + exc.code,
+                                   state='DEVELOPER_OUTCOME_UNKNOWN')
         return persist_failure('DEVELOPER_GW_AGENT_D6_SESSION_REFUSED',
                                state='DEVELOPER_OUTCOME_UNKNOWN')
     except gw_agent_wiring.WiringRefused as exc:
