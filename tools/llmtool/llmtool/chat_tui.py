@@ -2447,7 +2447,11 @@ class ChatTUI:
                 from .task_store import TaskStore
                 # The task status index first (read only); a missing, unreadable or stale
                 # index falls back to reading every record, and the note says so.
-                records, unreadable, note = chat_tui_status.load_list(TaskStore())
+                store = TaskStore()
+                records, unreadable, note = chat_tui_status.load_list(store)
+                # Full reads only of the index rows the recent events need, so F4 and
+                # /task events show the same newest events as a full read.
+                records = chat_tui_status.complete_recent_events(store, records)
                 outcome = (records, unreadable, None, note)
         except LLMToolError as exc:
             outcome = ([], 0, str(exc))

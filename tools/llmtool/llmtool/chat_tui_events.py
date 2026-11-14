@@ -197,17 +197,55 @@ def _row_events(record):
     return events, summary["event_count"] > len(events)
 
 
+def _text_cut(record, event):
+    """Whether the status index shortened this event text (an index row only)."""
+    from .chat_tui_status import INDEX_KEY
+    from .task_index import TUI_TEXT_LIMIT
+    return (type(record) is dict and INDEX_KEY in record and
+            len(event["text"]) == TUI_TEXT_LIMIT and event["text"].endswith("…"))
+
+
 def _recent_rows(records, limit):
-    """([(event, task_id)] newest first, untimed last, at most ``limit``; whether the
-    status index kept only each Task's newest events)."""
-    rows, partial = [], False
-    for record in records:
+    """([(event, task_id)] newest first, untimed last, at most ``limit``; the positions in
+    ``records`` of status-index rows that may make those rows differ from a full read).
+
+    The selection is global: every row's events are merged, then the newest ``limit`` are
+    kept. A status-index row keeps only its Task's newest events; its dropped older events
+    all sort after its last kept event, so they can belong in the selection only when that
+    last kept event is itself selected (or it kept none). Such rows, and rows with a
+    selected event whose text the index shortened, are returned as open: the selection is
+    then not known to be complete. Every other dropped event is provably older than the
+    selection, so it equals the selection over full records.
+    """
+    rows, last_kept = [], {}
+    for position, record in enumerate(records):
         task_id = value(record, "task_id")
         events, cut = _row_events(record)
-        partial = partial or cut
-        rows += [(event, task_id) for event in events]
+        task_rows = [(event, task_id, position) for event in events]
+        rows += task_rows
+        if cut:
+            last_kept[position] = task_rows[-1] if task_rows else None
     timed = sorted((r for r in rows if r[0]["time"]), key=lambda r: r[0]["time"], reverse=True)
-    return (timed + [r for r in rows if not r[0]["time"]])[:limit], partial
+    shown = (timed + [r for r in rows if not r[0]["time"]])[:limit]
+    shown_ids = {id(row) for row in shown}
+    unsure = {position for position, last in last_kept.items()
+              if last is None or id(last) in shown_ids}
+    unsure.update(position for event, _task_id, position in shown
+                  if _text_cut(records[position], event))
+    return [(event, task_id) for event, task_id, _position in shown], sorted(unsure)
+
+
+def open_rows(records, limit=None):
+    """Positions in ``records`` of status-index rows that a full TaskStore read must
+    replace before the newest ``limit`` (default RECENT_LIMIT, which also covers the
+    shorter CONVERSATION_LIMIT) recent events equal a full read of every record."""
+    return _recent_rows(records, RECENT_LIMIT if limit is None else limit)[1]
+
+
+def _partial_text(open_count):
+    from .task_index import TUI_EVENT_LIMIT
+    return ("INCOMPLETE: %d Tasks not read in full (status index keeps %d per Task); "
+            "older events or full event text may be missing" % (open_count, TUI_EVENT_LIMIT))
 
 
 CONVERSATION_LIMIT = 20  # Events /task events prints into the conversation (#1838).
@@ -215,12 +253,15 @@ CONVERSATION_LIMIT = 20  # Events /task events prints into the conversation (#18
 
 def conversation_text(records, unreadable, read_at, note=None, limit=CONVERSATION_LIMIT):
     """#1838: what /task events prints into the conversation: the newest events across
-    Tasks, or "no events in TaskStore". Read only, like the F4 pane."""
-    rows, _partial = _recent_rows(records, limit)
+    Tasks, or "no events in TaskStore". Read only, like the F4 pane. A selection that is
+    not known to equal a full read says so; it is never presented as complete."""
+    rows, partial = _recent_rows(records, limit)
     lines = ["Recent events across %d Tasks (%d unreadable; read %s; newest %d shown; "
              "F4 opens the events pane)" % (len(records), unreadable, read_at, len(rows))]
     if note:
         lines.append("  " + note)
+    if partial:
+        lines.append("  " + _partial_text(len(partial)))
     lines += ["  " + format_event(event, task_id) for event, task_id in rows]
     if not rows:
         lines.append("  no events in TaskStore")
@@ -229,12 +270,14 @@ def conversation_text(records, unreadable, read_at, note=None, limit=CONVERSATIO
 
 def recent_text(records, unreadable, refreshed, note=None):
     """Cross-Task recent events pane text; ``note`` (status index fallback) follows the
-    header lines."""
+    header lines. A selection not known to be complete says so in the header."""
     from .task_index import TUI_EVENT_LIMIT
     rows, partial = _recent_rows(records, RECENT_LIMIT)
     lines = ["Recent events across %d Tasks (%d unreadable; refreshed %s; newest %d shown%s)"
              % (len(records), unreadable, refreshed, RECENT_LIMIT,
-                ", status index keeps %d per Task" % TUI_EVENT_LIMIT if partial else ""),
+                ", status index keeps %d per Task; INCOMPLETE: %d Tasks not read in full, "
+                "older events may be missing" % (TUI_EVENT_LIMIT, len(partial))
+                if partial else ""),
              "F5 or r refreshes, Esc closes, Tab focuses for scrolling; read only, no inbox ack/poll"]
     if note:
         lines.append(note)

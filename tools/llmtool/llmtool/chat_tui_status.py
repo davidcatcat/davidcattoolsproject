@@ -501,7 +501,9 @@ def load_list(store):
         records, unreadable = load_records(store)
         return (records, unreadable, _INDEX_FALLBACK.get(reason, "status index unavailable")
                 + "; read every TaskStore record")
-    records, unreadable, stale = [], 0, []
+    # Rows keep the TaskStore ID order before the sort, like load_records, so rows with
+    # the same update time keep the same order as a full read.
+    slots, unreadable, stale = [], 0, []
     for task_id in store.task_ids():
         entry = entries.get(task_id)
         if entry is not None and entry["stat"] == task_index.record_key(store, task_id):
@@ -509,20 +511,45 @@ def load_list(store):
                 unreadable += 1
                 continue
             if "tui" in entry:
-                records.append(_index_record(task_id, entry, entry["tui"]))
+                slots.append(_index_record(task_id, entry, entry["tui"]))
                 continue
-        stale.append(task_id)
-    for task_id in stale:
+        stale.append(len(slots))
+        slots.append(task_id)
+    for position in stale:
         try:
-            records.append(store.get(task_id))
+            slots[position] = store.get(slots[position])
         except Exception:
+            slots[position] = None
             unreadable += 1
+    records = [record for record in slots if record is not None]
     records.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
     note = None
     if stale:
         note = ("status index out of date for %d Tasks; read those TaskStore records"
                 % len(stale))
     return records[:LIST_LIMIT], unreadable, note
+
+
+def complete_recent_events(store, records):
+    """The list rows with a full TaskStore read for each status-index row the recent
+    events views (F4, /task events) cannot show completely from the index: a row whose
+    dropped older events, or shortened event text, could fall within the newest events
+    across Tasks (chat_tui_events.open_rows). Every other row stays the index row, so the
+    newest events equal those of a full read of every record. A row whose read fails stays
+    the index row and the views say they are incomplete. Read only; with nothing to
+    complete, the same list is returned and the store is not touched."""
+    from .chat_tui_events import open_rows
+    positions = open_rows(records)
+    if not positions:
+        return records
+    completed = list(records)
+    for position in positions:
+        try:
+            completed[position] = store.get(completed[position]["task_id"])
+        except Exception:
+            pass   # the index row stays; the events views mark the result incomplete
+    completed.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
+    return completed
 
 
 # Stages in which PM-dispatched work is running in the background, and who is at work.
