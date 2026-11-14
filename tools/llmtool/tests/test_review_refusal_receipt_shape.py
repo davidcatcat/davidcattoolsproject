@@ -61,10 +61,24 @@ class RefusalReceiptShapeTests(unittest.TestCase):
             self._invoke_refusal(runner=runner)
         refusal = raised.exception.review_refusal
         self.assertEqual(refusal['excerpt'], shape)
+        # #1938: the re-raised message holds no reply text either.
+        self.assertNotIn('synthetic', str(raised.exception))
         text = Path(refusal['receipt_path']).read_text(encoding='utf-8')
         self.assertNotIn('synthetic', text)
         self.assertEqual(json.loads(text)['excerpt'], refusal['excerpt'])
         return refusal
+
+    def test_refusal_message_holds_fixed_words_only(self):
+        # #1938: str(exc) names the reason and the shape, never the screened reply.
+        with patch.object(task_submission_cli, '_screen_text', side_effect=lambda t, _n: t), \
+                self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_codex_review(
+                _codex_event_stream(MARKER), task_id=base.TASK, run_id='c' * 32,
+                contract_digest='d' * 64, head=HEAD)
+        self.assertEqual(str(raised.exception), 'Reviewer dispatch refused: VERDICT_NOT_JSON; '
+                         'REPLY_SHAPE bytes=27 lines=1 first=letter')
+        self.assertNotIn('synthetic', str(raised.exception))
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
 
     def test_shape_words_only(self):
         self.assertEqual(review_dispatch._reply_shape(' {x\ny'), 'REPLY_SHAPE bytes=5 lines=2 first=brace')
