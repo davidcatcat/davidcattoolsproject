@@ -1311,14 +1311,118 @@ class AutoReviewRepairTests(unittest.TestCase):
         self.assertEqual(store.get(task_id)['review_repair_claims'], [first])
         self.assertEqual((self.recorded, self.calls), ([], []))
 
-    def test_live_claim_replay_is_unchanged_for_an_auto_repair(self):
-        live = claim(f'pr-{PR}', HEAD, pr=PR, state='DISPATCHED', repair=tid(0x86))
-        live['executor_task'] = EXECUTOR
-        store = self.chain(b_claims=[live], c_claims=[claim('pr-5', OLD_HEAD, pr=5)])
+    @staticmethod
+    def live():
+        record = claim(f'pr-{PR}', HEAD, pr=PR, state='DISPATCHED', repair=tid(0x86))
+        record['executor_task'] = EXECUTOR
+        return record
+
+    def snapshot(self, store):
+        return {task_id: store.get(task_id).get('review_repair_claims')
+                for task_id in store.task_ids()}
+
+    def test_an_auto_replay_of_the_chains_only_claim_returns_it(self):
+        # v91 F1: alone in a chain of three Tasks, and alone in a single-Task chain.
+        for name, store, task_id in (
+                ('chain', self.chain(b_claims=[self.live()]), CHAIN_B),
+                ('single', SharedMemoryStore(self.plain(review_repair_claims=[self.live()])),
+                 TASK)):
+            with self.subTest(case=name):
+                before = self.snapshot(store)
+                with self.patched():
+                    result = self.direct(store, task_id, auto=True)
+                self.assertTrue(result['replayed'])
+                self.assertEqual(result['repair_task_id'], tid(0x86))
+                self.assertEqual(self.snapshot(store), before)
+                self.assertEqual((self.recorded, self.calls), ([], []))
+
+    def test_an_auto_replay_is_refused_when_the_chain_has_another_review_claim(self):
+        # v91 F1: another claim in another chain Task, or in another PR family of
+        # this Task, refuses the auto replay with no state change. A manual
+        # replay of the same claim is unchanged.
+        cases = (
+            ('another chain Task',
+             self.chain(b_claims=[self.live()], c_claims=[claim('pr-5', OLD_HEAD, pr=5)]),
+             CHAIN_B),
+            ('another PR family',
+             SharedMemoryStore(self.plain(review_repair_claims=[
+                 self.live(), claim('pr-5', OLD_HEAD, pr=5)])),
+             TASK),
+            ('another family, same PR',
+             SharedMemoryStore(self.plain(review_repair_claims=[
+                 self.live(), claim(f'pr-{PR}-root', OLD_HEAD, pr=PR, attempt=2)])),
+             TASK))
+        for name, store, task_id in cases:
+            with self.subTest(case=name):
+                before = self.snapshot(store)
+                with self.patched():
+                    self.assert_refused(lambda: self.direct(store, task_id, auto=True),
+                                        'REVIEW_REPAIR_PM_REQUIRED')
+                self.assertEqual(self.snapshot(store), before)
+                self.assertEqual((self.recorded, self.calls), ([], []))
+                with self.patched():
+                    manual = self.direct(store, task_id)
+                self.assertTrue(manual['replayed'])
+                self.assertEqual(manual['repair_task_id'], tid(0x86))
+                self.assertEqual(self.snapshot(store), before)
+                self.assertEqual((self.recorded, self.calls), ([], []))
+
+    def test_an_auto_replay_counts_only_review_claims(self):
+        # A test-failure ('-ec2') claim elsewhere in the chain is not a review claim.
+        store = self.chain(b_claims=[self.live()],
+                           c_claims=[ec2_claim('pr-5-ec2', OLD_HEAD, pr=5)])
         with self.patched():
             result = self.direct(store, CHAIN_B, auto=True)
         self.assertTrue(result['replayed'])
-        self.assertEqual(result['repair_task_id'], tid(0x86))
+        self.assertEqual((self.recorded, self.calls), ([], []))
+
+    def test_an_auto_replay_is_decided_under_the_chain_lock_on_fresh_reads(self):
+        # A claim committed by another chain Task before this replay takes the
+        # chain lock is seen by the fresh read under the lock and refuses.
+        store = self.chain(b_claims=[self.live()])
+        held, seen = [], []
+        real_acquire = lineage_counts.acquire_chain_lock
+        real_count = lineage_counts.chain_review_repairs
+
+        def acquire(lock_store, key):
+            release = real_acquire(lock_store, key)
+            held.append(True)
+            with store.guard:
+                store.records[CHAIN_C]['review_repair_claims'] = [
+                    claim('pr-5', OLD_HEAD, pr=5)]
+
+            def done():
+                held.append(False)
+                release()
+            return done
+
+        def count(*args):
+            seen.append(held[-1:] == [True])
+            return real_count(*args)
+        with self.patched(), \
+             patch.object(lineage_counts, 'acquire_chain_lock', side_effect=acquire), \
+             patch.object(lineage_counts, 'chain_review_repairs', side_effect=count):
+            self.assert_refused(lambda: self.direct(store, CHAIN_B, auto=True),
+                                'REVIEW_REPAIR_PM_REQUIRED')
+        self.assertEqual(seen, [True])
+        self.assertEqual(held, [True, False])
+        self.assertEqual(store.get(CHAIN_B)['review_repair_claims'], [self.live()])
+        self.assertEqual((self.recorded, self.calls), ([], []))
+        # A chain in doubt (predecessor unreadable) refuses the auto replay too.
+        broken = SharedMemoryStore(_current(task_id=CHAIN_B, continues=CHAIN_A,
+                                            review_repair_claims=[self.live()]))
+        with self.patched():
+            self.assert_refused(lambda: self.direct(broken, CHAIN_B, auto=True),
+                                'REVIEW_REPAIR_PM_REQUIRED')
+        self.assertEqual(broken.get(CHAIN_B)['review_repair_claims'], [self.live()])
+        # A lock that cannot be taken refuses before the count is read.
+        with self.patched(), \
+             patch.object(lineage_counts, 'acquire_chain_lock',
+                          side_effect=LLMToolError('lock unavailable')), \
+             patch.object(lineage_counts, 'chain_review_repairs',
+                          side_effect=AssertionError('read without the lock')):
+            self.assert_refused(lambda: self.direct(store, CHAIN_B, auto=True),
+                                'REPAIR_CHAIN_LOCK_UNAVAILABLE')
         self.assertEqual((self.recorded, self.calls), ([], []))
 
     def test_a_single_task_chain_counts_review_claims_of_every_pr_family(self):
