@@ -794,6 +794,24 @@ class TestOutputExcerptsTests(unittest.TestCase):
         ascii_identifier = 'prefix_' + cloud_key + '_suffix'
         feedback._reject_credentials(ascii_identifier)
 
+    def test_feedback_sk_bearer_and_keyword_screens_detect_cjk_neighbors(self):
+        # #986 F4: an ASCII-only left boundary, so CJK text directly before a value
+        # no longer hides it; a longer ASCII identifier is still not a match.
+        from llmtool import feedback
+
+        # synthetic-fixture: screen-tool test
+        prefixed = 's' + 'k-' + 'x' * 24
+        # synthetic-fixture: screen-tool test
+        scheme = 'Bear' + 'er ' + 'y' * 16
+        # synthetic-fixture: screen-tool test
+        assigned = 'tok' + 'en=' + 'private-value'
+        for name, value in (('prefixed', prefixed), ('scheme', scheme),
+                            ('assigned', assigned)):
+            with self.subTest(shape=name):
+                with self.assertRaises(LLMToolError):
+                    feedback._reject_credentials('\u5317' + value + '\u4eac')
+                feedback._reject_credentials('prefix_' + value)
+
     def test_task_submission_cloud_key_screen_detects_cjk_neighbors_and_allows_longer_ascii_identifier(self):
         from llmtool import task_submission_cli
         from llmtool.test_output_excerpts import _CLOUD_KEY

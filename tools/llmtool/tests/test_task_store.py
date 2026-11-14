@@ -1506,6 +1506,56 @@ class TaskStoreTests(unittest.TestCase):
                         developer=developer)
         self.assertIsNone(self.store.get(task['task_id'])['developer'])
 
+    def _gw_agent_dispatch_task(self):
+        task = self._codex_dispatch_task()
+        task['pm_assignment'] = dict(task['pm_assignment'], route='gw-agent')
+        self.store.create(task)
+        return task
+
+    def _gw_agent_developer(self, **changes):
+        developer = self._developer_assignment(provider='gw-agent')
+        developer['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        developer.update(changes)
+        return developer
+
+    def test_gw_agent_developer_stores_its_validated_data_class(self):
+        # #1830: a gw-agent delegate keeps --data-class for a later review repair.
+        for data_class in ('SYNTHETIC', 'PUBLIC_REPO'):
+            with self.subTest(data_class=data_class):
+                task = self._gw_agent_dispatch_task()
+                saved = self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None},
+                    developer=self._gw_agent_developer(data_class=data_class))
+                self.assertEqual(saved['developer']['data_class'], data_class)
+                self.assertEqual(
+                    self.store.get(task['task_id'])['developer']['data_class'], data_class)
+
+    def test_legacy_developer_without_data_class_stays_valid(self):
+        # #1830: records written before the field keep validating unchanged.
+        task = self._gw_agent_dispatch_task()
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None},
+            developer=self._gw_agent_developer())
+        self.assertNotIn('data_class', saved['developer'])
+        task_store_module._validate(dict(self.store.get(task['task_id'])))
+
+    def test_developer_data_class_rejects_unknown_values_and_other_routes(self):
+        task = self._gw_agent_dispatch_task()
+        for data_class in ('UNKNOWN', 'INTERNAL', 'public_repo', '', None, 1):
+            with self.subTest(data_class=data_class):
+                with self.assertRaises(LLMToolError):
+                    self.store.compare_and_update(
+                        task['task_id'], expected={'developer': None},
+                        developer=self._gw_agent_developer(data_class=data_class))
+        self.assertIsNone(self.store.get(task['task_id'])['developer'])
+        codex_task = self._codex_dispatch_task()
+        self.store.create(codex_task)
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(
+                codex_task['task_id'], expected={'developer': None},
+                developer=dict(self._developer_assignment(), data_class='PUBLIC_REPO'))
+        self.assertIsNone(self.store.get(codex_task['task_id'])['developer'])
+
     def test_real_store_accepts_reviewer_accounts_and_preserves_them_on_transition(self):
         for account in ('claude-reviewer', 'codex-reviewer'):
             with self.subTest(account=account):
