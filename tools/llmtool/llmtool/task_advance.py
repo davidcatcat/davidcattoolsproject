@@ -2289,6 +2289,20 @@ def _reviewer_fallback(record, exc):
     return alternate, code
 
 
+def _blocked_fallback_reviewer(record, head):
+    """#1831 P2: the other eligible Reviewer while the head has one claim, else None."""
+    if sum(type(item) is dict and item.get('head_sha') == head
+           for item in _claims(record)) != 1:
+        return None
+    family = task_completion._reviewer_author_family(record.get('developer'))
+    alternate = 'claude-reviewer' if family == 'claude' else 'codex-reviewer'
+    try:
+        review_dispatch._select_reviewer(record, alternate)
+    except Exception:
+        return None
+    return alternate
+
+
 def _refusal(exc, attribute):
     code = getattr(exc, attribute, None)
     if type(code) is str and re.fullmatch(r'[A-Z0-9_]{1,64}', code):
@@ -3052,6 +3066,13 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             redispatch_reason = _failure_reason(unusable.get('failure_reason'))
         else:
             step = 'REVIEW_OUTCOME_UNKNOWN'
+    blocked_reviewer = None
+    if step == 'REVIEWER_ATTENTION' and not reviewer_session_done:
+        # #1831 P2: one redispatch of version N+1 with the other eligible Reviewer.
+        blocked_reviewer = _blocked_fallback_reviewer(record, d6['result_head'])
+        if blocked_reviewer is not None:
+            step = 'DISPATCH_REVIEW'
+            codes.extend(('REVIEW_BLOCKED', 'REVIEWER_FALLBACK'))
     if step == 'RUN_REMOTE_TEST':
         guard()  # #1781: an EC2 run is an external action
         try:
@@ -3116,9 +3137,12 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         try:
             try:
                 result = invoke(store=store, task_id=task_id, executor_task=executor_task,
-                                pr_number=number, version=version)
+                                pr_number=number, version=version,
+                                **({} if blocked_reviewer is None else
+                                   {'reviewer': blocked_reviewer}))
             except Exception as exc:
-                fallback = _reviewer_fallback(record, exc)
+                # A P2 redispatch already uses the alternate: no P1 fallback on top.
+                fallback = None if blocked_reviewer else _reviewer_fallback(record, exc)
                 if fallback is None:
                     raise
                 # #1831 P1: one fallback per step, through dispatch_review only.
