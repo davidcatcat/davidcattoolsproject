@@ -100,7 +100,7 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'review_dispatch_claim', 'review_repair_claims', 'high_debug',
     'abandonment', 'pm_session_adoptions', 'pm_provenance', 'merge_attempt',
     'published_pr', 'repair_cap_override', 'publish_operations',
-    'review_exception', 'lineage', 'review_disputes', 'waiting'))
+    'review_exception', 'lineage', 'review_disputes', 'waiting', 'continues'))
 # Owner-exception merge evidence (#1253, #1519). Only this one exception type
 # is persisted; its evidence is the exact owner_exception.verify() result.
 _REVIEW_EXCEPTION_TYPE = 'OWNER_EXCEPTION_DETERMINISTIC_REDACTION'
@@ -284,6 +284,40 @@ _DEVELOPER_TIMEOUT_MAX_SECONDS = 1800
 # developer shape so a review repair can reuse it (legacy records omit it).
 _DEVELOPER_DATA_CLASS_FIELDS = frozenset(('data_class',))
 _DEVELOPER_DATA_CLASSES = frozenset(('SYNTHETIC', 'PUBLIC_REPO'))
+# #1824: a Claude CLI run that ended CLAUDE_NO_CHANGES may keep a bounded, screened
+# diagnosis. Optional on every developer shape; legacy records omit it.
+_DEVELOPER_NO_CHANGES_FIELDS = frozenset(('no_changes_diagnosis',))
+_NO_CHANGES_DIAGNOSIS_FIELDS = frozenset(('reason', 'write_attempted', 'num_turns'))
+_NO_CHANGES_REASON_MAX_CHARS = 200
+_NO_CHANGES_MAX_TURNS = 1_000_000
+_DEVELOPER_OPTIONAL_FIELDS = _DEVELOPER_DATA_CLASS_FIELDS | _DEVELOPER_NO_CHANGES_FIELDS
+
+
+def _valid_no_changes_diagnosis(developer):
+    """#1824: strict shape of developer.no_changes_diagnosis (Claude CLI, CLAUDE_NO_CHANGES)."""
+    diagnosis = developer.get('no_changes_diagnosis')
+    execution = developer.get('execution')
+    if (developer.get('provider_profile') != 'claude' or
+            developer.get('backend_session_semantics') != 'CLI_REPORTED_SESSION_ID' or
+            developer.get('state') != 'BLOCKED' or
+            developer.get('error_code') != 'CLAUDE_NO_CHANGES' or
+            type(execution) is not dict or execution.get('status') != 'BLOCKED' or
+            type(diagnosis) is not dict or set(diagnosis) != _NO_CHANGES_DIAGNOSIS_FIELDS):
+        return False
+    reason = diagnosis['reason']
+    if (type(reason) is not str or not reason or reason != reason.strip() or
+            len(reason) > _NO_CHANGES_REASON_MAX_CHARS or
+            not all(char.isprintable() for char in reason) or
+            any(unicodedata.category(char) == 'Cf' for char in reason) or
+            (reason != 'UNKNOWN' and _emitted_sensitive(reason))):
+        return False
+    if diagnosis['write_attempted'] not in ('YES', 'NO', 'UNKNOWN'):
+        return False
+    turns = diagnosis['num_turns']
+    return (turns == 'UNKNOWN' if type(turns) is str else
+            type(turns) is int and 0 <= turns <= _NO_CHANGES_MAX_TURNS)
+
+
 _DEVELOPER_UNTIMED_SHAPES = (
     _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
     _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
@@ -498,6 +532,12 @@ ASSIGNMENTS_NAME = '.developer-assignments.json'
 ASSIGNMENTS_LOCK_NAME = '.developer-assignments.lock'
 # #1781: per-Task advance lease sidecar, '.<task_id>.json.advance.lock'.
 ADVANCE_LEASE_SUFFIX = '.advance.lock'
+# #1502 WP-D L1 phase 2: record-pm --continues checks and creates under one
+# store-wide lock; a review repair reads chain counts and writes its claim
+# under the chain lock '.<oldest_task_id>.json.chain.lock'.
+CONTINUES_LOCK_NAME = '.task-continues.lock'
+CHAIN_LOCK_SUFFIX = '.chain.lock'
+LINEAGE_LOCK_TIMEOUT_SECONDS = 10.0
 ASSIGNMENTS_MAX_BYTES = 256 * 1024
 MAX_ASSIGNMENTS = 128
 MAX_ASSIGNMENT_AUDIT = 16
@@ -1772,6 +1812,11 @@ def _validate(record, *, strict=True):
     if 'waiting' in keys:
         keys.discard('waiting')
         _validate_waiting(record['waiting'])
+    if 'continues' in keys:
+        # #1502 WP-D L1: the optional predecessor Task; a record without it stays valid.
+        keys.discard('continues')
+        if not _hex32(record['continues']) or record['continues'] == record.get('task_id'):
+            _fail('TASK_CONTINUES_INVALID')
     if type(record) is dict and 'pm_session_adoptions' in record:
         keys.discard('pm_session_adoptions')
     if (type(record) is not dict or
@@ -2272,10 +2317,14 @@ def _validate(record, *, strict=True):
         if developer is not None:
             # #1815: the shapes carry the optional run timeout; legacy records omit it.
             # The validated --data-class a gw-agent delegate stored is an optional
-            # key on every shape; legacy records omit it.
+            # key on every shape; legacy records omit it. So is the #1824
+            # Claude no_changes_diagnosis, checked strictly below.
             if (type(developer) is not dict or
-                    frozenset(developer) - _DEVELOPER_DATA_CLASS_FIELDS
+                    frozenset(developer) - _DEVELOPER_OPTIONAL_FIELDS
                     not in _DEVELOPER_RECORD_SHAPES):
+                _fail()
+            if ('no_changes_diagnosis' in developer and
+                    not _valid_no_changes_diagnosis(developer)):
                 _fail()
             if ('data_class' in developer and
                     (developer.get('provider_profile') != 'gw-agent' or
@@ -4464,13 +4513,15 @@ class TaskStore:
             _fail('WORKER_AVAILABILITY_INVALID')
 
     @staticmethod
-    def _lock_sidecar(directory, lock_name, *, exclusive, code):
+    def _lock_sidecar(directory, lock_name, *, exclusive, code, timeout=None):
         """Take a shared or exclusive flock on a sidecar lock file in the store root.
 
         Both the open and the flock are bounded by the TaskStore update-lock
-        deadline; a holder past it fails closed with ``<code>_BUSY``.
+        deadline (or ``timeout`` seconds); a holder past it fails closed with
+        ``<code>_BUSY``.
         """
-        deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+        deadline = time.monotonic() + (TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+                                       if timeout is None else timeout)
         lock_fd = None
         try:
             while True:
@@ -4541,6 +4592,38 @@ class TaskStore:
             yield
         finally:
             self._unlock_sidecar(lock_fd)
+
+    @contextlib.contextmanager
+    def _exclusive_sidecar(self, name, code):
+        directory = self._dirfd()
+        try:
+            lock_fd = self._lock_sidecar(directory, name, exclusive=True, code=code,
+                                         timeout=LINEAGE_LOCK_TIMEOUT_SECONDS)
+        finally:
+            os.close(directory)
+        try:
+            yield
+        finally:
+            self._unlock_sidecar(lock_fd)
+
+    def continues_lock(self):
+        """#1502 WP-D L1: hold the store-wide continues lock exclusively.
+
+        record-pm --continues holds it across check_continues and the create,
+        so a predecessor gets at most one successor. A holder past the bounded
+        wait is TASK_CONTINUES_LOCK_BUSY.
+        """
+        return self._exclusive_sidecar(CONTINUES_LOCK_NAME, 'TASK_CONTINUES_LOCK')
+
+    def chain_lock(self, chain_key):
+        """#1502 WP-D L1: hold one continuation chain's lock exclusively.
+
+        chain_key is the chain's oldest Task ID. review_repair holds it across
+        the chain counts and its claim write. A holder past the bounded wait is
+        TASK_CHAIN_LOCK_BUSY; a malformed key refuses before any file is opened.
+        """
+        name = '.' + self._name(chain_key) + CHAIN_LOCK_SUFFIX
+        return self._exclusive_sidecar(name, 'TASK_CHAIN_LOCK')
 
     def _take_advance_lease_exclusive(self, task_id, *, busy_code='SPLIT_CHILD_ADVANCING'):
         """Take the advance lease exclusively without waiting; return its fd.
@@ -4713,13 +4796,58 @@ class TaskStore:
             os.close(directory)
         return result
 
+    @staticmethod
+    def _read_lock_sidecar(directory, lock_name, *, code):
+        """#1837 P2: a shared read lock opened without O_CREAT; None when absent.
+
+        Writers create the lock before any data, so an absent lock means empty.
+        A lock removed after the open has no link left and is refused.
+        """
+        deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+        try:
+            lock_fd = os.open(lock_name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+                              dir_fd=directory)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            _fail(code + '_UNAVAILABLE')
+        try:
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        _fail(code + '_BUSY')
+                    time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
+            info = os.fstat(lock_fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                    stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                _fail(code + '_INVALID')
+            return lock_fd
+        except LLMToolError:
+            os.close(lock_fd)
+            raise
+        except OSError:
+            os.close(lock_fd)
+            _fail(code + '_UNAVAILABLE')
+
     def get_worker_observations(self):
-        """Read a complete worker/layer view; absent or expired results are UNKNOWN."""
-        directory = self._dirfd()
+        """Read a complete worker/layer view; absent or expired results are UNKNOWN.
+
+        #1837 P2: the read creates nothing; an absent root or lock reads as empty.
+        """
+        record = {'schema_version': WORKER_AVAILABILITY_SCHEMA_VERSION,
+                  'observations': [], 'record_sha256': None}
+        directory = self._dirfd(create=False)
+        if directory is None:
+            return self._worker_availability_view(record)
         lock_fd = None
         try:
-            lock_fd = self._lock_worker_availability(directory, exclusive=False)
-            record = self._read_worker_availability_at(directory)
+            lock_fd = self._read_lock_sidecar(directory, WORKER_AVAILABILITY_LOCK_NAME,
+                                              code='WORKER_AVAILABILITY')
+            if lock_fd is not None:
+                record = self._read_worker_availability_at(directory)
         finally:
             if lock_fd is not None:
                 try:
@@ -4746,11 +4874,20 @@ class TaskStore:
         self._write_sidecar_at(directory, ASSIGNMENTS_NAME, raw, code='ASSIGNMENTS')
 
     def _with_assignments(self, *, exclusive, change=None):
-        directory = self._dirfd()
+        # #1837 P2: a read (no change) creates nothing; an absent root or lock is empty.
+        directory = self._dirfd(create=change is not None)
+        if directory is None:
+            return []
         lock_fd = None
         try:
-            lock_fd = self._lock_sidecar(directory, ASSIGNMENTS_LOCK_NAME,
-                                         exclusive=exclusive, code='ASSIGNMENTS')
+            if change is None:
+                lock_fd = self._read_lock_sidecar(directory, ASSIGNMENTS_LOCK_NAME,
+                                                  code='ASSIGNMENTS')
+                if lock_fd is None:
+                    return []
+            else:
+                lock_fd = self._lock_sidecar(directory, ASSIGNMENTS_LOCK_NAME,
+                                             exclusive=exclusive, code='ASSIGNMENTS')
             assignments = self._read_assignments_at(directory)
             if change is None:
                 return json.loads(json.dumps(assignments))
@@ -5012,6 +5149,9 @@ class TaskStore:
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
             _fail()
+        if 'continues' in changes:
+            # #1502 WP-D L1: continues is written once, when record-pm creates the Task.
+            _fail('TASK_CONTINUES_IMMUTABLE')
         if (trusted_split is not None or split_child_max is not None) and (
                 trusted_split not in SPLIT_ACTIONS or set(changes) != {'lineage'} or
                 (split_child_max is not None) != (trusted_split == 'COMMIT') or
@@ -5348,7 +5488,8 @@ class TaskStore:
                 self._write(current, create=False)
                 raise dispatch_denial
             immutable = {'schema_version', 'task_id', 'run_id', 'pm_session_id',
-                         'created_at', 'task_contract', 'task_binding', 'record_sha256'}
+                         'created_at', 'task_contract', 'task_binding', 'record_sha256',
+                         'continues'}
             writable = FIELDS - immutable
             if trusted_pm_session_adoption:
                 writable = writable | {'pm_session_id'}

@@ -209,6 +209,17 @@ class ReviewDispatchTests(unittest.TestCase):
                                  'REVIEWER_FAMILY_UNSUPPORTED')
                 evaluate.assert_not_called()
 
+    def test_unknown_reviewer_key_is_refused_before_the_gate(self):
+        # #785 D6-WP1: only claude-reviewer or codex-reviewer may be requested.
+        task = {'task_id': TASK, 'developer': {'provider_profile': 'gw-agent'}}
+        for reviewer in ('gemini-reviewer', 'Claude-Reviewer', ''):
+            with self.subTest(reviewer=reviewer), patch.object(
+                    review_dispatch.worker_dispatch, 'evaluate') as evaluate:
+                with self.assertRaises(LLMToolError) as raised:
+                    review_dispatch._select_reviewer(task, reviewer)
+                self.assertEqual(raised.exception.review_dispatch_code, 'REVIEWER_INVALID')
+                evaluate.assert_not_called()
+
     def test_review_result_drops_claude_verdict_for_agy_claude_model(self):
         task = {'task_id': TASK, 'run_id': 'c' * 32,
                 'task_binding': {'contract_digest': 'd' * 64}}
