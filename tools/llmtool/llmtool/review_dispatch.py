@@ -406,6 +406,17 @@ def _jsonl_shape(raw):
     return 'OUTPUT_SHAPE no_bad_line lines=%d' % len(lines)
 
 
+def _reply_shape(text):
+    """#1907: fixed-word shape of a refused reply excerpt; never its text."""
+    if type(text) is not str:
+        return 'REPLY_SHAPE unavailable'
+    first = text.lstrip()[:1]
+    kind = ('blank' if not first else 'brace' if first in '{[' else
+            'letter' if first.isalpha() else 'digit' if first.isdigit() else 'other')
+    return 'REPLY_SHAPE bytes=%d lines=%d first=%s' % (
+        len(text.encode('utf-8')), len(text.split('\n')), kind)
+
+
 def _codex_final_message(raw):
     """Return the last complete Codex agent message when its JSONL is readable."""
     if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_MAX_OUTPUT:
@@ -1416,8 +1427,11 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                 excerpt_key = 'label'
                 excerpt_val = REVIEW_OUTPUT_ABSENT
             else:
+                # #1907 (as #1163): the receipt and the refusal keep only a
+                # fixed-word shape, never screened model text.
                 excerpt_key = 'excerpt'
-                excerpt_val = raw_excerpt
+                excerpt_val = (raw_excerpt if str(raw_excerpt).startswith('OUTPUT_SHAPE ')
+                               else _reply_shape(str(raw_excerpt)))
             refusal = {
                 'failure_reason': reason,
                 excerpt_key: excerpt_val,
