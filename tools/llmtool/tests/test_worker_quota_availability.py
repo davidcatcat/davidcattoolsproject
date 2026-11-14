@@ -29,6 +29,14 @@ TASK = '1a' * 16
 EXECUTOR = '2b' * 16
 HEAD = '3c' * 20
 DIGEST = hashlib.sha256(b'quota availability fixture').hexdigest()
+OUTPUT_DIGEST = hashlib.sha256(b'provider stdout fixture').hexdigest()
+GW_WORKER = 'gw-agent'
+
+
+def _executed(status='BLOCKED', exit_code=0):
+    """Execution evidence of a finished provider process (plain labels only)."""
+    return {'status': status, 'native_session_id': 'session-label',
+            'process_exit_code': exit_code, 'stdout_sha256': OUTPUT_DIGEST}
 
 
 def _stamp(value):
@@ -137,16 +145,17 @@ class _Base(unittest.TestCase):
         return store.get_worker_observations()[worker]['quota']
 
     @staticmethod
-    def _write_fail(store, *, observed, fresh_until, condition='QUOTA_EXHAUSTED'):
+    def _write_fail(store, *, observed, fresh_until, condition='QUOTA_EXHAUSTED',
+                    worker=WORKER):
         store.record_worker_observation(
-            worker_key=WORKER, layer='quota', status='FAIL',
+            worker_key=worker, layer='quota', status='FAIL',
             observed_at=_stamp(observed), fresh_until=_stamp(fresh_until),
             source='TEST_FIXTURE', evidence_sha256=DIGEST, condition=condition)
 
-    def _write_fresh_fail(self, store):
+    def _write_fresh_fail(self, store, worker=WORKER):
         observed = _now() - timedelta(minutes=5)
         self._write_fail(store, observed=observed,
-                         fresh_until=observed + timedelta(hours=6))
+                         fresh_until=observed + timedelta(hours=6), worker=worker)
 
 
 class OwnerCaseTests(_Base):
@@ -256,6 +265,63 @@ class OwnerCaseTests(_Base):
             worker_availability.quota_gate(self.store, WORKER)
         self.assertEqual(caught.exception.reset_at, reset)
 
+    # F1: gw-agent has its own observation slot and its delegate is gated.
+    def test_gw_agent_fail_is_stored_and_gates_its_delegate(self):
+        task = {'task_id': TASK, 'developer': {
+            'state': 'BLOCKED', 'error_code': 'DEVELOPER_GW_AGENT_QUOTA_EXHAUSTED_HTTP_429'}}
+        self.assertEqual(
+            worker_availability.record_outcome(self.store, GW_WORKER, task), 'FAIL')
+        self.assertEqual(self._quota(self.store, GW_WORKER)['status'], 'FAIL')
+        # Other workers are untouched.
+        self.assertEqual(self._quota(self.store)['status'], 'UNKNOWN')
+        with self.assertRaises(worker_availability.WorkerQuotaUnavailable) as caught:
+            task_submission_cli.run_task_delegate_checked(
+                Namespace(task_id=TASK, provider='gw-agent', pm_session=None),
+                store=self.store)
+        self.assertEqual(caught.exception.worker_key, GW_WORKER)
+        self.assertEqual(self.delegate.calls, [])
+        self.assertEqual(self.store.task_writes, [])
+        # The Claude route has no FAIL and still dispatches.
+        self.assertEqual(self._checked(), 0)
+
+
+class BackgroundCompletionTests(_Base):
+    """F2: the detached OpenCode child records its own terminal outcome."""
+
+    def _run_child(self, developer, *, raises=False):
+        def opencode(args, *, store=None, d6_binding=None):
+            store.tasks[args.task_id]['developer'] = dict(developer)
+            if raises:
+                raise LLMToolError('fixture adapter failure')
+            return 1
+
+        def codex(*args, **kwargs):
+            raise AssertionError('wrong route')
+
+        self._patch(task_submission_cli, 'run_task_opencode_delegate', opencode)
+        self._patch(task_submission_cli, 'run_task_codex_delegate', codex)
+        return task_submission_cli._run_detached_delegate(
+            Namespace(task_id=TASK), provider='opencode', store=self.store,
+            d6_binding=None)
+
+    def test_background_quota_outcome_is_recorded(self):
+        self.assertEqual(self._run_child({
+            'state': 'BLOCKED', 'error_code': 'OPENCODE_QUOTA_EXHAUSTED'}), 1)
+        self.assertEqual(self._quota(self.store, 'opencode-developer')['status'], 'FAIL')
+        with self.assertRaises(worker_availability.WorkerQuotaUnavailable):
+            worker_availability.quota_gate(self.store, 'opencode-developer')
+
+    def test_background_outcome_recorded_when_delegate_raises(self):
+        with self.assertRaises(LLMToolError):
+            self._run_child({'state': 'DEVELOPER_RESPONDED', 'error_code': None},
+                            raises=True)
+        self.assertEqual(self._quota(self.store, 'opencode-developer')['status'], 'PASS')
+
+    def test_background_timeout_records_nothing(self):
+        self._run_child({'state': 'BLOCKED', 'error_code': 'OPENCODE_TIMEOUT'})
+        self.assertEqual(
+            self._quota(self.store, 'opencode-developer')['status'], 'UNKNOWN')
+
 
 class OutcomeRecordTests(_Base):
 
@@ -281,6 +347,9 @@ class OutcomeRecordTests(_Base):
             ('DEVELOPER_UNAVAILABLE', 'D6_SOURCE_BINDING_MISMATCH'),
             ('DEVELOPER_OUTCOME_UNKNOWN', 'DEVELOPER_PROVIDER_UNAVAILABLE'),
             ('BLOCKED', 'OWNER_PAUSED'),
+            ('BLOCKED', 'WORKER_QUOTA_UNAVAILABLE'),
+            ('BLOCKED', 'DEVELOPER_GW_AGENT_HTTP_4290'),
+            ('BLOCKED', 'CLAUDE_QUOTA_EXHAUSTEDX'),
             ('DEVELOPER_UNAVAILABLE', None),
         ]
         for state, code in cases:
@@ -304,6 +373,10 @@ class OutcomeRecordTests(_Base):
             ('CLAUDE_QUOTA_EXHAUSTED', 'QUOTA_EXHAUSTED'),
             ('AGY_QUOTA_EXHAUSTED', 'QUOTA_EXHAUSTED'),
             ('GW_AGENT_RATE_LIMITED', 'RATE_LIMITED'),
+            # F3: real gateway codes carry the gateway's suffix.
+            ('DEVELOPER_GW_AGENT_QUOTA_EXHAUSTED_HTTP_429', 'QUOTA_EXHAUSTED'),
+            ('DEVELOPER_GW_AGENT_RATE_LIMITED_HTTP_429', 'RATE_LIMITED'),
+            ('DEVELOPER_GW_AGENT_EXIT_NONZERO_HTTP_429', 'RATE_LIMITED'),
         ]
         for code, condition in cases:
             with self.subTest(code=code):
@@ -352,6 +425,46 @@ class OutcomeRecordTests(_Base):
                 self.assertEqual(view['status'], 'PASS')
                 self.assertNotIn('condition', view)
 
+    # F4: a non-quota outcome with provider execution evidence writes PASS.
+    def test_evidenced_non_quota_outcome_writes_pass(self):
+        cases = [
+            ('BLOCKED', 'CLAUDE_NO_CHANGES'),
+            ('BLOCKED', 'CLAUDE_WRITE_SCOPE_VIOLATION'),
+            ('DEVELOPER_OUTCOME_UNKNOWN', 'CLAUDE_RESULT_PERSISTENCE_REJECTED'),
+        ]
+        for state, code in cases:
+            with self.subTest(code=code):
+                store = self._new_store()
+                self._write_fresh_fail(store)
+                task = {'task_id': TASK, 'developer': {
+                    'state': state, 'error_code': code, 'execution': _executed()}}
+                self.assertEqual(
+                    worker_availability.record_outcome(store, WORKER, task), 'PASS')
+                self.assertEqual(self._quota(store)['status'], 'PASS')
+
+    def test_no_execution_evidence_never_writes_pass(self):
+        cases = [
+            # Pre-launch refusals carry no execution.
+            ('BLOCKED', 'CLAUDE_NO_CHANGES', None),
+            ('DEVELOPER_UNAVAILABLE', 'D6_SOURCE_BINDING_MISMATCH', None),
+            # Execution shell without a provider answer.
+            ('DEVELOPER_OUTCOME_UNKNOWN', 'OPENCODE_ADAPTER_UNKNOWN',
+             {'status': 'UNKNOWN', 'native_session_id': None,
+              'process_exit_code': None, 'stdout_sha256': None}),
+            # Still in flight, killed, or timed out.
+            ('DEVELOPER_DISPATCHING', None, _executed('UNKNOWN')),
+            ('BLOCKED', 'CLAUDE_EXIT_NONZERO', _executed(exit_code=-9)),
+            ('BLOCKED', 'CLAUDE_TIMEOUT', _executed()),
+            ('DEVELOPER_OUTCOME_UNKNOWN', 'CODEX_INTERRUPTED', _executed('UNKNOWN')),
+        ]
+        for state, code, execution in cases:
+            with self.subTest(state=state, code=code):
+                store = self._new_store()
+                task = {'task_id': TASK, 'developer': {
+                    'state': state, 'error_code': code, 'execution': execution}}
+                self.assertIsNone(worker_availability.record_outcome(store, WORKER, task))
+                self.assertEqual(self._quota(store)['status'], 'UNKNOWN')
+
     def test_unchanged_developer_record_is_not_recorded_again(self):
         self.store.tasks[TASK]['developer'] = {'state': 'BLOCKED',
                                                'error_code': 'CLAUDE_QUOTA_EXHAUSTED'}
@@ -365,6 +478,7 @@ class OutcomeRecordTests(_Base):
         self.assertIsNone(worker_availability.delegate_worker_key('company-gw-agent'))
         self.assertIsNone(worker_availability.delegate_worker_key(None))
         self.assertEqual(worker_availability.delegate_worker_key('claude'), WORKER)
+        self.assertEqual(worker_availability.delegate_worker_key('gw-agent'), GW_WORKER)
 
 
 class QuotaLayerStoreTests(_Base):
@@ -480,6 +594,17 @@ class ReviewRepairGateTests(_Base):
             self._run()
         self.assertEqual(caught.exception.review_repair_code, 'REPAIR_COUNT_UNAVAILABLE')
         self.assertEqual(self.count_reads, [True])
+        self.assertEqual(self.recorded, [])
+        self.assertEqual(self.dispatched, [])
+        self.assertEqual(self.store.task_writes, [])
+
+    def test_review_repair_gw_agent_refused_on_fresh_fail(self):
+        self.store.tasks[TASK]['developer']['provider_profile'] = 'gw-agent'
+        self._write_fresh_fail(self.store, worker=GW_WORKER)
+        with self.assertRaises(LLMToolError) as caught:
+            self._run()
+        self.assertEqual(caught.exception.review_repair_code, 'WORKER_QUOTA_UNAVAILABLE')
+        self.assertEqual(self.count_reads, [])
         self.assertEqual(self.recorded, [])
         self.assertEqual(self.dispatched, [])
         self.assertEqual(self.store.task_writes, [])

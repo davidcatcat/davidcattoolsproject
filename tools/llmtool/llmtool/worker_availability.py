@@ -6,9 +6,13 @@ the Owner dispatch policy stays the only dispatch authority, is checked first,
 and is never changed here. No model switch, no paid route, no new permission.
 
 * Only a Developer ``error_code`` ending ``_QUOTA_EXHAUSTED`` (or a route
-  rate-limit code ending ``_RATE_LIMITED``) records quota FAIL. Test failures,
-  program errors, timeouts and refusals never do.
-* A run that returned a provider result records quota PASS.
+  rate-limit code ending ``_RATE_LIMITED``), optionally followed by the
+  gateway's own code (for example ``_HTTP_429``), or a gateway ``HTTP_429``
+  code, records quota FAIL. Test failures, program errors, timeouts and
+  refusals never do.
+* A run that returned a provider result, or any non-quota outcome with
+  provider execution evidence, records quota PASS. Pre-launch refusals never
+  do.
 * FAIL is fresh until a trusted provider-reported reset time, else for six
   hours from the observation. An expired or absent record reads UNKNOWN: never
   PASS, and it does not block.
@@ -34,6 +38,15 @@ PROVIDER_RESULT_STATES = frozenset(('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJ
 # Developer routes the delegate gate covers; each maps to its worker key.
 _DELEGATE_ROUTES = frozenset(('claude', 'opencode', 'agy', 'codex', 'gw-agent'))
 _CODE = re.compile(r'[A-Z0-9_]{1,64}\Z')
+# A quota/rate-limit word, alone or followed by a gateway suffix (F3).
+_QUOTA_CODE = re.compile(r'(?:\A|_)QUOTA_EXHAUSTED(?:_|\Z)')
+_RATE_CODE = re.compile(r'(?:\A|_)RATE_LIMITED(?:_|\Z)')
+_HTTP_429_CODE = re.compile(r'(?:\A|_)HTTP_429\Z')
+_SHA256 = re.compile(r'[0-9a-f]{64}\Z')
+# Records still waiting on the provider: no outcome yet.
+_IN_FLIGHT_STATES = frozenset(('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING'))
+# Codes that end a run without a provider answer, whatever was captured.
+_NO_RESULT_WORDS = ('TIMEOUT', 'INTERRUPTED')
 _STAMP = '%Y-%m-%dT%H:%M:%SZ'
 _UNKNOWN = {'status': 'UNKNOWN', 'observed_at': None, 'fresh_until': None,
             'source': None, 'evidence_sha256': None}
@@ -107,17 +120,55 @@ def quota_gate(store, worker_key):
     raise WorkerQuotaUnavailable(worker_key, reset_at)
 
 
+def _quota_condition(code):
+    """QUOTA_EXHAUSTED or RATE_LIMITED for a route quota/rate-limit code, else None.
+
+    The gw-agent route appends the gateway's own code after the route code
+    (for example ``..._QUOTA_EXHAUSTED_HTTP_429``), so a quota or rate-limit
+    word may be followed by a gateway suffix. HTTP 429 is a rate limit.
+    """
+    if type(code) is not str or _CODE.fullmatch(code) is None:
+        return None
+    if _QUOTA_CODE.search(code) is not None:
+        return 'QUOTA_EXHAUSTED'
+    if _RATE_CODE.search(code) is not None or _HTTP_429_CODE.search(code) is not None:
+        return 'RATE_LIMITED'
+    return None
+
+
+def _provider_executed(developer):
+    """True only when a finished provider process left execution evidence.
+
+    A process exit code of zero or more and a provider stdout digest show the
+    provider ran and answered. Pre-launch refusals, in-flight records, killed
+    processes and timeouts carry no such evidence.
+    """
+    if developer.get('state') in _IN_FLIGHT_STATES:
+        return False
+    code = developer.get('error_code')
+    if type(code) is str and any(word in code for word in _NO_RESULT_WORDS):
+        return False
+    execution = developer.get('execution')
+    if type(execution) is not dict:
+        return False
+    exit_code = execution.get('process_exit_code')
+    digest = execution.get('stdout_sha256')
+    return (type(exit_code) is int and exit_code >= 0 and
+            type(digest) is str and _SHA256.fullmatch(digest) is not None)
+
+
 def classify_outcome(developer):
     """Return QUOTA_EXHAUSTED, RATE_LIMITED, PASS or None (record nothing)."""
     if type(developer) is not dict:
         return None
-    code = developer.get('error_code')
-    if type(code) is str and _CODE.fullmatch(code) is not None:
-        if code.endswith(QUOTA_EXHAUSTED_SUFFIX):
-            return 'QUOTA_EXHAUSTED'
-        if code.endswith(RATE_LIMITED_SUFFIX):
-            return 'RATE_LIMITED'
+    condition = _quota_condition(developer.get('error_code'))
+    if condition is not None:
+        return condition
     if developer.get('state') in PROVIDER_RESULT_STATES:
+        return 'PASS'
+    # #1816 F4: a non-quota outcome after the provider actually ran (for
+    # example CLAUDE_NO_CHANGES with execution evidence) shows quota was there.
+    if _provider_executed(developer):
         return 'PASS'
     # Timeouts, program errors, refusals and unknown outcomes say nothing
     # about quota.

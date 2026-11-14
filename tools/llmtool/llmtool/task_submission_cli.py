@@ -167,6 +167,27 @@ def _background_read(fd):
     return value
 
 
+def _run_detached_delegate(args, *, provider, store, d6_binding):
+    """Run the direct delegate inside the detached child and record its outcome.
+
+    #1816 F2: the invoking process returns at the launch receipt, before the
+    provider finishes, so the detached child records the terminal quota outcome
+    itself. The record is evidence only and never changes the delegate result.
+    """
+    from . import worker_availability
+    worker_key = worker_availability.delegate_worker_key(provider)
+    before = (worker_availability.developer_snapshot(store, args.task_id)
+              if worker_key is not None else None)
+    try:
+        return (run_task_codex_delegate(args, store=store, d6_binding=d6_binding)
+                if provider == 'codex' else
+                run_task_opencode_delegate(args, store=store, d6_binding=d6_binding))
+    finally:
+        if worker_key is not None:
+            worker_availability.record_delegate_outcome(
+                store, worker_key, args.task_id, before)
+
+
 def _run_background_delegate(args, *, provider, store, d6_binding):
     """Run the existing direct delegate path in a detached, double-forked child."""
     if not hasattr(os, 'fork') or not hasattr(os, 'setsid'):
@@ -203,11 +224,8 @@ def _run_background_delegate(args, *, provider, store, d6_binding):
                 write_fd, {'kind': 'launched', 'pid': pid})
             try:
                 with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                    result = (run_task_codex_delegate(
-                        args, store=store, d6_binding=d6_binding)
-                        if provider == 'codex' else
-                        run_task_opencode_delegate(
-                            args, store=store, d6_binding=d6_binding))
+                    result = _run_detached_delegate(
+                        args, provider=provider, store=store, d6_binding=d6_binding)
                 _background_send(write_fd, {'kind': 'finished', 'return_code': result,
                                             'output': output.getvalue()})
             except BaseException as exc:

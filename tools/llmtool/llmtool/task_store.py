@@ -451,9 +451,11 @@ _TASK_STORE_CONTENTION_ERRNOS = frozenset(
     value for value in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EBUSY, errno.EINTR,
                         errno.ENOLCK)
     if value is not None)
+# #1816 F1: gw-agent is a gated Developer route, so it has an observation slot.
+# Records written before it was added name only the older keys and stay valid.
 WORKER_KEYS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
-    'company-gw', 'claude-reviewer',
+    'company-gw', 'gw-agent', 'claude-reviewer',
 ))
 # #1816: the quota layer records a Developer quota or rate-limit refusal. It is
 # technical evidence for worker_availability.quota_gate, never dispatch authority.
