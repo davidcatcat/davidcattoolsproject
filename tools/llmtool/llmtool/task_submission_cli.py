@@ -69,8 +69,6 @@ RESPONSE_LIMIT = 64 * 1024
 # A prompt carrying skill text must stay strictly under 64 KiB.
 _CLAUDE_PROMPT_MAX_BYTES = min(64 * 1024 - 1, CLAUDE_MAX_PROMPT_BYTES)
 _AGY_PROMPT_MAX_BYTES = min(64 * 1024 - 1, AGY_MAX_PROMPT_BYTES)
-_DEVELOPER_SKILL_ROLE = 'developer'
-_DEVELOPER_SKILL_GATE = 'develop'
 _PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 # No production Reviewer dispatcher is installed. A future Host runtime may
 # bind this internal seam only after a separate authority/runtime grant.
@@ -4556,52 +4554,65 @@ def _require_gw_agent_served_model(route_config, served_model, role, *, owner_ov
     return served_model
 
 
-def _required_skills(registration, snapshot, provider):
-    """Return the manifest and full skill text for a Developer launch."""
-    try:
-        manifest = skill_manifest.build_manifest(
-            registration.root, snapshot.head, _DEVELOPER_SKILL_ROLE, _DEVELOPER_SKILL_GATE,
-            provider=provider)
-        files = skill_manifest.read_manifest_files(registration.root, manifest)
-    except skill_manifest.SkillManifestError as exc:
-        raise LLMToolError(exc.code) from None
-    sections = []
-    for path, text in files:
-        try:
-            # Size is judged on the whole prompt, so it has its own refusal code.
-            _screen_text(text, skill_manifest.MAX_SKILL_FILE_SIZE)
-        except LLMToolError:
-            raise LLMToolError(provider.upper() + '_SKILL_TEXT_REFUSED') from None
-        sections.append('\nREQUIRED_SKILL_BEGIN path=' + path + '\n' + text +
-                        '\nREQUIRED_SKILL_END path=' + path)
-    return manifest, ''.join(sections)
-
-
 # Provider profile -> role-card route of its Developer run (#1502 WP-F).
 _SKILL_CARD_ROUTES = {'agy': 'agy', 'claude': 'claude-developer'}
 
 
-def _pin_skill_dispatch(task, provider):
-    """Pin authenticated main for this run's role cards before they are built.
+def _developer_card_prefix(task, registration, provider):
+    """Pin main for this run and return (prefix, prefix_sha256) of its cards.
 
-    skill_ledger.pin_dispatch() reads the commit itself through
-    task_completion.read_authenticated_main_sha(); nothing here supplies it.
-    No gate reads delivery evidence yet, so a failed pin does not stop the
-    dispatch: the later delivery record is refused as DISPATCH_PIN_MISSING.
+    The prefix is common core + Developer card, read by
+    skill_manifest.build_role_cards() from Git objects at the immutable
+    dispatch pin that skill_ledger.pin_dispatch() wrote for this Task/run/route
+    (it reads authenticated main itself; nothing here supplies the commit).
+    Fail closed, before any store write or provider call: a failed pin is
+    <PROVIDER>_SKILL_PIN_FAILED, a card missing at the pin is
+    <PROVIDER>_ROLE_CARD_MISSING, unsafe card text is
+    <PROVIDER>_SKILL_TEXT_REFUSED, and any other card build failure (not on
+    main, not a file, not UTF-8, prefix over 14 KiB) keeps its
+    SKILL_MANIFEST_* code. The legacy whole-file manifest is not used.
     """
+    route = _SKILL_CARD_ROUTES[provider]
+    label = provider.upper()
     try:
-        skill_ledger.pin_dispatch(task['task_id'], task['run_id'],
-                                  _SKILL_CARD_ROUTES[provider])
+        pinned = skill_ledger.pin_dispatch(task['task_id'], task['run_id'], route)
     except Exception as exc:
         code = getattr(exc, 'skill_ledger_code', 'LEDGER_UNREADABLE')
-        print(provider.upper() + '_SKILL_PIN_FAILED: ' + code, file=sys.stderr)
+        raise LLMToolError(label + '_SKILL_PIN_FAILED: ' + code) from None
+    if type(pinned) is not str or re.fullmatch(r'[0-9a-f]{40}', pinned) is None:
+        raise LLMToolError(label + '_SKILL_PIN_FAILED: PIN_INVALID')
+    try:
+        built = skill_manifest.build_role_cards(
+            registration.root, pinned, route, main_ref=skill_manifest.DEFAULT_MAIN_REF)
+    except skill_manifest.SkillManifestError as exc:
+        if exc.code == skill_manifest.SKILL_MANIFEST_PATH_MISSING:
+            raise LLMToolError(label + '_ROLE_CARD_MISSING') from None
+        raise LLMToolError(exc.code) from None
+    if (type(built) is not dict or built.get('commit') != pinned or
+            built.get('route') != route or type(built.get('cards')) is not list):
+        raise LLMToolError(label + '_ROLE_CARD_PIN_MISMATCH')
+    for card in built['cards']:
+        try:
+            # Size is judged on the whole prefix, so it has its own refusal code.
+            _screen_text(card.get('text') if type(card) is dict else None,
+                         skill_manifest.MAX_DEVELOPER_PREFIX_SIZE)
+        except LLMToolError:
+            raise LLMToolError(label + '_SKILL_TEXT_REFUSED') from None
+    try:
+        prefix = skill_manifest.role_card_prefix(built)
+    except skill_manifest.SkillManifestError as exc:
+        raise LLMToolError(exc.code) from None
+    return prefix, hashlib.sha256(prefix.encode('utf-8')).hexdigest()
 
 
-def _record_skill_delivery(task, registration, snapshot, provider, model, manifest, result):
+def _record_skill_delivery(task, registration, snapshot, provider, model,
+                           prefix_sha256, result):
     """Record delivery evidence for a run the provider returned from.
 
     Only the trusted path writes CONTROLLER_DELIVERED: the role cards come
     from this run's dispatch pin, never from a base commit given here.
+    ``manifest_sha256`` is the sha256 of the exact card prefix this run sent;
+    the ledger itself adds the pin and the card digests it derives from it.
     No gate reads this entry yet, so a ledger failure must not discard the
     finished run. The append can fail after its line persists: outcome unknown.
     """
@@ -4609,9 +4620,9 @@ def _record_skill_delivery(task, registration, snapshot, provider, model, manife
         skill_ledger.record_card_delivery({
             'task_id': task['task_id'], 'run_id': task['run_id'],
             'session_id': result.session_id,
-            'agent_id': registration.trusted_agent_id, 'role': manifest['role'],
+            'agent_id': registration.trusted_agent_id, 'role': 'developer',
             'provider': provider, 'model': model, 'repo': registration.common_dir,
-            'head': snapshot.head, 'manifest_sha256': manifest['manifest_sha256'],
+            'head': snapshot.head, 'manifest_sha256': prefix_sha256,
             'route': _SKILL_CARD_ROUTES[provider],
         }, repo_root=registration.root)
     except Exception as exc:
@@ -5131,9 +5142,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     _screen_text(prompt, AGY_MAX_PROMPT_BYTES)
     if len(prompt.encode('utf-8')) > AGY_MAX_PROMPT_BYTES:
         raise LLMToolError('request or response exceeds the supported size')
-    _pin_skill_dispatch(task, 'agy')
-    manifest, skill_text = _required_skills(registration, snapshot, 'agy')
-    prompt = instructions + skill_text + task_json
+    card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'agy')
+    prompt = instructions + card_prefix + task_json
     if len(prompt.encode('utf-8')) > _AGY_PROMPT_MAX_BYTES:
         raise LLMToolError('AGY_SKILL_PROMPT_TOO_LARGE')
     provider_input_bytes = len(prompt.encode('utf-8'))
@@ -5227,7 +5237,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         }, gate=route_gate, boundary=GatedBoundary(),
            snapshot=capture_snapshot)
         _record_skill_delivery(task, registration, snapshot, 'agy', result.model,
-                               manifest, result)
+                               card_prefix_sha256, result)
         after_registration = task_completion.read_d6_registration(
             registration.task_id, registration.common_dir)
         after = task_completion.collect_git_snapshot(registration.root)
@@ -5457,9 +5467,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
     _screen_text(prompt, CLAUDE_MAX_PROMPT_BYTES)
     if len(prompt.encode('utf-8')) > CLAUDE_MAX_PROMPT_BYTES:
         raise LLMToolError('request or response exceeds the supported size')
-    _pin_skill_dispatch(task, 'claude')
-    manifest, skill_text = _required_skills(registration, snapshot, 'claude')
-    prompt = instructions + skill_text + task_json
+    card_prefix, card_prefix_sha256 = _developer_card_prefix(task, registration, 'claude')
+    prompt = instructions + card_prefix + task_json
     if len(prompt.encode('utf-8')) > _CLAUDE_PROMPT_MAX_BYTES:
         raise LLMToolError('CLAUDE_SKILL_PROMPT_TOO_LARGE')
     provider_input_bytes = len(prompt.encode('utf-8'))
@@ -5550,7 +5559,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
             'write_paths': write_paths, 'executable': executable,
             'prompt': prompt, 'timeout': 600, 'state_dirs': (),
         }, gate=route_gate, boundary=GatedBoundary(), snapshot=capture_snapshot)
-        _record_skill_delivery(task, registration, snapshot, 'claude', model, manifest, result)
+        _record_skill_delivery(task, registration, snapshot, 'claude', model,
+                               card_prefix_sha256, result)
         after_registration = task_completion.read_d6_registration(
             registration.task_id, registration.common_dir)
         after = task_completion.collect_git_snapshot(registration.root)

@@ -37,14 +37,16 @@ MAX_SKILL_FILE_SIZE = 1024 * 1024
 MAX_DEVELOPER_PREFIX_SIZE = 14 * 1024
 GIT_READ_TIMEOUT_SECONDS = 10
 
+COMMON_CORE_CARD_PATH = 'skills/role-cards/common-core.md'
 DEVELOPER_CARD_PATH = 'skills/role-cards/developer.md'
 # Role-card table (WP-F design 3.7, #1502): common core first, then the
-# Developer card, in prompt order. The common core stays in the route's own
-# entrypoint file until the WP-H slimming (design section 4). The card file
-# holds every route appendix, so all Developer routes share one card.
+# Developer card, in prompt order. Claude Developer and AGY receive the
+# common-core card; OpenCode and gw-agent keep the route entrypoint file as
+# their common core until their own delivery ships. The card file holds every
+# route appendix, so all Developer routes share one card.
 _ROLE_CARD_TABLE = {
-    'agy': ('AGENTS.md', DEVELOPER_CARD_PATH),
-    'claude-developer': ('CLAUDE.md', DEVELOPER_CARD_PATH),
+    'agy': (COMMON_CORE_CARD_PATH, DEVELOPER_CARD_PATH),
+    'claude-developer': (COMMON_CORE_CARD_PATH, DEVELOPER_CARD_PATH),
     'gw-agent': ('AGENTS.md', DEVELOPER_CARD_PATH),
     'opencode-developer': ('AGENTS.md', DEVELOPER_CARD_PATH),
 }
@@ -375,6 +377,39 @@ def build_role_cards(repo_root, base_commit, route, git_runner=subprocess.run,
         'prefix_size': total,
         'cards_sha256': hashlib.sha256(canonical).hexdigest(),
     }
+
+
+def role_card_prefix(built):
+    """Return the exact prompt prefix for cards from build_role_cards().
+
+    Each card is wrapped, in table order, as
+    ``\\nREQUIRED_SKILL_BEGIN path=<p>\\n<text>\\nREQUIRED_SKILL_END path=<p>``.
+    Every card text must still match its recorded sha256 (else
+    SKILL_MANIFEST_PATH_MISSING). The whole wrapped prefix, in UTF-8 bytes,
+    must fit MAX_DEVELOPER_PREFIX_SIZE (else SKILL_MANIFEST_PREFIX_TOO_LARGE);
+    it is never truncated.
+    """
+    cards = built.get('cards') if type(built) is dict else None
+    if type(cards) is not list or not cards:
+        _raise(SKILL_MANIFEST_PATH_MISSING)
+    sections = []
+    for card in cards:
+        if (type(card) is not dict or type(card.get('path')) is not str or
+                type(card.get('text')) is not str or
+                type(card.get('sha256')) is not str):
+            _raise(SKILL_MANIFEST_PATH_MISSING)
+        try:
+            raw = card['text'].encode('utf-8')
+        except UnicodeError:
+            _raise(SKILL_MANIFEST_NOT_UTF8)
+        if hashlib.sha256(raw).hexdigest() != card['sha256']:
+            _raise(SKILL_MANIFEST_PATH_MISSING)
+        sections.append('\nREQUIRED_SKILL_BEGIN path=' + card['path'] + '\n' +
+                        card['text'] + '\nREQUIRED_SKILL_END path=' + card['path'])
+    prefix = ''.join(sections)
+    if len(prefix.encode('utf-8')) > MAX_DEVELOPER_PREFIX_SIZE:
+        _raise(SKILL_MANIFEST_PREFIX_TOO_LARGE)
+    return prefix
 
 
 def read_manifest_files(repo_root, manifest, git_runner=subprocess.run):
