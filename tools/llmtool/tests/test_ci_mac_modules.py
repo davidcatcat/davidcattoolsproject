@@ -53,14 +53,45 @@ PR_781_PATHS = (
 )
 
 
+PR_787_PATHS = (
+    "tools/llmtool/llmtool/chat_tui.py",
+    "tools/llmtool/llmtool/chat_tui_status.py",
+    "tools/llmtool/tests/test_chat_tui.py",
+)
+
+
 class MacTestIdSelectionTests(unittest.TestCase):
     def assert_pr_781_selection(self, report):
-        """Check the #781 report against its core set and import-derived extras.
+        """Check the #781 report against its core set and import-derived extras."""
+        self.assert_import_derived_selection(
+            report, "#781",
+            {"llmtool.review_repair", "llmtool.task_advance"},
+            MAC_REQUIRED | {
+                "test_review_repair", "test_task_advance", "test_task_drive",
+                "test_claude_route_wiring",
+            },
+        )
+
+    def assert_pr_787_selection(self, report):
+        """Check the #787 report against its core set and import-derived extras."""
+        self.assert_import_derived_selection(
+            report, "#787",
+            {"llmtool.chat_tui", "llmtool.chat_tui_status"},
+            MAC_REQUIRED | {
+                "test_chat_tui", "test_chat_tui_scenarios",
+                "test_chat_tui_theme", "test_chat_tui_layout", "test_chat_tui_pm",
+                "test_chat_tui_source_revision",
+                # test_task_index imports llmtool.chat_tui_status (#1838).
+                "test_task_index",
+            },
+        )
+
+    def assert_import_derived_selection(self, report, label, targets, core):
+        """Check an L1 report: every core ID, plus exactly the importing test modules.
 
         The extras are derived from the test tree with ``ast`` here, so a new
-        test module importing task_advance or review_repair needs no edit.
+        test module importing a changed source module needs no edit.
         """
-        targets = {"llmtool.review_repair", "llmtool.task_advance"}
         test_dir = REPO_ROOT / "tools" / "llmtool" / "tests"
 
         def imports_target(test_path):
@@ -84,22 +115,24 @@ class MacTestIdSelectionTests(unittest.TestCase):
         self.assertEqual(report["fallback_paths"], [])
         self.assertEqual(report["fallback_details"], [])
         selected = set(report["test_ids"])
-        core = MAC_REQUIRED | {
-            "test_review_repair", "test_task_advance", "test_task_drive",
-            "test_claude_route_wiring",
+        # A Mac-required class ID is covered when its whole module is selected.
+        core = {
+            test_id.partition(".")[0]
+            if test_id.partition(".")[0] in selected else test_id
+            for test_id in core
         }
-        self.assertEqual(core - selected, set(), "#781 core test IDs are missing")
+        self.assertEqual(core - selected, set(), f"{label} core test IDs are missing")
         for test_id in sorted(selected - core):
             test_path = test_dir / f"{test_id}.py"
             self.assertTrue(
                 test_id.startswith("test_") and test_id.isidentifier()
                 and test_path.is_file() and imports_target(test_path),
-                f"#781 selected an unrelated test ID: {test_id}",
+                f"{label} selected an unrelated test ID: {test_id}",
             )
         for test_path in sorted(test_dir.glob("test_*.py")):
             if imports_target(test_path):
                 self.assertIn(test_path.stem, selected,
-                              f"#781 missed an importing test module: {test_path.stem}")
+                              f"{label} missed an importing test module: {test_path.stem}")
 
     def test_pr_781_fixture_check_rejects_lost_unrelated_and_fallback_edits(self):
         report = ci_mac_modules.selection_report(list(PR_781_PATHS), REPO_ROOT)
@@ -433,23 +466,8 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 {"FULL"},
                 ("tools/llmtool/llmtool/opencode_direct_developer.py", "high_risk_file"),
             ),
-            (
-                "#787",
-                [
-                    "tools/llmtool/llmtool/chat_tui.py",
-                    "tools/llmtool/llmtool/chat_tui_status.py",
-                    "tools/llmtool/tests/test_chat_tui.py",
-                ],
-                "L1",
-                MAC_REQUIRED | {
-                    "test_chat_tui", "test_chat_tui_scenarios",
-                    "test_chat_tui_theme", "test_chat_tui_layout", "test_chat_tui_pm",
-                    "test_chat_tui_source_revision",
-                    # test_task_index imports llmtool.chat_tui_status (#1838).
-                    "test_task_index",
-                },
-                None,
-            ),
+            # #787 ids are checked by assert_pr_787_selection, not a frozen list.
+            ("#787", list(PR_787_PATHS), "L1", None, None),
             (
                 "#789",
                 [
@@ -508,6 +526,10 @@ class MacTestIdSelectionTests(unittest.TestCase):
                     self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
                 elif label == "#781":
                     self.assert_pr_781_selection(report)
+                elif label == "#787":
+                    self.assert_pr_787_selection(report)
+                    self.assertIn("test_task_index", report["test_ids"])
+                    self.assertEqual(report["fallback_reasons"], [])
                 elif label == "#791":
                     self.assertEqual(report["fallback_reasons"], [])
                     self.assertEqual(report["fallback_paths"], [])
