@@ -91,6 +91,76 @@ class PostInlineCopiesTests(unittest.TestCase):
                                         poster=lambda p, payload: posted.append(payload))
             self.assertEqual((result['failed'], posted), (1, []))
 
+    def test_rerun_with_its_own_copies_listed_posts_nothing(self):
+        first, posted = self.run_post()
+        self.assertEqual(first['posted'], 2)
+        existing = [{'body': payload['body']} for _pr, payload in posted]
+        result, again = self.run_post(existing=existing)
+        self.assertEqual(result, {'posted': 0, 'skipped': 2, 'failed': 0})
+        self.assertEqual(again, [])
+
+    def test_marker_sits_on_its_own_first_line(self):
+        _result, posted = self.run_post()
+        for _pr, payload in posted:
+            first_line, rest = payload['body'].split('\n', 1)
+            self.assertRegex(first_line, r'\A<!-- llmtool-inline-copy head=%s id=F[12] -->\Z' % HEAD)
+            self.assertTrue(rest.startswith('Advisory copy of formal verdict finding '))
+
+    def test_comment_lister_failure_is_counted_and_posts_nothing(self):
+        posted = []
+        def lister(pr):
+            raise OSError('synthetic list failure')
+        result = post_inline_copies(7, HEAD, VERDICT, file_lister=lambda pr: list(CHANGED),
+                                    comment_lister=lister,
+                                    poster=lambda pr, payload: posted.append(payload))
+        self.assertEqual(result, {'posted': 0, 'skipped': 0, 'failed': 1})
+        self.assertEqual(posted, [])
+
+    def test_one_poster_failure_does_not_stop_the_next_copy(self):
+        calls = []
+        def flaky(pr, payload):
+            calls.append(payload['path'])
+            if len(calls) == 1:
+                raise RuntimeError('synthetic post failure')
+        result, _posted = self.run_post(poster=flaky)
+        self.assertEqual(result, {'posted': 1, 'skipped': 0, 'failed': 1})
+        self.assertEqual(calls, ['tools/llmtool/llmtool/a.py', 'docs/b.md'])
+
+    def test_more_bad_inputs_post_nothing_and_counts_are_plain_ints(self):
+        for pr, head in ((-1, HEAD), (True, HEAD), (7.0, HEAD), (None, HEAD),
+                         (7, None), (7, 'g' * 40), (7, 'a' * 41), (7, ' ' + 'a' * 40)):
+            calls = []
+            def track(name):
+                def call(*args):
+                    calls.append(name)
+                    return []
+                return call
+            result = post_inline_copies(pr, head, VERDICT, file_lister=track('files'),
+                                        comment_lister=track('comments'), poster=track('post'))
+            self.assertEqual(result, {'posted': 0, 'skipped': 0, 'failed': 1})
+            self.assertEqual(calls, [])
+            self.assertEqual({type(value) for value in result.values()}, {int})
+
+    def test_counts_are_plain_ints_after_posting(self):
+        result, _posted = self.run_post()
+        self.assertEqual(sorted(result), ['failed', 'posted', 'skipped'])
+        self.assertEqual({type(value) for value in result.values()}, {int})
+
+    def test_module_imports_no_network_or_subprocess_code(self):
+        import ast
+        import llmtool.review_inline as module
+        with open(module.__file__, encoding='utf-8') as handle:
+            tree = ast.parse(handle.read())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split('.')[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add((node.module or '').split('.')[0])
+        self.assertEqual(imported, {'re'})
+        names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+        self.assertFalse(names & {'__import__', 'open', 'exec', 'eval'})
+
 
 if __name__ == '__main__':
     unittest.main()
