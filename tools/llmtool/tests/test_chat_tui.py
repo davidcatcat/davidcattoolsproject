@@ -8896,11 +8896,12 @@ class TaskGroupListUiTests(Base):
             self.assertFalse(ui.list_note)                       # current index: no fallback
             rows = ''.join(text for _style, text in ui.list_text()).splitlines()
             # Width- and layout-independent: find the selected Task row by its leading
-            # fields (they always fit); the request column may be cut with … at a narrow
-            # terminal, so the name is checked on the listed row's data instead.
+            # fields; the terminal is set wide enough that the request column is not cut,
+            # and the name is also checked on the listed row's data.
             selected = [line for line in rows if line.startswith('▶ ')]
             self.assertEqual(len(selected), 1, rows)
             self.assertTrue(selected[0].startswith('▶ dddddddd  RUNNING'), rows)
+            self.assertTrue(selected[0].rstrip().endswith('index row request'), rows)
             self.assertFalse([line for line in rows[:rows.index(selected[0])]
                               if 'status index' in line or 'read every TaskStore' in line],
                              rows)                               # no fallback note row
@@ -8920,12 +8921,16 @@ class TaskGroupListUiTests(Base):
                 await asyncio.sleep(0.01)
             ui.start_task.assert_called_once_with('show', 'd' * 32, None)
 
-        with patch.object(chat_tui_status, 'load_list',
-                          return_value=([indexed], 0, None)) as load, \
+        # Environment-independent: the list read never builds a TaskStore over the
+        # runner's real HOME; the stand-in store goes straight to the patched load_list.
+        store = object()
+        with patch('llmtool.task_store.TaskStore', return_value=store), \
+                patch.object(chat_tui_status, 'load_list',
+                             return_value=([indexed], 0, None)) as load, \
                 patch.object(chat_tui_status, 'load_records',
                              side_effect=AssertionError('no full read')):
-            self.drive(['\x1bOR', shown, '\r', opened])
-        load.assert_called_once()
+            self.drive(['\x1bOR', shown, '\r', opened], size=[Size(rows=40, columns=200)])
+        load.assert_called_once_with(store)
 
     def test_status_index_fallback_note_shows_in_list_and_events(self):
         note = 'status index not found; read every TaskStore record'
