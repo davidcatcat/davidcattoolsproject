@@ -211,6 +211,24 @@ def read_only_task_command(text):
             (len(words) == 3 and words[:2] == ["/task", "show"]))
 
 
+def task_store_root():
+    """The local TaskStore root; only looked at here, never created."""
+    return Path.home() / ".local" / "state" / "llmtool" / "tasks"
+
+
+def task_store_absent():
+    """#1819 (security v91 F1): True when nothing exists at the TaskStore root.
+
+    Without developer mode the read-only views then show an empty list or events, or
+    "task not found", and call nothing in TaskStore, which would create the root. Anything
+    at the path (even an entry TaskStore refuses) still goes to TaskStore as before.
+    """
+    return not os.path.lexists(task_store_root())
+
+
+TASK_NOT_FOUND = "task not found: %s (no local TaskStore)"
+
+
 # Existing commands only: (label shown, text a completion puts in the draft, summary).
 # Picking one edits the input draft; it never runs the command.
 SLASH_COMMANDS = (
@@ -2410,10 +2428,14 @@ class ChatTUI:
         self.list_reader.start()
 
     def _read_list(self, loop):
-        from .task_store import TaskStore
         try:
-            records, unreadable = chat_tui_status.load_records(TaskStore())
-            outcome = (records, unreadable, None)
+            if not self.dev and task_store_absent():
+                # #1819 F1: a read-only view never creates the store; absent reads as empty.
+                outcome = ([], 0, None)
+            else:
+                from .task_store import TaskStore
+                records, unreadable = chat_tui_status.load_records(TaskStore())
+                outcome = (records, unreadable, None)
         except LLMToolError as exc:
             outcome = ([], 0, str(exc))
         except Exception:
@@ -2797,29 +2819,15 @@ class ChatTUI:
         After a submit that created a Task, the detail is read back from Core with
         task show, so the detail pane never reuses the submit output.
         """
-        from argparse import Namespace
-        from .task_submission_cli import run_task_show, run_task_submit
-
         result = {"action": action, "first": first, "from_mode": from_mode, "code": None,
                   "view": None, "raw": "", "error": None, "detail": None}
         try:
-            if action == "submit":
-                with background_cli_invocation():
-                    result["code"], result["raw"] = self._core_call(
-                        run_task_submit, Namespace(provider=first, request=[request]))
+            if action == "show" and not self.dev and task_store_absent():
+                # #1819 F1: a read-only show never calls Core or TaskStore, which would
+                # create the root; with no store there is no Task to show.
+                result["error"] = TASK_NOT_FOUND % first
             else:
-                result["code"], result["raw"] = self._core_call(
-                    run_task_show, Namespace(task_id=first))
-            result["view"] = chat_tui_task.parse_core_view(result["raw"])
-            if action == "show":
-                if result["view"] is not None:
-                    result["detail"] = self._detail_text(result["view"])
-            elif result["view"] is not None and result["code"] == 0:
-                _code, raw = self._core_call(
-                    run_task_show, Namespace(task_id=result["view"]["task_id"]))
-                shown = chat_tui_task.parse_core_view(raw)
-                if shown is not None:
-                    result["detail"] = self._detail_text(shown)
+                self._core_task(action, first, request, result)
         except LLMToolError as exc:
             result["error"] = str(exc)
         except BaseException:
@@ -2828,6 +2836,29 @@ class ChatTUI:
             loop.call_soon_threadsafe(self.finish_task, result)
         except RuntimeError:
             pass
+
+    def _core_task(self, action, first, request, result):
+        """Worker thread: the existing Core task submit/show, filling ``result``."""
+        from argparse import Namespace
+        from .task_submission_cli import run_task_show, run_task_submit
+
+        if action == "submit":
+            with background_cli_invocation():
+                result["code"], result["raw"] = self._core_call(
+                    run_task_submit, Namespace(provider=first, request=[request]))
+        else:
+            result["code"], result["raw"] = self._core_call(
+                run_task_show, Namespace(task_id=first))
+        result["view"] = chat_tui_task.parse_core_view(result["raw"])
+        if action == "show":
+            if result["view"] is not None:
+                result["detail"] = self._detail_text(result["view"])
+        elif result["view"] is not None and result["code"] == 0:
+            _code, raw = self._core_call(
+                run_task_show, Namespace(task_id=result["view"]["task_id"]))
+            shown = chat_tui_task.parse_core_view(raw)
+            if shown is not None:
+                result["detail"] = self._detail_text(shown)
 
     @staticmethod
     def _detail_text(view):

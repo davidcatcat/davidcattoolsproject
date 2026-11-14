@@ -1770,10 +1770,14 @@ class TaskModeTests(Base):
         self.drive(['/task mode profile first\r', 'first task\r', self.idle])
         task_id = self.store_records()[0]['task_id']
         state = self.temp_root.resolve() / '.local' / 'state' / 'llmtool'
+        # Security v91 F1: an existing store goes to TaskStore; directories are compared too.
+        self.assertTrue((state / 'tasks').is_dir())
+        self.assertFalse(chat_tui.task_store_absent())
 
         def snapshot():
-            return sorted((str(p.relative_to(state)), p.stat().st_size, p.stat().st_mtime_ns)
-                          for p in state.rglob('*') if p.is_file() and 'chat' not in p.parts)
+            return sorted((str(p.relative_to(state)), p.is_dir(), p.stat().st_size,
+                           p.stat().st_mtime_ns)
+                          for p in state.rglob('*') if 'chat' not in p.parts)
 
         async def listed(ui):
             for _ in range(200):
@@ -1802,6 +1806,94 @@ class TaskModeTests(Base):
         self.assertEqual(self.pm.complete.call_count, calls)
         self.assertEqual(len(self.store_records()), 1)
         self.assertEqual(snapshot(), before)
+
+    def test_1819_f1_task_store_root_is_looked_at_never_created(self):
+        root = self.temp_root.resolve() / '.local' / 'state' / 'llmtool' / 'tasks'
+        self.assertEqual(chat_tui.task_store_root(), root)
+        self.assertTrue(chat_tui.task_store_absent())
+        self.assertFalse(root.parent.exists())   # the check itself creates nothing
+        root.mkdir(parents=True)
+        self.assertFalse(chat_tui.task_store_absent())
+
+    def test_1819_f1_absent_task_store_stays_absent_without_dev(self):
+        # Security v91 F1: without --dev, /task list, F3, /task events, F4, /task show and F2
+        # on a home with no TaskStore root show the empty views or "task not found", never
+        # call TaskStore or Core, and create nothing under .local/state/llmtool.
+        state = self.temp_root.resolve() / '.local' / 'state' / 'llmtool'
+        self.assertFalse(state.exists())
+        task_id = 'a' * 32
+
+        async def listed(ui):
+            for _ in range(200):
+                if ui.list_loaded is not None and ui.list_reader is None:
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError('list read did not finish')
+
+        def empty_list(ui):
+            self.assertTrue(ui.show_list)
+            self.assertIsNone(ui.list_error)
+            self.assertEqual(ui.list_records, [])
+            self.assertIn('no Tasks in TaskStore', ui.list_plain_text())
+
+        def empty_events(ui):
+            self.assertTrue(ui.show_events)
+            self.assertIn('no events in TaskStore', ui.events_view.text)
+
+        def not_found(ui):
+            self.assertIn(chat_tui.TASK_NOT_FOUND % task_id, ui.conversation.text)
+            self.assertFalse(ui.show_detail)
+
+        with patch('llmtool.task_store.TaskStore',
+                   side_effect=AssertionError('TaskStore must not be called')) as store, \
+                patch.object(chat_tui_status, 'load_records',
+                             side_effect=AssertionError('no TaskStore read')) as load, \
+                patch('llmtool.task_submission_cli.run_task_show',
+                      side_effect=AssertionError('no Core show')) as show:
+            ui, _ = self.drive(['/task list\r', listed, empty_list,
+                                '\x1bOR', lambda ui: self.assertFalse(ui.show_list),
+                                '\x1bOR', listed, empty_list, '\x1bOR',
+                                '/task events\r', listed, empty_events,
+                                '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
+                                '\x1bOS', listed, empty_events, '\x1bOS',
+                                '/task show ' + task_id + '\r', self.idle, not_found,
+                                '\x1bOQ', lambda ui: self.assertFalse(ui.show_detail)],
+                               dev=False)
+        self.assertFalse(ui.dev)
+        for called in (store, load, show):
+            called.assert_not_called()
+        self.assertNotIn(chat_tui.TASK_HIDDEN, ui.conversation.text)
+        self.assertIn('no Task detail loaded yet', ui.conversation.text)
+        self.pm_factory.assert_not_called()
+        self.assertFalse(state.exists())   # no directory or file anywhere under it
+
+    def test_1819_f1_dev_mode_still_reads_through_task_store(self):
+        # --dev is unchanged: list, events and show still go to TaskStore and Core even with
+        # no root (its existing store creation is a separate follow-up); mocks keep the
+        # temporary home untouched here.
+        state = self.temp_root.resolve() / '.local' / 'state' / 'llmtool'
+        self.assertFalse(state.exists())
+
+        async def listed(ui):
+            for _ in range(200):
+                if ui.list_loaded is not None and ui.list_reader is None:
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError('list read did not finish')
+
+        with patch('llmtool.task_store.TaskStore') as store, \
+                patch.object(chat_tui_status, 'load_records', return_value=([], 0)) as load, \
+                patch('llmtool.task_submission_cli.run_task_show', return_value=1) as show:
+            ui, _ = self.drive(['/task list\r', listed, '\x1bOR',
+                                '/task events\r', listed, '\x1bOS',
+                                '/task show ' + 'a' * 32 + '\r', self.idle], dev=True)
+        self.assertTrue(ui.dev)
+        self.assertEqual(load.call_count, 2)
+        self.assertEqual(store.call_count, 2)
+        show.assert_called_once()
+        self.assertNotIn('task not found', ui.conversation.text)
+        self.assertIn('llmtool task command failed', ui.conversation.text)   # Core's answer
+        self.assertFalse(state.exists())   # every TaskStore and Core call was a mock
 
     def test_task_submit_shows_core_receipt_and_opens_core_detail(self):
         request = '請新增測試\n第二行：多行需求'
