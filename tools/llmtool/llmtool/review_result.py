@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import re
 import shutil
 
@@ -178,8 +179,8 @@ def _claim_for(task, *, executor_task, pr_number, version):
 _UTC_SECONDS = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z')
 
 
-def _settle_unknown_claim(store, task, claim, comments, *, head, version):
-    """#1636: settle an UNKNOWN Claude review claim from its one bound PASS.
+def _settle_candidate(task, claim, comments, *, head, version):
+    """#1636: whether an UNKNOWN Claude review claim may settle from its one bound PASS.
 
     Only a claim with no failure reason and a started Reviewer session may
     settle. The PR must hold exactly one verdict bound to this claim's head
@@ -207,6 +208,47 @@ def _settle_unknown_claim(store, task, claim, comments, *, head, version):
             not task_completion.is_formal_claude_pass(
                 comment.get('body'), task_id=task['task_id'], run_id=task['run_id'],
                 contract_digest=task['task_binding']['contract_digest'], result_sha=head)):
+        return False
+    return True
+
+
+def _default_common_dir():
+    """#1909: the trusted canonical root's Git common dir, resolved by Git.
+
+    The same ``rev-parse --git-common-dir`` the D6 registry uses; never the
+    caller's cwd and never a joined path.
+    """
+    root = os.path.realpath(task_completion._trust_config().canonical_root)
+    common = task_completion._git(
+        root, ('rev-parse', '--path-format=absolute', '--git-common-dir'),
+        limit=4096).decode('utf-8', 'strict').strip()
+    if not os.path.isabs(common) or os.path.realpath(common) != common:
+        _refuse('REVIEW_REVIEWER_SESSION_UNBOUND')
+    return common
+
+
+def _reviewer_session_bound(claim, common_dir):
+    """#1909 item 2: the claim's Reviewer D6 record binds the claim's own native session.
+
+    A missing, invalid or unreadable record, or an unbound or different
+    session, is not bound. Without ``common_dir`` _default_common_dir()
+    is used.
+    """
+    try:
+        if common_dir is None:
+            common_dir = _default_common_dir()
+        registration = task_completion.read_d6_registration(
+            claim['reviewer_task'], common_dir,
+            allowed_states=task_completion._D6_EVIDENCE_STATES)
+    except Exception:
+        return False
+    return (type(registration.native_session_id) is str and
+            registration.native_session_id == claim.get('native_session_id'))
+
+
+def _settle_unknown_claim(store, task, claim, comments, *, head, version):
+    """#1636: settle a claim that _settle_candidate accepts; never replay the dispatch."""
+    if not _settle_candidate(task, claim, comments, head=head, version=version):
         return False
     from .review_dispatch import _now
     stored = task.get('review_dispatch_claim')
@@ -286,8 +328,13 @@ def _inline_copies(pr_number, head, body, *, inline_io, github_get):
 
 
 def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
-                         reviewer_session_done=False, github_get=None, inline_io=None):
-    """Classify the latest claim-bound verdict and persist one idempotent event."""
+                         reviewer_session_done=False, github_get=None, inline_io=None,
+                         common_dir=None):
+    """Classify the latest claim-bound verdict and persist one idempotent event.
+
+    #1909 item 2: an UNKNOWN claim that would settle needs its Reviewer D6
+    to bind the claim's native session (registry under ``common_dir``).
+    """
     if (type(version) is not int or not 1 <= version <= 9999 or
             type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
             type(reviewer_session_done) is not bool):
@@ -341,11 +388,17 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
                     'version': version, 'outcome': outcome, 'comment_id': comment_id}
         event_id = hashlib.sha256(json.dumps(
             identity, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
+    settle = (claim.get('state') == 'UNKNOWN' and
+              _settle_candidate(task, claim, comments, head=head, version=version))
+    if settle and not _reviewer_session_bound(claim, common_dir):
+        # #1909 item 2: completion could never verify an unbound Reviewer
+        # session, so the claim stays UNKNOWN and no event is recorded.
+        _refuse('REVIEW_REVIEWER_SESSION_UNBOUND')
     result = store.record_completion_event(
         task_id, event_id=event_id, run_id=task['run_id'],
         session_id='review-' + event_id, source='REVIEWER', source_sha=head,
         sequence=0, payload_sha256=payload_sha256)
-    if claim.get('state') == 'UNKNOWN':
+    if settle:
         _settle_unknown_claim(store, task, claim, comments, head=head, version=version)
     output = {'state': outcome, 'event_id': event_id,
               'created': result['created'], 'comment_id': comment_id,
