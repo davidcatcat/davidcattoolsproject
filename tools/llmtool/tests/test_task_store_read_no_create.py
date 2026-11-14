@@ -40,6 +40,31 @@ class ReadNoCreateTests(unittest.TestCase):
         os.close(self.store._dirfd())
         self.assertEqual(self.root.stat().st_mode & 0o777, 0o700)
 
+    def assertUnavailable(self, read):
+        with self.assertRaises(LLMToolError) as caught:
+            read()
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_UNAVAILABLE')
+
+    def test_absent_root_under_a_symlinked_parent_is_refused(self):
+        real = self.base / 'real'
+        real.mkdir(mode=0o700)
+        (self.base / 'state').symlink_to(real)
+        self.assertUnavailable(self.store.task_ids)
+        self.assertUnavailable(lambda: self.store.get(TASK_ID))
+        self.assertUnavailable(lambda: self.store.completion_d6_task_ids('member-one'))
+        self.assertEqual(list(real.iterdir()), [])
+
+    def test_absent_root_under_an_unsafe_or_replaced_parent_is_refused(self):
+        parent = self.root.parent
+        parent.mkdir(mode=0o700)
+        os.chmod(parent, 0o777)
+        self.assertUnavailable(self.store.task_ids)
+        os.chmod(parent, 0o700)
+        parent.rmdir()
+        parent.write_text('a path changed under the store')
+        self.assertUnavailable(self.store.task_ids)
+        self.assertUnavailable(lambda: self.store.get(TASK_ID))
+
     def test_symlinked_root_is_still_refused(self):
         target = self.base / 'elsewhere'
         target.mkdir(mode=0o700)

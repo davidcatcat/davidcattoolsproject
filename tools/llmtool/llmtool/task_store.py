@@ -3231,6 +3231,11 @@ class TaskStore:
                 _fail('TASK_STORE_UNAVAILABLE')
             try:
                 info = current.lstat()
+            except FileNotFoundError:
+                if create:
+                    _fail('TASK_STORE_UNAVAILABLE')
+                # Every existing parent passed the checks below; nothing was created.
+                return False
             except OSError:
                 _fail('TASK_STORE_UNAVAILABLE')
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
@@ -3242,12 +3247,13 @@ class TaskStore:
         info = self.root.lstat()
         if info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700:
             _fail('TASK_STORE_UNAVAILABLE')
+        return True
 
     def _dirfd(self, create=True):
-        # #1837: create=False never creates the root and returns None when it is absent.
-        if not create and not os.path.lexists(self.root):
+        # #1837: create=False checks every existing parent, creates nothing and returns
+        # None when the root is absent.
+        if not self._ensure_root(create):
             return None
-        self._ensure_root(create)
         try:
             fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             info = os.fstat(fd)
