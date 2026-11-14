@@ -340,6 +340,91 @@ class UnknownClaimReconcileShapeTests(unittest.TestCase):
         self.assertEqual(self.state(), 'UNKNOWN')
 
 
+class InlineCopyTests(unittest.TestCase):
+    """#1235 C6a 2b: advisory inline copies when a new verdict is recorded."""
+
+    FINDING = 'Finding: F1 [High] tools/a.py:3 the guard is missing\n'
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = _store(self.temp.name)
+        self.posts = []
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def io(self, files=('tools/a.py',)):
+        return {
+            'file_lister': lambda _pr: list(files),
+            'comment_lister': lambda _pr: [],
+            'poster': lambda pr, comment: self.posts.append((pr, comment)),
+        }
+
+    def comments(self, extra=''):
+        digest = self.store.get(TASK)['task_binding']['contract_digest']
+        return [dict(comment, body=comment['body'].replace(CONTRACT, digest))
+                for comment in [_comment('FIX', extra=extra)]]
+
+    def record(self, comments, **kw):
+        kw.setdefault('github_get', lambda _path: comments)
+        return review_result.record_review_result(
+            store=self.store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR, **kw)
+
+    def test_new_verdict_posts_each_finding_once_and_replay_posts_nothing(self):
+        first = self.record(self.comments(self.FINDING), inline_io=self.io())
+        self.assertEqual(first['state'], 'REVIEW_FAIL')
+        self.assertEqual(first['inline_copies'], {'posted': 1, 'skipped': 0, 'failed': 0})
+        second = self.record(self.comments(self.FINDING), inline_io=self.io())
+        self.assertFalse(second['created'])
+        self.assertNotIn('inline_copies', second)
+        self.assertEqual(len(self.posts), 1)
+        pr, payload = self.posts[0]
+        self.assertEqual((pr, payload['path'], payload['line'], payload['commit_id']),
+                         (PR, 'tools/a.py', 3, HEAD))
+
+    def test_io_failure_is_counted_and_never_changes_the_result(self):
+        def bad_lister(_pr):
+            raise OSError('synthetic lister failure')
+        bad_io = dict(self.io(), file_lister=bad_lister)
+        result = self.record(self.comments(self.FINDING), inline_io=bad_io)
+        self.assertEqual(result['state'], 'REVIEW_FAIL')
+        self.assertTrue(result['created'])
+        self.assertEqual(result['inline_copies'], {'posted': 0, 'skipped': 0, 'failed': 1})
+        self.assertEqual(len(self.store.get(TASK)['completion_events']), 1)
+
+    def test_injected_reader_without_io_never_builds_gh_io(self):
+        with patch.object(review_result, '_production_inline_io',
+                          side_effect=AssertionError('unexpected gh io build')):
+            result = self.record(self.comments(self.FINDING))
+        self.assertEqual(result['state'], 'REVIEW_FAIL')
+        self.assertNotIn('inline_copies', result)
+
+    def test_production_reader_builds_io_only_for_a_finding_line(self):
+        for extra, built in (('', False), (self.FINDING, True)):
+            with self.subTest(extra=extra, built=built):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    self.store = _store(temp_dir)
+                    self.posts = []
+                    comments = self.comments(extra)
+                    with patch.object(review_result.task_completion, '_github_get',
+                                      return_value=comments), \
+                            patch.object(review_result, '_production_inline_io',
+                                         return_value=self.io()) as factory:
+                        result = self.record(comments, github_get=None)
+                        self.assertEqual(factory.called, built)
+                        self.assertEqual('inline_copies' in result, built)
+
+    def test_production_io_setup_failure_is_counted(self):
+        comments = self.comments(self.FINDING)
+        with patch.object(review_result.task_completion, '_github_get',
+                          return_value=comments), \
+                patch.object(review_result, '_production_inline_io',
+                             side_effect=RuntimeError('synthetic setup failure')):
+            result = self.record(comments, github_get=None)
+        self.assertEqual(result['state'], 'REVIEW_FAIL')
+        self.assertEqual(result['inline_copies'], {'posted': 0, 'skipped': 0, 'failed': 1})
+
+
 class StableFindingIdTests(unittest.TestCase):
     """#1502 WP-D section 4.12: finding IDs, severity and blocking."""
 
