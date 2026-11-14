@@ -181,18 +181,46 @@ def _developer_of(store, task_id):
     return copy.deepcopy(record.get('developer')) if type(record) is dict else _UNREAD
 
 
+def _store_implements(store, name):
+    """Whether the store's class defines ``name``; never consults the instance."""
+    try:
+        return callable(getattr(type(store), name, None))
+    except Exception:
+        return False
+
+
 def _with_quota_observation(store, task_id, call):
     """#1816: run one delegate, then record its outcome in the quota layer.
 
     Only a Developer record this run changed is observed. Recording is evidence
     only; its failure never changes the delegate's result or exception.
+
+    It adds no Task read, so the route's own validations (a supplied owner ref
+    first) still come before any store read. A TaskStore reports in memory the
+    record its own committed Developer writes left (developer_write). A store
+    whose class has no record_worker_observation is never touched; only one
+    that records observations but cannot report its writes falls back to get().
     """
-    before = _developer_of(store, task_id)
+    if not _store_implements(store, 'record_worker_observation'):
+        return call()
+    counted = _store_implements(store, 'developer_write')
+    try:
+        before = (store.developer_write(task_id)[0] if counted
+                  else _developer_of(store, task_id))
+        observable = True
+    except Exception:
+        observable = False
     try:
         return call()
     finally:
         try:
-            if callable(getattr(store, 'record_worker_observation', None)):
+            if not observable:
+                pass
+            elif counted:
+                count, record = store.developer_write(task_id)
+                if count != before and type(record) is dict:
+                    worker_availability.observe(store, record)
+            else:
                 record = store.get(task_id)
                 if type(record) is dict and record.get('developer') != before:
                     worker_availability.observe(store, record)

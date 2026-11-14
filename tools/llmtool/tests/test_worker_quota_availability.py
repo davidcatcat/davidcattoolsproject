@@ -408,5 +408,94 @@ class OutcomeRecordingTest(unittest.TestCase):
         self.assertEqual([item['status'] for item in store.observations], ['FAIL'])
 
 
+class _CountingStore:
+    """Reports its Developer writes like TaskStore.developer_write; counts Task reads."""
+
+    def __init__(self, developer):
+        self.record = _record(developer)
+        self.gets = []
+        self.writes = 0
+        self.observations = []
+
+    def get(self, task_id):
+        self.gets.append(task_id)
+        return copy.deepcopy(self.record)
+
+    def update(self, task_id, **changes):
+        self.record.update(copy.deepcopy(changes))
+        self.writes += 1
+        return copy.deepcopy(self.record)
+
+    def developer_write(self, task_id):
+        return self.writes, (copy.deepcopy(self.record) if self.writes else None)
+
+    def record_worker_observation(self, **observation):
+        self.observations.append(observation)
+
+
+class NoAddedTaskReadTest(unittest.TestCase):
+    """The observation wrapper adds no Task read before or after the route."""
+
+    def delegate(self, store, effect):
+        args = SimpleNamespace(task_id=TASK, provider='opencode', mode='proposal',
+                               background=False, timeout=None, acceptance=['Edit x.txt.'])
+        with mock.patch.object(cli, '_validate_acceptance_scope'), \
+                mock.patch.object(cli, '_check_delegate_repair_cap'), \
+                mock.patch.object(cli, '_delegate_timeout'), \
+                mock.patch.object(cli, 'run_task_opencode_delegate', side_effect=effect):
+            return cli.run_task_delegate(args, store=store)
+
+    def test_written_outcome_is_observed_without_a_task_read(self):
+        store = _CountingStore(None)
+
+        def effect(args, *, store):
+            store.update(TASK, developer=copy.deepcopy(QUOTA_DEV))
+            return 1
+        self.assertEqual(self.delegate(store, effect), 1)
+        self.assertEqual(store.gets, [])
+        self.assertEqual([(item['worker_key'], item['status'])
+                          for item in store.observations],
+                         [('opencode-developer', 'FAIL')])
+
+    def test_route_reads_count_exactly_as_without_the_wrapper(self):
+        store = _CountingStore(QUOTA_DEV)
+
+        def effect(args, *, store):
+            store.get(TASK)
+            raise LLMToolError('fixture refusal')
+        with self.assertRaises(LLMToolError):
+            self.delegate(store, effect)
+        self.assertEqual(store.gets, [TASK])
+        self.assertEqual(store.observations, [])
+
+    def test_refusal_before_any_read_reads_nothing(self):
+        store = _CountingStore(QUOTA_DEV)
+
+        def effect(args, *, store):
+            raise LLMToolError('fixture owner-ref refusal')
+        with self.assertRaises(LLMToolError):
+            self.delegate(store, effect)
+        self.assertEqual(store.gets, [])
+        self.assertEqual(store.observations, [])
+
+    def test_store_without_observations_is_never_touched(self):
+        class UnreadStore:
+            def __getattr__(self, name):
+                raise AssertionError('store must not be touched by the wrapper')
+
+        def effect(args, *, store):
+            raise LLMToolError('fixture owner-ref refusal')
+        with self.assertRaises(LLMToolError) as caught:
+            self.delegate(UnreadStore(), effect)
+        self.assertEqual(str(caught.exception), 'fixture owner-ref refusal')
+
+    def test_task_store_developer_write_reads_no_task_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve() / 'tasks'
+            store = task_store.TaskStore(root)
+            self.assertEqual(store.developer_write(TASK), (0, None))
+            self.assertFalse(root.exists())
+
+
 if __name__ == '__main__':
     unittest.main()
