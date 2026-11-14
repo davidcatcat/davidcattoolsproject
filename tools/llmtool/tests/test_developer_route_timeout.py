@@ -1,16 +1,25 @@
 """Per-route default_timeout and max_timeout in developer-routes.json."""
 
+from argparse import Namespace
+from contextlib import redirect_stdout
 import copy
 import importlib.util
+import io
 import json
+import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 from llmtool import developer_routes, task_completion
+from llmtool import task_submission_cli as submission_cli
+from llmtool.cli import parser_for_cli
 from llmtool.developer_routes import RouteError, load_route_config, resolve_route_timeout
 from llmtool.developer_routes.base import DeveloperRoute, run_route
+from llmtool.errors import LLMToolError
+from llmtool.task_store import TaskStoreConflict
 
 ROUTES_FILE = Path(__file__).resolve().parents[1] / 'developer-routes.json'
 DRIFT_SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'guidance_drift_check.py'
@@ -349,6 +358,197 @@ class RunRouteTimeoutTests(unittest.TestCase):
         route = NamedRoute('agy')
         route.config.update(default_timeout=600, max_timeout=1800)
         self.assert_request_refused(route, 1200, 'TIMEOUT_OVER_ROUTE_MAX')
+
+
+class _StoreReached(Exception):
+    """Raised by ReachedStore: the delegate passed its timeout check."""
+
+
+class ReachedStore:
+    """Fake store whose first read proves the timeout was not refused."""
+
+    def get(self, task_id):
+        raise _StoreReached()
+
+
+class CaptureStore:
+    """Fake store: records the first developer write, then loses the CAS."""
+
+    def __init__(self, task):
+        self.task = task
+        self.reads = 0
+        self.developers = []
+
+    def get(self, task_id):
+        self.reads += 1
+        return copy.deepcopy(self.task)
+
+    def d6_bind_compare_and_update(self, task_id, *, executor_task_id, expected,
+                                   developer, completion):
+        self.developers.append(copy.deepcopy(developer))
+        raise TaskStoreConflict()
+
+
+def timeout_refusals(route):
+    """(requested, resolver code) pairs every delegate must refuse for route."""
+    cases = [(1801, 'TIMEOUT_OVER_HARD_CAP'), (3600, 'TIMEOUT_OVER_HARD_CAP'),
+             (0, 'TIMEOUT_INVALID'), (-1, 'TIMEOUT_INVALID'), (True, 'TIMEOUT_INVALID')]
+    if route in SHORT_ROUTES:
+        cases += [(601, 'TIMEOUT_OVER_ROUTE_MAX'), (1200, 'TIMEOUT_OVER_ROUTE_MAX'),
+                  (1800, 'TIMEOUT_OVER_ROUTE_MAX')]
+    return cases
+
+
+def timeout_accepted(route):
+    """Requested values the route accepts; None is the route default."""
+    return (None, 1, 600) + ((1200, 1800) if route in LONG_ROUTES else ())
+
+
+class DelegateTimeoutTests(unittest.TestCase):
+    """#1815 piece 2: task delegate --timeout is resolved before launch and recorded."""
+
+    DELEGATES = {
+        'agy': submission_cli.run_task_agy_delegate,
+        'claude': submission_cli.run_task_claude_delegate,
+        'gw-agent': submission_cli.run_task_gw_agent_delegate,
+        'opencode': submission_cli.run_task_opencode_delegate,
+    }
+
+    def delegate_args(self, **changes):
+        values = dict(task_id='a' * 32, mode='direct', background=False, timeout=None,
+                      selection_source='PM', owner_ref=None, context_stdin=False,
+                      egress_basis='synthetic text', data_class='public',
+                      acceptance=['bounded'])
+        values.update(changes)
+        return Namespace(**values)
+
+    def assert_refusal(self, raised, code, route):
+        message = str(raised.exception)
+        self.assertTrue(message.startswith(code + ':'), message)
+        self.assertIn(route, message)
+
+    def test_timeout_routes_are_the_four_direct_routes(self):
+        self.assertEqual(set(submission_cli.TIMEOUT_ROUTES), set(ROUTE_NAMES))
+        self.assertEqual(set(self.DELEGATES), set(ROUTE_NAMES))
+
+    def test_parser_timeout_is_optional_int(self):
+        parser = parser_for_cli()
+        for route in ROUTE_NAMES:
+            base = ['task', 'delegate', 'a' * 32, '--provider', route, '--mode', 'direct',
+                    '--selection-source', 'PM', '--executor-task', 'executor-task-1',
+                    '--read-path', 'sample.py', '--write-path', 'sample.py',
+                    '--acceptance', 'focused test passes', '--egress-basis', 'synthetic text']
+            with self.subTest(route=route):
+                self.assertIsNone(parser.parse_args(base).timeout)
+                # The parser only reads an int; the route limits are the resolver's.
+                for value in ('600', '1200', '1800', '1801'):
+                    self.assertEqual(
+                        parser.parse_args(base + ['--timeout', value]).timeout, int(value))
+                for value in ('soon', '1.5', ''):
+                    with redirect_stdout(io.StringIO()), \
+                            mock.patch('sys.stderr', io.StringIO()), \
+                            self.assertRaises(SystemExit):
+                        parser.parse_args(base + ['--timeout', value])
+
+    def test_helper_defaults_and_accepts_route_limits(self):
+        for route in ROUTE_NAMES:
+            with self.subTest(route=route):
+                # No attribute and an explicit None both give the route default.
+                self.assertEqual(submission_cli._delegate_timeout(Namespace(), route), 600)
+                for requested in timeout_accepted(route):
+                    expected = 600 if requested is None else requested
+                    self.assertEqual(submission_cli._delegate_timeout(
+                        Namespace(timeout=requested), route), expected)
+
+    def test_helper_refuses_with_resolver_code(self):
+        for route in ROUTE_NAMES:
+            for requested, code in timeout_refusals(route):
+                with self.subTest(route=route, requested=requested):
+                    with self.assertRaises(LLMToolError) as raised:
+                        submission_cli._delegate_timeout(Namespace(timeout=requested), route)
+                    self.assert_refusal(raised, code, route)
+
+    def test_delegate_refuses_before_task_read_or_fork(self):
+        for route in ROUTE_NAMES:
+            for requested, code in timeout_refusals(route):
+                for background in (False, True):
+                    with self.subTest(route=route, requested=requested,
+                                      background=background):
+                        args = self.delegate_args(provider=route, timeout=requested,
+                                                  background=background)
+                        # store=object(): any Task read fails with AttributeError.
+                        with mock.patch.object(os, 'fork') as fork, \
+                                self.assertRaises(LLMToolError) as raised:
+                            submission_cli.run_task_delegate(args, store=object())
+                        self.assert_refusal(raised, code, route)
+                        fork.assert_not_called()
+
+    def test_route_delegates_refuse_before_task_read(self):
+        for route, delegate in self.DELEGATES.items():
+            for requested, code in timeout_refusals(route):
+                with self.subTest(route=route, requested=requested):
+                    with mock.patch('llmtool.gw_agent_sessions.sweep_quietly'), \
+                            self.assertRaises(LLMToolError) as raised:
+                        delegate(self.delegate_args(timeout=requested), store=object())
+                    self.assert_refusal(raised, code, route)
+
+    def test_route_delegates_accept_route_limits(self):
+        for route, delegate in self.DELEGATES.items():
+            for requested in timeout_accepted(route):
+                with self.subTest(route=route, requested=requested):
+                    with mock.patch('llmtool.gw_agent_sessions.sweep_quietly'), \
+                            self.assertRaises(_StoreReached):
+                        delegate(self.delegate_args(timeout=requested), store=ReachedStore())
+
+    def record_opencode_timeout(self, requested):
+        """Return the OpenCode developer record written before launch."""
+        acceptance = ['focused test passes']
+        task = {'task_id': 'a' * 32, 'run_id': 'b' * 32, 'state': 'PM_RESPONDED',
+                'schema_version': 2, 'request': 'Update the sample value.',
+                'response': 'Route the change to OpenCode.', 'developer': None,
+                'task_binding': {'contract_digest': 'c' * 64},
+                'pm_assignment': {'route': 'opencode', 'risk': 'LOW',
+                                  'acceptance': acceptance,
+                                  'goal': 'Update the sample value.'}}
+        store = CaptureStore(task)
+        registration = SimpleNamespace(
+            task_id='executor-task-1', trusted_agent_id='opencode-developer',
+            session_ref=None, native_session_id=None, root='/d6', common_dir='/d6-common',
+            branch='task')
+        snapshot = SimpleNamespace(head='d' * 40)
+        args = self.delegate_args(timeout=requested, acceptance=acceptance,
+                                  read_path=['sample.py'], write_path=['sample.py'],
+                                  executor_task='executor-task-1')
+        with mock.patch.object(submission_cli, '_opencode_developer_profile',
+                               return_value=('opencode/sample-model-free', 12)), \
+                mock.patch.object(submission_cli.opencode_direct_developer, 'run') as launch, \
+                self.assertRaises(LLMToolError) as raised:
+            submission_cli.run_task_opencode_delegate(
+                args, store=store, d6_binding=(registration, snapshot))
+        self.assertIn('duplicate dispatch refused', str(raised.exception))
+        launch.assert_not_called()
+        self.assertEqual(len(store.developers), 1)
+        return store.developers[0]
+
+    def test_opencode_record_carries_resolved_timeout(self):
+        for requested, expected in ((None, 600), (600, 600), (1200, 1200), (1800, 1800)):
+            with self.subTest(requested=requested):
+                developer = self.record_opencode_timeout(requested)
+                self.assertEqual(developer['timeout_seconds'], expected)
+                self.assertIs(type(developer['timeout_seconds']), int)
+                self.assertEqual(developer['provider_profile'], 'opencode')
+                self.assertEqual(developer['state'], 'DEVELOPER_PENDING')
+
+    def test_opencode_refusal_writes_no_record(self):
+        for requested, code in timeout_refusals('opencode'):
+            with self.subTest(requested=requested):
+                store = CaptureStore({})
+                with self.assertRaises(LLMToolError) as raised:
+                    submission_cli.run_task_opencode_delegate(
+                        self.delegate_args(timeout=requested), store=store)
+                self.assert_refusal(raised, code, 'opencode')
+                self.assertEqual(store.reads, 0)
+                self.assertEqual(store.developers, [])
 
 
 if __name__ == '__main__':

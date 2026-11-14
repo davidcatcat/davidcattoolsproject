@@ -29,7 +29,9 @@ from .test_output_excerpts import _emitted_sensitive
 
 MODEL = 'opencode/deepseek-v4.1-flash-free#high'
 AGENT = 'llmtool-direct-developer'
-MAX_WALL_CLOCK_SECONDS = 600
+# #1815: each run's bound is resolve_route_timeout('opencode', requested) from
+# developer-routes.json; this is only the absolute ceiling no run may exceed.
+MAX_WALL_CLOCK_SECONDS = 1800
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
 MAX_PROMPT_BYTES = 64 * 1024
@@ -100,6 +102,23 @@ class DirectResult:
 
 def _reject(code):
     raise DirectOpenCodeError(code)
+
+
+def resolved_timeout(requested=None):
+    """Return the OpenCode run bound from developer-routes.json (#1815).
+
+    None gives the route default_timeout. A refusal raises DirectOpenCodeError
+    with the resolver code (TIMEOUT_INVALID, TIMEOUT_OVER_HARD_CAP,
+    TIMEOUT_OVER_ROUTE_MAX or ROUTE_CONFIG_INVALID).
+    """
+    from .developer_routes import RouteError, resolve_route_timeout
+    try:
+        value = resolve_route_timeout('opencode', requested)
+    except RouteError as exc:
+        raise DirectOpenCodeError(exc.code) from None
+    if type(value) is not int or not 1 <= value <= MAX_WALL_CLOCK_SECONDS:
+        _reject('OPENCODE_BUDGET_INVALID')
+    return value
 
 
 def is_free_model(model):
@@ -716,9 +735,14 @@ def _version(executable):
 def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         dispatch_store=None, dispatch_task_id=None,
         launch_callback=None,
-        timeout_seconds=MAX_WALL_CLOCK_SECONDS, executable=None, model=MODEL,
+        timeout_seconds=None, executable=None, model=MODEL,
         steps=DEFAULT_AGENT_STEPS):
-    """Invoke one bounded OpenCode run in the existing D6 task worktree."""
+    """Invoke one bounded OpenCode run in the existing D6 task worktree.
+
+    timeout_seconds None uses the opencode route default_timeout; a given value
+    must pass resolve_route_timeout (route max_timeout, hard cap 1800). A
+    refusal raises the resolver code before any provider process starts.
+    """
     validate_model(model)
     root = Path(root).resolve(strict=True)
     if not root.is_dir():
@@ -731,9 +755,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         _reject('OPENCODE_D6_BINDING_CHANGED')
     if dispatch_store is None or type(dispatch_task_id) is not str:
         _reject('WORKER_DISPATCH_CONTEXT_UNAVAILABLE')
-    if (type(timeout_seconds) is not int or
-            not 1 <= timeout_seconds <= MAX_WALL_CLOCK_SECONDS):
-        _reject('OPENCODE_BUDGET_INVALID')
+    timeout_seconds = resolved_timeout(timeout_seconds)
     executable = executable or shutil.which('opencode')
     if not executable or not os.path.isabs(executable):
         _reject('OPENCODE_RUNTIME_UNAVAILABLE')
