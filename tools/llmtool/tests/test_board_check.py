@@ -491,6 +491,18 @@ class TextAndTimeTests(BoardCheckCase):
         result = run([{'id': 'held', 'after': 'once review is done'}])
         self.assertRow(result, 'held', board_check.ANOMALY, 'free text')
 
+    def test_unreadable_owner_marker_or_task_record_is_unknown(self):
+        # #763: an unreadable Owner-marker issue or Task record stays UNKNOWN with its code.
+        ref = 'https://github.com/o/r/issues/7#issuecomment-5'
+        github = FakeGitHub({'issues/7': {'state': 'unknown'}})
+        result = run([{'id': 'ask', 'owner_ref': ref}], github=github)
+        self.assertRow(result, 'ask', board_check.UNKNOWN, 'OWNER_MARKER_UNAVAILABLE')
+        store = FakeStore(pending(TASK_PENDING))
+        store.get = lambda task_id: ['not', 'a', 'record']
+        result = run([{'id': 'pending', 'task_id': TASK_PENDING}], store=store)
+        self.assertRow(result, 'pending', board_check.UNKNOWN, 'TASK_RECORD_UNREADABLE')
+        self.assertEqual((result['result'], result['exit_code']), ('UNKNOWN', 1))
+
     def test_owner_ref_without_open_marker_is_not_waiting_owner(self):
         ref = 'https://github.com/o/r/issues/7#issuecomment-5'
         github = FakeGitHub({'issues/7': {'state': 'open'},
