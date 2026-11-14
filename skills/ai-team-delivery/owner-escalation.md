@@ -63,8 +63,8 @@ Each ask carries one structured record with these fields:
 
 `R-OTHER` is the safety valve: never skip a real safety concern because no row fits, and never pick a row just to ask. If `R-OTHER` exceeds 10% of asks, the rules are reviewed. Stopping a dangerous action never needs an Owner question first.
 `pm_owner_marker.py ask` refuses an incomplete or mismatched record before any GitHub call (#1943 WP-1b).
-The weekly audit runs `python3 tools/llmtool/scripts/owner_ask_audit.py --since ISO --until ISO` (#1943 WP-1d). It is read-only and reports the week's asks, gated and ungated asks, the count per row and the `R-OTHER` ratio. A Reviewer from another family than the PM's checks `R-OTHER` asks and at least 20% of the others.
-[NOT LIVE] (#1943): the monitor flag `UNGATED_OWNER_ASK`. Until it is live, the weekly audit's `ungated` count is the check.
+The weekly audit runs `python3 tools/llmtool/scripts/owner_ask_audit.py --since ISO --until ISO` (#1943 WP-1d). It is read-only and reports the week's asks, gated and ungated asks, the count per row and the `R-OTHER` ratio. It also reports Owner wait time per ask (from the ask to the next PM-relayed ANSWERED record on the same Issue: answered, unanswered, total and mean) (#1985). A Reviewer from another family than the PM's checks `R-OTHER` asks and at least 20% of the others.
+The monitor flag `UNGATED_OWNER_ASK` is live since #1983 and flags a `waiting_owner` ask from PM or Integrator posted after the ask gate without a valid `owner-ask` record line, with the weekly audit as the second check.
 
 ## Standing PM cleanup (Owner O2, #1943)
 
