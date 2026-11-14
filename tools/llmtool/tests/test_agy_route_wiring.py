@@ -385,16 +385,22 @@ class AgyRouteWiringTests(unittest.TestCase):
                 self.assertEqual(caught.exception.dispatch_code, expected_code)
                 self.assertEqual(writes, [])
 
-    # #1692 PR 2 (Owner decision 2026-11-13): the real worker-dispatch.json pauses
-    # AGY. These tests read the live file through the real gate; nothing is mocked
-    # in the policy decision. Gate-level transitions (repair, recovery, retry,
-    # continuation, historical record) are covered in test_worker_dispatch.py.
-    @staticmethod
-    def _real_policy():
+    # #289 (Owner decision 2026-11-14): the real worker-dispatch.json resumes
+    # PM-selected AGY dispatch. #1692: this module never reads the live file; the
+    # real AGY row is pinned by test_worker_dispatch.py under its explicit
+    # repository config. Here the gate runs against a synthetic ALLOWED or PAUSED
+    # AGY row; nothing is mocked in the policy decision. Gate-level transitions
+    # (repair, recovery, retry, continuation, historical record) are covered in
+    # test_worker_dispatch.py.
+    def _allowed_policy(self):
         return patch.object(worker_dispatch, '_POLICY_PATH',
-                            Path(worker_dispatch._DEFAULT_POLICY_PATH))
+                            self._fixture_policy({'dispatch': 'ALLOWED'}))
 
-    def _real_policy_agy_delegate(self, *, owner_ref, repair_packet):
+    def _paused_policy(self):
+        return patch.object(worker_dispatch, '_POLICY_PATH',
+                            self._fixture_policy({'dispatch': 'PAUSED'}))
+
+    def _paused_policy_agy_delegate(self, *, owner_ref, repair_packet):
         task_id = 'a' * 32
         task = {
             'schema_version': 2, 'task_id': task_id, 'run_id': 'b' * 32,
@@ -423,7 +429,7 @@ class AgyRouteWiringTests(unittest.TestCase):
                          executor_task='executor-d6', read_path=['src.py'],
                          write_path=['src.py'], repair_packet=repair_packet)
         route_runner = Mock()
-        with self._real_policy(), \
+        with self._paused_policy(), \
                 patch.object(task_submission_cli.task_completion, 'validate_task_binding'), \
                 patch.object(task_submission_cli, '_delegate_d6_binding',
                              return_value=(SimpleNamespace(task_id='executor-d6'),
@@ -435,13 +441,13 @@ class AgyRouteWiringTests(unittest.TestCase):
         route_runner.assert_not_called()
         return caught.exception.dispatch_code, writes
 
-    def test_real_policy_pauses_agy(self):
-        with self._real_policy():
+    def test_allowed_agy_row_allows_agy(self):
+        with self._allowed_policy():
             decision = worker_dispatch.evaluate('agy')
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason_code, 'OWNER_POLICY_ALLOWED')
 
-    def test_real_policy_refuses_agy_delegate_new_repair_and_ci_return(self):
+    def test_paused_policy_refuses_agy_delegate_new_repair_and_ci_return(self):
         def packet(excerpt):
             return {'task': 'task-1', 'pr': 7, 'executor_task': 'executor-d6',
                     'failed_head': 'd' * 40, 'version': 1, 'verdict_comment_id': 9,
@@ -458,19 +464,24 @@ class AgyRouteWiringTests(unittest.TestCase):
         for name, repair_packet in entry_points:
             for owner_ref in owner_refs:
                 with self.subTest(entry_point=name, owner_ref=owner_ref):
-                    code, writes = self._real_policy_agy_delegate(
+                    code, writes = self._paused_policy_agy_delegate(
                         owner_ref=owner_ref, repair_packet=repair_packet)
                     self.assertEqual(code, 'OWNER_PAUSED')
                     self.assertEqual(writes, [])
 
-    def test_real_policy_agy_route_gate_refuses_launch(self):
+    def test_agy_route_gate_admits_launch_when_allowed_and_refuses_when_paused(self):
         # The adapter-boundary gate rechecked before every AGY provider launch
-        # (new, repair, retry, recovery or re-dispatch) refuses under the real policy.
+        # (new, repair, retry, recovery or re-dispatch) admits it under an ALLOWED
+        # AGY row (the resumed real row's state) and refuses it under a PAUSED row.
         refs = (None, 'https://github.com/davidcatcat/davidcattoolsproject/'
                       'issues/289#issuecomment-1')
-        with self._real_policy():
-            for owner_ref in refs:
-                with self.subTest(owner_ref=owner_ref):
+        for owner_ref in refs:
+            with self.subTest(owner_ref=owner_ref):
+                with self._allowed_policy():
+                    decision = owner_assignment_gate('a' * 32, owner_ref)()
+                self.assertTrue(decision.allowed)
+                self.assertEqual(decision.reason_code, 'OWNER_POLICY_ALLOWED')
+                with self._paused_policy():
                     self.assertFalse(owner_assignment_gate('a' * 32, owner_ref)())
 
     def test_agy_developer_record_stores_omitted_owner_ref_as_none(self):
