@@ -2210,6 +2210,22 @@ def _canonical_verdict_body(text):
     return text.replace('\r\n', '\n').replace('\r', '\n').rstrip()
 
 
+def _newer_claim_pending(record, pr_number, head, body):
+    """#1132 item 1: a newer open review claim at the same PR and head blocks an older PASS."""
+    match = re.search(r'(?m)^Verdict: PASS \| Version: v(\d+) \| HEAD: ', body or '')
+    claims = record.get('review_dispatch_claim') if type(record) is dict else None
+    if type(claims) is dict:
+        claims = [claims]
+    if match is None or type(claims) is not list:
+        return False
+    version = int(match.group(1))
+    return any(type(claim) is dict and claim.get('pr') == pr_number and
+               claim.get('head_sha') == head and type(claim.get('version')) is int and
+               claim['version'] > version and
+               claim.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN')
+               for claim in claims)
+
+
 def is_formal_claude_pass(body, *, task_id, run_id, contract_digest, result_sha):
     """Return whether a comment is the exact task-bound formal Claude PASS."""
     if type(body) is not str:
@@ -2760,6 +2776,10 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         missing.append('FORMAL_REVIEW_NOT_ACCEPTED')
     if ordering_ambiguous:
         missing.append('FORMAL_REVIEW_NOT_ACCEPTED')
+    if (verdict is not None and verdict[2] and codex_task_record_loaded and
+            _newer_claim_pending(codex_task_record, pr_number, result_sha,
+                                 verdict[1].get('body'))):
+        missing.append('REVIEW_NEWER_CLAIM_PENDING')
     if (reviewer.trusted_agent_id == executor_identity or
             reviewer.session_ref == 'UNKNOWN' or reviewer.session_ref == '' or
             reviewer.session_ref == executor_session_ref):
@@ -2812,6 +2832,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         'REVIEWER_ACTOR_D6_BINDING_MISSING',
         'REVIEWER_ACTOR_D6_BINDING_MISMATCH',
         'REVIEWER_D6_HEAD_MISMATCH', 'REVIEWER_D6_HEAD_UNAVAILABLE',
+        'REVIEW_NEWER_CLAIM_PENDING',
     }
     reviewer_bound = (review is not None and review.get('state') in accepting_states and
                       bool(formal_marker.search(review_body)) and review_binding_verified and
