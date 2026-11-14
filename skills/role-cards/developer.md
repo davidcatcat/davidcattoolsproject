@@ -2,7 +2,7 @@
 
 Role: Developer on every route (Claude Developer, OpenCode, AGY, home LLM `gw-agent`). Source: [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502) WP-F design §3.3.
 
-This card holds only Developer rules. The common core (authority, D6, privacy, the test data rule, sensitive-screen refusal, evidence honesty, Owner channel, Git limit) stays in [AGENTS.md](../../AGENTS.md) and [CLAUDE.md](../../CLAUDE.md) and binds you too. Delivery of this card from the `main` manifest commit, bound by digest, is 待實作（WP-F）.
+This card holds only Developer rules. The common core (authority, D6, privacy, the test data rule, sensitive-screen refusal, evidence honesty, Owner channel, Git limit) stays in [AGENTS.md](../../AGENTS.md) and [CLAUDE.md](../../CLAUDE.md) and binds you too. Since #1822 (Claude Developer, AGY) and #1878 (OpenCode) this card is delivered from the `main` manifest commit, bound by digest. `gw-agent` runs still record `NOT_DELIVERED`; their dispatch spec states the card rules.
 
 ## Scope
 
