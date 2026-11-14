@@ -3225,47 +3225,102 @@ class TaskStore:
     def __init__(self, root=None):
         self.root = Path(default_root() if root is None else root).absolute()
 
-    def _ensure_root(self):
+    def _open_root(self, create):
+        """#1837: open the root one O_NOFOLLOW fd per component, relative to the
+        validated parent. create=False creates nothing and returns None only
+        for a confirmed absence; anything else fails TASK_STORE_UNAVAILABLE."""
         if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW'):
             _fail('TASK_STORE_UNAVAILABLE')
-        current = Path(self.root.anchor)
+        cloexec = getattr(os, 'O_CLOEXEC', 0)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec
         uid = os.getuid()
-        for part in self.root.parts[1:]:
-            current = current / part
-            try:
-                current.mkdir(mode=0o700)
-            except FileExistsError:
-                pass
-            except OSError:
-                _fail('TASK_STORE_UNAVAILABLE')
-            try:
-                info = current.lstat()
-            except OSError:
-                _fail('TASK_STORE_UNAVAILABLE')
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-                _fail('TASK_STORE_UNAVAILABLE')
-            if info.st_uid not in (uid, 0):
-                _fail('TASK_STORE_UNAVAILABLE')
-            if info.st_mode & 0o022 and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX):
-                _fail('TASK_STORE_UNAVAILABLE')
-        info = self.root.lstat()
-        if info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700:
-            _fail('TASK_STORE_UNAVAILABLE')
-
-    def _dirfd(self):
-        self._ensure_root()
         try:
-            fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            info = os.fstat(fd)
-            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or
-                    stat.S_IMODE(info.st_mode) != 0o700):
-                os.close(fd)
-                _fail('TASK_STORE_UNAVAILABLE')
-            return fd
-        except LLMToolError:
-            raise
+            fd = os.open(self.root.anchor, os.O_RDONLY | os.O_DIRECTORY | cloexec)
         except OSError:
             _fail('TASK_STORE_UNAVAILABLE')
+        try:
+            try:
+                info = os.fstat(fd)
+            except OSError:
+                _fail('TASK_STORE_UNAVAILABLE')
+            chain = [(Path(self.root.anchor), info)]
+            for part in self.root.parts[1:]:
+                child = self._open_component(fd, part, flags, create, chain)
+                if child is None:
+                    return None
+                try:
+                    info = os.fstat(child)
+                except OSError:
+                    os.close(child)
+                    _fail('TASK_STORE_UNAVAILABLE')
+                if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (uid, 0) or
+                        (info.st_mode & 0o022 and
+                         not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX))):
+                    os.close(child)
+                    _fail('TASK_STORE_UNAVAILABLE')
+                os.close(fd)
+                fd = child
+                chain.append((chain[-1][0] / part, info))
+            if info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700:
+                _fail('TASK_STORE_UNAVAILABLE')
+            opened, fd = fd, None
+            return opened
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    @staticmethod
+    def _open_component(fd, part, flags, create, chain):
+        """Open part under the validated parent fd; None only for a confirmed absence."""
+        try:
+            return os.open(part, flags, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            _fail('TASK_STORE_UNAVAILABLE')
+        if not create:
+            if not TaskStore._absent_under(fd, part, chain):
+                _fail('TASK_STORE_UNAVAILABLE')
+            return None
+        try:
+            os.mkdir(part, 0o700, dir_fd=fd)
+        except FileExistsError:
+            pass
+        except OSError:
+            _fail('TASK_STORE_UNAVAILABLE')
+        try:
+            return os.open(part, flags, dir_fd=fd)
+        except OSError:
+            _fail('TASK_STORE_UNAVAILABLE')
+
+    @staticmethod
+    def _absent_under(fd, part, chain):
+        """True only when part is missing under a still-linked parent on its own path."""
+        try:
+            os.stat(part, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+        else:
+            return False
+        try:
+            if os.fstat(fd).st_nlink <= 0:
+                return False
+            for path, info in chain:
+                now = os.lstat(path)
+                if (not stat.S_ISDIR(now.st_mode) or
+                        (now.st_dev, now.st_ino) != (info.st_dev, info.st_ino)):
+                    return False
+        except OSError:
+            return False
+        return True
+
+    def _ensure_root(self):
+        os.close(self._open_root(True))  # shim for task_submission_cli
+
+    def _dirfd(self, create=True):
+        return self._open_root(create)
 
     @staticmethod
     def _name(task_id):
@@ -3470,7 +3525,9 @@ class TaskStore:
 
     def task_ids(self):
         """List stored Task IDs (names only; each record is validated on read)."""
-        directory = self._dirfd()
+        directory = self._dirfd(create=False)
+        if directory is None:
+            return []
         try:
             names = os.listdir(directory)
         except OSError:
@@ -3493,7 +3550,9 @@ class TaskStore:
         if not _safe_identifier(executor_task_id, D6_TASK_ID):
             _fail()
         task_ids = self.task_ids()
-        directory = self._dirfd()
+        directory = self._dirfd(create=False)
+        if directory is None:
+            return []
         try:
             matching = []
             for task_id in task_ids:
@@ -3507,7 +3566,9 @@ class TaskStore:
         return sorted(matching)
 
     def get(self, task_id):
-        directory = self._dirfd()
+        directory = self._dirfd(create=False)
+        if directory is None:
+            raise _TaskNotFound('task not found')
         try:
             return dict(self._read_at(directory, task_id))
         finally:
