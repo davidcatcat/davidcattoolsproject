@@ -3131,6 +3131,11 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                                         executor_task=executor_task, pr_number=number,
                                         version=version, reviewer=alternate)
                     except Exception as alt_exc:
+                        if (getattr(alt_exc, 'review_dispatch_code', None) not in
+                                _REVIEWER_ROUTE_UNAVAILABLE):
+                            # Security v91 F1: any other refusal of the alternate keeps
+                            # the existing handling (failure reason, refusal receipt).
+                            raise
                         codes.append(_refusal(alt_exc, 'review_dispatch_code'))
                         alternate = None
                 if alternate is None:

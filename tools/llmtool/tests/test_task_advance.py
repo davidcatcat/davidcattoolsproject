@@ -5344,6 +5344,8 @@ class ReviewerFallbackTests(unittest.TestCase):
         def dispatch(**kwargs):
             calls.append(kwargs)
             answer = pending.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
             if isinstance(answer, str):
                 err = LLMToolError('refused')
                 err.review_dispatch_code = answer
@@ -5391,6 +5393,21 @@ class ReviewerFallbackTests(unittest.TestCase):
                          ['REVIEWER_NOT_ALLOWED', 'REVIEWER_UNAVAILABLE'])
         self.assertEqual(len(calls), 1)
         self.assertNotIn('claude-reviewer', [call.get('reviewer') for call in calls])
+
+    def test_non_route_refusal_of_the_alternate_keeps_its_diagnostics(self):
+        refusal = {'failure_reason': 'REVIEW_HEADER_MISMATCH',
+                   'excerpt': 'synthetic header mismatch excerpt',
+                   'receipt_path': '/repo/test_receipt.json'}
+        error = LLMToolError('refused')
+        error.review_dispatch_code = 'REVIEW_NOT_POSTED'
+        error.review_failure_reason = 'REVIEW_HEADER_MISMATCH'
+        error.review_refusal = dict(refusal)
+        result, calls = self.advance(self.GEMINI, 'ROLE_MODEL_NOT_ALLOWED', error)
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(result['codes'], ['ROLE_MODEL_NOT_ALLOWED', 'REVIEWER_FALLBACK',
+                                           'REVIEW_NOT_POSTED', 'REVIEW_HEADER_MISMATCH'])
+        self.assertEqual(result['review_refusal'], refusal)
+        self.assertEqual(len(calls), 2)
 
     def test_other_refusals_make_no_fallback(self):
         result, calls = self.advance(self.GEMINI, 'REVIEW_NOT_POSTED')
