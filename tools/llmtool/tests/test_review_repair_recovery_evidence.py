@@ -71,6 +71,33 @@ class RecoveryEvidenceTests(unittest.TestCase):
         root['developer']['provider_profile'] = 'codex'
         self.refused(rec.check_authorization, root, repair)
 
+    def test_valid_records_pass_e4(self):
+        for profile in ('gw-agent', 'claude'):
+            root, repair = records(profile)
+            if profile == 'claude':
+                repair['developer']['executor_task_id'] = 'exec-1'
+            with self.subTest(profile=profile):
+                self.assertIsNone(rec.check_execution(root, repair, CLAIM))
+
+    def test_e4_refuses_each_execution_mismatch(self):
+        cases = [(('developer', 'selection_source'), 'OWNER'),
+                 (('developer', 'state'), 'DEVELOPER_DISPATCHING'),
+                 (('developer', 'executor_task_id'), 'exec-2'),
+                 (('developer', 'source_sha'), '9' * 40),
+                 (('developer', 'provider_profile'), 'agy'),
+                 (('developer', 'execution', 'process_exit_code'), True),
+                 (('developer', 'execution', 'native_session_id'), ''),
+                 (('developer', 'execution'), None),
+                 (('completion', 'executor_task_id'), 'exec-2'),
+                 (('completion', 'evidence', 'task_id'), '9' * 32),
+                 (('completion', 'evidence', 'run_id'), '9' * 32),
+                 (('completion', 'evidence', 'contract_digest'), '9' * 64),
+                 (('completion', 'evidence', 'source_sha'), '9' * 40),
+                 (('completion',), None)]
+        for path, value in cases:
+            with self.subTest(path=path):
+                self.refused(rec.check_execution, *self.changed(path, value))
+
 
 if __name__ == '__main__':
     unittest.main()

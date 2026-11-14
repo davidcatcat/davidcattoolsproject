@@ -100,6 +100,7 @@ def check_identity(root, repair, claim):
 
 # Delegates that also record an adapter authorization (worker_dispatch.authorize_dispatch).
 _ADAPTER_PROFILES = ('gw-agent', 'opencode')
+_TERMINAL = ('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED')
 
 
 def _dicts(*values):
@@ -127,4 +128,26 @@ def check_authorization(root, repair, claim):
                    if 'authorization_id' not in entry} - {None}
     adapted = any(entry.get('authorization_id') in transitions for entry in allowed)
     if not transitions or (profile in _ADAPTER_PROFILES and not adapted):
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+
+
+def check_execution(root, repair, claim):
+    """E4: the repair Developer ran to a terminal result on the claim HEAD in its D6."""
+    _dicts(root.get('developer'), repair.get('developer'), repair.get('completion'),
+           repair.get('task_binding'))
+    developer, completion = repair['developer'], repair['completion']
+    _dicts(developer.get('execution'), completion.get('evidence'))
+    execution, evidence = developer['execution'], completion['evidence']
+    session = execution.get('native_session_id')
+    if (developer.get('selection_source') != 'PM' or developer.get('state') not in _TERMINAL or
+            developer.get('executor_task_id', claim['executor_task']) != claim['executor_task'] or
+            developer.get('source_sha') != claim['head_sha'] or
+            developer.get('provider_profile') != root['developer'].get('provider_profile') or
+            type(execution.get('process_exit_code')) is not int or
+            type(session) is not str or not session or
+            completion.get('executor_task_id') != claim['executor_task'] or
+            evidence.get('task_id') != repair.get('task_id') or
+            evidence.get('run_id') != repair.get('run_id') or
+            evidence.get('contract_digest') != repair['task_binding'].get('contract_digest') or
+            evidence.get('source_sha') != claim['head_sha']):
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
