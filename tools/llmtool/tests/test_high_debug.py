@@ -22,6 +22,16 @@ from llmtool.task_store import TaskStore
 
 _REAL_POST_GITHUB_RECORD = high_debug._post_github_record
 _RECOVERY_REF = 'https://github.com/org/repo/issues/1097#issuecomment-3'
+# #1502 WP-F: these tests do not read main; the rule loader is stubbed.
+# tests/test_high_debug_cards.py covers the real loader.
+_STUB_RULES = 'RULES stub\nRULES_END\n\n'
+_STUB_RULES_RESULT = (_STUB_RULES, hashlib.sha256(_STUB_RULES.encode('utf-8')).hexdigest())
+
+
+def _stub_debug_rules(test):
+    patcher = patch.object(high_debug, '_debug_rules', return_value=_STUB_RULES_RESULT)
+    patcher.start()
+    test.addCleanup(patcher.stop)
 
 
 def _keyword_lines(count):
@@ -56,6 +66,7 @@ class HighDebugTests(unittest.TestCase):
             return_value=Path(self.unposted_root.name) / 'tasks')
         self._store_root_patch.start()
         self.addCleanup(self._store_root_patch.stop)
+        _stub_debug_rules(self)
 
     @staticmethod
     def _report(outcome_lines, prose=''):
@@ -2039,6 +2050,7 @@ class HighDebugWrongTaskOrFamilyTests(unittest.TestCase):
                                     return_value=True)
         self.poster = poster_patch.start()
         self.addCleanup(poster_patch.stop)
+        _stub_debug_rules(self)
 
     _REMOVED = object()
 
