@@ -494,15 +494,21 @@ def load_list(store):
     A record whose index entry is absent or out of date (file stat changed) is read from
     TaskStore. A missing, unreadable or stale index falls back to load_records; the note
     says so. Read only: the index is never written, created or repaired here.
+
+    An index row keeps only its Task's newest events. The full record of a row whose
+    older events could still be among the newest events across Tasks is read as well
+    (chat_tui_events.index_rows_to_read), so the events views select the same events as
+    from full records; every other row needs no TaskStore.get.
     """
     from . import task_index
+    from .chat_tui_events import index_rows_to_read
     entries, reason = task_index.display_entries(store)
     if entries is None:
         records, unreadable = load_records(store)
         return (records, unreadable, _INDEX_FALLBACK.get(reason, "status index unavailable")
                 + "; read every TaskStore record")
-    records, unreadable, stale = [], 0, []
-    for task_id in store.task_ids():
+    records, unreadable, stale = [], 0, 0
+    for task_id in store.task_ids():   # TaskStore order, as load_records reads them
         entry = entries.get(task_id)
         if entry is not None and entry["stat"] == task_index.record_key(store, task_id):
             if not entry["readable"]:
@@ -511,18 +517,24 @@ def load_list(store):
             if "tui" in entry:
                 records.append(_index_record(task_id, entry, entry["tui"]))
                 continue
-        stale.append(task_id)
-    for task_id in stale:
+        stale += 1
         try:
             records.append(store.get(task_id))
         except Exception:
             unreadable += 1
     records.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
+    records = records[:LIST_LIMIT]
+    for position in index_rows_to_read(records):
+        try:
+            records[position] = store.get(records[position]["task_id"])
+        except Exception:
+            pass   # the row stays; /task events says its older events may be missing
+    records.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
     note = None
     if stale:
         note = ("status index out of date for %d Tasks; read those TaskStore records"
-                % len(stale))
-    return records[:LIST_LIMIT], unreadable, note
+                % stale)
+    return records, unreadable, note
 
 
 # Stages in which PM-dispatched work is running in the background, and who is at work.

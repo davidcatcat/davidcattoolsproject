@@ -29,7 +29,7 @@ _TUI_KEYS = frozenset({'updated_at', 'stage', 'name', 'executor', 'prs', 'owner'
 # outside the closure keeps a fresh index; a change to any module inside makes it stale.
 FINGERPRINT_ROOTS = ('task_index', 'task_store')
 _PACKAGE_NAME = __name__.rpartition('.')[0] or 'llmtool'
-_SCAN_CACHE = {}           # sha256 of module bytes -> (imports, bound names); per process
+_SCAN_CACHE = {}  # sha256 of module bytes -> (imports, defined, re-exports); per process
 _SCAN_CACHE_LIMIT = 1024
 
 
@@ -39,31 +39,42 @@ class FingerprintUnavailable(Exception):
 
 
 def _scan(contents):
-    """(import statements, names bound anywhere) of one module, from its AST only.
+    """(import statements, names defined, re-exported names) of one module, from its AST.
 
+    Defined names are bound anywhere by a statement other than ``from ... import``
+    (def, class, assignment, except, ``import x``); a name bound only by ``from M import
+    N [as name]`` maps to its sources ((level, M, N), ...), so a lookup can follow the
+    import instead of trusting the binding (#1838 repair: an unresolved import never
+    resolves itself). A star import counts as defining '*'.
     Cached by content digest, so an edited module is always parsed again.
     """
     key = hashlib.sha256(contents).digest()
     cached = _SCAN_CACHE.get(key)
     if cached is not None:
         return cached
-    imports, bound = set(), set()
+    imports, defined, exports = set(), set(), {}
     for node in ast.walk(ast.parse(contents)):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 imports.add((0, alias.name, ()))
-                bound.add((alias.asname or alias.name).partition('.')[0])
+                defined.add((alias.asname or alias.name).partition('.')[0])
         elif isinstance(node, ast.ImportFrom):
             imports.add((node.level, node.module or '',
                          tuple(alias.name for alias in node.names)))
-            bound.update(alias.asname or alias.name for alias in node.names)
+            for alias in node.names:
+                if alias.name == '*':
+                    defined.add('*')
+                else:
+                    exports.setdefault(alias.asname or alias.name, set()).add(
+                        (node.level, node.module or '', alias.name))
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bound.add(node.name)
+            defined.add(node.name)
         elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            bound.add(node.id)
+            defined.add(node.id)
         elif isinstance(node, ast.ExceptHandler) and node.name:
-            bound.add(node.name)
-    result = (tuple(sorted(imports)), frozenset(bound))
+            defined.add(node.name)
+    result = (tuple(sorted(imports)), frozenset(defined),
+              {name: tuple(sorted(sources)) for name, sources in exports.items()})
     if len(_SCAN_CACHE) >= _SCAN_CACHE_LIMIT:
         _SCAN_CACHE.clear()
     _SCAN_CACHE[key] = result
@@ -123,35 +134,57 @@ def _closure(package):
             modules[parts] = (source.name == '__init__.py', name, contents, scan)
         return modules[parts]
 
+    def target(parts, level, module):
+        """The package parts an import in module ``parts`` names, or None outside it."""
+        is_package, name, _contents, _scan_result = read(parts)
+        if level == 0:
+            if module != _PACKAGE_NAME and not module.startswith(_PACKAGE_NAME + '.'):
+                return None
+            return tuple(module.split('.')[1:])
+        here = parts if is_package else parts[:-1]
+        if level - 1 > len(here):
+            raise FingerprintUnavailable('relative import beyond the package in ' + name)
+        return here[:len(here) - (level - 1)] + (tuple(module.split('.')) if module else ())
+
+    def provides(base, item, seen):
+        """Whether package module ``base`` provides ``item``: a submodule of a package, a
+        name it defines, or a name it imports from somewhere that provides it. ``seen``
+        holds the (module, name) lookups in progress, so a name whose only source is the
+        import being resolved, directly or through a cycle, is unresolved (fail closed)."""
+        want(base)
+        base_package, _name, _bytes, (_imports, defined, exports) = read(base)
+        if base_package and _module_source(package, base + (item,)) is not None:
+            want(base + (item,))
+            return True
+        if item in defined or '*' in defined or '__getattr__' in defined:
+            return True
+        for level, module, original in exports.get(item, ()):
+            source = target(base, level, module)
+            if source is None:
+                return True        # bound from outside the package: not checked here
+            if (source, original) in seen:
+                continue
+            if provides(source, original, seen | {(source, original)}):
+                return True
+        return False
+
     while pending:
         parts = pending.pop()
-        is_package, name, _contents, (imports, _bound) = read(parts)
+        _is_package, name, _contents, (imports, _defined, _exports) = read(parts)
         for depth in range(len(parts)):
             # Importing a submodule first runs each enclosing package's __init__.py.
             if not (package.joinpath(*parts[:depth]) / '__init__.py').is_file():
                 raise FingerprintUnavailable('no __init__.py for package '
                                              + label(parts[:depth]))
             want(parts[:depth])
-        here = parts if is_package else parts[:-1]
         for level, module, names in imports:
-            if level == 0:
-                if module != _PACKAGE_NAME and not module.startswith(_PACKAGE_NAME + '.'):
-                    continue
-                base = tuple(module.split('.')[1:])
-            else:
-                if level - 1 > len(here):
-                    raise FingerprintUnavailable('relative import beyond the package in '
-                                                 + name)
-                base = here[:len(here) - (level - 1)] + (
-                    tuple(module.split('.')) if module else ())
+            base = target(parts, level, module)
+            if base is None:
+                continue
             want(base)
-            base_package, _name, _bytes, (_imports, bound) = read(base)
+            read(base)
             for item in names:
-                if item == '*':
-                    continue
-                if base_package and _module_source(package, base + (item,)) is not None:
-                    want(base + (item,))
-                elif item not in bound and '*' not in bound and '__getattr__' not in bound:
+                if item != '*' and not provides(base, item, frozenset({(base, item)})):
                     raise FingerprintUnavailable('unresolved name %s in %s imported by %s'
                                                  % (item, label(base), name))
     return {modules[parts][1]: modules[parts][2] for parts in wanted}

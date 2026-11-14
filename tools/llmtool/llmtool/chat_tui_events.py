@@ -198,16 +198,45 @@ def _row_events(record):
 
 
 def _recent_rows(records, limit):
-    """([(event, task_id)] newest first, untimed last, at most ``limit``; whether the
-    status index kept only each Task's newest events)."""
-    rows, partial = [], False
-    for record in records:
+    """([(event, task_id)] newest first, untimed last, at most ``limit``; the positions in
+    ``records`` of index rows whose unkept older events could belong in that selection).
+
+    An index row keeps its Task's newest events, in the order task_events gives them, so
+    each unkept event sorts after the row's last kept one (older, untimed, or an equal time
+    later in the same Task). When that last kept event is not selected, no unkept event of
+    the row is either; when it is selected (or the row kept none), only the full record
+    gives the exact selection. With no such row, the selection equals the one built from
+    full TaskStore records (#1838 repair: indexed and full reads agree).
+    """
+    rows, cut = [], {}
+    for position, record in enumerate(records):
         task_id = value(record, "task_id")
-        events, cut = _row_events(record)
-        partial = partial or cut
-        rows += [(event, task_id) for event in events]
+        events, partial = _row_events(record)
+        if partial:
+            cut[position] = len(events)
+        rows += [(event, task_id, position) for event in events]
     timed = sorted((r for r in rows if r[0]["time"]), key=lambda r: r[0]["time"], reverse=True)
-    return (timed + [r for r in rows if not r[0]["time"]])[:limit], partial
+    chosen = (timed + [r for r in rows if not r[0]["time"]])[:limit]
+    shown = {}
+    for _event_row, _task_id, position in chosen:
+        shown[position] = shown.get(position, 0) + 1
+    unsure = [position for position, kept in sorted(cut.items())
+              if shown.get(position, 0) == kept]
+    return [(event, task_id) for event, task_id, _position in chosen], unsure
+
+
+def index_rows_to_read(records, limit=RECENT_LIMIT):
+    """Positions in ``records`` (newest first, as load_list returns them) of status index
+    rows whose full TaskStore record is needed for the newest ``limit`` events across
+    Tasks. The default covers both the F4 pane and /task events (a smaller limit's
+    selection is a prefix of this one)."""
+    return _recent_rows(records, limit)[1]
+
+
+# Shown when an index row that could hold newer events stayed unread (its record changed
+# or became unreadable after the index was checked): the selection may miss its events.
+PARTIAL_NOTE = ("status index keeps %d events per Task; a Task's older events could not be "
+                "read, so some newer events may be missing")
 
 
 CONVERSATION_LIMIT = 20  # Events /task events prints into the conversation (#1838).
@@ -216,11 +245,14 @@ CONVERSATION_LIMIT = 20  # Events /task events prints into the conversation (#18
 def conversation_text(records, unreadable, read_at, note=None, limit=CONVERSATION_LIMIT):
     """#1838: what /task events prints into the conversation: the newest events across
     Tasks, or "no events in TaskStore". Read only, like the F4 pane."""
-    rows, _partial = _recent_rows(records, limit)
+    from .task_index import TUI_EVENT_LIMIT
+    rows, unsure = _recent_rows(records, limit)
     lines = ["Recent events across %d Tasks (%d unreadable; read %s; newest %d shown; "
              "F4 opens the events pane)" % (len(records), unreadable, read_at, len(rows))]
     if note:
         lines.append("  " + note)
+    if unsure:
+        lines.append("  " + PARTIAL_NOTE % TUI_EVENT_LIMIT)
     lines += ["  " + format_event(event, task_id) for event, task_id in rows]
     if not rows:
         lines.append("  no events in TaskStore")
@@ -231,10 +263,10 @@ def recent_text(records, unreadable, refreshed, note=None):
     """Cross-Task recent events pane text; ``note`` (status index fallback) follows the
     header lines."""
     from .task_index import TUI_EVENT_LIMIT
-    rows, partial = _recent_rows(records, RECENT_LIMIT)
+    rows, unsure = _recent_rows(records, RECENT_LIMIT)
     lines = ["Recent events across %d Tasks (%d unreadable; refreshed %s; newest %d shown%s)"
              % (len(records), unreadable, refreshed, RECENT_LIMIT,
-                ", status index keeps %d per Task" % TUI_EVENT_LIMIT if partial else ""),
+                ", status index keeps %d per Task" % TUI_EVENT_LIMIT if unsure else ""),
              "F5 or r refreshes, Esc closes, Tab focuses for scrolling; read only, no inbox ack/poll"]
     if note:
         lines.append(note)

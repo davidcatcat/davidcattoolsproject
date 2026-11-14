@@ -3325,10 +3325,11 @@ class TaskStatusIndexListTests(unittest.TestCase):
         return (self.BASE + timedelta(seconds=n)).strftime('%Y-%m-%dT%H:%M:%SZ')
 
     def summary(self, n, **fields):
-        """A synthetic index projection (labelled synthetic; no real Task data)."""
+        """A synthetic index projection (labelled synthetic; no real Task data). It keeps
+        every event of its Task (event_count 1), so no events view needs the record."""
         base = {'updated_at': self.stamp(n), 'stage': 'RUNNING',
                 'name': 'synthetic row %d' % n, 'executor': None, 'prs': [], 'owner': False,
-                'terminal': False, 'event_count': 5,
+                'terminal': False, 'event_count': 1,
                 'events': [[self.stamp(n), 'TASK', 'synthetic event %d' % n, True]]}
         base.update(fields)
         return base
@@ -3382,9 +3383,13 @@ class TaskStatusIndexListTests(unittest.TestCase):
         self.assertEqual(page[0]['stage'], 'RUNNING')
         self.assertEqual(page[0]['name'], 'synthetic row 2999')
         lines = events.splitlines()
-        self.assertIn('newest 100 shown, status index keeps 3 per Task', lines[0])
+        # Every index row keeps all its events: the selection is exact, with no caveat.
+        self.assertIn('newest 100 shown)', lines[0])
+        self.assertNotIn('status index keeps', events)
         self.assertTrue(lines[2].startswith(self.stamp(2999) + '  ' + ('%032x' % 2999)[:8]
                                             + '  [TASK] synthetic event 2999'))
+        self.assertTrue(lines[101].startswith(self.stamp(2900) + '  ' + ('%032x' % 2900)[:8]
+                                              + '  [TASK] synthetic event 2900'))
         self.assertLess(elapsed, 2.0)
         self.assertEqual(self.snapshot(), before)
 
@@ -3525,6 +3530,107 @@ class TaskStatusIndexListTests(unittest.TestCase):
         events = indexed[2][chat_tui_status.INDEX_KEY]['events']
         self.assertEqual(events, [[e['time'], e['kind'], e['text'], e['recorded']]
                                   for e in self.events.task_events(full[2])[:3]])
+
+    def event_task(self, n, extra):
+        """A synthetic record (labelled synthetic; no real Task data) with ``extra`` High
+        Debug entries after its creation: 1 + ``extra`` events at stamps 10n .. 10n+extra."""
+        return _record(task_id='%032x' % n, request='full record %d' % n,
+                       created_at=self.stamp(10 * n), updated_at=self.stamp(10 * n + 9),
+                       high_debug=[{'recorded_at': self.stamp(10 * n + k), 'status': 'PASS',
+                                    'family': 'synthetic', 'model_observed': 'synthetic'}
+                                   for k in range(1, extra + 1)])
+
+    def indexed_store(self, records):
+        """A store of ``records`` and a current index holding each one's real projection."""
+        for record in records:
+            (self.root / (record['task_id'] + '.json')).write_text('{}')
+        store = _IndexStore(self.root, {record['task_id']: record for record in records})
+        self.write_index(store, {
+            record['task_id']: {'stat': self.index.record_key(store, record['task_id']),
+                                'readable': True, 'created_at': record['created_at'],
+                                'pm_session_id': record['pm_session_id'],
+                                'tui': chat_tui_status.index_summary(record)}
+            for record in records})
+        return store
+
+    def test_task_with_more_events_than_the_index_keeps_selects_like_full_records(self):
+        # Review F2: Task A has five events, all newer than Task B's only event. The index
+        # keeps A's newest three; the fourth newest event overall is A's, never B's.
+        a, b = self.event_task(2, 4), self.event_task(1, 0)   # A: stamps 20..24; B: 10
+        store = self.indexed_store([a, b])
+        summary = chat_tui_status.index_summary(a)
+        self.assertEqual((len(summary['events']), summary['event_count']),
+                         (self.index.TUI_EVENT_LIMIT, 5))
+        # The index rows alone cannot give the exact selection, and both views say so.
+        rows = [chat_tui_status._index_record(r['task_id'], {'created_at': r['created_at']},
+                                              chat_tui_status.index_summary(r)) for r in (a, b)]
+        self.assertEqual(self.events.index_rows_to_read(rows), [0])
+        self.assertIn(self.events.PARTIAL_NOTE % self.index.TUI_EVENT_LIMIT,
+                      self.events.conversation_text(rows, 0, 'now', None, 4))
+        self.assertIn('status index keeps 3 per Task',
+                      self.events.recent_text(rows, 0, 'now').splitlines()[0])
+        before = self.snapshot()
+        with patch.object(chat_tui_status, 'load_records',
+                          side_effect=AssertionError('no full read')):
+            records, unreadable, note = chat_tui_status.load_list(store)
+        store.get.assert_called_once_with(a['task_id'])    # A only: B's index row is whole
+        self.assertEqual((unreadable, note), (0, None))
+        self.assertNotIn(chat_tui_status.INDEX_KEY, records[0])   # A, from its record
+        self.assertIn(chat_tui_status.INDEX_KEY, records[1])      # B, from the index
+        full, _unreadable = chat_tui_status.load_records(store)
+        for limit in (4, self.events.CONVERSATION_LIMIT):
+            with self.subTest(limit=limit):
+                self.assertEqual(self.events.conversation_text(records, 0, 'now', None, limit),
+                                 self.events.conversation_text(full, 0, 'now', None, limit))
+        self.assertEqual(self.events.recent_text(records, 0, 'now'),
+                         self.events.recent_text(full, 0, 'now'))
+        shown = self.events.conversation_text(records, 0, 'now', None, 4).splitlines()
+        self.assertEqual([line.split()[0] for line in shown[1:]],
+                         [self.stamp(24), self.stamp(23), self.stamp(22), self.stamp(21)])
+        self.assertNotIn('status index keeps', self.events.recent_text(records, 0, 'now'))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_unreadable_record_for_the_selection_keeps_the_row_and_says_so(self):
+        a, b = self.event_task(2, 4), self.event_task(1, 0)
+        store = self.indexed_store([a, b])
+        store.get.side_effect = OSError('synthetic: record changed after the index check')
+        records, unreadable, note = chat_tui_status.load_list(store)
+        store.get.assert_called_once_with(a['task_id'])
+        self.assertEqual((unreadable, note), (0, None))
+        self.assertEqual([chat_tui_status.row(r)['task_id'] for r in records],
+                         [a['task_id'], b['task_id']])
+        self.assertTrue(all(chat_tui_status.INDEX_KEY in record for record in records))
+        lines = self.events.conversation_text(records, 0, 'now').splitlines()
+        self.assertEqual(lines[1],
+                         '  ' + self.events.PARTIAL_NOTE % self.index.TUI_EVENT_LIMIT)
+        self.assertIn('status index keeps 3 per Task',
+                      self.events.recent_text(records, 0, 'now').splitlines()[0])
+
+    def test_3000_index_rows_with_more_events_read_only_the_newest_tasks(self):
+        # Every Task has five events; the index keeps three. Only the Tasks whose kept
+        # events all reach the newest 100 are read, and the views equal full reads.
+        records = [self.event_task(n, 4) for n in range(3000)]
+        store = self.indexed_store(records)
+        before = self.snapshot()
+        started = time.monotonic()
+        with patch.object(chat_tui_status, 'load_records',
+                          side_effect=AssertionError('no full read')):
+            listed, unreadable, note = chat_tui_status.load_list(store)
+        elapsed = time.monotonic() - started
+        newest = 3000 - self.events.RECENT_LIMIT // self.index.TUI_EVENT_LIMIT
+        self.assertEqual(sorted(call.args[0] for call in store.get.call_args_list),
+                         ['%032x' % n for n in range(newest, 3000)])
+        self.assertEqual((unreadable, note), (0, None))
+        self.assertEqual(len(listed), chat_tui_status.LIST_LIMIT)
+        self.assertLess(elapsed, 2.0)
+        full, _unreadable = chat_tui_status.load_records(store)
+        self.assertEqual([chat_tui_status.row(r) for r in listed],
+                         [chat_tui_status.row(r) for r in full])
+        self.assertEqual(self.events.recent_text(listed, 0, 'now'),
+                         self.events.recent_text(full, 0, 'now'))
+        self.assertEqual(self.events.conversation_text(listed, 0, 'now'),
+                         self.events.conversation_text(full, 0, 'now'))
+        self.assertEqual(self.snapshot(), before)
 
 
 @unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')

@@ -320,6 +320,65 @@ class ValidatorFingerprintScopeTests(unittest.TestCase):
                 append(directory, module, text)
                 self.assert_unavailable(directory)
 
+    def test_initializer_import_of_a_missing_module_never_resolves_itself(self):
+        # Review F1: a package __init__.py whose own (here function-local) import names a
+        # missing module binds that name only through the unresolved import itself.
+        cases = {
+            'function-local': (b'\ndef _synthetic_local():\n'
+                               b'    from . import synthetic_missing\n'
+                               b'    return synthetic_missing\n'),
+            'top level': b'\nfrom . import synthetic_missing\n',
+            'absolute': b'\nfrom llmtool import synthetic_missing\n',
+            'aliased': b'\nfrom . import synthetic_missing as synthetic_alias\n',
+        }
+        for case, text in cases.items():
+            with self.subTest(case):
+                directory = build(self.builds, 'init-' + case.replace(' ', '-'))
+                append(directory, '__init__.py', text)
+                self.assert_unavailable(directory)
+        # Another closure module importing that name through the package is unresolved too.
+        directory = build(self.builds, 'init-reexport')
+        append(directory, '__init__.py', b'\nfrom . import synthetic_missing\n')
+        append(directory, 'task_store.py', b'\nfrom . import synthetic_missing\n')
+        self.assert_unavailable(directory)
+
+    def test_initializer_import_of_an_existing_module_is_followed(self):
+        directory = build(self.builds, 'init-present')
+        (directory / 'synthetic_dep.py').write_bytes(b'SYNTHETIC = 1\n')
+        before = self.fingerprint(directory)
+        self.assertEqual(before, self.real())
+        append(directory, '__init__.py', b'\ndef _synthetic_local():\n'
+                                         b'    from . import synthetic_dep\n'
+                                         b'    return synthetic_dep\n')
+        self.assertIn('synthetic_dep.py', task_index.fingerprint_modules(package=directory))
+        added = self.fingerprint(directory)
+        append(directory, 'synthetic_dep.py', _EDIT)
+        self.assertNotIn(self.fingerprint(directory), (before, added))
+
+    def test_reexported_names_resolve_only_through_a_defining_module(self):
+        # A name imported from a module that itself imports it resolves through the chain
+        # to the module that defines it; a chain that only loops back never resolves.
+        directory = build(self.builds, 'reexport-chain')
+        (directory / 'synthetic_a.py').write_bytes(b'from .synthetic_b import SYNTHETIC\n')
+        (directory / 'synthetic_b.py').write_bytes(b'SYNTHETIC = 1\n')
+        append(directory, 'task_store.py', b'\nfrom .synthetic_a import SYNTHETIC\n')
+        modules = task_index.fingerprint_modules(package=directory)
+        self.assertIn('synthetic_a.py', modules)
+        self.assertIn('synthetic_b.py', modules)
+        cases = {
+            'cycle': (b'from .synthetic_b import SYNTHETIC\n',
+                      b'from .synthetic_a import SYNTHETIC\n'),
+            'self': (b'from .synthetic_a import SYNTHETIC\n', b'VALUE = 1\n'),
+            'missing at the end': (b'from .synthetic_b import SYNTHETIC\n', b'VALUE = 1\n'),
+        }
+        for case, (first, second) in cases.items():
+            with self.subTest(case):
+                directory = build(self.builds, 'reexport-' + case.replace(' ', '-'))
+                (directory / 'synthetic_a.py').write_bytes(first)
+                (directory / 'synthetic_b.py').write_bytes(second)
+                append(directory, 'task_store.py', b'\nfrom .synthetic_a import SYNTHETIC\n')
+                self.assert_unavailable(directory)
+
     @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0,
                      'file modes do not stop reads by root')
     def test_unreadable_closure_module_makes_the_index_unavailable(self):
