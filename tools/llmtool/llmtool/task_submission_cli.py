@@ -2242,7 +2242,7 @@ def _run_task_drive_leased(args, store, caller_key, sleep, advance_call, adapter
         from . import gw_agent_sessions
         gw_agent_sessions.sweep_quietly(store)
     _print(result)
-    return 1 if result.get('codes') else 0
+    return _advance_exit_code(result)
 
 
 def run_task_claude_result(args, *, store=None, stdout=None):
