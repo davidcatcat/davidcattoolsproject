@@ -40,5 +40,57 @@ class InlineFindingsTests(unittest.TestCase):
         self.assertEqual(inline_findings('Finding: F1 [High] docs/b.md:1 x', [None, 3]), [])
 
 
+from llmtool.review_inline import post_inline_copies  # noqa: E402
+
+HEAD = 'a' * 40
+VERDICT = ('Finding: F1 [High] tools/llmtool/llmtool/a.py:12 off by one\n'
+           'Finding: F2 [Low] docs/b.md:3 wording\n')
+
+
+class PostInlineCopiesTests(unittest.TestCase):
+    def run_post(self, existing=(), poster=None, body=VERDICT, head=HEAD):
+        posted = []
+        def post(pr, payload):
+            posted.append((pr, payload))
+        result = post_inline_copies(
+            7, head, body, file_lister=lambda pr: list(CHANGED),
+            comment_lister=lambda pr: list(existing), poster=poster or post)
+        return result, posted
+
+    def test_posts_each_finding_once_on_the_head_line(self):
+        result, posted = self.run_post()
+        self.assertEqual(result, {'posted': 2, 'skipped': 0, 'failed': 0})
+        self.assertEqual(posted[0], (7, {
+            'body': '<!-- llmtool-inline-copy head=%s id=F1 -->\n'
+                    'Advisory copy of formal verdict finding F1 [High]: off by one' % HEAD,
+            'commit_id': HEAD, 'path': 'tools/llmtool/llmtool/a.py', 'line': 12, 'side': 'RIGHT'}))
+        self.assertEqual(posted[1][1]['path'], 'docs/b.md')
+
+    def test_existing_copy_on_same_head_is_skipped_other_head_is_not(self):
+        existing = [{'body': '<!-- llmtool-inline-copy head=%s id=F1 -->\nold' % HEAD},
+                    {'body': '<!-- llmtool-inline-copy head=%s id=F2 -->\nold' % ('b' * 40)}, 'junk']
+        result, posted = self.run_post(existing=existing)
+        self.assertEqual(result, {'posted': 1, 'skipped': 1, 'failed': 0})
+        self.assertEqual([item[1]['path'] for item in posted], ['docs/b.md'])
+
+    def test_failures_are_counted_never_raised(self):
+        def broken(pr, payload):
+            raise OSError('synthetic post failure')
+        self.assertEqual(self.run_post(poster=broken)[0], {'posted': 0, 'skipped': 0, 'failed': 2})
+        def lister(pr):
+            raise OSError('synthetic list failure')
+        result = post_inline_copies(7, HEAD, VERDICT, file_lister=lister,
+                                    comment_lister=lambda pr: [], poster=broken)
+        self.assertEqual(result, {'posted': 0, 'skipped': 0, 'failed': 1})
+
+    def test_bad_pr_or_head_posts_nothing(self):
+        for pr, head in ((0, HEAD), ('7', HEAD), (7, 'A' * 40), (7, 'a' * 39)):
+            posted = []
+            result = post_inline_copies(pr, head, VERDICT, file_lister=lambda p: list(CHANGED),
+                                        comment_lister=lambda p: [],
+                                        poster=lambda p, payload: posted.append(payload))
+            self.assertEqual((result['failed'], posted), (1, []))
+
+
 if __name__ == '__main__':
     unittest.main()
