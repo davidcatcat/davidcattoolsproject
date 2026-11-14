@@ -196,6 +196,16 @@ class TaskSubmissionCLITests(unittest.TestCase):
             submission_cli, '_bind_direct_native_session', return_value=False)
         self.native_bind_patch.start()
         self.addCleanup(self.native_bind_patch.stop)
+        # #1502 WP-F: OpenCode runs here never pin main or read role cards from
+        # Git; tests/test_opencode_route_wiring.py covers the real card path.
+        prefix = '\nREQUIRED_SKILL_BEGIN path=card\nFixture rules.\nREQUIRED_SKILL_END path=card'
+        for patcher in (
+                patch.object(submission_cli, '_developer_card_prefix', return_value=(
+                    prefix, hashlib.sha256(prefix.encode('utf-8')).hexdigest())),
+                patch.object(submission_cli.skill_ledger, 'record_card_delivery',
+                             return_value='receipt')):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def invoke(self, *, resolver=None, client=None, key=None):
         out = io.StringIO()
