@@ -467,14 +467,58 @@ class ApplyTests(_RepoCase):
         real_mkdir = os.mkdir
 
         def spy_mkdir(path, *args, **kwargs):
-            made.append(os.path.relpath(path, self.root))
+            made.append((path, kwargs.get('dir_fd') is not None))
             return real_mkdir(path, *args, **kwargs)
 
         p = self.make_plan([{'op': 'move', 'from': 'README.txt', 'to': 'a/b/c/README.txt'}])
         with mock.patch.object(file_ops.os, 'mkdir', side_effect=spy_mkdir), \
                 mock.patch.object(file_ops.os, 'makedirs', side_effect=AssertionError('makedirs')):
             self.assertEqual('APPLIED', file_ops.apply(self.root, p)['status'])
-        self.assertEqual([os.path.join('a'), os.path.join('a', 'b'), os.path.join('a', 'b', 'c')], made)
+        # One bare name per level, always relative to a directory fd.
+        self.assertEqual([('a', True), ('b', True), ('c', True)], made)
+
+    def test_ancestor_swapped_during_parent_creation(self):
+        p = self.make_plan([{'op': 'move', 'from': 'README.txt', 'to': 'a/b/c/README.txt'}])
+        real_mkdir = os.mkdir
+        made = []
+
+        def swapping_mkdir(path, *args, **kwargs):
+            made.append(path)
+            if len(made) == 2:  # 'a' was created and opened; swap it for a symlink outside
+                os.rename(os.path.join(self.root, 'a'), os.path.join(self.root, 'a-aside'))
+                os.symlink(self.outside, os.path.join(self.root, 'a'))
+            return real_mkdir(path, *args, **kwargs)
+
+        calls, spy = self.spy_mutate()
+        with mock.patch.object(file_ops.os, 'mkdir', side_effect=swapping_mkdir), spy:
+            result = file_ops.apply(self.root, p)
+        self.assertIsolated(result, 0)
+        self.assertEqual([], calls)
+        self.assertEqual([], os.listdir(self.outside))  # nothing created through the symlink
+        self.assertFalse(any(os.path.isabs(m) for m in made))
+        self.assertTrue(os.path.islink(os.path.join(self.root, 'a')))
+        self.assertTrue(self.exists('README.txt'))
+
+    def test_source_parent_swapped_during_destination_creation(self):
+        p = self.make_plan([{'op': 'move', 'from': 'docs/a.txt', 'to': 'fresh/a.txt'}])
+        moved_aside = os.path.join(self.outside, 'docs')
+        real_mkdir = os.mkdir
+
+        def swapping_mkdir(path, *args, **kwargs):
+            made = real_mkdir(path, *args, **kwargs)
+            if not os.path.lexists(moved_aside):
+                os.rename(os.path.join(self.root, 'docs'), moved_aside)
+                os.symlink(moved_aside, os.path.join(self.root, 'docs'))
+            return made
+
+        calls, spy = self.spy_mutate()
+        with mock.patch.object(file_ops.os, 'mkdir', side_effect=swapping_mkdir), spy:
+            result = file_ops.apply(self.root, p)
+        self.assertIsolated(result, 0)
+        self.assertIn('docs/a.txt', result['reason'])
+        self.assertEqual([], calls)  # no git mutation after the swap
+        self.assertEqual(['a.txt', 'b.txt', 'sub'], sorted(os.listdir(moved_aside)))
+        self.assertFalse(self.exists('fresh/a.txt'))
 
     def test_git_runs_as_argument_lists_without_forbidden_verbs(self):
         real_run = subprocess.run

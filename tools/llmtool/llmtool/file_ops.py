@@ -9,11 +9,13 @@ Four steps, each small and explicit:
   tree, expands each op to concrete tracked files and checks the whole batch.
   Any failure refuses the whole batch; nothing changes.
 * ``apply(root, plan)``: re-runs the plan checks, then one ``git rm`` or
-  ``git mv`` per concrete file with argument lists. Right before each call
-  every existing component of source and destination is re-checked (lstat,
-  no symlink, realpath inside the root) and destination parents are created
-  one level at a time with ``os.mkdir``; after each call the result paths are
-  checked the same way. It never commits, pushes,
+  ``git mv`` per concrete file with argument lists. Destination parents are
+  created first, one level at a time, only through directory file
+  descriptors opened from the root with ``O_DIRECTORY|O_NOFOLLOW``
+  (``os.mkdir(name, dir_fd=fd)``; never an absolute path). Then, right before
+  each call, every existing component of source and destination is re-checked
+  (lstat, no symlink, realpath inside the root); after each call the result
+  paths are checked the same way. It never commits, pushes,
   resets, cleans or checks out. A mid-run failure stops at once and returns
   ``FAILED`` with ``isolate=True``: the caller must not run a Developer or
   publish, and recovery is to recreate the D6. Re-applying an already
@@ -47,6 +49,13 @@ PRECHECK_FAILED = 'FILE_OPS_PRECHECK_FAILED'
 PARTIAL_STATE = 'FILE_OPS_PARTIAL_STATE'
 VERIFY_FAILED = 'FILE_OPS_VERIFY_FAILED'
 _GUARD = 'FILE_OPS_APPLY_GUARD'  # internal: becomes a FAILED/isolate result, never raised
+
+# Parent creation needs directory file descriptors; without them apply fails
+# closed. Captured at import so a patched ``os.mkdir`` cannot change the answer.
+_DIR_FD_OK = (hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW')
+              and os.mkdir in os.supports_dir_fd and os.open in os.supports_dir_fd)
+_DIR_FLAGS = (os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+              | getattr(os, 'O_CLOEXEC', 0))
 
 _HEAD_RE = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')
 _REGULAR_MODES = frozenset({'100644', '100755'})
@@ -425,41 +434,67 @@ def _failed(sealed, completed, reason):
             'head': sealed['head'], 'plan_sha256': sealed['sha256']}
 
 
-def _inside(root, path):
-    real = os.path.realpath(path)
-    return real != root and os.path.commonpath([root, real]) == root
+def _open_dir(name, dir_fd, rel):
+    """Open ``name`` under ``dir_fd`` as a directory without following a symlink."""
+    try:
+        return os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+    except OSError:
+        raise _error(_GUARD, f'{rel}: parent {name} is a symlink or not a directory') from None
+
+
+def _child_dir(name, dir_fd, rel):
+    """Return an fd for directory ``name`` under ``dir_fd``, creating it if absent."""
+    try:
+        return os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        raise _error(_GUARD, f'{rel}: parent {name} is a symlink or not a directory') from None
+    try:
+        os.mkdir(name, dir_fd=dir_fd)
+    except FileExistsError:
+        pass  # something appeared; the O_NOFOLLOW open below decides
+    except OSError:
+        raise _error(_GUARD, f'{rel}: cannot create parent {name}') from None
+    return _open_dir(name, dir_fd, rel)
 
 
 def _make_parents(root, rel):
     """Create the parents of ``rel`` one level at a time; never follow a symlink.
 
-    Each level is lstat-checked (created with ``os.mkdir`` only when absent)
-    and must be a real directory, not a symlink, resolving inside ``root``.
+    The walk holds a directory fd opened from ``root`` with
+    ``O_DIRECTORY|O_NOFOLLOW`` and creates each missing level with
+    ``os.mkdir(name, dir_fd=fd)``, so a component swapped for a symlink is
+    refused, and a swapped ancestor cannot redirect creation outside ``root``.
     """
     parent = posixpath.dirname(rel)
     if not parent:
         return
-    current = root
-    for part in parent.split('/'):
-        current = os.path.join(current, part)
-        try:
-            st = os.lstat(current)
-        except FileNotFoundError:
-            os.mkdir(current)  # raises if anything (even a dangling symlink) appeared
-            st = os.lstat(current)
-        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
-            raise _error(_GUARD, f'{rel}: parent is a symlink or not a directory')
-        if not _inside(root, current):
-            raise _error(_GUARD, f'{rel}: parent resolves outside the worktree')
+    if not _DIR_FD_OK:
+        raise _error(_GUARD, 'directory file descriptors are not supported on this platform')
+    fd = _open_dir(root, None, rel)
+    try:
+        for part in parent.split('/'):
+            child = _child_dir(part, fd, rel)
+            os.close(fd)
+            fd = child
+            if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise _error(_GUARD, f'{rel}: parent {part} is not a directory')
+    finally:
+        os.close(fd)
 
 
 def _guard_before(root, f):
-    """Re-validate every existing component right before the git call."""
+    """Create destination parents, then re-validate source and destination.
+
+    The checks run after parent creation and immediately before the git
+    call, so a swap during parent creation is still caught.
+    """
     if f['op'] == 'delete':
         _fs_check(root, f['path'], True, _GUARD)
         return
-    _fs_check(root, f['from'], True, _GUARD)
     _make_parents(root, f['to'])
+    _fs_check(root, f['from'], True, _GUARD)
     _fs_check(root, f['to'], False, _GUARD)
 
 
