@@ -280,6 +280,10 @@ _DEVELOPER_GW_AUDIT_FIELDS = frozenset((
 # #1815: resolved Developer run timeout, optional on every developer shape.
 _DEVELOPER_TIMEOUT_FIELDS = frozenset(('timeout_seconds',))
 _DEVELOPER_TIMEOUT_MAX_SECONDS = 1800
+# The data class a gw-agent delegate validated at dispatch, optional on every
+# developer shape so a review repair can reuse it (legacy records omit it).
+_DEVELOPER_DATA_CLASS_FIELDS = frozenset(('data_class',))
+_DEVELOPER_DATA_CLASSES = frozenset(('SYNTHETIC', 'PUBLIC_REPO'))
 _DEVELOPER_UNTIMED_SHAPES = (
     _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
     _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
@@ -2267,8 +2271,16 @@ def _validate(record, *, strict=True):
         developer = record['developer']
         if developer is not None:
             # #1815: the shapes carry the optional run timeout; legacy records omit it.
+            # The validated --data-class a gw-agent delegate stored is an optional
+            # key on every shape; legacy records omit it.
             if (type(developer) is not dict or
-                    frozenset(developer) not in _DEVELOPER_RECORD_SHAPES):
+                    frozenset(developer) - _DEVELOPER_DATA_CLASS_FIELDS
+                    not in _DEVELOPER_RECORD_SHAPES):
+                _fail()
+            if ('data_class' in developer and
+                    (developer.get('provider_profile') != 'gw-agent' or
+                     type(developer['data_class']) is not str or
+                     developer['data_class'] not in _DEVELOPER_DATA_CLASSES)):
                 _fail()
             if ('timeout_seconds' in developer and
                     (type(developer['timeout_seconds']) is not int or

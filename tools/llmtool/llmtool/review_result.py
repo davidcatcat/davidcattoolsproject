@@ -3,8 +3,9 @@
 import hashlib
 import json
 import re
+import shutil
 
-from . import task_completion
+from . import review_inline, task_completion
 from .errors import LLMToolError
 
 
@@ -243,8 +244,41 @@ def _completed_claim_result(task, claim, *, version):
     return latest, event_id
 
 
+_INLINE_IO_KEYS = ('file_lister', 'comment_lister', 'poster')
+
+
+def _production_inline_io():
+    """Build the gh api I/O for advisory inline copies; raise on any setup failure."""
+    from . import review_dispatch, review_inline_io
+    gh = shutil.which('gh', path=task_completion._GH_PATH)
+    root = task_completion._trust_config().canonical_root
+    return dict(zip(_INLINE_IO_KEYS,
+                    review_inline_io.github_io(root, gh, review_dispatch._gh_env())))
+
+
+def _inline_copies(pr_number, head, body, *, inline_io, github_get):
+    """#1235 C6a 2b: post advisory inline copies of a new verdict's findings.
+
+    Returns fixed counts, or None when nothing was tried. It never raises and
+    never changes the verdict, the event or the claim. Without injected I/O,
+    gh is called only with the production GitHub reader and a finding line.
+    """
+    if type(body) is not str:
+        return None
+    if inline_io is None:
+        if github_get is not None and github_get is not task_completion._github_get:
+            return None
+        if not any(review_inline._LINE.fullmatch(line.strip()) for line in body.splitlines()):
+            return None
+    try:
+        io = _production_inline_io() if inline_io is None else inline_io
+        return review_inline.post_inline_copies(pr_number, head, body, **io)
+    except Exception:
+        return {'posted': 0, 'skipped': 0, 'failed': 1}
+
+
 def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
-                         reviewer_session_done=False, github_get=None):
+                         reviewer_session_done=False, github_get=None, inline_io=None):
     """Classify the latest claim-bound verdict and persist one idempotent event."""
     if (type(version) is not int or not 1 <= version <= 9999 or
             type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
@@ -263,9 +297,11 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
         _refuse('REVIEW_RESULT_TASK_INVALID')
 
     latest = None
+    latest_body = None
     event_id = None
     if claim.get('state') == 'COMPLETED':
         latest, event_id = _completed_claim_result(task, claim, version=version)
+        latest_body = claim['review_result']['review_text']
     else:
         get = task_completion._github_get if github_get is None else github_get
         comments = get(f'issues/{pr_number}/comments?per_page=100')
@@ -277,6 +313,7 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
             current = _comment_verdict(comment, head=head, version=version, task=task)
             if current is not None and (latest is None or current[:2] > latest[:2]):
                 latest = current
+                latest_body = comment.get('body')
 
     if latest is None:
         if not reviewer_session_done:
@@ -302,6 +339,12 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
         sequence=0, payload_sha256=payload_sha256)
     if claim.get('state') == 'UNKNOWN':
         _settle_unknown_claim(store, task, claim, comments, head=head, version=version)
-    return {'state': outcome, 'event_id': event_id,
-            'created': result['created'], 'comment_id': comment_id,
-            'head': head, 'version': version}
+    output = {'state': outcome, 'event_id': event_id,
+              'created': result['created'], 'comment_id': comment_id,
+              'head': head, 'version': version}
+    if result['created'] is True and latest is not None:
+        counts = _inline_copies(pr_number, head, latest_body,
+                                inline_io=inline_io, github_get=github_get)
+        if counts is not None:
+            output['inline_copies'] = counts
+    return output

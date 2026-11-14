@@ -373,6 +373,18 @@ class MergeTrainOpsTest(unittest.TestCase):
                 self._assert_refused(self._merge(), code)
                 self.assertEqual(self.gh.calls, [])
 
+    def test_other_non_success_linux_states_refuse(self):
+        # #1182 acceptance 6: only an exact-head SUCCESS counts.
+        self._create()
+        for conclusion, status in (('failure', 'completed'), ('timed_out', 'completed'),
+                                   ('action_required', 'completed'), ('neutral', 'completed'),
+                                   (None, 'in_progress'), (None, 'queued')):
+            with self.subTest(conclusion=conclusion, status=status):
+                self.github.checks[self.train_head] = [
+                    _run(LINUX, self.train_head, conclusion, status), _run(MACOS, self.train_head)]
+                self._assert_refused(self._merge(), 'MERGE_CHECKS_NOT_GREEN')
+                self.assertEqual(self.gh.calls, [])
+
     def test_claim_conflict_refuses_before_merge(self):
         self._create()
         other_claim = {'pr': TRAIN_PR, 'head_sha': self.train_head, 'state': 'CLAIMED',
