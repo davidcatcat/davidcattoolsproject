@@ -107,3 +107,114 @@ class TaskDriveExitCodeTests(unittest.TestCase):
         exit_code = task_submission_cli.run_task_drive(
             args, store=self.store, advance_call=advance, sleep=lambda _: None)
         self.assertEqual(exit_code, 1)
+
+    @patch('llmtool.task_submission_cli._print')
+    @patch('llmtool.pm_caller.guarded', side_effect=lambda func, *a, **kw: func)
+    @patch('llmtool.pm_caller.check_caller', return_value='test-caller-key')
+    @patch('llmtool.task_drive.drive')
+    def test_step_refused_with_empty_codes_returns_one(
+            self, mock_drive, _check_caller, _guarded, _print):
+        mock_drive.return_value = {
+            'task_id': 'task-1', 'step': 'REFUSED', 'codes': []}
+        advance, _calls = self.adapter([])
+        args = parser_for_cli().parse_args([
+            'task', 'drive', 'task-1', '--poll-seconds', '0'])
+        exit_code = task_submission_cli.run_task_drive(
+            args, store=self.store, advance_call=advance, sleep=lambda _: None)
+        self.assertEqual(exit_code, 1)
+
+    @patch('llmtool.task_submission_cli._print')
+    @patch('llmtool.pm_caller.guarded', side_effect=lambda func, *a, **kw: func)
+    @patch('llmtool.pm_caller.check_caller', return_value='test-caller-key')
+    @patch('llmtool.task_drive.drive')
+    def test_step_max_steps_with_empty_codes_returns_one(
+            self, mock_drive, _check_caller, _guarded, _print):
+        mock_drive.return_value = {
+            'task_id': 'task-1', 'step': 'MAX_STEPS', 'codes': []}
+        advance, _calls = self.adapter([])
+        args = parser_for_cli().parse_args([
+            'task', 'drive', 'task-1', '--poll-seconds', '0'])
+        exit_code = task_submission_cli.run_task_drive(
+            args, store=self.store, advance_call=advance, sleep=lambda _: None)
+        self.assertEqual(exit_code, 1)
+
+    @patch('llmtool.task_submission_cli._print')
+    @patch('llmtool.pm_caller.guarded', side_effect=lambda func, *a, **kw: func)
+    @patch('llmtool.pm_caller.check_caller', return_value='test-caller-key')
+    @patch('llmtool.task_drive.drive')
+    def test_step_unknown_with_empty_codes_returns_one(
+            self, mock_drive, _check_caller, _guarded, _print):
+        mock_drive.return_value = {
+            'task_id': 'task-1', 'step': 'UNKNOWN', 'codes': []}
+        advance, _calls = self.adapter([])
+        args = parser_for_cli().parse_args([
+            'task', 'drive', 'task-1', '--poll-seconds', '0'])
+        exit_code = task_submission_cli.run_task_drive(
+            args, store=self.store, advance_call=advance, sleep=lambda _: None)
+        self.assertEqual(exit_code, 1)
+
+    @patch('llmtool.task_submission_cli._print')
+    @patch('llmtool.pm_caller.guarded', side_effect=lambda func, *a, **kw: func)
+    @patch('llmtool.pm_caller.check_caller', return_value='test-caller-key')
+    @patch('llmtool.task_drive.drive')
+    def test_step_reviewer_attention_with_empty_codes_returns_one(
+            self, mock_drive, _check_caller, _guarded, _print):
+        mock_drive.return_value = {
+            'task_id': 'task-1', 'step': 'REVIEWER_ATTENTION', 'codes': []}
+        advance, _calls = self.adapter([])
+        args = parser_for_cli().parse_args([
+            'task', 'drive', 'task-1', '--poll-seconds', '0'])
+        exit_code = task_submission_cli.run_task_drive(
+            args, store=self.store, advance_call=advance, sleep=lambda _: None)
+        self.assertEqual(exit_code, 1)
+
+    @patch('llmtool.task_submission_cli._print')
+    @patch('llmtool.pm_caller.guarded', side_effect=lambda func, *a, **kw: func)
+    @patch('llmtool.pm_caller.check_caller', return_value='test-caller-key')
+    @patch('llmtool.task_drive.drive')
+    def test_step_merged_with_empty_codes_returns_zero(
+            self, mock_drive, _check_caller, _guarded, _print):
+        mock_drive.return_value = {
+            'task_id': 'task-1', 'step': 'MERGED', 'codes': []}
+        advance, _calls = self.adapter([])
+        args = parser_for_cli().parse_args([
+            'task', 'drive', 'task-1', '--poll-seconds', '0'])
+        exit_code = task_submission_cli.run_task_drive(
+            args, store=self.store, advance_call=advance, sleep=lambda _: None)
+        self.assertEqual(exit_code, 0)
+
+    @patch('llmtool.gw_agent_sessions.sweep_quietly')
+    @patch('llmtool.task_submission_cli._print')
+    @patch('llmtool.pm_caller.guarded', side_effect=lambda func, *a, **kw: func)
+    @patch('llmtool.pm_caller.check_caller', return_value='test-caller-key')
+    @patch('llmtool.task_drive.drive')
+    def test_step_closed_with_empty_codes_returns_zero(
+            self, mock_drive, _check_caller, _guarded, _print, _sweep_quietly):
+        mock_drive.return_value = {
+            'task_id': 'task-1', 'step': 'CLOSED', 'codes': []}
+        advance, _calls = self.adapter([])
+        args = parser_for_cli().parse_args([
+            'task', 'drive', 'task-1', '--poll-seconds', '0'])
+        exit_code = task_submission_cli.run_task_drive(
+            args, store=self.store, advance_call=advance, sleep=lambda _: None)
+        self.assertEqual(exit_code, 0)
+
+    @patch('llmtool.task_submission_cli._print')
+    @patch('llmtool.pm_caller.guarded', side_effect=lambda func, *a, **kw: func)
+    @patch('llmtool.pm_caller.check_caller', return_value='test-caller-key')
+    @patch('llmtool.task_drive.drive')
+    def test_step_max_steps_with_no_codes_key_returns_one(
+            self, mock_drive, _check_caller, _guarded, _print):
+        mock_drive.return_value = {
+            'task_id': 'task-1', 'step': 'MAX_STEPS'}
+        advance, _calls = self.adapter([])
+        args = parser_for_cli().parse_args([
+            'task', 'drive', 'task-1', '--poll-seconds', '0'])
+        exit_code = task_submission_cli.run_task_drive(
+            args, store=self.store, advance_call=advance, sleep=lambda _: None)
+        self.assertEqual(exit_code, 1)
+
+    def test_advance_exit_code_empty_codes_at_max_steps_returns_zero(self):
+        self.assertEqual(
+            task_submission_cli._advance_exit_code({'step': 'MAX_STEPS', 'codes': []}),
+            0)
