@@ -481,7 +481,7 @@ class WorkerEnvelopeTests(unittest.TestCase):
                 launched.append(argv)
                 raise OSError('fixture stops before a real process')
             with patch('subprocess.Popen',side_effect=refuse_after_capture), \
-                    self.assertRaises(Exception):
+                    self.assertRaises(OSError):
                 provider._invoke_review_job(str(exe),'prompt',deadline=time.monotonic()+5,
                     auth_home=tmp,launch_nonce='a'*32,runtime_pin='b'*64,forbidden_sessions=())
         self.assertEqual(len(launched),1)
