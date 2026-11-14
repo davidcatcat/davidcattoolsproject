@@ -930,9 +930,7 @@ def _create_d6(*, task_id, base_sha, repo_root, executor_task, agent_id='codex-h
         cwd=repo_root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, check=False, timeout=180)
     if result.returncode != 0:
-        # Only a normal exit that names the lifecycle's own rejection is
-        # classified. A signal kill (negative code), a crash traceback or any
-        # other failure is unclear and stays CalledProcessError.
+        # Only a normal exit naming the lifecycle's own rejection is classified.
         stderr = result.stderr or b''
         match = (_LIFECYCLE_REJECTED.search(stderr)
                  if type(result.returncode) is int and result.returncode > 0 and
@@ -1084,12 +1082,7 @@ def _d6_trust_root():
 
 
 def _d6_path_absent(d6, bound):
-    """True only when bound/d6 is confirmed absent and trust still names bound.
-
-    #1502 WP-D O7 F1: bound is _d6_trust_root() taken before the create, so the
-    lifecycle's own path is checked. A trust change, an orphan D6 or any doubt
-    is not absent.
-    """
+    """F1: True only when bound/d6 is confirmed absent and trust still names bound."""
     if bound is None or _d6_trust_root() != bound:
         return False
     try:
@@ -1376,11 +1369,7 @@ def _group_debug_used(store, task, entries):
 
 
 def _reserve_debug(store, task_id, entries, reservation):
-    """#1502 WP-D O7: count and append one RESERVED entry under the lineage lock.
-
-    Returns its index, len(entries). UNKNOWN counts as used; the lock is
-    released on every path.
-    """
+    """O7: under the lineage lock, count and append one RESERVED entry; return its index."""
     from . import lineage_counts, repair_policy
     try:
         policy = repair_policy.load_policy()
@@ -1561,8 +1550,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
     model_requested = debug_model
-    # #1502 WP-D O7: reserved before any D6 create or provider call; every
-    # outcome finalizes it in place, a crash leaves it RESERVED (used).
+    # O7: reserved before any D6 create or provider call; a crash leaves it RESERVED.
     try:
         reserved_at = store._completion_now()
     except Exception:
@@ -1577,8 +1565,6 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
 
     def failed(code, observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN', report=None,
                detail=None, screen_hits=None, post=True):
-        # Finalizes the reservation; a failed finalize leaves it RESERVED
-        # (used) and the caller still sees the original code.
         try:
             recorded_at = store._completion_now()
         except Exception:
@@ -1614,9 +1600,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
             diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root,
                                     executor_task=executor_task)
     except Exception as error:
-        # No provider call happened. Only a classified rejection with no D6
-        # left behind (path, branch or record) is cancelled, finalized not
-        # used; anything unclear stays RESERVED (used).
+        # Only a classified rejection with no D6 left behind is cancelled.
         if (isinstance(error, _D6CreateRejected) and _d6_path_absent(d6, trusted) and
                 not _d6_taken(repo_root, registration.common_dir, d6)):
             failed('HIGH_DEBUG_D6_CREATE_FAILED', post=False)

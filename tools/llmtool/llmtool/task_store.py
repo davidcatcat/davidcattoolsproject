@@ -158,10 +158,9 @@ _REPAIR_CAP_OVERRIDE_VALID_SHAPES = tuple(
 _HIGH_DEBUG_FIELDS = frozenset(('family', 'failed_corrections', 'early_reason', 'examined_sha',
     'd6', 'model_requested', 'model_observed', 'effort_observed', 'status',
     'report_sha256', 'report', 'usage', 'recorded_at'))
-# #1502 WP-D O7: a RESERVED AI Debug entry keeps these values when finalized.
+# #1502 WP-D O7: a RESERVED entry keeps these values and gets one of these statuses.
 _HIGH_DEBUG_IDENTITY = ('family', 'failed_corrections', 'early_reason', 'examined_sha',
                         'd6', 'model_requested', 'rules_sha256')
-# The only statuses a RESERVED entry may be finalized to; anything else refuses.
 _HIGH_DEBUG_FINAL_STATUSES = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED',
                               'REPORT_INVALID', 'RUN_FAILED')
 
@@ -4121,12 +4120,7 @@ class TaskStore:
         _fail('HIGH_DEBUG_BUSY')
 
     def finalize_high_debug(self, task_id, index, entry):
-        """#1502 WP-D O7: replace the RESERVED entry at index with its final entry, once.
-
-        Written through the compare-and-update path; the store refuses
-        HIGH_DEBUG_IMMUTABLE unless entries[index] is RESERVED, entry has
-        another status and the same identity, and every other entry is unchanged.
-        """
+        """O7: replace the RESERVED entry at index with its final entry, once."""
         for _ in range(5):
             current = self.get(task_id)
             entries = current.get('high_debug', [])

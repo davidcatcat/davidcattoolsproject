@@ -223,8 +223,7 @@ class HighDebugTests(unittest.TestCase):
         return caught.exception.high_debug_code, created
 
     def test_failed_codex_attempts_are_recorded_and_retry_uses_a_new_d6(self):
-        # #1502 WP-D O7: a started attempt that failed uses the Debug, so each
-        # case gets a fresh store and a retry on the same store is refused.
+        # O7: a failed started attempt uses the Debug; each case gets a fresh store.
         root = self._repo()
         cases = (
             ({'returncode': 1}, 'HIGH_DEBUG_RUN_FAILED'),
@@ -593,12 +592,10 @@ class HighDebugTests(unittest.TestCase):
             raise high_debug._D6CreateRejected('D6_TEST_REJECTED')
         def leaves_nothing(**_kwargs):
             raise high_debug._D6CreateRejected('D6_TEST_REJECTED')
-        # #1502 WP-D O7: each confirmed failed create finalizes one not-used
-        # entry, so attempts advance; a leftover hd2 branch is still skipped.
-        # A create that leaves its D6 behind is unclear and stays RESERVED.
+        # O7: a confirmed failed create finalizes one not-used entry; one leaving
+        # its D6 behind stays RESERVED. A leftover hd2 branch is skipped.
         subprocess.run(['git', '-C', str(root), 'branch',
                         'llmtool/high-debug-executor-hd2-aaaaaaa'], check=True)
-        # F1: the trusted D6 path must be confirmed absent; no D6 exists there.
         (root / 'd6s').mkdir()
         trusted = patch.object(high_debug, 'trust', SimpleNamespace(
             load_trust=lambda: SimpleNamespace(tasks_root=str(root / 'd6s'))))
