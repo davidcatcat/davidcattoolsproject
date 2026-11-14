@@ -427,10 +427,9 @@ def _owner_acceptance_required(files):
         path = item.get('filename') if type(item) is dict else None
         if type(path) is not str:
             return True
+        # Owner O3 (#1943): TUI test files alone need no Owner acceptance; product TUI code does.
         if (re.fullmatch(r'tools/llmtool/llmtool/chat_tui[^/]*\.py', path) or
                 re.fullmatch(r'tools/llmtool/llmtool/tui_[^/]*\.py', path) or
-                re.fullmatch(r'tools/llmtool/tests/test_chat_tui[^/]*', path) or
-                re.fullmatch(r'tools/llmtool/tests/test_tui_[^/]*', path) or
                 path == 'tools/llmtool/tests/tui_pty_driver.py'):
             return True
     return False
