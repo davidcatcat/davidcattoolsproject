@@ -429,6 +429,23 @@ class CiRefusalTests(_Base):
         self.assertCi(_checks(_run(101, LINUX, 'failure'), _run(120, MACOS)),
                       'MERGE_CHECKS_NOT_GREEN')
 
+    def test_other_non_success_states_refuse(self):
+        # #1182 acceptance 6: only an exact-head SUCCESS counts, for every required check.
+        docs = [{'filename': 'docs/guide.md'}]
+        for conclusion, status in (('cancelled', 'completed'), ('timed_out', 'completed'),
+                                   ('action_required', 'completed'), ('neutral', 'completed'),
+                                   ('stale', 'completed'), (None, 'in_progress'),
+                                   (None, 'queued')):
+            with self.subTest(conclusion=conclusion, status=status):
+                odd = {'conclusion': conclusion, 'status': status}
+                self.assertCi(_checks(_run(101, LINUX, **odd), _run(120, MACOS)),
+                              'MERGE_CHECKS_NOT_GREEN')
+                self.assertCi(_checks(_run(101, LINUX), _run(120, MACOS, **odd)),
+                              'MERGE_CHECKS_NOT_GREEN')
+                self.assertCi(_checks(_run(55, DOCS, **odd)), 'MERGE_CHECKS_NOT_GREEN',
+                              files=docs)
+                self.assertEqual(self.store.writes, [])
+
     def test_skipped_required_linux_check(self):
         self.assertCi(_checks(_run(101, LINUX, 'skipped'), _run(120, MACOS)),
                       'MERGE_REQUIRED_CHECK_SKIPPED')
