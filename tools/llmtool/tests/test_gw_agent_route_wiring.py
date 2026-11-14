@@ -2246,7 +2246,10 @@ class GwAgentRealStoreTests(unittest.TestCase):
                 self.assertEqual(run['d6'], d6)
                 self.assertEqual(run['code'], 1)
                 self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                # #1895: a helper that timed out keeps its own code.
                 self.assertEqual(developer['error_code'],
+                                 'DEVELOPER_GW_AGENT_D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE'
+                                 if name == 'helper-unavailable' else
                                  'DEVELOPER_GW_AGENT_D6_SESSION_REFUSED')
                 self.assertIsNone(developer['artifact'])
                 self.assertEqual(run['event_calls'], 0)
