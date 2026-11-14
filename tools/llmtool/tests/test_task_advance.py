@@ -3558,7 +3558,7 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
 
     def merge(self, *, main_reply=None, compare_reply=None, check_runs=None,
               labels=('mac-ci',), mergeable_state='clean', mergeable=True,
-              pr_head=HEAD, current_pr_head=None):
+              pr_head=HEAD, current_pr_head=None, claim_error=None):
         from llmtool.task_completion import _GITHUB_API_PATH
         main_reply = {'commit': {'sha': MAIN_SHA}} if main_reply is None else main_reply
         compare_reply = {'status': 'ahead'} if compare_reply is None else compare_reply
@@ -3581,6 +3581,8 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
                 return record
 
             def compare_and_update(self, _task_id, *, expected, merge_attempt):
+                if claim_error is not None:
+                    raise claim_error
                 claims.append(dict(merge_attempt))
 
         def reply(value):
@@ -3695,6 +3697,21 @@ class TaskAdvanceMergeCurrentMainTests(unittest.TestCase):
         self.assertEqual(result['step'], 'WAITING_CI')
         self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
         self.assertEqual(claims, [])
+
+    def test_strict_invalid_record_on_claim_write_has_its_own_refusal_code(self):
+        # #1362: a record that fails strict re-validation on the merge claim write
+        # is refused as MERGE_RECORD_INVALID, not as a MERGE_CLAIM_CONFLICT race.
+        for store_code, code in (('TASK_STORE_INVALID', 'MERGE_RECORD_INVALID'),
+                                 ('TASK_STORE_CONFLICT', 'MERGE_CLAIM_CONFLICT'),
+                                 (None, 'MERGE_CLAIM_CONFLICT')):
+            error = LLMToolError('Task store write refused; details omitted')
+            if store_code is not None:
+                error.task_store_error_code = store_code
+            with self.subTest(store_code=store_code):
+                result, _reads, calls, claims = self.merge(claim_error=error)
+                self.assertEqual((result['step'], result['codes']), ('MERGE_REFUSED', [code]))
+                self.assertFalse(any('merge' in call for call in calls))
+                self.assertEqual(claims, [])
 
     def test_lineage_parked_root_or_ended_task_refuses_merge(self):
         # #1502 WP-D D10: a PARKED ROOT is never merged, nor is an ended Task.
