@@ -3138,12 +3138,6 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             ('unlabeled TUI module path', {'files': [
                 {'filename': 'tools/llmtool/llmtool/tui_markdown_editor.py'}]},
              'MERGE_OWNER_ACCEPTANCE_MANUAL'),
-            ('TUI test path', {'files': [
-                {'filename': 'tools/llmtool/tests/test_tui_markdown.py'}]},
-             'MERGE_OWNER_ACCEPTANCE_MANUAL'),
-            ('chat TUI test path', {'files': [
-                {'filename': 'tools/llmtool/tests/test_chat_tui.py'}]},
-             'MERGE_OWNER_ACCEPTANCE_MANUAL'),
             ('TUI PTY driver path', {'files': [
                 {'filename': 'tools/llmtool/tests/tui_pty_driver.py'}]},
              'MERGE_OWNER_ACCEPTANCE_MANUAL'),

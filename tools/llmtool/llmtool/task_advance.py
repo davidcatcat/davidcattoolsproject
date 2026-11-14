@@ -423,16 +423,48 @@ def _has_pr_label(pr, label):
 def _owner_acceptance_required(files):
     if type(files) is not list:
         return True
+    has_tui_test = False
+    has_non_tui_test = False
     for item in files:
-        path = item.get('filename') if type(item) is dict else None
+        if type(item) is not dict:
+            return True
+        path = item.get('filename')
         if type(path) is not str:
             return True
+        if 'previous_filename' in item:
+            prev = item['previous_filename']
+            if type(prev) is not str:
+                return True
+        else:
+            prev = None
+        # Owner O3 (#1943): TUI test files alone need no Owner acceptance; product TUI code does.
         if (re.fullmatch(r'tools/llmtool/llmtool/chat_tui[^/]*\.py', path) or
                 re.fullmatch(r'tools/llmtool/llmtool/tui_[^/]*\.py', path) or
-                re.fullmatch(r'tools/llmtool/tests/test_chat_tui[^/]*', path) or
-                re.fullmatch(r'tools/llmtool/tests/test_tui_[^/]*', path) or
                 path == 'tools/llmtool/tests/tui_pty_driver.py'):
             return True
+        if prev is not None and (
+                re.fullmatch(r'tools/llmtool/llmtool/chat_tui[^/]*\.py', prev) or
+                re.fullmatch(r'tools/llmtool/llmtool/tui_[^/]*\.py', prev) or
+                prev == 'tools/llmtool/tests/tui_pty_driver.py'):
+            return True
+        is_path_tui_test = bool(
+            re.fullmatch(r'tools/llmtool/tests/test_chat_tui[^/]*', path) or
+            re.fullmatch(r'tools/llmtool/tests/test_tui_[^/]*', path))
+        if prev is not None:
+            is_prev_tui_test = bool(
+                re.fullmatch(r'tools/llmtool/tests/test_chat_tui[^/]*', prev) or
+                re.fullmatch(r'tools/llmtool/tests/test_tui_[^/]*', prev))
+            if is_path_tui_test or is_prev_tui_test:
+                has_tui_test = True
+            if not (is_path_tui_test and is_prev_tui_test):
+                has_non_tui_test = True
+        else:
+            if is_path_tui_test:
+                has_tui_test = True
+            else:
+                has_non_tui_test = True
+    if has_tui_test and has_non_tui_test:
+        return True
     return False
 
 
