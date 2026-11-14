@@ -272,6 +272,22 @@ class DelegateFileOpsTests(_DelegateCase):
             self.assertEqual(0, self.delegate(task['task_id']))
         self.assertUnchanged(task['task_id'])
 
+    def test_task_without_file_ops_is_read_once(self):
+        task = self.record_pm()
+        real_get = self.store.get
+        reads = []
+
+        def counted_get(task_id):
+            reads.append(task_id)
+            return real_get(task_id)
+
+        with mock.patch.object(self.store, 'get', side_effect=counted_get):
+            self.assertEqual(0, self.delegate(task['task_id']))
+        # The gate's read is the route's read: no second read for file_ops.
+        self.assertEqual([task['task_id']], reads)
+        self.assertEqual(1, len(self.route_calls))
+        self.assertIsNone(self.route_calls[0]['evidence'])
+
     def test_overwrite_refused_and_nothing_changes(self):
         self.write('archive/docs/a.txt', 'already here\n')
         self.head = self.commit()

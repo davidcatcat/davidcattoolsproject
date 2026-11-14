@@ -7202,13 +7202,135 @@ def _file_ops_rebind(args, before):
     return registration, snapshot
 
 
-def _file_ops_gate(args, store, route):
+def _has_file_ops(task):
+    """#1502: True when the Task's PM assignment carries file_ops."""
+    assignment = task.get('pm_assignment') if type(task) is dict else None
+    return type(assignment) is dict and assignment.get('file_ops') is not None
+
+
+class _LoadedTaskStore:
+    """#1502: serve the Task read by the file_ops gate to the route's own first read.
+
+    Routes that read their Task themselves get this proxy, so a dispatch without
+    applied file_ops reads the Task once. The record (or the read error, which
+    the route then raises at its own read, after its own pre-read checks) is
+    served once, only if the route's next store call is ``get`` of this Task.
+    Any other store call drops it first, so it is never served after this
+    process may have changed the Task. Everything else goes to the real store,
+    and the proxy compares equal to the store it wraps.
+    """
+
+    def __init__(self, store, task_id, record=None, error=None):
+        self._store = store
+        self._task_id = task_id
+        self._loaded = (record, error)
+
+    def __eq__(self, other):
+        return other is self or other is self._store
+
+    def __hash__(self):
+        return hash(self._store)
+
+    def get(self, task_id):
+        loaded, self._loaded = self._loaded, None
+        if loaded is not None and task_id == self._task_id:
+            record, error = loaded
+            if error is not None:
+                raise error
+            return record
+        return self._store.get(task_id)
+
+    def __getattr__(self, name):
+        if name in ('_store', '_task_id', '_loaded'):
+            raise AttributeError(name)
+        value = getattr(self._store, name)
+        if not callable(value):
+            return value
+
+        def call(*args, **kwargs):
+            self._loaded = None
+            return value(*args, **kwargs)
+        return call
+
+
+def _delegate_pre_read_checks(args, route):
+    """The argument refusals a route makes before it reads its Task, in the route's order.
+
+    Run before the file_ops gate reads the Task, so such a refusal still comes
+    before any store read (#785 M18 for the owner ref). Same checks and
+    messages as the route; the route repeats them.
+    """
+    if route == 'agy':
+        _optional_agy_owner_ref(args)
+        if getattr(args, 'mode', None) != 'direct':
+            raise LLMToolError('--provider agy requires --mode direct')
+        if getattr(args, 'context_stdin', False):
+            raise LLMToolError('AGY direct reads only its registered D6 task scope')
+    elif route == 'claude':
+        owner_ref = getattr(args, 'owner_ref', None)
+        if owner_ref is not None and (type(owner_ref) is not str or
+                worker_dispatch.owner_comment_ref().fullmatch(owner_ref) is None):
+            raise LLMToolError('--provider claude requires a valid --owner-ref before Task mutation')
+        if getattr(args, 'mode', None) != 'direct':
+            raise LLMToolError('--provider claude requires --mode direct')
+        if getattr(args, 'context_stdin', False):
+            raise LLMToolError('Claude direct reads only its registered D6 task scope')
+        if getattr(args, 'selection_source', None) != 'PM':
+            raise LLMToolError('Claude direct requires a PM-selected assignment')
+
+
+def _file_ops_route_store(args, store, route):
+    """#1502: run the file_ops gate for a route that reads its Task itself.
+
+    Reads the Task once. Without applied file_ops (legacy Task, a Task with a
+    Developer, or an unreadable Task) the route gets that same read through
+    ``_LoadedTaskStore``, so no second read. When the gate applied or
+    re-verified file_ops the route reads the store itself: it must see the
+    record holding the VERIFIED evidence the gate saved. gw-agent always
+    re-reads: its route sweeps gw-agent sessions through the store before its
+    Task read, and that sweep may change the Task.
+    """
+    _delegate_pre_read_checks(args, route)
+    try:
+        task = store.get(args.task_id)
+    except Exception as exc:
+        if route == 'gw-agent':
+            return store
+        return _LoadedTaskStore(store, args.task_id, error=exc)
+    if _file_ops_gate(args, store, route, task) is not None or route == 'gw-agent':
+        return store
+    return _LoadedTaskStore(store, args.task_id, record=task)
+
+
+def _file_ops_gate_loaded(args, store, route, loaded):
+    """#1502: the file_ops gate for a branch that loaded its Task before its other checks.
+
+    Without file_ops in ``loaded`` there is no re-read and nothing to apply:
+    file_ops are bound into the contract digest and cannot be added later, and
+    the store refuses any Developer for a file_ops Task without VERIFIED
+    evidence (FILE_OPS_EVIDENCE_REQUIRED). With file_ops the Task is re-read on
+    purpose: the branch ran D6 binding and the repair cap since ``loaded``, and
+    the write-once evidence, FAILED isolation and Developer checks must use
+    the current record. A stale record could apply ops another delegate had
+    already applied, and the evidence CAS would refuse only after the change.
+    """
+    if not _has_file_ops(loaded):
+        return None
+    try:
+        task = store.get(args.task_id)
+    except Exception:
+        return None
+    return _file_ops_gate(args, store, route, task)
+
+
+def _file_ops_gate(args, store, route, task):
     """#1502: apply the PM-assigned file_ops once, immediately before the Developer launch.
 
-    Called by each route branch of ``run_task_delegate`` after its own checks.
-    Every route-support, dispatch-gate, Task-state, contract and D6-identity
-    refusal (``_file_ops_dispatch_precheck``) runs first, so a refused
-    dispatch never changes the D6 and records no evidence.
+    Called by each route branch of ``run_task_delegate`` after its own checks,
+    through ``_file_ops_route_store`` or ``_file_ops_gate_loaded``, with the
+    Task record just read. Every route-support, dispatch-gate, Task-state,
+    contract and D6-identity refusal (``_file_ops_dispatch_precheck``) runs
+    first, so a refused dispatch never changes the D6 and records no evidence.
 
     Runs on the bound D6 at its registered HEAD. The first apply needs a clean
     tree; ``file_ops.plan`` refuses the whole batch before any change. A
@@ -7222,10 +7344,6 @@ def _file_ops_gate(args, store, route):
     applied, and the store refuses any Developer for a file_ops Task without
     VERIFIED evidence (FILE_OPS_EVIDENCE_REQUIRED).
     """
-    try:
-        task = store.get(args.task_id)
-    except Exception:
-        return None
     if type(task) is not dict:
         return None
     task_id = task.get('task_id')
@@ -7306,6 +7424,9 @@ def run_task_delegate(args, *, store=None):
                            'Claude, OpenCode, AGY and gw-agent Developer routes')
     # #1502: PM-assigned file_ops run once per route branch below, after every
     # check that can refuse the dispatch and immediately before the Developer.
+    # A Task without file_ops is not read again for them: a branch that holds
+    # its record passes it (_file_ops_gate_loaded), and a route that reads its
+    # Task itself reuses the gate's read (_file_ops_route_store).
     if getattr(args, 'background', False):
         provider = getattr(args, 'provider', None)
         if provider == 'codex' and getattr(args, 'mode', 'proposal') != 'direct':
@@ -7366,7 +7487,7 @@ def run_task_delegate(args, *, store=None):
         if previous is None:
             _reject_claude_reserved_d6(registration)
         _check_delegate_repair_cap(args, store, (registration, _snapshot))
-        if _file_ops_gate(args, store, provider) is not None:
+        if _file_ops_gate_loaded(args, store, provider, existing) is not None:
             registration, _snapshot = _file_ops_rebind(args, _snapshot)
         return _run_background_delegate(
             args, provider=provider, store=store,
@@ -7379,8 +7500,7 @@ def run_task_delegate(args, *, store=None):
         # (None accepted) before any store read or Task mutation.
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         _check_delegate_repair_cap(args, store)
-        _file_ops_gate(args, store, 'agy')
-        return run_task_agy_delegate(args, store=store)
+        return run_task_agy_delegate(args, store=_file_ops_route_store(args, store, 'agy'))
     if args.provider == 'claude':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider claude requires --mode direct')
@@ -7388,25 +7508,23 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('--provider claude does not support --background')
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         _check_delegate_repair_cap(args, store)
-        _file_ops_gate(args, store, 'claude')
-        return run_task_claude_delegate(args, store=store)
+        return run_task_claude_delegate(args, store=_file_ops_route_store(args, store, 'claude'))
     if args.provider == 'gw-agent':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider gw-agent requires --mode direct')
         _check_delegate_repair_cap(args, store)
-        _file_ops_gate(args, store, 'gw-agent')
-        return run_task_gw_agent_delegate(args, store=store)
+        return run_task_gw_agent_delegate(
+            args, store=_file_ops_route_store(args, store, 'gw-agent'))
     _validate_acceptance_scope(args.acceptance)
     if getattr(args, 'mode', 'proposal') == 'direct':
         if args.provider != 'codex':
             raise LLMToolError('--mode direct is supported only for the Codex Developer route')
         _check_delegate_repair_cap(args, store)
-        _file_ops_gate(args, store, 'codex')
-        return run_task_codex_delegate(args, store=store)
+        return run_task_codex_delegate(args, store=_file_ops_route_store(args, store, 'codex'))
     if args.provider == 'opencode':
         _check_delegate_repair_cap(args, store)
-        _file_ops_gate(args, store, 'opencode')
-        return run_task_opencode_delegate(args, store=store)
+        return run_task_opencode_delegate(
+            args, store=_file_ops_route_store(args, store, 'opencode'))
     if args.provider != 'codex':
         raise LLMToolError('unsupported Developer route')
     if not getattr(args, 'context_stdin', False) and not hasattr(args, 'context'):
@@ -7436,7 +7554,7 @@ def run_task_delegate(args, *, store=None):
     if task.get('developer') is None:
         _reject_claude_reserved_d6(registration)
     _check_delegate_repair_cap(args, store, (registration, snapshot))
-    if _file_ops_gate(args, store, 'codex') is not None:
+    if _file_ops_gate_loaded(args, store, 'codex', task) is not None:
         registration, snapshot = _file_ops_rebind(args, snapshot)
     source_sha = snapshot.head
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
