@@ -177,6 +177,20 @@ class ClaudeRoute(DeveloperRoute):
             return 'CLI_USAGE'
         return None
 
+    def provider_quota_reported(self, parsed):
+        """Only a parsed Claude CLI JSON error result with api_error_status 429.
+
+        Stderr text, the synthetic stderr-fallback result and result text are
+        never evidence; quota_exhausted still classifies them as before.
+        """
+        raw = parsed.get('raw')
+        return (type(raw) is dict and raw.get('type') == 'result' and
+                raw.get('is_error') is True and
+                _is_canonical_uuid(raw.get('session_id')) and
+                parsed.get('session_id') == raw['session_id'] and
+                type(raw.get('api_error_status')) is int and
+                raw['api_error_status'] == 429)
+
     def quota_exhausted(self, parsed, stderr):
         if parsed.get('status') == 'DONE':
             return False

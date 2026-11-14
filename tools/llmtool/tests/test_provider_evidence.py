@@ -1,5 +1,9 @@
 """Design c6876861575 items 1-2: provider_evidence from parsed provider output.
 
+v92 F1/RCA: evidence provenance is separate from quota classification. Stderr
+text, a synthetic or unrelated result keep the route's quota refusal code but
+give no evidence.
+
 Fixtures are scrubbed shapes of real provider output: fixed ids, digests and
 counts only. No credential-shaped value appears anywhere (Owner #763 A).
 """
@@ -61,6 +65,15 @@ def _claude_result(**changes):
     }
     value.update(changes)
     return json.dumps(value).encode('utf-8')
+
+
+def _claude_429(**changes):
+    """Scrubbed shape of a Claude CLI JSON error result for an API 429."""
+    value = {'is_error': True, 'num_turns': 0, 'result': 'API Error.',
+             'api_error_status': 429,
+             'usage': {'input_tokens': 0, 'output_tokens': 0}, 'modelUsage': {}}
+    value.update(changes)
+    return _claude_result(**value)
 
 
 def _agy_result(**changes):
@@ -220,12 +233,54 @@ class ClaudeEvidenceTest(_RouteRunCase):
                 modelUsage={})), model=CLAUDE_MODEL)
         self.assertIsNone(caught.exception.provider_evidence)
 
-    def test_quota_refusal_is_quota_exhausted(self):
+    def test_parsed_429_result_is_quota_exhausted(self):
+        # Positive control: api_error_status 429 in the parsed CLI JSON result.
         with self.assertRaises(RouteError) as caught:
-            self.run_route(self.route(), _runner(1, b'', b'usage limit reached'),
-                           model=CLAUDE_MODEL)
+            self.run_route(self.route(), _runner(1, _claude_429()), model=CLAUDE_MODEL)
         self.assertEqual(caught.exception.code, 'CLAUDE_QUOTA_EXHAUSTED')
         self.assertEqual(caught.exception.provider_evidence, QUOTA)
+
+    def test_signal_termination_with_parsed_429_gives_none(self):
+        for code in (-15, -9, -2):
+            with self.subTest(code=code):
+                with self.assertRaises(RouteError) as caught:
+                    self.run_route(self.route(), _runner(code, _claude_429()),
+                                   model=CLAUDE_MODEL)
+                self.assertEqual(caught.exception.code, 'CLAUDE_QUOTA_EXHAUSTED')
+                self.assertIsNone(caught.exception.provider_evidence)
+
+    def test_rca_rows_keep_quota_code_but_give_no_evidence(self):
+        # v92 F1/RCA: provenance is separate from classification. Each row is
+        # still refused CLAUDE_QUOTA_EXHAUSTED, but carries no evidence.
+        rows = (
+            ('stderr-only quota text, empty stdout', b'', b'usage limit reached'),
+            ('invalid stdout', b'not json', b'usage limit reached'),
+            ('valid result, other API error, quota stderr',
+             _claude_429(api_error_status=500), b'rate limit'),
+            ('valid result, quota-like result text only',
+             _claude_result(subtype='error_max_turns', result='Added rate limit handling.'),
+             b''),
+        )
+        for label, stdout, stderr in rows:
+            with self.subTest(row=label):
+                with self.assertRaises(RouteError) as caught:
+                    self.run_route(self.route(), _runner(1, stdout, stderr),
+                                   model=CLAUDE_MODEL)
+                self.assertEqual(caught.exception.code, 'CLAUDE_QUOTA_EXHAUSTED')
+                self.assertIsNone(caught.exception.provider_evidence)
+
+    def test_synthetic_fallback_result_gives_no_condition(self):
+        route = self.route()
+        parsed = route.parse_output(b'', b'usage limit reached', '')
+        self.assertEqual(parsed['raw'], {})
+        self.assertTrue(route.quota_exhausted(parsed, b'usage limit reached'))
+        self.assertFalse(route.provider_quota_reported(parsed))
+        self.assertIsNone(base._quota_evidence(route, parsed))
+        # A hand-made 429 raw without a parsed, matching session is not proof.
+        self.assertFalse(route.provider_quota_reported(
+            {'session_id': None, 'raw': {'api_error_status': 429}}))
+        self.assertTrue(route.provider_quota_reported(
+            route.parse_output(_claude_429(), b'', '')))
 
     def test_signal_termination_with_quota_text_gives_none(self):
         # Review F1: a negative (signal) exit is termination, not a condition.
@@ -304,6 +359,53 @@ class AgyEvidenceTest(_RouteRunCase):
         self.assertEqual(caught.exception.code, 'AGY_QUOTA_EXHAUSTED')
         self.assertIsNone(caught.exception.provider_evidence)
 
+    def test_rca_rows_keep_quota_code_but_give_no_evidence(self):
+        # v92 F1/RCA: each row is still refused AGY_QUOTA_EXHAUSTED by the
+        # unchanged classifier, but carries no evidence.
+        rows = (
+            ('stderr-only quota text, empty stdout', b'', b'RESOURCE_EXHAUSTED'),
+            ('invalid stdout', b'not json', b'quota exceeded'),
+            ('SUCCESS status with quota stderr', _agy_result(), b'quota exceeded'),
+            ('valid result, other status, quota stderr',
+             _agy_result(status='FAILED'), b'rate limit'),
+            ('valid result, quota-like error field only',
+             _agy_result(status='FAILED', error='quota exceeded'), b''),
+        )
+        for label, stdout, stderr in rows:
+            with self.subTest(row=label):
+                with self.assertRaises(RouteError) as caught:
+                    self.run_route(self.route(), _runner(0, stdout, stderr, log=self.LOG),
+                                   model=AGY_MODEL, log_path='agy.log')
+                self.assertEqual(caught.exception.code, 'AGY_QUOTA_EXHAUSTED')
+                self.assertIsNone(caught.exception.provider_evidence)
+
+    def test_synthetic_fallback_result_gives_no_condition(self):
+        route = self.route()
+        parsed = route.parse_output(b'', b'RESOURCE_EXHAUSTED', '')
+        self.assertEqual(parsed['raw'], {})
+        self.assertTrue(route.quota_exhausted(parsed, b'RESOURCE_EXHAUSTED'))
+        self.assertFalse(route.provider_quota_reported(parsed))
+        self.assertIsNone(base._quota_evidence(route, parsed))
+        self.assertFalse(route.provider_quota_reported(
+            {'session_id': 'x', 'raw': {'status': 'RESOURCE_EXHAUSTED',
+                                        'conversation_id': 'x'}}))
+        self.assertTrue(route.provider_quota_reported(route.parse_output(
+            _agy_result(status='RESOURCE_EXHAUSTED'), b'', '')))
+
+
+class QuotaEvidenceHookTest(unittest.TestCase):
+    def test_only_exact_true_from_the_hook_gives_evidence(self):
+        self.assertEqual(base._quota_evidence(
+            SimpleNamespace(provider_quota_reported=lambda parsed: True), {}), QUOTA)
+        for hook in (lambda parsed: 1, lambda parsed: 'yes', lambda parsed: QUOTA,
+                     lambda parsed: None, lambda parsed: 1 / 0):
+            self.assertIsNone(base._quota_evidence(
+                SimpleNamespace(provider_quota_reported=hook), {}))
+        self.assertIsNone(base._quota_evidence(SimpleNamespace(), {}))
+
+    def test_default_route_hook_gives_none(self):
+        self.assertFalse(base.DeveloperRoute.provider_quota_reported(None, {'raw': {}}))
+
 
 class GwAgentEvidenceTest(_RouteRunCase):
     def test_parsed_usage_and_served_model_give_gateway_usage(self):
@@ -346,6 +448,24 @@ class GwAgentEvidenceTest(_RouteRunCase):
         with self.assertRaises(RouteError) as caught:
             self.run_route(_GwFixture(fixture), _runner(4, b''), model=GW_MODEL)
         self.assertIsNone(caught.exception.provider_evidence)
+
+    def test_quota_stderr_without_gateway_code_gives_none(self):
+        fixture = _gw_result(status='MODEL_ERROR', code='HTTP_500')
+        with self.assertRaises(RouteError) as caught:
+            self.run_route(_GwFixture(fixture), _runner(4, b'', b'quota exceeded'),
+                           model=GW_MODEL)
+        self.assertEqual(caught.exception.code, 'GW_AGENT_MODEL_ERROR')
+        self.assertIsNone(caught.exception.provider_evidence)
+
+    def test_condition_only_from_parsed_gateway_result(self):
+        route = _gw_route(_gw_result(status='MODEL_ERROR', code='HTTP_429',
+                                     usage={'status': 'UNKNOWN'}))
+        parsed = route.parse_output(b'', b'', '')
+        self.assertTrue(route.provider_quota_reported(parsed))
+        # No parsed result (synthetic or missing) gives none.
+        self.assertFalse(_gw_route(None).provider_quota_reported({}))
+        unparsed = _gw_route(_gw_result(status='MODEL_ERROR', code='HTTP_429'))
+        self.assertFalse(unparsed.provider_quota_reported({}))
 
 
 class OpenCodeEvidenceTest(unittest.TestCase):

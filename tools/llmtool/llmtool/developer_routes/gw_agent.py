@@ -589,6 +589,14 @@ class GwAgentRoute(DeveloperRoute):
     def quota_exhausted(self, parsed, stderr):
         return self._gateway_code == 'HTTP_429'
 
+    def provider_quota_reported(self, parsed):
+        """Only the parsed gateway result code HTTP_429 on a non-DONE status."""
+        result = self._result
+        return (type(result) is dict and result.get('code') == 'HTTP_429' and
+                result.get('status') != 'DONE' and
+                getattr(self, '_status', None) == result.get('status') and
+                self._gateway_code == 'HTTP_429')
+
     def provider_basis(self, parsed):
         """GATEWAY_USAGE only for a parsed result with usage and a real served_model."""
         result = self._result

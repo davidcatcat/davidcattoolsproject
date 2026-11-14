@@ -163,6 +163,14 @@ class DeveloperRoute(ABC):
         except Exception:
             return None
 
+    def provider_quota_reported(self, parsed: Mapping[str, Any]) -> bool:
+        """Optional hook, default False: a parsed provider field reports quota exhaustion.
+
+        Evidence provenance only (v92 F1/RCA). Stderr text, a synthetic or
+        unrelated result never qualify; the quota classifier is separate.
+        """
+        return False
+
     def validate_request(self, request: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(request, Mapping):
             raise RouteError(f'{self.name.upper()}_REQUEST_INVALID')
@@ -617,6 +625,18 @@ def _result_evidence(route, parsed):
     return None
 
 
+def _quota_evidence(route, parsed):
+    """{condition: QUOTA_EXHAUSTED} only when a parsed provider field reports it."""
+    hook = getattr(route, 'provider_quota_reported', None)
+    if not callable(hook):
+        return None
+    try:
+        reported = hook(parsed)
+    except Exception:
+        return None
+    return dict(QUOTA_EXHAUSTED_EVIDENCE) if reported is True else None
+
+
 def _exit_diagnostic(code, stderr):
     """#1606: exit code plus a bounded, screened, one-line stderr tail."""
     from ..task_submission_cli import _redact_rejected_output
@@ -867,11 +887,14 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         gateway_code = getattr(route, '_gateway_code', None)
         if type(gateway_code) is str and re.fullmatch(r'[A-Z0-9_]{1,48}', gateway_code):
             facts['gateway_code'] = gateway_code
-        # A signal-terminated process (negative exit) is an interruption or
-        # host termination: the classifier is unchanged, but no evidence.
+        # The classifier (and so the refusal code) is unchanged. Evidence is
+        # separate provenance: only a parsed provider field gives it, never
+        # stderr text or a synthetic/unrelated result (v92 F1/RCA). A
+        # signal-terminated process (negative exit) is an interruption or
+        # host termination and gives none.
         raise RouteError(_route_code(route, 'QUOTA_EXHAUSTED'),
                          progress=quota_progress, facts=facts,
-                         provider_evidence=(QUOTA_EXHAUSTED_EVIDENCE if code >= 0
+                         provider_evidence=(_quota_evidence(route, parsed) if code >= 0
                                             else None))
     try:
         route.validate_status(parsed)
