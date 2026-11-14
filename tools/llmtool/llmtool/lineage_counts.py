@@ -17,7 +17,9 @@ store-wide continues lock, so a predecessor gets at most one successor. A
 review repair reads the chain counts and writes its claim under the chain lock
 of the chain's oldest Task (chain_key), so two repairs in one chain cannot
 both spend the last repair. A lock that cannot be taken refuses; nothing is
-checked or written without it.
+checked or written without it. Under the same lock and counts, an automatic
+(task advance/drive) review repair is refused REVIEW_REPAIR_PM_REQUIRED once
+the chain has used a review repair (child 2).
 """
 
 import contextlib

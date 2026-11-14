@@ -660,13 +660,56 @@ class ReviewRepairChainTests(unittest.TestCase):
                      remote_test_receipt=_receipt())
 
     def test_same_head_replay_on_the_current_task_is_unchanged(self):
-        live = claim(f'pr-{PR}', HEAD, pr=PR, state='DISPATCHED', repair=tid(321))
-        live['executor_task'] = EXECUTOR
-        store = self.store(None, review_repair_claims=[live])
-        result = self.dispatch(store)
-        self.assertTrue(result['replayed'])
-        self.assertEqual(result['repair_task_id'], tid(321))
-        self.assertEqual(self.calls, [])
+        # The chain is in doubt (UNKNOWN), yet a live claim still replays, auto or not.
+        for auto in (False, True):
+            with self.subTest(auto=auto):
+                self.calls.clear()
+                live = claim(f'pr-{PR}', HEAD, pr=PR, state='DISPATCHED', repair=tid(321))
+                live['executor_task'] = EXECUTOR
+                store = self.store(None, review_repair_claims=[live])
+                result = self.dispatch(store, auto=auto)
+                self.assertTrue(result['replayed'])
+                self.assertEqual(result['repair_task_id'], tid(321))
+                self.assertEqual(self.calls, [])
+
+    def test_auto_review_repair_only_on_a_chain_with_none_used(self):
+        # L1 child 2: an automatic request gets only the chain's first review repair.
+        result = self.dispatch(self.store([]), auto=True)
+        self.assertEqual((result['claim']['family'], result['claim']['attempt']),
+                         (f'pr-{PR}', 1))
+        self.calls.clear()
+        used = [claim('pr-5', OLD_HEAD, pr=5)]
+        # D1 would admit (RCA_CONFIRMED on HEAD), but an auto request needs the PM.
+        self.refused(self.store(used, high_debug=self.rca()), 'REVIEW_REPAIR_PM_REQUIRED',
+                     auto=True)
+        # A chain in doubt counts as used.
+        self.refused(self.store(None, high_debug=self.rca()), 'REVIEW_REPAIR_PM_REQUIRED',
+                     auto=True)
+        # The manual PM repair keeps the D1 rules.
+        self.refused(self.store(used), 'REPAIR_DEBUG_REQUIRED')
+        self.dispatch(self.store(used, high_debug=self.rca()))
+        self.assertEqual(self.calls[0]['packet']['high_debug_report_sha256'],
+                         self.rca()[0]['report_sha256'])
+        # Test failures keep their own count: an auto EC2 repair is not affected.
+        self.calls.clear()
+        result = self.dispatch(self.store(used), auto=True, remote_test_receipt=_receipt())
+        self.assertEqual(result['claim']['family'], f'pr-{PR}-ec2')
+
+    def test_auto_retry_after_a_failed_first_repair_stops(self):
+        def first():
+            item = claim(f'pr-{PR}', HEAD, pr=PR, state='DISPATCHED', repair=tid(322))
+            item['executor_task'] = EXECUTOR
+            return item
+        # REPAIR_RETRY: the first repair is the chain's one, so auto stops and
+        # the failed claim stays DISPATCHED (refused() checks it is unchanged).
+        self.refused(self.store([], review_repair_claims=[first()], high_debug=self.rca()),
+                     'REVIEW_REPAIR_PM_REQUIRED', auto=True, retry_claim_id=tid(322))
+        # The manual retry with RCA_CONFIRMED on HEAD is still admitted (D1).
+        store = self.store([], review_repair_claims=[first()], high_debug=self.rca())
+        result = self.dispatch(store, retry_claim_id=tid(322))
+        self.assertEqual(result['claim']['attempt'], 2)
+        self.assertEqual([item['state'] for item in
+                          store.get(TASK)['review_repair_claims']], ['FAILED', 'DISPATCHED'])
 
     def test_a_continuations_own_repair_on_another_pr_counts(self):
         # F1: this Task's own review repair on PR 5 uses the chain's first repair.
@@ -766,7 +809,7 @@ class ChainLockTests(unittest.TestCase):
 
     rca = staticmethod(ReviewRepairChainTests.rca)
 
-    def dispatch(self, store, task_id, *, test_failure, hold=0.0):
+    def dispatch(self, store, task_id, *, test_failure, hold=0.0, auto=False):
         def adapter(**request):
             self.calls.append(request)
             return {'status': 'DISPATCHED'}
@@ -781,7 +824,7 @@ class ChainLockTests(unittest.TestCase):
             store=store, task_id=task_id, executor_task=EXECUTOR, pr_number=PR,
             github_get=lambda _path: [_comment()], dispatch_adapter=adapter,
             current_head=lambda _task, _executor: HEAD, repair_task_recorder=recorder,
-            **extra)
+            auto=auto, **extra)
 
     def patched(self):
         allowed = type('Decision', (), {'allowed': True})()
@@ -868,6 +911,50 @@ class ChainLockTests(unittest.TestCase):
                 self.assertIn(caught.exception.review_repair_code,
                               self.refusal_codes(test_failure))
                 self.assertEqual(store.get(MIDDLE).get('review_repair_claims', []), [])
+
+    def test_auto_repair_on_an_earlier_task_after_a_later_one_needs_the_pm(self):
+        # L1 child 2, sequential OLDEST <- MIDDLE <- NEWEST: NEWEST takes the
+        # chain's one automatic review repair; MIDDLE (counting its successor)
+        # then stops for the PM, whose manual repair keeps D1.
+        store = self.chain_store([])
+        with self.patched():
+            self.dispatch(store, NEWEST, test_failure=False, auto=True)
+            self.recorded.clear()
+            with self.assertRaises(LLMToolError) as caught:
+                self.dispatch(store, MIDDLE, test_failure=False, auto=True)
+            self.assertEqual(caught.exception.review_repair_code, 'REVIEW_REPAIR_PM_REQUIRED')
+            self.assertEqual(store.get(MIDDLE).get('review_repair_claims', []), [])
+            self.assertEqual((self.recorded, len(self.calls)), ([], 1))
+            result = self.dispatch(store, MIDDLE, test_failure=False)   # manual, RCA on HEAD
+        self.assertEqual(result['claim']['high_debug_report_sha256'],
+                         self.rca()[0]['report_sha256'])
+        self.assertEqual(len(self.new_claims(store)), 2)
+
+    def test_two_concurrent_auto_repairs_with_none_used_admit_exactly_one(self):
+        store = self.chain_store([])
+        with self.patched():
+            results = run_concurrently(
+                lambda: self.dispatch(store, MIDDLE, test_failure=False, hold=0.3, auto=True),
+                lambda: self.dispatch(store, NEWEST, test_failure=False, hold=0.3, auto=True))
+        kinds = sorted(kind for kind, _value in results)
+        self.assertEqual(kinds, ['ok', 'refused'], results)
+        refusal = next(value for kind, value in results if kind == 'refused')
+        self.assertEqual(getattr(refusal, 'review_repair_code', None),
+                         'REVIEW_REPAIR_PM_REQUIRED')
+        self.assertEqual(len(self.new_claims(store)), 1)
+        self.assertEqual((len(self.recorded), len(self.calls)), (1, 1))
+
+    def test_the_auto_rule_is_decided_only_under_the_chain_lock(self):
+        # The chain has used its review repair, but with the lock busy the
+        # request refuses for the lock: no unlocked check decides the rule.
+        store = self.chain_store([claim('pr-5', OLD_HEAD, pr=5)])
+        with patch.object(task_store_module, 'LINEAGE_LOCK_TIMEOUT_SECONDS', 0.2), \
+             self.patched():
+            with store.chain_lock(OLDEST):
+                with self.assertRaises(LLMToolError) as caught:
+                    self.dispatch(store, NEWEST, test_failure=False, auto=True)
+        self.assertEqual(caught.exception.review_repair_code, 'REPAIR_CHAIN_LOCK_UNAVAILABLE')
+        self.assertEqual((self.new_claims(store), self.recorded, self.calls), ([], [], []))
 
     def test_an_ancestor_fork_refuses_before_any_claim_or_dispatch(self):
         # Review F1 (v2): OLDEST <- MIDDLE <- NEWEST and FORK <- MIDDLE. The other
@@ -1100,7 +1187,8 @@ class AdvanceChainTests(unittest.TestCase):
     def test_review_repair_is_left_to_review_repair_as_on_main(self):
         # Child 1 adds no advance-side review gate: whatever the chain's review
         # count, advance hands the review FAIL to review_repair (which counts the
-        # chain under the chain lock) and passes no replay flag.
+        # chain under the chain lock) and passes no replay flag. Child 2 adds
+        # only the explicit auto flag; the rule is decided in review_repair.
         cases = (('fresh chain', self.store((), [])),
                  ('legacy task, none used', self.store((), continues=False)),
                  ('predecessor used one', self.store((), [claim('pr-9', OLD_HEAD, pr=9)])),
@@ -1117,8 +1205,129 @@ class AdvanceChainTests(unittest.TestCase):
                 self.assertEqual(len(repaired), 1)
                 self.assertNotIn('replay_only', repaired[0])
                 self.assertIsNone(repaired[0]['retry_claim_id'])
+                self.assertIs(repaired[0]['auto'], True)
                 self.assertEqual(store.get(ADV_TASK)['review_repair_claims'], before)
         self.assertFalse(hasattr(task_advance, '_review_repairs_used'))
+
+
+# L1 child 2: task advance / drive through the real chain-locked admission.
+
+CHAIN_A, CHAIN_B, CHAIN_C, FIRST_REPAIR = tid(0x81), tid(0x82), tid(0x83), tid(0x8f)
+
+
+class AdvanceAutoRepairTests(unittest.TestCase):
+    def setUp(self):
+        worker_policy_fixture.install(self)
+        self.calls, self.seen = [], []
+
+    @staticmethod
+    def record(task_id, **changes):
+        """A Task ready for both advance (review FAIL on HEAD) and review_repair."""
+        changes.setdefault('review_repair_claims', [])
+        changes.setdefault('completion', {
+            'executor_task_id': EXECUTOR, 'state': 'WAITING_REVIEW',
+            'evidence': {'common_dir': '/tmp/git', 'result': {'result_head': HEAD}}})
+        return _current(task_id=task_id, **changes)
+
+    def injected(self):
+        def adapter(**request):
+            self.calls.append(request)
+            return {'status': 'DISPATCHED'}
+
+        def recorder(**request):
+            return {'task_id': request['repair_task_id'],
+                    'pm_assignment': {'acceptance': ['Repair the reported issue.']}}
+        return {'github_get': lambda _path: [_comment()],
+                'current_head': lambda _task, _executor: HEAD,
+                'dispatch_adapter': adapter, 'repair_task_recorder': recorder}
+
+    def patched(self):
+        allowed = type('Decision', (), {'allowed': True})()
+        stack = contextlib.ExitStack()
+        for target, name, value in (
+                (task_advance, '_d6_snapshot', dict(_d6(), task_id=EXECUTOR)),
+                (task_advance, '_pr_snapshot', dict(PR_SNAPSHOT, number=PR)),
+                (task_advance, '_review_outcomes', [{
+                    'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                    'outcome': 'REVIEW_FAIL'}]),
+                (review_repair.worker_dispatch, 'evaluate', allowed),
+                (review_repair.shutil, 'which', '/usr/bin/agy')):
+            stack.enter_context(patch.object(target, name, return_value=value))
+        return stack
+
+    def advance(self, store, task_id):
+        def repair(**kwargs):
+            # The real review_repair; only the provider, D6 and GitHub reads are injected.
+            self.seen.append(dict(kwargs))
+            kwargs.update(self.injected())
+            return review_repair.repair_review(**kwargs)
+        with self.patched():
+            return task_advance.advance(task_id=task_id, store=store, pr_number=PR,
+                                        cwd='/repo/task', github_get=lambda _path: [],
+                                        repair_review_call=repair)
+
+    def test_advance_on_an_earlier_chain_task_stops_for_the_pm(self):
+        # A <- B <- C, sequential: C already used the chain's one review repair.
+        used = claim(f'pr-{PR}', OTHER_HEAD, pr=PR)
+        store = MemoryStore({'task_id': CHAIN_A, 'review_repair_claims': []},
+                            self.record(CHAIN_B, continues=CHAIN_A,
+                                        high_debug=ReviewRepairChainTests.rca()),
+                            self.record(CHAIN_C, continues=CHAIN_B,
+                                        review_repair_claims=[used]))
+        result = self.advance(store, CHAIN_B)
+        self.assertEqual((result['step'], result['codes']),
+                         ('STOPPED', ['REVIEW_REPAIR_PM_REQUIRED']))
+        self.assertEqual(len(self.seen), 1)
+        self.assertIs(self.seen[0]['auto'], True)
+        self.assertIsNone(self.seen[0]['retry_claim_id'])
+        self.assertEqual(store.get(CHAIN_B)['review_repair_claims'], [])
+        self.assertEqual(self.calls, [])
+        # The PM's manual task repair (auto False) with RCA_CONFIRMED is admitted (D1).
+        with self.patched():
+            manual = review_repair.repair_review(
+                store=store, task_id=CHAIN_B, executor_task=EXECUTOR, pr_number=PR,
+                **self.injected())
+        self.assertEqual(manual['claim']['high_debug_report_sha256'],
+                         ReviewRepairChainTests.rca()[0]['report_sha256'])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_auto_retry_after_a_failed_first_repair_stops(self):
+        first = claim(f'pr-{PR}', HEAD, pr=PR, state='DISPATCHED', repair=FIRST_REPAIR)
+        first['executor_task'] = EXECUTOR
+        lone = self.record(CHAIN_B, review_repair_claims=[first])
+        del lone['continues']
+        store = MemoryStore(lone, {'task_id': FIRST_REPAIR,
+                                   'developer': {'state': 'DEVELOPER_UNAVAILABLE'}})
+        result = self.advance(store, CHAIN_B)
+        self.assertEqual((result['step'], result['codes']),
+                         ('STOPPED', ['REVIEW_REPAIR_PM_REQUIRED']))
+        self.assertEqual(len(self.seen), 1)
+        self.assertIs(self.seen[0]['auto'], True)
+        self.assertEqual(self.seen[0]['retry_claim_id'], FIRST_REPAIR)
+        self.assertEqual([item['state'] for item in
+                          store.get(CHAIN_B)['review_repair_claims']], ['DISPATCHED'])
+        self.assertEqual(self.calls, [])
+
+    def test_advance_maps_only_the_pm_refusal_to_stopped(self):
+        def refusing(code):
+            def call(**_kwargs):
+                error = LLMToolError('Review repair refused; details omitted')
+                error.review_repair_code = code
+                raise error
+            return call
+        store = MemoryStore(self.record(CHAIN_B, continues=CHAIN_A),
+                            {'task_id': CHAIN_A, 'review_repair_claims': []})
+        for code in ('REVIEW_REPAIR_PM_REQUIRED', 'REPAIR_DEBUG_REQUIRED'):
+            with self.subTest(code=code), self.patched():
+                result = task_advance.advance(
+                    task_id=CHAIN_B, store=store, pr_number=PR, cwd='/repo/task',
+                    github_get=lambda _path: [], repair_review_call=refusing(code))
+                if code == 'REVIEW_REPAIR_PM_REQUIRED':
+                    self.assertEqual((result['step'], result['codes']),
+                                     ('STOPPED', ['REVIEW_REPAIR_PM_REQUIRED']))
+                else:   # other refusals keep today's report
+                    self.assertEqual(result['step'], 'REPAIR_REVIEW')
+                    self.assertIn(code, result['codes'])
 
 
 if __name__ == '__main__':

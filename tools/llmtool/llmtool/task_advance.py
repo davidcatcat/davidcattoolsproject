@@ -878,7 +878,8 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
         captured = io.StringIO()
         with contextlib.redirect_stdout(captured):
             value = invoke(store=store, task_id=task_id, executor_task=executor_task,
-                           pr_number=number, auto_review=False, github_get=github_get,
+                           pr_number=number, auto_review=False, auto=True,
+                           github_get=github_get,
                            retry_claim_id=retry_claim_id, ci_failure=ci_failure)
         emitted = captured.getvalue().strip()
         try:
@@ -3267,9 +3268,11 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                     invoke = repair_review_call or review_repair.repair_review
                     try:
                         captured = io.StringIO()
+                        # #1502 WP-D L1 child 2: an automatic request; review_repair
+                        # decides the one-auto-repair rule under the chain lock.
                         repair_args = dict(store=store, task_id=task_id,
                             executor_task=executor_task, pr_number=number,
-                            auto_review=False, github_get=get,
+                            auto_review=False, auto=True, github_get=get,
                             retry_claim_id=(repair_claim.get('repair_task_id')
                                             if step == 'REPAIR_RETRY' and
                                             type(repair_claim) is dict else None))
@@ -3286,6 +3289,8 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                         code = _refusal(exc, 'review_repair_code')
                         if code == 'REPAIR_LIMIT_REACHED' and remote_status == 'FAIL':
                             step, codes = 'STOPPED', ['TEST_FAIL_LIMIT_REACHED']
+                        elif code == 'REVIEW_REPAIR_PM_REQUIRED':
+                            step, codes = 'STOPPED', ['REVIEW_REPAIR_PM_REQUIRED']
                         else:
                             codes.append(code)
     elif step == 'RUN_TASK_COMPLETE':

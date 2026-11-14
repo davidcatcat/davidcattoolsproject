@@ -2349,7 +2349,8 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
         auto_review=getattr(args, 'auto_review', False),
         review_dispatcher=review_dispatcher,
         delegate_callable=delegate_callable,
-        repair_task_recorder=repair_task_recorder)
+        repair_task_recorder=repair_task_recorder,
+        auto=False)   # #1502 L1 child 2: a manual PM repair keeps the D1 rules
     return _print(result)
 
 

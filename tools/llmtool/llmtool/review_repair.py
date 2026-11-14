@@ -584,11 +584,19 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                   dispatch_adapter=None, current_head=None, auto_review=False,
                   review_dispatcher=None, delegate_callable=None,
                   repair_task_recorder=None, retry_claim_id=None,
-                  remote_test_receipt=None, ci_failure=None):
+                  remote_test_receipt=None, ci_failure=None, auto=False):
     """Claim and dispatch one repair for a failed review, remote test or CI check.
 
     remote_test_receipt (EC2) and ci_failure (#1502 WP-D D11) are exclusive; both
     are test failures and share one count, the '<base>-ec2' family.
+
+    auto (#1502 WP-D L1 child 2): True when task advance or task drive asks.
+    Inside the chain-locked admission an auto review repair, a REPAIR_RETRY
+    included, is refused REVIEW_REPAIR_PM_REQUIRED once the chain has used a
+    review repair (or its count is UNKNOWN); only the PM's manual `task repair`
+    (auto False) may then admit one, under the D1 rules. Any value but False
+    counts as auto. Replay of a live claim and test-failure repairs are not
+    affected.
     """
     if ci_failure is not None and remote_test_receipt is not None:
         _refuse('CI_FAILURE_INVALID')
@@ -744,6 +752,12 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         counts = lineage_counts.lineage_counts(store, task, base_family=base_family,
                                                include_successors=True)
         rca_entry = None
+        if not test_failure and auto is not False:
+            # L1 child 2: one automatic review repair per chain, decided only
+            # here under the chain lock (successors included); UNKNOWN is used.
+            used_reviews = counts.get('review_repairs')
+            if type(used_reviews) is not int or used_reviews != 0:
+                _refuse('REVIEW_REPAIR_PM_REQUIRED')
         if not test_failure:
             rca_entry = _review_gate(task, attempts, packet, family, _policy(), counts=counts)
             if rca_entry is not None:
