@@ -100,7 +100,7 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'review_dispatch_claim', 'review_repair_claims', 'high_debug',
     'abandonment', 'pm_session_adoptions', 'pm_provenance', 'merge_attempt',
     'published_pr', 'repair_cap_override', 'publish_operations',
-    'review_exception', 'lineage', 'review_disputes', 'waiting'))
+    'review_exception', 'lineage', 'review_disputes', 'waiting', 'continues'))
 # Owner-exception merge evidence (#1253, #1519). Only this one exception type
 # is persisted; its evidence is the exact owner_exception.verify() result.
 _REVIEW_EXCEPTION_TYPE = 'OWNER_EXCEPTION_DETERMINISTIC_REDACTION'
@@ -1768,6 +1768,11 @@ def _validate(record, *, strict=True):
     if 'waiting' in keys:
         keys.discard('waiting')
         _validate_waiting(record['waiting'])
+    if 'continues' in keys:
+        # #1502 WP-D L1: the optional predecessor Task; a record without it stays valid.
+        keys.discard('continues')
+        if not _hex32(record['continues']) or record['continues'] == record.get('task_id'):
+            _fail('TASK_CONTINUES_INVALID')
     if type(record) is dict and 'pm_session_adoptions' in record:
         keys.discard('pm_session_adoptions')
     if (type(record) is not dict or
@@ -4929,6 +4934,9 @@ class TaskStore:
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
             _fail()
+        if 'continues' in changes:
+            # #1502 WP-D L1: continues is written once, when record-pm creates the Task.
+            _fail('TASK_CONTINUES_IMMUTABLE')
         if (trusted_split is not None or split_child_max is not None) and (
                 trusted_split not in SPLIT_ACTIONS or set(changes) != {'lineage'} or
                 (split_child_max is not None) != (trusted_split == 'COMMIT') or
@@ -5265,7 +5273,8 @@ class TaskStore:
                 self._write(current, create=False)
                 raise dispatch_denial
             immutable = {'schema_version', 'task_id', 'run_id', 'pm_session_id',
-                         'created_at', 'task_contract', 'task_binding', 'record_sha256'}
+                         'created_at', 'task_contract', 'task_binding', 'record_sha256',
+                         'continues'}
             writable = FIELDS - immutable
             if trusted_pm_session_adoption:
                 writable = writable | {'pm_session_id'}

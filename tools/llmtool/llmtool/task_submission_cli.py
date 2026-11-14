@@ -756,6 +756,9 @@ def add_task_submission_parsers(actions):
                            help='PM runtime that owns --pm-session-id (default claude-code)')
     record_pm.add_argument('--pm-cwd',
                            help='working directory of the PM session (default: current directory)')
+    record_pm.add_argument('--continues', metavar='TASK',
+                           help='earlier Task ID this Task continues (write-once; '
+                                'repair counts are summed over the chain)')
     inbox = actions.add_parser(
         'inbox', help='Read unacknowledged completion events for one active PM session')
     inbox.add_argument('--pm-session', required=True,
@@ -7481,6 +7484,11 @@ def run_task_record_pm(args, *, store=None, input_stream=None, return_record=Fal
                    'pm_cwd': observer(native_session, os.getcwd() if cwd is None else cwd)}
     prompt, response, assignment = _read_pm_record_input(input_stream)
     task_id, run_id = (new_id() if task_id is None else task_id), new_id()
+    # #1502 WP-D L1: an optional write-once link to the Task this one continues.
+    continues = getattr(args, 'continues', None)
+    if continues is not None:
+        from . import lineage_counts
+        lineage_counts.check_continues(store, task_id, continues)
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
     contract = _contract(task_id, digest)
     record = _record(
@@ -7505,6 +7513,8 @@ def run_task_record_pm(args, *, store=None, input_stream=None, return_record=Fal
             **({} if session is None else session),
         },
     )
+    if continues is not None:
+        record['continues'] = continues
     try:
         store.create(record)
         saved = store.get(task_id)
