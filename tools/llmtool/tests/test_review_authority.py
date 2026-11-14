@@ -14,6 +14,7 @@ from unittest.mock import patch
 from llmtool import review_authority as a, task_review as r, authorization_ledger as l
 from llmtool import authorization_policy as p
 from llmtool.developer_routes import load_route_config
+from llmtool.errors import LLMToolError
 from llmtool.task_review_collector import LocalFacts
 from test_task_review import fixture, FakeHost, NOW
 import review_trust_fixture
@@ -160,7 +161,7 @@ class AuthorityTests(unittest.TestCase):
         registration=a._decode_host(r.canonical(hostdata).decode())
         self.assertEqual(registration.agents[0].branch_prefix,'automation/ai-loop')
         hostdata['agents'][0]['branch_prefix']='main'
-        with self.assertRaises(Exception):
+        with self.assertRaises(LLMToolError):
             a._decode_host(r.canonical(hostdata).decode())
 
     def test_registered_agent_accepts_only_exact_review_origins(self):
@@ -184,7 +185,7 @@ class AuthorityTests(unittest.TestCase):
             'HTTPS://github.com/davidcatcat/davidcattoolsproject.git',
             'https://github.com/someoneelse/davidcattoolsproject.git',
         ):
-            with self.subTest(origin=origin), self.assertRaises(Exception):
+            with self.subTest(origin=origin), self.assertRaises(LLMToolError):
                 hostdata=copy.deepcopy(self.h.hostdata)
                 hostdata['agents'][0]['origin']=origin
                 a._decode_host(r.canonical(hostdata).decode())
@@ -195,13 +196,13 @@ class AuthorityTests(unittest.TestCase):
         new_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/777#issuecomment-1'
         with review_trust_fixture.use_trust(new_issue):
             a._reference(new_ref)
-            with self.assertRaises(Exception) as caught: a._reference(REF)
+            with self.assertRaises(LLMToolError) as caught: a._reference(REF)
             self.assertEqual(caught.exception.review_code,'REVIEW_HOST_POLICY_INVALID')
-            with self.assertRaises(Exception):
+            with self.assertRaises(LLMToolError):
                 a._reference('https://github.com/davidcatcat/davidcattoolsproject/issues/7777#issuecomment-1')
         with review_trust_fixture.use_trust(review_trust_fixture.make_trust('otherorg/other-repo')):
             a._reference('https://github.com/otherorg/other-repo/issues/120#issuecomment-1')
-            with self.assertRaises(Exception): a._reference(REF)
+            with self.assertRaises(LLMToolError): a._reference(REF)
 
     def test_registered_agent_origin_and_observation_follow_trust_slug(self):
         other=review_trust_fixture.make_trust('otherorg/other-repo',host_policy_issue=120)
@@ -212,11 +213,11 @@ class AuthorityTests(unittest.TestCase):
                 with self.subTest(origin=origin):
                     agent=a.RegisteredAgent(**dict(self.h.hostdata['agents'][0],origin=origin))
                     self.assertEqual(agent.origin,origin)
-            with self.assertRaises(Exception) as caught:
+            with self.assertRaises(LLMToolError) as caught:
                 a.RegisteredAgent(**self.h.hostdata['agents'][0])
             self.assertEqual(caught.exception.review_code,'REVIEW_REGISTRATION_INVALID')
             # A host registration still carrying the old origin now fails closed.
-            with self.assertRaises(Exception) as caught: self.h.observer.observe()
+            with self.assertRaises(LLMToolError) as caught: self.h.observer.observe()
             self.assertEqual(caught.exception.review_code,'REVIEW_REGISTRATION_INVALID')
         # With a registration accepted earlier, the Observation carries the current trust slug.
         registration=a.load_host_registration(self.h.pin)
@@ -283,7 +284,7 @@ class AuthorityTests(unittest.TestCase):
     def test_replay_new_nonce_or_run_still_same_object(self):
         b,packet=self.h.binding();ad=self.h.authority.admit(b);token=self.h.authority.consume(ad)
         self.assertTrue(token.committed)
-        with self.assertRaises(Exception):self.h.authority.consume(ad)
+        with self.assertRaises(LLMToolError):self.h.authority.consume(ad)
         b2=replace(b,reviewer_launch_nonce='e'*32,redeem_run_id='d'*32)
         self.assertFalse(self.h.authority.admit(b2).admitted)
         self.assertEqual(self.h.ledger.status(ad.grant_ref),'CONSUMED')
@@ -343,30 +344,30 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(self.h.ledger.status(receipt.nonce),'EFFECT_UNKNOWN')
     def test_launch_once_and_only_after_committed_consume(self):
         b,packet=self.h.binding();ad=self.h.authority.admit(b)
-        with self.assertRaises(Exception):self.h.launcher.launch(packet.data,r.ConsumeToken(b.digest,b.reviewer_launch_nonce,ad.grant_ref,False,True))
+        with self.assertRaises(LLMToolError):self.h.launcher.launch(packet.data,r.ConsumeToken(b.digest,b.reviewer_launch_nonce,ad.grant_ref,False,True))
         token=self.h.authority.consume(ad)
         self.h.launcher.launch(packet.data,token)
-        with self.assertRaises(Exception):self.h.launcher.launch(packet.data,token)
+        with self.assertRaises(LLMToolError):self.h.launcher.launch(packet.data,token)
     def test_host_file_safety_and_pins(self):
         for mode in (0o644,0o666):
             self.h.hostpath.chmod(mode)
-            with self.assertRaises(Exception):a.load_host_registration(self.h.pin)
+            with self.assertRaises(LLMToolError):a.load_host_registration(self.h.pin)
         self.h.hostpath.chmod(0o600)
-        with self.assertRaises(Exception):a.load_host_registration(replace(self.h.pin,host_digest='0'*64))
+        with self.assertRaises(LLMToolError):a.load_host_registration(replace(self.h.pin,host_digest='0'*64))
         link=self.h.hostdir/'link.json';link.symlink_to(self.h.hostpath)
-        with self.assertRaises(Exception):a.read_host_file(link)
-        with self.assertRaises(Exception):a.load_host_registration(replace(self.h.pin,repository_roots=(str(self.h.hostdir),)))
+        with self.assertRaises(LLMToolError):a.read_host_file(link)
+        with self.assertRaises(LLMToolError):a.load_host_registration(replace(self.h.pin,repository_roots=(str(self.h.hostdir),)))
     def test_replaced_ledger_or_nonce_denied(self):
         wrong=replace(self.h.pin,host_digest='0'*64)
-        with self.assertRaises(Exception):a.load_host_registration(wrong)
+        with self.assertRaises(LLMToolError):a.load_host_registration(wrong)
         old=self.h.ledger_path.with_suffix('.saved');self.h.ledger_path.rename(old)
         self.h.ledger_path.write_bytes(b'not a ledger');self.h.ledger_path.chmod(0o600)
-        with self.assertRaises(Exception):a.load_host_registration(self.h.pin)
+        with self.assertRaises(LLMToolError):a.load_host_registration(self.h.pin)
     def test_route_data_cost_bounds(self):
         for changes in ({'unknown_cost_accepted':False},{'data_classes':('COMPANY_LOG',)},
             {'provider':'other-provider'},{'max_attempts':2},{'max_packet_bytes':262145},
             {'retry_count':1},{'call_timeout_seconds':121},{'per_day_cap':True}):
-            with self.subTest(changes=changes),self.assertRaises(Exception):replace(self.h.policy,**changes)
+            with self.subTest(changes=changes),self.assertRaises(LLMToolError):replace(self.h.policy,**changes)
     def test_pair_originals_and_privacy_block_without_transform(self):
         h=self.h
         result=h.run(approval=replace(h.fake.approval,record_ref='forged-pair'))
@@ -375,7 +376,7 @@ class AuthorityTests(unittest.TestCase):
             r.screen(text)
         for text in ('/Users/alice/private.log','/home/alice/auth.json','/Users/<user>/.ssh/id_rsa',
                      '/private/var/folders/user/run.log','/Users/<user>/../alice/private.log'):
-            with self.subTest(text=text),self.assertRaises(Exception):r.screen(text)
+            with self.subTest(text=text),self.assertRaises(LLMToolError):r.screen(text)
     def test_readonly_check_does_not_claim_pin_or_touch_ledger(self):
         from llmtool.cli import main
         import io
@@ -559,7 +560,7 @@ class WorkerJobIntegrationTests(unittest.TestCase):
             self.assertNotIn(tool,allowed_tools)
         receipt=next(iter(h.authority.receipts.values()))
         self.assertEqual(h.ledger.status(receipt.nonce),'EFFECT_DONE')
-        with self.assertRaises(Exception):h.launcher.launch(h.packet_input,
+        with self.assertRaises(LLMToolError):h.launcher.launch(h.packet_input,
             r.ConsumeToken(receipt.binding.call.digest,h.issuer.reviewer_launch_nonce,receipt.nonce,True,True))
 
     def test_both_cross_roles_denied_before_any_spawn(self):
@@ -634,7 +635,7 @@ class WorkerJobIntegrationTests(unittest.TestCase):
         reg=a._decode_host(r.canonical(legacy.hostdata).decode())
         self.assertEqual(reg.route_policies[0][0].reviewer_role,'llmtool-review/claude-cli')
         h.hostdata['route_policies'][0]['policy'].pop('reviewer_role')
-        with self.assertRaises(Exception):a._decode_host(r.canonical(h.hostdata).decode())
+        with self.assertRaises(LLMToolError):a._decode_host(r.canonical(h.hostdata).decode())
 
     def test_finalization_uncertainty_blocks_success(self):
         h=self.harness()
@@ -686,7 +687,7 @@ class WorkerJobIntegrationTests(unittest.TestCase):
             receipt=next(iter(h.authority.receipts.values()))
             self.assertEqual(h.ledger.status(receipt.nonce),'EFFECT_UNKNOWN')
             with patch('subprocess.Popen',side_effect=AssertionError('resend')):
-                with self.assertRaises(Exception):h.launcher.launch(b'',r.ConsumeToken('', '', '',True,True))
+                with self.assertRaises(LLMToolError):h.launcher.launch(b'',r.ConsumeToken('', '', '',True,True))
         finally:
             # Test-owned unreaped fake child only; restore actual bounded wait.
             pending.process.wait(timeout=2)
@@ -776,7 +777,7 @@ class WorkerJobIntegrationTests(unittest.TestCase):
         h=self.harness()
         reg=a.load_host_registration(h.pin)
         with patch('time.monotonic',side_effect=(0,2)):
-            with self.assertRaises(Exception) as caught:a.verify_worker_executable(reg,1)
+            with self.assertRaises(LLMToolError) as caught:a.verify_worker_executable(reg,1)
         self.assertEqual(caught.exception.review_code,'REVIEW_TIMEOUT')
 
 
@@ -801,7 +802,7 @@ class RegistryModelTests(unittest.TestCase):
         for model in (UNLISTED_MODEL,'gpt-unlisted-model'):
             with self.subTest(model=model):
                 h=Harness(model=model);self.addCleanup(h.close)
-                with self.assertRaises(Exception) as caught:h.issuer.policy(h.policy.digest)
+                with self.assertRaises(LLMToolError) as caught:h.issuer.policy(h.policy.digest)
                 self.assert_model_refused(caught)
                 self.assertFalse(h.issuer.vouches_for(h.policy.digest))
                 with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
@@ -816,7 +817,7 @@ class RegistryModelTests(unittest.TestCase):
         self.assertEqual(a.admit_reviewer_model(REVIEW_MODEL),REVIEW_MODEL)
         for model in (UNLISTED_MODEL,CROSS_FAMILY_MODEL,'anthropic/'+REVIEW_MODEL,
                       REVIEW_MODEL.upper(),None):
-            with self.subTest(model=model),self.assertRaises(Exception) as caught:
+            with self.subTest(model=model),self.assertRaises(LLMToolError) as caught:
                 a.admit_reviewer_model(model)
             self.assert_model_refused(caught)
 
@@ -829,7 +830,7 @@ class RegistryModelTests(unittest.TestCase):
                 token=h.authority.consume(ad);self.assertTrue(token.committed)
                 with patch.object(h.issuer,'policy',return_value=_policy_with_model(h.policy,model)), \
                         patch('subprocess.Popen',side_effect=AssertionError('spawn')) as spawn:
-                    with self.assertRaises(Exception) as caught:h.launcher.launch(packet.data,token)
+                    with self.assertRaises(LLMToolError) as caught:h.launcher.launch(packet.data,token)
                 self.assert_model_refused(caught)
                 spawn.assert_not_called()
 
@@ -844,7 +845,7 @@ class RegistryModelTests(unittest.TestCase):
                 with patch.object(h.issuer,'policy',return_value=_policy_with_model(h.policy,model)), \
                         patch.object(h.issuer,'matches',return_value=True), \
                         patch('subprocess.Popen',side_effect=AssertionError('spawn')) as spawn:
-                    with self.assertRaises(Exception) as caught:
+                    with self.assertRaises(LLMToolError) as caught:
                         h.launcher.launch(packet.data,token,deadline=time.monotonic()+30)
                 self.assert_model_refused(caught)
                 spawn.assert_not_called()
@@ -855,7 +856,7 @@ class RegistryModelTests(unittest.TestCase):
             with self.subTest(model=model):
                 h=WorkerHarness(model=model);self.addCleanup(h.close)
                 with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
-                    with self.assertRaises(Exception) as caught:
+                    with self.assertRaises(LLMToolError) as caught:
                         a.run_foreground_review(h.issuer,h.ledger,budget=h.fake.budget)
                 self.assert_model_refused(caught)
                 self.assertFalse(h.argv_file.exists())
@@ -906,25 +907,25 @@ class ForegroundEntryTests(unittest.TestCase):
 
     def test_repeat_and_failed_attempt_cannot_replace_services_or_launch(self):
         h=self.harness();self.invoke(h);retained=h.issuer.foreground_services
-        with patch('subprocess.Popen',side_effect=AssertionError('resend')),self.assertRaises(Exception):
+        with patch('subprocess.Popen',side_effect=AssertionError('resend')),self.assertRaises(LLMToolError):
             self.invoke(h)
         self.assertIs(h.issuer.foreground_services,retained)
         h=self.harness()
         with patch.object(a,'compose_host_services',side_effect=ValueError('fixture failure')):
             with self.assertRaises(ValueError):self.invoke(h)
         with patch.object(a,'compose_host_services',side_effect=AssertionError('retry')):
-            with self.assertRaises(Exception):self.invoke(h)
+            with self.assertRaises(LLMToolError):self.invoke(h)
         self.assertIsNone(h.issuer.foreground_services)
 
     def test_legacy_route_and_invalid_budget_denied_before_effect(self):
         h=Harness();self.addCleanup(h.close)
         with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
-            with self.assertRaises(Exception):self.invoke(h)
+            with self.assertRaises(LLMToolError):self.invoke(h)
         self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
         h=self.harness()
         with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
-            with self.assertRaises(Exception):a.run_foreground_review(h.issuer,h.ledger,budget=object())
-        with self.assertRaises(Exception):self.invoke(h) # invalid attempt is not reset
+            with self.assertRaises(LLMToolError):a.run_foreground_review(h.issuer,h.ledger,budget=object())
+        with self.assertRaises(LLMToolError):self.invoke(h) # invalid attempt is not reset
 
     def test_original_deadline_survives_delayed_run_review_handoff(self):
         import time
@@ -975,7 +976,7 @@ class ForegroundEntryTests(unittest.TestCase):
             self.assertFalse(pending.cleanup_confirmed)
             self.assertEqual(result['status'],'BLOCKED')
             with patch('subprocess.Popen',side_effect=AssertionError('resend')):
-                with self.assertRaises(Exception):self.invoke(h)
+                with self.assertRaises(LLMToolError):self.invoke(h)
             self.assertIs(h.issuer.pending_job,pending)
         finally:
             pending.process.wait(timeout=2) # bounded test-owned cleanup only
@@ -995,7 +996,7 @@ class ForegroundEntryTests(unittest.TestCase):
             worker=threading.Thread(target=first);worker.start()
             try:
                 self.assertTrue(entered.wait(timeout=1))
-                with self.assertRaises(Exception):self.invoke(h)
+                with self.assertRaises(LLMToolError):self.invoke(h)
             finally:release.set();worker.join(timeout=2)
             self.assertFalse(worker.is_alive());compose.assert_called_once()
         self.assertEqual(len(errors),1)
@@ -1049,7 +1050,7 @@ class ForegroundEntryTests(unittest.TestCase):
                         patch('time.monotonic',side_effect=lambda:real()+(181 if late[0] else 0)):
                     if stage=='compose':
                         with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
-                            with self.assertRaises(Exception) as caught:self.invoke(h)
+                            with self.assertRaises(LLMToolError) as caught:self.invoke(h)
                         self.assertEqual(caught.exception.review_code,'REVIEW_TIMEOUT')
                     else:
                         result=self.invoke(h)
