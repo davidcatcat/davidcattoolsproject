@@ -66,15 +66,19 @@ class ClaudeNoChangesDiagnosisRouteTests(unittest.TestCase):
     """run_task_claude_delegate with the real ClaudeRoute parser on CLI JSON."""
 
     def _run(self, stdout=None, *, changed_paths=(), raw=b'', runner_error=None,
-             extra_patches=()):
+             extra_patches=(), goal=None, prompts=None):
         cli, store, args, _reg, _ev, _pr, _rq, patches, _runner = (
             wiring.ClaudeRouteWiringTests._setup(
                 self, changed_paths=changed_paths, raw=raw))
+        if goal is not None:
+            store.task['pm_assignment'] = dict(store.task['pm_assignment'], goal=goal)
         result = SimpleNamespace(session_id=_SESSION, exit_code=0,
             stdout_sha256='e' * 64, elapsed_ms=42, cleanup_status='CONFIRMED',
             usage={'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5})
 
-        def runner(route, _request, *, gate, **_kwargs):
+        def runner(route, request, *, gate, **_kwargs):
+            if prompts is not None:
+                prompts.append(request['prompt'])
             self.assertTrue(gate().allowed)
             if runner_error is not None:
                 raise runner_error
@@ -159,13 +163,63 @@ class ClaudeNoChangesDiagnosisRouteTests(unittest.TestCase):
                 self.assertEqual(developer['no_changes_diagnosis']['reason'], 'UNKNOWN')
 
     def test_long_line_is_cut_to_200_characters(self):
-        line = 'The requested change was already present in the file. ' * 8
+        # Wording shares no 20-character run with the prompt (v93 echo rule).
+        line = 'The loader already had this exact fix in place earlier. ' * 8
         status, developer = self._run(_cli_stdout(result='Intro.\n' + line))
         self._assert_no_changes_evidence(status, developer)
         reason = developer['no_changes_diagnosis']['reason']
         self.assertLessEqual(len(reason), 200)
         self.assertEqual(reason, line.strip()[:200].rstrip())
         self.assertNotIn('\n', reason)
+
+    def test_reason_echoing_a_prompt_sentence_gives_unknown(self):
+        sentence = 'Do not run tests, use Git, publish, or use network services.'
+        for text in (
+                # The whole sentence, exactly as sent.
+                sentence,
+                # A 20+ character run of it, other case and spacing.
+                'Stopping:  DO NOT RUN TESTS,   use git, so nothing changed.',
+                # A whole short line that was sent (the goal), under 20 characters.
+                'claude   GOAL'):
+            with self.subTest(text=text):
+                prompts = []
+                status, developer = self._run(_cli_stdout(result='Intro.\n' + text),
+                                              prompts=prompts)
+                self.assertEqual(len(prompts), 1)
+                self.assertIn(sentence, prompts[0])
+                self._assert_no_changes_evidence(status, developer)
+                self.assertEqual(developer['no_changes_diagnosis']['reason'], 'UNKNOWN')
+
+    def test_reason_echoing_a_context_fragment_gives_unknown(self):
+        goal = 'Use the "strict" parser for the config loader.'
+        for text in (
+                # The goal is JSON-escaped in the prompt; its decoded text still counts.
+                'I left THE "STRICT"   PARSER alone.',
+                # A run of the acceptance item.
+                'Did not Record The Bounded Result yet.'):
+            with self.subTest(text=text):
+                prompts = []
+                status, developer = self._run(_cli_stdout(result=text), goal=goal,
+                                              prompts=prompts)
+                self.assertIn('\\"strict\\" parser', prompts[0])
+                self._assert_no_changes_evidence(status, developer)
+                self.assertEqual(developer['no_changes_diagnosis']['reason'], 'UNKNOWN')
+
+    def test_genuine_short_reason_is_kept(self):
+        prompts = []
+        status, developer = self._run(_cli_stdout(result='The file already matched.'),
+                                      prompts=prompts)
+        self.assertNotIn('the file already matched', prompts[0].casefold())
+        self._assert_no_changes_evidence(status, developer)
+        self.assertEqual(developer['no_changes_diagnosis']['reason'],
+                         'The file already matched.')
+
+    def test_echo_check_fails_closed_without_sent_text(self):
+        reason = task_submission_cli._claude_no_changes_reason
+        self.assertEqual(reason('The file already matched.', ()), 'UNKNOWN')
+        self.assertEqual(reason('The file already matched.', None), 'UNKNOWN')
+        self.assertEqual(reason('The file already matched.', ('Unrelated sent text.',)),
+                         'The file already matched.')
 
     def test_write_attempted_comes_only_from_structured_fields(self):
         write = {'tool_name': 'Write', 'tool_input': {'file_path': 'src.py'}}

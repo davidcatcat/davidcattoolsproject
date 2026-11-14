@@ -5424,12 +5424,63 @@ class _DiagnosedClaudeRoute(ClaudeRoute):
         return parsed
 
 
-def _claude_no_changes_reason(text):
+# v93: a reason that repeats this many normalized characters of sent text is refused.
+_NO_CHANGES_ECHO_RUN = 20
+
+
+def _echo_normalize(text):
+    """Whitespace runs to one space, case folded (v93 echo comparison only)."""
+    return ' '.join(text.split()).casefold()
+
+
+def _claude_sent_texts(prompt, prompt_packet):
+    """v93: the prompt as sent plus every decoded string of its TASK_JSON packet.
+
+    The packet is JSON-escaped inside the prompt, so its strings are also kept
+    decoded; an echo of either form is then found."""
+    texts = [prompt]
+    pending = [prompt_packet]
+    while pending:
+        value = pending.pop()
+        if type(value) is str:
+            texts.append(value)
+        elif type(value) is dict:
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif type(value) in (list, tuple):
+            pending.extend(value)
+    return tuple(texts)
+
+
+class _SentTextIndex:
+    """v93: normalized prompt/context text and all its _NO_CHANGES_ECHO_RUN-character runs."""
+
+    def __init__(self, sent_texts):
+        if (type(sent_texts) is not tuple or not sent_texts or
+                any(type(text) is not str for text in sent_texts)):
+            raise ValueError('sent text is unavailable')
+        self.texts = tuple(_echo_normalize(text) for text in sent_texts)
+        self.runs = {text[i:i + _NO_CHANGES_ECHO_RUN] for text in self.texts
+                     for i in range(len(text) - _NO_CHANGES_ECHO_RUN + 1)}
+
+    def echoes(self, candidate):
+        """True if the whole candidate, or any 20+ character run of it, was sent."""
+        value = _echo_normalize(candidate)
+        if not value or any(value in text for text in self.texts):
+            return True
+        return any(value[i:i + _NO_CHANGES_ECHO_RUN] in self.runs
+                   for i in range(len(value) - _NO_CHANGES_ECHO_RUN + 1))
+
+
+def _claude_no_changes_reason(text, sent_texts):
     """Last non-empty line of the CLI result text, screened and cut; else UNKNOWN.
 
     Any C0/C1 control character other than CR or LF, a screen hit or other
     non-printable text gives UNKNOWN. Control characters are refused before the
-    text is split or stripped; provider text is never reworded to pass the screen."""
+    text is split or stripped; provider text is never reworded to pass the screen.
+    v93: a line that repeats the prompt or context sent to Claude (whole, or any
+    20+ character run after whitespace/case normalization) gives UNKNOWN; missing
+    sent text also gives UNKNOWN (fail closed)."""
     if type(text) is not str:
         return 'UNKNOWN'
     if any((ord(char) < 0x20 and char not in '\r\n') or 0x7f <= ord(char) <= 0x9f
@@ -5448,10 +5499,16 @@ def _claude_no_changes_reason(text):
             _screen_text(value, 4 * 1024 * 1024)
         except LLMToolError:
             return 'UNKNOWN'
+    try:
+        index = _SentTextIndex(sent_texts)
+        if index.echoes(line) or index.echoes(reason):
+            return 'UNKNOWN'
+    except Exception:
+        return 'UNKNOWN'
     return reason
 
 
-def _claude_no_changes_diagnosis(raw):
+def _claude_no_changes_diagnosis(raw, sent_texts):
     """#1824: {reason, write_attempted, num_turns} from structured CLI fields only.
 
     write_attempted is YES only on a well-formed permission denial for a write
@@ -5476,7 +5533,7 @@ def _claude_no_changes_diagnosis(raw):
             write_attempted = 'NO'
         else:
             write_attempted = 'UNKNOWN'
-        return {'reason': _claude_no_changes_reason(raw.get('result')),
+        return {'reason': _claude_no_changes_reason(raw.get('result'), sent_texts),
                 'write_attempted': write_attempted, 'num_turns': turns}
     except Exception:
         return {'reason': 'UNKNOWN', 'write_attempted': 'UNKNOWN', 'num_turns': 'UNKNOWN'}
@@ -5776,8 +5833,9 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
         if (result is not None and error_code == 'CLAUDE_NO_CHANGES' and
                 type(parsed_cli_result) is dict):
             # #1824: bounded, screened diagnosis only from this run's parsed CLI result.
+            # v93: a reason that repeats the sent prompt or context is UNKNOWN.
             developer['no_changes_diagnosis'] = _claude_no_changes_diagnosis(
-                parsed_cli_result)
+                parsed_cli_result, _claude_sent_texts(prompt, prompt_packet))
         if owner_gate_denied:
             developer['blocked_reason'] = 'OWNER_DISPATCH_DENIED'
         elif exc.blocked_reason is not None:
