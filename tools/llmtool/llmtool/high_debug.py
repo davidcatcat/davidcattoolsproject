@@ -1071,20 +1071,29 @@ def _d6_taken(repo_root, common_dir, d6):
         return True
 
 
-def _d6_path_absent(d6):
-    """True only when the trusted D6 path (trust tasks_root / d6) is confirmed absent.
-
-    #1502 WP-D O7 F1: an orphan D6 directory, an unreadable trust config or any
-    other doubt is not absent.
-    """
+def _d6_trust_root():
+    """(trusted tasks_root, st_dev, st_ino) of an absolute directory, else None."""
     try:
-        tasks_root = Path(trust.load_trust().tasks_root)
+        root = Path(trust.load_trust().tasks_root)
+        info = os.stat(root) if root.is_absolute() else None
     except Exception:
-        return False
-    if not tasks_root.is_absolute():
+        return None
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        return None
+    return root, info.st_dev, info.st_ino
+
+
+def _d6_path_absent(d6, bound):
+    """True only when bound/d6 is confirmed absent and trust still names bound.
+
+    #1502 WP-D O7 F1: bound is _d6_trust_root() taken before the create, so the
+    lifecycle's own path is checked. A trust change, an orphan D6 or any doubt
+    is not absent.
+    """
+    if bound is None or _d6_trust_root() != bound:
         return False
     try:
-        (tasks_root / d6).lstat()
+        (bound[0] / d6).lstat()
     except FileNotFoundError:
         return True
     except Exception:
@@ -1293,11 +1302,7 @@ _DEBUG_NOT_STARTED = ('HIGH_DEBUG_QUOTA_EXHAUSTED', 'HIGH_DEBUG_AUTH_FAILED',
 
 
 def _debug_entry_used(entry):
-    """True unless entry is a RUN_FAILED confirmed not started; any doubt is used.
-
-    _DEBUG_USED_STATUSES, RESERVED and any unknown status are used. RUN_FAILED
-    is used unless its report is exactly one of _DEBUG_NOT_STARTED.
-    """
+    """True unless entry is a RUN_FAILED confirmed not started; any doubt is used."""
     if type(entry) is not dict:
         return True
     if entry.get('status') == 'RUN_FAILED':
@@ -1336,12 +1341,7 @@ def _debug_kind_and_key(store, task):
 
 
 def _group_debug_used(store, task, entries):
-    """Debugs used by a split child's group, or UNKNOWN on any doubt.
-
-    The child's own entries plus each other child listed in its ROOT's lineage
-    splits, each child's own high_debug entries. A missing or unreadable ROOT
-    or sibling is UNKNOWN.
-    """
+    """Debugs used by the child and every child in its ROOT's splits; doubt is UNKNOWN."""
     from .repair_policy import UNKNOWN
     root_id = task['lineage'].get('lineage_id')
     try:
@@ -1376,14 +1376,10 @@ def _group_debug_used(store, task, entries):
 
 
 def _reserve_debug(store, task_id, entries, reservation):
-    """#1502 WP-D O7: count and reserve one AI Debug under the lineage lock.
+    """#1502 WP-D O7: count and append one RESERVED entry under the lineage lock.
 
-    Like review_repair's chain lock: take the lock (else
-    HIGH_DEBUG_CHAIN_LOCK_UNAVAILABLE), reread the Task (HIGH_DEBUG_BUSY when
-    its key or high_debug list is no longer entries), count chain-wide or
-    group-wide (UNKNOWN counts as used), refuse with the admit_debug code, then
-    append the RESERVED entry (else HIGH_DEBUG_RESERVATION_FAILED). The lock is
-    released on every path. Returns the entry's index, len(entries).
+    Returns its index, len(entries). UNKNOWN counts as used; the lock is
+    released on every path.
     """
     from . import lineage_counts, repair_policy
     try:
@@ -1565,9 +1561,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
     model_requested = debug_model
-    # #1502 WP-D O7: one RESERVED entry, counted chain-wide under the lineage
-    # lock, is persisted before any D6 create or provider call. Every outcome
-    # finalizes that entry in place; a crash leaves it RESERVED (used).
+    # #1502 WP-D O7: reserved before any D6 create or provider call; every
+    # outcome finalizes it in place, a crash leaves it RESERVED (used).
     try:
         reserved_at = store._completion_now()
     except Exception:
@@ -1582,10 +1577,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
 
     def failed(code, observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN', report=None,
                detail=None, screen_hits=None, post=True):
-        # A diagnosis attempt that started but did not finish finalizes its
-        # reservation: it counts toward the entry limit and keeps its D6
-        # traceable. A failed finalize leaves it RESERVED (used); the original
-        # refusal code is what the caller sees.
+        # Finalizes the reservation; a failed finalize leaves it RESERVED
+        # (used) and the caller still sees the original code.
         try:
             recorded_at = store._completion_now()
         except Exception:
@@ -1610,6 +1603,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         _refuse(code, detail)
 
     create = create_d6 or _create_d6
+    trusted = _d6_trust_root()   # F1: bound once for the create and its cancel
     try:
         # Codex keeps the original create call; only Claude passes an agent id.
         if route == 'claude':
@@ -1620,13 +1614,10 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
             diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root,
                                     executor_task=executor_task)
     except Exception as error:
-        # No provider call happened. Only a classified rejection (the
-        # lifecycle exited by itself naming its rejection, the trusted D6 path
-        # is absent and no branch or registry record of this D6 exists) is the
-        # cancel path, finalized not used. A signal kill, an unclassified exit,
-        # a timeout, any other error or a D6 left behind (an orphan directory
-        # included) is unclear: the entry stays RESERVED (used).
-        if (isinstance(error, _D6CreateRejected) and _d6_path_absent(d6) and
+        # No provider call happened. Only a classified rejection with no D6
+        # left behind (path, branch or record) is cancelled, finalized not
+        # used; anything unclear stays RESERVED (used).
+        if (isinstance(error, _D6CreateRejected) and _d6_path_absent(d6, trusted) and
                 not _d6_taken(repo_root, registration.common_dir, d6)):
             failed('HIGH_DEBUG_D6_CREATE_FAILED', post=False)
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED', 'reservation=RESERVED')

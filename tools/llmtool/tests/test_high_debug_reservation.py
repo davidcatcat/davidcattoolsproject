@@ -22,12 +22,13 @@ import review_trust_fixture
 
 HEAD = 'a' * 40
 AT = '2026-11-15T00:00:00Z'
-PM = 'pm-reservation-test'
 REQUEST = 'Bounded AI Debug reservation test Task.'
 REASON = 'Synthetic early reason.'
 RULES = ('RULES stub\nRULES_END\n\n', 'c' * 64)
 REPORT = ''.join('## ' + heading + '\nDetails.\n'
                  for heading in high_debug.REPORT_SECTIONS) + 'RCA_CONFIRMED'
+QUOTA = ('RUN_FAILED', 'HIGH_DEBUG_QUOTA_EXHAUSTED')
+MARKER = 'D6 lifecycle rejected (D6_TEST_REJECTED)'
 
 
 def setUpModule():
@@ -38,10 +39,10 @@ def tearDownModule():
     review_trust_fixture.stop_module()
 
 
-def entry(status='RESERVED', report=None, d6='executor-hd1-aaaaaaa'):
-    """One high_debug entry bound to this module's request; status as given."""
+def entry(status='RESERVED', report=None):
     item = high_debug._failed_entry(
-        family='pr-17', failed_corrections=None, early_reason=REASON, head=HEAD, d6=d6,
+        family='pr-17', failed_corrections=None, early_reason=REASON, head=HEAD,
+        d6='executor-hd1-aaaaaaa',
         code=report or ('HIGH_DEBUG_RESERVED' if status == 'RESERVED' else 'HIGH_DEBUG_RUN_FAILED'),
         observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN', recorded_at=AT,
         model_requested=high_debug._CODEX_MODEL, rules_sha256=RULES[1])
@@ -49,11 +50,21 @@ def entry(status='RESERVED', report=None, d6='executor-hd1-aaaaaaa'):
     return item
 
 
-QUOTA = ('RUN_FAILED', 'HIGH_DEBUG_QUOTA_EXHAUSTED')
-
-
 class Crash(BaseException):
     pass
+
+
+def succeeds(*, prompt, cwd, output_path):
+    Path(output_path).write_text(REPORT, encoding='utf-8')
+    return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+
+
+def exits(code, stderr=b''):
+    return lambda **_kwargs: SimpleNamespace(returncode=code, stdout=b'', stderr=stderr)
+
+
+def rejected(**_kwargs):
+    raise high_debug._D6CreateRejected('D6_TEST_REJECTED')
 
 
 class ReservationCase(unittest.TestCase):
@@ -62,23 +73,19 @@ class ReservationCase(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.base = Path(temp.name).resolve()
         self.store = TaskStore(self.base / 'tasks')
-        for name, value in (('_debug_rules', RULES),):
-            patcher = patch.object(high_debug, name, return_value=value)
+        self.d6s = self.base / 'd6s'   # the trusted D6 parent, read at every trust load
+        self.d6s.mkdir()
+        for target, name, kwargs in (
+                (high_debug, '_debug_rules', {'return_value': RULES}),
+                (high_debug.task_store, 'default_root', {'return_value': self.base / 'tasks'}),
+                (high_debug, 'trust', {'new': SimpleNamespace(
+                    load_trust=lambda: SimpleNamespace(tasks_root=str(self.d6s)))})):
+            patcher = patch.object(target, name, **kwargs)
             patcher.start()
             self.addCleanup(patcher.stop)
-        patcher = patch.object(high_debug.task_store, 'default_root',
-                               return_value=self.base / 'tasks')
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        # The trusted D6 parent: no D6 directory exists there unless a test makes one.
-        self.d6s = self.base / 'd6s'
-        patcher = patch.object(high_debug, 'trust', SimpleNamespace(
-            load_trust=lambda: SimpleNamespace(tasks_root=str(self.d6s))))
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def task(self, continues=None, completion=False):
-        task = cli._record(new_id(), new_id(), PM, 'pm-profile', REQUEST,
+        task = cli._record(new_id(), new_id(), 'pm-reservation-test', 'pm-profile', REQUEST,
                            state='PM_RESPONDED', provider_type='openai-compatible',
                            model='pm-model', backend='NO_NATIVE_SESSION_ID_EXPOSED',
                            request_sha=hashlib.sha256(REQUEST.encode()).hexdigest())
@@ -103,10 +110,9 @@ class ReservationCase(unittest.TestCase):
         self.store.create(task)
         return task['task_id']
 
-    def split(self, count=2):
-        """A ROOT and its committed, OPEN split children (Owner B flow)."""
+    def split(self):
         root, op = self.task(), new_id()
-        children = [self.task() for _ in range(count)]
+        children = [self.task(), self.task()]
 
         def line(kind, state, **extra):
             return dict({'lineage_id': root, 'kind': kind,
@@ -121,10 +127,13 @@ class ReservationCase(unittest.TestCase):
                           child_max=8, expected={'lineage': None})
         for child in children:
             finalize_split_child(self.store, child)
-        return root, children
+        return children
 
     def entries(self, task_id, store=None):
         return (store or self.store).get(task_id).get('high_debug', [])
+
+    def statuses(self, task_id, store=None):
+        return [item['status'] for item in self.entries(task_id, store)]
 
     def reserve(self, task_id, store=None):
         store = store or self.store
@@ -140,17 +149,19 @@ class ReservationCase(unittest.TestCase):
         return None
 
     def race(self, first, second):
-        """Reserve on two Tasks at once; an unlocked count would let both pass."""
+        """F2: each count is taken before the barrier and returned after it, so
+        an unlocked count would let both pass; the barrier timeout is ignored."""
         barrier = threading.Barrier(2, timeout=1)
         real = lineage_counts.chain_debug_used
         results = []
 
         def counted(*args):
+            used = real(*args)
             try:
                 barrier.wait()
             except threading.BrokenBarrierError:
-                pass   # the timeout is ignored: a locked count proceeds alone
-            return real(*args)
+                pass
+            return used
 
         def run(task_id):
             try:
@@ -167,20 +178,18 @@ class ReservationCase(unittest.TestCase):
         return sorted(results, key=str)
 
     def run_debug(self, task_id, runner, *, create=None, fallback=False, store=None,
-                  taken=(False,), real=False):
-        """Drive run_high_debug on the real store; (refusal code or None, D6 creates)."""
+                  real=False, taken=None):
         registration = SimpleNamespace(result_sha=HEAD, root=str(self.base / 'executor-d6'),
                                        common_dir=str(self.base / 'repo' / '.git'))
         store = store or self.store
         created = []
 
-        def default_create(**kwargs):
-            created.append([item['status'] for item in self.entries(task_id, store)])
+        def default_create(**_kwargs):
+            created.append(self.statuses(task_id, store))
             return str(self.base)
         git = SimpleNamespace(run=lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=b''),
                               DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE,
                               CalledProcessError=subprocess.CalledProcessError)
-        probes = list(taken)
         call = high_debug.run_high_debug_with_fallback if fallback else high_debug.run_high_debug
         with patch.object(high_debug.worker_dispatch, 'evaluate',
                           return_value=SimpleNamespace(allowed=True)), \
@@ -189,8 +198,7 @@ class ReservationCase(unittest.TestCase):
              patch.object(high_debug.role_config, 'resolve_role', return_value={
                  'role': 'claude-debug', 'source': 'roles', 'account': 'acct',
                  'config_dir': '/safe/claude', 'provider': 'claude'}), \
-             patch.object(high_debug, '_d6_taken',
-                          side_effect=lambda *_args: probes.pop(0) if len(probes) > 1 else probes[0]), \
+             patch.object(high_debug, '_d6_taken', return_value=False, side_effect=taken), \
              patch.object(high_debug, '_post_record', return_value=True), \
              patch.object(high_debug, 'subprocess', subprocess if real else git), \
              redirect_stdout(io.StringIO()):
@@ -204,21 +212,11 @@ class ReservationCase(unittest.TestCase):
                 return error.high_debug_code, created
         return None, created
 
-
-def succeeds(*, prompt, cwd, output_path):
-    Path(output_path).write_text(REPORT, encoding='utf-8')
-    return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
-
-
-def exits(code, stderr=b''):
-    return lambda **_kwargs: SimpleNamespace(returncode=code, stdout=b'', stderr=stderr)
-
-
-def rejected(**_kwargs):
-    raise high_debug._D6CreateRejected('D6_TEST_REJECTED')
-
-
-MARKER = 'D6 lifecycle rejected (D6_TEST_REJECTED)'
+    def assert_reserved(self, task_id, runner):
+        self.assertEqual(self.last_error.high_debug_detail, 'reservation=RESERVED')
+        self.assertEqual(self.statuses(task_id), ['RESERVED'])
+        self.assertEqual(self.run_debug(task_id, runner), ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
+        runner.assert_not_called()
 
 
 class AtomicAdmissionTests(ReservationCase):
@@ -226,8 +224,7 @@ class AtomicAdmissionTests(ReservationCase):
         first = self.task()
         second = self.task(continues=first)
         self.assertEqual(self.race(first, second), [0, 'HIGH_DEBUG_DEBUG_PARENT_USED'])
-        self.assertEqual([item['status'] for task_id in (first, second)
-                          for item in self.entries(task_id)], ['RESERVED'])
+        self.assertEqual(self.statuses(first) + self.statuses(second), ['RESERVED'])
 
     def test_b_a_chain_and_a_split_group_share_one_cap(self):
         first = self.task()
@@ -238,7 +235,7 @@ class AtomicAdmissionTests(ReservationCase):
             self.assertEqual(self.code(lambda: self.reserve(task_id)),
                              'HIGH_DEBUG_DEBUG_PARENT_USED')
             self.assertEqual(self.entries(task_id), [])
-        _root, (one, two) = self.split()
+        one, two = self.split()
         self.assertEqual(self.reserve(one), 0)
         self.assertEqual(self.code(lambda: self.reserve(two)), 'HIGH_DEBUG_DEBUG_GROUP_USED')
         self.assertEqual(self.entries(two), [])
@@ -263,7 +260,7 @@ class AtomicAdmissionTests(ReservationCase):
         winner, loser = self.race(other, other)
         self.assertEqual(winner, 0)
         self.assertIn(loser, ('HIGH_DEBUG_BUSY', 'HIGH_DEBUG_DEBUG_PARENT_USED'))
-        self.assertEqual([item['status'] for item in self.entries(other)], ['RESERVED'])
+        self.assertEqual(self.statuses(other), ['RESERVED'])
 
     def test_f_a_held_chain_lock_blocks_only_its_own_chain(self):
         held, other = self.task(), self.task()
@@ -296,16 +293,13 @@ class AtomicAdmissionTests(ReservationCase):
         self.assertEqual(self.code(lambda: self.reserve(orphan)), 'HIGH_DEBUG_DEBUG_PARENT_USED')
         self.assertEqual(self.entries(orphan), [])
 
-
-class FinalizeTests(ReservationCase):
     def test_h_finalize_refuses_everything_but_one_in_place_finalize(self):
         task_id = self.task()
         self.assertEqual(self.reserve(task_id), 0)
         for changed in (dict(entry('RUN_FAILED'), d6='executor-hd9-aaaaaaa'),
                         dict(entry('RUN_FAILED'), early_reason='Another reason.'),
                         dict(entry('RUN_FAILED'), status='NOT_A_STATUS'),
-                        dict(entry('RUN_FAILED'), status=None),
-                        entry()):
+                        dict(entry('RUN_FAILED'), status=None), entry()):
             with self.subTest(changed=changed['status']):
                 self.assertEqual(self.code(lambda: self.store.finalize_high_debug(
                     task_id, 0, changed)), 'HIGH_DEBUG_IMMUTABLE')
@@ -319,17 +313,14 @@ class FinalizeTests(ReservationCase):
             with self.subTest(index=index):
                 self.assertEqual(self.code(lambda: self.store.finalize_high_debug(
                     other, index, entry('RUN_FAILED'))), 'HIGH_DEBUG_IMMUTABLE')
-        self.assertEqual([item['status'] for item in self.entries(other)],
-                         ['RUN_FAILED', 'RESERVED'])
+        self.assertEqual(self.statuses(other), ['RUN_FAILED', 'RESERVED'])
 
 
 class RunTests(ReservationCase):
     def test_reservation_is_stored_before_create_and_finalized_in_place(self):
         task_id = self.task(completion=True)
         self.store.append_high_debug(task_id, entry(*QUOTA))
-        code, created = self.run_debug(task_id, succeeds)
-        self.assertIsNone(code)
-        self.assertEqual(created, [['RUN_FAILED', 'RESERVED']])
+        self.assertEqual(self.run_debug(task_id, succeeds), (None, [['RUN_FAILED', 'RESERVED']]))
         stored = self.entries(task_id)
         self.assertEqual([item['status'] for item in stored], ['RUN_FAILED', 'RCA_CONFIRMED'])
         self.assertEqual(stored[1]['d6'], high_debug._d6_name('executor', 2, HEAD))
@@ -343,8 +334,7 @@ class RunTests(ReservationCase):
         self.assertEqual([(item['status'], item['report']) for item in self.entries(task_id)],
                          [('RUN_FAILED', 'HIGH_DEBUG_RUN_FAILED')])
         runner = Mock()
-        self.assertEqual(self.run_debug(task_id, runner),
-                         ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
+        self.assertEqual(self.run_debug(task_id, runner), ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
         runner.assert_not_called()
 
     def test_d_a_crash_leaves_reserved_across_a_restart(self):
@@ -355,8 +345,7 @@ class RunTests(ReservationCase):
         with self.assertRaises(Crash):
             self.run_debug(task_id, crashes)
         restarted = TaskStore(self.base / 'tasks')
-        self.assertEqual([item['status'] for item in self.entries(task_id, restarted)],
-                         ['RESERVED'])
+        self.assertEqual(self.statuses(task_id, restarted), ['RESERVED'])
         self.assertEqual(self.run_debug(task_id, Mock(), store=restarted),
                          ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
         self.assertEqual(self.code(lambda: self.reserve(task_id, restarted)),
@@ -367,7 +356,7 @@ class RunTests(ReservationCase):
         with patch.object(TaskStore, 'finalize_high_debug', side_effect=LLMToolError('refused')):
             self.assertEqual(self.run_debug(task_id, exits(1))[0], 'HIGH_DEBUG_RUN_FAILED')
         self.assertIn('reservation=UNFINALIZED', self.last_error.high_debug_detail)
-        self.assertEqual([item['status'] for item in self.entries(task_id)], ['RESERVED'])
+        self.assertEqual(self.statuses(task_id), ['RESERVED'])
 
     def test_g_a_failed_create_is_not_used_and_quota_falls_back_once(self):
         task_id = self.task(completion=True)
@@ -375,27 +364,18 @@ class RunTests(ReservationCase):
         self.assertEqual(self.run_debug(task_id, runner, create=rejected)[0],
                          'HIGH_DEBUG_D6_CREATE_FAILED')
         runner.assert_not_called()
+        self.assertEqual(self.run_debug(task_id, succeeds), (None, [['RUN_FAILED', 'RESERVED']]))
         self.assertEqual([(item['status'], item['report']) for item in self.entries(task_id)],
-                         [('RUN_FAILED', 'HIGH_DEBUG_D6_CREATE_FAILED')])
+                         [('RUN_FAILED', 'HIGH_DEBUG_D6_CREATE_FAILED'), ('RCA_CONFIRMED', REPORT)])
         quota = self.task(completion=True)
         runner = Mock(side_effect=[exits(1, b"You've hit your usage limit.")(),
                                    RuntimeError('claude stops')])
-        self.assertEqual(self.run_debug(quota, runner, fallback=True)[0],
-                         'HIGH_DEBUG_RUN_FAILED')
+        self.assertEqual(self.run_debug(quota, runner, fallback=True)[0], 'HIGH_DEBUG_RUN_FAILED')
         self.assertEqual(runner.call_count, 2)
         stored = self.entries(quota)
         self.assertEqual([(item['status'], item['report']) for item in stored],
                          [QUOTA, ('RUN_FAILED', 'HIGH_DEBUG_RUN_FAILED')])
         self.assertEqual(stored[1]['model_requested'], high_debug._CLAUDE_MODEL)
-
-    def test_g_a_confirmed_create_failure_lets_the_next_request_run(self):
-        task_id = self.task(completion=True)
-        self.assertEqual(self.run_debug(task_id, Mock(), create=rejected,
-                                        taken=(False, False))[0], 'HIGH_DEBUG_D6_CREATE_FAILED')
-        self.assertEqual(self.run_debug(task_id, succeeds), (None, [['RUN_FAILED', 'RESERVED']]))
-        self.assertEqual([(item['status'], item['report']) for item in self.entries(task_id)],
-                         [('RUN_FAILED', 'HIGH_DEBUG_D6_CREATE_FAILED'),
-                          ('RCA_CONFIRMED', REPORT)])
 
     def test_g_an_unclear_create_stays_reserved_and_the_next_request_refuses(self):
         def times_out(**_kwargs):
@@ -409,23 +389,16 @@ class RunTests(ReservationCase):
 
         def unclassified(**_kwargs):
             raise subprocess.CalledProcessError(1, 'lifecycle')
-        for create, taken in ((times_out, (False,)), (errors, (False,)), (no_root, (False,)),
-                              (unclassified, (False,)), (rejected, (False, True))):
+        # The last case leaves a branch or registry record behind.
+        for create, taken in ((times_out, None), (errors, None), (no_root, None),
+                              (unclassified, None), (rejected, [False, True])):
             with self.subTest(create=create.__name__):
-                task_id = self.task(completion=True)
-                runner = Mock()
+                task_id, runner = self.task(completion=True), Mock()
                 self.assertEqual(self.run_debug(task_id, runner, create=create, taken=taken)[0],
                                  'HIGH_DEBUG_D6_CREATE_FAILED')
-                self.assertEqual(self.last_error.high_debug_detail, 'reservation=RESERVED')
-                self.assertEqual([(item['status'], item['report'])
-                                  for item in self.entries(task_id)],
-                                 [('RESERVED', 'HIGH_DEBUG_RESERVED')])
-                self.assertEqual(self.run_debug(task_id, runner),
-                                 ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
-                runner.assert_not_called()
+                self.assert_reserved(task_id, runner)
 
     def test_g_the_real_lifecycle_boundary_releases_only_a_classified_rejection(self):
-        """Real subprocess through _create_d6: a kill or unclassified exit stays used."""
         (self.base / 'repo').mkdir()
         script = self.base / 'lifecycle.py'
         cases = (
@@ -435,8 +408,7 @@ class RunTests(ReservationCase):
             ('exit_1', 'import sys\nsys.exit(1)\n', 'RESERVED'),
             ('traceback', f'raise RuntimeError({MARKER!r})\n', 'RESERVED'),
             ('classified', f'import sys\nsys.exit({MARKER!r})\n', 'RUN_FAILED'),
-            # F1: the lifecycle names its own rejection but leaves an orphan D6
-            # directory at the trusted path; that is not a confirmed cancel.
+            # A named rejection that leaves an orphan D6 directory is not a cancel.
             ('orphan_dir', 'import os, sys\n'
                            f'os.makedirs(os.path.join({str(self.d6s)!r}, '
                            'sys.argv[sys.argv.index("--task-id") + 1]))\n'
@@ -452,39 +424,51 @@ class RunTests(ReservationCase):
                     code, _created = self.run_debug(task_id, runner, real=True,
                                                     create=high_debug._create_d6)
                 self.assertEqual(code, 'HIGH_DEBUG_D6_CREATE_FAILED')
-                runner.assert_not_called()
                 stored = self.entries(task_id)
-                self.assertEqual([item['status'] for item in stored], [status])
                 if status == 'RESERVED':
-                    self.assertEqual(self.last_error.high_debug_detail, 'reservation=RESERVED')
-                    self.assertEqual(self.run_debug(task_id, runner),
-                                     ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
+                    self.assert_reserved(task_id, runner)
                 else:
-                    self.assertEqual(stored[0]['report'], 'HIGH_DEBUG_D6_CREATE_FAILED')
-                    self.assertFalse(high_debug._debug_entry_used(stored[0]))
+                    runner.assert_not_called()
+                    self.assertEqual((stored[0]['status'], stored[0]['report']),
+                                     ('RUN_FAILED', 'HIGH_DEBUG_D6_CREATE_FAILED'))
         self.assertTrue((self.d6s / stored[0]['d6']).is_dir())
 
-    def test_g_only_a_confirmed_absent_trusted_d6_path_is_absent(self):
-        d6 = 'executor-hd1-aaaaaaa'
-        self.assertTrue(high_debug._d6_path_absent(d6))
-        (self.d6s / d6).mkdir(parents=True)
-        self.assertFalse(high_debug._d6_path_absent(d6))
+    def test_g_only_an_absent_d6_on_the_bound_trust_path_is_cancelled(self):
+        d6, bound = 'executor-hd1-aaaaaaa', high_debug._d6_trust_root()
+        self.assertTrue(high_debug._d6_path_absent(d6, bound))
+        (self.d6s / d6).mkdir()
+        self.assertFalse(high_debug._d6_path_absent(d6, bound))
         (self.d6s / d6).rmdir()
         (self.d6s / d6).symlink_to(self.base / 'missing')
-        self.assertFalse(high_debug._d6_path_absent(d6))
+        self.assertFalse(high_debug._d6_path_absent(d6, bound))
+        self.assertFalse(high_debug._d6_path_absent('executor-hd2-aaaaaaa', None))
 
         def broken():
             raise OSError('trust unreadable')
-        for loader in (broken, lambda: SimpleNamespace(tasks_root='relative/tasks')):
-            with self.subTest(loader=loader), \
-                 patch.object(high_debug, 'trust', SimpleNamespace(load_trust=loader)):
-                self.assertFalse(high_debug._d6_path_absent('executor-hd2-aaaaaaa'))
-        with patch.object(high_debug, 'trust', SimpleNamespace(load_trust=broken)):
-            task_id = self.task(completion=True)
-            self.assertEqual(self.run_debug(task_id, Mock(), create=rejected)[0],
-                             'HIGH_DEBUG_D6_CREATE_FAILED')
-        self.assertEqual(self.last_error.high_debug_detail, 'reservation=RESERVED')
-        self.assertEqual([item['status'] for item in self.entries(task_id)], ['RESERVED'])
+        for loader in (broken, lambda: SimpleNamespace(tasks_root='relative'),
+                       lambda: SimpleNamespace(tasks_root=str(self.base / 'none'))):
+            with patch.object(high_debug, 'trust', SimpleNamespace(load_trust=loader)):
+                self.assertIsNone(high_debug._d6_trust_root())
+
+        def moved(**_kwargs):   # F1: trust names another directory at cancel time
+            self.d6s = self.base / 'moved'
+            self.d6s.mkdir()
+            rejected()
+
+        def replaced(**_kwargs):   # F1: the same path is now another directory
+            self.d6s.rename(self.base / 'old')
+            self.d6s.mkdir()
+            rejected()
+
+        def unreadable(**_kwargs):
+            self.d6s = None
+            rejected()
+        for create in (moved, replaced, unreadable):
+            with self.subTest(create=create.__name__):
+                task_id, runner = self.task(completion=True), Mock()
+                self.assertEqual(self.run_debug(task_id, runner, create=create)[0],
+                                 'HIGH_DEBUG_D6_CREATE_FAILED')
+                self.assert_reserved(task_id, runner)
 
     def test_g_a_failed_codex_finalize_makes_the_claude_admission_refuse(self):
         task_id = self.task(completion=True)
@@ -493,7 +477,7 @@ class RunTests(ReservationCase):
             self.assertEqual(self.run_debug(task_id, runner, fallback=True)[0],
                              'HIGH_DEBUG_DEBUG_PARENT_USED')
         self.assertEqual(runner.call_count, 1)
-        self.assertEqual([item['status'] for item in self.entries(task_id)], ['RESERVED'])
+        self.assertEqual(self.statuses(task_id), ['RESERVED'])
 
 
 if __name__ == '__main__':

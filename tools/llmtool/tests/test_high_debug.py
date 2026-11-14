@@ -599,6 +599,7 @@ class HighDebugTests(unittest.TestCase):
         subprocess.run(['git', '-C', str(root), 'branch',
                         'llmtool/high-debug-executor-hd2-aaaaaaa'], check=True)
         # F1: the trusted D6 path must be confirmed absent; no D6 exists there.
+        (root / 'd6s').mkdir()
         trusted = patch.object(high_debug, 'trust', SimpleNamespace(
             load_trust=lambda: SimpleNamespace(tasks_root=str(root / 'd6s'))))
         trusted.start()
