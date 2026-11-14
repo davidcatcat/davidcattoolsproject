@@ -362,6 +362,33 @@ def _run_ask(args):
         if signal_scope is None or exc.owner is not signal_scope:
             raise exc
         termination_handled = True
+        # #1851: mute only the finalizer error of the live object being released, on this thread.
+        import threading
+        import traceback
+        held, frame_tb = [], exc.__traceback__
+        while frame_tb is not None:
+            held.extend(frame_tb.tb_frame.f_locals.values())
+            frame_tb = frame_tb.tb_next
+        traceback.clear_frames(exc.__traceback__)
+        handler_thread, releasing = threading.get_ident(), None
+        previous_hook = sys.unraisablehook
+
+        def mute_released(unraisable):
+            tb = unraisable.exc_traceback
+            owner = tb.tb_frame.f_locals.get('self') if tb is not None else None
+            if not (threading.get_ident() == handler_thread and owner is not None
+                    and id(owner) == releasing):
+                previous_hook(unraisable)
+
+        sys.unraisablehook = mute_released
+        try:
+            while held:
+                value = held.pop()
+                releasing = id(value)
+                del value
+        finally:
+            releasing = None
+            sys.unraisablehook = previous_hook
         if exc.stream is sys.stdout and exc.stream is sys.__stdout__:
             silence_broken_pipe(exc.stream)
             sys.stdout = None
