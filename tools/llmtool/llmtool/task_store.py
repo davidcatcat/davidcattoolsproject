@@ -405,6 +405,53 @@ _DEVELOPER_EXECUTION_DIFF_SHAPES = (
     _DIRECT_EXECUTION_FIELDS | _DEVELOPER_EXECUTION_DIFF_FIELDS,
     _DIRECT_EXECUTION_BINDING_FIELDS | _DEVELOPER_EXECUTION_DIFF_FIELDS,
 )
+# Design c6876861575 items 1-2: optional developer.execution.provider_evidence.
+# Exactly {basis, accepted: True} or {condition}; enums only, no free text.
+# Each direct route has one basis; codex and company-gw never carry evidence.
+PROVIDER_EVIDENCE_BASES = {
+    'claude': 'CLI_USAGE', 'opencode': 'STEP_USAGE',
+    'agy': 'AGY_STATUS', 'gw-agent': 'GATEWAY_USAGE',
+}
+PROVIDER_EVIDENCE_CONDITIONS = {
+    'claude': frozenset(('QUOTA_EXHAUSTED',)),
+    'opencode': frozenset(('QUOTA_EXHAUSTED', 'RATE_LIMITED')),
+    'agy': frozenset(('QUOTA_EXHAUSTED',)),
+    'gw-agent': frozenset(('QUOTA_EXHAUSTED',)),
+}
+
+
+def valid_provider_evidence(evidence, provider_profile):
+    """Whether evidence is a strict provider_evidence value for this profile."""
+    if type(evidence) is not dict or type(provider_profile) is not str:
+        return False
+    keys = set(evidence)
+    if keys == {'basis', 'accepted'}:
+        return (type(evidence['basis']) is str and evidence['accepted'] is True and
+                PROVIDER_EVIDENCE_BASES.get(provider_profile) == evidence['basis'])
+    if keys == {'condition'}:
+        return (type(evidence['condition']) is str and
+                evidence['condition'] in PROVIDER_EVIDENCE_CONDITIONS.get(
+                    provider_profile, frozenset()))
+    return False
+
+
+def _execution_without_provider_evidence(execution, provider_profile):
+    """Return execution with a valid provider_evidence removed, or fail.
+
+    A record without provider_evidence (every legacy record) is returned as is.
+    Evidence rides only on the plain direct execution shape: never with Codex
+    binding, launch or diff fields.
+    """
+    if type(execution) is not dict or 'provider_evidence' not in execution:
+        return execution
+    stripped = {key: value for key, value in execution.items()
+                if key != 'provider_evidence'}
+    if (set(stripped) != _DIRECT_EXECUTION_FIELDS or
+            not valid_provider_evidence(execution['provider_evidence'], provider_profile)):
+        _fail()
+    return stripped
+
+
 _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_REJECTED', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE',
     'DEVELOPER_OUTPUT_INVALID_DIFF', 'DEVELOPER_OUTPUT_OUT_OF_SCOPE',
@@ -2535,7 +2582,8 @@ def _validate(record, *, strict=True):
                                      result['recorded_at']) is None):
                     _fail()
             if 'execution' in developer:
-                execution = developer['execution']
+                execution = _execution_without_provider_evidence(
+                    developer['execution'], developer['provider_profile'])
                 if execution is not None:
                     if (developer['provider_profile'] not in (
                             'opencode', 'codex', 'agy', 'claude', 'gw-agent') or

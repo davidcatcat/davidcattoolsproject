@@ -41,7 +41,8 @@ class RouteError(LLMToolError):
 
     def __init__(self, code: str, *, blocked_reason: str | None = None,
                  progress: Mapping[str, Any] | None = None,
-                 facts: Mapping[str, Any] | None = None):
+                 facts: Mapping[str, Any] | None = None,
+                 provider_evidence: Mapping[str, Any] | None = None):
         if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
             code = 'ROUTE_ERROR'
         super().__init__('Developer route execution unavailable; details omitted')
@@ -50,6 +51,28 @@ class RouteError(LLMToolError):
         self.progress = dict(progress) if progress is not None else None
         self.observed_facts = dict(facts or {})
         self.facts = self.observed_facts
+        # Only run_route sets this, and only from the route's parsed output.
+        self.provider_evidence = (dict(provider_evidence)
+                                  if provider_evidence is not None else None)
+
+
+# Design c6876861575 items 1-2: the evidence a route may return from its own
+# parsed provider output. Exit 0, cleanup or a stdout digest alone give none.
+PROVIDER_EVIDENCE_BASES = frozenset(('CLI_USAGE', 'STEP_USAGE', 'AGY_STATUS', 'GATEWAY_USAGE'))
+QUOTA_EXHAUSTED_EVIDENCE = {'condition': 'QUOTA_EXHAUSTED'}
+
+
+def accepted_evidence(basis):
+    """Return {basis, accepted: True} for a known basis, else None."""
+    if type(basis) is str and basis in PROVIDER_EVIDENCE_BASES:
+        return {'basis': basis, 'accepted': True}
+    return None
+
+
+def usage_reported(usage):
+    """Whether normalized usage reports a positive token total."""
+    return (isinstance(usage, Mapping) and type(usage.get('total_tokens')) is int and
+            usage['total_tokens'] > 0)
 
 
 @dataclass(frozen=True)
@@ -67,6 +90,7 @@ class RouteResult:
     elapsed_ms: int
     cleanup_status: str
     boundary: Mapping[str, Any]
+    provider_evidence: Mapping[str, Any] | None = None
 
 
 class DeveloperRoute(ABC):
@@ -127,6 +151,17 @@ class DeveloperRoute(ABC):
     def validate_status(self, parsed: Mapping[str, Any]) -> None:
         """Optional hook, default accepts: map a consistent provider status to route errors."""
         return None
+
+    def provider_basis(self, parsed: Mapping[str, Any]) -> str | None:
+        """Optional hook, default none: the evidence basis proven by parsed output."""
+        return None
+
+    def provider_evidence(self, parsed: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Return {basis, accepted: True} from this route's parsed output, else None."""
+        try:
+            return accepted_evidence(self.provider_basis(parsed))
+        except Exception:
+            return None
 
     def validate_request(self, request: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(request, Mapping):
@@ -567,6 +602,21 @@ def _git_status_paths(root):
     return tuple(paths)
 
 
+def _result_evidence(route, parsed):
+    """Basis evidence from the route's own parsed output; any doubt gives none."""
+    hook = getattr(route, 'provider_evidence', None)
+    if not callable(hook):
+        return None
+    try:
+        evidence = hook(parsed)
+    except Exception:
+        return None
+    if (isinstance(evidence, Mapping) and set(evidence) == {'basis', 'accepted'} and
+            evidence['accepted'] is True):
+        return accepted_evidence(evidence['basis'])
+    return None
+
+
 def _exit_diagnostic(code, stderr):
     """#1606: exit code plus a bounded, screened, one-line stderr tail."""
     from ..task_submission_cli import _redact_rejected_output
@@ -818,7 +868,8 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         if type(gateway_code) is str and re.fullmatch(r'[A-Z0-9_]{1,48}', gateway_code):
             facts['gateway_code'] = gateway_code
         raise RouteError(_route_code(route, 'QUOTA_EXHAUSTED'),
-                         progress=quota_progress, facts=facts)
+                         progress=quota_progress, facts=facts,
+                         provider_evidence=QUOTA_EXHAUSTED_EVIDENCE)
     try:
         route.validate_status(parsed)
     except RouteError:
@@ -845,6 +896,7 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
                            str(parsed.get('summary', '')), parsed.get('session_id'),
                            verified, value['effort'], parsed.get('usage'), changed,
                            code, stdout_hash, elapsed,
-                           getattr(execute, 'last_cleanup_status', 'UNKNOWN'), dict(proof))
+                           getattr(execute, 'last_cleanup_status', 'UNKNOWN'), dict(proof),
+                           _result_evidence(route, parsed))
     except Exception:
         raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None

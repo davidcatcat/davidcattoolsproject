@@ -29,7 +29,7 @@ from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import (TaskStore, TaskStoreConflict, new_id, _json_bytes,
                          _DIRECT_EXECUTION_FIELDS, _NO_CHANGES_MAX_TURNS,
-                         _NO_CHANGES_REASON_MAX_CHARS)
+                         _NO_CHANGES_REASON_MAX_CHARS, valid_provider_evidence)
 from . import active_pm_inbox
 from . import remote_test
 from . import task_completion
@@ -3811,8 +3811,32 @@ def _text_developer_apply_check(root, source_sha, artifact):
     return result.returncode == 0 and len(result.stdout) <= 64 * 1024 and len(result.stderr) <= 64 * 1024
 
 
-def _direct_execution(result, *, status='SUCCEEDED'):
+def _with_provider_evidence(execution, evidence, provider_profile):
+    """Add the route-returned provider_evidence when it is strictly valid.
+
+    Design c6876861575 items 1-2: the value comes only from the route's return
+    value (result or refusal); anything else leaves execution unchanged.
+    """
+    if valid_provider_evidence(evidence, provider_profile):
+        return dict(execution, provider_evidence=dict(evidence))
+    return execution
+
+
+def _condition_execution(evidence, provider_profile, status):
+    """A minimal execution carrying only a route-returned provider condition."""
+    if (type(evidence) is not dict or set(evidence) != {'condition'} or
+            not valid_provider_evidence(evidence, provider_profile)):
+        return None
     return {
+        'status': status, 'native_session_id': None, 'process_exit_code': None,
+        'stdout_sha256': None, 'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+        'usage_source': 'UNKNOWN', 'source_bytes': None, 'source_file_count': None,
+        'source_manifest_sha256': None, 'provider_evidence': dict(evidence),
+    }
+
+
+def _direct_execution(result, *, status='SUCCEEDED', evidence=False):
+    execution = {
         'status': status,
         'native_session_id': result.session_id,
         'process_exit_code': result.exit_code,
@@ -3824,6 +3848,10 @@ def _direct_execution(result, *, status='SUCCEEDED'):
         'source_file_count': result.source_file_count,
         'source_manifest_sha256': result.source_manifest_sha256,
     }
+    if evidence:
+        execution = _with_provider_evidence(
+            execution, getattr(result, 'provider_evidence', None), 'opencode')
+    return execution
 
 
 def _remote_task_test_paths(task, *, read_paths=()):
@@ -4205,8 +4233,14 @@ def _store_accepts_direct_execution(developer):
     status = _DIRECT_BIND_STATUS.get(profile)
     if status is None or type(execution) is not dict:
         return False
-    # Exact field set: no Codex binding, launch or diff fields on these routes.
-    if set(execution) != _DIRECT_EXECUTION_FIELDS:
+    # Exact field set: no Codex binding, launch or diff fields on these routes;
+    # optional provider_evidence must pass the store's strict shape.
+    fields = set(execution)
+    if 'provider_evidence' in fields:
+        if not valid_provider_evidence(execution['provider_evidence'], profile):
+            return False
+        fields.discard('provider_evidence')
+    if fields != _DIRECT_EXECUTION_FIELDS:
         return False
     digest = execution['stdout_sha256']
     manifest = execution['source_manifest_sha256']
@@ -4858,7 +4892,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
                 provider_type='opencode-cli', model=model,
                 max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
                 error_code=exc.direct_opencode_code,
-                execution={
+                execution=_with_provider_evidence({
                     'status': 'UNKNOWN', 'native_session_id': exc.native_session_id,
                     'process_exit_code': exc.process_exit_code,
                     'stdout_sha256': exc.stdout_sha256,
@@ -4868,7 +4902,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
                     'source_bytes': exc.source_bytes,
                     'source_file_count': exc.source_file_count,
                     'source_manifest_sha256': exc.source_manifest_sha256,
-                })
+                }, getattr(exc, 'provider_evidence', None), 'opencode'))
         else:
             developer.update(state='DEVELOPER_UNAVAILABLE',
                               error_code=exc.direct_opencode_code)
@@ -4922,7 +4956,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         rejection = _developer_output_rejection(
             artifact, write_paths, normalize=False, allow_new_files=True,
             sources=_revision_sources(registration.root, snapshot.head))
-        execution = _direct_execution(result)
+        execution = _direct_execution(result, evidence=True)
         if rejection is not None:
             saved = _persist_developer_output_rejection(
                 store, task['task_id'], developer, rejection, result.usage, artifact,
@@ -4948,7 +4982,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             provider_type='opencode-cli', model=model,
             max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
             error_code='OPENCODE_RESULT_EVIDENCE_UNKNOWN',
-            execution=_direct_execution(result, status='UNKNOWN'))
+            execution=_direct_execution(result, status='UNKNOWN', evidence=True))
         if not isinstance(exc, Exception):
             try:
                 store.compare_and_update(
@@ -4978,7 +5012,8 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
                 artifact=None, artifact_sha256=None, usage=None,
                 error_code='OPENCODE_D6_SESSION_REFUSED',
-                execution={**_direct_execution(result, status='UNKNOWN'),
+                # Parsed step usage travels with the session refusal.
+                execution={**_direct_execution(result, status='UNKNOWN', evidence=True),
                            'usage_source': 'UNKNOWN'})
         saved = store.compare_and_update(
             task['task_id'], expected={'developer': expected_developer}, **final_write)
@@ -5347,13 +5382,14 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             return 1
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
-            error_code=None, execution={
+            error_code=None, execution=_with_provider_evidence({
                 'status': 'DONE', 'native_session_id': result.session_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
                 'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
-                'source_manifest_sha256': None}, usage=usage)
+                'source_manifest_sha256': None},
+                getattr(result, 'provider_evidence', None), 'agy'), usage=usage)
         if (type(result.session_id) is str and
                 AGY_CONVERSATION.fullmatch(result.session_id)):
             binding = _bind_codex_native_session(registration, result.session_id)
@@ -5378,6 +5414,11 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             developer['blocked_reason'] = exc.blocked_reason
         if exc.progress is not None:
             developer['progress'] = exc.progress
+        condition = (None if owner_gate_denied or developer.get('execution') is not None
+                     else _condition_execution(getattr(exc, 'provider_evidence', None),
+                                               'agy', 'BLOCKED'))
+        if condition is not None:
+            developer['execution'] = condition
         store.update(task['task_id'], developer=developer)
         _print(_task_view(store.get(task['task_id'])))
         return 1
@@ -5582,13 +5623,15 @@ def _claude_committed_carry(task, store, registration, snapshot, developer, comp
             'd6_base': base, 'carried_head': head}
         return dict(developer, state='DEVELOPER_RESPONDED', source_sha=base,
             artifact=raw.decode('utf-8', 'strict'), artifact_sha256=hashlib.sha256(raw).hexdigest(),
-            error_code=None, direct_result_callback=callback, usage=usage, execution={
+            error_code=None, direct_result_callback=callback, usage=usage,
+            execution=_with_provider_evidence({
                 'status': 'DONE', 'native_session_id': result.session_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
                 'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
-                'source_manifest_sha256': None}), dict(completion, evidence=dict(
+                'source_manifest_sha256': None},
+                getattr(result, 'provider_evidence', None), 'claude')), dict(completion, evidence=dict(
                     completion['evidence'], source_sha=base, result_head=head))
     except Exception:
         return None
@@ -5812,13 +5855,14 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
         usage = _normalize_agy_usage(result.usage)
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
-            error_code=None, execution={
+            error_code=None, execution=_with_provider_evidence({
                 'status': 'DONE', 'native_session_id': result.session_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
                 'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
-                'source_manifest_sha256': None}, usage=usage)
+                'source_manifest_sha256': None},
+                getattr(result, 'provider_evidence', None), 'claude'), usage=usage)
     except _ClaudeCommittedCarry:
         return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
     except RouteError as exc:
@@ -5829,13 +5873,19 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
                 'CLAUDE_NO_CHANGES', 'CLAUDE_WRITE_SCOPE_VIOLATION',
                 'CLAUDE_OUTPUT_TOO_LARGE', 'CLAUDE_D6_BINDING_CHANGED')):
             usage = _normalize_agy_usage(result.usage)
-            developer.update(execution={
+            developer.update(execution=_with_provider_evidence({
                 'status': 'BLOCKED', 'native_session_id': result.session_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
                 'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
-                'source_manifest_sha256': None}, usage=usage)
+                'source_manifest_sha256': None},
+                getattr(result, 'provider_evidence', None), 'claude'), usage=usage)
+        elif result is None and not owner_gate_denied:
+            condition = _condition_execution(getattr(exc, 'provider_evidence', None),
+                                             'claude', 'BLOCKED')
+            if condition is not None:
+                developer['execution'] = condition
         parsed_cli_result = getattr(route, 'parsed_cli_result', None)
         if (result is not None and error_code == 'CLAUDE_NO_CHANGES' and
                 type(parsed_cli_result) is dict):
@@ -6060,7 +6110,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     expected_developer = copy.deepcopy(claimed['developer'])
 
-    def persist_failure(error_code, *, state='DEVELOPER_UNAVAILABLE'):
+    def persist_failure(error_code, *, state='DEVELOPER_UNAVAILABLE',
+                        provider_evidence=None, interrupted=False):
         # Start from the last saved record, never the in-flight one: the refused
         # write may be what carries the fault, and the saved identity is the only
         # one the store gate lets a failure state keep. A claim refused before
@@ -6070,12 +6121,21 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         if type(developer.get('execution')) is dict:
             # Keep what the run observed, cleanup_status above all, whenever the
             # store accepts it; the bare record stays valid whatever it held.
+            observed = {**developer['execution'], 'status': 'UNKNOWN',
+                        'usage_source': 'UNKNOWN'}
+            if interrupted:
+                # An interruption gives no provider evidence.
+                observed.pop('provider_evidence', None)
             records.insert(0, {
                 **failed,
                 **{field: developer[field] for field in
                    ('audit_sha256', 'audit_copy_path_sha256', 'changed_files')},
-                'execution': {**developer['execution'], 'status': 'UNKNOWN',
-                              'usage_source': 'UNKNOWN'}})
+                'execution': observed})
+        elif not interrupted:
+            # A route quota refusal keeps its parsed condition and nothing else.
+            condition = _condition_execution(provider_evidence, 'gw-agent', 'UNKNOWN')
+            if condition is not None:
+                records.insert(0, {**failed, 'execution': condition})
         for record in records:
             try:
                 store.compare_and_update(
@@ -6091,7 +6151,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     def persist_interrupted():
         # Best effort: the interruption itself must still reach the caller.
         try:
-            persist_failure('DEVELOPER_INTERRUPTED', state='DEVELOPER_OUTCOME_UNKNOWN')
+            persist_failure('DEVELOPER_INTERRUPTED', state='DEVELOPER_OUTCOME_UNKNOWN',
+                            interrupted=True)
         except Exception:
             pass
 
@@ -6196,12 +6257,14 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             audit_sha256=audit_sha,
             audit_copy_path_sha256=hashlib.sha256(os.fsencode(route.audit_copy_path)).hexdigest(),
             changed_files=list(changed_paths),
-            execution={'status': 'DONE', 'native_session_id': result.session_id,
+            execution=_with_provider_evidence({'status': 'DONE',
+                'native_session_id': result.session_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
                 'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
                 'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
-                'source_manifest_sha256': None})
+                'source_manifest_sha256': None},
+                getattr(result, 'provider_evidence', None), 'gw-agent'))
         site.after_result(result.session_id, task_input)
         # #1535: a D6 keeps the first gw-agent session it took. A later PM Task
         # (fresh session, #1509) or repair round there keeps that session; a D6
@@ -6223,7 +6286,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             if not code.endswith('_' + gateway_code):
                 code = (code + '_' + gateway_code)[:64]
         code = code[:64]
-        return persist_failure(code)
+        return persist_failure(code, provider_evidence=(
+            None if owner_gate_denied else getattr(exc, 'provider_evidence', None)))
     except Exception:
         return persist_failure('DEVELOPER_RESULT_UNKNOWN',
                                state='DEVELOPER_OUTCOME_UNKNOWN')

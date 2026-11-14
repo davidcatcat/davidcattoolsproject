@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import uuid
 
-from .base import DeveloperRoute, RouteError
+from .base import DeveloperRoute, RouteError, usage_reported
 from .. import github_identity
 
 _MODEL = re.compile(r'claude-[a-z0-9][a-z0-9.-]{0,120}\Z')
@@ -166,6 +166,16 @@ class ClaudeRoute(DeveloperRoute):
     def validate_status(self, parsed):
         if parsed.get('status') != 'DONE':
             raise RouteError('CLAUDE_STATUS_FAILED')
+
+    def provider_basis(self, parsed):
+        """CLI_USAGE only for a parsed Claude CLI JSON result reporting token usage."""
+        raw = parsed.get('raw')
+        if (type(raw) is dict and raw.get('type') == 'result' and
+                _is_canonical_uuid(raw.get('session_id')) and
+                parsed.get('session_id') == raw['session_id'] and
+                usage_reported(parsed.get('usage'))):
+            return 'CLI_USAGE'
+        return None
 
     def quota_exhausted(self, parsed, stderr):
         if parsed.get('status') == 'DONE':
