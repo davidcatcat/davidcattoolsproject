@@ -1896,7 +1896,8 @@ def _validate(record, *, strict=True):
         identities = set()
         for item in claims:
             if (type(item) is not dict or
-                    set(item) - frozenset(('failure_reason', 'binding_mismatch_keys')) not in (
+                    set(item) - frozenset(('failure_reason', 'binding_mismatch_keys',
+                                           'rules_sha256')) not in (
                         _REVIEW_DISPATCH_CLAIM_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
@@ -1906,6 +1907,10 @@ def _validate(record, *, strict=True):
                      not _known_review_failure_reason(item['failure_reason'])) or
                     ('binding_mismatch_keys' in item and
                      not _valid_binding_mismatch_keys(item)) or
+                    # #1502 WP-F: sha256 of the exact Reviewer rule prefix sent.
+                    ('rules_sha256' in item and
+                     (type(item['rules_sha256']) is not str or
+                      re.fullmatch(r'[0-9a-f]{64}', item['rules_sha256']) is None)) or
                     ('account' in item and
                      (type(item['account']) is not str or
                       _NAME.fullmatch(item['account']) is None)) or
@@ -5126,7 +5131,7 @@ class TaskStore:
                                 all(before.get(key) == after.get(key) for key in (
                                     'executor_task', 'pr', 'head_sha', 'version',
                                     'account_mode', 'account', 'claimed_at',
-                                    'reviewer_task')) and
+                                    'reviewer_task', 'rules_sha256')) and
                                 (before.get('state') == 'CLAIMED' and
                                  (after.get('state') == 'COMPLETED' or
                                   ('review_result' not in after))) and
