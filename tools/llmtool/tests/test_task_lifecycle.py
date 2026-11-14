@@ -210,6 +210,24 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 1)
         self.assertIn('HANDOFF_INCOMPLETE', result.findings)
 
+    def test_handoff_state_and_author_refusals_name_their_code(self):
+        # #367: replay refusals keep TASK_HANDOFF_INVALID, TASK_STATE_INVALID and
+        # TASK_REVIEW_NOT_INDEPENDENT.
+        h, e = self.events[3].handoff, self.events
+        cases = (
+            (e[:3] + (replace(e[3], handoff=replace(h, epoch=8)),) + e[4:], 'TASK_HANDOFF_INVALID'),
+            (e[:3] + (replace(e[3], handoff=replace(h, outstanding_criteria=())),) + e[4:],
+             'TASK_HANDOFF_INVALID'),
+            ((e[0], replace(e[1], state=t.State.RUNNING), *e[2:]), 'TASK_STATE_INVALID'),
+            ((replace(e[0], prior_event_id='wrong'),), 'TASK_STATE_INVALID'),
+            (e[:4] + (replace(e[4], agent=self.expect.agents[0]),), 'TASK_REVIEW_NOT_INDEPENDENT'),
+        )
+        for events, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(LLMToolError) as raised:
+                    self.inspect(events)
+                self.assertEqual(raised.exception.lifecycle_code, code)
+
     def test_model_only_false_completion_cannot_satisfy_tests(self):
         review = self.events[-1].evidence[0]
         claim = replace(review, source=v.EvidenceSource.MODEL_CLAIM)
