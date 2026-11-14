@@ -5873,6 +5873,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'execution': None, 'created_at': _timestamp(), 'timeout_seconds': timeout,
         'direct_result_callback': _direct_result_callback(
             task, registration, snapshot.head, test_policy=test_policy),
+        # The --data-class validated above, kept so a review repair can reuse it.
+        'data_class': data_class,
     }
     completion = {
         'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,

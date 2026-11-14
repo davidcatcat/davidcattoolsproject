@@ -195,10 +195,10 @@ def _typed_finding(finding):
 
 def _reject_credentials(text):
     """Reject recognizable credential material; callers must still curate/redact input."""
-    if re.search(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|' + _CLOUD_KEY + r'|\bsk-[A-Za-z0-9_-]{20,}|\bBearer\s+[A-Za-z0-9._/-]{12,}', text):
+    if re.search(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|' + _CLOUD_KEY + r'|(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{20,}|(?<![A-Za-z0-9_])Bearer\s+[A-Za-z0-9._/-]{12,}', text):
         raise LLMToolError('feedback contains recognizable credential material; redact before capture')
     assignments = re.finditer(
-        r'''["']?\b(?:api[_-]?key|password|token|secret|access[_-]?token|client[_-]?secret|aws_secret_access_key)["']?\s*[:=]\s*["']?([^\s"',;{}]+)''',
+        r'''["']?(?<!(?-i:[A-Za-z0-9_]))(?:api[_-]?key|password|token|secret|access[_-]?token|client[_-]?secret|aws_secret_access_key)["']?\s*[:=]\s*["']?([^\s"',;{}]+)''',
         text, re.IGNORECASE)
     for match in assignments:
         if match.group(1).lower() not in ('redacted', '<redacted>', '***', 'null', 'none', 'placeholder'):
