@@ -360,6 +360,9 @@ def _run_ask(args):
         if signal_scope is None or exc.owner is not signal_scope:
             raise exc
         termination_handled = True
+        # #1851: the signal may land inside a stdlib constructor; the half-built
+        # object's finalizer must not print a traceback while the ask exits.
+        sys.unraisablehook = lambda unraisable: None
         if exc.stream is sys.stdout and exc.stream is sys.__stdout__:
             silence_broken_pipe(exc.stream)
             sys.stdout = None
