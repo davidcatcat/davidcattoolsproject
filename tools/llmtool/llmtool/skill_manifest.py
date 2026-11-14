@@ -40,15 +40,16 @@ GIT_READ_TIMEOUT_SECONDS = 10
 COMMON_CORE_CARD_PATH = 'skills/role-cards/common-core.md'
 DEVELOPER_CARD_PATH = 'skills/role-cards/developer.md'
 # Role-card table (WP-F design 3.7, #1502): common core first, then the
-# Developer card, in prompt order. Claude Developer and AGY receive the
-# common-core card; OpenCode and gw-agent keep the route entrypoint file as
-# their common core until their own delivery ships. The card file holds every
-# route appendix, so all Developer routes share one card.
+# Developer card, in prompt order. Every Developer route receives the
+# common-core card. gw-agent has no card delivery yet (its runs record
+# NOT_DELIVERED ROUTE_NOT_SUPPORTED); its row names the cards it would get.
+# The card file holds every route appendix, so all Developer routes share
+# one card.
 _ROLE_CARD_TABLE = {
     'agy': (COMMON_CORE_CARD_PATH, DEVELOPER_CARD_PATH),
     'claude-developer': (COMMON_CORE_CARD_PATH, DEVELOPER_CARD_PATH),
-    'gw-agent': ('AGENTS.md', DEVELOPER_CARD_PATH),
-    'opencode-developer': ('AGENTS.md', DEVELOPER_CARD_PATH),
+    'gw-agent': (COMMON_CORE_CARD_PATH, DEVELOPER_CARD_PATH),
+    'opencode-developer': (COMMON_CORE_CARD_PATH, DEVELOPER_CARD_PATH),
 }
 
 _BASE_PATHS = (
@@ -379,14 +380,120 @@ def build_role_cards(repo_root, base_commit, route, git_runner=subprocess.run,
     }
 
 
+DEBUG_CARD_PATH = 'skills/role-cards/debug.md'
+HIGH_DEBUG_REPORT_PATH = 'skills/ai-team-delivery/high-debug-report.md'
+# WP-F design 3.7 Debug row (#1502): common core, the Debug card and the High
+# Debug report procedure, in prompt order. Both Debug routes share this list.
+_DEBUG_CARD_PATHS = (COMMON_CORE_CARD_PATH, DEBUG_CARD_PATH, HIGH_DEBUG_REPORT_PATH)
+MAX_DEBUG_PREFIX_SIZE = 14 * 1024
+
+REVIEWER_CARD_PATH = 'skills/role-cards/reviewer.md'
+REVIEW_CHANGE_SKILL_PATH = 'skills/review-change/SKILL.md'
+FORMAL_VERDICT_PATH = 'skills/ai-team-delivery/formal-verdict.md'
+# WP-F design 3.7 Reviewer row (#1502): common core, the Reviewer card and the
+# two review-gate procedures, in prompt order. Both Reviewer routes share it.
+_REVIEW_CARD_PATHS = (COMMON_CORE_CARD_PATH, REVIEWER_CARD_PATH,
+                      REVIEW_CHANGE_SKILL_PATH, FORMAL_VERDICT_PATH)
+MAX_REVIEW_PREFIX_SIZE = 24 * 1024
+# The wrapped-prefix cap role_card_prefix() applies per built role; every
+# other role keeps MAX_DEVELOPER_PREFIX_SIZE.
+_PREFIX_CAPS = {'review': MAX_REVIEW_PREFIX_SIZE}
+
+
+def _build_fixed_cards(repo_root, base_commit, paths, role, cap, git_runner,
+                       main_ref):
+    """Read one fixed card list from Git objects at ``base_commit``.
+
+    Applies the same commit and main ancestry checks as build_role_cards();
+    the working tree is never read. ``role`` is also the route. The total card
+    bytes must fit ``cap`` (else SKILL_MANIFEST_PREFIX_TOO_LARGE).
+    """
+    if type(base_commit) is not str or _COMMIT_RE.fullmatch(base_commit) is None:
+        _raise(SKILL_MANIFEST_COMMIT_INVALID)
+    if (type(main_ref) is not str or _MAIN_REF_RE.fullmatch(main_ref) is None
+            or '..' in main_ref or main_ref.endswith(('/', '.', '.lock'))):
+        _raise(SKILL_MANIFEST_MAIN_REF_INVALID)
+    _verify_commit_object(git_runner, repo_root, base_commit)
+    _verify_on_main(git_runner, repo_root, base_commit, main_ref)
+
+    commit = base_commit.lower()
+    cards = []
+    total = 0
+    for path in paths:
+        content = _read_blob(git_runner, repo_root, commit, path)
+        total += len(content)
+        if total > cap:
+            _raise(SKILL_MANIFEST_PREFIX_TOO_LARGE)
+        cards.append({
+            'path': path,
+            'sha256': hashlib.sha256(content).hexdigest(),
+            'size': len(content),
+            'text': content.decode('utf-8'),
+        })
+
+    digest_input = {
+        'schema_version': 1,
+        'commit': commit,
+        'role': role,
+        'route': role,
+        'cards': [
+            {key: card[key] for key in ('path', 'sha256', 'size')}
+            for card in cards
+        ],
+    }
+    canonical = json.dumps(
+        digest_input, sort_keys=True, separators=(',', ':'), ensure_ascii=True,
+    ).encode('utf-8')
+    return {
+        'schema_version': 1,
+        'commit': commit,
+        'role': role,
+        'route': role,
+        'cards': cards,
+        'prefix_size': total,
+        'cards_sha256': hashlib.sha256(canonical).hexdigest(),
+    }
+
+
+def build_debug_cards(repo_root, base_commit, git_runner=subprocess.run,
+                      main_ref=DEFAULT_MAIN_REF):
+    """Return the Debug rule cards in the same shape as build_role_cards().
+
+    The fixed list is common core, Debug card and High Debug report, read
+    only from Git objects at ``base_commit`` after the same commit and main
+    ancestry checks as build_role_cards(); the working tree is never read.
+    The total card bytes must fit MAX_DEBUG_PREFIX_SIZE (else
+    SKILL_MANIFEST_PREFIX_TOO_LARGE). ``role`` and ``route`` are 'debug';
+    ``cards_sha256`` covers the commit, role, route and each card's path,
+    sha256 and size. Use role_card_prefix() for the prompt text.
+    """
+    return _build_fixed_cards(repo_root, base_commit, _DEBUG_CARD_PATHS, 'debug',
+                              MAX_DEBUG_PREFIX_SIZE, git_runner, main_ref)
+
+
+def build_review_cards(repo_root, base_commit, git_runner=subprocess.run,
+                       main_ref=DEFAULT_MAIN_REF):
+    """Return the formal Reviewer rule cards in the same shape as build_debug_cards().
+
+    The fixed list is common core, Reviewer card, review-change skill and
+    formal verdict format, read only from Git objects at ``base_commit`` after
+    the same commit and main ancestry checks; the working tree is never read.
+    The total card bytes must fit MAX_REVIEW_PREFIX_SIZE (else
+    SKILL_MANIFEST_PREFIX_TOO_LARGE). ``role`` and ``route`` are 'review'.
+    """
+    return _build_fixed_cards(repo_root, base_commit, _REVIEW_CARD_PATHS, 'review',
+                              MAX_REVIEW_PREFIX_SIZE, git_runner, main_ref)
+
+
 def role_card_prefix(built):
-    """Return the exact prompt prefix for cards from build_role_cards().
+    """Return the exact prompt prefix for cards from a card builder.
 
     Each card is wrapped, in table order, as
     ``\\nREQUIRED_SKILL_BEGIN path=<p>\\n<text>\\nREQUIRED_SKILL_END path=<p>``.
     Every card text must still match its recorded sha256 (else
     SKILL_MANIFEST_PATH_MISSING). The whole wrapped prefix, in UTF-8 bytes,
-    must fit MAX_DEVELOPER_PREFIX_SIZE (else SKILL_MANIFEST_PREFIX_TOO_LARGE);
+    must fit MAX_REVIEW_PREFIX_SIZE for role 'review' and
+    MAX_DEVELOPER_PREFIX_SIZE otherwise (else SKILL_MANIFEST_PREFIX_TOO_LARGE);
     it is never truncated.
     """
     cards = built.get('cards') if type(built) is dict else None
@@ -407,7 +514,10 @@ def role_card_prefix(built):
         sections.append('\nREQUIRED_SKILL_BEGIN path=' + card['path'] + '\n' +
                         card['text'] + '\nREQUIRED_SKILL_END path=' + card['path'])
     prefix = ''.join(sections)
-    if len(prefix.encode('utf-8')) > MAX_DEVELOPER_PREFIX_SIZE:
+    role = built.get('role')
+    cap = _PREFIX_CAPS.get(role, MAX_DEVELOPER_PREFIX_SIZE) if type(role) is str \
+        else MAX_DEVELOPER_PREFIX_SIZE
+    if len(prefix.encode('utf-8')) > cap:
         _raise(SKILL_MANIFEST_PREFIX_TOO_LARGE)
     return prefix
 

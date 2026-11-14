@@ -253,6 +253,20 @@ class MergeTrainStoreTest(unittest.TestCase):
                            root=self.root, train_pr=201)
         self.assertEqual(store.get('t-1', root=self.root), updated)
 
+    def test_held_record_lock_refuses_busy_and_changes_nothing(self):
+        # #1182: a record whose lock another holder keeps refuses TRAIN_RECORD_BUSY.
+        import fcntl
+        from unittest import mock
+        created = self.create()
+        holder = os.open(self.directory / '.t-1.lock', os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            with mock.patch.object(store, 'LOCK_TIMEOUT_SECONDS', 0.05):
+                self.assertRefused('TRAIN_RECORD_BUSY', self.update, created, train_pr=200)
+        finally:
+            os.close(holder)
+        self.assertEqual(store.get('t-1', root=self.root), created)
+
     def test_immutable_keys_refused(self):
         created = self.create()
         for key, value in (('main_sha', 'd' * 40), ('members', []), ('excluded', []),

@@ -49,6 +49,16 @@ def _offline_comment_post(_root, _pr_number, _body):
     raise AssertionError('a test reached the GitHub comment post')
 
 
+#1502 WP-F: the Reviewer rule step reads main from GitHub and Git. Tests here
+# get this fixed prefix instead; tests/test_review_dispatch_cards.py covers it.
+_STUB_RULES_PREFIX = 'RULES stub for review dispatch tests\nRULES_END\n\n'
+_STUB_RULES_SHA256 = hashlib.sha256(_STUB_RULES_PREFIX.encode('utf-8')).hexdigest()
+
+
+def _stub_review_rules(_repo_root):
+    return _STUB_RULES_PREFIX, _STUB_RULES_SHA256
+
+
 def setUpModule():
     review_trust_fixture.start_module()
     # #1705: verdict-post receipts go to a module temp directory, and no test
@@ -59,7 +69,8 @@ def setUpModule():
     for name, value in (
             ('_verdict_post_dir', lambda _store: review_dispatch._private_post_dir(post_dir)),
             ('_list_issue_comments', _offline_comment_list),
-            ('_create_issue_comment', _offline_comment_post)):
+            ('_create_issue_comment', _offline_comment_post),
+            ('_review_rules', _stub_review_rules)):
         patcher = patch.object(review_dispatch, name, value)
         patcher.start()
         _MODULE_PATCHES.append(patcher)

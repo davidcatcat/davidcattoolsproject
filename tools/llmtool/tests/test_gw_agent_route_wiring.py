@@ -1,3 +1,4 @@
+import contextlib
 import copy
 import dataclasses
 import hashlib
@@ -25,6 +26,7 @@ from llmtool import (
     worker_dispatch,
 )
 from llmtool.developer_routes import GwAgentRoute, RouteError, load_route_config
+from llmtool.developer_routes import base as base_module
 from llmtool.developer_routes.gw_agent import cleanup_audit_copies
 from llmtool.errors import LLMToolError
 from llmtool.providers.cli_lifecycle import CLIHostTermination, _Cancelled
@@ -65,6 +67,11 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                               side_effect=listed_route_config)
         routes.start()
         self.addCleanup(routes.stop)
+        # #1502 WP-F: these cases do not isolate HOME, so the per-run
+        # NOT_DELIVERED event never reaches the user's real skill ledger.
+        not_delivered = patch.object(task_submission_cli.skill_ledger, 'record_not_delivered')
+        self.record_not_delivered = not_delivered.start()
+        self.addCleanup(not_delivered.stop)
 
     def test_gw_agent_endpoint_reads_the_gateway_profile_not_company_gw(self):
         profile = {'name': 'work', 'base_url': 'https://gateway.example', 'model': 'm1',
@@ -353,9 +360,12 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         decision = worker_dispatch.PolicyDecision('gw-agent', True,
                                                   'OWNER_POLICY_ALLOWED', 'f' * 64)
         seen_requests = []
-        def fake_runner(_route, request, *, gate, **_kwargs):
+        def fake_runner(_route, request, *, gate, on_launch, **_kwargs):
             self.assertIs(gate(), decision)
             seen_requests.append(copy.deepcopy(request))
+            # Nothing is recorded until run_route reaches its launch boundary.
+            self.record_not_delivered.assert_not_called()
+            on_launch()
             raise RouteError('GW_AGENT_TIMEOUT')
 
         with patch.object(task_completion, 'validate_task_binding'), \
@@ -385,6 +395,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen_requests[0]['task']['data_class'], 'public_repo')
         self.assertEqual(store.value['developer']['state'], 'DEVELOPER_UNAVAILABLE')
         self.assertEqual(store.value['developer']['error_code'], 'DEVELOPER_GW_AGENT_TIMEOUT')
+        # A launched run that then fails still records its one NOT_DELIVERED event.
+        self.record_not_delivered.assert_called_once_with({
+            'task_id': 'a' * 32, 'run_id': 'b' * 32, 'role': 'developer',
+            'route': 'gw-agent', 'reason_code': 'ROUTE_NOT_SUPPORTED'})
 
     def test_gw_agent_uses_claude_formal_reviewer(self):
         task = {'task_id': 'a' * 32, 'run_id': 'b' * 32,
@@ -502,6 +516,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(store.value['dispatch_audit'][-1]['action'], 'DISPATCH')
         self.assertEqual(store.value['dispatch_audit'][-1]['decision'], 'ALLOWED')
         runner.assert_not_called()
+        # Refused before launch: no run, so no NOT_DELIVERED event.
+        self.record_not_delivered.assert_not_called()
 
     def test_unlisted_gateway_profile_model_is_refused_before_task_mutation(self):
         # #1773 (CWE-863): the role model is listed, but the gateway profile
@@ -1343,6 +1359,132 @@ class GwAgentRealStoreTests(unittest.TestCase):
         self.assertIn('+hello synthetic\n', developer['artifact'])
         self.assertEqual((self.root / target).read_text(), 'hello synthetic\n')
         self.assertEqual(self._git('status', '--porcelain'), f'?? {target}')
+
+    # #1502 WP-F: gw-agent receives no role cards, so each launched run writes
+    # one NOT_DELIVERED ROUTE_NOT_SUPPORTED event to the real skill ledger,
+    # which lives under this test's temporary HOME.
+
+    def _ledger_rows(self):
+        path = task_submission_cli.skill_ledger._path()
+        self.assertTrue(str(path).startswith(str(self.base)))
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
+
+    def test_launched_run_records_one_not_delivered_event_before_the_gateway_runs(self):
+        rows_before_run_route = []
+        rows_at_process_start = []
+
+        def process_runner(*args):
+            rows_at_process_start.append(self._ledger_rows())
+            try:
+                return base_module._default_runner(*args)
+            finally:
+                process_runner.last_cleanup_status = (
+                    base_module._default_runner.last_cleanup_status)
+
+        def runner(route, request, **kwargs):
+            rows_before_run_route.append(self._ledger_rows())
+            return task_submission_cli.run_route(route, request, runner=process_runner,
+                                                 **kwargs)
+
+        target = 'gw-agent-not-delivered.md'
+        code, task = self._delegate(target, route_runner=runner)
+        self.assertEqual(code, 0)
+        self._assert_success_persisted(task, target)
+        rows = self._ledger_rows()
+        self.assertEqual(len(rows), 1)
+        # Not before run_route's checks; already there when the gateway starts.
+        self.assertEqual(rows_before_run_route, [[]])
+        self.assertEqual(rows_at_process_start, [rows])
+        event = rows[0]
+        self.assertEqual(
+            {key: event[key] for key in ('entry_type', 'task_id', 'run_id', 'role',
+                                         'route', 'reason_code', 'evidence_level')},
+            {'entry_type': 'NOT_DELIVERED', 'task_id': task['task_id'],
+             'run_id': task['run_id'], 'role': 'developer', 'route': 'gw-agent',
+             'reason_code': 'ROUTE_NOT_SUPPORTED', 'evidence_level': 'UNVERIFIED'})
+        # gw-agent never pins main, reads cards or claims delivery.
+        self.assertFalse(any(row.get('entry_type') == 'DISPATCH_PIN' or
+                             row.get('evidence_level') == 'CONTROLLER_DELIVERED'
+                             for row in rows))
+        self.assertEqual(task_submission_cli.skill_ledger.verify_chain(), (True, None))
+        self.assertNotIn('REQUIRED_SKILL_BEGIN', task['developer'].get('artifact') or '')
+
+    def test_pre_launch_refusal_records_no_not_delivered_event(self):
+        runner = Mock(side_effect=AssertionError('gateway run'))
+        code, task = self._delegate(
+            'gw-agent-paused.md', route_runner=runner,
+            authorize=Mock(side_effect=worker_dispatch.WorkerDispatchDenied('OWNER_PAUSED')))
+        self.assertEqual(code, 1)
+        self.assertEqual(task['developer']['error_code'], 'DEVELOPER_OWNER_PAUSED')
+        runner.assert_not_called()
+        self.assertEqual(self._ledger_rows(), [])
+
+    def test_refusal_inside_run_route_records_no_not_delivered_event(self):
+        # F1: the event is written at run_route's launch boundary, so a refusal
+        # by any run_route check (request validation, final dispatch/D6 gate,
+        # write-boundary verification) leaves the ledger empty.
+        class _UnverifiedBoundary(_NoSandboxBoundary):
+            def verify(self, root, write_paths, state_dirs=(), *, runner):
+                return {'verified': False, 'policy_sha256': 'a' * 64, 'probes': []}
+
+        def bad_request(request, kwargs):
+            return dict(request, executable='relative-executable'), kwargs
+
+        def denied_gate(request, kwargs):
+            return request, dict(kwargs, gate=lambda: False)
+
+        def unverified_boundary(request, kwargs):
+            return request, dict(kwargs, boundary=_UnverifiedBoundary())
+
+        cases = (
+            ('request validation', bad_request, 'DEVELOPER_GW_AGENT_REQUEST_INVALID'),
+            ('dispatch gate', denied_gate, 'DEVELOPER_GW_AGENT_DISPATCH_DENIED'),
+            ('write boundary', unverified_boundary, 'DEVELOPER_BLOCKED_WRITE_ISOLATION'),
+        )
+        for label, change, error_code in cases:
+            with self.subTest(check=label):
+                self._fresh_store()
+                launches, process_starts = [], []
+
+                def process_runner(*args):
+                    process_starts.append(args)
+                    raise AssertionError('gateway process started')
+
+                def runner(route, request, *, on_launch, **kwargs):
+                    def launch():
+                        launches.append(label)
+                        on_launch()
+                    request, kwargs = change(request, kwargs)
+                    return task_submission_cli.run_route(
+                        route, request, runner=process_runner, on_launch=launch,
+                        **kwargs)
+
+                code, task = self._delegate(
+                    'gw-agent-refused-' + label.replace(' ', '-') + '.md',
+                    route_runner=runner)
+                self.assertEqual(code, 1)
+                self.assertEqual(task['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+                self.assertEqual(task['developer']['error_code'], error_code)
+                self.assertEqual(launches, [])
+                self.assertEqual(process_starts, [])
+                self.assertEqual(self._ledger_rows(), [])
+
+    def test_ledger_failure_reports_outcome_unknown_and_does_not_block_the_run(self):
+        stderr = io.StringIO()
+        failing = Mock(side_effect=task_submission_cli.skill_ledger.SkillLedgerError(
+            'CHAIN_BROKEN'))
+        target = 'gw-agent-ledger-unknown.md'
+        with patch.object(task_submission_cli.skill_ledger, 'record_not_delivered', failing), \
+                contextlib.redirect_stderr(stderr):
+            code, task = self._delegate(target)
+        self.assertEqual(code, 0)
+        self._assert_success_persisted(task, target)
+        failing.assert_called_once_with({
+            'task_id': task['task_id'], 'run_id': task['run_id'], 'role': 'developer',
+            'route': 'gw-agent', 'reason_code': 'ROUTE_NOT_SUPPORTED'})
+        self.assertIn('GW_AGENT_SKILL_LEDGER_OUTCOME_UNKNOWN: CHAIN_BROKEN', stderr.getvalue())
 
     def test_repair_run_resumes_bound_gateway_session(self):
         self._delegate("gw-agent-first.md")
