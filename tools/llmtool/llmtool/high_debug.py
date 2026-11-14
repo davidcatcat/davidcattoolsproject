@@ -1574,9 +1574,15 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         else:
             diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root,
                                     executor_task=executor_task)
-    except Exception:
-        # No provider call happened: the only cancel path, finalized not used.
-        failed('HIGH_DEBUG_D6_CREATE_FAILED', post=False)
+    except Exception as error:
+        # No provider call happened. Only a confirmed failure (the lifecycle
+        # exited non-zero and no branch or registry record of this D6 exists)
+        # is the cancel path, finalized not used. A timeout, any other error
+        # or a D6 left behind is unclear: the entry stays RESERVED (used).
+        if (isinstance(error, subprocess.CalledProcessError) and
+                not _d6_taken(repo_root, registration.common_dir, d6)):
+            failed('HIGH_DEBUG_D6_CREATE_FAILED', post=False)
+        _refuse('HIGH_DEBUG_D6_CREATE_FAILED', 'reservation=RESERVED')
     reason = f'failed corrections: {failed_corrections}' if failed_corrections is not None else f'early reason: {early_reason}'
     prompt = rules_prefix + (f'Task: {task_id}\nPR: {pr_number}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'
               f'Evidence:\n{evidence_text}\n\nRequired report sections, each exactly as its own line:\n'

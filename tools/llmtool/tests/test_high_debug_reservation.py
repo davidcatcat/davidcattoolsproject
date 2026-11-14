@@ -160,7 +160,8 @@ class ReservationCase(unittest.TestCase):
                 thread.join()
         return sorted(results, key=str)
 
-    def run_debug(self, task_id, runner, *, create=None, fallback=False, store=None):
+    def run_debug(self, task_id, runner, *, create=None, fallback=False, store=None,
+                  taken=(False,)):
         """Drive run_high_debug on the real store; (refusal code or None, D6 creates)."""
         registration = SimpleNamespace(result_sha=HEAD, root=str(self.base / 'executor-d6'),
                                        common_dir=str(self.base / 'repo' / '.git'))
@@ -171,7 +172,9 @@ class ReservationCase(unittest.TestCase):
             created.append([item['status'] for item in self.entries(task_id, store)])
             return str(self.base)
         git = SimpleNamespace(run=lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=b''),
-                              DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE)
+                              DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE,
+                              CalledProcessError=subprocess.CalledProcessError)
+        probes = list(taken)
         call = high_debug.run_high_debug_with_fallback if fallback else high_debug.run_high_debug
         with patch.object(high_debug.worker_dispatch, 'evaluate',
                           return_value=SimpleNamespace(allowed=True)), \
@@ -180,7 +183,8 @@ class ReservationCase(unittest.TestCase):
              patch.object(high_debug.role_config, 'resolve_role', return_value={
                  'role': 'claude-debug', 'source': 'roles', 'account': 'acct',
                  'config_dir': '/safe/claude', 'provider': 'claude'}), \
-             patch.object(high_debug, '_d6_taken', return_value=False), \
+             patch.object(high_debug, '_d6_taken',
+                          side_effect=lambda *_args: probes.pop(0) if len(probes) > 1 else probes[0]), \
              patch.object(high_debug, '_post_record', return_value=True), \
              patch.object(high_debug, 'subprocess', git), \
              redirect_stdout(io.StringIO()):
@@ -371,6 +375,45 @@ class RunTests(ReservationCase):
         self.assertEqual([(item['status'], item['report']) for item in stored],
                          [QUOTA, ('RUN_FAILED', 'HIGH_DEBUG_RUN_FAILED')])
         self.assertEqual(stored[1]['model_requested'], high_debug._CLAUDE_MODEL)
+
+    def test_g_a_confirmed_create_failure_lets_the_next_request_run(self):
+        task_id = self.task(completion=True)
+
+        def exits_nonzero(**_kwargs):
+            raise subprocess.CalledProcessError(1, 'lifecycle')
+        self.assertEqual(self.run_debug(task_id, Mock(), create=exits_nonzero,
+                                        taken=(False, False))[0], 'HIGH_DEBUG_D6_CREATE_FAILED')
+        self.assertEqual(self.run_debug(task_id, succeeds), (None, [['RUN_FAILED', 'RESERVED']]))
+        self.assertEqual([(item['status'], item['report']) for item in self.entries(task_id)],
+                         [('RUN_FAILED', 'HIGH_DEBUG_D6_CREATE_FAILED'),
+                          ('RCA_CONFIRMED', REPORT)])
+
+    def test_g_an_unclear_create_stays_reserved_and_the_next_request_refuses(self):
+        def times_out(**_kwargs):
+            raise subprocess.TimeoutExpired('lifecycle', 180)
+
+        def errors(**_kwargs):
+            raise RuntimeError('lifecycle state unknown')
+
+        def no_root(**_kwargs):
+            high_debug._refuse('HIGH_DEBUG_D6_CREATE_FAILED')
+
+        def leaves_d6(**_kwargs):
+            raise subprocess.CalledProcessError(1, 'lifecycle')
+        for create, taken in ((times_out, (False,)), (errors, (False,)), (no_root, (False,)),
+                              (leaves_d6, (False, True))):
+            with self.subTest(create=create.__name__):
+                task_id = self.task(completion=True)
+                runner = Mock()
+                self.assertEqual(self.run_debug(task_id, runner, create=create, taken=taken)[0],
+                                 'HIGH_DEBUG_D6_CREATE_FAILED')
+                self.assertEqual(self.last_error.high_debug_detail, 'reservation=RESERVED')
+                self.assertEqual([(item['status'], item['report'])
+                                  for item in self.entries(task_id)],
+                                 [('RESERVED', 'HIGH_DEBUG_RESERVED')])
+                self.assertEqual(self.run_debug(task_id, runner),
+                                 ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
+                runner.assert_not_called()
 
     def test_g_a_failed_codex_finalize_makes_the_claude_admission_refuse(self):
         task_id = self.task(completion=True)

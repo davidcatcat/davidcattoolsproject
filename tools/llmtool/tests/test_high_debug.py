@@ -586,10 +586,6 @@ class HighDebugTests(unittest.TestCase):
     def test_failed_create_costs_no_entry_and_retry_skips_a_leftover_d6(self):
         store = _Store()
         root = self._repo()
-        def leaves_branch(**kwargs):
-            subprocess.run(['git', '-C', str(root), 'branch',
-                            'llmtool/high-debug-' + kwargs['task_id']], check=True)
-            raise subprocess.TimeoutExpired('lifecycle', 180)
         def leaves_record(**kwargs):
             registry = root / '.git' / 'llmtool-worktrees'
             registry.mkdir(exist_ok=True)
@@ -597,26 +593,28 @@ class HighDebugTests(unittest.TestCase):
             raise subprocess.CalledProcessError(1, 'lifecycle')
         def leaves_nothing(**_kwargs):
             raise subprocess.CalledProcessError(1, 'lifecycle')
-        # #1502 WP-D O7: each failed create finalizes one not-used entry, so
-        # attempts advance; a leftover hd2 branch is still skipped.
+        # #1502 WP-D O7: each confirmed failed create finalizes one not-used
+        # entry, so attempts advance; a leftover hd2 branch is still skipped.
+        # A create that leaves its D6 behind is unclear and stays RESERVED.
         subprocess.run(['git', '-C', str(root), 'branch',
                         'llmtool/high-debug-executor-hd2-aaaaaaa'], check=True)
         expected = (
-            (leaves_branch, 'executor-hd1-aaaaaaa'),
-            (leaves_record, 'executor-hd3-aaaaaaa'),
-            (leaves_nothing, 'executor-hd4-aaaaaaa'),
-            (leaves_nothing, 'executor-hd4-aaaaaaa'),
+            (leaves_nothing, 'executor-hd1-aaaaaaa', 'RUN_FAILED', 'HIGH_DEBUG_D6_CREATE_FAILED'),
+            (leaves_nothing, 'executor-hd3-aaaaaaa', 'RUN_FAILED', 'HIGH_DEBUG_D6_CREATE_FAILED'),
+            (leaves_record, 'executor-hd3-aaaaaaa', 'RESERVED', 'HIGH_DEBUG_RESERVED'),
         )
-        for create, name in expected:
+        for create, name, _status, _report in expected:
             with self.subTest(name=name):
                 observed, created = self._failing_case(store, root, create=create)
                 self.assertEqual(observed, 'HIGH_DEBUG_D6_CREATE_FAILED')
                 self.assertEqual(created, [name])
         self.assertEqual([(entry['status'], entry['report'], entry['d6'])
                           for entry in store.entries],
-                         [('RUN_FAILED', 'HIGH_DEBUG_D6_CREATE_FAILED', name)
-                          for _create, name in expected])
-        self.assertFalse(any(high_debug._debug_entry_used(entry) for entry in store.entries))
+                         [(status, report, name) for _create, name, status, report in expected])
+        self.assertEqual([high_debug._debug_entry_used(entry) for entry in store.entries],
+                         [False, False, True])
+        self.assertEqual(self._failing_case(store, root, create=leaves_nothing),
+                         ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
 
     def test_failed_attempt_keeps_its_code_when_recording_fails(self):
         store = _Store()
