@@ -445,6 +445,8 @@ class MacTestIdSelectionTests(unittest.TestCase):
                     "test_chat_tui", "test_chat_tui_scenarios",
                     "test_chat_tui_theme", "test_chat_tui_layout", "test_chat_tui_pm",
                     "test_chat_tui_source_revision",
+                    # test_task_index imports llmtool.chat_tui_status (#1838).
+                    "test_task_index",
                 },
                 None,
             ),
