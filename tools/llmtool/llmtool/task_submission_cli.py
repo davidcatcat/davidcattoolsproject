@@ -4907,14 +4907,17 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
     final_write = {'developer': developer}
     try:
         try:
+            held = registration.native_session_id
+            if held == 'UNKNOWN':
+                # #1328 security v91 F2: a D6 whose session is UNKNOWN takes none.
+                raise _D6SessionRefused()
             if _bind_direct_native_session(
                     registration, developer, completion, opencode_direct_developer._SESSION,
                     # #1328: like gw-agent (#1535), a D6 keeps the first OpenCode
-                    # session it took, and a later run there keeps it. A D6
-                    # holding another route's session is still refused.
-                    repair=(getattr(args, 'repair_packet', None) is not None or
-                            opencode_direct_developer._SESSION.fullmatch(
-                                registration.native_session_id or '') is not None)):
+                    # session it took, and a later run there, repair or not, keeps
+                    # it. Another route's session is refused, also with a repair
+                    # packet (security v91 F1).
+                    repair=opencode_direct_developer._SESSION.fullmatch(held or '') is not None):
                 # One write saves the result and the evidence naming its D6 session.
                 final_write['completion'] = completion
         except _D6SessionRefused:
