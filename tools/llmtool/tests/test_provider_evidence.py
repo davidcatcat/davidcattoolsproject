@@ -6,7 +6,11 @@ counts only. No credential-shaped value appears anywhere (Owner #763 A).
 
 from __future__ import annotations
 
+import contextlib
+import copy
+import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -223,6 +227,23 @@ class ClaudeEvidenceTest(_RouteRunCase):
         self.assertEqual(caught.exception.code, 'CLAUDE_QUOTA_EXHAUSTED')
         self.assertEqual(caught.exception.provider_evidence, QUOTA)
 
+    def test_signal_termination_with_quota_text_gives_none(self):
+        # Review F1: a negative (signal) exit is termination, not a condition.
+        # The classifier code is unchanged; only the evidence is withheld.
+        for code in (-15, -9, -2):
+            with self.subTest(code=code):
+                with self.assertRaises(RouteError) as caught:
+                    self.run_route(self.route(), _runner(code, b'', b'usage limit reached'),
+                                   model=CLAUDE_MODEL)
+                self.assertEqual(caught.exception.code, 'CLAUDE_QUOTA_EXHAUSTED')
+                self.assertIsNone(caught.exception.provider_evidence)
+
+    def test_signal_termination_after_result_gives_none(self):
+        with self.assertRaises(RouteError) as caught:
+            self.run_route(self.route(), _runner(-15, _claude_result()), model=CLAUDE_MODEL)
+        self.assertEqual(caught.exception.code, 'CLAUDE_INTERRUPTED')
+        self.assertIsNone(caught.exception.provider_evidence)
+
     def test_nonzero_exit_gives_none(self):
         with self.assertRaises(RouteError) as caught:
             self.run_route(self.route(), _runner(1, _claude_result()), model=CLAUDE_MODEL)
@@ -275,6 +296,14 @@ class AgyEvidenceTest(_RouteRunCase):
         self.assertEqual(caught.exception.code, 'AGY_QUOTA_EXHAUSTED')
         self.assertEqual(caught.exception.provider_evidence, QUOTA)
 
+    def test_signal_termination_with_quota_status_gives_none(self):
+        with self.assertRaises(RouteError) as caught:
+            self.run_route(self.route(),
+                           _runner(-15, _agy_result(status='RESOURCE_EXHAUSTED'), log=self.LOG),
+                           model=AGY_MODEL, log_path='agy.log')
+        self.assertEqual(caught.exception.code, 'AGY_QUOTA_EXHAUSTED')
+        self.assertIsNone(caught.exception.provider_evidence)
+
 
 class GwAgentEvidenceTest(_RouteRunCase):
     def test_parsed_usage_and_served_model_give_gateway_usage(self):
@@ -304,6 +333,13 @@ class GwAgentEvidenceTest(_RouteRunCase):
             self.run_route(_GwFixture(fixture), _runner(4, b''), model=GW_MODEL)
         self.assertEqual(caught.exception.code, 'GW_AGENT_QUOTA_EXHAUSTED')
         self.assertEqual(caught.exception.provider_evidence, QUOTA)
+
+    def test_signal_termination_with_http_429_gives_none(self):
+        fixture = _gw_result(status='MODEL_ERROR', code='HTTP_429',
+                             usage={'status': 'UNKNOWN'})
+        with self.assertRaises(RouteError) as caught:
+            self.run_route(_GwFixture(fixture), _runner(-15, b''), model=GW_MODEL)
+        self.assertIsNone(caught.exception.provider_evidence)
 
     def test_other_gateway_failure_gives_none(self):
         fixture = _gw_result(status='MODEL_ERROR', code='HTTP_500')
@@ -364,6 +400,17 @@ class OpenCodeEvidenceTest(unittest.TestCase):
             self.assertIsNone(opencode.condition_evidence(code))
             self.assertIsNone(opencode.DirectOpenCodeError(code).provider_evidence)
 
+    def test_nonzero_exit_conditions_need_a_positive_exit(self):
+        # Review F1: run() takes the nonzero-exit evidence from this helper; a
+        # signal (negative) exit is termination and gives none.
+        self.assertEqual(opencode.exit_condition_evidence(1, 'OPENCODE_FREE_LIMIT'), QUOTA)
+        self.assertEqual(opencode.exit_condition_evidence(2, 'OPENCODE_RATE_LIMITED'), RATE)
+        for returncode in (-15, -9, -2, 0, None, True, '1'):
+            for code in ('OPENCODE_FREE_LIMIT', 'OPENCODE_RATE_LIMITED'):
+                with self.subTest(returncode=returncode, code=code):
+                    self.assertIsNone(opencode.exit_condition_evidence(returncode, code))
+        self.assertIsNone(opencode.exit_condition_evidence(1, 'OPENCODE_PROVIDER_FAILED'))
+
 
 def _opencode_result(evidence=STEP_USAGE):
     return opencode.DirectResult(
@@ -379,10 +426,6 @@ class DelegateEvidenceTest(unittest.TestCase):
         self.assertEqual(cli._direct_execution(result, evidence=True)['provider_evidence'],
                          STEP_USAGE)
         self.assertNotIn('provider_evidence', cli._direct_execution(result))
-        refused = {**cli._direct_execution(result, status='UNKNOWN', evidence=True),
-                   'usage_source': 'UNKNOWN'}
-        # D6_SESSION_REFUSED keeps the parsed usage evidence.
-        self.assertEqual(refused['provider_evidence'], STEP_USAGE)
         self.assertNotIn('provider_evidence', cli._direct_execution(
             _opencode_result(evidence=None), evidence=True))
 
@@ -447,11 +490,7 @@ def _legacy_execution(**changes):
 
 
 class TaskStoreEvidenceTest(unittest.TestCase):
-    def test_legacy_execution_without_evidence_is_unchanged(self):
-        execution = _legacy_execution()
-        self.assertIs(task_store._execution_without_provider_evidence(execution, 'claude'),
-                      execution)
-        self.assertIsNone(task_store._execution_without_provider_evidence(None, 'claude'))
+    """Per-profile matrix of the strict shape check TaskStore._validate calls."""
 
     def test_valid_shapes(self):
         cases = (('claude', CLI_USAGE), ('opencode', STEP_USAGE), ('agy', AGY_STATUS),
@@ -502,6 +541,245 @@ class TaskStoreEvidenceTest(unittest.TestCase):
                     task_store._execution_without_provider_evidence(
                         _legacy_execution(provider_evidence=dict(CLI_USAGE), **extra),
                         'claude')
+
+
+# Review F2: real TaskStore records, written and loaded through TaskStore.
+
+def _refused_execution(**changes):
+    """The execution an OpenCode D6_SESSION_REFUSED outcome persists."""
+    value = {'status': 'UNKNOWN', 'native_session_id': OC_SESSION, 'process_exit_code': 0,
+             'stdout_sha256': 'e' * 64, 'elapsed_ms': 1500, 'cleanup_status': 'CONFIRMED',
+             'usage_source': 'UNKNOWN', 'source_bytes': 100, 'source_file_count': 1,
+             'source_manifest_sha256': '9' * 64}
+    value.update(changes)
+    return value
+
+
+def _developer(execution, **changes):
+    value = {
+        'assignment_id': task_store.new_id(), 'selection_source': 'USER',
+        'state': 'DEVELOPER_OUTCOME_UNKNOWN', 'provider_profile': 'opencode',
+        'provider_type': 'opencode-cli', 'model': opencode.MODEL,
+        'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+        'session_id': 'dev-' + task_store.new_id(), 'source_sha': HEAD,
+        'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+        'read_paths': ['x.txt'], 'write_paths': ['x.txt'],
+        'acceptance': ['Edit x.txt.'], 'context_sha256': '5' * 64,
+        'egress_basis': 'Synthetic fixture text only.', 'input_bytes': 100,
+        'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
+        'artifact_sha256': None, 'usage': None,
+        'error_code': 'OPENCODE_D6_SESSION_REFUSED', 'execution': execution,
+        'created_at': '2026-11-14T00:00:00Z',
+    }
+    value.update(changes)
+    return value
+
+
+def _codex_developer(execution):
+    return _developer(execution, provider_profile='codex', provider_type='codex-cli',
+                      model=None, backend_session_semantics='NO_NATIVE_SESSION_ID_EXPOSED',
+                      error_code='CODEX_PROVIDER_FAILED')
+
+
+def _task_record(developer):
+    request = 'Edit x.txt for the fixture.'
+    record = cli._record(
+        task_store.new_id(), task_store.new_id(), 'pm-fixture', 'company-gw', request,
+        state='PM_RESPONDED', provider_type='openai-compatible', model=GW_MODEL,
+        backend='EPHEMERAL_SINGLE_CALL',
+        request_sha=hashlib.sha256(request.encode('utf-8')).hexdigest())
+    record.update(response='PM planned one edit.', developer=developer,
+                  pm_route_binding={'type': 'openai-compatible', 'model': GW_MODEL,
+                                    'base_url': None})
+    return record
+
+
+class _StoreCase(unittest.TestCase):
+    """A private TaskStore root (0700) in a temporary directory."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store_root = Path(self._tmp.name).resolve() / 'tasks'
+        os.mkdir(self.store_root, 0o700)
+        os.chmod(self.store_root, 0o700)
+        self.store = task_store.TaskStore(self.store_root)
+
+    def write(self, record):
+        """Write through TaskStore's validated write path, then load it back."""
+        self.store._write(record, create=True)
+        return self.store.get(record['task_id'])
+
+    def plant(self, record):
+        """Place stored bytes as an older writer left them (no write-time check)."""
+        value = dict(record)
+        value['record_sha256'] = task_store._digest(value)
+        path = self.store_root / task_store.TaskStore._name(value['task_id'])
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(task_store._json_bytes(value))
+        os.chmod(path, 0o600)
+        return value['task_id']
+
+    def assert_invalid(self, call):
+        with self.assertRaises(LLMToolError) as caught:
+            call()
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
+
+
+class TaskStoreRecordEvidenceTest(_StoreCase):
+    def test_legacy_record_without_evidence_loads(self):
+        task_id = self.plant(_task_record(_developer(_refused_execution())))
+        loaded = self.store.get(task_id)
+        self.assertEqual(loaded['developer']['execution'], _refused_execution())
+        self.assertNotIn('provider_evidence', loaded['developer']['execution'])
+
+    def test_valid_evidence_is_written_and_loaded(self):
+        for evidence in (STEP_USAGE, QUOTA, RATE):
+            with self.subTest(evidence=evidence):
+                loaded = self.write(_task_record(_developer(
+                    _refused_execution(provider_evidence=dict(evidence)))))
+                self.assertEqual(loaded['developer']['execution']['provider_evidence'],
+                                 evidence)
+                planted = self.plant(_task_record(_developer(
+                    _refused_execution(provider_evidence=dict(evidence)))))
+                self.assertEqual(
+                    self.store.get(planted)['developer']['execution']['provider_evidence'],
+                    evidence)
+
+    def test_invalid_evidence_refused_on_write_and_on_load(self):
+        invalid = (
+            {}, None, 'STEP_USAGE', {'basis': 'STEP_USAGE'},
+            {'basis': 'STEP_USAGE', 'accepted': False},
+            {'basis': 'STEP_USAGE', 'accepted': 1},
+            {'basis': 'STEP_USAGE', 'accepted': True, 'note': 'x'},
+            {'basis': 'CLI_USAGE', 'accepted': True},
+            {'basis': 'EXIT_ZERO', 'accepted': True},
+            {'condition': 'TIMEOUT'}, {'condition': 'quota exhausted'},
+            {'condition': 'QUOTA_EXHAUSTED', 'basis': 'STEP_USAGE'},
+        )
+        for evidence in invalid:
+            with self.subTest(evidence=evidence):
+                record = _task_record(_developer(
+                    _refused_execution(provider_evidence=copy.deepcopy(evidence))))
+                self.assert_invalid(lambda: self.store._write(record, create=True))
+                task_id = self.plant(record)
+                self.assert_invalid(lambda: self.store.get(task_id))
+
+    def test_codex_record_never_carries_evidence(self):
+        execution = _refused_execution(native_session_id=None)
+        # Control: the same Codex record without evidence is valid.
+        self.write(_task_record(_codex_developer(execution)))
+        for evidence in (CLI_USAGE, STEP_USAGE, QUOTA, RATE):
+            with self.subTest(evidence=evidence):
+                record = _task_record(_codex_developer(
+                    dict(execution, provider_evidence=dict(evidence))))
+                self.assert_invalid(lambda: self.store._write(record, create=True))
+                task_id = self.plant(record)
+                self.assert_invalid(lambda: self.store.get(task_id))
+
+
+class _DelegateStore:
+    """In-memory stand-in for the delegate's TaskStore calls; keeps every write."""
+
+    def __init__(self, record):
+        self.record = copy.deepcopy(record)
+        self.writes = []
+
+    def get(self, task_id):
+        return copy.deepcopy(self.record)
+
+    def _apply(self, expected, changes):
+        if expected is not None and any(self.record.get(key) != value
+                                        for key, value in expected.items()):
+            raise task_store.TaskStoreConflict()
+        self.writes.append(copy.deepcopy(changes))
+        self.record.update(copy.deepcopy(changes))
+        return copy.deepcopy(self.record)
+
+    def d6_bind_compare_and_update(self, task_id, *, executor_task_id, expected, **changes):
+        return self._apply(expected, changes)
+
+    def update(self, task_id, **changes):
+        return self._apply(None, changes)
+
+    def compare_and_update(self, task_id, *, expected, **changes):
+        return self._apply(expected, changes)
+
+
+class OpenCodeDelegateSessionRefusalTest(_StoreCase):
+    """The delegate's own D6_SESSION_REFUSED path keeps parsed STEP_USAGE."""
+
+    DIFF = (b'diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n'
+            b'@@ -1 +1 @@\n-old\n+new\n')
+
+    def run_delegate(self, result):
+        task = _task_record(None)
+        task['record_sha256'] = task_store._digest(task)
+        # A D6 whose session is UNKNOWN takes none: the real refusal trigger.
+        registration = SimpleNamespace(
+            task_id='provider-evidence-fixture', trusted_agent_id='opencode-developer',
+            session_ref='fixture-session-ref', native_session_id='UNKNOWN',
+            root='/nonexistent/d6', common_dir='/nonexistent/d6/.git', branch='main')
+        snapshot = SimpleNamespace(root=registration.root, common_dir=registration.common_dir,
+                                   branch='main', head=HEAD)
+        args = SimpleNamespace(
+            task_id=task['task_id'], timeout=None, context_stdin=False,
+            selection_source='USER', acceptance=['Edit x.txt.'], read_path=['x.txt'],
+            write_path=['x.txt'], egress_basis='Synthetic fixture text only.',
+            repair_packet=None)
+        store = _DelegateStore(task)
+        patches = (
+            mock.patch.object(cli, '_delegate_timeout', return_value=600),
+            mock.patch.object(cli, '_opencode_developer_prompt', return_value='Edit x.txt.'),
+            mock.patch.object(cli, '_opencode_developer_profile',
+                              return_value=(opencode.MODEL, 10)),
+            mock.patch.object(cli, '_developer_card_prefix', return_value=('', POLICY)),
+            mock.patch.object(cli, '_direct_result_callback', return_value={}),
+            mock.patch.object(cli.task_completion, 'bind_executor_task',
+                              return_value=(registration, snapshot)),
+            mock.patch.object(cli, '_bootstrap_registered_d6'),
+            mock.patch.object(cli, '_refresh_d6_binding_after_bootstrap',
+                              return_value=registration),
+            mock.patch.object(cli.opencode_direct_developer, 'run', return_value=result),
+            mock.patch.object(cli, '_record_skill_delivery'),
+            mock.patch.object(cli.task_completion, 'collect_git_snapshot',
+                              return_value=snapshot),
+            mock.patch.object(cli.task_completion, '_worktree_diff',
+                              return_value=(['x.txt'], self.DIFF)),
+            mock.patch.object(cli, '_revision_sources', return_value=lambda path: 'old\n'),
+            mock.patch.object(cli, '_developer_output_rejection', return_value=None),
+            mock.patch.object(cli, '_print'),
+        )
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            code = cli.run_task_opencode_delegate(args, store=store,
+                                                  d6_binding=(registration, snapshot))
+        return code, store
+
+    def test_session_refusal_persists_step_usage(self):
+        code, store = self.run_delegate(_opencode_result())
+        self.assertEqual(code, 1)
+        developer = store.writes[-1]['developer']
+        self.assertEqual(store.record['developer'], developer)
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(developer['error_code'], 'OPENCODE_D6_SESSION_REFUSED')
+        self.assertIsNone(developer['usage'])
+        self.assertIsNone(developer['artifact'])
+        execution = developer['execution']
+        self.assertEqual(execution['usage_source'], 'UNKNOWN')
+        self.assertEqual(execution['provider_evidence'], STEP_USAGE)
+        # The persisted execution passes real TaskStore validation and loads back.
+        loaded = self.write(_task_record(_developer(execution)))
+        self.assertEqual(loaded['developer']['execution'], execution)
+
+    def test_session_refusal_without_parsed_usage_persists_none(self):
+        code, store = self.run_delegate(_opencode_result(evidence=None))
+        self.assertEqual(code, 1)
+        developer = store.writes[-1]['developer']
+        self.assertEqual(developer['error_code'], 'OPENCODE_D6_SESSION_REFUSED')
+        self.assertNotIn('provider_evidence', developer['execution'])
 
 
 if __name__ == '__main__':

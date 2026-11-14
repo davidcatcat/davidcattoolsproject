@@ -119,6 +119,13 @@ def condition_evidence(code):
     return {'condition': condition} if condition is not None else None
 
 
+def exit_condition_evidence(returncode, code):
+    """Condition evidence for a nonzero exit; a signal (negative) exit gives none."""
+    if type(returncode) is not int or returncode <= 0:
+        return None
+    return condition_evidence(code)
+
+
 def step_usage_evidence(events):
     """Return STEP_USAGE when at least one parsed step_finish reports token usage."""
     for event in events:
@@ -989,7 +996,8 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                         'OPENCODE_PROVIDER_FAILED')
         raise DirectOpenCodeError(
                                   failure_code, attempted=True,
-                                  provider_evidence=condition_evidence(failure_code),
+                                  provider_evidence=exit_condition_evidence(
+                                      process.returncode, failure_code),
                                   cleanup_status=cleanup, process_exit_code=process.returncode,
                                   stdout_sha256=(hashlib.sha256(raw).hexdigest() if raw else None),
                                   elapsed_ms=elapsed, source_bytes=source_bytes,

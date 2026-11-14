@@ -867,9 +867,12 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         gateway_code = getattr(route, '_gateway_code', None)
         if type(gateway_code) is str and re.fullmatch(r'[A-Z0-9_]{1,48}', gateway_code):
             facts['gateway_code'] = gateway_code
+        # A signal-terminated process (negative exit) is an interruption or
+        # host termination: the classifier is unchanged, but no evidence.
         raise RouteError(_route_code(route, 'QUOTA_EXHAUSTED'),
                          progress=quota_progress, facts=facts,
-                         provider_evidence=QUOTA_EXHAUSTED_EVIDENCE)
+                         provider_evidence=(QUOTA_EXHAUSTED_EVIDENCE if code >= 0
+                                            else None))
     try:
         route.validate_status(parsed)
     except RouteError:
