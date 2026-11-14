@@ -865,7 +865,8 @@ class MergeTrainOpsTest(unittest.TestCase):
         return {'step': 'CLOSED', 'codes': []}
 
     def _expected_comment(self):
-        return (f'Closed by llmtool merge train {TRAIN_ID}: this change was merged in '
+        return ('<!-- activity: type=task actor=PM target=PR status=TRACKING -->\n'
+                f'Closed by llmtool merge train {TRAIN_ID}: this change was merged in '
                 f'train PR #{TRAIN_PR} as squash commit {MERGE_SHA}.')
 
     def test_close_closes_only_open_member_prs_with_fixed_comment(self):
