@@ -43,7 +43,7 @@ from . import skill_manifest
 from . import trust
 from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, capture_snapshot,
                                UnsupportedBoundary, check_route_model, for_platform,
-                               load_route_config, run_route)
+                               load_route_config, resolve_route_timeout, run_route)
 from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent_usage,
                                         cleanup_audit_copies)
 from .developer_routes.agy import (
@@ -851,6 +851,10 @@ def add_task_submission_parsers(actions):
                           help='32-character Task ID containing the confirmed High Debug diagnosis')
     delegate.add_argument('--high-debug-family',
                           help='root-cause family matching the confirmed High Debug diagnosis')
+    delegate.add_argument('--timeout', type=int, default=None, metavar='SECONDS',
+                          help=('Claude, OpenCode, AGY and gw-agent direct runs: wall-clock '
+                                'limit in seconds (default: the route default_timeout; at most '
+                                'the route max_timeout and never above 1800)'))
     delegate.add_argument('--context-stdin', action='store_true',
                           help='codex text proposals only: read bounded, sensitive-screened context from stdin')
     delegate.add_argument('--pm-session',
@@ -4597,8 +4601,27 @@ def _record_skill_delivery(task, registration, snapshot, provider, model, manife
         print(provider.upper() + '_SKILL_LEDGER_OUTCOME_UNKNOWN: ' + code, file=sys.stderr)
 
 
+# #1815: Developer routes whose run timeout comes from developer-routes.json.
+TIMEOUT_ROUTES = ('agy', 'claude', 'gw-agent', 'opencode')
+
+
+def _delegate_timeout(args, route):
+    """Return the resolved run timeout for route, refusing before any Task mutation.
+
+    ``task delegate --timeout`` is optional; without it the route default_timeout
+    applies. A refusal carries the resolver code (TIMEOUT_INVALID,
+    TIMEOUT_OVER_HARD_CAP, TIMEOUT_OVER_ROUTE_MAX or ROUTE_CONFIG_INVALID).
+    """
+    try:
+        return resolve_route_timeout(route, getattr(args, 'timeout', None))
+    except RouteError as exc:
+        raise LLMToolError(
+            f'{exc.code}: --timeout refused for the {route} Developer route') from None
+
+
 def run_task_opencode_delegate(args, *, store, d6_binding=None):
     """Claim one PM-bound OpenCode run and capture its real scoped workspace diff."""
+    timeout = _delegate_timeout(args, 'opencode')
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
     if (type(previous_developer) is dict and
@@ -4657,6 +4680,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         'artifact_format': 'unified_diff', 'artifact': None,
         'artifact_sha256': None, 'usage': None, 'error_code': None,
         'execution': None, 'created_at': _timestamp(),
+        'timeout_seconds': timeout,
         'direct_result_callback': _direct_result_callback(
             task, registration, snapshot.head, test_policy='LOCAL'),
     }
@@ -4741,7 +4765,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             write_paths=write_paths, prompt=prompt,
             dispatch_store=store, dispatch_task_id=task['task_id'], steps=steps,
             prelaunch_validate=validate_prelaunch_d6_binding, model=model,
-            launch_callback=record_opencode_launch)
+            launch_callback=record_opencode_launch, timeout_seconds=timeout)
     except opencode_direct_developer.DirectOpenCodeError as exc:
         if exc.attempted:
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
@@ -5040,6 +5064,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         raise LLMToolError('--provider agy requires --mode direct')
     if getattr(args, 'context_stdin', False):
         raise LLMToolError('AGY direct reads only its registered D6 task scope')
+    timeout = _delegate_timeout(args, 'agy')
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
     if (type(previous_developer) is dict and
@@ -5128,6 +5153,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
         'artifact_sha256': None, 'usage': None, 'error_code': None,
         'execution': None, 'created_at': _timestamp(), 'owner_assignment_ref': owner_ref,
+        'timeout_seconds': timeout,
         'direct_result_callback': _direct_result_callback(
             task, registration, snapshot.head, test_policy=test_policy),
     }
@@ -5199,7 +5225,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             'root': registration.root, 'model': model, 'effort': effort,
             'expected_branch': registration.branch, 'expected_head': snapshot.head,
             'write_paths': write_paths, 'executable': executable,
-            'prompt': prompt, 'log_path': 'agy.log', 'timeout': 600,
+            'prompt': prompt, 'log_path': 'agy.log', 'timeout': timeout,
             'state_dirs': (),
         }, gate=route_gate, boundary=GatedBoundary(),
            snapshot=capture_snapshot)
@@ -5352,6 +5378,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
         raise LLMToolError('Claude direct reads only its registered D6 task scope')
     if getattr(args, 'selection_source', None) != 'PM':
         raise LLMToolError('Claude direct requires a PM-selected assignment')
+    timeout = _delegate_timeout(args, 'claude')
     task = store.get(args.task_id)
     previous = task.get('developer')
     if (type(previous) is dict and previous.get('provider_profile') == 'claude' and
@@ -5453,7 +5480,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
         'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
         'artifact_sha256': None, 'usage': None, 'error_code': None,
         'execution': None, 'created_at': _timestamp(), 'owner_assignment_ref': owner_ref,
-        'executor_task_id': registration.task_id,
+        'executor_task_id': registration.task_id, 'timeout_seconds': timeout,
         'direct_result_callback': _direct_result_callback(
             task, registration, snapshot.head, test_policy=test_policy),
     }
@@ -5524,7 +5551,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
             'root': registration.root, 'model': model, 'effort': effort,
             'expected_branch': registration.branch, 'expected_head': snapshot.head,
             'write_paths': write_paths, 'executable': executable,
-            'prompt': prompt, 'timeout': 600, 'state_dirs': (),
+            'prompt': prompt, 'timeout': timeout, 'state_dirs': (),
         }, gate=route_gate, boundary=GatedBoundary(), snapshot=capture_snapshot)
         _record_skill_delivery(task, registration, snapshot, 'claude', model, manifest, result)
         after_registration = task_completion.read_d6_registration(
@@ -5627,6 +5654,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         raise LLMToolError('--provider gw-agent requires --mode direct')
     if getattr(args, 'context_stdin', False):
         raise LLMToolError('gw-agent direct reads only its registered D6 task scope')
+    timeout = _delegate_timeout(args, 'gw-agent')
     egress_basis = _screen_text(getattr(args, 'egress_basis', None), 512)
     data_class = getattr(args, 'data_class', None)
     if type(data_class) is not str or not data_class:
@@ -5764,7 +5792,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'egress_basis': egress_basis, 'input_bytes': len(prompt.encode('utf-8')),
         'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
         'artifact_sha256': None, 'usage': None, 'error_code': None,
-        'execution': None, 'created_at': _timestamp(),
+        'execution': None, 'created_at': _timestamp(), 'timeout_seconds': timeout,
         'direct_result_callback': _direct_result_callback(
             task, registration, snapshot.head, test_policy=test_policy),
     }
@@ -5893,7 +5921,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             result = execute(route, {'root': registration.root, 'model': model, 'effort': effort,
                 'expected_branch': registration.branch, 'expected_head': snapshot.head,
                 'write_paths': write_paths, 'executable': sys.executable,
-                'prompt': prompt, 'task': task_input, 'timeout': 600,
+                'prompt': prompt, 'task': task_input, 'timeout': timeout,
                 'state_dirs': (), **site.route_fields()}, gate=route_gate, boundary=for_platform(),
                 snapshot=capture_snapshot)
         finally:
@@ -6998,6 +7026,13 @@ def run_task_delegate(args, *, store=None):
         raise LLMToolError(
             f'WORKER_ID_RETIRED_ALIAS: {retired} is a retired id; use '
             f'{worker_dispatch.RETIRED_WORKER_ALIASES[retired]} (#1502 WP-E)')
+    # #1815: refuse a bad --timeout before any Task read, fork or provider call.
+    selected_route = getattr(args, 'provider', None)
+    if selected_route in TIMEOUT_ROUTES:
+        _delegate_timeout(args, selected_route)
+    elif getattr(args, 'timeout', None) is not None:
+        raise LLMToolError('TIMEOUT_ROUTE_UNSUPPORTED: --timeout applies only to the '
+                           'Claude, OpenCode, AGY and gw-agent Developer routes')
     if getattr(args, 'background', False):
         provider = getattr(args, 'provider', None)
         if provider == 'codex' and getattr(args, 'mode', 'proposal') != 'direct':

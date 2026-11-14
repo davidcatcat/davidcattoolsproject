@@ -1577,6 +1577,105 @@ class TaskSubmissionCLITests(unittest.TestCase):
         stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(stored['developer']['artifact'], developer['artifact'])
 
+    # #1815: task delegate --timeout.
+    def test_delegate_parser_accepts_optional_timeout(self):
+        parser = parser_for_cli()
+        base = ['task', 'delegate', 'a' * 32, '--provider', 'claude', '--mode', 'direct',
+                '--selection-source', 'PM', '--executor-task', 'executor-task-1',
+                '--read-path', 'sample.py', '--write-path', 'sample.py',
+                '--acceptance', 'focused test passes', '--egress-basis', 'synthetic text']
+        self.assertIsNone(parser.parse_args(base).timeout)
+        self.assertEqual(parser.parse_args(base + ['--timeout', '1200']).timeout, 1200)
+        with redirect_stdout(io.StringIO()), patch('sys.stderr', io.StringIO()), \
+                self.assertRaises(SystemExit):
+            parser.parse_args(base + ['--timeout', 'soon'])
+
+    def test_delegate_refuses_bad_timeout_before_task_read_or_fork(self):
+        cases = (('agy', 601, 'TIMEOUT_OVER_ROUTE_MAX'),
+                 ('gw-agent', 1200, 'TIMEOUT_OVER_ROUTE_MAX'),
+                 ('claude', 1801, 'TIMEOUT_OVER_HARD_CAP'),
+                 ('opencode', 3600, 'TIMEOUT_OVER_HARD_CAP'),
+                 ('claude', 0, 'TIMEOUT_INVALID'),
+                 ('opencode', -5, 'TIMEOUT_INVALID'),
+                 ('codex', 600, 'TIMEOUT_ROUTE_UNSUPPORTED'))
+        for provider, timeout, code in cases:
+            for background in (False, True):
+                with self.subTest(provider=provider, timeout=timeout, background=background):
+                    args = Namespace(task_id='a' * 32, provider=provider, mode='direct',
+                                     background=background, timeout=timeout,
+                                     selection_source='PM', acceptance=['bounded'])
+                    # store=object(): any Task read would fail with AttributeError.
+                    with patch.object(os, 'fork') as fork, \
+                            self.assertRaises(LLMToolError) as raised:
+                        run_task_delegate(args, store=object())
+                    self.assertTrue(str(raised.exception).startswith(code + ':'),
+                                    str(raised.exception))
+                    fork.assert_not_called()
+
+    def test_route_delegates_refuse_bad_timeout_before_task_read(self):
+        cases = ((submission_cli.run_task_claude_delegate, 1801, 'TIMEOUT_OVER_HARD_CAP'),
+                 (submission_cli.run_task_agy_delegate, 601, 'TIMEOUT_OVER_ROUTE_MAX'),
+                 (submission_cli.run_task_gw_agent_delegate, 601, 'TIMEOUT_OVER_ROUTE_MAX'),
+                 (submission_cli.run_task_opencode_delegate, True, 'TIMEOUT_INVALID'))
+        for delegate, timeout, code in cases:
+            with self.subTest(delegate=delegate.__name__):
+                args = Namespace(task_id='a' * 32, mode='direct', timeout=timeout,
+                                 selection_source='PM', owner_ref=None,
+                                 context_stdin=False, egress_basis='synthetic text',
+                                 data_class='public')
+                with patch('llmtool.gw_agent_sessions.sweep_quietly'), \
+                        self.assertRaises(LLMToolError) as raised:
+                    delegate(args, store=object())
+                self.assertTrue(str(raised.exception).startswith(code + ':'),
+                                str(raised.exception))
+
+    def test_route_timeout_helper_uses_route_limits(self):
+        for route in submission_cli.TIMEOUT_ROUTES:
+            with self.subTest(route=route):
+                self.assertEqual(submission_cli._delegate_timeout(Namespace(), route), 600)
+                self.assertEqual(
+                    submission_cli._delegate_timeout(Namespace(timeout=None), route), 600)
+                self.assertEqual(
+                    submission_cli._delegate_timeout(Namespace(timeout=600), route), 600)
+        for route in ('claude', 'opencode'):
+            for requested in (1200, 1800):
+                with self.subTest(route=route, requested=requested):
+                    self.assertEqual(submission_cli._delegate_timeout(
+                        Namespace(timeout=requested), route), requested)
+
+    def assert_opencode_timeout_passed_and_recorded(self, requested, expected):
+        task = self._pm_task_with_opencode_assignment()
+        store_root = Path(self.home) / '.local/state/llmtool/tasks'
+        seen = []
+
+        def execute(**kwargs):
+            seen.append(kwargs['timeout_seconds'])
+            # The bound is durable before the provider runs.
+            stored = TaskStore(store_root).get(task['task_id'])
+            self.assertEqual(stored['developer']['timeout_seconds'], expected)
+            raise DirectOpenCodeError('OPENCODE_RUNTIME_UNAVAILABLE')
+
+        changes = {} if requested is None else {'timeout': requested}
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=execute), \
+                redirect_stdout(io.StringIO()):
+            code = run_task_delegate(self._opencode_delegate_args(task, **changes))
+        self.assertEqual(code, 1)
+        self.assertEqual(seen, [expected])
+        stored = TaskStore(store_root).get(task['task_id'])
+        self.assertEqual(stored['developer']['timeout_seconds'], expected)
+        self.assertEqual(stored['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+
+    def test_opencode_delegate_without_timeout_uses_route_default(self):
+        self.assert_opencode_timeout_passed_and_recorded(None, 600)
+
+    def test_opencode_delegate_passes_and_records_1200(self):
+        self.assert_opencode_timeout_passed_and_recorded(1200, 1200)
+
+    def test_opencode_delegate_passes_and_records_1800(self):
+        self.assert_opencode_timeout_passed_and_recorded(1800, 1800)
+
     def test_opencode_completion_cas_succeeds_and_preserves_newer_record(self):
         result = DirectResult(0, 'ses_Abc123', 'Updated fixture.', None,
                               'UNKNOWN', 'a' * 64, 32, 'CONFIRMED',

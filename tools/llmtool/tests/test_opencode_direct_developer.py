@@ -1157,6 +1157,73 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                 self.run_with_valid_binding(root=self.root, read_paths=[path], write_paths=[path],
                     prompt='bounded task prompt', timeout_seconds=5, executable=cli)
 
+    # #1815: the run bound is resolve_route_timeout('opencode', ...), not a fixed 600.
+    def run_bound_seconds(self, **kwargs):
+        """Run once; return the observed run-lifecycle deadline minus launch time."""
+        from llmtool.providers.cli_lifecycle import CLIProcessLifecycle as RealLifecycle
+        seen = []
+
+        def lifecycle(name, *args, **kw):
+            seen.append(kw['deadline'] - time.monotonic())
+            return RealLifecycle(name, *args, **kw)
+
+        cli = self.fake_cli(self.event('step_start') + '\n')
+        with patch('llmtool.opencode_direct_developer.CLIProcessLifecycle',
+                   side_effect=lifecycle):
+            self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                write_paths=['source.py'], prompt='bounded task prompt',
+                executable=cli, **kwargs)
+        # The version probe comes first; the last lifecycle owns the run.
+        self.assertGreaterEqual(len(seen), 2)
+        return seen[-1] - 3  # the run lifecycle adds a 3-second cleanup margin
+
+    def test_run_bound_defaults_to_route_default(self):
+        bound = self.run_bound_seconds()
+        self.assertGreater(bound, 590)
+        self.assertLessEqual(bound, 600)
+
+    def test_run_accepts_long_resolved_bound(self):
+        for requested in (1200, 1800):
+            with self.subTest(requested=requested):
+                bound = self.run_bound_seconds(timeout_seconds=requested)
+                self.assertGreater(bound, requested - 10)
+                self.assertLessEqual(bound, requested)
+
+    def test_run_refuses_bad_timeout_before_provider(self):
+        cases = ((1801, 'TIMEOUT_OVER_HARD_CAP'), (3600, 'TIMEOUT_OVER_HARD_CAP'),
+                 (0, 'TIMEOUT_INVALID'), (-1, 'TIMEOUT_INVALID'),
+                 (True, 'TIMEOUT_INVALID'), (600.0, 'TIMEOUT_INVALID'),
+                 ('600', 'TIMEOUT_INVALID'))
+        for requested, code in cases:
+            with self.subTest(requested=requested):
+                marker = self.root / 'provider-run-invoked'
+                cli = self.fake_cli(self.event('step_start') + '\n',
+                                    invocation_marker=marker)
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                        write_paths=['source.py'], prompt='bounded task prompt',
+                        timeout_seconds=requested, executable=cli)
+                self.assertEqual(caught.exception.direct_opencode_code, code)
+                self.assertFalse(caught.exception.attempted)
+                self.assertFalse(marker.exists())
+
+    def test_resolved_timeout_matches_route_limits(self):
+        from llmtool import opencode_direct_developer as adapter
+        self.assertEqual(adapter.MAX_WALL_CLOCK_SECONDS, 1800)
+        self.assertEqual(adapter.resolved_timeout(), 600)
+        for requested in (1, 600, 1200, 1800):
+            with self.subTest(requested=requested):
+                self.assertEqual(adapter.resolved_timeout(requested), requested)
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            adapter.resolved_timeout(1801)
+        self.assertEqual(caught.exception.direct_opencode_code, 'TIMEOUT_OVER_HARD_CAP')
+        with patch('llmtool.developer_routes.load_route_config',
+                   return_value={'routes': {'opencode': {'default_timeout': 600,
+                                                         'max_timeout': 600}}}):
+            with self.assertRaises(DirectOpenCodeError) as caught:
+                adapter.resolved_timeout(1200)
+        self.assertEqual(caught.exception.direct_opencode_code, 'TIMEOUT_OVER_ROUTE_MAX')
+
 
 if __name__ == '__main__':
     unittest.main()
