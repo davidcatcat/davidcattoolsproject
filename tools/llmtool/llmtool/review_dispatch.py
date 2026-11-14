@@ -685,11 +685,28 @@ def _dispatch(*, task_id, prompt, repo_root, env, model):
 
 def _bind_d6(task_id, session_id, repo_root):
     lifecycle = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
-    result = subprocess.run(
-        [sys.executable, '-B', str(lifecycle), '--bind-native-session-task-id', task_id,
-         '--native-session-id', session_id, '--repo-root', str(repo_root)],
-        cwd=str(repo_root), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False, timeout=120)
+    cmd = [sys.executable, '-B', str(lifecycle), '--bind-native-session-task-id', task_id,
+           '--native-session-id', session_id, '--repo-root', str(repo_root)]
+    try:
+        result = subprocess.run(
+            cmd, cwd=str(repo_root), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=120)
+    except (subprocess.TimeoutExpired, OSError):
+        # #1909 item 3: a bind helper that timed out (often waiting on the registry lock) or did not start is retried exactly once, like #1895 item 2.
+        try:
+            result = subprocess.run(
+                cmd, cwd=str(repo_root), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=False, timeout=120)
+        except (subprocess.TimeoutExpired, OSError):
+            raise RuntimeError('REVIEWER_SESSION_BIND_TIMEOUT')
+        if result.returncode == 0:
+            return None
+        if result.stderr and b'D6_BIND_NATIVE_SESSION_ALREADY_SET' in result.stderr:
+            from .review_result import _reviewer_session_bound
+            if _reviewer_session_bound({'reviewer_task': task_id, 'native_session_id': session_id}, None) is True:
+                return None
+        raise RuntimeError('REVIEWER_SESSION_BIND_FAILED')
+
     if result.returncode:
         raise RuntimeError('REVIEWER_SESSION_BIND_FAILED')
 
