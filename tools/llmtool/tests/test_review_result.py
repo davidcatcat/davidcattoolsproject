@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from llmtool import cli, review_result, task_store, task_submission_cli
+from llmtool.errors import LLMToolError
 
 
 TASK, RUN, HEAD, CONTRACT = 'a' * 32, 'b' * 32, 'c' * 40, 'd' * 64
@@ -332,7 +333,7 @@ class UnknownClaimReconcileShapeTests(unittest.TestCase):
         self.assertEqual(self.state(), 'UNKNOWN')
         self.store.family = 'gw-agent'
         with patch.object(self.store.store, 'compare_and_update', side_effect=RuntimeError):
-            with self.assertRaises(Exception) as caught:
+            with self.assertRaises(LLMToolError) as caught:
                 self.run_result([_comment()])
         self.assertEqual(caught.exception.review_dispatch_code,
                          'REVIEW_RESULT_CLAIM_RECONCILE_FAILED')
