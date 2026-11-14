@@ -23,7 +23,7 @@ ISSUE_URL = 'https://api.github.com/repos/' + REPOSITORY + '/issues/12'
 ROUTE = {'default_model': 'model-default', 'default_effort': 'medium',
          'allowed_models': ['model-default', 'model-user', 'model-env', 'model-cli']}
 # The claude-reviewer model listed in developer-routes.json (#1502 WP-E).
-REVIEWER_MODEL = 'claude-opus-5-5'
+REVIEWER_MODEL = 'claude-sonnet-5-5'
 
 
 def comment(route='agy', model='model-extra', marker=True):
