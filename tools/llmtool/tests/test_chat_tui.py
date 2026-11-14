@@ -1790,8 +1790,12 @@ class TaskModeTests(Base):
                             '\x1bOR', '/task events\r',
                             lambda ui: self.assertTrue(ui.show_events),
                             '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
+                            '\x1bOS', listed, lambda ui: self.assertTrue(ui.show_events),
+                            '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
                             '/task show ' + task_id + '\r', self.idle,
-                            lambda ui: self.assertTrue(ui.show_detail)], dev=False)
+                            lambda ui: self.assertTrue(ui.show_detail),
+                            '\x1bOQ', lambda ui: self.assertFalse(ui.show_detail),
+                            '\x1bOQ', lambda ui: self.assertTrue(ui.show_detail)], dev=False)
         self.assertFalse(ui.dev)
         self.assertNotIn(chat_tui.TASK_HIDDEN, ui.conversation.text)
         self.assertIn(task_id, ui.detail_view.text)
@@ -2048,6 +2052,85 @@ class W57ChatTests(Base):
         self.assertNotIn('/task submit is for development testing', ui.conversation.text)
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/', dev=False)
                           if c[0].startswith('/task')], ['/task show', '/task list', '/task events'])
+
+    def test_1819_bare_and_other_task_forms_stay_hidden_without_dev(self):
+        # #1819: without --dev only the exact read-only forms run. A bare /task (the case the
+        # advisory pre-review found uncovered) and every other /task form print TASK_HIDDEN
+        # and do nothing else: no usage, no pane, no Task read, no Task mode, no submit.
+        os.environ.pop(chat_tui.DEV_ENV, None)
+        forms = ['/task', '/task ', '/task mode off', '/task mode profile first',
+                 '/task submit --provider first request', '/task show', '/task show a b',
+                 '/task list --all', '/task events now', '/task bogus']
+
+        def enter(form):
+            # Enter on the typed draft without the picker, which would complete '/task'.
+            def step(ui):
+                ui.input.text = form
+                ui.submit()
+            return step
+
+        with patch('llmtool.task_submission_cli.run_task_submit') as submit, \
+                patch.object(chat_tui.ChatTUI, 'start_task') as start, \
+                patch.object(chat_tui.ChatTUI, 'refresh_list') as refresh, \
+                patch.object(chat_tui.ChatTUI, 'set_task_mode') as mode:
+            ui, _ = self.drive([enter(form) for form in forms])
+        self.assertFalse(ui.dev)
+        for called in (submit, start, refresh, mode):
+            called.assert_not_called()
+        self.assertEqual(ui.conversation.text.count('llmtool: ' + chat_tui.TASK_HIDDEN),
+                         len(forms))
+        self.assertNotIn('usage: /task', ui.conversation.text)
+        self.assertFalse(ui.show_list or ui.show_events or ui.show_detail)
+        self.assertIsNone(ui.task_profile)
+        self.assertFalse(ui.busy)
+        self.assertEqual(list(self.session.history), [])
+        self.factory.assert_not_called()
+
+    def test_1819_picker_and_tab_offer_only_read_only_task_commands_without_dev(self):
+        os.environ.pop(chat_tui.DEV_ENV, None)
+        read_only = ['/task show', '/task list', '/task events']
+
+        def offered(ui):
+            self.assertEqual([item[0] for item in ui.menu_items], read_only)
+
+        ui, _ = self.drive(['/task', offered, '\x15',
+                            '/ta', '\t', lambda ui: self.assertEqual(ui.input.text, '/task '),
+                            offered, '\x15',
+                            '/task l', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/task list'),
+                            '\x15', '/task m', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/task m'),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
+        self.assertFalse(ui.dev)
+        self.assertNotIn('> /task', ui.conversation.text)
+        help_text = ui.help_text()
+        for key in ('F2', 'F3', 'F4'):
+            self.assertIn(key, help_text)
+            self.assertIn(key, ui.command_help_text())
+        self.factory.assert_not_called()
+
+    def test_1819_dev_mode_task_behaviour_is_unchanged(self):
+        # With LLMTOOL_TUI_DEV=1 (Base) or --dev: bare /task still prints the usage, every
+        # /task command is offered, and the help keeps the developer section.
+        for dev in (None, True):
+            def enter_bare(ui):
+                ui.input.text = '/task'
+                ui.submit()
+
+            ui, _ = self.drive(['/task', lambda ui: self.assertEqual(
+                                    [item[0] for item in ui.menu_items],
+                                    ['/task submit', '/task show', '/task mode',
+                                     '/task list', '/task events']),
+                                '\x15', enter_bare], dev=dev)
+            self.assertTrue(ui.dev)
+            self.assertIn('usage: /task submit --provider PROFILE REQUEST\n'
+                          '       /task show TASK_ID\n'
+                          '       /task mode profile PROFILE', ui.conversation.text)
+            self.assertNotIn(chat_tui.TASK_HIDDEN, ui.conversation.text)
+            for dev_only in ('/task submit', '/task mode', 'Developer mode'):
+                self.assertIn(dev_only, ui.help_text())
+            self.assertIn('Developer tools', ui.command_help_text())
+        self.factory.assert_not_called()
 
     def test_w60_up_down_with_nothing_to_open_say_why_once(self):
         os.environ.pop(chat_tui.DEV_ENV, None)
