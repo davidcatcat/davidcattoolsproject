@@ -3567,8 +3567,16 @@ class TaskStatusIndexListTests(unittest.TestCase):
         partial_chat = self.events.conversation_text(indexed, unreadable, 'now', note)
         self.assertIn('status index keeps 3 per Task; INCOMPLETE: 33 Tasks not read in full',
                       partial_pane.splitlines()[0])
+        # The conversation's newest 20 index events: the many-event Task's 2007-2005, all
+        # three kept events of n=39..35, and 1343/1342 of n=34. Open: the many-event Task
+        # and n=35..39 (their last kept event is shown). n=34's last kept event (1341) is
+        # not shown, so its dropped event (1340) cannot enter the selection: 6 open Tasks.
+        self.assertEqual(
+            sorted(indexed[position]['task_id'] for position in
+                   self.events.open_rows(indexed, self.events.CONVERSATION_LIMIT)),
+            sorted([_PARITY_MANY] + ['%032x' % n for n in range(35, 40)]))
         self.assertTrue(partial_chat.splitlines()[1].startswith(
-            '  INCOMPLETE: 7 Tasks not read in full (status index keeps 3 per Task)'),
+            '  INCOMPLETE: 6 Tasks not read in full (status index keeps 3 per Task)'),
             partial_chat)
         self.assertNotIn(_parity_stamp(1205) + many, partial_pane)
 
