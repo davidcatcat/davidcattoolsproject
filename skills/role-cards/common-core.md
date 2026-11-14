@@ -2,7 +2,7 @@
 
 Role: every role (PM, Developer, Reviewer, Debug) on every route. Source: [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502) WP-F design §3.2.
 
-These nine rules bind together with your role card. They restate rules from [AGENTS.md](../../AGENTS.md) and [CLAUDE.md](../../CLAUDE.md); procedures stay in the linked skills. Delivery of this card from the `main` manifest commit, bound by digest, is 待實作（WP-F）.
+These nine rules bind together with your role card. They restate rules from [AGENTS.md](../../AGENTS.md) and [CLAUDE.md](../../CLAUDE.md); procedures stay in the linked skills. Since #1822 (Claude Developer, AGY) and #1878 (OpenCode) this card is delivered from the `main` manifest commit, bound by digest. `gw-agent` runs still record `NOT_DELIVERED`; their dispatch spec states the card rules.
 
 ## 1. Authority
 
