@@ -691,6 +691,15 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(pm_runtime.current_binding(state_root=self.root)['native_session_id'],
                          binding['native_session_id'])
 
+    def test_history_paging_refusals_name_their_code(self):
+        # #683: bad history paging is refused with PM_HISTORY_QUERY_INVALID.
+        for paging in ({'after': -1}, {'after': True}, {'limit': 0}, {'latest': 0}):
+            with self.subTest(paging=sorted(paging)):
+                with self.assertRaises(LLMToolError) as raised:
+                    pm_runtime.read_history(SESSION, state_root=self.root, **paging)
+                self.assertEqual(raised.exception.pm_runtime_code,
+                                 'PM_HISTORY_QUERY_INVALID')
+
     def test_binding_account_mismatch_and_one_shot_override(self):
         account_a = Path(self.temp.name) / 'account-a'
         account_b = Path(self.temp.name) / 'account-b'
