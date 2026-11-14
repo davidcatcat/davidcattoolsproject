@@ -60,6 +60,20 @@ A refused local commit must not reach origin, including in history. This is a PM
 
 **On every refusal (Owner #763 A):** Stop the Task. Keep the audit record and the original D6. Report only the rule name, file, line, Task ID and refusal type, never values. Classify the refusal as a real block, a test-design problem or a detector false positive, and complete the #981 disposition record before any new flow. Never pass refused content to a new Developer, never resend the old Task and never hint how to pass the screen. A false positive gets a bounded fix package with RCA and a regression test; rotating Developers is not a fix. Start at most one new independent Developer Task per blocked item, from latest main. If that Task is refused again, stop and create no third; investigate the detector-defect family and report the RCA and a proposed fix to the PM. The existing defect-family repair cap stays, and a new Task or a new D6 never resets it. High Debug, Reviewer and security rules are unchanged. The joined-fixture sentence above stays the only exception to the [test data rule](SKILL.md#test-data-rule-owner-763-a-2026-11-08). The PM keeps an efficiency log on the work-package Issue: refusal count, confirmed false positives, test-design stops, extra Developer and Reviewer runs, recurring rules and root causes, with UNKNOWN where data is missing and no refused values. [Owner decision, relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6717848625).
 
+**False positives: two separate routes (Owner O4 option a, #1943).** Fixing the screen and releasing the refused item are separate.
+
+- **Route 1, screen fix:** a new Task limited to the screen code and rules, with RCA and a regression test (synthetic fixtures under the existing rule). It carries metadata only (rule name, line, classification), never the refused content. Codex security review, formal cross-family review and CI apply.
+  An independent Reviewer's local confirmation of the false positive is the condition for starting Route 1, and is used for nothing else.
+- **Route 2, the refused item:** it stays blocked, and no Reviewer opinion releases it. It may restart only when all of these hold: the screen fix is merged; the fixed screen is installed and verified; the original source still exists; its digest matches the recorded digest exactly; the fixed screen rescans that same source with no hit.
+  Then at most one new compliant Task starts from latest `main` under the rules above. A missing source, a digest mismatch, a hit or incomplete verification keeps it blocked. A second screen fix in the same rule family is an Owner question (`R-SECURITY`).
+
+Never resend refused content, rewrite sensitive data to pass the screen, or fabricate a Developer response that can no longer be retrieved. [NOT LIVE] (#1943 WP-4): the digest-bound rescan of Developer output; `screen-recover` covers `task high-debug` only.
+
+### Confirmed refusals (Owner O5, #1943)
+
+A refusal is confirmed only with explicit evidence: the model states a refusal, or a formal screen hits. An UNKNOWN `NO_CHANGES`, or another no-change result with no stated reason, is not a safety refusal. The PM investigates under the existing rules, narrows the scope, and if needed reassigns once to another `ALLOWED` route through all gates.
+Reassignment resets no repair count, cost record or safety limit. An Owner command to stop, report back or not retry comes first. A confirmed safety refusal is never routed around.
+
 ### Rule-file PRs (Owner 2026-11-05, #1019)
 
 A PR that changes a path in `tools/llmtool/sensitive-paths.json` is a rule-file PR. It needs formal review and exact-head CI like any other PR and no per-PR Owner approval. Check the list as installed, not the PR head, and count a rename out of a listed path. If the list cannot be read, treat the PR as a rule-file PR. `CLAUDE.md`, `AGENTS.md` and `skills/` are not listed for now.
@@ -111,10 +125,13 @@ Escalate to the Owner only when one of these applies:
 
 - the work needs authority the team does not have;
 - the work cannot continue safely;
-- a Task that does not end successfully notifies the Owner (D4);
-- the decision belongs to the Owner under [owner-escalation](owner-escalation.md).
+- the decision belongs to the Owner under [owner-escalation](owner-escalation.md), and the ask passes the [Owner ask gate](owner-escalation.md#owner-ask-gate-owner-o1-1943).
 
-Everything else is a PM decision: routine failures, Reviewer FAIL, a quota pause, a VPN outage and repair choices. Record the PM decision and continue. While the escalation is open, only the dependent action waits.
+Everything else is a PM decision: routine failures, Reviewer FAIL, a quota pause, a VPN outage, repair choices, a tool dead end (a defect record under [defect triage](defect-triage.md)), a harness permission refusal (a [`harness_permission` record](owner-escalation.md#standing-pm-cleanup-owner-o2-1943)) and a [no-change result without a confirmed refusal](#confirmed-refusals-owner-o5-1943).
+Record the PM decision and continue. While the escalation is open, only the dependent action waits.
+
+A Task that does not end successfully is an Owner **notice** (D4), not a decision request. Post one comment beginning with `<!-- activity: type=pm_progress actor=PM target=Owner status=NOTICE -->` with the outcome, and continue.
+Never use a `waiting_owner` marker or options for a notice ([Owner O1, relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/1943#issuecomment-6879415056)).
 
 Every Owner decision request must appear in the monitor (Owner 2026-10-28, #515):
 
