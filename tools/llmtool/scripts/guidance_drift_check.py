@@ -61,12 +61,17 @@ class Str:
 
 
 class Int:
-    def __init__(self, minimum: int = 0):
+    def __init__(self, minimum: int = 0, maximum: int | None = None):
         self.minimum = minimum
+        self.maximum = maximum
 
     def errors(self, value: Any, where: str) -> list[str]:
         if type(value) is not int or value < self.minimum:
-            return [f"{where} must be an integer >= {self.minimum}"]
+            if self.maximum is None:
+                return [f"{where} must be an integer >= {self.minimum}"]
+            return [f"{where} must be an integer >= {self.minimum} and <= {self.maximum}"]
+        if self.maximum is not None and value > self.maximum:
+            return [f"{where} must be an integer >= {self.minimum} and <= {self.maximum}"]
         return []
 
 
@@ -146,7 +151,25 @@ class Obj:
         return errors
 
 
-REPO_PATH = r"(?!/)(?!.*\\)(?!(?:.*/)?\.\.(?:/|$))[^\s]+"
+class TimeoutPair:
+    """An Obj whose default_timeout must not exceed its max_timeout (#1815)."""
+
+    def __init__(self, inner: Obj):
+        self.inner = inner
+
+    def errors(self, value: Any, where: str) -> list[str]:
+        errors = self.inner.errors(value, where)
+        if type(value) is dict:
+            default, maximum = value.get("default_timeout"), value.get("max_timeout")
+            if type(default) is int and type(maximum) is int and default > maximum:
+                errors.append(f"{where}.default_timeout must be <= max_timeout")
+        return errors
+
+
+# Same value as llmtool.developer_routes.HARD_TIMEOUT_CAP_SECONDS (#1815); a
+# test keeps the two in step. This script does not import the llmtool package.
+ROUTE_TIMEOUT_CAP_SECONDS = 1800
+REPO_PATH =r"(?!/)(?!.*\\)(?!(?:.*/)?\.\.(?:/|$))[^\s]+"
 ROUTE_PROFILE = Obj(
     {"adapter": Str(), "model": Str()},
     {
@@ -157,8 +180,14 @@ ROUTE_PROFILE = Obj(
         "data_class_map": MapOf(Str(r"[a-z_]+"), r"[A-Z][A-Z_]*"),
     },
 )
-DEVELOPER_ROUTE = Obj(
-    {"default_model": Str(), "allowed_models": ListOf(Str(), min_items=1), "default_effort": Str(r"[a-z]+")},
+DEVELOPER_ROUTE = TimeoutPair(Obj(
+    {
+        "default_model": Str(),
+        "allowed_models": ListOf(Str(), min_items=1),
+        "default_effort": Str(r"[a-z]+"),
+        "default_timeout": Int(1, ROUTE_TIMEOUT_CAP_SECONDS),
+        "max_timeout": Int(1, ROUTE_TIMEOUT_CAP_SECONDS),
+    },
     {
         "executable": Str(r"[A-Za-z0-9._-]+"),
         "package_path": Str(),
@@ -169,7 +198,7 @@ DEVELOPER_ROUTE = Obj(
         "authorization_ref": Str(r"https://\S+"),
         "allowed_data_classes": ListOf(Str(r"[a-z_]+"), min_items=1),
     },
-)
+))
 # Review/AI Debug role model registry (#1502 WP-E). The route loader checks
 # the exact role names; this schema checks shape only.
 ROLE_MODELS = Obj({"allowed_models": ListOf(Str(), min_items=1)})

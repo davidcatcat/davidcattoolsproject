@@ -17,6 +17,7 @@ check = guidance_drift_check.check
 # Fictional model names used by the fixtures below; the fixture
 # developer-routes.json allows all of them.
 FIXTURE_MODELS = ("gpt-6-luna", "gpt-6.1-sol", "gpt-7-x", "gpt-8-y", "qwen3-coder", "kimi-k2")
+_DELETE = object()
 
 
 def fixture_routes(models=FIXTURE_MODELS, roles=None):
@@ -28,6 +29,8 @@ def fixture_routes(models=FIXTURE_MODELS, roles=None):
                 "default_model": models[0],
                 "allowed_models": list(models),
                 "default_effort": "medium",
+                "default_timeout": 600,
+                "max_timeout": 1800,
             },
         },
     }
@@ -459,6 +462,89 @@ class RuleFileSchemaTests(unittest.TestCase):
 
     def test_routes_without_roles_still_pass(self):
         self.assertEqual(self.findings_after("developer-routes.json", fixture_routes()), [])
+
+    def route_findings(self, **changes):
+        routes = fixture_routes()
+        entry = routes["routes"]["fixture"]
+        for key, value in changes.items():
+            if value is _DELETE:
+                del entry[key]
+            else:
+                entry[key] = value
+        return self.findings_after("developer-routes.json", routes)
+
+    def test_route_timeouts_valid_values_pass(self):
+        # #1815: 1 <= default_timeout <= max_timeout <= 1800.
+        for default, maximum in ((1, 1), (600, 600), (600, 1800), (1800, 1800), (1, 1800)):
+            with self.subTest(default=default, maximum=maximum):
+                self.assertEqual(
+                    self.route_findings(default_timeout=default, max_timeout=maximum), [])
+
+    def test_route_timeouts_missing_fail(self):
+        prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.routes.fixture"
+        for key in ("default_timeout", "max_timeout"):
+            with self.subTest(key=key):
+                self.assertIn(f'{prefix} is missing key "{key}"',
+                              self.route_findings(**{key: _DELETE}))
+        findings = self.route_findings(default_timeout=_DELETE, max_timeout=_DELETE)
+        self.assertIn(f'{prefix} is missing key "default_timeout"', findings)
+        self.assertIn(f'{prefix} is missing key "max_timeout"', findings)
+
+    def test_route_timeouts_non_int_fail(self):
+        prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.routes.fixture"
+        for key in ("default_timeout", "max_timeout"):
+            for value in ("600", 600.0, 1.5, True, False, None, [600], {"s": 600}):
+                with self.subTest(key=key, value=value):
+                    self.assertIn(f"{prefix}.{key} must be an integer >= 1 and <= 1800",
+                                  self.route_findings(**{key: value}))
+
+    def test_route_timeouts_out_of_range_fail(self):
+        prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.routes.fixture"
+        cases = [
+            ({"default_timeout": 0}, "default_timeout must be an integer >= 1 and <= 1800"),
+            ({"default_timeout": -5}, "default_timeout must be an integer >= 1 and <= 1800"),
+            ({"max_timeout": 0, "default_timeout": 0}, "max_timeout must be an integer >= 1 and <= 1800"),
+            ({"max_timeout": 1801}, "max_timeout must be an integer >= 1 and <= 1800"),
+            ({"default_timeout": 1801, "max_timeout": 1801},
+             "default_timeout must be an integer >= 1 and <= 1800"),
+            ({"default_timeout": 10 ** 9}, "default_timeout must be an integer >= 1 and <= 1800"),
+            ({"default_timeout": 900, "max_timeout": 600}, "default_timeout must be <= max_timeout"),
+            ({"default_timeout": 1800, "max_timeout": 1}, "default_timeout must be <= max_timeout"),
+        ]
+        for changes, expected in cases:
+            with self.subTest(changes=changes):
+                self.assertIn(f"{prefix}.{expected}", self.route_findings(**changes))
+
+    def test_route_timeouts_keep_other_strict_checks(self):
+        # The timeout keys add no leniency: unknown keys and bad models still fail.
+        prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.routes.fixture"
+        self.assertIn(f'{prefix} has unknown key "timeout"', self.route_findings(timeout=600))
+        self.assertIn(f"{prefix}.allowed_models needs at least 1 item(s)",
+                      self.route_findings(allowed_models=[]))
+        findings = self.route_findings(default_timeout=900, max_timeout=600, extra=True)
+        self.assertIn(f'{prefix} has unknown key "extra"', findings)
+        self.assertIn(f"{prefix}.default_timeout must be <= max_timeout", findings)
+
+    def test_invalid_route_timeouts_make_model_allowlist_unavailable(self):
+        self.route_findings(max_timeout=1801)
+        self.assertEqual(guidance_drift_check._allowed_models(self.repo)[1],
+                         ["tools/llmtool/developer-routes.json: MODEL_ALLOWLIST_UNAVAILABLE schema invalid"])
+
+    def test_timeout_cap_matches_route_loader(self):
+        from llmtool import developer_routes
+
+        self.assertEqual(guidance_drift_check.ROUTE_TIMEOUT_CAP_SECONDS,
+                         developer_routes.HARD_TIMEOUT_CAP_SECONDS)
+
+    def test_real_routes_declare_timeouts(self):
+        repository = Path(__file__).resolve().parents[3]
+        with (repository / "tools" / "llmtool" / "developer-routes.json").open(encoding="utf-8") as stream:
+            routes = json.load(stream)["routes"]
+        for name, entry in routes.items():
+            with self.subTest(route=name):
+                self.assertIs(type(entry["default_timeout"]), int)
+                self.assertIs(type(entry["max_timeout"]), int)
+                self.assertTrue(1 <= entry["default_timeout"] <= entry["max_timeout"] <= 1800)
 
     def test_unreadable_duplicate_key_and_non_finite_rule_files_fail(self):
         cases = {
