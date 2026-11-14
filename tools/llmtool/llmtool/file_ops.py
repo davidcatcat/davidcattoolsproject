@@ -23,6 +23,18 @@ Four steps, each small and explicit:
 * ``verify(root, plan)``: the tree holds exactly the planned result (same blob
   ids as HEAD for moves, exact ``git status``) and returns the evidence.
 
+Threat model. ``apply`` runs only on a single-writer, leased D6 worktree,
+before any Developer process for the Task exists. The checks guard against
+mistakes and stale or hostile tree contents (a symlink committed or left in
+the tree, a path that escapes the root), not against a concurrent attacker:
+any principal able to race these calls already has the same write access to
+the worktree and needs no help from this module. The window inside each
+``git rm`` / ``git mv`` call, between the final pre-check and git's own path
+handling, is accepted (Owner decision: no transaction engine). ``_guard_after``
+re-checks the result paths after every call; if a component was swapped
+during that window it is detected and ``apply`` returns ``FAILED`` with
+``isolate=True``, so the D6 is discarded rather than trusted.
+
 This is not a generic shell or file API.
 """
 
@@ -539,6 +551,13 @@ def apply(root, plan):
     Raises before any change when the plan or tree is refused. Returns
     ``APPLIED`` or, for an already verified tree, ``VERIFIED`` with
     ``noop=True``. A mid-run failure returns ``FAILED`` with ``isolate=True``.
+
+    Threat model: call this only on a single-writer, leased D6 before any
+    Developer process exists. A principal able to race it already has equal
+    write access to the worktree. The window inside each git call, after the
+    final pre-check, is accepted (Owner: no transaction engine);
+    ``_guard_after`` detects a component swapped in that window and the
+    result is ``FAILED`` with ``isolate=True`` (recreate the D6).
     """
     root = _resolve_root(root)
     head, ops, files = _open_plan(plan)

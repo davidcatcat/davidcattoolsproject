@@ -462,6 +462,46 @@ class ApplyTests(_RepoCase):
         self.assertEqual(1, len(calls))
         self.assertTrue(self.exists('src/tool.py'))
 
+    def test_swap_inside_git_window_after_final_check_isolates(self):
+        # Threat model regression: the window inside a git call, after the
+        # final pre-check, is accepted; _guard_after must detect a swap there.
+        p = self.make_plan([{'op': 'move', 'from': 'README.txt', 'to': 'moved/README.txt'},
+                            {'op': 'delete', 'path': 'src/tool.py'}])
+        moved_aside = os.path.join(self.outside, 'moved')
+        events = []
+        real_mutate = file_ops._mutate
+        real_before = file_ops._guard_before
+        real_after = file_ops._guard_after
+
+        def before(root, f):
+            real_before(root, f)
+            events.append(('final-check', f['op']))
+
+        def after(root, f):
+            events.append(('after-check', f['op']))
+            real_after(root, f)
+
+        def git_runner(root, args):
+            # Mocked git runner: the real mutation, then a component swap
+            # while still "inside" git, i.e. after the final pre-check.
+            events.append(('git', args[0]))
+            ok = real_mutate(root, args)
+            os.rename(os.path.join(self.root, 'moved'), moved_aside)
+            os.symlink(moved_aside, os.path.join(self.root, 'moved'))
+            return ok
+
+        with mock.patch.object(file_ops, '_guard_before', side_effect=before), \
+                mock.patch.object(file_ops, '_guard_after', side_effect=after), \
+                mock.patch.object(file_ops, '_mutate', side_effect=git_runner):
+            result = file_ops.apply(self.root, p)
+        self.assertIsolated(result, 1)
+        self.assertIn('symlink', result['reason'])
+        # Final check passed, git ran, then the after-check caught the swap;
+        # the second op never started.
+        self.assertEqual([('final-check', 'move'), ('git', 'mv'), ('after-check', 'move')], events)
+        self.assertTrue(self.exists('src/tool.py'))
+        self.assertTrue(os.path.islink(os.path.join(self.root, 'moved')))
+
     def test_destination_parents_created_one_level_at_a_time(self):
         made = []
         real_mkdir = os.mkdir
