@@ -143,6 +143,9 @@ A chat question alone does not count as asking the Owner.
 
 Carried Owner acceptance ([Owner standing rule](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6723320384)): if the relay comment passed to `task advance --merge --owner-acceptance URL` names an older head H0 of the same PR, the merge may go on at the current head H1 only when the PR's own changes since H0 are edits to test files already in the PR that add or delete no file, remove no assertion, skip or test method and add no skip. Carry mode carries only Owner product acceptance. H1 still needs its own bound PASS and exact-head CI. Any `MERGE_ACCEPTANCE_CARRY_*` refusal means the PM asks the Owner again for the current head.
 
+**TUI test-only changes (Owner O3, #1943).** `task advance` asks for Owner product acceptance (`MERGE_OWNER_ACCEPTANCE_MANUAL`) when a PR changes TUI product code (`tools/llmtool/llmtool/chat_tui*.py`, `tools/llmtool/llmtool/tui_*.py`) or the PTY driver `tools/llmtool/tests/tui_pty_driver.py`.
+A PR that changes only TUI test files (`tools/llmtool/tests/test_chat_tui*`, `tools/llmtool/tests/test_tui_*`) needs no Owner acceptance. Formal review, CI and security gates still apply ([Owner O3, relayed](https://github.com/davidcatcat/davidcattoolsproject/issues/1943#issuecomment-6879415056)).
+
 For the required remediation after an AI misses something, see [closing process gaps](pm-continuation-reference.md#closing-process-gaps).
 
 ### Reviewer and Developer quota continuation (Owner 2026-10-27)
