@@ -185,6 +185,15 @@ class MergeTrainTests(unittest.TestCase):
             self.assertIsNone(result['head'])
             self.assertEqual(result['codes'], ['TRAIN_TOO_FEW_MEMBERS'])
 
+    def test_unverified_candidate_has_no_head(self):
+        # #1182: a built tip that fails the delta check is never offered as the train head.
+        members = self.members(2)
+        with patch.object(merge_train, 'train_delta_verified', return_value=False):
+            result = merge_train.build_candidate(self.root, self.base, members)
+        self.assertIsNone(result['head'])
+        self.assertEqual(result['codes'], ['TRAIN_CANDIDATE_UNVERIFIED'])
+        self.assertEqual(result['merged'], ['pr-1', 'pr-2'])
+
     def test_invalid_base_has_no_head(self):
         members = self.members(2)
         blob = self.git('hash-object', '-w', '--stdin', input='blob\n').strip()
