@@ -462,7 +462,7 @@ class PMCallerStoreTests(unittest.TestCase):
         module_repair.assert_not_called()
         repair_call.assert_called_once_with(
             store=store, task_id='t', executor_task='executor-1', pr_number=17,
-            auto_review=False, github_get=github_get, retry_claim_id=None)
+            auto_review=False, github_get=github_get, retry_claim_id=None, auto=True)
         self.assertEqual(result['step'], 'REPAIR_REVIEW')
         self.assertEqual(result['result'], {'state': 'REPAIR_DISPATCHED'})
 

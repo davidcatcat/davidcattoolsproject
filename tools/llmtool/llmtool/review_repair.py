@@ -584,11 +584,17 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                   dispatch_adapter=None, current_head=None, auto_review=False,
                   review_dispatcher=None, delegate_callable=None,
                   repair_task_recorder=None, retry_claim_id=None,
-                  remote_test_receipt=None, ci_failure=None):
+                  remote_test_receipt=None, ci_failure=None, auto=False):
     """Claim and dispatch one repair for a failed review, remote test or CI check.
 
     remote_test_receipt (EC2) and ci_failure (#1502 WP-D D11) are exclusive; both
     are test failures and share one count, the '<base>-ec2' family.
+
+    auto is True only from task advance / drive. An auto review repair (a retry
+    included) is refused REVIEW_REPAIR_PM_REQUIRED, inside the chain-locked
+    admission, once any review repair claim exists anywhere in the chain (every
+    chain Task, every PR family; UNKNOWN counts as used). A manual task repair
+    (auto False) keeps D1. auto has no effect on a test-failure repair.
     """
     if ci_failure is not None and remote_test_receipt is not None:
         _refuse('CI_FAILURE_INVALID')
@@ -741,7 +747,19 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         # The chain is write-once, so a key that changed is a read in doubt.
         if lineage_counts.chain_key(store, task) != key:
             _refuse('REPAIR_COUNT_UNAVAILABLE')
-        counts = lineage_counts.lineage_counts(store, task, base_family=base_family,
+        if auto and not test_failure:
+            # Checked only here, under the chain lock, on a fresh read of this
+            # Task: a claim committed since the first read is seen.
+            try:
+                current = store.get(task_id)
+            except Exception:
+                current = None
+            used = (lineage_counts.chain_review_repairs(store, current)
+                    if type(current) is dict and current.get('task_id') == task_id
+                    else None)
+            if type(used) is not int or used != 0:
+                _refuse('REVIEW_REPAIR_PM_REQUIRED')
+        counts =lineage_counts.lineage_counts(store, task, base_family=base_family,
                                                include_successors=True)
         rca_entry = None
         if not test_failure:

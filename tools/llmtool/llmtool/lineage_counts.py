@@ -203,6 +203,40 @@ def lineage_counts(store, task, *, base_family, include_successors=False):
             'test_fails': tests}
 
 
+def chain_review_repairs(store, task):
+    """Every review repair claim of task's whole chain: a count or UNKNOWN.
+
+    The auto review repair limit (v92 F1, CWE-841): every chain Task (the Task,
+    its predecessors and its successors) adds every claim whose family is not
+    '-ec2', on any PR and in any PR family, legacy EC2 claims included. A Task
+    alone in its chain counts all its families too. '-ec2' claims are test
+    failures, not review repairs. Any read, link or claim in doubt is UNKNOWN,
+    which the caller treats as used. Run it under the chain lock.
+    """
+    if type(task) is not dict:
+        return UNKNOWN
+    records = chain_records(store, task)
+    if records is None or store is None:
+        return UNKNOWN
+    later = successor_records(store, task, {record.get('task_id') for record in records})
+    if later is None or len(records) + len(later) > MAX_CHAIN:
+        return UNKNOWN
+    count = 0
+    for record in records + later:
+        claims = record.get('review_repair_claims', [])
+        if type(claims) is not list:
+            return UNKNOWN
+        for claim in claims:
+            if type(claim) is not dict:
+                return UNKNOWN
+            family = claim.get('family', f"pr-{claim.get('pr')}")
+            if type(family) is not str:
+                return UNKNOWN
+            if not family.endswith(_EC2_SUFFIX):
+                count += 1
+    return count
+
+
 def check_continues(store, task_id, predecessor):
     """Refuse, with a fixed code, a --continues link that breaks the chain shape.
 

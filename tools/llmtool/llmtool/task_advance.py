@@ -879,7 +879,8 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
         with contextlib.redirect_stdout(captured):
             value = invoke(store=store, task_id=task_id, executor_task=executor_task,
                            pr_number=number, auto_review=False, github_get=github_get,
-                           retry_claim_id=retry_claim_id, ci_failure=ci_failure)
+                           retry_claim_id=retry_claim_id, ci_failure=ci_failure,
+                           auto=True)
         emitted = captured.getvalue().strip()
         try:
             result = json.loads(emitted) if emitted else value
@@ -3279,7 +3280,10 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                             auto_review=False, github_get=get,
                             retry_claim_id=(repair_claim.get('repair_task_id')
                                             if step == 'REPAIR_RETRY' and
-                                            type(repair_claim) is dict else None))
+                                            type(repair_claim) is dict else None),
+                            # Auto: review_repair applies the chain-wide auto
+                            # limit under its chain lock; advance never pre-checks it.
+                            auto=True)
                         if remote_status == 'FAIL':
                             repair_args['remote_test_receipt'] = failure_receipt
                         with contextlib.redirect_stdout(captured):
@@ -3293,6 +3297,8 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
                         code = _refusal(exc, 'review_repair_code')
                         if code == 'REPAIR_LIMIT_REACHED' and remote_status == 'FAIL':
                             step, codes = 'STOPPED', ['TEST_FAIL_LIMIT_REACHED']
+                        elif code == 'REVIEW_REPAIR_PM_REQUIRED':
+                            step, codes = 'STOPPED', ['REVIEW_REPAIR_PM_REQUIRED']
                         else:
                             codes.append(code)
     elif step == 'RUN_TASK_COMPLETE':
