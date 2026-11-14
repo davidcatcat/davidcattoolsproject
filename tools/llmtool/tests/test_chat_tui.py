@@ -1996,24 +1996,24 @@ class W57ChatTests(Base):
                 self.assertFalse(ui.show_events)
 
             ui, _ = self.drive(['/task mode profile first\r', '/task submit --provider x y\r',
-                                '/task\r', 'plain\r', self.idle,
-                                '\x1bOR', hidden,
-                                '\x1bOS', hidden,
-                                '/tas', lambda ui: self.assertEqual(ui.menu_items, [])])
+                                '/task list extra\r', 'plain\r', self.idle,
+                                hidden, '/task m', lambda ui: self.assertEqual(ui.menu_items, [])])
         submit.assert_not_called()
         self.assertFalse(ui.dev)
         self.assertIsNone(ui.task_profile)
         self.assertEqual(ui.conversation.text.count('llmtool: ' + chat_tui.TASK_HIDDEN), 3)
         self.assertEqual([t['content'] for t in self.session.history], ['plain', 'reply'])
         help_text = ui.help_text()
-        self.assertNotIn('/task', help_text)
-        self.assertNotIn('/task', ui.command_help_text())
-        self.assertNotIn('F3', help_text)
-        self.assertNotIn('Task mode', help_text)
+        for dev_only in ('/task submit', '/task mode', 'Task mode', 'Developer mode'):
+            self.assertNotIn(dev_only, help_text)
+            self.assertNotIn(dev_only, ui.command_help_text())
+        for read_only in ('/task list', '/task show TASK_ID', '/task events', 'F3'):
+            self.assertIn(read_only, help_text)
+            self.assertIn(read_only, ui.command_help_text())
         self.assertIn('/pm connect', help_text)
         self.assertNotIn('/task submit is for development testing', ui.conversation.text)
-        self.assertEqual([c for c in chat_tui.slash_matches('/', dev=False)
-                          if c[0].startswith('/task')], [])
+        self.assertEqual([c[0] for c in chat_tui.slash_matches('/', dev=False)
+                          if c[0].startswith('/task')], ['/task show', '/task list', '/task events'])
 
     def test_w60_up_down_with_nothing_to_open_say_why_once(self):
         os.environ.pop(chat_tui.DEV_ENV, None)
@@ -2021,7 +2021,7 @@ class W57ChatTests(Base):
 
         def once(ui):
             self.assertEqual(ui.conversation.text.count(hint), 1)
-            self.assertNotIn('F3', ui.conversation.text)       # F3 exists only with --dev
+            self.assertIn('F3 看 Task 清單', ui.conversation.text)   # #1819: F3 without --dev too
             self.assertEqual(ui.input.text, '')
 
         ui, _ = self.drive(['\x1b[B', once, '\x1b[B', once, '\x1b[A', once,
@@ -2033,7 +2033,9 @@ class W57ChatTests(Base):
         self.assertFalse(chat_tui.dev_enabled({chat_tui.DEV_ENV: '0'}))
         self.assertFalse(chat_tui.dev_enabled({}))
         self.assertIn('/task mode profile PROFILE', chat_tui.key_help(True))
-        self.assertNotIn('/task', chat_tui.key_help(False))
+        self.assertNotIn('/task submit', chat_tui.key_help(False))
+        self.assertNotIn('/task mode', chat_tui.key_help(False))
+        self.assertIn('/task list', chat_tui.key_help(False))
         with patch('llmtool.chat_tui.run_chat_tui', return_value=0) as run:
             from llmtool import cli
             home = self.temp_root
