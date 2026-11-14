@@ -590,9 +590,9 @@ class HighDebugTests(unittest.TestCase):
             registry = root / '.git' / 'llmtool-worktrees'
             registry.mkdir(exist_ok=True)
             (registry / (kwargs['task_id'] + '.json')).write_text('{}', encoding='utf-8')
-            raise subprocess.CalledProcessError(1, 'lifecycle')
+            raise high_debug._D6CreateRejected('D6_TEST_REJECTED')
         def leaves_nothing(**_kwargs):
-            raise subprocess.CalledProcessError(1, 'lifecycle')
+            raise high_debug._D6CreateRejected('D6_TEST_REJECTED')
         # #1502 WP-D O7: each confirmed failed create finalizes one not-used
         # entry, so attempts advance; a leftover hd2 branch is still skipped.
         # A create that leaves its D6 behind is unclear and stays RESERVED.

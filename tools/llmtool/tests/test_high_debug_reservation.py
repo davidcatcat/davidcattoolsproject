@@ -161,7 +161,7 @@ class ReservationCase(unittest.TestCase):
         return sorted(results, key=str)
 
     def run_debug(self, task_id, runner, *, create=None, fallback=False, store=None,
-                  taken=(False,)):
+                  taken=(False,), real=False):
         """Drive run_high_debug on the real store; (refusal code or None, D6 creates)."""
         registration = SimpleNamespace(result_sha=HEAD, root=str(self.base / 'executor-d6'),
                                        common_dir=str(self.base / 'repo' / '.git'))
@@ -186,7 +186,7 @@ class ReservationCase(unittest.TestCase):
              patch.object(high_debug, '_d6_taken',
                           side_effect=lambda *_args: probes.pop(0) if len(probes) > 1 else probes[0]), \
              patch.object(high_debug, '_post_record', return_value=True), \
-             patch.object(high_debug, 'subprocess', git), \
+             patch.object(high_debug, 'subprocess', subprocess if real else git), \
              redirect_stdout(io.StringIO()):
             try:
                 call(store=store, task_id=task_id, executor_task='executor', pr_number=17,
@@ -206,6 +206,13 @@ def succeeds(*, prompt, cwd, output_path):
 
 def exits(code, stderr=b''):
     return lambda **_kwargs: SimpleNamespace(returncode=code, stdout=b'', stderr=stderr)
+
+
+def rejected(**_kwargs):
+    raise high_debug._D6CreateRejected('D6_TEST_REJECTED')
+
+
+MARKER = 'D6 lifecycle rejected (D6_TEST_REJECTED)'
 
 
 class AtomicAdmissionTests(ReservationCase):
@@ -356,11 +363,8 @@ class RunTests(ReservationCase):
 
     def test_g_a_failed_create_is_not_used_and_quota_falls_back_once(self):
         task_id = self.task(completion=True)
-
-        def broken(**_kwargs):
-            raise subprocess.CalledProcessError(1, 'lifecycle')
         runner = Mock()
-        self.assertEqual(self.run_debug(task_id, runner, create=broken)[0],
+        self.assertEqual(self.run_debug(task_id, runner, create=rejected)[0],
                          'HIGH_DEBUG_D6_CREATE_FAILED')
         runner.assert_not_called()
         self.assertEqual([(item['status'], item['report']) for item in self.entries(task_id)],
@@ -378,10 +382,7 @@ class RunTests(ReservationCase):
 
     def test_g_a_confirmed_create_failure_lets_the_next_request_run(self):
         task_id = self.task(completion=True)
-
-        def exits_nonzero(**_kwargs):
-            raise subprocess.CalledProcessError(1, 'lifecycle')
-        self.assertEqual(self.run_debug(task_id, Mock(), create=exits_nonzero,
+        self.assertEqual(self.run_debug(task_id, Mock(), create=rejected,
                                         taken=(False, False))[0], 'HIGH_DEBUG_D6_CREATE_FAILED')
         self.assertEqual(self.run_debug(task_id, succeeds), (None, [['RUN_FAILED', 'RESERVED']]))
         self.assertEqual([(item['status'], item['report']) for item in self.entries(task_id)],
@@ -398,10 +399,10 @@ class RunTests(ReservationCase):
         def no_root(**_kwargs):
             high_debug._refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
-        def leaves_d6(**_kwargs):
+        def unclassified(**_kwargs):
             raise subprocess.CalledProcessError(1, 'lifecycle')
         for create, taken in ((times_out, (False,)), (errors, (False,)), (no_root, (False,)),
-                              (leaves_d6, (False, True))):
+                              (unclassified, (False,)), (rejected, (False, True))):
             with self.subTest(create=create.__name__):
                 task_id = self.task(completion=True)
                 runner = Mock()
@@ -414,6 +415,38 @@ class RunTests(ReservationCase):
                 self.assertEqual(self.run_debug(task_id, runner),
                                  ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
                 runner.assert_not_called()
+
+    def test_g_the_real_lifecycle_boundary_releases_only_a_classified_rejection(self):
+        """Real subprocess through _create_d6: a kill or unclassified exit stays used."""
+        (self.base / 'repo').mkdir()
+        script = self.base / 'lifecycle.py'
+        cases = (
+            ('killed', 'import os, signal, sys\n'
+                       f'sys.stderr.write({MARKER!r} + "\\n"); sys.stderr.flush()\n'
+                       'os.kill(os.getpid(), signal.SIGKILL)\n', 'RESERVED'),
+            ('exit_1', 'import sys\nsys.exit(1)\n', 'RESERVED'),
+            ('traceback', f'raise RuntimeError({MARKER!r})\n', 'RESERVED'),
+            ('classified', f'import sys\nsys.exit({MARKER!r})\n', 'RUN_FAILED'),
+        )
+        for name, source, status in cases:
+            with self.subTest(case=name):
+                script.write_text(source, encoding='utf-8')
+                task_id = self.task(completion=True)
+                runner = Mock()
+                with patch.object(high_debug, '_LIFECYCLE', script):
+                    code, _created = self.run_debug(task_id, runner, real=True,
+                                                    create=high_debug._create_d6)
+                self.assertEqual(code, 'HIGH_DEBUG_D6_CREATE_FAILED')
+                runner.assert_not_called()
+                stored = self.entries(task_id)
+                self.assertEqual([item['status'] for item in stored], [status])
+                if status == 'RESERVED':
+                    self.assertEqual(self.last_error.high_debug_detail, 'reservation=RESERVED')
+                    self.assertEqual(self.run_debug(task_id, runner),
+                                     ('HIGH_DEBUG_DEBUG_PARENT_USED', []))
+                else:
+                    self.assertEqual(stored[0]['report'], 'HIGH_DEBUG_D6_CREATE_FAILED')
+                    self.assertFalse(high_debug._debug_entry_used(stored[0]))
 
     def test_g_a_failed_codex_finalize_makes_the_claude_admission_refuse(self):
         task_id = self.task(completion=True)

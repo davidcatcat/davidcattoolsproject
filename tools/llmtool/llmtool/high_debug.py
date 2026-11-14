@@ -908,14 +908,37 @@ def confirm_screen_batch(task_id, family, d6, batch, hits, classification, ref, 
     return progress
 
 
+_LIFECYCLE = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
+_LIFECYCLE_REJECTED = re.compile(rb'D6 lifecycle rejected \(([A-Z0-9_]{1,64})\)')
+
+
+class _D6CreateRejected(Exception):
+    """The lifecycle exited by itself and named its own rejection (#1502 WP-D O7)."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
 def _create_d6(*, task_id, base_sha, repo_root, executor_task, agent_id='codex-high-debug-gpt-6.1-sol'):
-    lifecycle = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
-    result = subprocess.run([sys.executable, '-B', str(lifecycle), '--task-id', task_id,
+    argv = [sys.executable, '-B', str(_LIFECYCLE), '--task-id', task_id,
         '--agent-id', agent_id, '--session-ref', 'pending-' + task_id,
         '--lease-ref', f'high-debug {executor_task} at {base_sha}', '--branch',
-        'llmtool/high-debug-' + task_id, '--base-sha', base_sha, '--repo-root', str(repo_root)],
+        'llmtool/high-debug-' + task_id, '--base-sha', base_sha, '--repo-root', str(repo_root)]
+    result = subprocess.run(argv,
         cwd=repo_root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=True, timeout=180)
+        stderr=subprocess.PIPE, check=False, timeout=180)
+    if result.returncode != 0:
+        # Only a normal exit that names the lifecycle's own rejection is
+        # classified. A signal kill (negative code), a crash traceback or any
+        # other failure is unclear and stays CalledProcessError.
+        stderr = result.stderr or b''
+        match = (_LIFECYCLE_REJECTED.search(stderr)
+                 if type(result.returncode) is int and result.returncode > 0 and
+                 b'Traceback (most recent call last)' not in stderr else None)
+        if match is not None:
+            raise _D6CreateRejected(match.group(1).decode('ascii'))
+        raise subprocess.CalledProcessError(result.returncode, argv, result.stdout, stderr)
     marker = ('root=',)
     for field in result.stdout.decode('utf-8', 'replace').split():
         if field.startswith(marker[0]): return field[5:]
@@ -1575,11 +1598,12 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
             diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root,
                                     executor_task=executor_task)
     except Exception as error:
-        # No provider call happened. Only a confirmed failure (the lifecycle
-        # exited non-zero and no branch or registry record of this D6 exists)
-        # is the cancel path, finalized not used. A timeout, any other error
+        # No provider call happened. Only a classified rejection (the
+        # lifecycle exited by itself naming its rejection, and no branch or
+        # registry record of this D6 exists) is the cancel path, finalized not
+        # used. A signal kill, an unclassified exit, a timeout, any other error
         # or a D6 left behind is unclear: the entry stays RESERVED (used).
-        if (isinstance(error, subprocess.CalledProcessError) and
+        if (isinstance(error, _D6CreateRejected) and
                 not _d6_taken(repo_root, registration.common_dir, d6)):
             failed('HIGH_DEBUG_D6_CREATE_FAILED', post=False)
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED', 'reservation=RESERVED')
