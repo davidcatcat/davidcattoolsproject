@@ -1179,7 +1179,14 @@ class HighDebugRunBindingTests(unittest.TestCase):
                 created.append((task_id, base_sha, executor_task))
                 return str(diagnosis_root)
 
+            # #1502 WP-F: this test does not read main; the rule step is
+            # stubbed with a fixed prefix (test_high_debug_cards covers it).
+            rules_prefix = 'RULES stub\nRULES_END\n\n'
+            rules_sha256 = hashlib.sha256(rules_prefix.encode('utf-8')).hexdigest()
+            prompts = []
+
             def runner(*, prompt, cwd, output_path):
+                prompts.append(prompt)
                 self.assertEqual(cwd, str(diagnosis_root))
                 Path(output_path).write_text(_REPORT, encoding='utf-8')
                 events = json.dumps({'type': 'thread.started', 'thread_id': thread_id})
@@ -1198,6 +1205,8 @@ class HighDebugRunBindingTests(unittest.TestCase):
                                  return_value=SimpleNamespace(allowed=True)), \
                     patch.object(high_debug.task_completion, 'collect_git_snapshot',
                                  return_value=SimpleNamespace(head=_HEAD)), \
+                    patch.object(high_debug, '_debug_rules',
+                                 return_value=(rules_prefix, rules_sha256)), \
                     patch.object(high_debug, '_d6_taken', return_value=False), \
                     patch.object(high_debug, '_post_record', return_value=False), \
                     patch.object(high_debug, 'subprocess', fake_subprocess), \
@@ -1217,6 +1226,9 @@ class HighDebugRunBindingTests(unittest.TestCase):
         entry = diagnosis['high_debug'][-1]
         self.assertEqual(entry['model_observed'], 'gpt-6.1-sol')
         self.assertEqual(entry['d6'], created[0][0])
+        self.assertEqual(len(prompts), 1)
+        self.assertTrue(prompts[0].startswith(rules_prefix))
+        self.assertEqual(entry['rules_sha256'], rules_sha256)
         self.assertEqual([event['event_id'] for event in diagnosis['completion_events']],
                          [result['event_id']])
         self._passes(diagnosis)

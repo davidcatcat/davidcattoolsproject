@@ -39,6 +39,11 @@ from llmtool.opencode_direct_developer import DirectOpenCodeError, DirectResult
 # Captured before any fixture patches it (#1072).
 _REAL_DIRECT_BIND = submission_cli._bind_direct_native_session
 
+# #1502 WP-F: a fixed rule prefix stands in for the main-pinned Reviewer cards,
+# so no dispatch_review here reads GitHub or Git for rules.
+RULES_PREFIX = 'RULES stub for task submission CLI tests\nRULES_END\n\n'
+RULES_SHA256 = hashlib.sha256(RULES_PREFIX.encode('utf-8')).hexdigest()
+
 FIXTURE_ORIGINS = ('git@github.com:davidcatcat/davidcattoolsproject.git',
                    'https://github.com/davidcatcat/davidcattoolsproject.git')
 
@@ -112,6 +117,10 @@ class TaskSubmissionCLITests(unittest.TestCase):
                                  lambda args, store, d6_binding=None: None)
         cap_patch.start()
         self.addCleanup(cap_patch.stop)
+        rules_patch = patch('llmtool.review_dispatch._review_rules',
+                            return_value=(RULES_PREFIX, RULES_SHA256))
+        rules_patch.start()
+        self.addCleanup(rules_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name).resolve() / 'home'
@@ -1351,6 +1360,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(claim['executor_task'], d6_task_id)
         self.assertEqual(claim['head_sha'], result_head)
         self.assertEqual(claim['pr'], 123)
+        self.assertEqual(claim['rules_sha256'], RULES_SHA256)
         with self.assertRaises(LLMToolError) as same_family:
             _preflight(store, task['task_id'], d6_task_id, 1, 1,
                        reviewer='claude-reviewer')
