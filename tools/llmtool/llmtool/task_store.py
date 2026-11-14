@@ -1853,7 +1853,12 @@ def _validate(record, *, strict=True):
         if type(entries) is not list or len(entries) > 8:
             _fail('HIGH_DEBUG_INVALID')
         for item in entries:
-            if (type(item) is not dict or set(item) != _HIGH_DEBUG_FIELDS or
+            # #1502 WP-F: rules_sha256 is optional so older entries stay valid.
+            if (type(item) is not dict or
+                set(item) - {'rules_sha256'} != _HIGH_DEBUG_FIELDS or
+                ('rules_sha256' in item and
+                 (type(item['rules_sha256']) is not str or
+                  re.fullmatch(r'[0-9a-f]{64}', item['rules_sha256']) is None)) or
                 type(item.get('family')) is not str or re.fullmatch(r'[a-z0-9._-]{1,64}', item['family']) is None or
                 type(item.get('examined_sha')) is not str or re.fullmatch(r'[0-9a-f]{40}', item['examined_sha']) is None or
                 type(item.get('d6')) is not str or re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['d6']) is None or

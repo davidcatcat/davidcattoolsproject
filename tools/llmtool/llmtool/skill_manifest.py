@@ -379,6 +379,73 @@ def build_role_cards(repo_root, base_commit, route, git_runner=subprocess.run,
     }
 
 
+DEBUG_CARD_PATH = 'skills/role-cards/debug.md'
+HIGH_DEBUG_REPORT_PATH = 'skills/ai-team-delivery/high-debug-report.md'
+# WP-F design 3.7 Debug row (#1502): common core, the Debug card and the High
+# Debug report procedure, in prompt order. Both Debug routes share this list.
+_DEBUG_CARD_PATHS = (COMMON_CORE_CARD_PATH, DEBUG_CARD_PATH, HIGH_DEBUG_REPORT_PATH)
+MAX_DEBUG_PREFIX_SIZE = 14 * 1024
+
+
+def build_debug_cards(repo_root, base_commit, git_runner=subprocess.run,
+                      main_ref=DEFAULT_MAIN_REF):
+    """Return the Debug rule cards in the same shape as build_role_cards().
+
+    The fixed list is common core, Debug card and High Debug report, read
+    only from Git objects at ``base_commit`` after the same commit and main
+    ancestry checks as build_role_cards(); the working tree is never read.
+    The total card bytes must fit MAX_DEBUG_PREFIX_SIZE (else
+    SKILL_MANIFEST_PREFIX_TOO_LARGE). ``role`` and ``route`` are 'debug';
+    ``cards_sha256`` covers the commit, role, route and each card's path,
+    sha256 and size. Use role_card_prefix() for the prompt text.
+    """
+    if type(base_commit) is not str or _COMMIT_RE.fullmatch(base_commit) is None:
+        _raise(SKILL_MANIFEST_COMMIT_INVALID)
+    if (type(main_ref) is not str or _MAIN_REF_RE.fullmatch(main_ref) is None
+            or '..' in main_ref or main_ref.endswith(('/', '.', '.lock'))):
+        _raise(SKILL_MANIFEST_MAIN_REF_INVALID)
+    _verify_commit_object(git_runner, repo_root, base_commit)
+    _verify_on_main(git_runner, repo_root, base_commit, main_ref)
+
+    commit = base_commit.lower()
+    cards = []
+    total = 0
+    for path in _DEBUG_CARD_PATHS:
+        content = _read_blob(git_runner, repo_root, commit, path)
+        total += len(content)
+        if total > MAX_DEBUG_PREFIX_SIZE:
+            _raise(SKILL_MANIFEST_PREFIX_TOO_LARGE)
+        cards.append({
+            'path': path,
+            'sha256': hashlib.sha256(content).hexdigest(),
+            'size': len(content),
+            'text': content.decode('utf-8'),
+        })
+
+    digest_input = {
+        'schema_version': 1,
+        'commit': commit,
+        'role': 'debug',
+        'route': 'debug',
+        'cards': [
+            {key: card[key] for key in ('path', 'sha256', 'size')}
+            for card in cards
+        ],
+    }
+    canonical = json.dumps(
+        digest_input, sort_keys=True, separators=(',', ':'), ensure_ascii=True,
+    ).encode('utf-8')
+    return {
+        'schema_version': 1,
+        'commit': commit,
+        'role': 'debug',
+        'route': 'debug',
+        'cards': cards,
+        'prefix_size': total,
+        'cards_sha256': hashlib.sha256(canonical).hexdigest(),
+    }
+
+
 def role_card_prefix(built):
     """Return the exact prompt prefix for cards from build_role_cards().
 
