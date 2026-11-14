@@ -3215,7 +3215,7 @@ class TaskStore:
     def __init__(self, root=None):
         self.root = Path(default_root() if root is None else root).absolute()
 
-    def _ensure_root(self):
+    def _ensure_root(self, create=True):
         if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW'):
             _fail('TASK_STORE_UNAVAILABLE')
         current = Path(self.root.anchor)
@@ -3223,7 +3223,8 @@ class TaskStore:
         for part in self.root.parts[1:]:
             current = current / part
             try:
-                current.mkdir(mode=0o700)
+                if create:
+                    current.mkdir(mode=0o700)
             except FileExistsError:
                 pass
             except OSError:
@@ -3242,8 +3243,11 @@ class TaskStore:
         if info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700:
             _fail('TASK_STORE_UNAVAILABLE')
 
-    def _dirfd(self):
-        self._ensure_root()
+    def _dirfd(self, create=True):
+        # #1837: create=False never creates the root and returns None when it is absent.
+        if not create and not os.path.lexists(self.root):
+            return None
+        self._ensure_root(create)
         try:
             fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             info = os.fstat(fd)
@@ -3460,7 +3464,9 @@ class TaskStore:
 
     def task_ids(self):
         """List stored Task IDs (names only; each record is validated on read)."""
-        directory = self._dirfd()
+        directory = self._dirfd(create=False)
+        if directory is None:
+            return []
         try:
             names = os.listdir(directory)
         except OSError:
@@ -3483,7 +3489,9 @@ class TaskStore:
         if not _safe_identifier(executor_task_id, D6_TASK_ID):
             _fail()
         task_ids = self.task_ids()
-        directory = self._dirfd()
+        directory = self._dirfd(create=False)
+        if directory is None:
+            return []
         try:
             matching = []
             for task_id in task_ids:
@@ -3497,7 +3505,9 @@ class TaskStore:
         return sorted(matching)
 
     def get(self, task_id):
-        directory = self._dirfd()
+        directory = self._dirfd(create=False)
+        if directory is None:
+            raise _TaskNotFound('task not found')
         try:
             return dict(self._read_at(directory, task_id))
         finally:
