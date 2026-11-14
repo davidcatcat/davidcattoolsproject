@@ -3597,6 +3597,27 @@ class TaskStore:
                             changes={'file_ops_evidence': evidence},
                             trusted_file_ops_evidence=True)
 
+    @contextlib.contextmanager
+    def d6_binding_lock(self):
+        """Hold the D6 binding lock exclusively (#1502 ``task file-ops`` only).
+
+        The same lock ``_d6_commit`` takes for its locked check and commit, so
+        while it is held no Task can gain a D6: a binder waits, and one past the
+        update-lock deadline refuses ``TASK_D6_BINDING_BUSY``. A lock that
+        cannot be taken raises ``TASK_D6_BINDING_BUSY``/``_UNAVAILABLE``. The
+        holder must not bind a D6 or take this lock again until it leaves.
+        """
+        directory = self._dirfd()
+        try:
+            lock_fd = self._lock_sidecar(directory, D6_BINDING_LOCK_NAME,
+                                         exclusive=True, code='TASK_D6_BINDING')
+        finally:
+            os.close(directory)
+        try:
+            yield
+        finally:
+            self._unlock_sidecar(lock_fd)
+
     @staticmethod
     def _claude_d6_holds(record, executor_task_id):
         if record.get('abandonment') is not None:

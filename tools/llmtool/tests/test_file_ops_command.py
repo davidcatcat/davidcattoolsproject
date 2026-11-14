@@ -238,6 +238,84 @@ class FileOpsCommandTests(unittest.TestCase):
                          'TASK_FILE_OPS_EVIDENCE_IMMUTABLE')
         self.assertEqual(self.store.get(task['task_id'])['file_ops_evidence'], evidence)
 
+    def assert_binding_lock_free(self):
+        # Taken exclusively with the real lock: a lock left held fails BUSY here.
+        with self.store.d6_binding_lock():
+            pass
+
+    def test_concurrent_d6_bind_during_apply_is_refused(self):
+        task = self.record_pm()
+        other = self.record_pm(ops=None)
+        real_apply = file_ops.apply
+        refusals = []
+
+        def apply_with_bind(root, sealed):
+            # A second Task tries to bind the same D6 while file-ops is mid-apply.
+            with self.assertRaises(LLMToolError) as ctx:
+                self.store.d6_bind_compare_and_update(
+                    other['task_id'], executor_task_id=D6, expected={'developer': None})
+            refusals.append(ctx.exception.task_store_error_code)
+            return real_apply(root, sealed)
+
+        with mock.patch.object(task_store, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 0.2), \
+                mock.patch.object(file_ops, 'apply', side_effect=apply_with_bind):
+            rc, out = self.run_cmd(task)
+        self.assertEqual(refusals, ['TASK_D6_BINDING_BUSY'])
+        self.assertEqual((rc, out['status']), (0, 'VERIFIED'))
+        self.assertEqual(self.store.get(task['task_id'])['file_ops_evidence']['state'],
+                         'VERIFIED')
+        self.assertEqual(self.store.get(other['task_id'])['record_sha256'],
+                         other['record_sha256'])
+        self.assert_binding_lock_free()
+
+    def test_binding_lock_unavailable_refuses_before_mutation(self):
+        task = self.record_pm()
+        with mock.patch.object(task_store, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 0.2), \
+                mock.patch.object(file_ops, 'plan', side_effect=AssertionError('plan ran')), \
+                mock.patch.object(file_ops, 'apply', side_effect=AssertionError('apply ran')):
+            with self.store.d6_binding_lock():
+                rc, out = self.run_cmd(task)
+            self.assertEqual((rc, out['status'], out['code']),
+                             (1, 'REFUSED', 'FILE_OPS_D6_UNAVAILABLE'))
+            # A caller refusal never takes the lock.
+            with self.store.d6_binding_lock():
+                rc, out = self.run_cmd(task, pm_session='pm-other-session')
+            self.assertEqual((rc, out['code']), (1, 'PM_CALLER_NOT_OWNER'))
+        self.assertEqual(self.status(), '')
+        self.assertNotIn('file_ops_evidence', self.store.get(task['task_id']))
+        self.assert_binding_lock_free()
+
+    def test_binding_lock_released_on_every_path(self):
+        task = self.record_pm()
+        real_get = self.store.get
+        failed = {'state': 'FAILED', 'isolate': True}
+        # Refused by admission under the lock.
+        with mock.patch.object(self.store, 'get', side_effect=lambda tid: {
+                **real_get(tid), 'file_ops_evidence': failed}):
+            rc, out = self.run_cmd(task)
+        self.assertEqual((rc, out['code']), (1, 'FILE_OPS_EVIDENCE_FAILED'))
+        self.assert_binding_lock_free()
+        # Refused by plan before any change.
+        refused = LLMToolError('refused')
+        refused.code = 'FILE_OPS_PATH_INVALID'
+        with mock.patch.object(file_ops, 'plan', side_effect=refused):
+            rc, out = self.run_cmd(task)
+        self.assertEqual((rc, out['code']), (1, 'FILE_OPS_PATH_INVALID'))
+        self.assert_binding_lock_free()
+        # An unexpected error still releases the lock.
+        with mock.patch.object(file_ops, 'plan', side_effect=RuntimeError('boom')):
+            with self.assertRaises(RuntimeError):
+                self.run_cmd(task)
+        self.assert_binding_lock_free()
+        self.assertEqual(self.status(), '')
+        # Applied but the evidence write fails: isolate, and the lock is released.
+        with mock.patch.object(self.store, 'record_file_ops_evidence',
+                               side_effect=LLMToolError('not stored')):
+            rc, out = self.run_cmd(task)
+        self.assertEqual((rc, out['code'], out['isolate']),
+                         (1, 'FILE_OPS_EVIDENCE_NOT_STORED', True))
+        self.assert_binding_lock_free()
+
 
 if __name__ == '__main__':
     unittest.main()

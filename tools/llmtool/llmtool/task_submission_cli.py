@@ -2347,24 +2347,29 @@ def _file_ops_code(exc, default):
             else default)
 
 
-def _file_ops_admission(store, args):
-    """The one admission for ``task file-ops`` (#1502); nothing is changed here.
-
-    Order: the caller PM session owns the Task (the delegate wrapper's check);
-    Task schema, state, file_ops, no Developer, not abandoned, lineage; D6
-    registered ACTIVE with root, branch and HEAD from the registry, not held by
-    another live Task, tree clean at HEAD; no FAILED evidence. A tree that is not
-    clean passes only with VERIFIED evidence for this same D6 and HEAD (the
-    re-run, which the caller then checks read-only). Returns (task, registration).
-    """
+def _file_ops_caller(store, args):
+    """First admission step: the caller PM session owns the Task (the delegate check)."""
     from . import pm_caller
-    from .task_store import external_action_refusal
     try:
         pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
     except pm_caller.PMCallerRefused as exc:
         raise _FileOpsRefused(_file_ops_code(exc, 'PM_CALLER_REFUSED')) from None
     except Exception:
         raise _FileOpsRefused('FILE_OPS_TASK_UNAVAILABLE') from None
+
+
+def _file_ops_admission(store, args):
+    """The rest of the one admission for ``task file-ops`` (#1502); changes nothing.
+
+    Runs after ``_file_ops_caller`` and under the D6 binding lock, so the Task
+    read here is the one the evidence write compares against. Order: Task
+    schema, state, file_ops, no Developer, not abandoned, lineage; D6
+    registered ACTIVE with root, branch and HEAD from the registry, not held by
+    another live Task, tree clean at HEAD; no FAILED evidence. A tree that is not
+    clean passes only with VERIFIED evidence for this same D6 and HEAD (the
+    re-run, which the caller then checks read-only). Returns (task, registration).
+    """
+    from .task_store import external_action_refusal
     try:
         task = store.get(args.task_id)
     except Exception:
@@ -2396,7 +2401,8 @@ def _file_ops_admission(store, args):
             snapshot.branch != registration.branch or snapshot.head != registration.result_sha):
         raise _FileOpsRefused('FILE_OPS_D6_BINDING_MISMATCH')
     try:
-        # One D6, one writer: no other live Task may hold this D6.
+        # One D6, one writer: no other live Task may hold this D6. The caller
+        # holds the binding lock, so none can gain it until the evidence is stored.
         holders = store._d6_scan_holders(task['task_id'], frozenset((executor,)),
                                          TaskStore._claude_bind_holds)
     except Exception:
@@ -2424,8 +2430,14 @@ def run_task_file_ops(args, *, store=None, stdout=None):
     VERIFIED or FAILED evidence record by compare-and-update. A FAILED result
     stays (recovery is a new D6). A re-run with VERIFIED evidence and a
     matching tree is a no-op success; anything else refuses.
+
+    After the caller check, the D6 binding lock (the one ``TaskStore._d6_commit``
+    takes) is held exclusively from the holder check through plan, apply,
+    verify and the evidence write, and released on every path. A concurrent
+    bind of any D6 waits, and past the lock deadline refuses
+    ``TASK_D6_BINDING_BUSY``. A lock that cannot be taken refuses
+    ``FILE_OPS_D6_UNAVAILABLE`` before any mutation.
     """
-    from . import file_ops
     store = TaskStore() if store is None else store
     task_id = (args.task_id if type(args.task_id) is str and
                re.fullmatch(r'[0-9a-f]{32}', args.task_id) else None)
@@ -2434,6 +2446,22 @@ def run_task_file_ops(args, *, store=None, stdout=None):
         _print({'status': 'REFUSED', 'code': code, 'task_id': task_id, **extra}, stdout)
         return 1
 
+    try:
+        _file_ops_caller(store, args)
+    except _FileOpsRefused as exc:
+        return refuse(exc.code)
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(store.d6_binding_lock())
+        except Exception:
+            # Nothing read under the lock, nothing applied, no evidence stored.
+            return refuse('FILE_OPS_D6_UNAVAILABLE')
+        return _run_file_ops_locked(store, args, refuse, task_id, stdout)
+
+
+def _run_file_ops_locked(store, args, refuse, task_id, stdout):
+    """``task file-ops`` body; the caller holds the D6 binding lock throughout."""
+    from . import file_ops
     try:
         task, registration = _file_ops_admission(store, args)
     except _FileOpsRefused as exc:
