@@ -1978,7 +1978,10 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
             kind = fields.get("type", "").casefold()
             body_lines = body.splitlines()
             line2 = body_lines[1] if len(body_lines) > 1 else ""
+            actor = _MARKER_ROLES.get(fields.get("actor", ""), "")
+            target = _MARKER_ROLES.get(fields.get("target", ""), "")
             ungated = (kind == "waiting_owner"
+                       and _marker_direction_ok("waiting_owner", actor, target, status)
                        and status in _WAITING_ASK
                        and when >= OWNER_ASK_GATE_SINCE
                        and OWNER_ASK_VALID.fullmatch(line2) is None)

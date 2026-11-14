@@ -134,6 +134,32 @@ class TestLlmtoolMonitorUngatedAsk(unittest.TestCase):
         self.assertEqual(mon.office_view([], pending=[op], now=NOW),
                          mon.office_view([], pending=[op_explicit], now=NOW))
 
+    def test_reviewer_to_owner_waiting_owner_after_gate_is_not_flagged(self):
+        # actor=Reviewer target=Owner status=WAITING waiting_owner after the gate is NOT flagged
+        body = "<!-- activity: type=waiting_owner actor=Reviewer target=Owner status=WAITING -->\nNeed decision"
+        c = comment(107, NOW, body)
+        pending = mon.owner_pending([c], [])
+        self.assertEqual(len(pending), 1)
+        self.assertFalse(pending[0].ungated)
+
+        view = mon.office_view([], pending=pending, now=NOW)
+        star_lines = [line for line, _ in view if line.startswith("★ 等你決定")]
+        self.assertEqual(len(star_lines), 1)
+        self.assertNotIn("UNGATED_OWNER_ASK", star_lines[0])
+
+    def test_integrator_to_owner_waiting_owner_without_line_2_is_ungated(self):
+        # actor=Integrator target=Owner status=WAITING waiting_owner without line 2 is flagged
+        body = "<!-- activity: type=waiting_owner actor=Integrator target=Owner status=WAITING -->\nNeed decision"
+        c = comment(108, NOW, body)
+        pending = mon.owner_pending([c], [])
+        self.assertEqual(len(pending), 1)
+        self.assertTrue(pending[0].ungated)
+
+        view = mon.office_view([], pending=pending, now=NOW)
+        star_lines = [line for line, _ in view if line.startswith("★ 等你決定")]
+        self.assertEqual(len(star_lines), 1)
+        self.assertIn("（UNGATED_OWNER_ASK：未經提問閘門）", star_lines[0])
+
 
 if __name__ == "__main__":
     unittest.main()
