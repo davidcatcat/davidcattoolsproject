@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import re
 
 from .chat_tui_task import UNKNOWN, value
+from .worker_dispatch import stored_worker_id
 
 _DISPATCH_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z$")
 
@@ -106,6 +107,8 @@ def _other_events(record):
                              + " (model " + value(developer, "model") + "), state "
                              + value(developer, "state")))
     for item in _items(record.get("dispatch_audit")):
+        if "worker_key" in item:  # a retired alias (#1791) reads as its current id
+            item = dict(item, worker_key=stored_worker_id(item["worker_key"]))
         events.append(_event(_time(item, "at"), "DISPATCH",
                              "dispatch gate " + value(item, "action") + " " + value(item, "decision")
                              + " for " + value(item, "worker_key") + " (" + value(item, "reason_code")
