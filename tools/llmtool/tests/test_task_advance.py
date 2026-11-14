@@ -4110,6 +4110,17 @@ class ClaimStore:
         return self.record
 
 
+# #1502 WP-F: a fixed rule prefix stands in for the main-pinned Reviewer cards,
+# so no dispatch_review here reads GitHub or Git for rules.
+_STUB_RULES_PREFIX = 'RULES stub for task advance tests\nRULES_END\n\n'
+_STUB_RULES_SHA256 = hashlib.sha256(_STUB_RULES_PREFIX.encode('utf-8')).hexdigest()
+
+
+def _stub_review_rules():
+    return patch.object(review_dispatch, '_review_rules',
+                        return_value=(_STUB_RULES_PREFIX, _STUB_RULES_SHA256))
+
+
 class CodexReviewFailureReasonTests(unittest.TestCase):
     """#1105: each refusal of a finished Codex run names its fixed check."""
 
@@ -4172,7 +4183,8 @@ class CodexReviewFailureReasonTests(unittest.TestCase):
              patch('llmtool.codex_direct_developer.validate_profile'), \
              patch.object(review_dispatch, '_resolve_github_login', return_value='login'), \
              patch.object(review_dispatch.task_completion, 'read_d6_registration',
-                          return_value=reviewer):
+                          return_value=reviewer), \
+             _stub_review_rules():
             with self.assertRaises(LLMToolError) as caught:
                 review_dispatch.dispatch_review(
                     store=store, task_id=TASK, executor_task='executor-1', pr_number=17,
@@ -4194,6 +4206,7 @@ class CodexReviewFailureReasonTests(unittest.TestCase):
         self.assertEqual(len(claims), 1)
         self.assertEqual(claims[0]['state'], 'UNKNOWN')
         self.assertEqual(claims[0]['failure_reason'], 'VERDICT_NOT_JSON')
+        self.assertEqual(claims[0]['rules_sha256'], _STUB_RULES_SHA256)
         stored = json.dumps(claims)
         self.assertNotIn('SECRET-MODEL-TEXT', stored)
         self.assertNotIn('/Users/someone', stored)
@@ -4298,6 +4311,7 @@ class TaskAdvanceRepeatedVerdictPostTests(unittest.TestCase):
                              return_value=self.LOGIN), \
                 patch.object(review_dispatch.task_completion, 'read_d6_registration',
                              return_value=reviewer), \
+                _stub_review_rules(), \
                 patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
                 patch.object(task_advance, '_review_outcomes', return_value=[]), \
                 patch.object(task_advance, 'decide', return_value='DISPATCH_REVIEW'):
@@ -5329,6 +5343,103 @@ class IntegrationDeltaRealGitTests(unittest.TestCase):
         self.assertNotEqual(result['step'], 'CLOSED')
         self.assertIn('INTEGRATION_DELTA_UNVERIFIED', result['codes'])
         self.assertEqual(saved, [])
+
+
+class ReviewerFallbackTests(unittest.TestCase):
+    GEMINI = {'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'agy',
+              'model': 'gemini-3.8-flash-medium'}
+    CLAUDE = {'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'claude',
+              'model': 'claude-opus-5-5'}
+
+    def advance(self, developer, *answers):
+        calls = []
+        pending = list(answers)
+
+        def dispatch(**kwargs):
+            calls.append(kwargs)
+            answer = pending.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            if isinstance(answer, str):
+                err = LLMToolError('refused')
+                err.review_dispatch_code = answer
+                raise err
+            return answer
+
+        record = base_record(developer=dict(developer))
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(review_dispatch, '_policy',
+                          return_value=type('Policy', (), {'allowed': True})()):
+            # The worker-dispatch policy read depends on the checkout layout (it
+            # refuses on EC2); pin it allowed so the family rule alone decides.
+            result = task_advance.advance(
+                task_id=record['task_id'], store=ClaimStore(record),
+                pr_number=17, github_get=green_linux_ci,
+                dispatch_review_call=dispatch)
+        return result, calls
+
+    def test_refused_default_falls_back_once_to_the_other_eligible_reviewer(self):
+        result, calls = self.advance(
+            self.GEMINI, 'ROLE_MODEL_NOT_ALLOWED', {'state': 'DISPATCHED'})
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(result['codes'], ['ROLE_MODEL_NOT_ALLOWED', 'REVIEWER_FALLBACK'])
+        self.assertEqual(result['result'], {'state': 'DISPATCHED'})
+        self.assertEqual([call.get('reviewer') for call in calls],
+                         [None, 'codex-reviewer'])
+        self.assertEqual(calls[0]['version'], calls[1]['version'])
+
+    def test_refused_alternate_stops_once_as_reviewer_unavailable(self):
+        result, calls = self.advance(
+            self.GEMINI, 'REVIEWER_ACCOUNT_UNCONFIGURED', 'REVIEWER_NOT_ALLOWED')
+        self.assertEqual((result['step'], result['next']),
+                         ('REVIEWER_UNAVAILABLE', 'REVIEWER_UNAVAILABLE'))
+        self.assertEqual(result['codes'], [
+            'REVIEWER_ACCOUNT_UNCONFIGURED', 'REVIEWER_FALLBACK',
+            'REVIEWER_NOT_ALLOWED', 'REVIEWER_UNAVAILABLE'])
+        self.assertEqual(len(calls), 2)
+
+    def test_claude_author_never_falls_back_to_claude_reviewer(self):
+        result, calls = self.advance(self.CLAUDE, 'REVIEWER_NOT_ALLOWED')
+        self.assertEqual(result['step'], 'REVIEWER_UNAVAILABLE')
+        self.assertEqual(result['codes'],
+                         ['REVIEWER_NOT_ALLOWED', 'REVIEWER_UNAVAILABLE'])
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn('claude-reviewer', [call.get('reviewer') for call in calls])
+
+    def test_non_route_refusal_of_the_alternate_keeps_its_diagnostics(self):
+        refusal = {'failure_reason': 'REVIEW_HEADER_MISMATCH',
+                   'excerpt': 'synthetic header mismatch excerpt',
+                   'receipt_path': '/repo/test_receipt.json'}
+        error = LLMToolError('refused')
+        error.review_dispatch_code = 'REVIEW_NOT_POSTED'
+        error.review_failure_reason = 'REVIEW_HEADER_MISMATCH'
+        error.review_refusal = dict(refusal)
+        result, calls = self.advance(self.GEMINI, 'ROLE_MODEL_NOT_ALLOWED', error)
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(result['codes'], ['ROLE_MODEL_NOT_ALLOWED', 'REVIEWER_FALLBACK',
+                                           'REVIEW_NOT_POSTED', 'REVIEW_HEADER_MISMATCH'])
+        self.assertEqual(result['review_refusal'], refusal)
+        self.assertEqual(len(calls), 2)
+
+    def test_other_refusals_make_no_fallback(self):
+        result, calls = self.advance(self.GEMINI, 'REVIEW_NOT_POSTED')
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(result['codes'], ['REVIEW_NOT_POSTED'])
+        self.assertEqual(len(calls), 1)
+
+    def test_drive_stops_at_reviewer_unavailable_without_another_step(self):
+        calls = []
+
+        def advance_stub(**kwargs):
+            calls.append(kwargs)
+            return {'task_id': 't', 'step': 'REVIEWER_UNAVAILABLE', 'result': None,
+                    'codes': ['REVIEWER_NOT_ALLOWED', 'REVIEWER_UNAVAILABLE']}
+
+        result = task_drive.drive(task_id='t', max_steps=5, advance_call=advance_stub)
+        self.assertEqual(result['step'], 'REVIEWER_UNAVAILABLE')
+        self.assertEqual(len(calls), 1)
 
 
 class TaskAdvanceReviewRefusalTests(unittest.TestCase):

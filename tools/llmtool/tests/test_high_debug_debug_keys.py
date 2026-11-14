@@ -55,6 +55,11 @@ class RunHighDebugTests(unittest.TestCase):
                                return_value={'GH_CONFIG_DIR': '/safe/gh-config', 'PATH': '/usr/bin'})
         patcher.start()
         self.addCleanup(patcher.stop)
+        # #1502 WP-F: the rule loader would read main; test_high_debug_cards covers it.
+        patcher = patch.object(high_debug, '_debug_rules',
+                               return_value=('RULES stub\n', 'c' * 64))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _run(self, route, runner, *, resolve=None, allowed=True):
         registration = SimpleNamespace(result_sha='a' * 40, root=str(self.root),

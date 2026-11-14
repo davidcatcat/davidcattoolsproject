@@ -64,6 +64,34 @@ class IntakeTests(unittest.TestCase):
         self.assertEqual(result.execution_start, 'NOT_OBSERVED')
         self.assertFalse(result.accepted)
 
+    def test_each_refusal_names_its_reason(self):
+        # #367: every blocked branch keeps its own reason code, and live use stays refused.
+        cases = (
+            ({'next_task': None}, 'INTAKE_EVIDENCE_MISSING'),
+            ({'next_task': replace(self.next, source_sha='x')}, 'INTAKE_TASK_INVALID'),
+            ({'observation': replace(self.observation, generation=8)}, 'INTAKE_SESSION_MISMATCH'),
+            ({'observation': replace(self.observation, receptive=False)},
+             'INTAKE_SESSION_UNAVAILABLE'),
+            ({'now': 1031}, 'INTAKE_EXPIRED_OR_CLOCK_INVALID'),
+            ({'next_task': replace(self.next, write_paths=('other.py',))}, 'INTAKE_SCOPE_INVALID'),
+            ({'previous': None}, 'INTAKE_PREVIOUS_NOT_TERMINAL'),
+        )
+        for changes, reason in cases:
+            with self.subTest(reason=reason):
+                result = self.prepare(**changes)
+                self.assertEqual((result.status, result.reason), ('BLOCKED', reason))
+        live = intake.run_live(self.prepare())
+        self.assertEqual((live.status, live.reason),
+                         ('BLOCKED', 'LIVE_SESSION_TRANSPORT_NOT_ADMITTED'))
+
+    def test_unencodable_packet_is_refused(self):
+        # #367: a packet body that cannot be encoded is refused, never prepared.
+        from unittest import mock
+        with mock.patch.object(TaskBinding, 'to_dict', side_effect=TypeError('bad')):
+            result = self.prepare()
+        self.assertEqual((result.status, result.reason), ('BLOCKED', 'INTAKE_PACKET_INVALID'))
+        self.assertIsNone(result.packet_digest)
+
     def test_registered_previous_task_must_have_matching_terminal_receipt(self):
         self.assertEqual(self.prepare(previous=None).status, 'BLOCKED')
         self.assertEqual(self.prepare(registration=replace(

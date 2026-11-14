@@ -1,5 +1,6 @@
 """Tests verifying Reviewer and PM session environments isolate AI credentials."""
 
+import hashlib
 import io
 import json
 import os
@@ -17,6 +18,10 @@ from llmtool.errors import LLMToolError
 
 
 SYNTHETIC_TOKEN = 'synthetic-not-a-token'
+# #1502 WP-F: a fixed rule prefix stands in for the main-pinned Reviewer cards,
+# so dispatch_review here reads neither GitHub nor Git for rules.
+RULES_PREFIX = 'RULES stub for session AI identity tests\nRULES_END\n\n'
+RULES_SHA256 = hashlib.sha256(RULES_PREFIX.encode('utf-8')).hexdigest()
 
 
 class SessionAIIdentityTests(unittest.TestCase):
@@ -103,7 +108,9 @@ class SessionAIIdentityTests(unittest.TestCase):
              patch.object(review_dispatch.role_config, 'resolve_role',
                           lambda role, **kwargs: {'config_dir': fake_config_dir, 'source': 'roles', 'account': 'acc-1'}), \
              patch.object(review_dispatch, '_resolve_github_login',
-                          lambda: 'ddavidccatssun'):
+                          lambda: 'ddavidccatssun'), \
+             patch.object(review_dispatch, '_review_rules',
+                          return_value=(RULES_PREFIX, RULES_SHA256)):
             review_dispatch.dispatch_review(
                 store=fake_store,
                 task_id='task-1',

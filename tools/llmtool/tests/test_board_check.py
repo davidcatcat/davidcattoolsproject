@@ -295,6 +295,18 @@ class ActionableWithoutDispatchTests(BoardCheckCase):
                      github=github)
         self.assertRow(result, 'next', board_check.BLOCKED, 'PR #12 open')
 
+    def test_unreadable_issue_or_policy_predicate_is_unknown(self):
+        # #763: a blocker whose evidence cannot be read stays UNKNOWN with its code.
+        github = FakeGitHub({'issues/7': {'state': 'locked'}})
+        result = run([{'id': 'wait', 'blocker': 'issue_closed:7'}], github=github)
+        self.assertRow(result, 'wait', board_check.UNKNOWN, 'ISSUE_UNAVAILABLE')
+
+        def broken(worker, owner_ref=None, task_id=None):
+            raise RuntimeError('policy file unreadable')
+        result = run([{'id': 'deny', 'blocker': 'dispatch_denied:agy'}], evaluate=broken)
+        self.assertRow(result, 'deny', board_check.UNKNOWN, 'DISPATCH_POLICY_UNAVAILABLE')
+        self.assertEqual((result['result'], result['exit_code']), ('UNKNOWN', 1))
+
     def test_expired_time_predicate_is_actionable(self):
         rows = [{'id': 'later', 'blocker': 'time:2026-11-07T11:00:00Z'}]
         self.assertRow(run(rows), 'later', board_check.ACTIONABLE, 'reached')
@@ -304,6 +316,17 @@ class ActionableWithoutDispatchTests(BoardCheckCase):
         result = run([], github=FakeGitHub({OPEN_PRS: [{'number': 77}]}))
         self.assertRow(result, 'pr:#77', board_check.ANOMALY, 'missing from the board')
         self.assertEqual(result['exit_code'], 2)
+
+    def test_bad_or_endless_open_pr_list_is_unknown(self):
+        # #763: get_pages refuses a non-list page and a list that never ends.
+        result = run([], github=FakeGitHub({OPEN_PRS: {'number': 77}}))
+        self.assertRow(result, 'github:open-prs', board_check.UNKNOWN, 'GITHUB_READ_INVALID')
+        full = [{'number': number} for number in range(1, 101)]
+        pages = {f'pulls?state=open&per_page=100&page={page}': full
+                 for page in range(1, board_check.MAX_GITHUB_PAGES + 1)}
+        result = run([], github=FakeGitHub(pages))
+        self.assertRow(result, 'github:open-prs', board_check.UNKNOWN, 'GITHUB_LIST_TRUNCATED')
+        self.assertEqual((result['result'], result['exit_code']), ('UNKNOWN', 1))
 
     def test_board_check_only_reads(self):
         github = FakeGitHub()
