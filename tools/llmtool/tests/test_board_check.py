@@ -1108,8 +1108,9 @@ class AdapterTests(unittest.TestCase):
         def runner(cwd, args):
             return SimpleNamespace(returncode=1, stdout=b'')
         with mock.patch('llmtool.config.repository_config', return_value={'slug': 'o/r'}):
-            with self.assertRaises(Exception):
+            with self.assertRaises(board_check._Unknown) as caught:
                 board_check.github_reader(runner)('pulls/41')
+        self.assertEqual(caught.exception.code, 'GITHUB_READ_FAILED')
 
     def test_list_processes_parses_cwd_and_start(self):
         outputs = {'lsof': b'p123\nfcwd\nn/work/d6-run\n',
@@ -1125,8 +1126,9 @@ class AdapterTests(unittest.TestCase):
     def test_list_processes_failure_raises(self):
         def fake_run(argv, **kwargs):
             return SimpleNamespace(returncode=1, stdout=b'')
-        with self.assertRaises(Exception):
+        with self.assertRaises(board_check._Unknown) as caught:
             board_check.list_processes(fake_run)
+        self.assertEqual(caught.exception.code, 'PROCESS_LIST_FAILED')
 
 
 if __name__ == '__main__':
