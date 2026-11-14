@@ -9,7 +9,8 @@
       "denied_dirs": [".gemini"],
       "state_dirs": {"policy": "private-temp-only"},
       "default_timeout": 600,
-      "max_timeout": 600
+      "max_timeout": 600,
+      "max_diff_bytes": 262144
     },
     "claude": {
       "executable": "claude",
@@ -19,7 +20,8 @@
       "denied_dirs": [".claude"],
       "state_dirs": {"policy": "private-temp-only"},
       "default_timeout": 600,
-      "max_timeout": 1800
+      "max_timeout": 1800,
+      "max_diff_bytes": 262144
     },
     "gw-agent": {
       "package_path": "~/.local/lib/api-agent-gateway",
@@ -47,7 +49,8 @@
       "allowed_models": ["opencode/deepseek-v4.1-flash-free"],
       "default_effort": "high",
       "default_timeout": 600,
-      "max_timeout": 1800
+      "max_timeout": 1800,
+      "max_diff_bytes": 262144
     }
   },
   "roles": {
