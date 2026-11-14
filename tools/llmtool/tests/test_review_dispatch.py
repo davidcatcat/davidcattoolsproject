@@ -1859,7 +1859,8 @@ class ReviewRefusalReceiptTests(unittest.TestCase):
         self.assertTrue(hasattr(exc, 'review_refusal'))
         refusal = exc.review_refusal
         self.assertEqual(refusal['failure_reason'], 'VERDICT_NOT_JSON')
-        self.assertEqual(refusal['excerpt'], SCREENED_EXCERPT)
+        # #1907: only the fixed-word shape of the screened excerpt is kept.
+        self.assertEqual(refusal['excerpt'], review_dispatch._reply_shape(SCREENED_EXCERPT))
         self.assertNotIn('label', refusal)
         receipt_path = refusal['receipt_path']
         self.assertIsNotNone(receipt_path)
@@ -1880,7 +1881,7 @@ class ReviewRefusalReceiptTests(unittest.TestCase):
         self.assertEqual(content['reviewer_task'], claim['reviewer_task'])
         self.assertEqual(content['failure_reason'], 'VERDICT_NOT_JSON')
         self.assertEqual(content['not_a_verdict'], True)
-        self.assertEqual(content['excerpt'], SCREENED_EXCERPT)
+        self.assertEqual(content['excerpt'], review_dispatch._reply_shape(SCREENED_EXCERPT))
         self.assertNotIn('label', content)
         self.assertEqual(set(content.keys()), {
             'task_id', 'pr', 'head', 'version', 'reviewer_task',
