@@ -26,7 +26,7 @@
       "dispatch": "ALLOWED",
       "decided_by": "Owner",
       "decided_at": "2026-11-14",
-      "reason": "Owner decision 2026-11-14, relayed by PM on #289: resume PM-selected AGY Developer dispatch for A11 and other non-#1502 Tasks; model gemini-3.8-flash-medium per the 2026-11-10 Owner decision; no automatic retry or fallback; PM pauses AGY again after two consecutive route failures",
+      "reason": "Owner decision 2026-11-14, relayed by PM on #289: resume PM-selected AGY Developer dispatch for A11 and other non-#1502 Tasks; the model comes from developer-routes.json per the 2026-11-10 Owner decision; no automatic retry or fallback; PM pauses AGY again after two consecutive route failures",
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6869069265"
     },
     "company-gw": {

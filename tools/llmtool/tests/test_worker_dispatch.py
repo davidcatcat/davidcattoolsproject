@@ -371,10 +371,13 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertLessEqual(len(agy['reason']), 512)
         for phrase in ('resume PM-selected AGY Developer dispatch',
                        'A11 and other non-#1502 Tasks',
-                       'gemini-3.8-flash-medium per the 2026-11-10 Owner decision',
+                       'model comes from developer-routes.json per the 2026-11-10 '
+                       'Owner decision',
                        'no automatic retry or fallback',
                        'two consecutive route failures'):
             self.assertIn(phrase, agy['reason'])
+        # The reason names no model; the model lives in developer-routes.json.
+        self.assertNotIn('gemini', agy['reason'].lower())
         # The #289 relay of the 2026-11-14 Owner decision (an Issue comment URL).
         self.assertEqual(
             agy['evidence'],
