@@ -305,8 +305,17 @@ def _provider_route_binding(provider):
     return {'type': provider_type, 'model': model, 'base_url': normalized_url}
 
 
-def _pm_assignment(response):
-    """Parse an optional structured recommendation; never infer it from prose."""
+def _assignment_keys(assignment, allow_file_ops):
+    """developer_assignment keys; record-pm (#1502) also allows an optional file_ops."""
+    return set(assignment) - ({'file_ops'} if allow_file_ops else set())
+
+
+def _pm_assignment(response, *, allow_file_ops=False):
+    """Parse an optional structured recommendation; never infer it from prose.
+
+    file_ops, when allowed, is not part of pm_assignment (its key set is
+    fixed); record-pm stores it in its own Task field.
+    """
     try:
         value = _strict_json_object(response)
         if (type(value) is not dict or
@@ -318,14 +327,16 @@ def _pm_assignment(response):
         if assignment is None:
             return None
         if (type(assignment) is not dict or
-                set(assignment) != {'route', 'risk', 'goal', 'acceptance'} or
+                _assignment_keys(assignment, allow_file_ops) !=
+                {'route', 'risk', 'goal', 'acceptance'} or
                 assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                 assignment['risk'] not in ('LOW', 'OTHER') or
                 type(assignment['goal']) is not str or
                 type(assignment['acceptance']) is not list or
                 not 1 <= len(assignment['acceptance']) <= 16):
             return None
-        result = {'schema_version': 1, **assignment}
+        result = {'schema_version': 1, **{key: assignment[key] for key in
+                                           ('route', 'risk', 'goal', 'acceptance')}}
         _screen_text(result['goal'], 512)
         result['acceptance'] = [_screen_text(item, 512) for item in result['acceptance']]
         return result
@@ -333,7 +344,7 @@ def _pm_assignment(response):
         return None
 
 
-def _pm_assignment_limit_error(response):
+def _pm_assignment_limit_error(response, *, allow_file_ops=False):
     """Return a safe, specific diagnostic for an otherwise shaped PM assignment."""
     try:
         value = _strict_json_object(response)
@@ -341,7 +352,8 @@ def _pm_assignment_limit_error(response):
         if (type(value) is not dict or value.get('schema_version') != 1 or
                 type(value.get('schema_version')) is not int or
                 type(assignment) is not dict or
-                set(assignment) != {'route', 'risk', 'goal', 'acceptance'} or
+                _assignment_keys(assignment, allow_file_ops) !=
+                {'route', 'risk', 'goal', 'acceptance'} or
                 assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                 assignment['risk'] not in ('LOW', 'OTHER') or
                 type(assignment['goal']) is not str or
@@ -426,14 +438,26 @@ def _read_pm_record_input(stream=None):
         _strict_json_object(response)
     except (ValueError, TypeError):
         raise LLMToolError('PM response must be one strict JSON object') from None
-    assignment = _pm_assignment(response)
+    assignment = _pm_assignment(response, allow_file_ops=True)
     if (assignment is None or assignment['route'] not in ('gw-agent', 'opencode', 'codex', 'agy', 'claude') or
             assignment['risk'] != 'LOW'):
-        limit_error = _pm_assignment_limit_error(response)
+        limit_error = _pm_assignment_limit_error(response, allow_file_ops=True)
         if limit_error is not None:
             raise LLMToolError(limit_error)
         raise LLMToolError('PM response must recommend one low-risk supported Developer assignment')
     return request, response, assignment
+
+
+def _pm_file_ops(response):
+    """#1502: the optional file_ops of a record-pm response, parsed, or None.
+
+    A malformed list refuses the whole record with the fixed file_ops code.
+    """
+    from . import file_ops
+    raw = _strict_json_object(response)['developer_assignment']
+    if 'file_ops' not in raw:
+        return None
+    return file_ops.parse_ops(raw['file_ops'])
 
 
 def _pm_recommendation(response, *, executor_result=False):
@@ -690,6 +714,9 @@ def _task_view(record):
         view['active_pm_handoff'] = handoff
     if 'completion_events' in record:
         view['completion_events'] = record['completion_events']
+    for key in ('file_ops', 'file_ops_evidence', 'file_ops_reservation'):
+        if key in record:
+            view[key] = record[key]
     pm_recovery = active_pm_inbox.recovery(record)
     if pm_recovery is not None:
         view['pm_recovery'] = pm_recovery
@@ -804,6 +831,16 @@ def add_task_submission_parsers(actions):
                              help=('caller PM session (native UUID or pm- ID); must own '
                                    'the Task; default: CLAUDE_CODE_SESSION_ID or '
                                    'CODEX_THREAD_ID'))
+    file_ops_parser = actions.add_parser(
+        'file-ops', help=("Apply the Task's recorded delete/move file ops on its D6 and "
+                          'seal verified evidence; never commits or launches a provider'))
+    file_ops_parser.add_argument('task_id', help='existing durable Task ID')
+    file_ops_parser.add_argument('--executor-task', required=True,
+                                 help='registered ACTIVE D6 task id')
+    file_ops_parser.add_argument('--pm-session', required=True,
+                                 help='caller PM session (native UUID or pm- ID); must own the Task')
+    file_ops_parser.add_argument('--common-dir',
+                                 help='Git common dir holding the D6 registry (default: from cwd)')
     assignments = actions.add_parser(
         'assignments', help='List live Developer assignment ids for one worker')
     assignments.add_argument('--worker', required=True, help='worker-dispatch key')
@@ -2296,6 +2333,210 @@ def run_task_claude_bind_checked(args, *, store=None, stdout=None):
         _print(pm_caller.refusal(args.task_id, exc.code), stdout)
         return 1
     return run_task_claude_bind(args, store=store, stdout=stdout)
+
+
+class _FileOpsRefused(LLMToolError):
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+def _file_ops_code(exc, default):
+    code = getattr(exc, 'code', None)
+    return (code if type(code) is str and re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', code)
+            else default)
+
+
+def _file_ops_caller(store, args):
+    """First admission step: the caller PM session owns the Task (the delegate check)."""
+    from . import pm_caller
+    try:
+        pm_caller.check_caller(store, args.task_id, getattr(args, 'pm_session', None))
+    except pm_caller.PMCallerRefused as exc:
+        raise _FileOpsRefused(_file_ops_code(exc, 'PM_CALLER_REFUSED')) from None
+    except Exception:
+        raise _FileOpsRefused('FILE_OPS_TASK_UNAVAILABLE') from None
+
+
+def _file_ops_admission(store, args):
+    """The rest of the one admission for ``task file-ops`` (#1502); changes nothing.
+
+    Runs after ``_file_ops_caller`` and under the D6 binding lock, so the Task
+    read here is the one the evidence write compares against. Order: Task
+    schema, state, file_ops, no Developer, not abandoned, lineage; D6
+    registered ACTIVE with root, branch and HEAD from the registry, matching
+    any recorded completion or file-ops reservation, not held by another live
+    Task (another Task's reservation included), tree clean at HEAD; no FAILED
+    evidence. A tree that is not
+    clean passes only with VERIFIED evidence for this same D6 and HEAD (the
+    re-run, which the caller then checks read-only). Returns (task, registration).
+    """
+    from .task_store import external_action_refusal
+    try:
+        task = store.get(args.task_id)
+    except Exception:
+        raise _FileOpsRefused('FILE_OPS_TASK_UNAVAILABLE') from None
+    for refused, code in (
+            (task.get('schema_version') != 2, 'FILE_OPS_TASK_SCHEMA'),
+            (task.get('state') != 'PM_RESPONDED', 'FILE_OPS_TASK_STATE'),
+            (type(task.get('file_ops')) is not dict, 'FILE_OPS_NOT_RECORDED'),
+            (task.get('developer') is not None, 'FILE_OPS_DEVELOPER_EXISTS'),
+            (task.get('abandonment') is not None, 'FILE_OPS_TASK_ABANDONED'),
+            (external_action_refusal(task) is not None, external_action_refusal(task))):
+        if refused:
+            raise _FileOpsRefused(code)
+    executor = getattr(args, 'executor_task', None)
+    try:
+        common_dir = getattr(args, 'common_dir', None)
+        if common_dir is None:
+            common_dir = task_completion.collect_git_snapshot(os.getcwd()).common_dir
+        registration = task_completion.read_d6_registration(
+            executor, common_dir, allowed_states=('ACTIVE',))
+        snapshot = task_completion.collect_git_snapshot(registration.root)
+    except Exception:
+        raise _FileOpsRefused('FILE_OPS_D6_UNAVAILABLE') from None
+    completion = task.get('completion')
+    recorded = completion.get('executor_task_id') if type(completion) is dict else None
+    reservation = task.get('file_ops_reservation')
+    reserved = reservation.get('executor_task') if type(reservation) is dict else None
+    if (registration.task_id != executor or recorded not in (None, executor) or
+            reserved not in (None, executor) or
+            snapshot.root != registration.root or
+            snapshot.common_dir != registration.common_dir or
+            snapshot.branch != registration.branch or snapshot.head != registration.result_sha):
+        raise _FileOpsRefused('FILE_OPS_D6_BINDING_MISMATCH')
+    try:
+        # One D6, one writer: no other live Task (a file-ops reservation
+        # included) may hold this D6. The caller holds the binding lock, so none
+        # can gain it before this Task's reservation is written.
+        holders = store._d6_scan_holders(task['task_id'], frozenset((executor,)),
+                                         TaskStore._claude_bind_holds)
+    except Exception:
+        raise _FileOpsRefused('FILE_OPS_D6_UNAVAILABLE') from None
+    if holders:
+        raise _FileOpsRefused('FILE_OPS_D6_HELD')
+    evidence = task.get('file_ops_evidence')
+    verified = type(evidence) is dict and evidence.get('state') == 'VERIFIED'
+    if not snapshot.clean and not verified:
+        raise _FileOpsRefused('FILE_OPS_D6_NOT_CLEAN')
+    if evidence is not None and not verified:
+        raise _FileOpsRefused('FILE_OPS_EVIDENCE_FAILED')
+    if verified and (evidence.get('executor_task'), evidence.get('root'),
+                     evidence.get('branch'), evidence.get('head')) != (
+            registration.task_id, registration.root, registration.branch,
+            registration.result_sha):
+        raise _FileOpsRefused('FILE_OPS_EVIDENCE_MISMATCH')
+    return task, registration
+
+
+def run_task_file_ops(args, *, store=None, stdout=None):
+    """``task file-ops``: admission, then file_ops plan/apply/verify on that D6 only.
+
+    Never commits, pushes, resets, cleans or launches a provider. Seals one
+    VERIFIED or FAILED evidence record by compare-and-update. A FAILED result
+    stays (recovery is a new D6). A re-run with VERIFIED evidence and a
+    matching tree is a no-op success; anything else refuses.
+
+    After the caller check, the D6 binding lock (the one ``TaskStore._d6_commit``
+    takes) is held exclusively from the holder check through plan, the
+    reservation, apply, verify and the evidence write, and released on every
+    path. Before any mutation the Task records a persistent reservation of the
+    D6 (a binding-journal entry, then ``file_ops_reservation`` on the record),
+    which both binding predicates treat as a holder. So a concurrent binder of
+    this D6 waits, and then refuses ``TASK_D6_ALREADY_BOUND`` (past the lock
+    deadline, ``TASK_D6_BINDING_BUSY``), even if it validated or scanned
+    before the reservation. The reservation outlives a mutation failure, an
+    evidence-store failure and process exit; afterwards only this Task may
+    bind the D6. A lock that cannot be taken, or a reservation that cannot be
+    written, refuses ``FILE_OPS_D6_UNAVAILABLE`` before any mutation.
+    """
+    store = TaskStore() if store is None else store
+    task_id = (args.task_id if type(args.task_id) is str and
+               re.fullmatch(r'[0-9a-f]{32}', args.task_id) else None)
+
+    def refuse(code, **extra):
+        _print({'status': 'REFUSED', 'code': code, 'task_id': task_id, **extra}, stdout)
+        return 1
+
+    try:
+        _file_ops_caller(store, args)
+    except _FileOpsRefused as exc:
+        return refuse(exc.code)
+    with contextlib.ExitStack() as held:
+        try:
+            reserve = held.enter_context(store.d6_binding_lock())
+        except Exception:
+            # Nothing read under the lock, nothing applied, no evidence stored.
+            return refuse('FILE_OPS_D6_UNAVAILABLE')
+        return _run_file_ops_locked(store, args, refuse, task_id, stdout, reserve)
+
+
+def _run_file_ops_locked(store, args, refuse, task_id, stdout, reserve):
+    """``task file-ops`` body; the caller holds the D6 binding lock throughout."""
+    from . import file_ops
+    try:
+        task, registration = _file_ops_admission(store, args)
+    except _FileOpsRefused as exc:
+        return refuse(exc.code)
+    root, head = registration.root, registration.result_sha
+    ops = task['file_ops']['ops']
+    evidence = task.get('file_ops_evidence')
+    if evidence is not None:
+        try:
+            sealed = file_ops.expected_plan(root, head, ops)
+            file_ops.verify(root, sealed)
+            matches = (sealed['sha256'] == evidence['plan_sha256'] and
+                       file_ops.status_sha256(root) == evidence['status_sha256'])
+        except LLMToolError:
+            matches = False
+        if not matches:
+            return refuse('FILE_OPS_EVIDENCE_MISMATCH')
+        _print({'status': 'VERIFIED', 'noop': True, 'task_id': task_id,
+                'evidence': evidence}, stdout)
+        return 0
+    try:
+        sealed = file_ops.plan(root, head, ops)
+    except LLMToolError as exc:
+        # Refused before any change: nothing applied, no evidence stored.
+        return refuse(_file_ops_code(exc, 'FILE_OPS_REFUSED'))
+    if task.get('file_ops_reservation') is None:
+        # The persistent D6 reservation is stored before any mutation, under
+        # the binding lock; it is never released here, on any path.
+        try:
+            task = reserve(task['task_id'], registration.task_id,
+                           expected={'record_sha256': task['record_sha256']})
+        except Exception:
+            return refuse('FILE_OPS_D6_UNAVAILABLE')
+    try:
+        result = file_ops.apply(root, sealed)
+    except LLMToolError as exc:
+        # Refused before any change: nothing applied, no evidence stored; the
+        # reservation stays.
+        return refuse(_file_ops_code(exc, 'FILE_OPS_REFUSED'))
+    state = 'FAILED' if result.get('status') == 'FAILED' else 'VERIFIED'
+    status_sha256 = None
+    try:
+        if state == 'VERIFIED':
+            file_ops.verify(root, sealed)
+        status_sha256 = file_ops.status_sha256(root)
+    except LLMToolError:
+        state = 'FAILED'
+    evidence = {
+        'state': state, 'isolate': state == 'FAILED', 'task_id': task['task_id'],
+        'run_id': task['run_id'], 'executor_task': registration.task_id, 'root': root,
+        'branch': registration.branch, 'head': head,
+        'ops_sha256': task['file_ops']['ops_sha256'], 'plan_sha256': sealed['sha256'],
+        'status_sha256': status_sha256, 'recorded_at': _timestamp(),
+    }
+    try:
+        saved = store.record_file_ops_evidence(
+            task['task_id'], evidence, expected={'record_sha256': task['record_sha256']})
+    except Exception:
+        # The tree may hold changes with no sealed evidence: never trust this D6.
+        return refuse('FILE_OPS_EVIDENCE_NOT_STORED', isolate=True)
+    _print({'status': state, 'noop': False, 'task_id': task_id,
+            'evidence': saved['file_ops_evidence']}, stdout)
+    return 0 if state == 'VERIFIED' else 1
 
 
 def run_task_review_result(args, *, store=None, github_get=None):
@@ -7482,6 +7723,7 @@ def run_task_record_pm(args, *, store=None, input_stream=None, return_record=Fal
                    'pm_native_session_id': native_session,
                    'pm_cwd': observer(native_session, os.getcwd() if cwd is None else cwd)}
     prompt, response, assignment = _read_pm_record_input(input_stream)
+    ops = _pm_file_ops(response)
     task_id, run_id = (new_id() if task_id is None else task_id), new_id()
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
     contract = _contract(task_id, digest)
@@ -7507,6 +7749,11 @@ def run_task_record_pm(args, *, store=None, input_stream=None, return_record=Fal
             **({} if session is None else session),
         },
     )
+    if ops is not None:
+        from . import file_ops
+        # Immutable top-level field bound to this Task's contract (#1502).
+        record['file_ops'] = {'ops': ops, 'ops_sha256': file_ops.ops_sha256(ops),
+                              'contract_digest': record['task_binding']['contract_digest']}
     try:
         store.create(record)
         saved = store.get(task_id)

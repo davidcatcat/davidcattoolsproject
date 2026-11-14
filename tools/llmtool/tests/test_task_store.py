@@ -2293,6 +2293,157 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.task_store_code, 'INVALID')
         self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_ALREADY_BOUND')
 
+    @staticmethod
+    def _file_ops_task(store, *, ops=True):
+        """A record-pm Task with recorded file_ops (``ops=False``: none)."""
+        assignment = {'route': 'claude', 'risk': 'LOW', 'goal': 'Move one tracked file.',
+                      'acceptance': ['The file is moved.']}
+        if ops:
+            assignment['file_ops'] = [{'op': 'move', 'from': 'a.txt', 'to': 'docs/a.txt'}]
+        response = json.dumps({'schema_version': 1, 'summary': 'Move a file.',
+                               'developer_assignment': assignment})
+        stream = io.StringIO(json.dumps({'request': 'Move a.txt into docs.',
+                                         'response': response}))
+        return task_submission_cli_module.run_task_record_pm(
+            SimpleNamespace(pm_session_id=None, pm_runtime=None, pm_cwd=None),
+            store=store, input_stream=stream, return_record=True)
+
+    @staticmethod
+    def _reserve_file_ops(store, task, executor_task_id):
+        with store.d6_binding_lock() as reserve:
+            return reserve(task['task_id'], executor_task_id,
+                           expected={'record_sha256': task['record_sha256']})
+
+    def test_file_ops_reservation_holds_its_d6_for_both_binders(self):
+        store = TaskStore(Path(self.temp.name).resolve())
+        executor = 'd6-file-ops-reserved'
+        holder = self._file_ops_task(store)
+        other = self._file_ops_task(store, ops=False)
+        saved = self._reserve_file_ops(store, holder, executor)
+        self.assertEqual(set(saved['file_ops_reservation']), {'executor_task', 'reserved_at'})
+        self.assertEqual(saved['file_ops_reservation']['executor_task'], executor)
+        self.assertIsNone(saved['developer'])
+        self.assertTrue(TaskStore._d6_bind_holds(saved, executor))
+        self.assertTrue(TaskStore._claude_bind_holds(saved, executor))
+        self.assertEqual(TaskStore._d6_live_ids(saved), frozenset((executor,)))
+        self.assertFalse(TaskStore._claude_bind_holds(saved, 'd6-unrelated'))
+        journal = json.loads(
+            (store.root / task_store_module.D6_BINDING_JOURNAL_NAME).read_text())
+        self.assertEqual(journal['entries'][-1], {
+            'epoch': journal['epoch'], 'task_id': holder['task_id'],
+            'd6_sha256': task_store_module._d6_digest(executor)})
+        # A later process sees the same reservation: both binders refuse.
+        later = TaskStore(store.root)
+        for api in ('d6_bind_compare_and_update', 'claude_bind_compare_and_update'):
+            with self.subTest(api=api):
+                with self.assertRaises(LLMToolError) as caught:
+                    getattr(later, api)(other['task_id'], executor_task_id=executor,
+                                        expected={'developer': None})
+                self.assertEqual(str(caught.exception),
+                                 'TASK_D6_ALREADY_BOUND: D6 is held by Task ' +
+                                 holder['task_id'])
+        self.assertEqual(store.get(other['task_id'])['record_sha256'],
+                         other['record_sha256'])
+        self.assertEqual(store.get(holder['task_id']), saved)
+        # An unrelated D6 is unaffected, and the reserving Task may bind its own.
+        later.d6_bind_compare_and_update(other['task_id'], executor_task_id='d6-unrelated',
+                                         expected={'developer': None})
+        later.d6_bind_compare_and_update(holder['task_id'], executor_task_id=executor,
+                                         expected={'developer': None})
+
+    def test_file_ops_reservation_is_written_once_under_the_binding_lock(self):
+        store = TaskStore(Path(self.temp.name).resolve())
+        task = self._file_ops_task(store)
+        plain = self._file_ops_task(store, ops=False)
+        reservation = {'executor_task': 'd6-file-ops-reserved',
+                       'reserved_at': '2026-11-14T00:00:00Z'}
+
+        def code(call):
+            with self.assertRaises(LLMToolError) as caught:
+                call()
+            return caught.exception.task_store_error_code
+
+        self.assertEqual(code(lambda: store.update(task['task_id'],
+                                                   file_ops_reservation=reservation)),
+                         'TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+        self.assertEqual(code(lambda: store.create(dict(record(),
+                                                        file_ops_reservation=reservation))),
+                         'TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+        with store.d6_binding_lock() as reserve:
+            pass
+        self.assertEqual(code(lambda: reserve(task['task_id'], 'd6-file-ops-reserved',
+                                              expected={'record_sha256':
+                                                        task['record_sha256']})),
+                         'TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+        self.assertEqual(code(lambda: self._reserve_file_ops(store, plain,
+                                                             'd6-file-ops-reserved')),
+                         'TASK_FILE_OPS_RESERVATION_IMMUTABLE')
+        self.assertEqual(store.get(task['task_id']), task)
+        saved = self._reserve_file_ops(store, task, 'd6-file-ops-reserved')
+        self.assertEqual(code(lambda: self._reserve_file_ops(store, saved,
+                                                             'd6-file-ops-other')),
+                         'TASK_FILE_OPS_RESERVATION_IMMUTABLE')
+        self.assertEqual(store.get(task['task_id']), saved)
+        tampered = dict(saved, file_ops_reservation=dict(
+            saved['file_ops_reservation'], executor_task='../outside'))
+        tampered['record_sha256'] = task_store_module._digest(tampered)
+        self.assertEqual(code(lambda: task_store_module._validate(tampered)),
+                         'TASK_FILE_OPS_RESERVATION_INVALID')
+        # The lock is released after every refusal above.
+        with store.d6_binding_lock():
+            pass
+
+    def test_file_ops_reservation_refuses_binder_that_scanned_before_the_claim(self):
+        store = TaskStore(Path(self.temp.name).resolve())
+        real_scan = TaskStore._d6_scan_holders
+        for index, api in enumerate(('d6_bind_compare_and_update',
+                                     'claude_bind_compare_and_update')):
+            with self.subTest(api=api):
+                executor = 'd6-file-ops-race-%d' % index
+                holder = self._file_ops_task(store)
+                other = self._file_ops_task(store, ops=False)
+                binder = TaskStore(store.root)  # a separate worker
+                scanned, claimed = threading.Event(), threading.Event()
+                events = []
+
+                def scan(task_id, claims, holds, binder=binder, scanned=scanned,
+                         claimed=claimed, events=events):
+                    found = real_scan(binder, task_id, claims, holds)
+                    events.append(('B scanned', sorted(found)))
+                    scanned.set()
+                    claimed.wait(10)
+                    return found
+
+                def bind(binder=binder, other=other, executor=executor, events=events,
+                         api=api):
+                    try:
+                        getattr(binder, api)(other['task_id'], executor_task_id=executor,
+                                             expected={'developer': None})
+                        events.append(('B', 'BOUND'))
+                    except LLMToolError as exc:
+                        events.append(('B', str(exc)))
+
+                worker = threading.Thread(target=bind)
+                with patch.object(task_store_module, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 30), \
+                        patch.object(binder, '_d6_scan_holders', side_effect=scan):
+                    worker.start()
+                    self.assertTrue(scanned.wait(10))
+                    with store.d6_binding_lock() as reserve:
+                        reserve(holder['task_id'], executor,
+                                expected={'record_sha256': holder['record_sha256']})
+                        events.append(('A', 'reserved'))
+                        claimed.set()
+                        time.sleep(0.05)  # B now waits on the lock A holds
+                        events.append(('A', 'releasing'))
+                    worker.join(30)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(events, [
+                    ('B scanned', []), ('A', 'reserved'), ('A', 'releasing'),
+                    ('B', 'TASK_D6_ALREADY_BOUND: D6 is held by Task ' + holder['task_id'])])
+                self.assertEqual(store.get(other['task_id'])['record_sha256'],
+                                 other['record_sha256'])
+                self.assertIsNone(store.get(other['task_id'])['developer'])
+
     def test_other_task_store_failures_keep_the_omitted_details_message(self):
         holder_id = new_id()
         cases = (
