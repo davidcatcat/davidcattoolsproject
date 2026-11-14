@@ -6,7 +6,7 @@ Claude's entrypoint. Claude does not depend on AGENTS.md (Codex's entrypoint, un
 
 ## Harness skill delivery (partly live)
 
-- Live (#919): `task delegate` delivers the manifest-selected skills' full text to AGY and Claude Developer runs and records `CONTROLLER_DELIVERED` evidence in the skill ledger. [NOT LIVE]: delivery to OpenCode, `gw-agent`, Reviewer, Debug, sub-agent and PM runs (待實作（WP-F）), and missing evidence blocking protected transitions. A link, a skill name, a model claim or a parent's receipt is not delivery. This prose alone is not enforcement.
+- Live (#919, #1502 WP-F): Claude Developer, AGY and OpenCode runs get the `main`-pinned common-core and Developer cards, and llmtool records `CONTROLLER_DELIVERED` evidence. Formal Reviewer and AI Debug prompts carry `main`-pinned role cards whose digest is bound into the review claim or the Debug entry (#1822, #1877, #1878). `gw-agent` runs record `NOT_DELIVERED`. [NOT LIVE]: delivery to sub-agent and PM runs (待後續), and missing evidence blocking protected transitions (待實作（WP-F）). A link, a skill name, a model claim or a parent's receipt is not delivery. This prose alone is not enforcement.
 - Hooks are defence in depth; the real gates run at the point of action: the dispatch gate, `task complete` and merge checks.
 
 ## Authority and roles
@@ -82,7 +82,7 @@ Claude's entrypoint. Claude does not depend on AGENTS.md (Codex's entrypoint, un
 ## Debugging and evidence
 
 - **AI Debug (Owner 2026-10-27, [decision](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6437493012); [#1502](https://github.com/davidcatcat/davidcattoolsproject/issues/1502) O2, D1, D3, D4):**
-  - Today the PM assigns a separate, bounded, read-only diagnostic Task to Codex CLI `gpt-6.1-sol` through the `codex-developer` dispatch key (現行), under all dispatch, availability, data/D6 and budget gates. Separate `codex-debug` and `claude-debug` keys, switching to Claude Debug only when Codex reports quota exhausted or login failed, are 待實作（WP-B）.
+  - The PM runs a separate, bounded, read-only AI Debug with `llmtool task high-debug`, under all dispatch, availability, data/D6 and budget gates. It uses Codex CLI `gpt-6.1-sol` under the `codex-debug` dispatch key and switches to Claude Debug (`claude-debug`) only when Codex reports quota exhausted or login failed (WP-B).
   - The second valid review FAIL triggers AI Debug. Repairs are two in total: one after the first FAIL and one after Debug confirms the cause (D1). A third valid FAIL splits the Task into at most 3 child Tasks, then one PM REPLAN or a DROP with a recorded reason (D3). The counting gates are 待實作（WP-D）.
   - A Task that does not end successfully notifies the Owner; a successful one does not (D4). Debug grants no model default change, write authority, provider fallback or formal Reviewer acceptance. Follow the [High Debug report](skills/ai-team-delivery/high-debug-report.md), [PM continuation](skills/ai-team-delivery/pm-continuation.md) and [defect triage](skills/ai-team-delivery/defect-triage.md).
 - A model's self-review is not acceptance. Mac or runtime behaviour needs evidence from the actual Mac and tested revision; distinguish it from mock, Cloud and CI evidence. A GitHub comment does not prove Worker execution, Session wake or Owner notification. Never claim a task, review, test or High Debug without its run evidence.
