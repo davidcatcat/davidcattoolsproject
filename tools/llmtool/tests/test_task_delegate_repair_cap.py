@@ -1192,7 +1192,13 @@ class HighDebugRunBindingTests(unittest.TestCase):
 
             fake_subprocess = SimpleNamespace(run=git_status, DEVNULL=subprocess.DEVNULL,
                                               PIPE=subprocess.PIPE)
-            with patch.object(high_debug.task_store, 'default_root',
+            # #1502 WP-F: stub the rule loader so this test never reads main
+            # through GitHub or Git; tests/test_high_debug_cards.py covers it.
+            rules = 'RULES stub\nRULES_END\n\n'
+            rules_sha256 = hashlib.sha256(rules.encode('utf-8')).hexdigest()
+            with patch.object(high_debug, '_debug_rules',
+                              return_value=(rules, rules_sha256)), \
+                    patch.object(high_debug.task_store, 'default_root',
                               return_value=store_root), \
                     patch.object(high_debug.worker_dispatch, 'evaluate',
                                  return_value=SimpleNamespace(allowed=True)), \
@@ -1217,6 +1223,7 @@ class HighDebugRunBindingTests(unittest.TestCase):
         entry = diagnosis['high_debug'][-1]
         self.assertEqual(entry['model_observed'], 'gpt-6.1-sol')
         self.assertEqual(entry['d6'], created[0][0])
+        self.assertEqual(entry['rules_sha256'], rules_sha256)
         self.assertEqual([event['event_id'] for event in diagnosis['completion_events']],
                          [result['event_id']])
         self._passes(diagnosis)
