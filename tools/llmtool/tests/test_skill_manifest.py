@@ -16,7 +16,9 @@ from llmtool.skill_manifest import (
     MAX_DEVELOPER_PREFIX_SIZE,
     MAX_SKILL_FILE_SIZE,
     SKILL_MANIFEST_COMMIT_INVALID,
+    SKILL_MANIFEST_COMMIT_NOT_ON_MAIN,
     SKILL_MANIFEST_GATE_INVALID,
+    SKILL_MANIFEST_MAIN_REF_INVALID,
     SKILL_MANIFEST_NOT_FILE,
     SKILL_MANIFEST_NOT_UTF8,
     SKILL_MANIFEST_PATH_MISSING,
@@ -85,10 +87,14 @@ class SkillManifestTests(unittest.TestCase):
             with open(target, 'wb') as stream:
                 stream.write(content)
 
-    def _commit(self):
+    def _commit(self, update_main=True):
         self._git('add', '-A')
         self._git('commit', '-qm', 'fixture')
-        return self._git('rev-parse', 'HEAD').stdout.decode('ascii').strip()
+        commit = self._git('rev-parse', 'HEAD').stdout.decode('ascii').strip()
+        if update_main:
+            # Role cards are read only from commits on origin/main.
+            self._git('update-ref', 'refs/remotes/origin/main', commit)
+        return commit
 
     def _manifest(self, role='developer', gate='develop', runner=subprocess.run,
                   provider='codex'):
@@ -504,6 +510,71 @@ class SkillManifestTests(unittest.TestCase):
         self._write_files({DEVELOPER_CARD_PATH: b'\xff'})
         self.commit = self._commit()
         self._assert_card_code(SKILL_MANIFEST_NOT_UTF8, self.commit, 'opencode-developer')
+
+    def test_role_cards_accept_main_commit_and_older_main_commit(self):
+        older = self.commit
+        self._write_files({DEVELOPER_CARD_PATH: b'newer developer card\n'})
+        newer = self._commit()
+        for main_ref in ('refs/remotes/origin/main', 'origin/main'):
+            with self.subTest(main_ref=main_ref):
+                current = build_role_cards(self.repo, newer, 'agy', main_ref=main_ref)
+                self.assertEqual(current['cards'][1]['text'], 'newer developer card\n')
+                previous = build_role_cards(self.repo, older, 'agy', main_ref=main_ref)
+                self.assertEqual(previous['cards'][1]['text'], 'developer card\n')
+        # The default main ref is origin/main.
+        self.assertEqual(build_role_cards(self.repo, older, 'agy'), previous)
+
+    def test_role_cards_refuse_side_branch_commit_not_on_main(self):
+        self.assertNotEqual(SKILL_MANIFEST_COMMIT_NOT_ON_MAIN, SKILL_MANIFEST_COMMIT_INVALID)
+        main_commit = self.commit
+        self._git('checkout', '-q', '-b', 'side')
+        self._write_files({DEVELOPER_CARD_PATH: b'side branch card\n'})
+        side = self._commit(update_main=False)
+        calls = []
+
+        def runner(args, **kwargs):
+            calls.append(tuple(args))
+            return subprocess.run(args, **kwargs)
+
+        for main_ref in ('refs/remotes/origin/main', 'origin/main'):
+            with self.subTest(main_ref=main_ref):
+                calls.clear()
+                self._assert_card_code(
+                    SKILL_MANIFEST_COMMIT_NOT_ON_MAIN, side, 'claude-developer',
+                    git_runner=runner, main_ref=main_ref,
+                )
+                # Refused before any card blob is read.
+                self.assertFalse([call for call in calls if 'ls-tree' in call])
+        self._assert_card_code(SKILL_MANIFEST_COMMIT_NOT_ON_MAIN, side, 'claude-developer')
+        # The main commit itself still works while the side branch exists.
+        self.assertTrue(build_role_cards(self.repo, main_commit, 'claude-developer'))
+        # The ref given decides: the side commit is accepted against its own
+        # branch, and once origin/main includes it.
+        self.assertTrue(build_role_cards(
+            self.repo, side, 'claude-developer', main_ref='refs/heads/side'))
+        self._git('update-ref', 'refs/remotes/origin/main', side)
+        self.assertEqual(
+            build_role_cards(self.repo, side, 'claude-developer')['cards'][1]['text'],
+            'side branch card\n',
+        )
+
+    def test_role_cards_refuse_missing_or_malformed_main_ref(self):
+        self._git('update-ref', '-d', 'refs/remotes/origin/main')
+        self._assert_card_code(SKILL_MANIFEST_MAIN_REF_INVALID, self.commit, 'agy')
+        calls = []
+
+        def runner(args, **kwargs):
+            calls.append(tuple(args))
+            return subprocess.run(args, **kwargs)
+
+        for main_ref in (None, '', '-main', '--all', 'origin/main..side', 'main^',
+                         'main~1', 'main@{1}', 'origin main', 'refs/heads/', 'x.lock'):
+            with self.subTest(main_ref=main_ref):
+                self._assert_card_code(
+                    SKILL_MANIFEST_MAIN_REF_INVALID, self.commit, 'agy',
+                    git_runner=runner, main_ref=main_ref,
+                )
+        self.assertEqual(calls, [])
 
 
 if __name__ == '__main__':

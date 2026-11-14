@@ -10,9 +10,11 @@ also write .head. record() can raise after its line persists,
 so callers must treat that result as outcome unknown. The ledger is limited to
 16 MiB and uses an untimed exclusive flock.
 
-Role-card delivery (#1502 WP-F design 3.7): record_card_delivery() appends a
-CONTROLLER_DELIVERED receipt that also binds route, base commit and per-card
-sha256; check() verifies it like any other receipt. record_not_delivered()
+Role-card delivery (#1502 WP-F design 3.7): record_card_delivery() is the only
+writer of CONTROLLER_DELIVERED. It derives the route cards and their sha256
+itself from a base commit on origin/main and binds them to the Task/run
+binding; record() refuses that level. check() verifies it like any other
+receipt. Rows written before this rule are not re-validated. record_not_delivered()
 appends a NOT_DELIVERED event with a fixed reason code; it is never verified
 evidence, check() ignores it and task_summary() reads it as UNVERIFIED.
 """
@@ -27,6 +29,7 @@ import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from . import skill_manifest
 from .errors import LLMToolError
 
 SCHEMA_VERSION = 1
@@ -51,6 +54,9 @@ _MAX_CARD_PATH = 512
 _ROUTE_RE = re.compile(r'[a-z0-9][a-z0-9-]{0,63}')
 _COMMIT_RE = re.compile(r'[0-9a-fA-F]{40}')
 _SHA256_RE = re.compile(r'[0-9a-f]{64}')
+# record_card_delivery() derives these itself; a caller may never supply them.
+_CALLER_DIGEST_KEYS = ('cards', 'cards_sha256', 'prefix_size')
+_CARD_ENTRY_KEYS = frozenset(_BINDING_FIELDS + ('route', 'base_commit', 'evidence_level'))
 
 
 class SkillLedgerError(LLMToolError):
@@ -464,20 +470,38 @@ def _card_digests(cards):
 
 
 def record(entry, *, ttl_seconds=86400):
-    """Append an observed delivery record; evidence level must be explicit."""
+    """Append an observed delivery record; evidence level must be explicit.
+
+    CONTROLLER_DELIVERED is refused here (CONTROLLER_DELIVERED_REFUSED): that
+    level is written only by record_card_delivery(), which derives the card
+    digests itself.
+    """
+    if type(entry) is dict and entry.get('evidence_level') == CONTROLLER_DELIVERED:
+        _fail('CONTROLLER_DELIVERED_REFUSED')
     value = _stamped(_binding_value(entry, ttl_seconds), ttl_seconds)
     return _append_new(value)
 
 
-def record_card_delivery(entry, *, ttl_seconds=86400):
+def record_card_delivery(entry, *, repo_root, ttl_seconds=86400):
     """Append a CONTROLLER_DELIVERED receipt bound to role-card digests.
 
-    ``entry`` holds every binding field plus ``route``, ``base_commit`` (the
-    40-hex commit the cards were read from) and ``cards`` (a list of
-    ``{'path', 'sha256'}``). ``evidence_level`` may be omitted; any value
-    other than CONTROLLER_DELIVERED is refused.
+    ``entry`` holds every binding field plus ``route`` and ``base_commit``
+    (the 40-hex dispatch base). The cards, their sha256 and the cards digest
+    are derived here by skill_manifest.build_role_cards() from Git objects in
+    ``repo_root`` at ``base_commit``, which must be on origin/main; the Git
+    reader is not injectable. Caller-supplied ``cards``, ``cards_sha256`` or
+    ``prefix_size`` are refused (CALLER_DIGESTS_REFUSED); any other unknown
+    field is INVALID_ENTRY. A card build failure is refused with its
+    SKILL_MANIFEST_* code. ``role`` must be the Developer role the cards are
+    for (ROLE_MISMATCH). ``evidence_level`` may be omitted; any value other
+    than CONTROLLER_DELIVERED is refused. ``repo_root`` is trusted caller
+    input: a same-user caller can still point it at a repository it controls.
     """
     if type(entry) is not dict:
+        _fail('INVALID_ENTRY')
+    if any(key in entry for key in _CALLER_DIGEST_KEYS):
+        _fail('CALLER_DIGESTS_REFUSED')
+    if any(key not in _CARD_ENTRY_KEYS for key in entry):
         _fail('INVALID_ENTRY')
     level = entry.get('evidence_level', CONTROLLER_DELIVERED)
     if level != CONTROLLER_DELIVERED:
@@ -486,11 +510,26 @@ def record_card_delivery(entry, *, ttl_seconds=86400):
     route = entry.get('route')
     base_commit = entry.get('base_commit')
     if (not _valid_route(route) or type(base_commit) is not str or
-            _COMMIT_RE.fullmatch(base_commit) is None):
+            _COMMIT_RE.fullmatch(base_commit) is None or
+            not isinstance(repo_root, (str, os.PathLike))):
         _fail('INVALID_ENTRY')
-    value.update(route=route, base_commit=base_commit.lower(),
-                 cards=_card_digests(entry.get('cards')))
-    return _append_new(_stamped(value, ttl_seconds))
+    if value['role'].lower() != 'developer':
+        _fail('ROLE_MISMATCH')
+    # Validate that the stamped value encodes before any Git or ledger access.
+    value = _stamped(value, ttl_seconds)
+    try:
+        built = skill_manifest.build_role_cards(
+            repo_root, base_commit, route, main_ref=skill_manifest.DEFAULT_MAIN_REF)
+    except skill_manifest.SkillManifestError as exc:
+        _fail(exc.code)
+    if built.get('route') != route or built.get('commit') != base_commit.lower():
+        _fail('INVALID_ENTRY')
+    value.update(
+        route=route, base_commit=built['commit'],
+        cards=_card_digests([{'path': card['path'], 'sha256': card['sha256']}
+                             for card in built['cards']]),
+        cards_sha256=built['cards_sha256'], prefix_size=built['prefix_size'])
+    return _append_new(value)
 
 
 def record_not_delivered(entry, *, ttl_seconds=86400):

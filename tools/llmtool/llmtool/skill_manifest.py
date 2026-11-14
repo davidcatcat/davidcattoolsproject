@@ -24,6 +24,12 @@ SKILL_MANIFEST_ROLE_INVALID = 'SKILL_MANIFEST_ROLE_INVALID'
 SKILL_MANIFEST_GATE_INVALID = 'SKILL_MANIFEST_GATE_INVALID'
 SKILL_MANIFEST_ROUTE_INVALID = 'SKILL_MANIFEST_ROUTE_INVALID'
 SKILL_MANIFEST_PREFIX_TOO_LARGE = 'SKILL_MANIFEST_PREFIX_TOO_LARGE'
+SKILL_MANIFEST_MAIN_REF_INVALID = 'SKILL_MANIFEST_MAIN_REF_INVALID'
+SKILL_MANIFEST_COMMIT_NOT_ON_MAIN = 'SKILL_MANIFEST_COMMIT_NOT_ON_MAIN'
+
+# Role cards are read only from a commit on main as seen at dispatch.
+DEFAULT_MAIN_REF = 'refs/remotes/origin/main'
+_MAIN_REF_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$')
 
 MAX_SKILL_FILE_SIZE = 1024 * 1024
 # WP-F design 3.7: the whole Developer rule prefix (common core + card) stays
@@ -286,12 +292,38 @@ def role_card_routes():
     return tuple(sorted(_ROLE_CARD_TABLE))
 
 
-def build_role_cards(repo_root, base_commit, route, git_runner=subprocess.run):
+def _verify_on_main(git_runner, repo_root, commit, main_ref):
+    """Refuse unless ``commit`` equals or is an ancestor of ``main_ref``."""
+    resolved = _run_git(
+        git_runner, repo_root,
+        ['rev-parse', '--verify', '--quiet', main_ref + '^{commit}'],
+    )
+    if resolved is None or getattr(resolved, 'returncode', 1) != 0:
+        _raise(SKILL_MANIFEST_MAIN_REF_INVALID)
+    main_commit = _stdout(resolved).strip()
+    if not _valid_object_id(main_commit):
+        _raise(SKILL_MANIFEST_MAIN_REF_INVALID)
+    # Both arguments are verified 40-hex object ids, so neither can be read
+    # as an option. Exit 0 means ancestor or equal; anything else refuses.
+    ancestry = _run_git(
+        git_runner, repo_root,
+        ['merge-base', '--is-ancestor', commit.lower(),
+         main_commit.decode('ascii').lower()],
+    )
+    if ancestry is None or getattr(ancestry, 'returncode', 1) != 0:
+        _raise(SKILL_MANIFEST_COMMIT_NOT_ON_MAIN)
+
+
+def build_role_cards(repo_root, base_commit, route, git_runner=subprocess.run,
+                     main_ref=DEFAULT_MAIN_REF):
     """Return common core + Developer card text for one Developer route.
 
     Every card is read from Git objects at ``base_commit``, never from the
-    working tree. Callers pass the dispatch base commit on ``main``, never a
-    D6 or PR head. Refuses an unknown route (SKILL_MANIFEST_ROUTE_INVALID)
+    working tree. ``base_commit`` must equal or be an ancestor of the commit
+    ``main_ref`` names at call time (default ``origin/main``); a D6 or PR
+    head that is not on main is refused (SKILL_MANIFEST_COMMIT_NOT_ON_MAIN),
+    as is a missing or malformed main ref (SKILL_MANIFEST_MAIN_REF_INVALID).
+    Refuses an unknown route (SKILL_MANIFEST_ROUTE_INVALID)
     and a prefix whose total card bytes exceed MAX_DEVELOPER_PREFIX_SIZE
     (SKILL_MANIFEST_PREFIX_TOO_LARGE). ``cards_sha256`` covers the commit,
     route and each card's path, sha256 and size, not the text itself.
@@ -300,7 +332,11 @@ def build_role_cards(repo_root, base_commit, route, git_runner=subprocess.run):
         _raise(SKILL_MANIFEST_ROUTE_INVALID)
     if type(base_commit) is not str or _COMMIT_RE.fullmatch(base_commit) is None:
         _raise(SKILL_MANIFEST_COMMIT_INVALID)
+    if (type(main_ref) is not str or _MAIN_REF_RE.fullmatch(main_ref) is None
+            or '..' in main_ref or main_ref.endswith(('/', '.', '.lock'))):
+        _raise(SKILL_MANIFEST_MAIN_REF_INVALID)
     _verify_commit_object(git_runner, repo_root, base_commit)
+    _verify_on_main(git_runner, repo_root, base_commit, main_ref)
 
     commit = base_commit.lower()
     cards = []

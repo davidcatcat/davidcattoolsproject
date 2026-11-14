@@ -2,9 +2,11 @@
 
 import errno
 import fcntl
+import hashlib
 import json
 import multiprocessing
 import os
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -13,6 +15,14 @@ from pathlib import Path
 from unittest import mock
 
 from llmtool import skill_ledger as ledger
+from llmtool import skill_manifest
+
+# Role-card fixture files; plain text only.
+CARD_FILES = {
+    'AGENTS.md': b'core rules\n',
+    'CLAUDE.md': b'claude core rules\n',
+    'skills/role-cards/developer.md': b'developer card\n',
+}
 
 
 def _forked_writer(path, index, results):
@@ -790,17 +800,58 @@ class SkillLedgerTests(unittest.TestCase):
 
     # Role-card delivery (#1502 WP-F design 3.7, piece 1).
 
+    def card_repo(self):
+        """Create a small Git repo whose origin/main holds the role cards."""
+        if getattr(self, 'repo', None):
+            return self.repo
+        self.repo = str(Path(self.tmp.name) / 'repo')
+        os.mkdir(self.repo)
+        self.git('init', '-q')
+        self.git('config', 'user.email', 'ledger-tests@example.invalid')
+        self.git('config', 'user.name', 'Ledger Tests')
+        # #1757: no automatic gc or maintenance may still write under .git at cleanup.
+        self.git('config', 'gc.auto', '0')
+        self.git('config', 'maintenance.auto', 'false')
+        self.main_commit = self.commit_cards(CARD_FILES)
+        return self.repo
+
+    def git(self, *args):
+        return subprocess.run(['git', *args], cwd=self.repo, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, check=True)
+
+    def commit_cards(self, files, update_main=True):
+        for name, content in files.items():
+            target = Path(self.repo) / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        self.git('add', '-A')
+        self.git('commit', '-qm', 'cards')
+        commit = self.git('rev-parse', 'HEAD').stdout.decode('ascii').strip()
+        if update_main:
+            self.git('update-ref', 'refs/remotes/origin/main', commit)
+        return commit
+
     def card_entry(self, **changes):
+        self.card_repo()
         value = dict(self.entry)
         del value['evidence_level']
-        value.update({
-            'route': 'claude-developer',
-            'base_commit': 'A' * 40,
-            'cards': [{'path': 'CLAUDE.md', 'sha256': '1' * 64},
-                      {'path': 'skills/role-cards/developer.md', 'sha256': '2' * 64}],
-        })
+        value.update({'route': 'claude-developer', 'base_commit': self.main_commit})
         value.update(changes)
         return value
+
+    def record_cards(self, entry=None, **kwargs):
+        kwargs.setdefault('repo_root', self.card_repo())
+        return ledger.record_card_delivery(
+            self.card_entry() if entry is None else entry, **kwargs)
+
+    def expected_cards(self, files=CARD_FILES):
+        return [{'path': path, 'sha256': hashlib.sha256(files[path]).hexdigest()}
+                for path in ('CLAUDE.md', 'skills/role-cards/developer.md')]
+
+    def assert_ledger_code(self, code, operation):
+        with self.assertRaises(ledger.SkillLedgerError) as caught:
+            operation()
+        self.assertEqual(caught.exception.skill_ledger_code, code)
 
     def not_delivered_entry(self, **changes):
         value = {'task_id': 'task-a', 'run_id': 'run-n', 'role': 'Developer',
@@ -808,14 +859,22 @@ class SkillLedgerTests(unittest.TestCase):
         value.update(changes)
         return value
 
-    def test_card_delivery_records_controller_delivered_with_digests(self):
-        receipt = ledger.record_card_delivery(self.card_entry())
+    def test_card_delivery_derives_digests_from_main_commit(self):
+        self.card_repo()
+        entry = self.card_entry(base_commit=self.main_commit.upper())
+        receipt = self.record_cards(entry)
         row = json.loads(self.path.read_text().strip())
+        built = skill_manifest.build_role_cards(self.repo, self.main_commit,
+                                                'claude-developer')
         self.assertEqual(row['receipt_id'], receipt)
         self.assertEqual(row['evidence_level'], 'CONTROLLER_DELIVERED')
         self.assertEqual(row['route'], 'claude-developer')
-        self.assertEqual(row['base_commit'], 'a' * 40)
-        self.assertEqual(row['cards'], self.card_entry()['cards'])
+        self.assertEqual(row['base_commit'], self.main_commit.lower())
+        self.assertEqual(row['cards'], self.expected_cards())
+        self.assertEqual(row['cards_sha256'], built['cards_sha256'])
+        self.assertEqual(row['prefix_size'], built['prefix_size'])
+        for field in ledger._BINDING_FIELDS:
+            self.assertEqual(row[field], self.entry[field])
         self.assertNotIn('entry_type', row)
         result = self.check()
         self.assertEqual(result['status'], 'VERIFIED')
@@ -824,40 +883,123 @@ class SkillLedgerTests(unittest.TestCase):
         self.assertEqual(ledger.task_summary('task-a', ['Developer']),
                          {'Developer': 'CONTROLLER_DELIVERED'})
 
-    def test_card_delivery_explicit_level_must_be_controller_delivered(self):
-        self.assertTrue(ledger.record_card_delivery(
-            self.card_entry(evidence_level='CONTROLLER_DELIVERED')))
-        for level in ('OBSERVED_READ', 'UNVERIFIED', None, []):
-            with self.subTest(level=level):
-                with self.assertRaises(ledger.SkillLedgerError) as caught:
-                    ledger.record_card_delivery(self.card_entry(evidence_level=level))
-                self.assertEqual(caught.exception.skill_ledger_code,
-                                 'INVALID_EVIDENCE_LEVEL')
+    def test_card_delivery_reads_cards_from_older_main_commit(self):
+        self.card_repo()
+        older = self.main_commit
+        newer_files = dict(CARD_FILES)
+        newer_files['skills/role-cards/developer.md'] = b'newer developer card\n'
+        self.commit_cards(newer_files)
+        self.record_cards(self.card_entry(base_commit=older))
+        row = json.loads(self.path.read_text().strip())
+        self.assertEqual(row['base_commit'], older)
+        self.assertEqual(row['cards'], self.expected_cards())
+        # The working tree is never the source of the digests.
+        (Path(self.repo) / 'CLAUDE.md').write_bytes(b'uncommitted edit\n')
+        self.record_cards(self.card_entry(run_id='run-b', base_commit=older))
+        row = json.loads(self.path.read_text().splitlines()[-1])
+        self.assertEqual(row['cards'], self.expected_cards())
 
-    def test_invalid_card_delivery_is_refused_before_filesystem_access(self):
-        good_card = {'path': 'AGENTS.md', 'sha256': '3' * 64}
+    def test_card_delivery_refuses_caller_supplied_digests(self):
+        self.card_repo()
+        forged = [{'path': 'CLAUDE.md', 'sha256': '1' * 64},
+                  {'path': 'skills/role-cards/developer.md', 'sha256': '2' * 64}]
         cases = (
-            {'route': ''}, {'route': None}, {'route': 'Claude Developer'},
-            {'base_commit': 'short'}, {'base_commit': None}, {'base_commit': 'g' * 40},
-            {'cards': []}, {'cards': None}, {'cards': [good_card] * 2},
-            {'cards': [{'path': 'AGENTS.md'}]},
-            {'cards': [{'path': 'AGENTS.md', 'sha256': 'F' * 64}]},
-            {'cards': [{'path': '', 'sha256': '3' * 64}]},
-            {'cards': [dict(good_card, text='inline')]},
-            {'cards': [{'path': 'p' + str(i), 'sha256': '3' * 64} for i in range(17)]},
-            {'cards': [{'path': '\ud800', 'sha256': '3' * 64}]},
-            {'head': ''}, {'session_id': None},
+            {'cards': forged},
+            # Even digests that happen to be correct are not accepted from a caller.
+            {'cards': self.expected_cards()},
+            {'cards': []},
+            {'cards_sha256': '3' * 64},
+            {'prefix_size': 1},
+        )
+        with mock.patch.object(ledger.skill_manifest, 'build_role_cards',
+                               side_effect=AssertionError('git read')), \
+                mock.patch.object(ledger, '_path', side_effect=AssertionError(
+                    'filesystem path accessed')):
+            for changes in cases:
+                with self.subTest(changes=sorted(changes)):
+                    self.assert_ledger_code(
+                        'CALLER_DIGESTS_REFUSED',
+                        lambda: self.record_cards(self.card_entry(**changes)))
+        self.assertFalse(self.path.exists())
+        # The Git reader is not injectable, so it cannot supply forged blobs.
+        with self.assertRaises(TypeError):
+            self.record_cards(git_runner=subprocess.run)
+        self.assertFalse(self.path.exists())
+
+    def test_card_delivery_refuses_forged_commit(self):
+        self.card_repo()
+        self.git('checkout', '-q', '-b', 'side')
+        side_files = dict(CARD_FILES)
+        side_files['skills/role-cards/developer.md'] = b'side branch card\n'
+        side = self.commit_cards(side_files, update_main=False)
+        for commit, code in (
+                ('b' * 40, 'SKILL_MANIFEST_COMMIT_INVALID'),
+                (side, 'SKILL_MANIFEST_COMMIT_NOT_ON_MAIN')):
+            with self.subTest(code=code):
+                self.assert_ledger_code(
+                    code, lambda: self.record_cards(self.card_entry(base_commit=commit)))
+        self.git('update-ref', '-d', 'refs/remotes/origin/main')
+        self.assert_ledger_code(
+            'SKILL_MANIFEST_MAIN_REF_INVALID', lambda: self.record_cards())
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.check()['reason'], 'NOT_FOUND')
+
+    def test_generic_record_refuses_controller_delivered(self):
+        self.card_repo()
+        cases = (
+            {},
+            {'route': 'claude-developer', 'base_commit': self.main_commit,
+             'cards': [{'path': 'CLAUDE.md', 'sha256': '1' * 64}]},
+            {'base_commit': self.main_commit, 'cards': self.expected_cards()},
         )
         with mock.patch.object(ledger, '_path', side_effect=AssertionError(
                 'filesystem path accessed')):
             for changes in cases:
-                with self.subTest(changes=repr(changes)):
+                with self.subTest(changes=sorted(changes)):
                     with self.assertRaises(ledger.SkillLedgerError) as caught:
-                        ledger.record_card_delivery(self.card_entry(**changes))
-                    self.assertEqual(caught.exception.skill_ledger_code, 'INVALID_ENTRY')
-            with self.assertRaises(ledger.SkillLedgerError) as caught:
-                ledger.record_card_delivery('not a dict')
-            self.assertEqual(caught.exception.skill_ledger_code, 'INVALID_ENTRY')
+                        self.record(evidence_level='CONTROLLER_DELIVERED', **changes)
+                    code = caught.exception.skill_ledger_code
+                    self.assertEqual(code, 'CONTROLLER_DELIVERED_REFUSED')
+                    self.assertNotIn(code, ('INVALID_ENTRY', 'INVALID_EVIDENCE_LEVEL'))
+        self.assertFalse(self.path.exists())
+        # Other levels still go through the generic path.
+        for level in ('HOOK_DELIVERED', 'OBSERVED_READ'):
+            self.assertTrue(self.record(run_id='run-' + level, evidence_level=level))
+
+    def test_card_delivery_explicit_level_must_be_controller_delivered(self):
+        self.assertTrue(self.record_cards(
+            self.card_entry(evidence_level='CONTROLLER_DELIVERED')))
+        for level in ('OBSERVED_READ', 'UNVERIFIED', None, []):
+            with self.subTest(level=level):
+                self.assert_ledger_code(
+                    'INVALID_EVIDENCE_LEVEL',
+                    lambda: self.record_cards(self.card_entry(evidence_level=level)))
+
+    def test_invalid_card_delivery_is_refused_before_git_or_filesystem_access(self):
+        self.card_repo()
+        cases = (
+            {'route': ''}, {'route': None}, {'route': 'Claude Developer'},
+            {'base_commit': 'short'}, {'base_commit': None}, {'base_commit': 'g' * 40},
+            {'head': ''}, {'session_id': None}, {'head': '\ud800'},
+            {'note': 'unknown field'},
+        )
+        with mock.patch.object(ledger.skill_manifest, 'build_role_cards',
+                               side_effect=AssertionError('git read')), \
+                mock.patch.object(ledger, '_path', side_effect=AssertionError(
+                    'filesystem path accessed')):
+            for changes in cases:
+                with self.subTest(changes=repr(changes)):
+                    self.assert_ledger_code(
+                        'INVALID_ENTRY',
+                        lambda: self.record_cards(self.card_entry(**changes)))
+            for repo_root in (None, 1):
+                self.assert_ledger_code(
+                    'INVALID_ENTRY', lambda: self.record_cards(repo_root=repo_root))
+            self.assert_ledger_code(
+                'INVALID_ENTRY', lambda: self.record_cards('not a dict'))
+            # Developer cards are never recorded as another role's delivery.
+            self.assert_ledger_code(
+                'ROLE_MISMATCH', lambda: self.record_cards(self.card_entry(role='Reviewer')))
 
     def test_not_delivered_records_route_and_fixed_reason(self):
         for reason in sorted(ledger.NOT_DELIVERED_REASONS):
@@ -912,7 +1054,7 @@ class SkillLedgerTests(unittest.TestCase):
 
     def test_existing_entries_and_new_entries_share_one_chain(self):
         older = self.record()
-        ledger.record_card_delivery(self.card_entry(run_id='run-card'))
+        self.record_cards(self.card_entry(run_id='run-card'))
         ledger.record_not_delivered(self.not_delivered_entry())
         self.assertEqual(ledger.verify_chain(), (True, None))
         self.assertEqual(self.check()['status'], 'VERIFIED')
