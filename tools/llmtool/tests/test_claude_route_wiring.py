@@ -132,6 +132,16 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             def get(self, _task_id):
                 return dict(self.task)
 
+            # #1502 WP-D phase 2: the run claim's chain scan lists the store;
+            # it holds this one Task, on the D6 its completion names.
+            def task_ids(self):
+                return [self.task['task_id']]
+
+            def completion_d6_task_ids(self, executor_task_id):
+                completion = self.task.get('completion')
+                return ([self.task['task_id']] if type(completion) is dict and
+                        completion.get('executor_task_id') == executor_task_id else [])
+
             def compare_and_update(self, _task_id, *, expected, **updates):
                 self.writes += 1
                 self.task.update(updates)
@@ -151,8 +161,9 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         snapshot = SimpleNamespace(root='/registered/root', common_dir='/repo/.git',
                                    branch='task-branch', head='d' * 40, clean=True)
         registration = SimpleNamespace(task_id=executor_id, root=snapshot.root,
-            common_dir=snapshot.common_dir, branch=snapshot.branch, result_sha=snapshot.head,
-            trusted_agent_id=trusted_agent, session_ref='session-ref', native_session_id=None)
+            common_dir=snapshot.common_dir, branch=snapshot.branch, source_sha=snapshot.head,
+            result_sha=snapshot.head, trusted_agent_id=trusted_agent,
+            session_ref='session-ref', native_session_id=None)
         result = SimpleNamespace(session_id='12345678-1234-4234-8234-123456789abc',
             exit_code=0, stdout_sha256='e' * 64, elapsed_ms=42,
             cleanup_status='CONFIRMED',

@@ -15,8 +15,15 @@ REPORT = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPO
 
 
 class _Store:
+    TASK_ID = 'a' * 32   # the singleton Task every test here runs on
+
     def __init__(self):
         self.entries, self.events = [], []
+
+    # #1502 WP-D phase 2: Debug admission scans the store for the chain; it
+    # holds only the singleton Task, alone in its chain.
+    def task_ids(self):
+        return [self.TASK_ID]
 
     def get(self, task_id):
         return {'task_id': task_id, 'run_id': 'b' * 32,
@@ -74,7 +81,7 @@ class RunHighDebugTests(unittest.TestCase):
                           return_value=SimpleNamespace(head='a' * 40)):
             try:
                 high_debug.run_high_debug(
-                    store=store, task_id='a' * 32, executor_task='executor', pr_number=17,
+                    store=store, task_id=_Store.TASK_ID, executor_task='executor', pr_number=17,
                     family='family', failed_corrections=2, runner=runner,
                     create_d6=lambda **_kwargs: str(self.root), repo_root=str(self.root),
                     read_registration=lambda *_args, **_kwargs: registration, route=route)

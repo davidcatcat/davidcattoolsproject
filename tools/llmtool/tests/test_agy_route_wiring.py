@@ -149,6 +149,16 @@ class AgyRouteWiringTests(unittest.TestCase):
             def get(self, _task_id):
                 return dict(self.task)
 
+            # #1502 WP-D phase 2: the run claim's chain scan lists the store;
+            # it holds this one Task, on the D6 its completion names.
+            def task_ids(self):
+                return [self.task['task_id']]
+
+            def completion_d6_task_ids(self, executor_task_id):
+                completion = self.task.get('completion')
+                return ([self.task['task_id']] if type(completion) is dict and
+                        completion.get('executor_task_id') == executor_task_id else [])
+
             def compare_and_update(self, _task_id, *, expected, **updates):
                 store_writes.append(updates)
                 self.task.update(updates)
@@ -328,19 +338,22 @@ class AgyRouteWiringTests(unittest.TestCase):
                 raise AssertionError('store must not be read before owner-ref validation')
 
         # #785 M18: a missing ref is optional, but a supplied malformed ref is
-        # still refused before any store read. run_task_delegate leaves this
-        # check to run_task_agy_delegate so the repair-cap and High Debug
-        # refusals come first; call the AGY runner directly here.
-        for owner_ref in ('https://example.invalid/x', 7):
-            with self.subTest(owner_ref=owner_ref):
-                args = Namespace(provider='agy', mode='direct', owner_ref=owner_ref,
-                                 task_id='a' * 32, background=False,
-                                 acceptance=['the result is recorded'])
-                with self.assertRaises(LLMToolError) as caught:
-                    task_submission_cli.run_task_agy_delegate(args, store=UnreadStore())
-                self.assertEqual(
-                    str(caught.exception),
-                    '--provider agy requires a valid --owner-ref before Task mutation')
+        # still refused before any store read. #1502 WP-D phase 2:
+        # run_task_delegate validates it before the repair cap's chain scan,
+        # and the AGY runner validates it again before its own store read.
+        entry_points = (task_submission_cli.run_task_agy_delegate,
+                        task_submission_cli.run_task_delegate)
+        for entry_point in entry_points:
+            for owner_ref in ('https://example.invalid/x', 7):
+                with self.subTest(entry_point=entry_point.__name__, owner_ref=owner_ref):
+                    args = Namespace(provider='agy', mode='direct', owner_ref=owner_ref,
+                                     task_id='a' * 32, background=False,
+                                     acceptance=['the result is recorded'])
+                    with self.assertRaises(LLMToolError) as caught:
+                        entry_point(args, store=UnreadStore())
+                    self.assertEqual(
+                        str(caught.exception),
+                        '--provider agy requires a valid --owner-ref before Task mutation')
 
     def test_agy_delegate_without_owner_ref_reaches_the_store(self):
         class SentinelStore:

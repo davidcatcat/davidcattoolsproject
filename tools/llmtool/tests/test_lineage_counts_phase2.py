@@ -237,6 +237,33 @@ class DelegateRepairCapTests(Case):
         self.assertEqual(view['keys'], sorted([C, F]))
         self.assertIsNone(self.cap(store, C, D6_Y))
 
+    def test_a_fresh_unlinked_task_on_a_fresh_d6_counts_zero(self):
+        # C has no continues, no successor and no run; nothing names the fresh
+        # D6. Runs on other D6s (A on X, F on Z) are not counted: zero runs,
+        # so the original run passes and claims under C's own chain lock.
+        fresh_d6 = 'chain-d6-fresh'
+        store = self.store(task(A, d6=D6_X), task(F, d6=D6_Z), task(C))
+        view = cli._delegate_chain_view(store, C, fresh_d6, with_runs=True)
+        self.assertEqual(view['runs'], {})
+        self.assertEqual(sorted(view['members']), [C])
+        self.assertEqual(view['keys'], [C])
+        self.assertEqual(self.cap(store, C, fresh_d6, claim=self.claim), 'claimed')
+        self.assertEqual(self.claims, [True])
+        # The same holds in a store that holds only the fresh Task.
+        alone = self.store(task(C))
+        self.assertEqual(cli._delegate_chain_view(alone, C, fresh_d6, with_runs=True)['runs'],
+                         {})
+        self.assertIsNone(self.cap(alone, C, fresh_d6))
+
+    def test_the_delegated_tasks_own_read_error_propagates(self):
+        # The delegated Task is read explicitly: an unknown Task keeps its
+        # original store error, never a count refusal.
+        store = self.store(task(A, d6=D6_X))
+        with self.assertRaises(KeyError) as caught:
+            self.cap(store, C, D6_Y, claim=self.claim)
+        self.assertEqual(caught.exception.args, (C,))
+        self.assertEqual(self.claims, [])
+
     def test_a_stored_record_that_cannot_be_read_refuses_as_at_the_cap(self):
         # Any stored Task may continue C: a failed read is a real doubt.
         store = self.store(task(A, d6=D6_X), task(C))

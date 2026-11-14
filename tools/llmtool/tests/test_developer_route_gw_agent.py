@@ -1287,6 +1287,16 @@ class GwAgentDelegateDataClassTests(unittest.TestCase):
             def get(self, _task_id):
                 return copy.deepcopy(task)
 
+            # #1502 WP-D phase 2: the run claim's chain scan lists the store;
+            # it holds this one Task, with no completion on any D6 yet.
+            def task_ids(self):
+                return [task['task_id']]
+
+            def completion_d6_task_ids(self, executor_task_id):
+                completion = task.get('completion')
+                return ([task['task_id']] if type(completion) is dict and
+                        completion.get('executor_task_id') == executor_task_id else [])
+
             def d6_bind_compare_and_update(self, _task_id, *, executor_task_id, expected,
                                            **changes):
                 claimed.append(changes['developer'])
@@ -1296,7 +1306,7 @@ class GwAgentDelegateDataClassTests(unittest.TestCase):
         registration = SimpleNamespace(
             task_id='executor-d6', root='/registered/d6', common_dir='/registered/.git',
             branch='feat/task', trusted_agent_id='agent', session_ref='session',
-            native_session_id=None)
+            native_session_id=None, source_sha='c' * 40)
         snapshot = SimpleNamespace(head='c' * 40)
         route_config = {'routes': {'gw-agent': {
             'allowed_data_classes': ['synthetic', 'public_repo'],
@@ -1305,7 +1315,8 @@ class GwAgentDelegateDataClassTests(unittest.TestCase):
                          egress_basis='Task authorized source files only.',
                          data_class=data_class, read_path=['source.py'],
                          write_path=['source.py'], acceptance=['source changes'],
-                         selection_source='PM', timeout=None)
+                         selection_source='PM', timeout=None,
+                         executor_task=registration.task_id)
         cli = task_submission_cli
         with ExitStack() as stack:
             def patch(target, name, **kwargs):

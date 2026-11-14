@@ -113,8 +113,13 @@ class FakeClient:
 
 class TaskSubmissionCLITests(unittest.TestCase):
     def setUp(self):
-        cap_patch = patch.object(submission_cli, '_check_delegate_repair_cap',
-                                 lambda args, store, d6_binding=None: None)
+        # The cap itself is covered by DelegateRepairCapTests. This stub keeps
+        # the run claim: it invokes the supplied claim callback (the store's
+        # compare-and-update) and returns its result, as the real cap does
+        # under the chain locks.
+        def cap_stub(args, store, d6_binding=None, claim=None):
+            return claim() if claim is not None else None
+        cap_patch = patch.object(submission_cli, '_check_delegate_repair_cap', cap_stub)
         cap_patch.start()
         self.addCleanup(cap_patch.stop)
         rules_patch = patch('llmtool.review_dispatch._review_rules',
@@ -4954,6 +4959,10 @@ class DelegateRepairCapTests(unittest.TestCase):
         return Namespace(**values)
 
     def test_three_prior_assignments_refuse_all_routes_before_route_call(self):
+        # A supplied AGY ref is validated before the chain scan, so every
+        # route here gets a valid Owner comment ref on the dispatch Issue.
+        owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
+                     'issues/289#issuecomment-1')
         self._prior_assignments()
         routes = {
             'codex': 'run_task_codex_delegate',
@@ -4967,7 +4976,8 @@ class DelegateRepairCapTests(unittest.TestCase):
                 with patch.object(submission_cli, route_name) as route:
                     with self.assertRaisesRegex(LLMToolError,
                                                 'DELEGATE_REPAIR_LIMIT_REACHED'):
-                        run_task_delegate(self._args(task, provider), store=self.store)
+                        run_task_delegate(self._args(task, provider, owner_ref=owner_ref),
+                                          store=self.store)
                     route.assert_not_called()
 
     def test_one_prior_assignment_allows_repair_one_and_other_d6_is_unaffected(self):
@@ -5196,7 +5206,7 @@ class DelegateRepairCapTests(unittest.TestCase):
 
     def test_background_cap_refuses_codex_and_opencode_before_launch(self):
         self._prior_assignments()
-        registration = Namespace(task_id='executor-task-1')
+        registration = Namespace(task_id='executor-task-1', source_sha='a' * 40)
         snapshot = Namespace(head='a' * 40)
         for provider in ('codex', 'opencode'):
             with self.subTest(provider=provider):
@@ -5235,7 +5245,7 @@ class DelegateRepairCapTests(unittest.TestCase):
             task_id='executor-task-1', trusted_agent_id='test-agent',
             session_ref='test-session', native_session_id=None,
             root='/tmp/repair-cap-d6', common_dir='/tmp/repair-cap-d6/.git',
-            branch='task/repair-cap')
+            branch='task/repair-cap', source_sha='a' * 40)
         snapshot = Namespace(head='a' * 40)
         for provider in ('codex',):
             with self.subTest(provider=provider):
@@ -5345,8 +5355,18 @@ class DelegateRepairCapTests(unittest.TestCase):
                                     f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task["task_id"]}'):
             submission_cli._check_delegate_repair_cap(self._args(task, 'opencode'), self.store)
 
-    def test_other_d6_record_failing_validation_does_not_refuse_this_d6(self):
-        # A record for another D6 that fails full validation does not refuse this D6.
+    def test_readable_other_d6_record_adds_no_runs(self):
+        # Runs on another D6, in no chain with this Task, add nothing here.
+        self._prior_assignments(3, executor='executor-task-other')
+        task = self._task()
+        self.assertIsNone(submission_cli._check_delegate_repair_cap(
+            self._args(task, 'opencode'), self.store))
+
+    def test_other_d6_record_failing_validation_refuses_fail_closed(self):
+        # #1502 WP-D phase 2: any stored Task may continue this one, so the
+        # chain scan reads every stored Task through get(). A record for
+        # another D6 that fails full validation is a real read doubt: the
+        # count is UNKNOWN and refuses as at the cap, before any write.
         self._prior_assignments(1, executor='executor-task-other')
         other_id = self.store.task_ids()[0]
         record = {
@@ -5360,8 +5380,11 @@ class DelegateRepairCapTests(unittest.TestCase):
             self.store.get(other_id)
 
         task = self._task()
-        self.assertIsNone(submission_cli._check_delegate_repair_cap(
-            self._args(task, 'opencode'), self.store))
+        before = self.store.get(task['task_id'])
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+            submission_cli._check_delegate_repair_cap(
+                self._args(task, 'opencode'), self.store)
+        self.assertEqual(self.store.get(task['task_id']), before)
 
 
 if __name__ == '__main__':

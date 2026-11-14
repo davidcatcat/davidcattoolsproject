@@ -8,6 +8,7 @@ bound by the High Debug arguments or by the repair packet.
 import argparse
 import hashlib
 import io
+import re
 import unittest
 from contextlib import redirect_stderr
 from types import SimpleNamespace
@@ -185,6 +186,20 @@ def _args(**overrides):
 def _no_high_debug(**overrides):
     return _args(high_debug_ref=None, high_debug_task=None,
                  high_debug_family=None, **overrides)
+
+
+def _patch_owner_ref_pattern(test):
+    """Owner comment refs on the fixture repository's dispatch Issue 12 are valid.
+
+    The trust-bound pattern is built from the user's trusted config, which a
+    test never reads; this stands in for it with the fixture repository.
+    """
+    started = patch.object(
+        task_submission_cli.worker_dispatch, 'owner_comment_ref',
+        return_value=re.compile(
+            r'https://github\.com/example/project/issues/12#issuecomment-[1-9][0-9]*\Z'))
+    started.start()
+    test.addCleanup(started.stop)
 
 
 def _patch_trust_and_binding(test, binding=(None, SimpleNamespace(head=_HEAD))):
@@ -1383,6 +1398,9 @@ class DelegateRequiresHighDebugTaskTests(unittest.TestCase):
 
     def setUp(self):
         _patch_trust_and_binding(self)
+        # The AGY and Claude refs below are valid Owner comment refs, which
+        # run_task_delegate validates before the repair cap.
+        _patch_owner_ref_pattern(self)
 
     def test_each_route_refuses_before_its_runner(self):
         owner_ref = 'https://github.com/example/project/issues/12#issuecomment-78'
@@ -1413,6 +1431,114 @@ class DelegateRequiresHighDebugTaskTests(unittest.TestCase):
                         task_submission_cli.run_task_delegate(args, store=store)
                     runner.assert_not_called()
                 self.assertEqual(store.writes, [])
+
+
+# A D6 base that is the recorded result HEAD of a Task outside the chain view.
+_LINK_BASE = '7' * 40
+_OUTSIDE_TASK = '9' * 32
+
+
+class _UnreadStore:
+    """Any store access fails the test: nothing may be read or scanned."""
+
+    def __getattr__(self, name):
+        raise AssertionError('store must not be read before owner-ref validation')
+
+
+class PhaseTwoPrecedenceTests(unittest.TestCase):
+    """#1502 WP-D phase 2 RCA (PR #1952): refusal order of the delegate."""
+
+    def setUp(self):
+        _patch_trust_and_binding(self)
+        _patch_owner_ref_pattern(self)
+
+    def test_supplied_owner_ref_is_validated_before_the_chain_scan(self):
+        routes = (
+            ('agy', 'run_task_agy_delegate',
+             '--provider agy requires a valid --owner-ref before Task mutation'),
+            ('claude', 'run_task_claude_delegate',
+             '--provider claude requires a valid --owner-ref before Task mutation'),
+        )
+        for provider, runner_name, message in routes:
+            for owner_ref in ('https://example.invalid/x', 7):
+                args = _no_high_debug(provider=provider, mode='direct', owner_ref=owner_ref,
+                                      acceptance=['Synthetic acceptance.'])
+                with self.subTest(provider=provider, owner_ref=owner_ref), \
+                        patch.object(task_submission_cli, runner_name) as runner:
+                    with self.assertRaises(LLMToolError) as caught:
+                        task_submission_cli.run_task_delegate(args, store=_UnreadStore())
+                    self.assertEqual(str(caught.exception), message)
+                    runner.assert_not_called()
+            # Omission stays optional: the cap runs and refuses at the limit.
+            store = _Store(count=_REVIEW_LIMIT)
+            args = _no_high_debug(provider=provider, mode='direct', owner_ref=None,
+                                  acceptance=['Synthetic acceptance.'])
+            with self.subTest(provider=provider, owner_ref=None), \
+                    patch.object(task_submission_cli, runner_name) as runner:
+                with self.assertRaisesRegex(LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+                    task_submission_cli.run_task_delegate(args, store=store)
+                runner.assert_not_called()
+            self.assertGreater(store.scans, 0)
+            self.assertEqual(store.writes, [])
+
+    def test_current_task_read_error_propagates_unchanged(self):
+        for error in (LLMToolError('SENTINEL_TASK_READ'), OSError('task unreadable')):
+            store = _Store(count=1)
+            real_get = store.get
+
+            def get(task_id, error=error, real_get=real_get):
+                if task_id == _CURRENT_TASK:
+                    raise error
+                return real_get(task_id)
+            store.get = get
+            claims = []
+            with self.subTest(error=type(error).__name__):
+                with self.assertRaises(type(error)) as caught:
+                    task_submission_cli._check_delegate_repair_cap(
+                        _no_high_debug(), store, claim=lambda: claims.append(True))
+                # The original error object, not a count refusal.
+                self.assertIs(caught.exception, error)
+            # Read before the D6 listing; nothing claimed or written.
+            self.assertEqual(store.scans, 0)
+            self.assertEqual(claims, [])
+            self.assertEqual(store.writes, [])
+
+    def _linked_store(self, count):
+        store = _Store(count=count)
+        store.records[_OUTSIDE_TASK] = {
+            'task_id': _OUTSIDE_TASK, 'developer': None,
+            'completion': {'executor_task_id': 'other-d6', 'evidence': {
+                'source_sha': 'e' * 40, 'result_head': None,
+                'result': {'result_head': _LINK_BASE}}},
+        }
+        return store
+
+    def _cap_on_linked_base(self, store, claims):
+        binding = (SimpleNamespace(task_id=_EXECUTOR_TASK, source_sha=_LINK_BASE,
+                                   root='/nonexistent-d6-root'),
+                   SimpleNamespace(head=_HEAD))
+        return task_submission_cli._check_delegate_repair_cap(
+            _no_high_debug(), store, binding, claim=lambda: claims.append(True))
+
+    def test_cap_and_root_cause_refusals_precede_the_link_refusal(self):
+        # Control: under the limit, the base outside the chain refuses the link.
+        claims = []
+        store = self._linked_store(0)
+        with self.assertRaises(LLMToolError) as caught:
+            self._cap_on_linked_base(store, claims)
+        self.assertEqual(str(caught.exception), 'CONTINUATION_LINK_REQUIRED')
+        self.assertEqual(caught.exception.continuation_link_reason,
+                         'RESULT_HEAD_OUTSIDE_CHAIN')
+        for count, code in ((_REVIEW_LIMIT, 'DELEGATE_REPAIR_LIMIT_REACHED'),
+                            (_REPAIR_TWO, 'DELEGATE_HIGH_DEBUG_TASK_REQUIRED')):
+            store = self._linked_store(count)
+            with self.subTest(count=count):
+                with self.assertRaises(LLMToolError) as caught:
+                    self._cap_on_linked_base(store, claims)
+                self.assertEqual(str(caught.exception), code)
+                self.assertFalse(hasattr(caught.exception, 'continuation_link_code'))
+            self.assertEqual(store.writes, [])
+        self.assertEqual(claims, [])
 
 
 if __name__ == '__main__':

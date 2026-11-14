@@ -50,6 +50,13 @@ class ClaudeCommittedCarryTests(unittest.TestCase):
         records_get = store.get
         store.task_ids = lambda: [task_id, *records]
         store.get = lambda requested: records.get(requested) or records_get(requested)
+        # The D6 listing agrees with task_ids(): this Task when its completion
+        # names the D6, plus any other record whose completion names it.
+        own_d6_ids = store.completion_d6_task_ids
+        store.completion_d6_task_ids = lambda d6: sorted([*own_d6_ids(d6), *(
+            other_id for other_id, record in records.items()
+            if type(record.get('completion')) is dict and
+            record['completion'].get('executor_task_id') == d6)])
         if store_error is not None:
             accept = store.compare_and_update
 

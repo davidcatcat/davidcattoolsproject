@@ -5162,6 +5162,21 @@ def _optional_agy_owner_ref(args):
     return owner_ref
 
 
+def _optional_claude_owner_ref(args):
+    """Return the Claude --owner-ref, which may be None (#1502 WP-C).
+
+    Claude Developer is PM-selected (ALLOWED), so the ref is optional, but a
+    supplied ref must be a valid Owner comment URL, checked before any store
+    read, chain scan or Task mutation.
+    """
+    owner_ref = getattr(args, 'owner_ref', None)
+    if owner_ref is not None and (
+            type(owner_ref) is not str or
+            worker_dispatch.owner_comment_ref().fullmatch(owner_ref) is None):
+        raise LLMToolError('--provider claude requires a valid --owner-ref before Task mutation')
+    return owner_ref
+
+
 def run_task_agy_delegate(args, *, store, route_runner=None):
     """Run the provider-neutral AGY adapter against its registered D6 task."""
     owner_ref = _optional_agy_owner_ref(args)
@@ -5607,12 +5622,9 @@ def _claude_committed_carry(task, store, registration, snapshot, developer, comp
 
 def run_task_claude_delegate(args, *, store, route_runner=None):
     """Run Claude CLI in its Owner-assigned, registered D6 worktree."""
-    owner_ref = getattr(args, 'owner_ref', None)
     # #1502 WP-C: Claude Developer is PM-selected (ALLOWED); --owner-ref is optional
     # but must be a valid Owner reference when given.
-    if owner_ref is not None and (type(owner_ref) is not str or
-            worker_dispatch.owner_comment_ref().fullmatch(owner_ref) is None):
-        raise LLMToolError('--provider claude requires a valid --owner-ref before Task mutation')
+    owner_ref = _optional_claude_owner_ref(args)
     if getattr(args, 'mode', None) != 'direct':
         raise LLMToolError('--provider claude requires --mode direct')
     if getattr(args, 'context_stdin', False):
@@ -7087,14 +7099,18 @@ def _delegate_chain_view(store, current_task_id, executor_task, *, with_runs):
     follow-up or repair Task on a chain D6 is counted. A Task alone in its
     chain counts exactly as before: only the runs on the delegated D6.
 
-    The D6 listing and the reads of its Tasks come first; a failure there
-    refuses DELEGATE_REPAIR_COUNT_UNAVAILABLE as before. A chain scan or chain
-    in doubt is UNKNOWN and refuses DELEGATE_REPAIR_LIMIT_REACHED, as at the cap.
+    The delegated Task is read first, explicitly: its own read error (an
+    unknown or unreadable Task) propagates unchanged, never as a count. The
+    D6 listing and the reads of its Tasks come next; a failure there refuses
+    DELEGATE_REPAIR_COUNT_UNAVAILABLE as before. A chain scan or chain in
+    doubt is UNKNOWN and refuses DELEGATE_REPAIR_LIMIT_REACHED, as at the cap.
     """
     from . import lineage_counts
 
     def unavailable(task_id):
         return LLMToolError(f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}')
+    # The original read error of the delegated Task propagates unchanged.
+    store.get(current_task_id)
     try:
         on_d6 = list(store.completion_d6_task_ids(executor_task))
     except Exception:
@@ -7166,12 +7182,12 @@ def _check_delegate_repair_cap(args, store, d6_binding=None, claim=None):
     DELEGATE_CHAIN_LOCK_UNAVAILABLE before any count or write; a view whose
     keys changed while waiting is in doubt and refuses as at the cap.
 
-    With a D6 binding, a D6 whose registered base equals a recorded result
-    HEAD of a Task outside the view refuses CONTINUATION_LINK_REQUIRED before
-    any write (lineage_counts.check_continuation_link). There is no override.
-
-    The limits, their split and the High Debug path are unchanged
-    (_check_delegate_run_count).
+    The run count and its refusals (the limits, their split and the High
+    Debug path, _check_delegate_run_count) come first. Then, with a D6
+    binding, a D6 whose registered base equals a recorded result HEAD of a
+    Task outside the view refuses CONTINUATION_LINK_REQUIRED before any write
+    (lineage_counts.check_continuation_link). There is no override. Count,
+    link check and claim run under one hold of the chain locks.
     """
     from . import lineage_counts
     executor_task = getattr(args, 'executor_task', None)
@@ -7193,12 +7209,13 @@ def _check_delegate_repair_cap(args, store, d6_binding=None, claim=None):
                                     with_runs=True)
         if view['keys'] != keys:
             raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
+        # The cap and root-cause refusals come before the link refusal.
+        _check_delegate_run_count(args, store, d6_binding, policy, view)
         if d6_binding is not None:
             registration = d6_binding[0]
             lineage_counts.check_continuation_link(
                 store, set(view['members']) | set(view['runs']),
                 getattr(registration, 'source_sha', None), records=view['records'])
-        _check_delegate_run_count(args, store, d6_binding, policy, view)
         return claim() if claim is not None else None
     finally:
         release()
@@ -7491,9 +7508,10 @@ def run_task_delegate(args, *, store=None):
     if args.provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider agy requires --mode direct')
-        # #785 M18: no owner-ref check here. The repair cap and High Debug
-        # refusals come first; run_task_agy_delegate validates a supplied ref
-        # (None accepted) before any store read or Task mutation.
+        # #785 M18 / #1502 WP-D phase 2: a supplied ref is validated before
+        # the chain scan of the repair cap; omission stays optional and the
+        # live dispatch gate decides it later.
+        _optional_agy_owner_ref(args)
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         _check_delegate_repair_cap(args, store)
         return run_task_agy_delegate(args, store=store)
@@ -7502,6 +7520,8 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('--provider claude requires --mode direct')
         if getattr(args, 'background', False):
             raise LLMToolError('--provider claude does not support --background')
+        # A supplied ref is validated before the chain scan; omission is optional.
+        _optional_claude_owner_ref(args)
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         _check_delegate_repair_cap(args, store)
         return run_task_claude_delegate(args, store=store)
