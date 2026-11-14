@@ -231,12 +231,22 @@ def _fail_registry_model():
 
 
 def _registry_default(role, role_registry):
-    """Return (config, the registry's listed model for role); refuse when absent."""
+    """Return (config, the registry's listed model for role); refuse when absent.
+
+    #2027: if role_registry is None, RouteError from load_route_config() fails
+    with ROUTE_CONFIG_UNAVAILABLE; an absent roles entry keeps ROLE_MODEL_NOT_ALLOWED.
+    """
     from .developer_routes import RouteError, load_route_config
+    if role_registry is None:
+        try:
+            config = load_route_config()
+        except RouteError:
+            _fail("role configuration: route config unavailable", ROUTE_CONFIG_UNAVAILABLE)
+    else:
+        config = role_registry
     try:
-        config = load_route_config() if role_registry is None else role_registry
         models = config["roles"][role]["allowed_models"]
-    except (RouteError, KeyError, TypeError):
+    except (KeyError, TypeError):
         _fail_registry_model()
     if type(models) is not list or not models or type(models[0]) is not str:
         _fail_registry_model()

@@ -57,6 +57,38 @@ class RouteConfigUnavailableTests(unittest.TestCase):
     def test_route_config_unavailable_not_in_task_advance_reviewer_route_unavailable(self):
         self.assertNotIn('ROUTE_CONFIG_UNAVAILABLE', task_advance._REVIEWER_ROUTE_UNAVAILABLE)
 
+    def test_role_config_resolve_role_raises_route_config_unavailable_when_load_fails(self):
+        with patch.object(developer_routes, 'load_route_config', side_effect=RouteError('ROUTE_CONFIG_INVALID')):
+            for role_name in ('reviewer', 'codex-reviewer'):
+                with self.assertRaises(LLMToolError) as caught:
+                    role_config.resolve_role(role_name)
+                self.assertEqual(
+                    getattr(caught.exception, 'role_config_code', None),
+                    'ROUTE_CONFIG_UNAVAILABLE',
+                )
+
+    def test_review_dispatch_resolve_reviewer_role_under_patch_and_fallback(self):
+        with patch.object(developer_routes, 'load_route_config', side_effect=RouteError('ROUTE_CONFIG_INVALID')):
+            for reviewer_key in ('claude-reviewer', 'codex-reviewer'):
+                with self.assertRaises(LLMToolError) as caught:
+                    review_dispatch._resolve_reviewer_role(reviewer_key)
+                self.assertEqual(
+                    getattr(caught.exception, 'review_dispatch_code', None),
+                    'ROUTE_CONFIG_UNAVAILABLE',
+                )
+                self.assertIsNone(task_advance._reviewer_fallback({}, caught.exception))
+
+        claude_role = review_dispatch._resolve_reviewer_role('claude-reviewer')
+        self.assertEqual(claude_role['model'], 'claude-sonnet-5-5')
+
+    def test_role_config_registry_default_missing_roles_entry_refuses_role_model_not_allowed(self):
+        with self.assertRaises(LLMToolError) as caught:
+            role_config._registry_default('codex-reviewer', {'roles': {}})
+        self.assertEqual(
+            getattr(caught.exception, 'role_config_code', None),
+            'ROLE_MODEL_NOT_ALLOWED',
+        )
+
 
 if __name__ == '__main__':
     unittest.main()
