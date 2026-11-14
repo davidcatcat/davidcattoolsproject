@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from llmtool import review_transcript
 
@@ -61,3 +62,34 @@ class UnpostedVerdictTest(unittest.TestCase):
 
     def test_running_session_does_nothing(self):
         self.assertEqual(self.relay(verdict(), state=None), ('RUNNING', None, None))
+
+    def test_unreadable_reviewer_evidence_names_its_code(self):
+        # #1281 refusal-code pin: each reason a finished verdict cannot be read has one code.
+        claim = {'native_session_id': SESSION, 'reviewer_task': REVIEWER, 'head_sha': HEAD,
+                 'version': 1}
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home)
+        empty = lambda *_a, **_k: subprocess.CompletedProcess([], 0, b'[]', b'')
+        self.assertEqual(review_transcript.unposted_verdict(
+            claim, TASK, config_dir=home, claude='claude', run=empty),
+            ('UNKNOWN', 'REVIEWER_SESSION_UNKNOWN', None))
+        rows = json.dumps([{'sessionId': SESSION, 'state': 'stopped'}]).encode()
+        ended = lambda *_a, **_k: subprocess.CompletedProcess([], 0, rows, b'')
+        self.assertEqual(review_transcript.unposted_verdict(
+            claim, TASK, config_dir=home, claude='claude', run=ended),
+            ('ENDED', 'REVIEWER_TRANSCRIPT_UNAVAILABLE', None))
+        role = {'account': 'claude2', 'config_dir': home}
+        with mock.patch.object(review_transcript.role_config, 'resolve_role', return_value=role):
+            self.assertEqual(review_transcript.unposted_verdict(
+                dict(claim, account='other'), TASK, claude='claude', run=ended),
+                ('UNKNOWN', 'REVIEWER_ACCOUNT_CHANGED', None))
+        self.assertEqual(review_transcript.unposted_verdict(
+            dict(claim, native_session_id='not-a-uuid'), TASK, config_dir=home, run=ended),
+            ('NOT_APPLICABLE', None, None))
+
+    def test_screened_verdict_is_withheld(self):
+        from llmtool import task_submission_cli
+        with mock.patch.object(task_submission_cli, '_screen_text',
+                               side_effect=review_transcript.LLMToolError('synthetic')):
+            self.assertEqual(self.relay(verdict()),
+                             ('ENDED', 'REVIEWER_VERDICT_WITHHELD', None))
