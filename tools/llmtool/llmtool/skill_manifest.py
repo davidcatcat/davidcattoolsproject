@@ -40,15 +40,16 @@ GIT_READ_TIMEOUT_SECONDS = 10
 COMMON_CORE_CARD_PATH = 'skills/role-cards/common-core.md'
 DEVELOPER_CARD_PATH = 'skills/role-cards/developer.md'
 # Role-card table (WP-F design 3.7, #1502): common core first, then the
-# Developer card, in prompt order. Claude Developer and AGY receive the
-# common-core card; OpenCode and gw-agent keep the route entrypoint file as
-# their common core until their own delivery ships. The card file holds every
-# route appendix, so all Developer routes share one card.
+# Developer card, in prompt order. Every Developer route receives the
+# common-core card. gw-agent has no card delivery yet (its runs record
+# NOT_DELIVERED ROUTE_NOT_SUPPORTED); its row names the cards it would get.
+# The card file holds every route appendix, so all Developer routes share
+# one card.
 _ROLE_CARD_TABLE = {
     'agy': (COMMON_CORE_CARD_PATH, DEVELOPER_CARD_PATH),
     'claude-developer': (COMMON_CORE_CARD_PATH, DEVELOPER_CARD_PATH),
-    'gw-agent': ('AGENTS.md', DEVELOPER_CARD_PATH),
-    'opencode-developer': ('AGENTS.md', DEVELOPER_CARD_PATH),
+    'gw-agent': (COMMON_CORE_CARD_PATH, DEVELOPER_CARD_PATH),
+    'opencode-developer': (COMMON_CORE_CARD_PATH, DEVELOPER_CARD_PATH),
 }
 
 _BASE_PATHS = (

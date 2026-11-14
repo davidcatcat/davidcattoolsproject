@@ -70,17 +70,26 @@ class TextBuilderRuleTests(unittest.TestCase):
                 self.assertEqual(user['content'].count(TEST_DATA_RULE), 0)
 
     def test_opencode_prompt_carries_the_rule_once(self):
+        # #1502 WP-F: the delegate sends the pinned role-card prefix between
+        # the instructions and the packet; the rule stays once, before it.
+        card_prefix = '\nREQUIRED_SKILL_BEGIN path=card\nFixture rules.\nREQUIRED_SKILL_END path=card'
         for repair_packet in (None, _REPAIR_REFERENCE):
-            with self.subTest(repair=repair_packet is not None), \
-                    patch.object(task_submission_cli, '_validate_repair_packet',
-                                 return_value=_REPAIR_REFERENCE):
-                prompt = task_submission_cli._opencode_developer_prompt(
-                    _TASK, source_sha='d' * 40, read_paths=['example.py'],
-                    write_paths=['example.py'], acceptance=['ok'], pm_goal='g',
-                    repair_packet=repair_packet)
-                self.assertEqual(prompt.count(TEST_DATA_RULE), 1)
-                self.assertLess(prompt.index(TEST_DATA_RULE),
-                                prompt.index('TASK_PACKET_JSON='))
+            for prefix in ('', card_prefix):
+                with self.subTest(repair=repair_packet is not None, cards=bool(prefix)), \
+                        patch.object(task_submission_cli, '_validate_repair_packet',
+                                     return_value=_REPAIR_REFERENCE):
+                    prompt = task_submission_cli._opencode_developer_prompt(
+                        _TASK, source_sha='d' * 40, read_paths=['example.py'],
+                        write_paths=['example.py'], acceptance=['ok'], pm_goal='g',
+                        repair_packet=repair_packet, card_prefix=prefix)
+                    self.assertEqual(prompt.count(TEST_DATA_RULE), 1)
+                    self.assertLess(prompt.index(TEST_DATA_RULE),
+                                    prompt.index('TASK_PACKET_JSON='))
+                    if prefix:
+                        self.assertLess(prompt.index(TEST_DATA_RULE),
+                                        prompt.index(card_prefix))
+                        self.assertLess(prompt.index(card_prefix),
+                                        prompt.index('\nTASK_PACKET_JSON='))
 
     def test_codex_direct_prompt_carries_the_rule_once_including_repair_runs(self):
         for policy in ('LOCAL', 'REMOTE_RECEIPT'):
