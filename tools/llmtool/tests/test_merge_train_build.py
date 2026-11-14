@@ -295,6 +295,24 @@ class BuildTrainTests(unittest.TestCase):
             self._assert_no_push(runners)
         self.assertEqual(self.store.reads, [])
 
+    def test_invalid_clock_refuses_before_any_read(self):
+        # #1182: the train clock must be an aware datetime; anything else reads nothing.
+        runners, main_read = _Runners(), mock.Mock(return_value=self.repo.base)
+        members = [(TASK_A, PRS[TASK_A]), (TASK_B, PRS[TASK_B])]
+        for now in ('2026-11-14T00:00:00Z', datetime(2026, 11, 14), 1794600000):
+            with self.subTest(now=now), mock.patch.object(
+                    task_completion, 'read_authenticated_main_sha', main_read):
+                result = merge_train_build.build_train(
+                    members, store=self.store, caller_key=CALLER, github_get=self._github_get,
+                    git_runner=runners.git, gh_runner=runners.gh, root=self.repo.path,
+                    train_root=self.train_root, now=now)
+                self.assertEqual(result, {'step': 'REFUSED', 'codes': ['TRAIN_CLOCK_INVALID'],
+                                          'result': None})
+        main_read.assert_not_called()
+        self._assert_no_push(runners)
+        self.assertEqual(self.store.reads, [])
+        self.assertEqual(self._records(), [])
+
     def test_invalid_members_refuse_before_any_read(self):
         invalid = [
             [(TASK_A, 101), (TASK_A, 102)],
