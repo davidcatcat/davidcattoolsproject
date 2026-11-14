@@ -12,7 +12,7 @@ from llmtool.errors import LLMToolError
 from llmtool.role_config import resolve_role
 
 # The claude-reviewer model listed in developer-routes.json (#1502 WP-E).
-REVIEWER_MODEL = "claude-opus-5-5"
+REVIEWER_MODEL = "claude-sonnet-5-5"
 
 
 class RoleConfigTests(unittest.TestCase):
