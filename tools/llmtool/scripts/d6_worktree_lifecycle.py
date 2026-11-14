@@ -2653,6 +2653,83 @@ OWNER_APPROVED_RETAIN_RELEASE_RE = re.compile(
     r"#issuecomment-[0-9]+\Z")
 
 
+# #1331: an Owner-approved discard of an unpublished D6 head needs a verified,
+# private Git bundle backup under BACKUP_ROOT. Backups are only read, never removed.
+# Same repository comment URL form as the retain release, on any Issue.
+OWNER_APPROVED_DISCARD_RE = re.compile(
+    OWNER_APPROVED_RETAIN_RELEASE_RE.pattern.replace("(?:289|529)", "[0-9]+"))
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+BACKUP_ROOT = Path("~/.local/state/llmtool/backups")
+
+
+def _parse_owner_approved_discard(values):
+    """Map TASK_ID=APPROVAL_URL,BUNDLE_PATH,SHA256 values to (url, path, digest)."""
+    approvals = {}
+    for value in values or []:
+        task_id, separator, rest = value.partition("=")
+        parts = rest.split(",")
+        if (not separator or not TASK_ID_RE.fullmatch(task_id or "") or
+                task_id in approvals or len(parts) != 3 or
+                not OWNER_APPROVED_DISCARD_RE.fullmatch(parts[0]) or
+                not os.path.isabs(parts[1]) or not SHA256_RE.fullmatch(parts[2])):
+            _stop("D6_TASK_INPUT_INVALID")
+        approvals[task_id] = tuple(parts)
+    return approvals
+
+
+def _private_bundle_sha256(path):
+    """SHA-256 of a private regular file opened without following links, or a reason."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return "D6_DISCARD_BACKUP_MISSING"
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                info.st_mode & 0o022):
+            return "D6_DISCARD_BACKUP_UNSAFE"
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return "D6_DISCARD_BACKUP_MISSING"
+    finally:
+        os.close(fd)
+
+
+def _verify_discard_backup(canonical_root, head, bundle, digest, backup_root=None):
+    """None when ``bundle`` is a safe backup of ``head``; otherwise one reason code.
+
+    The bundle must sit under the backup root with no symlink in its path, be a
+    private regular file with the approved SHA-256 (checked before and after Git
+    reads it), pass ``git bundle verify`` and list ``head`` as a tip.
+    """
+    root = Path(os.path.realpath(os.path.expanduser(backup_root or BACKUP_ROOT)))
+    path = Path(bundle)
+    if (not path.is_absolute() or Path(os.path.realpath(path)) != path or
+            root not in path.parents):
+        return "D6_DISCARD_BACKUP_PATH_INVALID"
+    first = _private_bundle_sha256(path)
+    if not SHA256_RE.fullmatch(first):
+        return first
+    if first != digest:
+        return "D6_DISCARD_BACKUP_DIGEST_MISMATCH"
+    if _task_git(canonical_root, "bundle", "verify", "--quiet", str(path),
+                 check=False).returncode:
+        return "D6_DISCARD_BACKUP_UNVERIFIED"
+    listed = _task_git(canonical_root, "bundle", "list-heads", str(path), check=False)
+    tips = {line.split()[0] for line in listed.stdout.splitlines() if line.split()}
+    if listed.returncode or head not in tips:
+        return "D6_DISCARD_BACKUP_HEAD_MISSING"
+    if _private_bundle_sha256(path) != digest:
+        return "D6_DISCARD_BACKUP_DIGEST_MISMATCH"
+    return None
+
+
 def _parse_owner_approved_retain_release(values):
     approvals = {}
     for value in values or []:
