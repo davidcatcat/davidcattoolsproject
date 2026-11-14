@@ -27,7 +27,8 @@ def records(profile='gw-agent'):
                       'execution': {'process_exit_code': 0, 'native_session_id': 's-1'}},
         'completion': {'executor_task_id': 'exec-1', 'evidence': {
             'task_id': 'b' * 32, 'run_id': 'f' * 32, 'contract_digest': DIGEST,
-            'source_sha': HEAD}},
+            'source_sha': HEAD, 'executor_native_session': 'VERIFIED',
+            'executor_native_session_id': 's-1'}},
         'dispatch_audit': [entry('1' * 32), entry('2' * 32, authorization_id='1' * 32)]}
     for item in repair['dispatch_audit']:
         item['worker_key'] = WORKERS[profile]
@@ -66,6 +67,8 @@ class RecoveryEvidenceTests(unittest.TestCase):
                     ('dispatch_audit',), [first, entry('2' * 32, authorization_id='1' * 32)]))
         # gw-agent and opencode also need the adapter entry bound to the transition.
         for audit in ([entry('1' * 32)], [entry('2' * 32, authorization_id='2' * 32)],
+                      [entry(''), entry('2' * 32, authorization_id='')],
+                      [entry('X' * 32), entry('2' * 32, authorization_id='X' * 32)],
                       [entry('1' * 32), entry('2' * 32, authorization_id='9' * 32)]):
             with self.subTest(audit=audit):
                 self.refused(rec.check_authorization, *self.changed(('dispatch_audit',), audit))
@@ -91,6 +94,8 @@ class RecoveryEvidenceTests(unittest.TestCase):
                  (('developer', 'execution', 'native_session_id'), ''),
                  (('developer', 'execution'), None),
                  (('completion', 'executor_task_id'), 'exec-2'),
+                 (('completion', 'evidence', 'executor_native_session'), 'UNKNOWN'),
+                 (('completion', 'evidence', 'executor_native_session_id'), 's-2'),
                  (('completion', 'evidence', 'task_id'), '9' * 32),
                  (('completion', 'evidence', 'run_id'), '9' * 32),
                  (('completion', 'evidence', 'contract_digest'), '9' * 64),

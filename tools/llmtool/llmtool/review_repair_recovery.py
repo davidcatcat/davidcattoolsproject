@@ -124,9 +124,11 @@ def check_authorization(root, repair, claim):
                stored_worker_id(entry.get('worker_key')) == worker and
                (entry.get('assignment_id'), entry.get('source_sha'),
                 entry.get('contract_digest')) == binding]
-    transitions = {entry.get('attempt_id') for entry in allowed
-                   if 'authorization_id' not in entry} - {None}
-    adapted = any(entry.get('authorization_id') in transitions for entry in allowed)
+    transitions = {entry['attempt_id'] for entry in allowed
+                   if 'authorization_id' not in entry and type(entry.get('attempt_id')) is str
+                   and _HEX32.fullmatch(entry['attempt_id'])}
+    adapted = any(type(entry.get('authorization_id')) is str and
+                  entry['authorization_id'] in transitions for entry in allowed)
     if not transitions or (profile in _ADAPTER_PROFILES and not adapted):
         refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
 
@@ -145,6 +147,8 @@ def check_execution(root, repair, claim):
             developer.get('provider_profile') != root['developer'].get('provider_profile') or
             type(execution.get('process_exit_code')) is not int or
             type(session) is not str or not session or
+            evidence.get('executor_native_session') != 'VERIFIED' or
+            evidence.get('executor_native_session_id') != session or
             completion.get('executor_task_id') != claim['executor_task'] or
             evidence.get('task_id') != repair.get('task_id') or
             evidence.get('run_id') != repair.get('run_id') or
