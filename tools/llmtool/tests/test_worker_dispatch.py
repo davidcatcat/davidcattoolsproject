@@ -243,6 +243,14 @@ class WorkerDispatchTests(unittest.TestCase):
                          'OWNER_PAUSED')
         self.assertFalse(worker_dispatch.evaluate('unknown-worker').allowed)
 
+    def test_malformed_worker_key_is_refused_with_its_code(self):
+        # #763: a worker key outside the key pattern is WORKER_KEY_INVALID.
+        for key in ('Agy', '', 'agy developer', None, 'a' * 65):
+            with self.subTest(key=key):
+                decision = worker_dispatch.evaluate(key)
+                self.assertFalse(decision.allowed)
+                self.assertEqual(decision.reason_code, 'WORKER_KEY_INVALID')
+
     def test_owner_assignment_only_stays_blocked_without_explicit_policy_row(self):
         self._set_state('agy', 'OWNER_ASSIGNMENT_ONLY')
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6351999848'
