@@ -2340,6 +2340,8 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
         _print(pending)
         return 1
     from .review_repair import repair_review
+    # #1502 L1 child 2: a manual PM repair passes no auto flag (repair_review's
+    # default False), so it keeps the D1 rules.
     result = repair_review(
         store=store, task_id=args.task_id,
         executor_task=args.executor_task, pr_number=args.pr,
@@ -2349,8 +2351,7 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
         auto_review=getattr(args, 'auto_review', False),
         review_dispatcher=review_dispatcher,
         delegate_callable=delegate_callable,
-        repair_task_recorder=repair_task_recorder,
-        auto=False)   # #1502 L1 child 2: a manual PM repair keeps the D1 rules
+        repair_task_recorder=repair_task_recorder)
     return _print(result)
 
 
