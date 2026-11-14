@@ -282,6 +282,26 @@ class ClaudeSkillHookTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(hook._protected_gates(command), expected)
 
+    def test_repository_and_context_refusals_name_their_code(self):
+        # Refusal-code pin: no Git top level, no commit at HEAD and an oversized
+        # skills index each raise one fixed code.
+        plain = Path(self.temp.name).joinpath('plain')
+        plain.mkdir()
+        empty = Path(self.temp.name).joinpath('empty')
+        empty.mkdir()
+        subprocess.run(['git', 'init', '-q'], cwd=empty, check=True)
+        for call in (lambda: hook._repo_root(str(plain)), lambda: hook._commit(str(empty))):
+            with self.assertRaises(ValueError) as caught:
+                call()
+            self.assertEqual(caught.exception.args, ('REPOSITORY_UNAVAILABLE',))
+        manifest = {'manifest_sha256': 'a' * 64,
+                    'entries': [{'path': 'AGENTS.md', 'sha256': 'b' * 64}]}
+        with mock.patch.object(hook, 'build_manifest', return_value=manifest), \
+                mock.patch.object(hook, 'MAX_CONTEXT_CHARS', 10), \
+                self.assertRaises(ValueError) as caught:
+            hook._manifest_context(str(self.repo), 'c' * 40, 'pm', 'dispatch')
+        self.assertEqual(caught.exception.args, ('CONTEXT_TOO_LARGE',))
+
     def test_missing_hook_event_for_bash_fails_closed(self):
         result = hook.handle({'tool_name': 'Bash', 'tool_input': {'command': 'git push'}})
         self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
