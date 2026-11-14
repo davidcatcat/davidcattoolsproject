@@ -38,3 +38,41 @@ def inline_findings(body, changed_paths):
         if len(found) == MAX_INLINE_FINDINGS:
             break
     return found
+
+
+_MARKER = '<!-- llmtool-inline-copy head=%s id=%s -->'
+_HEX40 = re.compile(r'[0-9a-f]{40}')
+
+
+def post_inline_copies(pr_number, head, body, *, file_lister, comment_lister, poster):
+    """Post each selected finding once as an advisory PR line comment on ``head``.
+
+    The three callables do the GitHub I/O, so this function never touches the
+    network itself. Any failure is counted and never raised: a copy is advisory
+    and must never block the formal verdict. Returns fixed integer counts.
+    """
+    counts = {'posted': 0, 'skipped': 0, 'failed': 0}
+    if (type(pr_number) is not int or pr_number < 1 or type(head) is not str
+            or _HEX40.fullmatch(head) is None):
+        counts['failed'] = 1
+        return counts
+    try:
+        found = inline_findings(body, list(file_lister(pr_number)))
+        existing = [item.get('body') for item in comment_lister(pr_number) if type(item) is dict]
+    except Exception:
+        counts['failed'] = 1
+        return counts
+    for item in found:
+        finding_id = re.match(r'Advisory copy of formal verdict finding (F[0-9]+) ', item['body']).group(1)
+        marker = _MARKER % (head, finding_id)
+        if any(type(text) is str and text.startswith(marker) for text in existing):
+            counts['skipped'] += 1
+            continue
+        try:
+            poster(pr_number, {'body': marker + '\n' + item['body'], 'commit_id': head,
+                               'path': item['path'], 'line': item['line'], 'side': 'RIGHT'})
+        except Exception:
+            counts['failed'] += 1
+        else:
+            counts['posted'] += 1
+    return counts
