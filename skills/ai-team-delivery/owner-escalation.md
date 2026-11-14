@@ -61,7 +61,8 @@ Each ask carries one structured record with these fields:
 - `not_defect_not_harness`: why this is not a tool defect (that is a defect record under [defect triage](defect-triage.md)) and not a harness permission refusal (that is a `harness_permission` record, below).
 
 `R-OTHER` is the safety valve: never skip a real safety concern because no row fits, and never pick a row just to ask. If `R-OTHER` exceeds 10% of asks, the rules are reviewed. Stopping a dangerous action never needs an Owner question first.
-[NOT LIVE] (#1943): `pm_owner_marker.py ask` refusing an incomplete record, the monitor flag `UNGATED_OWNER_ASK` and the weekly cross-family audit. Until they are live, the PM applies this gate by hand.
+`pm_owner_marker.py ask` refuses an incomplete or mismatched record before any GitHub call (#1943 WP-1b).
+[NOT LIVE] (#1943): the monitor flag `UNGATED_OWNER_ASK` and the weekly cross-family audit. Until they are live, the PM checks those by hand.
 
 ## Standing PM cleanup (Owner O2, #1943)
 
@@ -87,7 +88,7 @@ This applies to every Owner decision on every Issue/PR, not to one topic (#812):
 - Every Owner answer, including a decision the Owner raises first in chat, is recorded by one comment that quotes the Owner and carries the `ANSWERED` marker, on each Issue/PR the answer touches.
 - Every scheduled sweep lists all open Owner rows in the repository and either settles each one or confirms it is still pending.
 
-Before asking, apply the [Owner ask gate](#owner-ask-gate-owner-o1-1943). Use `python3 tools/llmtool/scripts/pm_owner_marker.py ask N --question Q [--sheet FILE]` to post the waiting marker before asking in chat, `answer N --owner-words W --pm-reading R` to record the relayed answer, and `open-rows` for a read-only sweep of pending rows. The script takes the repository slug from the `origin` remote and uses `gh` for GitHub access.
+Before asking, apply the [Owner ask gate](#owner-ask-gate-owner-o1-1943). Use `python3 tools/llmtool/scripts/pm_owner_marker.py ask N --question Q --reserved-row ROW --blocked-action A --authority-check C --evidence E --not-defect-not-harness W [--other-reason O] [--sheet FILE]` to post the waiting marker with its ask record before asking in chat, `answer N --owner-words W --pm-reading R` to record the relayed answer, and `open-rows` for a read-only sweep of pending rows. The script takes the repository slug from the `origin` remote and uses `gh` for GitHub access.
 
 ## Decision record and continuation
 
