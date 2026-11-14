@@ -124,7 +124,43 @@ def audit(comments: list[dict], since: str, until: str) -> dict:
         "window": [since, until], "comments": len(window_comments), "asks": asks,
         "misused": misused, "corrected": corrected, "gated": gated, "ungated": ungated,
         "rows": rows, "r_other_ratio": ratio, "r_other_over_limit": ratio > 0.10, "items": items,
+        "owner_wait": owner_wait(comments, counted),
     }
+
+
+def _seconds(value) -> int | None:
+    from datetime import datetime, timezone
+    try:
+        return int(datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp())
+    except ValueError:
+        return None
+
+
+def owner_wait(comments: list[dict], asks: list[dict]) -> dict:
+    """#1943: Owner wait per ask, from the ask to the next ANSWERED record on its Issue."""
+    answers = []
+    for c in comments:
+        if not isinstance(c, dict):
+            continue
+        marker = _first_line_marker(c.get("body", ""))
+        if (marker and marker.get("target") == "Owner" and marker.get("status") == "ANSWERED"
+                and marker.get("type") != "waiting_owner"):
+            when = _seconds(c.get("created_at"))
+            if when is not None:
+                answers.append((_issue_number(c.get("issue_url")), when))
+    waits, unanswered = [], 0
+    for ask in asks:
+        number, start = _issue_number(ask.get("issue_url")), _seconds(ask.get("created_at"))
+        later = [when for issue, when in answers
+                 if start is not None and issue == number and when >= start]
+        if later:
+            waits.append(min(later) - start)
+        else:
+            unanswered += 1
+    total = sum(waits)
+    return {"answered": len(waits), "unanswered": unanswered, "total_seconds": total,
+            "mean_seconds": (total / len(waits)) if waits else None}
 
 
 def main(argv: list[str] | None = None) -> int:
