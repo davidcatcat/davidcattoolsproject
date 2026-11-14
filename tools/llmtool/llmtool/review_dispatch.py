@@ -23,7 +23,7 @@ from . import github_identity, role_config, task_completion, worker_dispatch
 # #1502 WP-E R1: the fallbacks equal the roles registry's listed models and,
 # like every resolved model, pass the shared registry check before launch.
 _CODEX_REVIEW_MODEL = 'gpt-6.1-sol'
-_CLAUDE_REVIEW_MODEL = 'claude-opus-5-5'
+_CLAUDE_REVIEW_MODEL = 'claude-sonnet-5-5'
 _CODEX_REVIEW_EFFORT = 'high'
 _CODEX_REVIEW_TIMEOUT = 600
 _CODEX_REVIEW_MAX_OUTPUT = 1024 * 1024
