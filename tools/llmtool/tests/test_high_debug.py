@@ -22,6 +22,16 @@ from llmtool.task_store import TaskStore
 
 _REAL_POST_GITHUB_RECORD = high_debug._post_github_record
 _RECOVERY_REF = 'https://github.com/org/repo/issues/1097#issuecomment-3'
+# #1502 WP-F: these tests do not read main; the rule loader is stubbed.
+# tests/test_high_debug_cards.py covers the real loader.
+_STUB_RULES = 'RULES stub\nRULES_END\n\n'
+_STUB_RULES_RESULT = (_STUB_RULES, hashlib.sha256(_STUB_RULES.encode('utf-8')).hexdigest())
+
+
+def _stub_debug_rules(test):
+    patcher = patch.object(high_debug, '_debug_rules', return_value=_STUB_RULES_RESULT)
+    patcher.start()
+    test.addCleanup(patcher.stop)
 
 
 def _keyword_lines(count):
@@ -56,6 +66,7 @@ class HighDebugTests(unittest.TestCase):
             return_value=Path(self.unposted_root.name) / 'tasks')
         self._store_root_patch.start()
         self.addCleanup(self._store_root_patch.stop)
+        _stub_debug_rules(self)
 
     @staticmethod
     def _report(outcome_lines, prose=''):
@@ -756,6 +767,30 @@ class HighDebugTests(unittest.TestCase):
                     failed_corrections=3)
         self.assertEqual(caught.exception.high_debug_code,
                          'HIGH_DEBUG_ARGUMENT_INVALID')
+
+    def test_family_must_match_the_prs_repair_claim_family(self):
+        # #1887: a Debug under another family than the PR's repair claims is refused
+        # before any dispatch, naming the expected family; other PRs are unaffected.
+        store = SimpleNamespace(get=lambda _task: {
+            'task_id': 'a' * 32,
+            'review_repair_claims': [{'family': 'pr-17', 'pr': 17}, {'pr': 17},
+                                     {'family': 'pr-9', 'pr': 9}],
+        })
+        cases = ((17, 'claude', 'HIGH_DEBUG_FAMILY_MISMATCH'),
+                 (17, 'pr-17', 'HIGH_DEBUG_DISPATCH_REFUSED'),
+                 (5, 'claude', 'HIGH_DEBUG_DISPATCH_REFUSED'))
+        for pr_number, family, code in cases:
+            with self.subTest(pr=pr_number, family=family), \
+                    patch.object(high_debug.worker_dispatch, 'evaluate',
+                                 return_value=SimpleNamespace(allowed=False)) as gate:
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug(store=store, task_id='a' * 32,
+                        executor_task='executor', pr_number=pr_number, family=family,
+                        early_reason='early')
+                self.assertEqual(caught.exception.high_debug_code, code)
+                if code == 'HIGH_DEBUG_FAMILY_MISMATCH':
+                    self.assertEqual(caught.exception.high_debug_detail, 'expected=pr-17')
+                    gate.assert_not_called()
 
     def test_neither_and_both_reason_forms_are_refused(self):
         store = SimpleNamespace(get=lambda _task: {'task_id': 'a' * 32})
@@ -2039,6 +2074,7 @@ class HighDebugWrongTaskOrFamilyTests(unittest.TestCase):
                                     return_value=True)
         self.poster = poster_patch.start()
         self.addCleanup(poster_patch.stop)
+        _stub_debug_rules(self)
 
     _REMOVED = object()
 

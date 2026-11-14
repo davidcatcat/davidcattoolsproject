@@ -21,6 +21,10 @@ EXECUTOR = 'executor-d6'
 REASON = 'REVIEW_PROMPT_REFUSED'
 RENDER_DETAIL = 'renderer-detail-must-not-be-kept'
 THREAD = '01234567-89ab-cdef-0123-456789abcdef'
+# #1502 WP-F: a fixed rule prefix stands in for the main-pinned Reviewer cards,
+# so no test here reads GitHub or Git for rules.
+RULES_PREFIX = 'RULES stub for review prompt refusal tests\nRULES_END\n\n'
+RULES_SHA256 = hashlib.sha256(RULES_PREFIX.encode('utf-8')).hexdigest()
 
 
 def setUpModule():
@@ -83,6 +87,10 @@ class ReviewPromptRefusalReasonTests(unittest.TestCase):
         env_patch = patch.dict(os.environ, {'HOME': str(home)})
         env_patch.start()
         self.addCleanup(env_patch.stop)
+        rules_patch = patch.object(review_dispatch, '_review_rules',
+                                   return_value=(RULES_PREFIX, RULES_SHA256))
+        rules_patch.start()
+        self.addCleanup(rules_patch.stop)
         self.root = Path(self.temp.name) / 'store'
         self.store, self.task_id = _real_store(self.root)
         self.create_calls, self.codex_calls = [], []
@@ -166,6 +174,7 @@ class ReviewPromptRefusalReasonTests(unittest.TestCase):
         self.assertEqual(claim['state'], 'UNKNOWN')
         self.assertEqual(claim['failure_reason'], REASON)
         self.assertEqual((claim['pr'], claim['head_sha'], claim['version']), (PR, HEAD, 1))
+        self.assertEqual(claim['rules_sha256'], RULES_SHA256)
         self.assertIsNone(claim['native_session_id'])
         stored = json.dumps(self.store.get(self.task_id))
         self.assertNotIn(RENDER_DETAIL, stored)
@@ -253,6 +262,7 @@ class ReviewPromptRefusalReasonTests(unittest.TestCase):
         self.assertEqual(claim['native_session_id'], THREAD)
         self.assertNotIn('failure_reason', claim)
         self.assertEqual(len(self.codex_calls), 1)
+        self.assertEqual(self.codex_calls[0]['prompt'], RULES_PREFIX + 'prompt')
         self.assertEqual(len(self.bind_calls), 1)
         self.assertEqual(self.decide(), 'REVIEW_OUTCOME_UNKNOWN')
 
