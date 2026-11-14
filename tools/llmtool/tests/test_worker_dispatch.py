@@ -156,9 +156,9 @@ class WorkerDispatchTests(unittest.TestCase):
                           Path(worker_dispatch._DEFAULT_POLICY_PATH)):
             decision = worker_dispatch.evaluate('agy')
             gw_agent_decision = worker_dispatch.evaluate('gw-agent')
-        # #1692 PR 2: the Owner paused AGY on 2026-11-13.
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
+        # #289: the Owner resumed PM-selected AGY dispatch on 2026-11-14.
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason_code, 'OWNER_POLICY_ALLOWED')
         self.assertTrue(gw_agent_decision.allowed)
         self.assertEqual(gw_agent_decision.reason_code, 'OWNER_POLICY_ALLOWED')
 
@@ -313,9 +313,11 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(worker['dispatch'], 'ALLOWED')
         self.assertNotIn('owner_assignments', worker)
 
-    # #1692 PR 2 (Owner decision 2026-11-13): the real policy pauses AGY. These
-    # tests read the live worker-dispatch.json through the real reader, parser
-    # and gates; each refusal has a control under the shared all-ALLOWED policy.
+    # #289 (Owner decision 2026-11-14): the real policy resumes PM-selected AGY
+    # dispatch. The row test reads the live worker-dispatch.json through the real
+    # reader and parser. The refusal tests below keep the #1692 PAUSED coverage
+    # against a copy of the real file whose only change is a PAUSED AGY row; each
+    # refusal has a control under the shared all-ALLOWED policy.
     def _real_policy(self):
         return patch.object(worker_dispatch, '_POLICY_PATH',
                             Path(worker_dispatch._DEFAULT_POLICY_PATH))
@@ -324,6 +326,22 @@ class WorkerDispatchTests(unittest.TestCase):
     def _real_policy_sha256():
         return hashlib.sha256(
             Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes()).hexdigest()
+
+    def _paused_agy_policy_path(self):
+        path = self.root / 'paused-agy' / 'worker-dispatch.json'
+        if not path.exists():
+            value = json.loads(Path(worker_dispatch._DEFAULT_POLICY_PATH).read_text(
+                encoding='utf-8'))
+            value['workers']['agy']['dispatch'] = 'PAUSED'
+            path.parent.mkdir()
+            path.write_text(json.dumps(value), encoding='utf-8')
+        return path
+
+    def _paused_agy_policy(self):
+        return patch.object(worker_dispatch, '_POLICY_PATH', self._paused_agy_policy_path())
+
+    def _paused_agy_policy_sha256(self):
+        return hashlib.sha256(self._paused_agy_policy_path().read_bytes()).hexdigest()
 
     def _agy(self, state, **changes):
         developer = self.developer(state=state, provider='agy')
@@ -340,26 +358,33 @@ class WorkerDispatchTests(unittest.TestCase):
             current, {'developer': new}, expected=expected)
         return denied, current['dispatch_audit']
 
-    def test_real_policy_agy_row_is_owner_paused_and_other_rows_unchanged(self):
+    def test_real_policy_agy_row_is_owner_resumed_and_other_rows_unchanged(self):
         raw = Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes()
         policy = worker_dispatch._parse_policy(raw)
         self.assertEqual(policy['schema_version'], 1)
         agy = policy['workers']['agy']
-        self.assertEqual(agy['dispatch'], 'PAUSED')
+        self.assertEqual(set(agy), {'dispatch', 'decided_by', 'decided_at', 'reason',
+                                    'evidence'})
+        self.assertEqual(agy['dispatch'], 'ALLOWED')
         self.assertEqual(agy['decided_by'], 'Owner')
-        self.assertEqual(agy['decided_at'], '2026-11-13')
-        self.assertIn('https://github.com/davidcatcat/davidcattoolsproject/issues/1692',
-                      agy['reason'])
-        # The #289 relay of the #1692 Owner decision (the validator accepts only #289).
+        self.assertEqual(agy['decided_at'], '2026-11-14')
+        self.assertLessEqual(len(agy['reason']), 512)
+        for phrase in ('resume PM-selected AGY Developer dispatch',
+                       'A11 and other non-#1502 Tasks',
+                       'gemini-3.8-flash-medium per the 2026-11-10 Owner decision',
+                       'no automatic retry or fallback',
+                       'two consecutive route failures'):
+            self.assertIn(phrase, agy['reason'])
+        # The #289 relay of the 2026-11-14 Owner decision (an Issue comment URL).
         self.assertEqual(
             agy['evidence'],
             'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
-            '#issuecomment-6850974885')
+            '#issuecomment-6869069265')
         self.assertNotIn('owner_assignments', agy)
         self.assertEqual(
             {key: row['dispatch'] for key, row in policy['workers'].items()},
             {'codex-developer': 'PAUSED', 'claude-developer': 'ALLOWED',
-             'opencode-developer': 'ALLOWED', 'agy': 'PAUSED',
+             'opencode-developer': 'ALLOWED', 'agy': 'ALLOWED',
              'company-gw': 'PAUSED', 'gw-agent': 'ALLOWED',
              'claude-reviewer': 'ALLOWED', 'codex-reviewer': 'ALLOWED',
              'codex-debug': 'ALLOWED', 'claude-debug': 'ALLOWED'})
@@ -369,10 +394,10 @@ class WorkerDispatchTests(unittest.TestCase):
             with self.subTest(worker=key):
                 self.assertEqual(decision.policy_sha256, hashlib.sha256(raw).hexdigest())
                 self.assertNotEqual(decision.reason_code, 'WORKER_POLICY_INVALID')
-        self.assertEqual(decisions['agy'].reason_code, 'OWNER_PAUSED')
-        self.assertFalse(decisions['agy'].allowed)
+        self.assertEqual(decisions['agy'].reason_code, 'OWNER_POLICY_ALLOWED')
+        self.assertTrue(decisions['agy'].allowed)
 
-    def test_real_policy_refuses_every_agy_taskstore_entry_point(self):
+    def test_paused_agy_row_refuses_every_agy_taskstore_entry_point(self):
         returned = {'review_return': {'state': 'RETURNED',
                                       'next_step': 'RETURN_TO_DEVELOPER_ONCE'}}
         pending = self._agy('DEVELOPER_PENDING')
@@ -401,7 +426,8 @@ class WorkerDispatchTests(unittest.TestCase):
             ('continuation on a new AGY assignment', pending,
              {**pending, 'assignment_id': new_id()}, {'developer': pending}, 'REASSIGN'),
         )
-        digest = self._real_policy_sha256()
+        digest = self._paused_agy_policy_sha256()
+        real_digest = self._real_policy_sha256()
         for name, old, new, expected, action in cases:
             with self.subTest(entry_point=name):
                 # Control: the shared all-ALLOWED policy admits the same transition.
@@ -409,7 +435,17 @@ class WorkerDispatchTests(unittest.TestCase):
                 self.assertIsNone(denied)
                 self.assertEqual((audit[-1]['worker_key'], audit[-1]['action'],
                                   audit[-1]['decision']), ('agy', action, 'ALLOWED'))
+                # The resumed real row admits it too (Owner 2026-11-14, #289).
                 with self._real_policy():
+                    denied, audit = self._agy_gate(
+                        old, new, expected=expected, history=history)
+                self.assertIsNone(denied)
+                self.assertEqual((audit[-1]['worker_key'], audit[-1]['action'],
+                                  audit[-1]['decision'], audit[-1]['reason_code'],
+                                  audit[-1]['policy_sha256']),
+                                 ('agy', action, 'ALLOWED', 'OWNER_POLICY_ALLOWED',
+                                  real_digest))
+                with self._paused_agy_policy():
                     denied, audit = self._agy_gate(
                         old, new, expected=expected, history=history)
                 self.assertIsInstance(denied, worker_dispatch.WorkerDispatchDenied)
@@ -423,7 +459,7 @@ class WorkerDispatchTests(unittest.TestCase):
                 self.assertFalse(any(entry.get('decision') == 'ALLOWED'
                                      for entry in audit[len(history):]))
 
-    def test_real_policy_refuses_agy_retry_and_timeout_continuation(self):
+    def test_paused_agy_row_refuses_agy_retry_and_timeout_continuation(self):
         timed_out = self._agy(
             'DEVELOPER_OUTCOME_UNKNOWN', error_code='DEVELOPER_TIMEOUT',
             execution={'status': 'TIMEOUT', 'diff_sha256': 'c' * 64,
@@ -439,13 +475,13 @@ class WorkerDispatchTests(unittest.TestCase):
               'error_code': None, 'execution': None},
              {'developer': timed_out}, 'REASSIGN'),
         )
-        digest = self._real_policy_sha256()
+        digest = self._paused_agy_policy_sha256()
         for name, new, expected, action in cases:
             with self.subTest(entry_point=name):
                 # AGY has no TIMEOUT_CONTINUATION action; only the gated actions apply.
                 self.assertEqual(worker_dispatch.task_store_attempts(
                     {'developer': timed_out}, {'developer': new}), [('agy', action)])
-                with self._real_policy():
+                with self._paused_agy_policy():
                     self.assertEqual(worker_dispatch.evaluate('agy').reason_code,
                                      'OWNER_PAUSED')
                     denied, audit = self._agy_gate(timed_out, new, expected=expected)
@@ -455,8 +491,8 @@ class WorkerDispatchTests(unittest.TestCase):
                 self.assertEqual(audit[-1]['decision'], 'BLOCKED')
                 self.assertEqual(audit[-1]['policy_sha256'], digest)
 
-    def test_real_policy_taskstore_refuses_new_agy_assignment_and_persists_blocked_audit(self):
-        with self._real_policy():
+    def test_paused_agy_row_taskstore_refuses_new_agy_assignment_and_persists_blocked_audit(self):
+        with self._paused_agy_policy():
             with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
                 self.store.compare_and_update(
                     self.task['task_id'],
@@ -470,9 +506,9 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'BLOCKED')
         self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_PAUSED')
         self.assertEqual(saved['dispatch_audit'][-1]['policy_sha256'],
-                         self._real_policy_sha256())
+                         self._paused_agy_policy_sha256())
 
-    def test_real_policy_refuses_agy_adapter_launch_for_historical_allowed_record(self):
+    def test_paused_agy_row_refuses_agy_adapter_launch_for_historical_allowed_record(self):
         # The record holds an unconsumed ALLOWED transition from the earlier row;
         # that historical authorization must not re-enable the adapter launch.
         pending = self._agy('DEVELOPER_PENDING')
@@ -501,7 +537,7 @@ class WorkerDispatchTests(unittest.TestCase):
             control, self.task['task_id'], 'agy', 'DISPATCH').allowed)
 
         store = MemoryStore(historical)
-        with self._real_policy():
+        with self._paused_agy_policy():
             with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
                 worker_dispatch.authorize_dispatch(
                     store, self.task['task_id'], 'agy', 'DISPATCH')
@@ -511,7 +547,7 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(entry['reason_code'], 'OWNER_PAUSED')
         self.assertEqual(entry['authorization_id'],
                          historical['dispatch_audit'][-1]['attempt_id'])
-        self.assertEqual(entry['policy_sha256'], self._real_policy_sha256())
+        self.assertEqual(entry['policy_sha256'], self._paused_agy_policy_sha256())
 
     def test_owner_assignment_policy_rejects_duplicate_or_malformed_bindings(self):
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-9999999999'
