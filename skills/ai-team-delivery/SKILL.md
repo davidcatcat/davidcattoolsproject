@@ -47,7 +47,7 @@ The EC2 remote-test runner is a PM pre-review tool on private infrastructure, no
 
 Developer done -> task advance: push branch -> EC2 test before the PR -> open PR -> Linux CI -> review -> PASS -> mac-ci label -> Mac CI -> merge without syncing main (M1, #1317). task advance is the only normal flow; manual commands are recovery only.
 
-On test or CI failure, returning the failure to the Developer and tracking failure counts per task is 待實作（WP-D）.
+On an EC2 remote-test or exact-head CI failure, `task advance` returns the failure to the original Developer through `task repair` and counts it on the Task's one test-failure count (`test_fail_max`, #1502 WP-D D11).
 
 The Developer implements the bounded packet, performs a distinct-context self-review and fixes ordinary findings before formal review. An OpenCode Developer must also complete a qualified, actually-free pre-review from a different model family before handoff. If none is available, record the limitation and mark the OpenCode Task BLOCKED. This pre-review is not independent acceptance or the formal Reviewer gate. For other current dispatch, route-specific and formal Reviewer rules, follow [AGENTS.md](../../AGENTS.md).
 
