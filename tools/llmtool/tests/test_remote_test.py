@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool import remote_test
+from llmtool.errors import LLMToolError
 from llmtool.task_store import _json_bytes, _validate_remote_test_receipts
 
 
@@ -797,19 +798,21 @@ class RemoteTestTests(unittest.TestCase):
                                         'remote_test_receipts': [valid_excerpt]})
         for changes in ({'ran_total': 0}, {'identity': {'uid': 0}},
                         {'failures': ['test_remote_test']}):
-            with self.subTest(changes=changes), self.assertRaises(Exception):
+            with self.subTest(changes=changes), self.assertRaises(LLMToolError) as caught:
                 bad = stored_receipt(**changes)
                 _validate_remote_test_receipts({'task_id': self.store.task['task_id'],
                                                 'run_id': self.store.task['run_id'],
                                                 'pm_session_id': self.store.task['pm_session_id'],
                                                 'remote_test_receipts': [bad]})
+            self.assertEqual(caught.exception.task_store_error_code, 'REMOTE_TEST_RECEIPT_INVALID')
 
         oversized = stored_receipt(failure_excerpt='x' * 4097)
-        with self.assertRaises(Exception):
+        with self.assertRaises(LLMToolError) as caught:
             _validate_remote_test_receipts({'task_id': self.store.task['task_id'],
                                             'run_id': self.store.task['run_id'],
                                             'pm_session_id': self.store.task['pm_session_id'],
                                             'remote_test_receipts': [oversized]})
+        self.assertEqual(caught.exception.task_store_error_code, 'REMOTE_TEST_RECEIPT_INVALID')
 
     def test_remote_busy_exit_maps_to_busy_without_receipt(self):
         def transport(argv, script, timeout):
