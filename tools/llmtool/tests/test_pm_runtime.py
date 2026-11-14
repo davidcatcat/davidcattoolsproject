@@ -675,6 +675,22 @@ class PMRuntimeTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             pm_runtime.list_bindings(state_root=self.root)
 
+    def test_binding_refusals_name_pm_binding_invalid(self):
+        # #683: a bad binding ID, a missing binding or a bad file name is PM_BINDING_INVALID.
+        binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root)
+        missing_id = '31234567-89ab-cdef-0123-456789abcdef'
+        for native_id in ('not-a-session-id', None, missing_id):
+            with self.subTest(native_id=native_id):
+                with self.assertRaises(LLMToolError) as raised:
+                    pm_runtime.select_binding(native_id, state_root=self.root)
+                self.assertEqual(raised.exception.pm_runtime_code, 'PM_BINDING_INVALID')
+        (self.root / 'not-a-session.binding.json').write_text('{}', encoding='utf-8')
+        with self.assertRaises(LLMToolError) as raised:
+            pm_runtime.list_bindings(state_root=self.root)
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_BINDING_INVALID')
+        self.assertEqual(pm_runtime.current_binding(state_root=self.root)['native_session_id'],
+                         binding['native_session_id'])
+
     def test_binding_account_mismatch_and_one_shot_override(self):
         account_a = Path(self.temp.name) / 'account-a'
         account_b = Path(self.temp.name) / 'account-b'
