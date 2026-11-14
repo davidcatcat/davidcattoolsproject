@@ -10,6 +10,12 @@ from .review_repair import EC2_FAMILY_SUFFIX
 
 _HEX32 = re.compile(r'[0-9a-f]{32}')
 _HEX40 = re.compile(r'[0-9a-f]{40}')
+_HEX64 = re.compile(r'[0-9a-f]{64}')
+_FAMILY = re.compile(r'[a-z0-9._-]{1,64}')
+_STAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
+# The TaskStore claim ranges; a bool is never an int here.
+_RANGES = {'pr': (1, 999999999), 'version': (1, 9999), 'attempt': (1, 3),
+           'comment_id': (0, 2 ** 63)}
 
 
 def refuse(code):
@@ -44,12 +50,20 @@ def check_claim(root, repair_task_id, *, executor_task, pr_number, others):
         if repair_task_id in named:
             refuse('REPAIR_RECOVERY_CLAIM_INVALID')
     found = [item for item in _claims(root) if item.get('repair_task_id') == repair_task_id]
-    claim = found[0] if len(found) == 1 else {}
-    family, head = claim.get('family'), claim.get('head_sha')
-    if (claim.get('state') != 'UNKNOWN' or claim.get('executor_task') != executor_task or
-            claim.get('pr') != pr_number or type(head) is not str or
-            not _HEX40.fullmatch(head) or
-            any(type(claim.get(key)) is not int for key in ('attempt', 'version', 'comment_id')) or
-            type(family) is not str or family.endswith(EC2_FAMILY_SUFFIX)):
+    if len(found) != 1 or not _valid_claim(found[0], executor_task, pr_number):
         refuse('REPAIR_RECOVERY_CLAIM_INVALID')
-    return dict(claim)
+    return dict(found[0])
+
+
+def _valid_claim(claim, executor_task, pr_number):
+    text = [claim.get(key) for key in ('head_sha', 'packet_sha256', 'claimed_at', 'family')]
+    if any(type(value) is not str for value in text):
+        return False
+    head, packet, stamp, family = text
+    return bool(
+        claim.get('state') == 'UNKNOWN' and claim.get('executor_task') == executor_task and
+        all(type(claim.get(key)) is int and low <= claim[key] <= high
+            for key, (low, high) in _RANGES.items()) and
+        claim['pr'] == pr_number and _HEX40.fullmatch(head) and _HEX64.fullmatch(packet) and
+        _STAMP.fullmatch(stamp) and _FAMILY.fullmatch(family) and
+        not family.endswith(EC2_FAMILY_SUFFIX))

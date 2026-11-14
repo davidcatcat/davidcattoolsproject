@@ -33,7 +33,10 @@ class RecoveryClaimTests(unittest.TestCase):
     def test_e1_refuses_each_bad_claim(self):
         bad = [{'state': 'DISPATCHED'}, {'state': 'CLAIMED'}, {'executor_task': 'exec-2'},
                {'pr': 18}, {'head_sha': 'C' * 40}, {'attempt': True}, {'version': '1'},
-               {'comment_id': None}, {'family': 'pr-17-ec2'}, {'family': None}]
+               {'comment_id': None}, {'family': 'pr-17-ec2'}, {'family': None},
+               {'attempt': 4}, {'version': 0}, {'comment_id': -1}, {'family': ''},
+               {'family': 'PR-17'}, {'packet_sha256': 'x'}, {'packet_sha256': None},
+               {'claimed_at': '2026-11-15'}]
         for change in bad:
             with self.subTest(change=change):
                 code = self.code(self.e1, root(dict(CLAIM, **change)))
@@ -42,6 +45,9 @@ class RecoveryClaimTests(unittest.TestCase):
                        root(dict(CLAIM, repair_task_id='e' * 32)), {'task_id': None}):
             with self.subTest(record=record):
                 self.assertEqual(self.code(self.e1, record), 'REPAIR_RECOVERY_CLAIM_INVALID')
+        # A bool PR number equals 1 but is not an int PR.
+        self.assertEqual(self.code(self.e1, root(dict(CLAIM, pr=True)), pr=1),
+                         'REPAIR_RECOVERY_CLAIM_INVALID')
 
     def test_e1_refuses_bad_arguments(self):
         for kwargs in ({'repair': 'B' * 32}, {'pr': True}, {'pr': 0}, {'executor': ''}):
