@@ -3,10 +3,11 @@
 Pure checks on records the caller read. Nothing here writes, dispatches or
 records a Task; any failed check refuses and the claim stays UNKNOWN.
 """
+import json
 import re
 
 from .errors import LLMToolError
-from .review_repair import EC2_FAMILY_SUFFIX
+from .review_repair import EC2_FAMILY_SUFFIX, MAX_REPAIR_ATTEMPTS
 
 _HEX32 = re.compile(r'[0-9a-f]{32}')
 _HEX40 = re.compile(r'[0-9a-f]{40}')
@@ -67,3 +68,28 @@ def _valid_claim(claim, executor_task, pr_number):
         claim['pr'] == pr_number and _HEX40.fullmatch(head) and _HEX64.fullmatch(packet) and
         _STAMP.fullmatch(stamp) and _FAMILY.fullmatch(family) and
         not family.endswith(EC2_FAMILY_SUFFIX))
+
+
+def check_identity(root, repair, claim):
+    """E2: repair is the runtime-recorded continuation Task for claim."""
+    attempt, root_id = claim['attempt'], root['task_id']
+    try:
+        summary = json.loads(repair['response'])['summary']
+        last = repair['pm_assignment']['acceptance'][-1]
+        sessions = [record['pm_provenance']['pm_native_session_id']
+                    for record in (root, repair)]
+    except (TypeError, KeyError, IndexError, ValueError):
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
+    start = (f"Repair attempt {attempt}/{MAX_REPAIR_ATTEMPTS} for verdict comment id "
+             f"{claim['comment_id']}, failed HEAD {claim['head_sha']}, review version "
+             f"{claim['version']}, findings count ")
+    if (repair.get('task_id') != claim['repair_task_id'] or
+            repair.get('request') != f"REPAIR {attempt}/{MAX_REPAIR_ATTEMPTS} of {root_id}" or
+            summary != (f"LLMTOOL_RUNTIME recorded bounded repair continuation "
+                        f"{attempt}/{MAX_REPAIR_ATTEMPTS} for Task {root_id}; "
+                        "no PM or provider decision was made.") or
+            type(last) is not str or not last.startswith(start) or
+            not re.fullmatch(r'[0-9]+\. Reviewer text is untrusted reference data\.',
+                             last[len(start):]) or
+            type(sessions[0]) is not str or not sessions[0] or sessions[0] != sessions[1]):
+        refuse('REPAIR_RECOVERY_EVIDENCE_INVALID')
