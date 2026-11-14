@@ -487,44 +487,53 @@ def _pr_files(number, github_get):
     return None, PR_FILES_TOO_MANY
 
 
-# #1502 WP-G gate 2: llmtool-linux-ci.yml's 'changes' job sets independent
-# code, docs and ai_loop flags. A tools/ai-loop/ path sets ai_loop (and docs
-# too when it is Markdown) but never code, so an ai-loop-only PR gets no shards
-# and no 'check (Linux 3.14)'. Require exactly the checks the flags produce,
-# never one that cannot appear.
+# #1502 WP-G gate 2 (sec v93): llmtool-linux-ci.yml's 'changes' job sets four
+# independent flags (code, docs, gateway, ai_loop) with linux_flags() from
+# tools/llmtool/scripts/ci_path_classes.py, and each enabled flag runs its own
+# check. The gates load that same classifier (never a local copy) and require
+# the union of the checks: a code PR that also changes docs, the gateway or
+# ai-loop still needs those checks. Never a check that cannot appear.
 _AI_LOOP_CHECK = 'ai-loop helper tests (Python 3.14)'
-_AI_LOOP_PREFIX = 'tools/ai-loop/'
+_GATEWAY_CHECK = 'gateway tests (Linux 3.14)'
+# In linux_flags() order: code, docs, gateway, ai_loop.
+_LINUX_FLAG_CHECKS = ('check (Linux 3.14)', 'check (docs)', _GATEWAY_CHECK, _AI_LOOP_CHECK)
+_CI_PATH_CLASSES = []
 
 
-def _linux_ci_flags(paths):
-    """(code, docs, ai_loop) as the workflow's classify step sets them."""
-    code = docs = ai_loop = False
-    for path in paths:
-        is_docs = task_completion._docs_only_ci([path])
-        if type(path) is str and path.startswith(_AI_LOOP_PREFIX):
-            ai_loop = True
-            docs = docs or is_docs
-        elif is_docs:
-            docs = True
-        else:
-            code = True
-    return code, docs, ai_loop
+def _ci_path_classes():
+    """The canonical CI path classifier module, loaded once from scripts/."""
+    if not _CI_PATH_CLASSES:
+        path = Path(__file__).resolve().parents[1] / 'scripts' / 'ci_path_classes.py'
+        spec = importlib.util.spec_from_file_location('_llmtool_ci_path_classes', path)
+        if spec is None or spec.loader is None:
+            raise ImportError('ci_path_classes.py unavailable')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _CI_PATH_CLASSES.append(module)
+    return _CI_PATH_CLASSES[0]
 
 
 def _required_linux_checks(paths, old_paths=()):
     """The exact-head Linux workflow check names a PR with these paths needs.
 
     CI diffs with --no-renames, so a rename's old path is classified exactly
-    like a changed path: a file moved out of code keeps the code check, and a
-    file moved out of tools/ai-loop/ keeps the ai-loop check.
+    like a changed path: both sides of a rename add their checks. Returns
+    None (fail closed) when the paths cannot be classified the way CI does.
     """
     if not paths:
         return ['check (Linux 3.14)']
-    code, docs, ai_loop = _linux_ci_flags(list(paths) + list(old_paths))
-    if code:
-        return ['check (Linux 3.14)']
-    return ((['check (docs)'] if docs else []) +
-            ([_AI_LOOP_CHECK] if ai_loop else []))
+    names = list(paths) + list(old_paths)
+    if any(type(name) is not str or '\0' in name for name in names):
+        return None
+    try:
+        data = b''.join(name.encode('utf-8', 'surrogateescape') + b'\0' for name in names)
+        flags = _ci_path_classes().linux_flags(data)
+    except Exception:
+        return None
+    if type(flags) is not tuple or len(flags) != len(_LINUX_FLAG_CHECKS):
+        return None
+    required = [name for flag, name in zip(flags, _LINUX_FLAG_CHECKS) if flag is True]
+    return required or None
 
 
 def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False,
@@ -575,7 +584,9 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
     if any(type(path) is not str for path in old_paths):
         return 'MERGE_CHECKS_UNAVAILABLE'
     required_checks = _required_linux_checks(paths, old_paths)
-    docs_only = required_checks == ['check (docs)']
+    if required_checks is None:
+        return 'MERGE_CHECKS_UNAVAILABLE'
+    docs_only =required_checks == ['check (docs)']
     requires_macos = not docs_only and _mac_ci_runs(paths + old_paths)
     if requires_macos:
         required_checks.append('check (macOS 3.13)')
@@ -692,11 +703,14 @@ def _review_ci_gate(number, head, github_get, latest_out=None):
     runs = checks['check_runs']
     if any(type(item) is not dict for item in runs):
         return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+    required_checks = _required_linux_checks(paths, old_paths)
+    if required_checks is None:
+        return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
     # Every required check must pass (a docs + ai-loop PR needs both). A
     # malformed run beats a failure, and a failure beats a pending check.
     failed = None
     pending = False
-    for required_name in _required_linux_checks(paths, old_paths):
+    for required_name in required_checks:
         candidates = [item for item in runs if item.get('head_sha') == head and
                       item.get('name') == required_name]
         for item in candidates:

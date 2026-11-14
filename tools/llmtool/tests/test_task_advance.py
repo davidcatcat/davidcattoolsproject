@@ -114,9 +114,14 @@ class TaskAdvanceMergeDocsRuleTests(unittest.TestCase):
             self._checks(['tools/llmtool/llmtool/deep/z.md'],
                          ['check (docs)', 'check (Linux 3.14)']),
             'MERGE_REQUIRED_CHECK_MISSING')
+        # Markdown also sets the workflow's docs flag, so check (docs) is required too.
+        self.assertEqual(
+            self._checks(['tools/llmtool/llmtool/deep/z.md'],
+                         ['check (Linux 3.14)', 'check (macOS 3.13)']),
+            'MERGE_REQUIRED_CHECK_MISSING')
         self.assertIsNone(
             self._checks(['tools/llmtool/llmtool/deep/z.md'],
-                         ['check (Linux 3.14)', 'check (macOS 3.13)']))
+                         ['check (Linux 3.14)', 'check (docs)', 'check (macOS 3.13)']))
 
     def test_top_level_readme_stays_docs_only(self):
         self.assertIsNone(self._checks(['README.md'], ['check (docs)']))
@@ -4899,19 +4904,27 @@ class PrFilesPaginationAndAiLoopTests(unittest.TestCase):
 
     def test_rename_source_counts_in_every_change_class(self):
         # CI diffs with --no-renames, so both sides of a rename are classified
-        # and the workflow's flags are the union of both: code wins; otherwise
-        # docs and ai-loop each add their own check.
-        docs, linux = ['check (docs)'], [self.LINUX]
+        # and the workflow's flags are the union of both: every enabled flag
+        # adds its own check (sec v93).
+        docs = ['check (docs)']
         docs_and_ai_loop = ['check (docs)', self.AI_LOOP]
+        code_and_docs = [self.LINUX, 'check (docs)']
+        code_and_ai_loop = [self.LINUX, self.AI_LOOP]
         cases = (
-            ('code to docs', 'docs/module.md', 'src/module.py', linux),
+            ('code to docs', 'docs/module.md', 'src/module.py', code_and_docs),
             ('ai-loop to docs', 'docs/loop.md', 'tools/ai-loop/loop.py', docs_and_ai_loop),
-            ('code to ai-loop', 'tools/ai-loop/loop.py', 'src/loop.py', linux),
-            ('docs to code', 'src/guide.py', 'docs/guide.md', linux),
+            ('code to ai-loop', 'tools/ai-loop/loop.py', 'src/loop.py', code_and_ai_loop),
+            ('docs to code', 'src/guide.py', 'docs/guide.md', code_and_docs),
             ('docs to ai-loop', 'tools/ai-loop/loop.py', 'docs/loop.md', docs_and_ai_loop),
             ('ai-loop Markdown to docs', 'docs/README.md', 'tools/ai-loop/README.md',
              docs_and_ai_loop),
-            ('ai-loop to code', 'src/loop.py', 'tools/ai-loop/loop.py', linux),
+            ('ai-loop to code', 'src/loop.py', 'tools/ai-loop/loop.py', code_and_ai_loop),
+            ('gateway to code', 'src/app.py', 'tools/api-agent-gateway/app.py',
+             [self.LINUX, 'gateway tests (Linux 3.14)']),
+            ('gateway to docs', 'docs/app.md', 'tools/api-agent-gateway/app.py',
+             [self.LINUX, 'check (docs)', 'gateway tests (Linux 3.14)']),
+            ('ai-loop to gateway', 'tools/api-agent-gateway/loop.py', 'tools/ai-loop/loop.py',
+             [self.LINUX, 'gateway tests (Linux 3.14)', self.AI_LOOP]),
             ('docs to docs', 'docs/new.md', 'docs/old.md', docs),
             ('ai-loop to ai-loop', 'tools/ai-loop/b.py', 'tools/ai-loop/a.py',
              [self.AI_LOOP]),
@@ -4950,7 +4963,8 @@ class PrFilesPaginationAndAiLoopTests(unittest.TestCase):
         self.assertEqual(task_advance._required_linux_checks(['docs/guide.md']),
                          ['check (docs)'])
         self.assertEqual(task_advance._required_linux_checks(
-            ['tools/ai-loop/README.md', 'src/module.py']), [self.LINUX])
+            ['tools/ai-loop/README.md', 'src/module.py']),
+            [self.LINUX, 'check (docs)', self.AI_LOOP])
 
     def test_review_needs_every_required_check(self):
         entries = ['tools/ai-loop/README.md']
@@ -4989,6 +5003,183 @@ class PrFilesPaginationAndAiLoopTests(unittest.TestCase):
                          'MERGE_REQUIRED_CHECK_MISSING')
         self.assertEqual(self.gates(renamed, ['check (docs)', self.LINUX, self.MAC]),
                          (None, (None, None)))
+
+
+class RequiredLinuxChecksUnionTests(unittest.TestCase):
+    """#1502 WP-G2 sec v93: the gates require every check the CI flags enable."""
+
+    PR = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'mergeable': True}
+    FIRST_PAGE = 'pulls/17/files?per_page=100'
+    LINUX = 'check (Linux 3.14)'
+    DOCS = 'check (docs)'
+    GATEWAY = 'gateway tests (Linux 3.14)'
+    AI_LOOP = 'ai-loop helper tests (Python 3.14)'
+    ORDER = (LINUX, DOCS, GATEWAY, AI_LOOP)
+    CODE_PATH = 'src/module.py'
+    DOCS_PATH = 'docs/guide.md'
+    GATEWAY_PATH = 'tools/api-agent-gateway/app.py'
+    AI_LOOP_PATH = 'tools/ai-loop/loop.py'
+    CANONICAL = Path(__file__).resolve().parents[1] / 'scripts' / 'ci_path_classes.py'
+    CASES = (
+        ('code', [CODE_PATH], [LINUX]),
+        ('docs', [DOCS_PATH], [DOCS]),
+        ('gateway', [GATEWAY_PATH], [LINUX, GATEWAY]),
+        ('gateway Markdown', ['tools/api-agent-gateway/README.md'], [LINUX, DOCS, GATEWAY]),
+        ('ai-loop', [AI_LOOP_PATH], [AI_LOOP]),
+        ('code + docs', [CODE_PATH, DOCS_PATH], [LINUX, DOCS]),
+        ('code + gateway', [CODE_PATH, GATEWAY_PATH], [LINUX, GATEWAY]),
+        ('code + ai-loop', [CODE_PATH, AI_LOOP_PATH], [LINUX, AI_LOOP]),
+        ('docs + ai-loop', [DOCS_PATH, AI_LOOP_PATH], [DOCS, AI_LOOP]),
+        ('all four', [CODE_PATH, DOCS_PATH, GATEWAY_PATH, AI_LOOP_PATH],
+         [LINUX, DOCS, GATEWAY, AI_LOOP]),
+    )
+
+    @classmethod
+    def canonical(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('ci_path_classes_parity', cls.CANONICAL)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def run(run_id, name, *, head=HEAD, status='completed', conclusion='success'):
+        return {'id': run_id, 'head_sha': head, 'name': name, 'status': status,
+                'conclusion': conclusion}
+
+    def gates(self, entries, runs):
+        files = [{'filename': item} if type(item) is str else item for item in entries]
+
+        def get(path):
+            if path.startswith('commits/'):
+                return {'total_count': len(runs), 'check_runs': runs}
+            if path == self.FIRST_PAGE:
+                return files
+            raise AssertionError(path)
+        return (task_advance._merge_checks({}, 17, HEAD, self.PR, get),
+                task_advance._review_ci_gate(17, HEAD, get))
+
+    def test_required_set_is_the_union_of_enabled_flags(self):
+        for label, paths, expected in self.CASES:
+            with self.subTest(label):
+                self.assertEqual(task_advance._required_linux_checks(paths), expected)
+
+    def test_rename_source_flags_join_the_union(self):
+        cases = (
+            ('code renamed to docs', self.DOCS_PATH, self.CODE_PATH, [self.LINUX, self.DOCS]),
+            ('gateway renamed to ai-loop', self.AI_LOOP_PATH, self.GATEWAY_PATH,
+             [self.LINUX, self.GATEWAY, self.AI_LOOP]),
+            ('ai-loop renamed to docs', self.DOCS_PATH, self.AI_LOOP_PATH,
+             [self.DOCS, self.AI_LOOP]),
+        )
+        for label, new, old, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(task_advance._required_linux_checks([new], [old]), expected)
+                renamed = [{'filename': new, 'previous_filename': old}]
+                runs = [self.run(index + 1, name) for index, name in enumerate(expected)]
+                self.assertEqual(self.gates(renamed, runs), (None, (None, None)))
+                self.assertEqual(
+                    self.gates(renamed, runs[:-1]),
+                    ('MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')))
+
+    def test_parity_with_the_canonical_classifier(self):
+        canonical = self.canonical()
+        samples = ['src/module.py', 'docs/guide.md', 'README.md', 'tools/llmtool/README.md',
+                   'tools/llmtool/llmtool/deep/z.md', 'tools/llmtool/llmtool/x.py',
+                   'tools/api-agent-gateway/app.py', 'tools/api-agent-gateway/README.md',
+                   'tools/ai-loop/loop.py', 'tools/ai-loop/README.md',
+                   '.github/workflows/llmtool-linux-ci.yml', 'skills/x/SKILL.md',
+                   'skills/x/tool.py', 'skills/x/data.json', 'scripts/tool.sh']
+        sets = [[path] for path in samples] + [
+            [first, second] for index, first in enumerate(samples)
+            for second in samples[index + 1:]]
+        for paths in sets:
+            with self.subTest(paths=paths):
+                data = b''.join(path.encode() + b'\0' for path in paths)
+                flags = canonical.linux_flags(data)
+                expected = [name for flag, name in zip(flags, self.ORDER) if flag]
+                self.assertEqual(task_advance._required_linux_checks(paths), expected)
+                # Rename sources are classified like changed paths.
+                self.assertEqual(task_advance._required_linux_checks(paths[:1], paths[1:]),
+                                 expected)
+
+    def test_flags_come_from_the_canonical_classifier_file(self):
+        module = task_advance._ci_path_classes()
+        self.assertEqual(Path(module.__file__).resolve(), self.CANONICAL)
+
+        class Fake:
+            calls = []
+
+            @classmethod
+            def linux_flags(cls, data):
+                cls.calls.append(data)
+                return (False, False, True, True)
+
+        with patch.object(task_advance, '_ci_path_classes', return_value=Fake):
+            self.assertEqual(task_advance._required_linux_checks(['a.py'], ['b.py']),
+                             [self.GATEWAY, self.AI_LOOP])
+        self.assertEqual(Fake.calls, [b'a.py\0b.py\0'])
+
+    def test_unclassifiable_paths_fail_closed(self):
+        runs = [self.run(1, self.LINUX)]
+        unavailable = ('MERGE_CHECKS_UNAVAILABLE', ('WAITING_CI', 'LINUX_CI_UNAVAILABLE'))
+        with patch.object(task_advance, '_ci_path_classes', side_effect=ImportError('gone')):
+            self.assertIsNone(task_advance._required_linux_checks([self.CODE_PATH]))
+            self.assertEqual(self.gates([self.CODE_PATH], runs), unavailable)
+        for flags in ((True, False, False), (False, False, False, False), None):
+            with self.subTest(flags=flags):
+                class Fake:
+                    @staticmethod
+                    def linux_flags(_data, flags=flags):
+                        return flags
+                with patch.object(task_advance, '_ci_path_classes', return_value=Fake):
+                    self.assertEqual(self.gates([self.CODE_PATH], runs), unavailable)
+        self.assertEqual(self.gates(['src/a\0b.py'], runs), unavailable)
+
+    def test_all_required_checks_green_passes_both_gates(self):
+        for label, paths, expected in self.CASES:
+            with self.subTest(label):
+                runs = [self.run(index + 1, name) for index, name in enumerate(expected)]
+                self.assertEqual(self.gates(paths, runs), (None, (None, None)))
+
+    def test_any_dropped_or_unhealthy_required_check_blocks_both_gates(self):
+        # Each required check in turn is missing, pending, skipped, failed or
+        # only present for a stale head while every other required check passed.
+        states = (
+            ('missing', None,
+             ('MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING'))),
+            ('pending', {'status': 'in_progress', 'conclusion': None},
+             ('MERGE_CHECKS_NOT_GREEN', ('WAITING_CI', 'LINUX_CI_PENDING'))),
+            ('skipped', {'conclusion': 'skipped'},
+             ('MERGE_REQUIRED_CHECK_SKIPPED', ('CI_FAILED', 'LINUX_CI_FAILED'))),
+            ('failed', {'conclusion': 'failure'},
+             ('MERGE_CHECKS_NOT_GREEN', ('CI_FAILED', 'LINUX_CI_FAILED'))),
+            ('stale head', {'head': 'b' * 40},
+             ('MERGE_CHECKS_NOT_GREEN', ('WAITING_CI', 'LINUX_CI_PENDING'))),
+        )
+        for label, paths, expected in self.CASES:
+            if len(expected) < 2:
+                continue
+            for target in expected:
+                for state, change, codes in states:
+                    with self.subTest(case=label, check=target, state=state):
+                        runs = []
+                        for index, name in enumerate(expected):
+                            if name != target:
+                                runs.append(self.run(index + 1, name))
+                            elif change is not None:
+                                runs.append(self.run(index + 1, name, **change))
+                        self.assertEqual(self.gates(paths, runs), codes)
+
+    def test_code_check_alone_no_longer_satisfies_a_mixed_pr(self):
+        # The sec v93 regression: only check (Linux 3.14) used to be required.
+        for label, paths, expected in self.CASES:
+            if expected[0] != self.LINUX or len(expected) < 2:
+                continue
+            with self.subTest(label):
+                self.assertEqual(
+                    self.gates(paths, [self.run(1, self.LINUX)]),
+                    ('MERGE_REQUIRED_CHECK_MISSING', ('WAITING_CI', 'LINUX_CI_PENDING')))
 
 
 class IntegrationDeltaRealGitTests(unittest.TestCase):
