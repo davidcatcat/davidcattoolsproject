@@ -114,7 +114,7 @@ class CLITests(unittest.TestCase):
 
         expected_freshness = {
             'delegate', 'review-dispatch', 'high-debug', 'repair', 'remote-test', 'drive',
-            'claude-bind',
+            'claude-bind', 'file-ops',
         }
         self.assertEqual(
             {action for action, (_function_name, fresh) in TASK_ACTIONS.items() if fresh},
@@ -153,6 +153,22 @@ class CLITests(unittest.TestCase):
         self.assertEqual(parsed.task_id, 'a' * 32)
         self.assertEqual(parsed.executor_task, 'd6-task')
         self.assertEqual(parsed.owner_ref, 'https://github.com/example/repo/issues/1')
+
+    def test_file_ops_cli_needs_fresh_source_and_dispatches(self):
+        from llmtool.cli import main
+        called = []
+        with patch('llmtool.source_freshness.require_fresh_source',
+                   return_value='OK') as freshness, \
+                patch.object(task_submission_cli, 'run_task_file_ops',
+                             side_effect=lambda args: called.append(args) or 0):
+            rc = main(['task', 'file-ops', 'a' * 32, '--executor-task', 'd6-task',
+                       '--pm-session', 'pm-test-session'])
+        self.assertEqual(rc, 0)
+        freshness.assert_called_once()
+        self.assertEqual(len(called), 1)
+        self.assertEqual((called[0].action, called[0].task_id, called[0].executor_task,
+                          called[0].pm_session, called[0].common_dir),
+                         ('file-ops', 'a' * 32, 'd6-task', 'pm-test-session', None))
 
     def test_review_bundle_is_local_early_dispatch_and_sanitized_json(self):
         result = self.run_cli('task','review-bundle','--help')
