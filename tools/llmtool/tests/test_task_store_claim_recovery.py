@@ -61,6 +61,27 @@ class ClaimRecoveryStoreTests(unittest.TestCase):
         changed = {key for key in saved if saved[key] != self.unknown.get(key)}
         self.assertEqual(changed - {'updated_at'}, {'review_repair_claims', 'record_sha256'})
 
+    def test_failed_evidence_stale_record_or_repeat_writes_nothing(self):
+        failed = LLMToolError('evidence')
+        self.assertIs(self.unchanged(LLMToolError, self.recover, verify=failed), failed)
+        self.unchanged(TaskStoreConflict, self.recover, sha='9' * 64)
+        saved, _ = self.recover()
+        error = self.unchanged(LLMToolError, self.recover, sha=saved['record_sha256'])
+        self.assertEqual(error.task_store_error_code, 'REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+
+    def test_no_untrusted_path_sets_unknown_dispatched(self):
+        error = self.unchanged(LLMToolError, self.cas, review_repair_claims=[
+            self.claims[0], dict(self.claims[1], state='DISPATCHED')])
+        self.assertEqual(error.task_store_error_code, 'REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+        # A recovery never carries caller changes, and a CLAIMED claim is not recovered.
+        error = self.unchanged(LLMToolError, self.store._update, self.task_id, expected=None,
+                               changes={'review_repair_claims': self.claims},
+                               claim_recovery=(self.repair, 'e-1', 17))
+        self.assertEqual(error.task_store_error_code, 'REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+        error = self.unchanged(LLMToolError, self.recover,
+                               repair=self.claims[0]['repair_task_id'])
+        self.assertEqual(error.task_store_error_code, 'REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+
 
 if __name__ == '__main__':
     unittest.main()
