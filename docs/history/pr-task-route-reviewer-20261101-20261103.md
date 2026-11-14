@@ -131,3 +131,83 @@ Same family (author route and last PASS are both Codex): #787, #789, #828.
 - #787: it also has a Claude PASS.
 - #789: it also has a Claude PASS.
 - #828: it also has a Claude PASS; the branch name says `gw`, the dispatch marker says Codex, and the table uses the marker.
+
+## Merged 2026-11-03
+
+67 PRs. Author route `UNKNOWN`: 7 PRs.
+
+| PR | Merged (UTC) | Task (prefix) | Author route | Route source | Reviewer |
+| --- | --- | --- | --- | --- | --- |
+| #829 | 2026-11-03 | 5c9a9fb9, e94de9da | Codex | dispatch marker | Claude |
+| #830 | 2026-11-03 | f9ffd4a3 | Codex | dispatch marker | Claude |
+| #831 | 2026-11-03 | 0c2dcaca, 1ae72949, 4e4bfc5e | Codex | dispatch marker | Claude |
+| #832 | 2026-11-03 | 2dd75fa9, 3a18a0e7 | Codex | dispatch marker | Claude |
+| #833 | 2026-11-03 | 0ed53748, ba268d43, e2cfa33e | Codex | dispatch marker | Claude |
+| #834 | 2026-11-03 | 24c843e4, d9d66a60, dfedb15c | Codex | dispatch marker | Claude |
+| #835 | 2026-11-03 | 150a8806, 6b29fd41, f61623d0 | Codex | dispatch marker | Claude |
+| #836 | 2026-11-03 | 784f2e3d, c1a0dad2 | Codex | dispatch marker | Claude, Codex (all PASS actors; same family) |
+| #837 | 2026-11-03 | 489f0f3f, 4d0c67fe, 72ad4af3 | Codex | dispatch marker | Claude |
+| #838 | 2026-11-03 | 1b6d54d4, 2c228177, 6be62cbd | Codex | dispatch marker | Claude |
+| #839 | 2026-11-03 | a23ab24b, ce818e2c | Codex | dispatch marker | Codex, Claude (all PASS actors; same family) |
+| #841 | 2026-11-03 | 0bd1ec81, 414ffb01, 4bc21091 | Codex | dispatch marker | Claude |
+| #843 | 2026-11-03 | UNKNOWN | Claude | branch name | Codex |
+| #844 | 2026-11-03 | UNKNOWN | Claude | branch name | Codex |
+| #845 | 2026-11-03 | a9da68e9, b9031662 | Codex | dispatch marker | Claude |
+| #846 | 2026-11-03 | 1b827222, 52d7d386 | Codex | dispatch marker | Codex (all PASS actors; same family) |
+| #848 | 2026-11-03 | b035057c, ee008ae3 | Codex | dispatch marker | Claude |
+| #849 | 2026-11-03 | 1cd01bb8, 279ccd25, 3e067407 | Codex | dispatch marker | Claude |
+| #850 | 2026-11-03 | UNKNOWN | Claude | branch name | Codex |
+| #851 | 2026-11-03 | 0517970a | Codex | dispatch marker | Claude |
+| #852 | 2026-11-03 | 3f7372e2 | Codex | dispatch marker | Codex (all PASS actors; same family) |
+| #853 | 2026-11-03 | 8355fe56 | Codex | dispatch marker | Claude |
+| #854 | 2026-11-03 | 83822c75 | Codex | dispatch marker | Claude |
+| #855 | 2026-11-03 | 17d64a67, da1b8d98 | Codex | dispatch marker | Claude |
+| #856 | 2026-11-03 | UNKNOWN | Claude | branch name | Codex |
+| #857 | 2026-11-03 | UNKNOWN | UNKNOWN | none | Codex |
+| #858 | 2026-11-03 | UNKNOWN | Claude | branch name | Codex |
+| #859 | 2026-11-03 | 034f65b6, 3e509a67, 8f595f83 | Codex | dispatch marker | Claude |
+| #860 | 2026-11-03 | abc01ac3, b5899063, bef540a3 | Codex | dispatch marker | Claude |
+| #861 | 2026-11-03 | a120e75e | Codex | dispatch marker | Claude |
+| #862 | 2026-11-03 | UNKNOWN | Claude | branch name | Codex |
+| #863 | 2026-11-03 | UNKNOWN | Claude | branch name | Codex |
+| #864 | 2026-11-03 | UNKNOWN | Claude | branch name | Codex |
+| #865 | 2026-11-03 | 0086fb86, 12da9bfd, 189c300b | Codex | dispatch marker | Claude |
+| #866 | 2026-11-03 | e3efd107 | Codex | dispatch marker | Claude |
+| #867 | 2026-11-03 | 02dab786, 297f3836, 36118488 | Codex | dispatch marker | Claude |
+| #868 | 2026-11-03 | 01e6f245, 49028af2, 688ad799 | Codex | dispatch marker | Claude |
+| #869 | 2026-11-03 | 66cec589 | Codex | dispatch marker | Claude |
+| #870 | 2026-11-03 | 66ee41ad, e3efd107 | Codex | dispatch marker | Claude |
+| #871 | 2026-11-03 | 59f2e9d7, e3efd107 | Codex | dispatch marker | Claude |
+| #872 | 2026-11-03 | 13a7a45a | Codex | dispatch marker | Claude |
+| #873 | 2026-11-03 | 163db2da, 181ed14b, 2b364e08 | Codex | dispatch marker | Claude |
+| #874 | 2026-11-03 | UNKNOWN | Claude | branch name | Codex |
+| #875 | 2026-11-03 | b69a0af3 | Codex | dispatch marker | Claude |
+| #876 | 2026-11-03 | b1f74243 | Codex | dispatch marker | Claude |
+| #877 | 2026-11-03 | UNKNOWN | UNKNOWN | none | Claude |
+| #878 | 2026-11-03 | 64af6c08, 964ddcab, c2d3591a | Codex | dispatch marker | Claude |
+| #879 | 2026-11-03 | 36e0172d, 48301b9a, e773c62a | Codex | dispatch marker | Claude |
+| #880 | 2026-11-03 | 0e24a59e, 2656d82f, 2881e65e | Codex | dispatch marker | Claude |
+| #881 | 2026-11-03 | 953ab50d | Codex | dispatch marker | Claude |
+| #883 | 2026-11-03 | 358c5efe, 417774fd, d5894c5f | Codex | dispatch marker | Claude |
+| #884 | 2026-11-03 | 9b25ea4b | Codex | dispatch marker | Claude |
+| #885 | 2026-11-03 | 2008a146, b6c1ba72, ca35ff35 | Codex | dispatch marker | Claude |
+| #886 | 2026-11-03 | 0ddd7940, 61fa4d2d, a681fa31 | Codex | dispatch marker | Claude |
+| #887 | 2026-11-03 | 259fd7ee, 8951b620, da5ec88b | Codex | dispatch marker | Claude |
+| #888 | 2026-11-03 | UNKNOWN | UNKNOWN | none | none (no verdict; see #1208 step 1c) |
+| #889 | 2026-11-03 | d42c458a | UNKNOWN | none | Claude |
+| #890 | 2026-11-03 | da160662, efa228ba | Codex | dispatch marker | Claude |
+| #891 | 2026-11-03 | 4859083f | UNKNOWN | none | Claude |
+| #893 | 2026-11-03 | 3332e50c, 96858f8d, f5dc11df | Codex | dispatch marker | Claude |
+| #894 | 2026-11-03 | a5a631fb | UNKNOWN | none | Claude |
+| #896 | 2026-11-03 | 31b5c5cc, 393eab98, 7304b948 | Codex | dispatch marker | Claude |
+| #897 | 2026-11-03 | 0850f348, 1ec930e0, 78731c63 | Codex | dispatch marker | Claude |
+| #898 | 2026-11-03 | 2713a0c0 | Codex | dispatch marker | Claude |
+| #899 | 2026-11-03 | 2a29e73b, 3ab5aeac, 842385dc | Codex | dispatch marker | Claude |
+| #901 | 2026-11-03 | f1ff465f | UNKNOWN | none | Claude |
+| #905 | 2026-11-03 | 26870228, 536c0e74 | Codex | dispatch marker | Claude |
+
+Same family (author route and last PASS are both Codex): #836, #839, #846, #852.
+- #836: it also has a Claude PASS; the branch name says `gw`, the dispatch marker says Codex, and the table uses the marker.
+- #839: it also has a Claude PASS.
+- #846: its only PASS is from Codex.
+- #852: its only PASS is from Codex.
