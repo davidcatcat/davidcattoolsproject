@@ -40,6 +40,7 @@ _GATEWAY_QUOTA_CODE = re.compile(r'[A-Z0-9_]*GW_AGENT_QUOTA_EXHAUSTED_[A-Z0-9_]{
 _RATE_LIMIT_CODE = re.compile(r'[A-Z][A-Z0-9_]*_(?:RATE_LIMITED|HTTP_429)\Z')
 # States that hold a provider result (a response, or output the host rejected).
 _PROVIDER_RESULT_STATES = frozenset(('DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED'))
+_SHA256_HEX = re.compile(r'[0-9a-f]{64}\Z')
 _UNREAD = object()
 
 
@@ -70,11 +71,31 @@ def classify_outcome(developer):
     if developer.get('state') in _PROVIDER_RESULT_STATES:
         return 'PASS'
     execution = developer.get('execution')
-    if (type(execution) is dict and execution.get('status') == 'DONE' and
-            type(execution.get('process_exit_code')) is int):
+    if type(execution) is not dict or type(execution.get('process_exit_code')) is not int:
+        return None
+    if execution.get('status') == 'DONE':
         # The provider process finished and reported: a non-quota outcome.
         return 'PASS'
+    if execution.get('status') == 'BLOCKED' and _evidenced_response(developer, execution):
+        # The provider returned and the host then blocked the result (e.g. a
+        # Claude run with no changes, or a Codex run that reported BLOCKED).
+        return 'PASS'
     return None
+
+
+def _evidenced_response(developer, execution):
+    """A BLOCKED run counts only with a returned session and output digest.
+
+    A prelaunch refusal has no process evidence; a timeout or interruption
+    never counts, whatever its execution fields say.
+    """
+    code = developer.get('error_code')
+    if type(code) is str and ('TIMEOUT' in code or 'INTERRUPTED' in code):
+        return False
+    session = execution.get('native_session_id')
+    digest = execution.get('stdout_sha256')
+    return (type(session) is str and session != '' and type(digest) is str and
+            _SHA256_HEX.fullmatch(digest) is not None)
 
 
 def worker_key_for_provider(provider_profile):

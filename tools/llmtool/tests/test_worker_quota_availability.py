@@ -220,6 +220,63 @@ class OutcomeClassificationTests(_Fixture):
         self.assertEqual(worker_availability.record_outcome(
             self.store, 'agy', rejected, task_id=new_id()), 'PASS')
 
+    @staticmethod
+    def _claude_blocked(error_code, **execution):
+        """The record task_submission_cli persists when a Claude run returned
+        and the host then blocked its result (e.g. CLAUDE_NO_CHANGES)."""
+        value = {'status': 'BLOCKED', 'native_session_id': new_id(),
+                 'process_exit_code': 0,
+                 'stdout_sha256': hashlib.sha256(b'synthetic stdout').hexdigest(),
+                 'elapsed_ms': 1200, 'cleanup_status': 'CONFIRMED',
+                 'usage_source': 'UNKNOWN', 'source_bytes': None,
+                 'source_file_count': None, 'source_manifest_sha256': None}
+        value.update(execution)
+        return _developer(profile='claude', state='BLOCKED', error_code=error_code,
+                          provider_type='claude-cli', artifact=None, artifact_sha256=None,
+                          execution=value, usage=None)
+
+    def test_claude_no_changes_record_writes_pass(self):
+        for code in ('CLAUDE_NO_CHANGES', 'CLAUDE_WRITE_SCOPE_VIOLATION',
+                     'CLAUDE_OUTPUT_TOO_LARGE'):
+            with self.subTest(code=code):
+                developer = self._claude_blocked(code)
+                self.assertEqual(worker_availability.classify_outcome(developer), 'PASS')
+        task_id = new_id()
+        self.store.records[task_id] = {'task_id': task_id, 'developer': None}
+        before = worker_availability.developer_snapshot(self.store, task_id)
+        self.store.records[task_id]['developer'] = self._claude_blocked('CLAUDE_NO_CHANGES')
+        self.assertEqual(worker_availability.record_task_outcome(self.store, task_id, before),
+                         'PASS')
+        self.assertEqual(self._status('claude-developer'), 'PASS')
+
+    def test_blocked_without_response_evidence_records_nothing(self):
+        cases = (
+            # Prelaunch refusal: no execution was ever observed.
+            _developer(profile='claude', state='BLOCKED', error_code='CLAUDE_DISPATCH_DENIED',
+                       execution=None),
+            _developer(profile='claude', state='BLOCKED', error_code='CLAUDE_D6_NOT_REGISTERED'),
+            # BLOCKED without a returned session or output digest.
+            self._claude_blocked('CLAUDE_NO_CHANGES', native_session_id=None),
+            self._claude_blocked('CLAUDE_NO_CHANGES', stdout_sha256=None),
+            self._claude_blocked('CLAUDE_NO_CHANGES', process_exit_code=None),
+            # Timeouts and interruptions never count, whatever their fields say.
+            self._claude_blocked('CLAUDE_TIMEOUT'),
+            self._claude_blocked('CODEX_INTERRUPTED'),
+            # A timeout status is not a provider result.
+            _developer(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_TIMEOUT',
+                       execution={'status': 'TIMEOUT', 'process_exit_code': 0}),
+        )
+        for developer in cases:
+            with self.subTest(code=developer['error_code']):
+                self.assertIsNone(worker_availability.classify_outcome(developer))
+                self.assertIsNone(worker_availability.record_outcome(
+                    self.store, 'claude-developer', developer, task_id=new_id()))
+        self.assertEqual(self._status('claude-developer'), 'UNKNOWN')
+
+    def test_blocked_quota_code_still_writes_fail(self):
+        developer = self._claude_blocked('DEVELOPER_CLAUDE_RATE_LIMITED')
+        self.assertEqual(worker_availability.classify_outcome(developer), 'FAIL')
+
     def test_fail_freshness_is_six_hours_without_trusted_reset(self):
         developer = _developer(state='DEVELOPER_UNAVAILABLE',
                                error_code='DEVELOPER_OPENCODE_QUOTA_EXHAUSTED')
