@@ -386,15 +386,15 @@ class AgyRouteWiringTests(unittest.TestCase):
                 self.assertEqual(writes, [])
 
     # #289 (Owner decision 2026-11-14): the real worker-dispatch.json resumes
-    # PM-selected AGY dispatch; the real-policy tests read the live file through
-    # the real gate. The #1692 refusal coverage stays against a synthetic PAUSED
+    # PM-selected AGY dispatch. #1692: this module never reads the live file; the
+    # real AGY row is pinned by test_worker_dispatch.py under its explicit
+    # repository config. Here the gate runs against a synthetic ALLOWED or PAUSED
     # AGY row; nothing is mocked in the policy decision. Gate-level transitions
     # (repair, recovery, retry, continuation, historical record) are covered in
     # test_worker_dispatch.py.
-    @staticmethod
-    def _real_policy():
+    def _allowed_policy(self):
         return patch.object(worker_dispatch, '_POLICY_PATH',
-                            Path(worker_dispatch._DEFAULT_POLICY_PATH))
+                            self._fixture_policy({'dispatch': 'ALLOWED'}))
 
     def _paused_policy(self):
         return patch.object(worker_dispatch, '_POLICY_PATH',
@@ -441,8 +441,8 @@ class AgyRouteWiringTests(unittest.TestCase):
         route_runner.assert_not_called()
         return caught.exception.dispatch_code, writes
 
-    def test_real_policy_allows_agy(self):
-        with self._real_policy():
+    def test_allowed_agy_row_allows_agy(self):
+        with self._allowed_policy():
             decision = worker_dispatch.evaluate('agy')
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.reason_code, 'OWNER_POLICY_ALLOWED')
@@ -469,15 +469,15 @@ class AgyRouteWiringTests(unittest.TestCase):
                     self.assertEqual(code, 'OWNER_PAUSED')
                     self.assertEqual(writes, [])
 
-    def test_agy_route_gate_admits_launch_under_real_policy_and_refuses_when_paused(self):
+    def test_agy_route_gate_admits_launch_when_allowed_and_refuses_when_paused(self):
         # The adapter-boundary gate rechecked before every AGY provider launch
-        # (new, repair, retry, recovery or re-dispatch) admits it under the resumed
-        # real policy and refuses it under a PAUSED AGY row.
+        # (new, repair, retry, recovery or re-dispatch) admits it under an ALLOWED
+        # AGY row (the resumed real row's state) and refuses it under a PAUSED row.
         refs = (None, 'https://github.com/davidcatcat/davidcattoolsproject/'
                       'issues/289#issuecomment-1')
         for owner_ref in refs:
             with self.subTest(owner_ref=owner_ref):
-                with self._real_policy():
+                with self._allowed_policy():
                     decision = owner_assignment_gate('a' * 32, owner_ref)()
                 self.assertTrue(decision.allowed)
                 self.assertEqual(decision.reason_code, 'OWNER_POLICY_ALLOWED')
