@@ -305,6 +305,17 @@ class ActionableWithoutDispatchTests(BoardCheckCase):
         self.assertRow(result, 'pr:#77', board_check.ANOMALY, 'missing from the board')
         self.assertEqual(result['exit_code'], 2)
 
+    def test_bad_or_endless_open_pr_list_is_unknown(self):
+        # #763: get_pages refuses a non-list page and a list that never ends.
+        result = run([], github=FakeGitHub({OPEN_PRS: {'number': 77}}))
+        self.assertRow(result, 'github:open-prs', board_check.UNKNOWN, 'GITHUB_READ_INVALID')
+        full = [{'number': number} for number in range(1, 101)]
+        pages = {f'pulls?state=open&per_page=100&page={page}': full
+                 for page in range(1, board_check.MAX_GITHUB_PAGES + 1)}
+        result = run([], github=FakeGitHub(pages))
+        self.assertRow(result, 'github:open-prs', board_check.UNKNOWN, 'GITHUB_LIST_TRUNCATED')
+        self.assertEqual((result['result'], result['exit_code']), ('UNKNOWN', 1))
+
     def test_board_check_only_reads(self):
         github = FakeGitHub()
         store = FakeStore(pending(TASK_PENDING))
