@@ -4274,6 +4274,15 @@ def _bind_direct_native_session(registration, developer, completion, session_for
             raise _D6SessionRefused()
         try:
             bind_code = _bind_codex_native_session(registration, session)
+            if (bind_code == 'D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE' and
+                    developer.get('provider_profile') == 'gw-agent'):
+                # #1895: a gw-agent bind helper that timed out or did not start is
+                # retried exactly once. A first helper that bound and was then
+                # stopped makes the retry answer ALREADY_SET; the read-back below
+                # still accepts only this run's session.
+                bind_code = _bind_codex_native_session(registration, session)
+                if bind_code == 'D6_BIND_NATIVE_SESSION_ALREADY_SET':
+                    bind_code = 'BOUND'
             if bind_code != 'BOUND':
                 raise _D6SessionRefused(bind_code)
             bound = task_completion.read_d6_registration(
