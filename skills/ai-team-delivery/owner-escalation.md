@@ -9,6 +9,7 @@ This is the operational decision boundary for the Integrator/PM. [AGENTS.md](../
 | Ordinary defect, CI/test failure, Reviewer FAIL | Diagnose, bounded fix, relevant retest and exact-HEAD rereview. Do not weaken a gate. |
 | Worker quota, login, VPN, availability or temporary tool failure | Consult current Owner dispatch policy and real availability. Retry safely within task budget, isolate affected Task, or reassign only to an already-authorized qualified route after D6 Writer release. Keep independent work moving. |
 | Task splitting, review sequencing, compliant low-risk change, nonblocking LOW issue | Make and record the decision and next responsible Agent. |
+| Lineage ended `FAILED_FINAL` and a High Debug confirmed a design root cause (Owner O7, #1943) | At most one redesign per root lineage: all counts carry over, no repair budget, no SPLIT, full original acceptance, Owner NOTICE first; an Owner stop command wins. [NOT LIVE] (#1943 WP-8): the `kind=redesign` gate. |
 | Reviewer route unavailable or pairing cannot be staffed | Under [Owner D6 (#846)](https://github.com/davidcatcat/davidcattoolsproject/issues/846), select any already-authorized, qualified formal Reviewer from a different model family. If none is qualified and authorized, mark only that review WAITING and ask the Owner to authorize an eligible pairing. Continue unrelated work; never use a same-family Reviewer or self-review. |
 | Existing eligible reviewed PR | May merge only after all review, exact-head CI, runtime and scope checks are satisfied. |
 
