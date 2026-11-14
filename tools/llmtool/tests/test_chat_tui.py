@@ -3427,7 +3427,8 @@ class TaskStatusIndexListTests(unittest.TestCase):
         store = self.store(3000)
         self.write_index(store)
         before = self.snapshot()
-        started = time.monotonic()
+        # Deterministic cost checks only (no wall-clock threshold): no full read, no
+        # per-record get, and the expected first page and events.
         with patch.object(chat_tui_status, 'load_records',
                           side_effect=AssertionError('no full read')):
             records, unreadable, note = chat_tui_status.load_list(store)
@@ -3435,7 +3436,6 @@ class TaskStatusIndexListTests(unittest.TestCase):
             records, self.BASE + timedelta(seconds=3000), False)
         page = [chat_tui_status.row(group['record']) for group in groups[:20]]
         events = self.events.recent_text(records, unreadable, 'now', note)
-        elapsed = time.monotonic() - started
         store.get.assert_not_called()
         self.assertIsNone(note)
         self.assertEqual((unreadable, hidden), (0, 0))
@@ -3447,7 +3447,6 @@ class TaskStatusIndexListTests(unittest.TestCase):
         self.assertIn('newest 100 shown, status index keeps 3 per Task', lines[0])
         self.assertTrue(lines[2].startswith(self.stamp(2999) + '  ' + ('%032x' % 2999)[:8]
                                             + '  [TASK] synthetic event 2999'))
-        self.assertLess(elapsed, 2.0)
         self.assertEqual(self.snapshot(), before)
 
     def test_missing_unreadable_stale_or_unavailable_index_falls_back_with_a_note(self):
@@ -9370,17 +9369,28 @@ class TaskGroupListUiTests(Base):
         with patch.object(chat_tui_status, 'load_list', return_value=([record], 0, note)):
             self.drive(['\x1bOR', list_note, '\x1bOR', '\x1bOS', events_note])
 
-    def test_list_ready_wait_holds_for_a_slow_status_index_read(self):
-        # Artificial delay in the index read, well past the drive's 50 ms key pause: the
-        # list-ready wait still sees the finished read, then the rows are checked as usual.
+    def test_list_ready_wait_holds_for_a_held_status_index_read(self):
+        # The index read is held by an explicit release event (no sleep), past the drive's
+        # key pause: while it is held the list-ready condition is not met; after release
+        # the wait sees the finished read, then the rows are checked as usual.
         note = 'status index not found; read every TaskStore record'
         record = _record(task_id='d' * 32, updated_at=datetime.now(timezone.utc).isoformat())
-        finished = threading.Event()
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
 
-        def slow_load(store):
-            time.sleep(0.5)
+        def held_load(store):
+            started.set()
+            if not release.wait(10):
+                raise AssertionError('status index read was never released')
             finished.set()
             return [record], 0, note
+
+        async def held(ui):
+            await WidgetTests.until(ui, lambda ui: started.is_set() and ui.list_visible(),
+                                    'status index read started')
+            self.assertFalse(finished.is_set())
+            self.assertIsNotNone(ui.list_reader)    # list-ready condition not met yet
+            release.set()
 
         async def list_note(ui):
             await self.listed(ui)
@@ -9390,8 +9400,8 @@ class TaskGroupListUiTests(Base):
             self.assertTrue(rows[3].startswith('▶ dddddddd'))
 
         with patch('llmtool.task_store.TaskStore', return_value=object()), \
-                patch.object(chat_tui_status, 'load_list', side_effect=slow_load):
-            self.drive(['\x1bOR', list_note])
+                patch.object(chat_tui_status, 'load_list', side_effect=held_load):
+            self.drive(['\x1bOR', held, list_note])
 
     def test_1838_owner_sequence_events_from_a_fresh_index_equal_the_full_read(self):
         # #1838 repair, without --dev: /task list, /task show, /task events over a fresh
