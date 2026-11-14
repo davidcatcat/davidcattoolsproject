@@ -237,6 +237,27 @@ def chain_review_repairs(store, task):
     return count
 
 
+def chain_debug_used(store, task, entries, is_used):
+    """O7: (used, used) over entries and the other chain Tasks' high_debug; doubt is UNKNOWN."""
+    if type(task) is not dict or type(entries) is not list or store is None:
+        return UNKNOWN, UNKNOWN
+    records = chain_records(store, task)
+    if records is None:
+        return UNKNOWN, UNKNOWN
+    later = successor_records(store, task, {record.get('task_id') for record in records})
+    if later is None or len(records) + len(later) > MAX_CHAIN:
+        return UNKNOWN, UNKNOWN
+    used = 0
+    for items in [entries] + [record.get('high_debug', []) for record in records[1:] + later]:
+        if type(items) is not list:
+            return UNKNOWN, UNKNOWN
+        try:
+            used += sum(1 for item in items if is_used(item))
+        except Exception:
+            return UNKNOWN, UNKNOWN
+    return used, used
+
+
 def check_continues(store, task_id, predecessor):
     """Refuse, with a fixed code, a --continues link that breaks the chain shape.
 
