@@ -295,6 +295,18 @@ class ActionableWithoutDispatchTests(BoardCheckCase):
                      github=github)
         self.assertRow(result, 'next', board_check.BLOCKED, 'PR #12 open')
 
+    def test_unreadable_issue_or_policy_predicate_is_unknown(self):
+        # #763: a blocker whose evidence cannot be read stays UNKNOWN with its code.
+        github = FakeGitHub({'issues/7': {'state': 'locked'}})
+        result = run([{'id': 'wait', 'blocker': 'issue_closed:7'}], github=github)
+        self.assertRow(result, 'wait', board_check.UNKNOWN, 'ISSUE_UNAVAILABLE')
+
+        def broken(worker, owner_ref=None, task_id=None):
+            raise RuntimeError('policy file unreadable')
+        result = run([{'id': 'deny', 'blocker': 'dispatch_denied:agy'}], evaluate=broken)
+        self.assertRow(result, 'deny', board_check.UNKNOWN, 'DISPATCH_POLICY_UNAVAILABLE')
+        self.assertEqual((result['result'], result['exit_code']), ('UNKNOWN', 1))
+
     def test_expired_time_predicate_is_actionable(self):
         rows = [{'id': 'later', 'blocker': 'time:2026-11-07T11:00:00Z'}]
         self.assertRow(run(rows), 'later', board_check.ACTIONABLE, 'reached')

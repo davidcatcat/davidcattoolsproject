@@ -1293,6 +1293,15 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         if len(family_claims) < failed_corrections:
             _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
     _require_screen_cleared(task_id, family)
+    # #1887: the review repair gate finds a confirmed RCA by the repair claim
+    # family, so a Debug for a PR that has repair claims must name one of them.
+    claims = task.get('review_repair_claims', [])
+    families = sorted({claim.get('family', f"pr-{claim.get('pr')}")
+                       for claim in (claims if type(claims) is list else [])
+                       if type(claim) is dict and claim.get('pr') == pr_number and
+                       type(claim.get('family', '')) is str})
+    if families and family not in families:
+        _refuse('HIGH_DEBUG_FAMILY_MISMATCH', 'expected=' + ','.join(families))
     if evidence is not None:
         try:
             with open(evidence, 'rb') as evidence_stream:

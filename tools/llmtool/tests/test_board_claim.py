@@ -219,6 +219,23 @@ class BoardClaimTests(unittest.TestCase):
         self.assertEqual(len(claims), 1)
         self.assertEqual(claims[0]['holder'], 'pm-1')
 
+    def test_malformed_missing_or_ended_task_cannot_be_bound(self):
+        """#763: binding a malformed, missing or ended Task raises CLAIM_TASK_UNKNOWN."""
+        board_check.claim_row(
+            self.ledger, self.rows, 'row-1', 'pm-1',
+            task_id=None, store=self.store, now=self.now,
+        )
+        self._create_task('a' * 32, 'b' * 32, state='ABANDONED')
+        for task_id in ('not-a-task-id', 'd' * 32, 'a' * 32):
+            with self.subTest(task_id=task_id):
+                with self.assertRaises(board_check.ClaimRefused) as cm:
+                    board_check.claim_row(
+                        self.ledger, self.rows, 'row-1', 'pm-1',
+                        task_id=task_id, store=self.store, now=self.now,
+                    )
+                self.assertEqual(cm.exception.code, 'CLAIM_TASK_UNKNOWN')
+        self.assertIsNone(self.ledger.read()[0]['task_id'])
+
     def test_claim_row_unknown(self):
         """Attempting to claim an unlisted row id raises CLAIM_ROW_UNKNOWN."""
         with self.assertRaises(board_check.ClaimRefused) as cm:
