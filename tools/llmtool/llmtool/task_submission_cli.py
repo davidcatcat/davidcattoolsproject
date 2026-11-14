@@ -2478,7 +2478,9 @@ def run_task_file_ops(args, *, store=None, stdout=None):
     reservation, apply, verify and the evidence write, and released on every
     path. Under the lock the caller check runs again on the freshly read Task
     and once more just before apply (v93), so a PM session adoption after the
-    first check refuses with the non-owner code before any change. Before any
+    first check refuses with the non-owner code before any change. Adoption of
+    a Task with file_ops and no evidence takes the same lock, so none can land
+    between the last recheck and apply or the evidence write. Before any
     mutation the Task records a persistent reservation of the
     D6 (a binding-journal entry, then ``file_ops_reservation`` on the record),
     which both binding predicates treat as a holder. So a concurrent binder of

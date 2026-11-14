@@ -479,10 +479,15 @@ class FileOpsCommandTests(unittest.TestCase):
         self.assert_binding_lock_free()
 
     @staticmethod
-    def adopt(store, task_id):
-        """Move the Task to a new PM session through the real TaskStore adoption."""
+    def adopt(store, task_id, *, locked=True):
+        """Move the Task to a new PM session through the real TaskStore adoption.
+
+        ``locked=False`` uses the internal path without the D6 binding lock, to
+        reach the defence-in-depth recheck just before apply.
+        """
         current = store.get(task_id)
-        return store.adopt_pm_session(
+        call = store.adopt_pm_session if locked else store._adopt_pm_session
+        return call(
             task_id, old_session_key=current['pm_session_id'],
             new_session_key='pm-' + task_store.new_id(), at='2026-11-14T00:00:00Z',
             expected_record_sha256=current['record_sha256'],
@@ -543,15 +548,78 @@ class FileOpsCommandTests(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.root, 'a.txt')))
         self.assert_binding_lock_free()
 
+    def test_adoption_during_run_waits_for_the_evidence(self):
+        # v93: adoption takes the D6 binding lock, so a separate worker that
+        # adopts mid-apply waits; A applies and seals evidence first, and B's
+        # adoption, compared against the record it read before, then loses.
+        task = self.record_pm()
+        adopter = TaskStore(root=self.store.root)
+        waiting = threading.Event()
+        events, results = [], []
+        real_apply, real_lock = file_ops.apply, TaskStore._lock_sidecar
+
+        def lock(directory, name, **kwargs):
+            if name == task_store.D6_BINDING_LOCK_NAME:
+                events.append('B waits')
+                waiting.set()
+            return real_lock(directory, name, **kwargs)
+
+        def adopt():
+            try:
+                results.append(self.adopt(adopter, task['task_id']))
+                events.append('B adopted')
+            except LLMToolError as exc:
+                events.append(exc.task_store_error_code)
+
+        worker = threading.Thread(target=adopt)
+
+        def apply_with_adopter(root, sealed):
+            worker.start()
+            self.assertTrue(waiting.wait(10))
+            result = real_apply(root, sealed)
+            events.append('A applied')
+            return result
+
+        with mock.patch.object(task_store, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 30), \
+                mock.patch.object(adopter, '_lock_sidecar', side_effect=lock), \
+                mock.patch.object(file_ops, 'apply', side_effect=apply_with_adopter):
+            rc, out = self.run_cmd(task)
+            worker.join(30)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual((rc, out['status']), (0, 'VERIFIED'))
+        self.assertEqual(events, ['B waits', 'A applied', 'TASK_STORE_CONFLICT'])
+        self.assertEqual(results, [])
+        current = self.store.get(task['task_id'])
+        self.assertEqual(current['file_ops_evidence'], out['evidence'])
+        self.assertEqual(current['pm_session_id'], task['pm_session_id'])
+        self.assert_binding_lock_free()
+        # With evidence sealed, a fresh adoption needs no lock and succeeds.
+        with self.store.d6_binding_lock():
+            adopted = self.adopt(adopter, task['task_id'])
+        self.assertNotEqual(adopted['pm_session_id'], task['pm_session_id'])
+        self.assertEqual(adopted['file_ops_evidence'], out['evidence'])
+
+    def test_adoption_while_lock_held_past_deadline_refuses_unchanged(self):
+        task = self.record_pm()
+        with mock.patch.object(task_store, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 0.2):
+            with self.store.d6_binding_lock():
+                with self.assertRaises(LLMToolError) as ctx:
+                    self.adopt(TaskStore(root=self.store.root), task['task_id'])
+        self.assertEqual(ctx.exception.task_store_error_code, 'TASK_D6_BINDING_BUSY')
+        self.assertEqual(self.store.get(task['task_id']), task)
+        self.assert_binding_lock_free()
+
     def test_adoption_after_reservation_refuses_before_apply(self):
-        # An adoption after admission is caught by the recheck just before apply.
+        # Defence in depth: an adoption after admission that skipped the lock
+        # (the internal unlocked path) is caught by the recheck before apply.
         task = self.record_pm()
         real_reserve = self.store._reserve_file_ops_d6
         adopted = []
 
         def reserve_then_adopt(task_id, executor_task_id, *, expected):
             saved = real_reserve(task_id, executor_task_id, expected=expected)
-            adopted.append(self.adopt(TaskStore(root=self.store.root), task_id))
+            adopted.append(self.adopt(TaskStore(root=self.store.root), task_id,
+                                      locked=False))
             return saved
 
         with mock.patch.object(self.store, '_reserve_file_ops_d6',

@@ -4091,7 +4091,40 @@ class TaskStore:
     def adopt_pm_session(self, task_id, *, old_session_key, new_session_key, at,
                          expected_record_sha256, old_runtime, new_runtime, new_account,
                          liveness):
-        """Library-internal: atomically move one PM binding, inbox and audit entry."""
+        """Library-internal: atomically move one PM binding, inbox and audit entry.
+
+        v93 (#1502, CWE-367): ``task file-ops`` holds the D6 binding lock
+        exclusively from its caller recheck through apply and the evidence
+        write. Adopting a Task it may still run for (``file_ops`` recorded at
+        creation, no sealed evidence yet) takes the same lock, shared, so the
+        adoption waits for that run and never lands between its recheck and
+        apply; past the update-lock deadline it refuses
+        ``TASK_D6_BINDING_BUSY`` and changes nothing.
+        """
+        kwargs = dict(old_session_key=old_session_key, new_session_key=new_session_key,
+                      at=at, expected_record_sha256=expected_record_sha256,
+                      old_runtime=old_runtime, new_runtime=new_runtime,
+                      new_account=new_account, liveness=liveness)
+        current = self.get(task_id)
+        # ``file_ops`` is only ever written at creation and evidence is written
+        # once, so a Task read here with no file_ops, or with sealed evidence,
+        # can never reach file-ops apply again.
+        if type(current.get('file_ops')) is not dict or 'file_ops_evidence' in current:
+            return self._adopt_pm_session(task_id, **kwargs)
+        directory = self._dirfd()
+        try:
+            lock_fd = self._lock_sidecar(directory, D6_BINDING_LOCK_NAME,
+                                         exclusive=False, code='TASK_D6_BINDING')
+        finally:
+            os.close(directory)
+        try:
+            return self._adopt_pm_session(task_id, **kwargs)
+        finally:
+            self._unlock_sidecar(lock_fd)
+
+    def _adopt_pm_session(self, task_id, *, old_session_key, new_session_key, at,
+                          expected_record_sha256, old_runtime, new_runtime, new_account,
+                          liveness):
         current = self.get(task_id)
         if current.get('pm_session_id') != old_session_key:
             raise TaskStoreConflict() from None

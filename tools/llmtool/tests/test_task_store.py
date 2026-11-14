@@ -2444,6 +2444,36 @@ class TaskStoreTests(unittest.TestCase):
                                  other['record_sha256'])
                 self.assertIsNone(store.get(other['task_id'])['developer'])
 
+    def test_pm_session_adoption_of_file_ops_task_takes_the_binding_lock(self):
+        # v93 (CWE-367): while ``task file-ops`` may run for a Task, its
+        # adoption waits on the D6 binding lock; other Tasks are unaffected.
+        store = TaskStore(Path(self.temp.name).resolve())
+        with_ops = self._file_ops_task(store)
+        plain = self._file_ops_task(store, ops=False)
+
+        def adopt(task):
+            current = store.get(task['task_id'])
+            return TaskStore(store.root).adopt_pm_session(
+                task['task_id'], old_session_key=current['pm_session_id'],
+                new_session_key='pm-' + new_id(), at='2026-11-14T00:00:00Z',
+                expected_record_sha256=current['record_sha256'],
+                old_runtime='claude-code', new_runtime='claude-code', new_account=None,
+                liveness=['PROCESS_CLEAN', 'LOCK_FREE', 'REGISTRY_CLEAN'])
+
+        with patch.object(task_store_module, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 0.2):
+            with store.d6_binding_lock():
+                with self.assertRaises(LLMToolError) as caught:
+                    adopt(with_ops)
+                adopted_plain = adopt(plain)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_D6_BINDING_BUSY')
+        self.assertEqual(store.get(with_ops['task_id']), with_ops)
+        self.assertNotEqual(adopted_plain['pm_session_id'], plain['pm_session_id'])
+        # The lock was released: the file_ops Task now adopts.
+        adopted = adopt(with_ops)
+        self.assertNotEqual(adopted['pm_session_id'], with_ops['pm_session_id'])
+        with store.d6_binding_lock():
+            pass
+
     def test_other_task_store_failures_keep_the_omitted_details_message(self):
         holder_id = new_id()
         cases = (
