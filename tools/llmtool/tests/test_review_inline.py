@@ -146,6 +146,17 @@ class PostInlineCopiesTests(unittest.TestCase):
         self.assertEqual(sorted(result), ['failed', 'posted', 'skipped'])
         self.assertEqual({type(value) for value in result.values()}, {int})
 
+    def test_changed_path_after_many_unrelated_paths_is_still_posted(self):
+        paths = ['docs/unrelated_%d.md' % n for n in range(3000)] + ['docs/b.md']
+        self.assertEqual(paths.index('docs/b.md'), 3000)
+        posted = []
+        result = post_inline_copies(7, HEAD, 'Finding: F2 [Low] docs/b.md:3 wording\n',
+                                    file_lister=lambda pr: iter(paths),
+                                    comment_lister=lambda pr: [],
+                                    poster=lambda pr, payload: posted.append(payload))
+        self.assertEqual(result, {'posted': 1, 'skipped': 0, 'failed': 0})
+        self.assertEqual([(item['path'], item['line']) for item in posted], [('docs/b.md', 3)])
+
     def test_module_imports_no_network_or_subprocess_code(self):
         import ast
         import llmtool.review_inline as module

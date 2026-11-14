@@ -57,7 +57,7 @@ def post_inline_copies(pr_number, head, body, *, file_lister, comment_lister, po
         counts['failed'] = 1
         return counts
     try:
-        found = inline_findings(body, list(file_lister(pr_number))[:3000])
+        found = inline_findings(body, list(file_lister(pr_number)))
         existing = [item.get('body') for item in comment_lister(pr_number) if type(item) is dict]
     except Exception:
         counts['failed'] = 1
