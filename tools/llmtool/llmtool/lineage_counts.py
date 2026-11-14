@@ -237,6 +237,35 @@ def chain_review_repairs(store, task):
     return count
 
 
+def chain_debug_used(store, task, entries, used_statuses):
+    """(parent_used, group_used): used AI Debugs over task's whole chain.
+
+    Every chain Task (the Task, its predecessors and its successors, at most
+    MAX_CHAIN) adds each high_debug entry whose status is in used_statuses; a
+    non-dict entry counts as used. entries are the Task's own entries, already
+    read by the caller. A Task alone in its chain counts only entries, as
+    before. Any read, link or shape in doubt gives (UNKNOWN, UNKNOWN), which
+    the policy treats as used.
+    """
+    unknown = (UNKNOWN, UNKNOWN)
+    if type(task) is not dict or type(entries) is not list or store is None:
+        return unknown
+    records = chain_records(store, task)
+    if records is None:
+        return unknown
+    later = successor_records(store, task, {record.get('task_id') for record in records})
+    if later is None or len(records) + len(later) > MAX_CHAIN:
+        return unknown
+    used = 0
+    for index, record in enumerate(records + later):
+        items = entries if index == 0 else record.get('high_debug', [])
+        if type(items) is not list:
+            return unknown
+        used += sum(1 for item in items
+                    if type(item) is not dict or item.get('status') in used_statuses)
+    return used, used
+
+
 def check_continues(store, task_id, predecessor):
     """Refuse, with a fixed code, a --continues link that breaks the chain shape.
 
