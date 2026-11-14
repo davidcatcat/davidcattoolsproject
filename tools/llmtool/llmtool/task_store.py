@@ -3699,6 +3699,23 @@ class TaskStore:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
 
+    def recover_review_repair_claim(self, task_id, repair_task_id, *, expected_sha256):
+        """#1928: one CAS sets one UNKNOWN repair claim DISPATCHED, only after E1-E5."""
+        claims = [dict(item, state='DISPATCHED')
+                  if type(item) is dict and item.get('repair_task_id') == repair_task_id
+                  else item for item in self.get(task_id).get('review_repair_claims') or ()]
+        return self._update(task_id, expected={'record_sha256': expected_sha256},
+                            changes={'review_repair_claims': claims},
+                            trusted_claim_recovery=True)
+
+    @staticmethod
+    def _claim_recovered(old, new, trusted):
+        """#1928: a trusted change is only UNKNOWN -> DISPATCHED."""
+        if trusted and (old.get('state') != 'UNKNOWN' or new.get('state') != 'DISPATCHED' or
+                        set(old) != set(new)):
+            _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+        return trusted
+
     @staticmethod
     def _claude_d6_holds(record, executor_task_id):
         if record.get('abandonment') is not None:
@@ -5226,7 +5243,10 @@ class TaskStore:
                        trusted_completion_events=False, trusted_abandonment=False,
                        abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
                        trusted_codex_launch=False, trusted_opencode_launch=False,
-                       trusted_split=None, split_child_max=None):
+                       trusted_split=None, split_child_max=None,
+                       trusted_claim_recovery=False):
+        if trusted_claim_recovery and set(changes) != {'review_repair_claims'}:
+            _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
         # Refused here, not by the writable-field check: the dispatch gate
         # before that check can write its audit to the record.
         if _D6_CLAIM_ARGUMENTS & set(changes):
@@ -5458,6 +5478,7 @@ class TaskStore:
                 new_claims = changes['review_repair_claims']
                 if (type(old_claims) is not list or type(new_claims) is not list or
                         len(new_claims) not in (len(old_claims), len(old_claims) + 1) or
+                        (trusted_claim_recovery and len(new_claims) != len(old_claims)) or
                         len(new_claims) > 64):
                     _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
                 if len(new_claims) == len(old_claims) + 1:
@@ -5498,7 +5519,8 @@ class TaskStore:
                         _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
                     i = changed[0]
                     old, new = old_claims[i], new_claims[i]
-                    if (not ((old.get('state') == 'CLAIMED' and
+                    recovered = self._claim_recovered(old, new, trusted_claim_recovery)
+                    if (not (recovered or (old.get('state') == 'CLAIMED' and
                               new.get('state') in ('DISPATCHED', 'UNKNOWN')) or
                              (old.get('state') == 'DISPATCHED' and
                               new.get('state') == 'FAILED')) or
