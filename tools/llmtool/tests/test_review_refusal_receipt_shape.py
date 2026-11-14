@@ -19,7 +19,14 @@ class RefusalReceiptShapeTests(unittest.TestCase):
     _invoke_refusal = base.ReviewRefusalReceiptTests._invoke_refusal
 
     def test_receipt_and_refusal_hold_no_model_text(self):
-        raw = _codex_event_stream(MARKER)
+        self.check_reply(MARKER, 'REPLY_SHAPE bytes=27 lines=1 first=letter')
+
+    def test_reply_that_imitates_an_output_shape_is_still_shaped(self):
+        self.check_reply('OUTPUT_SHAPE synthetic leaked words',
+                         'REPLY_SHAPE bytes=35 lines=1 first=letter')
+
+    def check_reply(self, reply, shape):
+        raw = _codex_event_stream(reply)
         task = self.store.get(self.task_id)
 
         def runner(**_kw):
@@ -32,7 +39,7 @@ class RefusalReceiptShapeTests(unittest.TestCase):
                 self.assertRaises(LLMToolError) as raised:
             self._invoke_refusal(runner=runner)
         refusal = raised.exception.review_refusal
-        self.assertEqual(refusal['excerpt'], 'REPLY_SHAPE bytes=27 lines=1 first=letter')
+        self.assertEqual(refusal['excerpt'], shape)
         text = refusal['receipt_path'].read_text(encoding='utf-8')
         self.assertNotIn('synthetic', text)
         self.assertEqual(json.loads(text)['excerpt'], refusal['excerpt'])

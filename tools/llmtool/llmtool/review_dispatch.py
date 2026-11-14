@@ -406,6 +406,12 @@ def _jsonl_shape(raw):
     return 'OUTPUT_SHAPE no_bad_line lines=%d' % len(lines)
 
 
+# #1907 pre-review F1: only an exact _jsonl_shape value keeps its words.
+_OUTPUT_SHAPE = re.compile(
+    r'OUTPUT_SHAPE (?:unavailable|utf8=invalid bytes=\d+|no_bad_line lines=\d+|'
+    r'line=\d+ of \d+ bytes=\d+ first=(?:blank|brace|letter|digit|other))')
+
+
 def _reply_shape(text):
     """#1907: fixed-word shape of a refused reply excerpt; never its text."""
     if type(text) is not str:
@@ -1430,7 +1436,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                 # #1907 (as #1163): the receipt and the refusal keep only a
                 # fixed-word shape, never screened model text.
                 excerpt_key = 'excerpt'
-                excerpt_val = (raw_excerpt if str(raw_excerpt).startswith('OUTPUT_SHAPE ')
+                excerpt_val = (raw_excerpt if _OUTPUT_SHAPE.fullmatch(str(raw_excerpt))
                                else _reply_shape(str(raw_excerpt)))
             refusal = {
                 'failure_reason': reason,
