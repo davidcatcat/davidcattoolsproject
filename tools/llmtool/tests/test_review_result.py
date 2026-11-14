@@ -143,6 +143,21 @@ class ReviewResultTests(unittest.TestCase):
         self.assertEqual(event['source'], 'REVIEWER')
         self.assertEqual(event['source_sha'], HEAD)
 
+    def test_bad_arguments_name_their_code(self):
+        # #1235: bad arguments are refused by code and record no event.
+        for change, code in (({'version': 0}, 'REVIEW_RESULT_ARGUMENT_INVALID'),
+                             ({'version': True}, 'REVIEW_RESULT_ARGUMENT_INVALID'),
+                             ({'pr_number': 0}, 'REVIEW_RESULT_ARGUMENT_INVALID'),
+                             ({'reviewer_session_done': 1}, 'REVIEW_RESULT_ARGUMENT_INVALID')):
+            with self.subTest(change=sorted(change)):
+                args = dict(store=self.store, task_id=TASK, executor_task=EXECUTOR,
+                            pr_number=PR, github_get=lambda path: [])
+                args.update(change)
+                with self.assertRaises(LLMToolError) as raised:
+                    review_result.record_review_result(**args)
+                self.assertEqual(raised.exception.review_dispatch_code, code)
+        self.assertEqual(self.store.get(TASK).get('completion_events') or [], [])
+
     def test_claude_pass_is_rejected_for_claude_developer_task(self):
         self.store = FamilyStore(self.store, 'claude')
         self.assertEqual(self.run_result([_comment(actor='Claude')])['state'], 'NOT_READY')
