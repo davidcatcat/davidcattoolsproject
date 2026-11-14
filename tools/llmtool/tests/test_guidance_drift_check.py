@@ -530,11 +530,11 @@ class RuleFileSchemaTests(unittest.TestCase):
         self.assertEqual(guidance_drift_check._allowed_models(self.repo)[1],
                          ["tools/llmtool/developer-routes.json: MODEL_ALLOWLIST_UNAVAILABLE schema invalid"])
 
-    def test_timeout_cap_matches_route_loader(self):
-        from llmtool import developer_routes
-
-        self.assertEqual(guidance_drift_check.ROUTE_TIMEOUT_CAP_SECONDS,
-                         developer_routes.HARD_TIMEOUT_CAP_SECONDS)
+    def test_timeout_cap_is_1800(self):
+        # This test does not import the llmtool package; the match with
+        # llmtool.developer_routes.HARD_TIMEOUT_CAP_SECONDS is checked in
+        # test_developer_route_timeout.py, which already imports it.
+        self.assertEqual(guidance_drift_check.ROUTE_TIMEOUT_CAP_SECONDS, 1800)
 
     def test_real_routes_declare_timeouts(self):
         repository = Path(__file__).resolve().parents[3]

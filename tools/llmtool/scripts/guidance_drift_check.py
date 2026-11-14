@@ -166,10 +166,11 @@ class TimeoutPair:
         return errors
 
 
-# Same value as llmtool.developer_routes.HARD_TIMEOUT_CAP_SECONDS (#1815); a
-# test keeps the two in step. This script does not import the llmtool package.
+# Same value as llmtool.developer_routes.HARD_TIMEOUT_CAP_SECONDS (#1815);
+# tests/test_developer_route_timeout.py keeps the two in step. This script and
+# its own test do not import the llmtool package.
 ROUTE_TIMEOUT_CAP_SECONDS = 1800
-REPO_PATH =r"(?!/)(?!.*\\)(?!(?:.*/)?\.\.(?:/|$))[^\s]+"
+REPO_PATH = r"(?!/)(?!.*\\)(?!(?:.*/)?\.\.(?:/|$))[^\s]+"
 ROUTE_PROFILE = Obj(
     {"adapter": Str(), "model": Str()},
     {

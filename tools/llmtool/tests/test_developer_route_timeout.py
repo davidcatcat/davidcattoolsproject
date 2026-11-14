@@ -1,6 +1,7 @@
 """Per-route default_timeout and max_timeout in developer-routes.json."""
 
 import copy
+import importlib.util
 import json
 from pathlib import Path
 import tempfile
@@ -12,6 +13,7 @@ from llmtool.developer_routes import RouteError, load_route_config, resolve_rout
 from llmtool.developer_routes.base import DeveloperRoute, run_route
 
 ROUTES_FILE = Path(__file__).resolve().parents[1] / 'developer-routes.json'
+DRIFT_SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'guidance_drift_check.py'
 ROUTE_NAMES = ('agy', 'claude', 'gw-agent', 'opencode')
 LONG_ROUTES = ('claude', 'opencode')
 SHORT_ROUTES = ('agy', 'gw-agent')
@@ -76,6 +78,15 @@ class ShippedTimeoutTests(unittest.TestCase):
         self.assertEqual(developer_routes.DEFAULT_TIMEOUT_SECONDS, 600)
         self.assertEqual(developer_routes.HARD_TIMEOUT_CAP_SECONDS, 1800)
         self.assertIn('resolve_route_timeout', developer_routes.__all__)
+
+    def test_rule_file_schema_cap_matches_hard_cap(self):
+        # #1815: guidance_drift_check.py keeps its own copy of the cap because
+        # it does not import the llmtool package; the two must stay in step.
+        spec = importlib.util.spec_from_file_location(
+            'guidance_drift_check_for_timeout_cap', DRIFT_SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.ROUTE_TIMEOUT_CAP_SECONDS, HARD_CAP)
 
 
 class ResolveRouteTimeoutTests(unittest.TestCase):
