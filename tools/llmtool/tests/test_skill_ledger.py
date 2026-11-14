@@ -72,7 +72,7 @@ class SkillLedgerTests(unittest.TestCase):
         args = dict(task_id='task-a', run_id='run-a', session_id='session-a',
                     agent_id='agent-a', role='Developer', provider='local',
                     model='model-a', repo='repo-a', head='head-a',
-                    manifest_sha256='manifest-a')
+                    manifest_sha256=self.entry['manifest_sha256'])
         args.update(changes)
         return ledger.check(**args)
 
@@ -819,7 +819,15 @@ class SkillLedgerTests(unittest.TestCase):
         self.git('config', 'gc.auto', '0')
         self.git('config', 'maintenance.auto', 'false')
         self.main_commit = self.commit_cards(CARD_FILES)
+        # Card receipts bind the digest of the exact prefix built at the pin,
+        # so card tests send and check that digest, not a placeholder.
+        self.entry['manifest_sha256'] = self.prefix_digest(self.main_commit)
         return self.repo
+
+    def prefix_digest(self, commit):
+        built = skill_manifest.build_role_cards(self.repo, commit, 'claude-developer')
+        return hashlib.sha256(
+            skill_manifest.role_card_prefix(built).encode('utf-8')).hexdigest()
 
     def git(self, *args):
         return subprocess.run(['git', *args], cwd=self.repo, stdout=subprocess.PIPE,
@@ -904,6 +912,10 @@ class SkillLedgerTests(unittest.TestCase):
         self.assertEqual(row['cards'], self.expected_cards())
         self.assertEqual(row['cards_sha256'], built['cards_sha256'])
         self.assertEqual(row['prefix_size'], built['prefix_size'])
+        # The stored digest is the ledger's own digest of the pinned prefix.
+        self.assertEqual(row['manifest_sha256'], hashlib.sha256(
+            skill_manifest.role_card_prefix(built).encode('utf-8')).hexdigest())
+        self.assertNotEqual(row['manifest_sha256'], 'manifest-a')
         for field in ledger._BINDING_FIELDS:
             self.assertEqual(row[field], self.entry[field])
         self.assertNotIn('entry_type', row)
@@ -913,6 +925,31 @@ class SkillLedgerTests(unittest.TestCase):
         self.assertEqual(ledger.verify_chain(), (True, None))
         self.assertEqual(ledger.task_summary('task-a', ['Developer']),
                          {'Developer': 'CONTROLLER_DELIVERED'})
+
+    def test_card_delivery_refuses_a_digest_that_differs_from_the_pinned_prefix(self):
+        self.card_repo()
+        self.pin()
+        before = self.path.read_bytes()
+        derived = self.entry['manifest_sha256']
+        newer_files = dict(CARD_FILES)
+        newer_files[DEV_CARD] = b'newer developer card\n'
+        # Digest of a prefix built at another main commit than the pin.
+        other = self.prefix_digest(self.commit_cards(newer_files))
+        for digest in ('manifest-a', '0' * 64, derived.upper(), other):
+            with self.subTest(digest=digest):
+                self.assert_ledger_code(
+                    'MANIFEST_DIGEST_MISMATCH',
+                    lambda: self.record_cards(self.card_entry(manifest_sha256=digest)))
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertNotEqual(self.check(manifest_sha256=digest)['status'],
+                                    'VERIFIED')
+        self.assertEqual(self.card_receipts(), [])
+        self.assertEqual(self.check()['status'], 'UNVERIFIED')
+        # The matching digest still records, and only it verifies.
+        self.record_cards()
+        self.assertEqual(self.check()['status'], 'VERIFIED')
+        self.assertEqual(self.check(manifest_sha256=other),
+                         {'status': 'UNVERIFIED', 'reason': 'MANIFEST_CHANGED'})
 
     def test_run_pinned_to_a_stays_valid_after_main_advances(self):
         self.card_repo()

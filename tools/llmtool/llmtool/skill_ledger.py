@@ -15,8 +15,9 @@ immutable DISPATCH_PIN row per Task/run/route holding the authenticated main
 commit, read by the controller itself (task_completion.read_authenticated_main_sha)
 before the run's cards are built. record_card_delivery() is the only writer of
 CONTROLLER_DELIVERED: it takes no base commit or digests from its caller, reads
-the pin for the entry's Task/run/route, derives the cards and their sha256
-from that pinned commit and refuses unless they equal the pin; record() refuses
+the pin for the entry's Task/run/route, derives the cards, their sha256 and the
+prefix digest from that pinned commit and refuses unless they equal the pin and
+the caller's sent-prefix digest; record() refuses
 that level. check() verifies a card receipt only while its pin is in the chain.
 A pin is never evidence. Rows written before this rule (no route) are not
 re-validated. record_not_delivered()
@@ -567,7 +568,10 @@ def record_card_delivery(entry, *, repo_root, ttl_seconds=86400):
     from Git objects in ``repo_root`` at the pinned commit, which must still be
     on origin/main; the Git reader is not injectable. The derived commit must
     equal the pin (PIN_MISMATCH), and the pin is re-read under the append lock.
-    Caller-supplied ``cards``, ``cards_sha256`` or ``prefix_size`` are refused
+    The stored ``manifest_sha256`` is sha256 of role_card_prefix() of those
+    derived cards; the caller's ``manifest_sha256`` (the digest of the prefix
+    it sent) must equal it (MANIFEST_DIGEST_MISMATCH, nothing appended) and is
+    never stored. Caller-supplied ``cards``, ``cards_sha256`` or ``prefix_size`` are refused
     (CALLER_DIGESTS_REFUSED), as are ``base_commit`` and ``pin_id``
     (CALLER_BASE_REFUSED); any other unknown field is INVALID_ENTRY. A card
     build failure is refused with its SKILL_MANIFEST_* code. ``role`` must be
@@ -609,7 +613,17 @@ def record_card_delivery(entry, *, repo_root, ttl_seconds=86400):
         _fail('INVALID_ENTRY')
     if built.get('commit') != base_commit:
         _fail('PIN_MISMATCH')
+    # The stored digest is always derived here from the pinned cards; the
+    # caller's digest of what it sent must equal it and is never stored.
+    try:
+        prefix = skill_manifest.role_card_prefix(built)
+    except skill_manifest.SkillManifestError as exc:
+        _fail(exc.code)
+    derived = hashlib.sha256(prefix.encode('utf-8')).hexdigest()
+    if value['manifest_sha256'] != derived:
+        _fail('MANIFEST_DIGEST_MISMATCH')
     value.update(
+        manifest_sha256=derived,
         route=route, base_commit=base_commit, pin_id=pin['receipt_id'],
         cards=_card_digests([{'path': card['path'], 'sha256': card['sha256']}
                              for card in built['cards']]),

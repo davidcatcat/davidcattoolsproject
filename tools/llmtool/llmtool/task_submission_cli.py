@@ -4612,7 +4612,8 @@ def _record_skill_delivery(task, registration, snapshot, provider, model,
     Only the trusted path writes CONTROLLER_DELIVERED: the role cards come
     from this run's dispatch pin, never from a base commit given here.
     ``manifest_sha256`` is the sha256 of the exact card prefix this run sent;
-    the ledger itself adds the pin and the card digests it derives from it.
+    the ledger derives its own prefix digest from the pin, refuses a differing
+    one (MANIFEST_DIGEST_MISMATCH) and adds the pin and card digests itself.
     No gate reads this entry yet, so a ledger failure must not discard the
     finished run. The append can fail after its line persists: outcome unknown.
     """
