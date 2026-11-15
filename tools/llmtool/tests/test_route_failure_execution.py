@@ -3,6 +3,7 @@
 import contextlib
 import hashlib
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -13,11 +14,28 @@ from llmtool.developer_routes.base import (
 from llmtool.task_submission_cli import (
     _launched_run_did_no_work, _route_failure_execution,
 )
-from tests.test_developer_route_contract import FakeBoundary, FakeRoute
-from tests.test_claude_route_wiring import ClaudeRouteWiringTests
-from tests.test_agy_route_wiring import AgyRouteWiringTests
-import review_trust_fixture
-import worker_policy_fixture
+
+try:
+    from test_developer_route_contract import FakeBoundary, FakeRoute
+except ImportError:
+    from tests.test_developer_route_contract import FakeBoundary, FakeRoute
+
+try:
+    import test_claude_route_wiring
+except ImportError:
+    from tests import test_claude_route_wiring
+
+try:
+    import test_agy_route_wiring
+except ImportError:
+    from tests import test_agy_route_wiring
+
+try:
+    import review_trust_fixture
+    import worker_policy_fixture
+except ImportError:
+    from tests import review_trust_fixture
+    from tests import worker_policy_fixture
 
 
 def setUpModule():
@@ -31,17 +49,18 @@ def tearDownModule():
 
 
 def _real_git_request(root):
-    subprocess.run(['/usr/bin/git', 'init', str(root)], check=True,
+    git = shutil.which('git') or '/usr/bin/git'
+    subprocess.run([git, 'init', str(root)], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(['/usr/bin/git', '-C', str(root), 'config', 'user.name', 'Test'], check=True)
-    subprocess.run(['/usr/bin/git', '-C', str(root), 'config', 'user.email', 'test@example.invalid'], check=True)
+    subprocess.run([git, '-C', str(root), 'config', 'user.name', 'Test'], check=True)
+    subprocess.run([git, '-C', str(root), 'config', 'user.email', 'test@example.invalid'], check=True)
     (root / 'out.txt').write_text('before\n')
-    subprocess.run(['/usr/bin/git', '-C', str(root), 'add', 'out.txt'], check=True)
-    subprocess.run(['/usr/bin/git', '-C', str(root), 'commit', '-m', 'initial'], check=True,
+    subprocess.run([git, '-C', str(root), 'add', 'out.txt'], check=True)
+    subprocess.run([git, '-C', str(root), 'commit', '-m', 'initial'], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    branch = subprocess.check_output(['/usr/bin/git', '-C', str(root), 'branch', '--show-current'],
+    branch = subprocess.check_output([git, '-C', str(root), 'branch', '--show-current'],
                                      text=True).strip()
-    head = subprocess.check_output(['/usr/bin/git', '-C', str(root), 'rev-parse', 'HEAD'],
+    head = subprocess.check_output([git, '-C', str(root), 'rev-parse', 'HEAD'],
                                    text=True).strip()
     return {
         'root': str(root),
@@ -195,7 +214,8 @@ class RouteFailureExecutionTests(unittest.TestCase):
         self.assertFalse(_launched_run_did_no_work(dev, lambda sha: False))
 
     def test_claude_route_wiring(self):
-        case = ClaudeRouteWiringTests(methodName='test_route_failure_records_no_delivery')
+        case = test_claude_route_wiring.ClaudeRouteWiringTests(
+            methodName='test_route_failure_records_no_delivery')
         e_with_facts = RouteError('CLAUDE_STATUS_FAILED')
         e_with_facts.execution_facts = {
             'process_exit_code': 1,
@@ -228,7 +248,6 @@ class RouteFailureExecutionTests(unittest.TestCase):
         self.assertIsNone(stored_dev.get('execution'))
 
     def test_agy_route_wiring(self):
-        agy_case = AgyRouteWiringTests(methodName='test_record_pm_accepts_agy_recommendation')
         e_with_facts = RouteError('AGY_STATUS_FAILED')
         e_with_facts.execution_facts = {
             'process_exit_code': 1,
@@ -236,7 +255,14 @@ class RouteFailureExecutionTests(unittest.TestCase):
             'elapsed_ms': 42,
             'cleanup_status': 'CONFIRMED',
         }
-        status, task, _events, _prompts = agy_case._run_agy_delegate(route_error=e_with_facts)
+        if hasattr(test_agy_route_wiring, '_run_agy_delegate'):
+            run_agy = test_agy_route_wiring._run_agy_delegate
+        else:
+            agy_case = test_agy_route_wiring.AgyRouteWiringTests(
+                methodName='test_record_pm_accepts_agy_recommendation')
+            run_agy = agy_case._run_agy_delegate
+
+        status, task, _events, _prompts = run_agy(route_error=e_with_facts)
         self.assertEqual(status, 1)
         stored_dev = task['developer']
         self.assertIsNotNone(stored_dev.get('execution'))
@@ -245,7 +271,7 @@ class RouteFailureExecutionTests(unittest.TestCase):
 
         # Without facts -> execution stays None
         e_without_facts = RouteError('AGY_STATUS_FAILED')
-        status, task, _events, _prompts = agy_case._run_agy_delegate(route_error=e_without_facts)
+        status, task, _events, _prompts = run_agy(route_error=e_without_facts)
         self.assertEqual(status, 1)
         stored_dev = task['developer']
         self.assertIsNone(stored_dev.get('execution'))
