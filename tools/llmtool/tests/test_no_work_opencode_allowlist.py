@@ -150,7 +150,7 @@ class TestD6UnchangedProbe(unittest.TestCase):
         reg = SimpleNamespace(root='/fake/root')
         snap = SimpleNamespace(head='a' * 40)
         with patch('llmtool.task_completion._worktree_diff', return_value=((), b'')), \
-             patch('llmtool.developer_routes.base._git_status_paths', return_value=('build/',)):
+             patch('llmtool.task_submission_cli._git_status_paths', return_value=('build/',)):
             d6_unchanged = _d6_unchanged_probe(None, (reg, snap))
             self.assertFalse(d6_unchanged('a' * 40, write_paths=('build/out.txt',)))
 
@@ -158,7 +158,7 @@ class TestD6UnchangedProbe(unittest.TestCase):
         reg = SimpleNamespace(root='/fake/root')
         snap = SimpleNamespace(head='a' * 40)
         with patch('llmtool.task_completion._worktree_diff', return_value=((), b'')), \
-             patch('llmtool.developer_routes.base._git_status_paths', return_value=('build/',)):
+             patch('llmtool.task_submission_cli._git_status_paths', return_value=()):
             d6_unchanged = _d6_unchanged_probe(None, (reg, snap))
             self.assertTrue(d6_unchanged('a' * 40, write_paths=('src/main.py',)))
 
@@ -166,16 +166,28 @@ class TestD6UnchangedProbe(unittest.TestCase):
         reg = SimpleNamespace(root='/fake/root')
         snap = SimpleNamespace(head='a' * 40)
         with patch('llmtool.task_completion._worktree_diff', return_value=((), b'')), \
-             patch('llmtool.developer_routes.base._git_status_paths', return_value=('build/',)):
+             patch('llmtool.task_submission_cli._git_status_paths', return_value=()):
             d6_unchanged = _d6_unchanged_probe(None, (reg, snap))
             self.assertTrue(d6_unchanged('a' * 40, write_paths=None))
             self.assertFalse(d6_unchanged('b' * 40, write_paths=None))
+
+    def test_d6_unchanged_ignored_dir_overlap(self):
+        reg = SimpleNamespace(root='/fake/root')
+        snap = SimpleNamespace(head='a' * 40)
+        with patch('llmtool.task_completion._worktree_diff', return_value=((), b'')), \
+             patch('llmtool.task_submission_cli._git_status_paths', return_value=('build/',)):
+            d6_unchanged = _d6_unchanged_probe(None, (reg, snap))
+            self.assertFalse(d6_unchanged('a' * 40, write_paths=('build/out.txt',)))
+        with patch('llmtool.task_completion._worktree_diff', return_value=((), b'')), \
+             patch('llmtool.task_submission_cli._git_status_paths', return_value=('.venv/',)):
+            d6_unchanged = _d6_unchanged_probe(None, (reg, snap))
+            self.assertTrue(d6_unchanged('a' * 40, write_paths=('build/out.txt',)))
 
     def test_d6_unchanged_exception_fails_closed(self):
         reg = SimpleNamespace(root='/fake/root')
         snap = SimpleNamespace(head='a' * 40)
         with patch('llmtool.task_completion._worktree_diff', return_value=((), b'')), \
-             patch('llmtool.developer_routes.base._git_status_paths', side_effect=RuntimeError('inspection failed')):
+             patch('llmtool.task_submission_cli._git_status_paths', side_effect=RuntimeError('inspection failed')):
             d6_unchanged = _d6_unchanged_probe(None, (reg, snap))
             self.assertFalse(d6_unchanged('a' * 40, write_paths=('src/main.py',)))
             self.assertFalse(d6_unchanged('a' * 40, write_paths=None))
