@@ -1,6 +1,6 @@
 # #1786 design: Mac CI capacity cancel is not a test failure
 
-Proposal only; not a review or acceptance. Source: `main` at `6091cda09b9a67b13ad8f3a2d6b254b53106733b`. Claims about today cite exact `path:line` at that SHA. Anything not read is marked UNVERIFIED. The change is 待實作（#1786）.
+Proposal only; not a review or acceptance. Source: `main` at `6091cda09b9a67b13ad8f3a2d6b254b53106733b`. Claims about today cite exact `path:line` at that SHA. Anything not read is marked UNVERIFIED. Implemented by PR #2082; section 7 records where the implementation differs from this proposal.
 
 ## 1. Today (現行)
 
@@ -76,6 +76,8 @@ When sibling job evidence is ambiguous, incomplete, or corrupted, `task_advance`
    - Behavior: Keeps today's `WAITING` (`WAITING_CI` with reason code `CI_JOB_CONCLUSION_UNKNOWN`).
    - Count impact: Does not spend the test-failure count; does not dispatch repair until a conclusive state is reached.
 
+Amendment (PM_DECIDE #1786 c6889125309): cases 1, 3 and 4, and a missing or unmatched details_url, keep today's counted CI_FAILED routing instead of WAITING; no exemption without positive evidence.
+
 ## 5. Out of scope
 
 To respect architectural boundaries and Owner authority, the following areas are strictly out of scope:
@@ -88,7 +90,7 @@ To respect architectural boundaries and Owner authority, the following areas are
 
 ## 6. Tests to add later
 
-The implementation of 待實作（#1786）will add unit test cases to `tools/llmtool/tests/test_task_advance.py` (or a dedicated CI routing test suite) covering fake sibling job lists:
+PR #2082 adds these unit test cases in `tools/llmtool/tests/test_task_advance_mac_capacity.py` (expectations as amended in section 7) covering fake sibling job lists:
 
 1. `test_mac_ci_capacity_cancel_select_cancelled_shards_skipped`:
    - Setup: `select` has `conclusion: "cancelled"`, shards (1/3, 2/3, 3/3) have `conclusion: "skipped"`, `check (macOS 3.13)` has `conclusion: "failure"`.
@@ -111,3 +113,11 @@ The implementation of 待實作（#1786）will add unit test cases to `tools/llm
 7. `test_mac_ci_fail_closed_unknown_job_conclusion`:
    - Setup: A sibling job reports `conclusion: "unexpected_status"`.
    - Expectation: Returns `WAITING_CI` (or fail-closed waiting), no repair dispatch, count unspent.
+
+## 7. Amendments (as implemented, PR #2082)
+
+- **Result code:** a proven capacity cancel returns `WAITING_ENV` with code `CI_ENV_MAC_CAPACITY_CANCELLED` (not `WAITING_CI_CAPACITY`). It dispatches no repair and spends no test-failure count.
+- **No exemption without positive evidence (PM_DECIDE #1786 c6889125309):** cases 1, 3 and 4 of section 4, and a missing or unmatched `details_url`, keep today's counted `CI_FAILED` routing instead of waiting.
+- **Trusted evidence only (Codex security v91 on #2081):** the exemption applies only when the PR changes nothing under `.github/`, the workflow run is `.github/workflows/llmtool-mac-ci.yml` at this head, and the `details_url` job id is the check job's id.
+- **Timeouts never qualify (Codex security v92, AI Debug #2082 c6890125782):** `timed_out` on `select` or any shard vetoes the exemption, because PR-controlled selector code can cause it. Only `cancelled` and `startup_failure` qualify, and they are interrupted CI evidence, not proof of capacity.
+- **Subset mode:** `select` success with every shard skipped is a mac-subset run and stays a counted test failure (PM_DECIDE #1786 c6889094590).

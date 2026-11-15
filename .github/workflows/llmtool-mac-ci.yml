@@ -75,11 +75,11 @@ jobs:
             report_full_fallback() {
               fallback_reason="$1"
               printf 'selection exact HEAD: %s\nselection changed paths:\n' "$EXPECTED_SHA"
-              git diff --no-ext-diff --no-renames --name-only "$BASE_SHA" "$EXPECTED_SHA" --
+              python3 -I -B tools/llmtool/scripts/ci_changed_paths.py --base "$BASE_SHA" --head "$EXPECTED_SHA" --format lines || echo "(changed paths unavailable)"
               printf 'selection level: L3\nselection test IDs: FULL\nselection test ID count: full-suite\nselection reason: selector_failure_requires_full\nselection fallback reasons: %s\nselection elapsed seconds: %s\n' \
                 "$fallback_reason" "$((SECONDS - selection_started))"
             }
-            if git diff --no-ext-diff --no-renames --name-only -z "$BASE_SHA" "$EXPECTED_SHA" -- > "$paths"; then
+            if python3 -I -B tools/llmtool/scripts/ci_changed_paths.py --base "$BASE_SHA" --head "$EXPECTED_SHA" --format nul > "$paths"; then
               count=0
               mode=monitor-only
               verify=false
@@ -117,7 +117,7 @@ jobs:
                     reason=$(printf '%s' "$selection" | python3 -I -B -c 'import json,sys; print(json.load(sys.stdin)["selection_reason"])')
                     fallback=$(printf '%s' "$selection" | python3 -I -B -c 'import json,sys; print(",".join(json.load(sys.stdin)["fallback_reasons"]) or "none")')
                     printf 'selection exact HEAD: %s\nselection changed paths:\n' "$EXPECTED_SHA"
-                    git diff --no-ext-diff --no-renames --name-only "$BASE_SHA" "$EXPECTED_SHA" --
+                    python3 -I -B tools/llmtool/scripts/ci_changed_paths.py --base "$BASE_SHA" --head "$EXPECTED_SHA" --format lines || echo "(changed paths unavailable)"
                     printf 'selection level: %s\nselection test IDs: %s\nselection test ID count: %s\nselection reason: %s\nselection fallback reasons: %s\nselection elapsed seconds: %s\n' "$level" "$(tr '\n' ' ' < "$RUNNER_TEMP/mac-test-ids")" "$count" "$reason" "$fallback" "$((SECONDS - selection_started))"
                     if [ "$level" = L3 ]; then
                       mode=full
