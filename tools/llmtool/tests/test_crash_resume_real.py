@@ -151,7 +151,8 @@ elif mode == 'drive':
         raise RuntimeError('this drive step must not poll or read GitHub quota')
 
     result = task_drive.drive(task_id=task_id, store=store, max_steps=1,
-                              advance_call=advance, quota_read=offline, sleep=offline)
+                              advance_call=advance, quota_read=offline, sleep=offline,
+                              code_tree_read=lambda: 'd' * 64)
     print('DONE', result['step'], 'created' if outcome['created'] else 'replayed',
           flush=True)
 else:
