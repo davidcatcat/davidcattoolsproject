@@ -234,8 +234,11 @@ class ExchangeTests(unittest.TestCase):
             '--output',self.wait_args.output,'--timeout','30','--json',
             wait_ready_file=ready)
         env = dict(os.environ,PYTHONDONTWRITEBYTECODE='1')
+        # #2074: a parent started as a background job has SIGINT ignored, and the
+        # child would inherit that; give the child the default SIGINT disposition.
         child = subprocess.Popen(command,env=env,stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,
+            preexec_fn=lambda: signal.signal(signal.SIGINT,signal.SIG_DFL))
         try:
             # The child must reach the review-wait polling loop (request and
             # trust validated) and still be running before it is interrupted.

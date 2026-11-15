@@ -857,6 +857,9 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 self.assertFalse(result.usage.calls[-1].known)
 
     def test_cancellation_reaps_both_owned_processes_and_retains_attempt_fence(self):
+        # #2074: a test process started as a background job has SIGINT ignored;
+        # the fake child's SIGINT must still raise KeyboardInterrupt here.
+        self.addCleanup(signal.signal,signal.SIGINT,signal.signal(signal.SIGINT,signal.default_int_handler))
         job=self.job('cancel');host=Host()
         with self.assertRaises(KeyboardInterrupt):
             w.run_worker(job,host)
@@ -1112,6 +1115,9 @@ class OpenCodeWorkerTests(unittest.TestCase):
             def __getattr__(self,name):
                 if name==self._missing: raise AttributeError(name)
                 return getattr(os,name)
+        # #2074: a test process started as a background job has SIGINT ignored;
+        # the fake child's SIGINT must still raise KeyboardInterrupt here.
+        self.addCleanup(signal.signal,signal.SIGINT,signal.signal(signal.SIGINT,signal.default_int_handler))
         job=self.job('cancel')
         host=Host()
         with patch.object(w,'os',OsWithout('WNOWAIT')):
