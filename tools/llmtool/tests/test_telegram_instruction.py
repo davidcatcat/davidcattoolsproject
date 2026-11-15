@@ -70,7 +70,7 @@ class FakeTransport:
 
 class InstructionTest(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.mkdtemp()
+        self.directory = os.path.realpath(tempfile.mkdtemp())
         os.chmod(self.directory, 0o700)
         self.cursor_path = os.path.join(self.directory, 'cursor.json')
         self.inbox_path = os.path.join(self.directory, 'inbox.json')
