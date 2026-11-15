@@ -18,6 +18,14 @@ review repair reads the chain counts and writes its claim under the chain lock
 of the chain's oldest Task (chain_key), so two repairs in one chain cannot
 both spend the last repair. A lock that cannot be taken refuses; nothing is
 checked or written without it.
+
+Chain views (phase 2 R2; pure, no store writes, no callers yet): store_records
+reads one bounded store snapshot; chain_in finds a Task's chain and key in it;
+d6_task_ids and delegate_chain gather the chains of a delegated Task and its
+D6 Tasks for the chain-wide Developer repair cap; recorded_result_heads and
+check_continuation_link refuse CONTINUATION_LINK_REQUIRED when a base SHA is a
+result head of a Task outside the chain; acquire_chain_locks takes several
+chain locks in sorted order. Doubt returns None or refuses.
 """
 
 import contextlib
@@ -28,12 +36,19 @@ from .errors import LLMToolError
 from .repair_policy import UNKNOWN
 
 MAX_CHAIN = 16
+MAX_DELEGATE_MEMBERS = 2 * MAX_CHAIN
+STORE_SCAN_MAX = 20000
 _HEX32 = re.compile(r'[0-9a-f]{32}')
+_HEX40 = re.compile(r'[0-9a-f]{40}')
 _EC2_SUFFIX = '-ec2'   # review_repair.EC2_FAMILY_SUFFIX
 
 
 def _hex32(value):
     return type(value) is str and _HEX32.fullmatch(value) is not None
+
+
+def _hex40(value):
+    return type(value) is str and _HEX40.fullmatch(value) is not None
 
 
 def _refuse(code):
@@ -375,3 +390,258 @@ def acquire_chain_lock(store, key):
     stack = contextlib.ExitStack()
     stack.enter_context(_store_lock(store, 'chain', key))
     return stack.close
+
+
+def acquire_chain_locks(store, keys):
+    """Take the chain locks of keys in sorted order; return one release callable.
+
+    Sorted, de-duplicated order means two callers with overlapping key sets
+    cannot deadlock. The release is idempotent and releases in reverse order.
+    On any acquire failure the locks already taken are released and the
+    failure is re-raised. A non-list, an empty list, or an empty or non-str
+    key raises LINEAGE_LOCK_INVALID before any lock is taken.
+    """
+    if (type(keys) is not list or not keys or
+            any(type(key) is not str or not key for key in keys)):
+        raise LLMToolError('LINEAGE_LOCK_INVALID')
+    held, guard = [], threading.Lock()
+
+    def release():
+        with guard:
+            taken = held[::-1]
+            held.clear()
+        first = None
+        for undo in taken:
+            try:
+                undo()
+            except Exception as error:   # release every lock before reporting
+                if first is None:
+                    first = error
+        if first is not None:
+            raise first
+
+    try:
+        for key in sorted(set(keys)):
+            held.append(acquire_chain_lock(store, key))
+    except BaseException:
+        try:
+            release()
+        except Exception:
+            pass   # the acquire failure is the error the caller sees
+        raise
+    return release
+
+
+def store_records(store):
+    """{task_id: record} for every stored Task, or None when the scan is in doubt.
+
+    store.task_ids() is read once, then store.get() once per ID. None when the
+    store is None, a read raises, a record is not a dict, an ID is not a
+    non-empty str or repeats, or the store lists more than STORE_SCAN_MAX IDs.
+    """
+    if store is None:
+        return None
+    try:
+        task_ids = list(store.task_ids())
+    except Exception:
+        return None
+    if len(task_ids) > STORE_SCAN_MAX:
+        return None
+    records = {}
+    for task_id in task_ids:
+        if type(task_id) is not str or not task_id or task_id in records:
+            return None
+        try:
+            record = store.get(task_id)
+        except Exception:
+            return None
+        if type(record) is not dict:
+            return None
+        records[task_id] = record
+    return records
+
+
+def chain_in(records, task_id):
+    """(chain_ids, key) for task_id in a store_records snapshot, or None in doubt.
+
+    chain_ids: the Task, its predecessors nearest first, then its successors
+    nearest first (lineage_counts include_successors order). key: the oldest
+    Task ID, as chain_key gives. None for a missing record, a malformed or self
+    link, a cycle, a chain record other than the Task whose task_id differs
+    from its key, a fork anywhere (a chain Task continued by two records) or a
+    chain over MAX_CHAIN Tasks.
+    """
+    if type(records) is not dict or type(task_id) is not str or not task_id:
+        return None
+    task = records.get(task_id)
+    if type(task) is not dict:
+        return None
+    children = {}
+    for other_id, other in records.items():
+        if type(other) is not dict:
+            return None
+        link = other.get('continues')
+        if type(link) is str:
+            children.setdefault(link, []).append(other_id)
+    chain, seen, current = [task_id], {task_id}, task
+    while 'continues' in current:
+        previous = current['continues']
+        if not _hex32(previous) or previous in seen or len(chain) >= MAX_CHAIN:
+            return None
+        record = records.get(previous)
+        if type(record) is not dict or record.get('task_id') != previous:
+            return None
+        # The member before it is its one successor; any other is a fork.
+        if len(children.get(previous, ())) != 1:
+            return None
+        chain.append(previous)
+        seen.add(previous)
+        current = record
+    key = chain[-1]
+    current = task_id
+    while current in children:
+        found = children[current]
+        if len(found) != 1:
+            return None
+        successor = found[0]
+        if (not _hex32(successor) or records[successor].get('task_id') != successor or
+                successor in seen or len(chain) >= MAX_CHAIN):
+            return None
+        chain.append(successor)
+        seen.add(successor)
+        current = successor
+    return chain, key
+
+
+def d6_task_ids(records, executor_task):
+    """Sorted IDs whose completion.executor_task_id is executor_task, or None in doubt.
+
+    None when records is not a dict, executor_task is not a non-empty str, an
+    ID is not a str, a record is not a dict, or any completion is neither None
+    nor a dict.
+    """
+    if type(records) is not dict or type(executor_task) is not str or not executor_task:
+        return None
+    found = []
+    for task_id, record in records.items():
+        if type(task_id) is not str or type(record) is not dict:
+            return None
+        completion = record.get('completion')
+        if completion is None:
+            continue
+        if type(completion) is not dict:
+            return None
+        if completion.get('executor_task_id') == executor_task:
+            found.append(task_id)
+    return sorted(found)
+
+
+def delegate_chain(records, seed_ids):
+    """The chains of a delegated Task and its D6 Tasks, or None in doubt.
+
+    seed_ids: the delegated Task first, then the D6 Tasks. Returns
+    {'members': {id: record}, 'keys': sorted unique chain keys, 'linked':
+    sorted IDs in chains longer than one Task}. Two seeds in one chain count
+    it once. None when seed_ids is not a non-empty list, any seed's chain is in
+    doubt, two chains share a Task, or members exceed MAX_DELEGATE_MEMBERS.
+    """
+    if type(records) is not dict or type(seed_ids) is not list or not seed_ids:
+        return None
+    chains, owner = {}, {}
+    for seed in seed_ids:
+        found = chain_in(records, seed)
+        if found is None:
+            return None
+        chain_ids, key = found
+        if key in chains:
+            if set(chain_ids) != chains[key]:
+                return None
+            continue
+        for member in chain_ids:
+            if member in owner:
+                return None   # one Task in two chains
+            owner[member] = key
+        chains[key] = set(chain_ids)
+        if len(owner) > MAX_DELEGATE_MEMBERS:
+            return None
+    linked = sorted(member for ids in chains.values() if len(ids) > 1 for member in ids)
+    return {'members': {member: records[member] for member in owner},
+            'keys': sorted(chains), 'linked': linked}
+
+
+def recorded_result_heads(record):
+    """The 40-hex result heads a Task recorded, other than its source SHA.
+
+    Reads completion.evidence.result_head and completion.evidence.result
+    .result_head; a head equal to evidence.source_sha is not a result. set()
+    when completion or evidence is None. None when the record, completion,
+    evidence or result has a wrong type, or a head is neither None nor a str.
+    """
+    if type(record) is not dict:
+        return None
+    completion = record.get('completion')
+    if completion is None:
+        return set()
+    if type(completion) is not dict:
+        return None
+    evidence = completion.get('evidence')
+    if evidence is None:
+        return set()
+    if type(evidence) is not dict:
+        return None
+    result = evidence.get('result')
+    if result is not None and type(result) is not dict:
+        return None
+    candidates = [evidence.get('result_head')]
+    if result is not None:
+        candidates.append(result.get('result_head'))
+    source = evidence.get('source_sha')
+    heads = set()
+    for head in candidates:
+        if head is None:
+            continue
+        if type(head) is not str:
+            return None
+        if _hex40(head) and head != source:
+            heads.add(head)
+    return heads
+
+
+def _link_refuse(reason):
+    error = LLMToolError('CONTINUATION_LINK_REQUIRED')
+    error.continuation_link_reason = reason
+    raise error from None
+
+
+def check_continuation_link(records, member_ids, base_sha):
+    """Refuse a base SHA that is the result of a Task outside the chain.
+
+    Raises LLMToolError('CONTINUATION_LINK_REQUIRED') with
+    continuation_link_reason 'RESULT_HEAD_OUTSIDE_CHAIN' when base_sha is a
+    recorded result head of a Task not in member_ids, or 'SCAN_IN_DOUBT' when
+    base_sha is not 40-hex, records is not a dict, member_ids is not a
+    collection of IDs, or a non-member's heads are in doubt. No override.
+    Returns None otherwise.
+    """
+    if not _hex40(base_sha) or type(records) is not dict:
+        _link_refuse('SCAN_IN_DOUBT')
+    if type(member_ids) not in (set, frozenset, list, tuple, dict):
+        _link_refuse('SCAN_IN_DOUBT')
+    try:
+        members = set(member_ids)
+    except TypeError:
+        _link_refuse('SCAN_IN_DOUBT')
+    outside = doubt = False
+    for task_id, record in records.items():
+        if task_id in members:
+            continue
+        heads = recorded_result_heads(record)
+        if heads is None:
+            doubt = True
+        elif base_sha in heads:
+            outside = True
+    if outside:
+        _link_refuse('RESULT_HEAD_OUTSIDE_CHAIN')
+    if doubt:
+        _link_refuse('SCAN_IN_DOUBT')
+    return None

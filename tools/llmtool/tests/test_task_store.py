@@ -3501,7 +3501,7 @@ class TaskStoreTests(unittest.TestCase):
             task_id='executor-task', trusted_agent_id='agent',
             session_ref='session-ref', native_session_id=None, root=root,
             common_dir=snapshot.common_dir, branch=snapshot.branch,
-            env2_pass_marker='pass')
+            env2_pass_marker='pass', source_sha=snapshot.head)
         args = SimpleNamespace(
             task_id=None, selection_source='USER', context_stdin=False,
             executor_task='executor-task', read_path=['src.py'],
@@ -3516,11 +3516,15 @@ class TaskStoreTests(unittest.TestCase):
             ('The requested change cannot be made safely.',
              'CODEX_RESULT_EVIDENCE_UNKNOWN', None, 'UNKNOWN', True),
         )
-        for reason, expected_code, expected_reason, expected_execution, evidence_failure in cases:
+        for index, (reason, expected_code, expected_reason, expected_execution,
+                    evidence_failure) in enumerate(cases):
             with self.subTest(reason=reason[:20]):
                 task = self._codex_dispatch_task()
                 self.store.create(task)
                 args.task_id = task['task_id']
+                # #1502 WP-D R2: each case is a first run on its own D6, so the
+                # chain gate's repair count never sees an earlier case's run.
+                registration.task_id = args.executor_task = f'executor-task-{index}'
                 result = SimpleNamespace(
                     status='BLOCKED', blocked_reason=reason,
                     thread_id='12345678-1234-4234-8234-123456789abc',
@@ -3572,7 +3576,7 @@ class TaskStoreTests(unittest.TestCase):
             task_id='executor-task', trusted_agent_id='agent',
             session_ref='session-ref', native_session_id=None, root=root,
             common_dir=snapshot.common_dir, branch=snapshot.branch,
-            env2_pass_marker='pass')
+            env2_pass_marker='pass', source_sha=snapshot.head)
         task = self._codex_dispatch_task()
         self.store.create(task)
         args = SimpleNamespace(

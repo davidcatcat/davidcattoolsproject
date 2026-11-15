@@ -33,6 +33,7 @@ from llmtool.providers.cli_lifecycle import CLIHostTermination, _Cancelled
 from llmtool import task_store
 
 
+import _chain_gate_fixture
 import review_trust_fixture
 
 
@@ -72,6 +73,11 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         not_delivered = patch.object(task_submission_cli.skill_ledger, 'record_not_delivered')
         self.record_not_delivered = not_delivered.start()
         self.addCleanup(not_delivered.stop)
+        # #1502 WP-D R2: these cases test route wiring on one-record fake stores
+        # without a store scan; the claim passes through the chain gate, which
+        # GwAgentRealStoreTests, test_task_delegate_repair_cap and
+        # test_lineage_delegate_integration run for real.
+        _chain_gate_fixture.pass_through_chain_gate(self)
 
     def test_gw_agent_endpoint_reads_the_gateway_profile_not_company_gw(self):
         profile = {'name': 'work', 'base_url': 'https://gateway.example', 'model': 'm1',
@@ -1862,6 +1868,11 @@ class GwAgentRealStoreTests(unittest.TestCase):
                 ('run-unexpected', {'route_runner': unexpected},
                  'DEVELOPER_OUTCOME_UNKNOWN', 'DEVELOPER_RESULT_UNKNOWN')):
             with self.subTest(path=name):
+                # #1502 WP-D R2: every failed run on executor-d6 counts toward
+                # the D6 repair cap, so one shared store would make the third
+                # path repair #2 (root cause required). Each path is an original
+                # run: it gets its own store.
+                self._fresh_store()
                 code, task = self._delegate(f'gw-agent-{name}.md', **options)
                 self.assertEqual(code, 1)
                 self._assert_failed(task, state, error_code)
@@ -2306,6 +2317,32 @@ class GwAgentRealStoreTests(unittest.TestCase):
             return 'BOUND'
         return lifecycle
 
+    def _record_confirmed_root_cause(self, task_id):
+        """Record an RCA_CONFIRMED High Debug entry on task_id at the D6 head.
+
+        The entry has the shape run_high_debug stores; the store validates it.
+        Returns (report, report_sha256) for the repair #2 packet.
+        """
+        from llmtool.high_debug import _d6_name
+        report = '\n'.join((
+            '## Identity and source', 'Synthetic fixture.',
+            '## Symptom and reproduction', 'Synthetic fixture.',
+            '## Root Cause', 'Confirmed root cause.',
+            '## Exactly what to modify', 'Synthetic fixture.',
+            '## Verification', 'Synthetic fixture.',
+            '## Risks and handoff', 'Synthetic fixture.',
+            '## Outcome/cost', 'RCA_CONFIRMED', 'Cost: UNKNOWN',
+        )) + '\n'
+        report_sha256 = hashlib.sha256(report.encode('utf-8')).hexdigest()
+        self.store.append_high_debug(task_id, {
+            'status': 'RCA_CONFIRMED', 'family': 'pr-1', 'failed_corrections': 2,
+            'early_reason': None, 'd6': _d6_name('executor-d6', 1, self.head),
+            'examined_sha': self.head, 'model_requested': 'synthetic-model',
+            'model_observed': 'synthetic-model', 'effort_observed': 'high',
+            'report': report, 'report_sha256': report_sha256, 'usage': 'UNKNOWN',
+            'recorded_at': '2026-11-15T00:00:00Z'})
+        return report, report_sha256
+
     def _gw_home_binding(self):
         from llmtool.developer_routes import gw_agent
         home = Path(self.store_root).parent / 'gw-agent-sessions' / 'executor-d6'
@@ -2358,12 +2395,20 @@ class GwAgentRealStoreTests(unittest.TestCase):
             seen.update(request)
             return task_submission_cli.run_route(route, request, **kwargs)
 
+        # #1502 WP-D R2: the first two runs on executor-d6 count, so this
+        # round is the D6's repair #2. Its packet carries the confirmed root
+        # cause review_repair binds, recorded on the Task it repairs.
+        report, report_sha256 = self._record_confirmed_root_cause(second['task_id'])
         with patch.object(task_submission_cli, '_validate_repair_packet',
                           side_effect=lambda value: value):
             code, repair = self._delegate(
                 'gw-agent-two.md', bind=bind, route_runner=spy_runner,
                 repair_packet={'reviewer_text_excerpt_untrusted_data':
-                               'synthetic finding'})
+                               'synthetic finding',
+                               'task': second['task_id'], 'executor_task': 'executor-d6',
+                               'failed_head': self.head,
+                               'high_debug_report_untrusted_data': report,
+                               'high_debug_report_sha256': report_sha256})
         self.assertEqual(seen['session_id'], second_session)
         self.assertEqual(seen['task']['task_id'], second['task_id'])
         self.assertEqual(self._assert_kept_d6_session(code, repair, first_session),
