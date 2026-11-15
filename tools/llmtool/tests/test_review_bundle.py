@@ -311,6 +311,66 @@ class BundleTests(unittest.TestCase):
             out.close()
             with patch('sys.stdout',out): self.assertNotEqual(b.run_review_bundle(self.args),0)
 
+    def test_prepare_refusal_codes_name_each_stage(self):
+        # #1230 refusal-code pin: each prepare_bundle stage refuses with one fixed code.
+        def code(environment=None):
+            with self.assertRaises(LLMToolError) as caught: self.prepare(environment)
+            return caught.exception.review_code
+        self.private_file(self.args.events, '\n'.join(e.to_json() for e in self.events[:3]))
+        self.assertEqual(code(), 'BUNDLE_TASK_NOT_READY')
+        self.write_inputs()
+        self.assertEqual(code({'CODEX_THREAD_ID':'changed-session'}), 'BUNDLE_BINDING_INVALID')
+        original = self.facts; self.facts = replace(original, clean_tracked=False)
+        self.assertEqual(code(), 'BUNDLE_BINDING_INVALID')
+        self.facts = original
+        for kind, expected in (('digest','BUNDLE_EVIDENCE_INVALID'), ('kind','BUNDLE_SCHEMA_INVALID')):
+            with self.subTest(kind=kind):
+                index = json.loads(json.dumps(self.index)); item = index['artifacts'][0]
+                if kind == 'digest': item['sha256'] = '0'*64
+                else: item['kind'] = 'SHELL'
+                self.private_file(self.args.evidence, json.dumps(index))
+                self.assertEqual(code(), expected)
+        self.private_file(self.args.evidence, json.dumps(self.index))
+        Path(self.args.contract).chmod(0o644)
+        self.assertEqual(code(), 'BUNDLE_FILE_INVALID')
+        self.assertFalse(Path(self.args.output).exists())
+
+    def test_budget_input_deadline_and_output_codes(self):
+        # #1230 refusal-code pin: size, input drift, deadline and late output change codes.
+        files = []
+        for i in range(3):
+            path = self.private/('capture'+str(i)+'.txt'); self.private_file(path,'x'*b.FILE_LIMIT)
+            files.append(dict(self.index['artifacts'][0], artifact_id='a'+str(i), path=str(path),
+                              sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+        self.private_file(self.args.evidence, json.dumps(dict(self.index, artifacts=files)))
+        with self.assertRaises(LLMToolError) as caught: self.prepare()
+        self.assertEqual(caught.exception.review_code, 'BUNDLE_TOO_LARGE')
+        inputs = b._Inputs(self.root, b.time.monotonic()+60)
+        inputs.read(self.args.expect)
+        self.private_file(self.args.expect, 'changed')
+        with self.assertRaises(LLMToolError) as caught: inputs.verify()
+        self.assertEqual(caught.exception.review_code, 'BUNDLE_INPUT_CHANGED')
+        with patch.object(b.time, 'monotonic', return_value=100):
+            with self.assertRaises(LLMToolError) as caught: b._check(99)
+        self.assertEqual(caught.exception.review_code, 'BUNDLE_TIMEOUT')
+        path = self.private/'late-output.json'
+        def change(): path.write_bytes(b'changed\n')
+        with self.assertRaises(LLMToolError) as caught:
+            b._write_output(str(path), self.root, b'bounded\n', b.time.monotonic()+60, change)
+        self.assertEqual(caught.exception.review_code, 'BUNDLE_OUTPUT_CHANGED')
+
+    def test_receipt_names_fallback_and_internal_codes(self):
+        # #1230 refusal-code pin: uncoded input errors and unexpected crashes get fixed codes.
+        for error, expected in ((ValueError('private detail'), 'BUNDLE_INPUT_INVALID'),
+                                (RuntimeError('private detail'), 'BUNDLE_INTERNAL_ERROR')):
+            with self.subTest(expected=expected):
+                out = io.StringIO()
+                with patch.object(b, 'prepare_bundle', side_effect=error), patch('sys.stdout', out):
+                    self.assertEqual(b.run_review_bundle(self.args), 1)
+                receipt = json.loads(out.getvalue())
+                self.assertEqual((receipt['status'], receipt['code']), ('BLOCKED', expected))
+                self.assertNotIn('private detail', out.getvalue())
+
     def test_late_public_receipt_must_not_exit_zero(self):
         clock = [100.0]
         class LateReceipt(io.StringIO):
