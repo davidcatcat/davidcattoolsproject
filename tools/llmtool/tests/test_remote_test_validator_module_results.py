@@ -2,6 +2,7 @@
 import json
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +66,24 @@ class ValidatorModuleResultsTests(unittest.TestCase):
         self.assertIsNone(validate(b'{"ran_total":' + big + b'}'))
         data = raw(module_results=results()).replace(b'"ran":2', b'"ran":' + big)
         self.assertIsNone(validate(data))
+
+    def test_deeply_nested_json_is_refused_not_raised(self):
+        nested = b'[' * 16000 + b'0' + b']' * 16000
+        self.assertIsNone(validate(nested))
+        marker = b'"module_results":['
+        data = raw(module_results=results()).replace(marker, marker + nested + b',', 1)
+        self.assertIsNone(validate(data))
+
+    def test_parser_errors_are_contained_but_interrupts_propagate(self):
+        for error in (MemoryError, RecursionError, OverflowError):
+            with self.subTest(error=error.__name__):
+                with mock.patch.object(rt.json, 'loads', side_effect=error):
+                    self.assertIsNone(validate(raw()))
+        for error in (KeyboardInterrupt, SystemExit):
+            with self.subTest(error=error.__name__):
+                with mock.patch.object(rt.json, 'loads', side_effect=error):
+                    with self.assertRaises(error):
+                        validate(raw())
 
 
 if __name__ == '__main__':
