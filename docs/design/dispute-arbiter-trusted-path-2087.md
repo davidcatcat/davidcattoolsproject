@@ -429,58 +429,193 @@ Today `_valid_review_dispute_ruling` (`task_store.py:1477-1488`) requires exactl
 
 ## 3. Design B (#2088): `SUPERSEDED`
 
+Source read for §3, §7 and §8 (O7 child 3/3): `8c4eac1f`. `task_submission_cli.py`, `review_repair.py`, `high_debug.py` and `lineage_counts.py` were read at this commit. Every line cited from these four files in §3, §7 and §8 refers to it. Lines cited from other files keep the commits stated at the top of this note. `task_store.py`, `pm_caller.py` and the five status and event readers of §7.2 were not read for this child.
+
 ### 3.1 Interface
 
 ```
-llmtool task dispute supersede <old_task_id> --pr <N> --finding <F#> --by <replacement_task_id> [--pm-session <id>]
+llmtool task dispute supersede <old_task_id> --pr <N> --finding <F#> --head <sha> --by <replacement_task_id> [--pm-session <id>]
 ```
 
-- **Who may call:** a PM session that `pm_caller.check_caller` accepts for **both** the old Task and the replacement Task.
-- A supersede carries no ruling, outcome, verdict or free text, so it does not engage Owner ruling C. It still records the PM caller as actor.
+- `--head` selects the entry. One (pr, finding) can have `OPEN` entries on several heads, because `_dispute_append` refuses a second `OPEN` only on the same head (`task_submission_cli.py:2762-2764`). llmtool matches the value against the stored entry. It only selects the entry and is never evidence.
+- Argument checks, before any read: `--pr` and `--finding` are checked as in `_dispute_arguments` (`:2487-2489`); `--head` must be 40 lower-case hex; `<old_task_id>` and `--by` must be 32 lower-case hex and differ. Any failure refuses `DISPUTE_ARGUMENT_INVALID`.
+- **Who may call:** a PM session that `pm_caller.check_caller` accepts for **both** the old Task and the replacement Task. The adapter calls it twice, in the same way `run_task_dispute` calls it once (`task_submission_cli.py:2887-2891`).
+- A supersede carries no ruling, outcome, verdict, free text or URL, so it does not engage Owner ruling C. It still records the PM caller as actor.
 - llmtool never supersedes automatically. A replacement Task may exist without its PM wanting the old dispute closed.
+- `supersede` has its own subparser. The shared loop that adds a required `--evidence-ref` to every action (`:1038-1050`) does not apply. The adapter does not read `args.evidence_ref`, which today is read for every action (`:2893-2894`).
+- A refusal prints only its code and exits 1, as `run_task_dispute` does (`:2906-2912`).
 
 ### 3.2 Conditions
 
-All conditions are checked under `lineage_counts.acquire_chain_lock` for the chain key. Old and replacement Tasks share one key through `continues`, as review repair does at `review_repair.py:799-808`. Any doubt refuses.
+One supersede runs one or more **rounds** under one chain lock. Each round re-reads both Tasks and runs every check below on that read. Any refusal writes nothing.
 
-1. **Old entry.**
-   - Exactly one entry for (pr, finding) on the old Task is `OPEN`.
-   - `RULED` refuses `DISPUTE_ALREADY_RULED`. `DEFERRED` refuses `DISPUTE_NOT_OPEN` (deferral is already non-blocking history).
-   - `SUPERSEDED` with an identical evidence digest returns the recorded result and writes nothing. A different digest refuses `DISPUTE_ALREADY_SUPERSEDED`.
-2. **No pending ruling.**
-   - If the entry's arbiter claim is `COMPLETED` and not yet ruled, refuse `DISPUTE_RULING_PENDING`. A ruling already produced is recorded first through `arbitrate`; it is never hidden by a supersede.
-   - `CLAIMED`, `DISPATCHED` or `UNKNOWN` arbiter claims do not block supersede. They stay in history, and a later `arbitrate` finalisation refuses `DISPUTE_SUPERSEDED` (§2.2 step 2), so no ruling is ever recorded for them.
-3. **Link.**
-   - The replacement record's `continues` must equal `old_task_id` exactly (direct successor only).
-   - Both Tasks must have the same `lineage_counts.chain_key`, and it must be unchanged after the lock (as at `review_repair.py:806-808`).
-   - The replacement must not be abandoned and must have a valid `task_binding` whose `contract_digest` differs from the old Task's.
-   - This digest check is weak on its own: `continues` is part of the contract digest (`task_submission_cli.py:535-542`), so a successor's digest always differs. The real proof that the dispute is moot is the new verified head in item 4.
-4. **New head.**
-   - The replacement's Executor D6 must be registered (`read_d6_registration`) with a clean snapshot whose head equals `result_sha` (as `_preflight`, `review_dispatch.py:245-256`).
-   - That head must differ from the disputed `head_sha` and from every head of the old Task's `review_dispatch_claim` list.
-5. **Old Task state.**
-   - An abandoned old Task is accepted, because abandonment is the normal fate of a replaced Task. This is the only write allowed on an abandoned record, and it touches only `review_disputes`.
-   - Whether `task_store.py` permits it is UNKNOWN; PR B1 must confirm or add it. If the store forbids it, B1 refuses `DISPUTE_TASK_ABANDONED` as today (`:2455-2456`), and that limit is reported to the PM.
+1. **Chain lock.** From a first read of the old Task, `key = lineage_counts.chain_key(store, old)`. Then `lineage_counts.acquire_chain_lock(store, key)`, as review repair does (`review_repair.py:799-808`) and as the High Debug reservation does (`high_debug.py:1397-1406`). If the lock cannot be taken, the call refuses `DISPUTE_CHAIN_LOCK_UNAVAILABLE`. The lock is released on every path.
+2. **Old Task.** `_dispute_task(store, old)` (`task_submission_cli.py:2449-2460`) checks the ID shape, that the record is readable, that it is not abandoned (`DISPUTE_TASK_ABANDONED`, `:2455-2456`), and that `review_disputes` is a well-formed list (`DISPUTE_RECORD_INVALID`, `:2457-2459`). On this fresh record, `chain_key` must still equal `key` (as at `review_repair.py:806-808`). Otherwise the call refuses `DISPUTE_CHAIN_UNKNOWN`.
+3. **Old entry.** Take the old Task's entries with this `pr`, this `finding_id` and `head_sha == --head`:
+   - none, or one that is `DEFERRED`: `DISPUTE_NOT_OPEN` (deferral is already non-blocking history);
+   - more than one: `DISPUTE_RECORD_INVALID`;
+   - `RULED`: `DISPUTE_ALREADY_RULED`;
+   - `SUPERSEDED`: the round runs items 5 and 6 and computes the §3.3 digest from them and from the stored `arbiter` snapshot, which cannot change after the supersede (§3.5). If the digest equals the stored `evidence_sha256`, return the recorded result and write nothing. Any other digest refuses `DISPUTE_ALREADY_SUPERSEDED`. A refusal in item 5 or 6 is returned as it is;
+   - `OPEN`: go on.
+4. **Arbiter claim.** An entry without `arbiter_claim` goes on. Otherwise, the claim it names (same `reviewer_task` and `version`, `purpose: 'dispute_ruling'`) must occur exactly once in `review_dispatch_claim`, or the call refuses `DISPUTE_RULING_CLAIM_INVALID`. Then the claim's state decides:
+
+   | Arbiter claim | Supersede |
+   |---|---|
+   | `CLAIMED` | Refuses `DISPUTE_ARBITER_IN_FLIGHT`. A launch may be running, and its post-launch write must land on an `OPEN` entry (§3.4). If a crash leaves the claim `CLAIMED`, the next `arbitrate` replay makes it `UNKNOWN` (§2.4), and supersede can then go on. |
+   | `DISPATCHED` (Claude) | Goes on. Its transcript is never collected after the supersede (§3.4). |
+   | `UNKNOWN` | Goes on. |
+   | `COMPLETED`, `BLOCKED` (withheld) | Goes on. There is no ruling to record. |
+   | `COMPLETED`, `RULING` | **B1:** refuses `DISPUTE_RULING_PENDING`. **B2** (after A3): the moot rule of §3.4 decides. |
+
+5. **Replacement link.**
+   - The replacement record must be readable, have the `--by` value as its `task_id`, and not be abandoned. Its `continues` must equal the old Task ID exactly (direct successor only). Otherwise the call refuses `DISPUTE_REPLACEMENT_INVALID`.
+   - Its `task_binding.contract_digest` must be a non-empty string that differs from the old Task's, or the call refuses `DISPUTE_REPLACEMENT_INVALID`. This check is weak on its own: `continues` is part of the contract digest (`task_submission_cli.py:539-542`), so a successor's digest always differs. The real proof that the dispute is moot is the new head (item 6).
+   - `chain_key(store, replacement)` must equal `key`.
+   - `lineage_counts.lineage_counts(store, replacement, base_family='pr-<N>', include_successors=True)` must return known values. `chain` must be a list whose first two IDs are the replacement and the old Task. `review_repairs`, `review_heads` and `test_fails` must not be `UNKNOWN`. Any `UNKNOWN` refuses `DISPUTE_CHAIN_UNKNOWN`.
+     - The function returns `UNKNOWN` for an unreadable or malformed link, a cycle, a fork anywhere in the chain, a chain longer than `MAX_CHAIN`, or a malformed `review_repair_claims` list (`lineage_counts.py:9-13`, `:175-185`, `:191-193`).
+     - Supersede reads these counts only to prove the chain. It never writes or corrects one.
+6. **New head.**
+   - Read the replacement's Executor D6 the way `_dispute_arbiter_registration` reads a D6 (`task_submission_cli.py:2539-2551`): `completion.executor_task_id`, `completion.evidence.common_dir`, `read_d6_registration(..., allowed_states=_D6_EVIDENCE_STATES)` and `collect_git_snapshot`. Its `result_sha` must be 40 hex and equal the snapshot head. The worktree must be clean, as `_preflight` requires (`review_dispatch.py:245-256`, read at `c1ab1339`).
+   - That head must differ from the entry's `head_sha`, from every `head_sha` in the old Task's `review_dispatch_claim`, and from every `head_sha` in its `review_disputes`.
+   - Otherwise the call refuses `DISPUTE_REPLACEMENT_HEAD_INVALID`.
+7. **Write** (§3.3).
 
 ### 3.3 Write
 
-One compare-and-update on the **old** Task's `record_sha256`:
+One `compare_and_update` on the **old** Task, with `expected={'record_sha256': ...}` taken from this round's item 2 read. This is the same call shape as at `task_submission_cli.py:2768-2769` and `:2869-2870`. It changes only `review_disputes`, and within it only the one entry:
 
 - `state: 'SUPERSEDED'`.
-- `superseded = {by_task, by_run, by_contract_digest, new_head, old_head, old_contract_digest, superseded_at, evidence_sha256}`. `evidence_sha256` is the SHA-256 of the canonical JSON of the other fields except the time.
-- One `SUPERSEDED` history event.
+- `superseded = {by_task, by_run, by_contract_digest, new_head, old_head, old_contract_digest, arbiter, superseded_at, evidence_sha256}`:
+  - `old_head` is the entry's `head_sha`. `new_head` is the head from item 6.
+  - `arbiter` is `null` for an entry without `arbiter_claim`. Otherwise it is `{reviewer_task, version, state, claim_sha256, moot_code}`, a snapshot of the claim at this write:
+    - `state` is the claim's state (`DISPATCHED`, `UNKNOWN` or `COMPLETED`);
+    - `claim_sha256` is the SHA-256 of the claim's canonical JSON (sorted keys, `(',', ':')` separators, as in §2.6 item 2);
+    - `moot_code` is `null`, except under the B2 moot rule.
+  - `evidence_sha256` is the SHA-256 of the canonical JSON of every other `superseded` field except `superseded_at`.
+- One history event: `{event: 'SUPERSEDED', at: superseded_at, actor: 'pm:<caller session>', head_sha: <old_head>, refs}`. `refs` holds `by_task`, plus `reviewer_task`, `version` and `claim_sha256` when `arbiter` is not `null`. All of these are keys of the fixed `refs` set (§2.6 item 3).
 
-The replacement Task is not written. It finds the old dispute through `continues`.
+Every other key of the entry stays byte-equal, including `arbiter_claim`, `review_version`, `evidence_ref` and the earlier `history` events. No other field of the old record is written. **The replacement Task is never written.** It finds the old dispute through `continues`.
 
-### 3.4 What supersede never does
+**CAS loser.** The store may refuse the write because `record_sha256` changed. The call then starts a new round at item 2, still under the lock: it re-reads both Tasks and runs every check again. So the loser of a race ends with the code that matches the winner's write (§3.4).
+- Rounds are limited to three. A fourth conflict refuses `DISPUTE_SUPERSEDE_CAS_CONFLICT`.
+- Any other store exception refuses `DISPUTE_SUPERSEDE_WRITE_UNKNOWN`. The next call's read shows whether the write landed. An identical replay then returns the recorded result.
+- The exception type the store raises for a changed `record_sha256` is defined in `task_store.py`, which was not read here. B1 pins it with the real `TaskStore`, as A3 does for `RULED`.
 
-- **It never rules.** No `ruling` key is set. `withdrawn_findings` (`review_repair.py:83-93`) still ignores the entry, so the finding is never treated as withdrawn.
-- **It never lifts a refusal on the old head.**
-  - `dispute_open_on` (`review_repair.py:72-80`) keeps its name and callers, but now returns true for `state in ('OPEN', 'SUPERSEDED')` on that PR head. A malformed list still counts as blocking.
-  - Review repair (`review_repair.py:690`) and High Debug (`high_debug.py:1540`) keep refusing on the old head. They gain distinct codes `REPAIR_DISPUTE_SUPERSEDED` / `DEBUG_DISPUTE_SUPERSEDED` so the cause is clear.
-  - `open`, `defer` and `arbitrate` on that (pr, finding, head) refuse `DISPUTE_SUPERSEDED`.
-  - Any merge-gate reader of `review_disputes` (outside read scope, UNKNOWN) must treat `SUPERSEDED` at least as strictly as `OPEN`. PR B1 greps every reader and pins each one by test.
-- **It never touches counts.** No repair, review-round, High Debug or lineage count is written, reset or lowered.
+### 3.4 Races with native completion and finalization
+
+Every write of a dispute flow is a compare-and-update on the old Task's `record_sha256`:
+- open and defer (`task_submission_cli.py:2768-2769`);
+- the arbiter claim (§2.2 steps 7 and 11, and step 11c C8);
+- `RULED` (§2.2 step 12e);
+- supersede (§3.3).
+
+The entry and the arbiter claim live in that one record. So two writes made from the same read never both land, and the loser re-reads. A1 also adds two store refusals as defence in depth:
+- `OPEN` → `SUPERSEDED` while the entry's arbiter claim is `CLAIMED`;
+- any change to a `purpose: 'dispute_ruling'` claim whose entry is `RULED` or `SUPERSEDED` (§7 PR A1).
+
+| Concurrent write | Supersede commits first | The other write commits first |
+|---|---|---|
+| `arbitrate` step 7: append the `CLAIMED` arbiter claim | Step 7's CAS loses. `arbitrate` refuses before any D6 or launch (§5, row "Replay of `arbitrate`"). A replay refuses `DISPUTE_SUPERSEDED` at step 2 | Supersede's next round finds `CLAIMED` and refuses `DISPUTE_ARBITER_IN_FLIGHT` |
+| Codex completion, step 11a (`CLAIMED` → `COMPLETED` or `UNKNOWN`) | Cannot happen. Supersede refuses while the claim is `CLAIMED`, and the A1 store refuses that write too | Supersede's next round decides by the new state (§3.2 item 4) |
+| Claude launch, step 11b (`CLAIMED` → `DISPATCHED`) | Cannot happen, as for 11a | Supersede's next round goes on (`DISPATCHED`) |
+| Claude collection, step 11c C8 (`DISPATCHED` → `COMPLETED`) | C8's CAS loses and writes nothing. Every later `arbitrate` refuses `DISPUTE_SUPERSEDED` at step 2, before any session or transcript read. The A1 store also refuses the transition. The claim stays `DISPATCHED` for good. A ruling in the transcript is never stored, posted or ruled | Supersede's next round finds `COMPLETED`. A `BLOCKED` result goes on. A `RULING` result is pending (B1) or goes to the moot rule (B2) |
+| Finalization, step 12e (`OPEN` → `RULED`) | F2 or F3 refuses `DISPUTE_SUPERSEDED` (§2.2 step 12b check 3). A ruling comment that was already posted stays on the PR and rules nothing (§4 item 9) | Supersede's next round refuses `DISPUTE_ALREADY_RULED` |
+| A second supersede of the same entry | Both run under the one chain lock, so they do not interleave. The second finds `SUPERSEDED`. With the same digest it returns the recorded result; otherwise it refuses `DISPUTE_ALREADY_SUPERSEDED` | (same) |
+| `task abandon` of the old Task | The entry stays `SUPERSEDED`. B1 pins that the abandon write keeps `review_disputes` byte-equal | Supersede's next round refuses `DISPUTE_TASK_ABANDONED` (§3.5) |
+| Review repair or High Debug on the old Task | Their counted writes take the same chain lock (`review_repair.py:799-808`, `high_debug.py:1397-1406`), so they run one after the other with supersede. Both are refused at the old head before and after the supersede (§3.5) | (same) |
+
+`open` and `defer` of the same (pr, finding, head) do not race. They are refused `DISPUTE_ALREADY_OPEN` while the entry is `OPEN` (`:2762-2764`), and `DISPUTE_SUPERSEDED` after it (B1).
+
+**The moot rule (B2, after A3).** A `COMPLETED` `RULING` arbiter claim on an `OPEN` entry is a ruling that `arbitrate` step 12 has not recorded yet. Supersede runs F's record checks on this round's read: `_ruling_check(record, identity=D, arbiter_claim, claim_sha256, current_head)`. These are §2.2 step 12b checks 2-5, which A3 factors out of `_ruling_current` (§7). The live head read of check 2 runs after this round's store read.
+
+- **F passes:** the ruling can be recorded now. Supersede refuses `DISPUTE_RULING_PENDING`, and the PM runs `arbitrate` first. A ruling that has already been produced is never hidden by a supersede.
+- **F refuses with a code of the moot set:**
+  - `DISPUTE_STALE`: the PR head moved off `D.head_sha`;
+  - `DISPUTE_PR_NOT_OPEN`: the PR is closed or merged (`_live_pr_head`, `task_submission_cli.py:2510-2511`);
+  - `DISPUTE_VERDICT_NEWER`: a newer formal outcome exists at the head;
+  - `DISPUTE_NO_FAIL_VERDICT`: the disputed verdict is gone.
+
+  In each of these cases, `arbitrate` would refuse the same ruling now for the same reason. Supersede goes on and records the code as `superseded.arbiter.moot_code`.
+- **F refuses with any other code** (`DISPUTE_HEAD_UNKNOWN`, `DISPUTE_RULING_CLAIM_INVALID`, `DISPUTE_NOT_OPEN`, …): supersede refuses with that code. A doubtful case is never treated as moot.
+
+**Why the moot rule is safe:**
+- Supersede lifts no refusal and withdraws no finding (§3.5, §3.6).
+- The ruling text stays in its `COMPLETED` claim, and `superseded.arbiter.claim_sha256` binds it.
+- So a moot supersede only gives up a `RULED` record that `arbitrate` would refuse at that moment.
+
+This answers the open point of §2.4 (last bullets) and the old §8: a `COMPLETED` ruling that check N refuses is moot, not pending. B1 alone is complete and fail-closed. If the Owner, through the PM, declines the moot rule, B2 is not merged, and every `COMPLETED` `RULING` claim keeps blocking supersede.
+
+### 3.5 Old head, history, abandoned records and counts
+
+**Old-head blocking stays.**
+
+- `review_repair.py` gains `dispute_block_on(task, pr, head)`. It returns `None`, `'OPEN'` or `'SUPERSEDED'` for that PR head of that Task.
+  - A malformed list or item gives `'OPEN'`, as `dispute_open_on` treats it today (`review_repair.py:74-77`).
+  - `'OPEN'` wins when both states exist at the head.
+  - `dispute_open_on` (`:72-80`) keeps its name and returns `dispute_block_on(...) is not None`. Every caller keeps every refusal it has today, including callers outside the read scope, and `SUPERSEDED` now blocks too.
+- Review repair (`review_repair.py:689-691`) refuses `REPAIR_DISPUTE_OPEN` for `'OPEN'`, as today, and `REPAIR_DISPUTE_SUPERSEDED` for `'SUPERSEDED'`. Test-failure repairs still skip the check (`:690`).
+- High Debug (`high_debug.py:1537-1541`) refuses `DEBUG_DISPUTE_OPEN` or `DEBUG_DISPUTE_SUPERSEDED` at the same point: before any entry is written, so no Debug is used.
+- `withdrawn_findings` (`review_repair.py:83-93`) reads only `RULED` entries, so a `SUPERSEDED` entry withdraws nothing.
+- `open`, `defer`, `rule` (until A3b) and `arbitrate` refuse `DISPUTE_SUPERSEDED` for the same (pr, finding, head).
+- The replacement Task is judged on its own record. `dispute_open_on` reads only the Task it is given (`review_repair.py:74`), and supersede copies nothing into the replacement. So the old dispute does not block repair or Debug at the new head. If a review of the new head repeats the finding, that is a new finding of a new verdict.
+
+**Terminal history.**
+
+- `SUPERSEDED` is terminal, like `RULED` (§4 item 12). The A1 store refuses every later change to the entry: its state, `superseded`, `arbiter_claim`, `history` or any other key.
+- The arbiter claim stays byte-equal in whatever state it is in. The A1 store refuses any change to it once its entry is terminal. So a `DISPATCHED` Claude claim never becomes `COMPLETED`, and a `COMPLETED` claim keeps its text and `source`.
+- The entry's `history` is the stored list plus exactly one `SUPERSEDED` event (§2.6 item 3).
+- A ruling comment that llmtool already posted stays on the PR. Without `RULED` it rules nothing (§4 item 9).
+
+**Abandoned records.** No dispute flow writes an abandoned Task. This needs no store exception, so the earlier open point about whether `task_store.py` allows a write on an abandoned record no longer matters.
+
+- `_dispute_task` refuses `DISPUTE_TASK_ABANDONED` (`task_submission_cli.py:2455-2456`). Supersede calls it in every round (§3.2 item 2).
+- **Old Task already abandoned:** supersede refuses. Its `OPEN` entry stays as the Task's terminal history. It blocks the old head exactly as `SUPERSEDED` would, because both make `dispute_open_on` true, so nothing is lost. The PM order is: supersede first, then abandon.
+- **Abandon after supersede:** the entry stays `SUPERSEDED`.
+- **Abandoned replacement:** the call refuses `DISPUTE_REPLACEMENT_INVALID`.
+- **Arbiter writes:**
+  - `arbitrate` refuses an abandoned Task at step 2 on every call, through `_dispute_task`.
+  - A call that launched before the abandon makes its post-launch write (step 11a, 11b or the `UNKNOWN` exception path) on a fresh read. If that read shows the Task abandoned, the call writes nothing, the claim stays `CLAIMED`, and the call reports `DISPUTE_TASK_ABANDONED` (PR A2).
+  - Step 11c C8 runs after step 2 in the same call. An abandon between them changes `record_sha256`, so the C8 CAS loses (PR A2b).
+  - F's fresh-record check (§2.2 step 12b item 1) refuses an abandoned record with `DISPUTE_TASK_ABANDONED`, so no `RULED` is ever written on an abandoned Task (PR A3).
+
+**Counts are kept and inherited.**
+
+- Supersede writes only `review_disputes`. `lineage_counts.py` reads only these fields:
+  - `review_repair_claims` (`:191-193`, `:241-246`);
+  - `high_debug` (`:266-272`);
+  - `continues` links (`:60-80`, `:83-127`);
+  - completion result heads (`:572-607`).
+
+  It never reads `review_disputes` or `review_dispatch_claim`. So supersede changes no count. An arbiter claim, in any state, is never counted as a review repair, a failed review head, a test failure or a Debug.
+- The replacement inherits the old Task's counts through `continues`. `lineage_counts` (`:148-218`), `chain_review_repairs` (`:221-252`) and `chain_debug_used` (`:255-273`) sum every Task of the chain, so "a continuation never resets a limit" (`:6-7`).
+  - `chain_records` and `successor_records` (`:60-127`) do not skip abandoned Tasks, so an abandoned old Task still counts.
+  - Review repair reads these counts under the chain lock (`review_repair.py:799-825`), and so does the High Debug reservation (`high_debug.py:1397-1416`).
+- If the chain is in doubt, every count is `UNKNOWN`, and `UNKNOWN` counts as the limit (`lineage_counts.py:9-13`; `_review_gate`, `review_repair.py:542-553`). Supersede refuses `DISPUTE_CHAIN_UNKNOWN` on such a chain (§3.2 items 2 and 5). It never writes onto a chain in doubt, and it never turns an `UNKNOWN` count into a known one.
+
+### 3.6 What supersede never does
+
+- **It never rules.** No `ruling` key is set, so `withdrawn_findings` ignores the entry and the finding is never treated as withdrawn.
+- **It never lifts a refusal on the old head** (§3.5).
+- **It never writes** the replacement Task, an abandoned Task, or any field of the old Task other than the one entry.
+- **It never touches** a count, a `continues` link, a `review_dispatch_claim` or a `completion_events` entry.
+- **It never runs the arbiter:** it never launches, stops or collects an arbiter run.
+- **It never posts to GitHub.** Its only GitHub read is B2's live head read inside F.
+
+### 3.7 Fail-closed cases
+
+This list replaces the `supersede` part of §6. In every case nothing is written, and the dispute stays as it was.
+
+- the caller does not own both Tasks;
+- chain problems: the chain lock is unavailable, the chain key changed, or the chain or its counts are `UNKNOWN`;
+- the old Task is abandoned, unreadable, or has a malformed dispute list;
+- entry problems: there is no entry for (pr, finding, head), or more than one, or the one entry is `DEFERRED`, `RULED`, or `SUPERSEDED` with another digest;
+- arbiter-claim problems:
+  - the claim is missing, duplicated or malformed;
+  - the claim is `CLAIMED`;
+  - the claim is `COMPLETED` `RULING` (B1), or F accepts it or refuses it with a code outside the moot set (B2);
+- the replacement is unreadable, abandoned, not the direct successor, unbound, or has the same contract digest;
+- the replacement head is unregistered, dirty, unequal to its snapshot, or equal to an old head;
+- three CAS conflicts in a row, or a store exception whose outcome is unknown.
 
 ---
 
@@ -596,10 +731,32 @@ Each PR touches at most four files. Tests follow the test data rule (Owner #763 
 
 The PM runs the tests on EC2; none were run for this note.
 
-Merge order: A1, A1b, A1c, A1d, A2, A2b, A3, A3b, A4. B1 needs only A1.
+### 7.1 Merge order
 
-- A2 must not merge before A1b and A1c, so no arbiter claim is ever stored while a formal reader could still pick it.
-- A3 must not merge before A1d, so no `arbitrate` `RULED` entry is ever written while `withdrawn_findings` is not version-scoped.
+**A1 → R0 → R1…Rn → A1b → A1c → A1d → B1 → A2 → A2b → A3 → B2 → A3b → A4 → D1.**
+
+Each PR may merge only after every PR in its "Needs" column has merged. The linear order above meets all of them.
+
+| PR | Needs | Why |
+|---|---|---|
+| A1 | none | Adds every new store shape. Nothing writes these shapes yet. |
+| R0 (docs) | none | Classifies the five readers of §7.2 that this note could not read. |
+| R1…Rn | R0 | One PR (at most four files) for each reader that R0 classes as "change". There are none if R0 finds none. |
+| A1b | A1 | Formal readers skip ruling claims before any ruling claim exists. |
+| A1c | A1 | Result and transcript readers refuse ruling claims before any exists. |
+| A1d | none | Withdrawal is version-scoped before any `arbitrate` ruling exists. |
+| B1 | A1, R0, every R PR | B1 makes the first `SUPERSEDED` write, so every reader of dispute states must handle that state first. |
+| A2 | A1, A1b, A1c, R0, every R PR | A2 stores the first arbiter claim, so no formal or status reader may still pick it. |
+| A2b | A2 | Adds Claude collection to the A2 launch. |
+| A3 | A1d, A2b | A3 writes the first `arbitrate` `RULED` entry and adds F. |
+| B2 | A3, B1 | The moot rule calls F (`_ruling_check`). |
+| A3b | A3 | Retires the manual `rule`, the last writer of the legacy key set. |
+| A4 | A3b | The store refuses new legacy-set `RULED` writes. |
+| D1 | A3b, B2 | Rule-file text describes the final commands. |
+
+- A2 must not merge before A1b, A1c and the R gate. So no arbiter claim is ever stored while a formal or status reader could still pick it.
+- B1 must not merge before the R gate. So no `SUPERSEDED` entry is ever stored while a reader could treat it as "no dispute".
+- A3 must not merge before A1d. So no `arbitrate` `RULED` entry is ever written while `withdrawn_findings` is not version-scoped.
 - A4 must not merge before A3b, which retires the last legacy writer.
 
 Which PR carries each change:
@@ -608,15 +765,73 @@ Which PR carries each change:
 |---|---|
 | Claim keys `purpose`/`dispute`/`reviewer`; ruling `review_result` shape (`RULING`/`BLOCKED`, `outcome`, `source`) | A1 |
 | `DISPATCHED` → `COMPLETED` for Claude ruling claims only; no #1636 settle for ruling claims; fixed keys extended | A1 |
-| `RULED` ruling evidence keys (including `finding_id`, `review_version`) and record-level binding; `arbiter_claim`; `history`; `SUPERSEDED` | A1 |
-| Formal readers in `review_repair.py`, `review_dispatch.py`, `task_submission_cli.py` skip ruling claims; merge-gate readers in `task_advance.py` pinned | A1b |
+| `RULED` ruling evidence keys (including `finding_id`, `review_version`) and record-level binding; `arbiter_claim`; `history` | A1 |
+| `OPEN` → `SUPERSEDED` with `superseded` (§3.3); refused while the arbiter claim is `CLAIMED`; terminal entries and their ruling claims frozen (§3.4) | A1 |
+| Classification of `board_check.py`, `task_status.py`, `chat_tui_status.py`, `chat_tui_events.py`, `github_events.py` (§7.2) | R0 |
+| Any reader change that R0 finds | R1…Rn |
+| Formal readers in `review_repair.py`, `review_dispatch.py`, `task_submission_cli.py` skip ruling claims, including `_claude_review_claim_matches` (§7.2); merge-gate readers in `task_advance.py` pinned | A1b |
 | `record_review_result`, `_settle_candidate` and `unposted_verdict` refuse ruling claims | A1c |
 | `withdrawn_findings` and `_review_gate` version-scoped (§4 item 6) | A1d |
-| `dispute_arbiter.py` (prompt, `parse_ruling` with the versioned header, `parse_codex_ruling`); `dispatch_arbiter`; `_dispatch_codex` `parser` argument; `arbitrate` steps 1-11a/11b, including check N at step 3 | A2 |
+| `supersede` with the B1 pending rule; `dispute_block_on`; `REPAIR_DISPUTE_SUPERSEDED`, `DEBUG_DISPUTE_SUPERSEDED`; `open`/`defer`/`rule` refuse `DISPUTE_SUPERSEDED` | B1 |
+| `dispute_arbiter.py` (prompt, `parse_ruling` with the versioned header, `parse_codex_ruling`); `dispatch_arbiter`; `_dispatch_codex` `parser` argument; `arbitrate` steps 1-11a/11b, including check N at step 3; no post-launch write on an abandoned record (§3.5) | A2 |
 | Claude collection, step 11c (`ruling_blocks`, `collect_claude_ruling`) | A2b |
-| Step 12: identity, freshness check F (F1/F2/F3), ruling receipt identity, `_find_posted_ruling`, verify, `RULED` CAS with reload and re-evaluate; race tests | A3 |
+| Step 12: identity, freshness check F (F1/F2/F3, as `_ruling_current` over `_ruling_check`, with the abandoned-record refusal), ruling receipt identity, `_find_posted_ruling`, verify, `RULED` CAS with reload and re-evaluate; race tests | A3 |
+| The moot rule (§3.4) | B2 |
 | Retire manual `rule` | A3b |
 | Store refuses a new legacy-set `RULED` write | A4 |
+
+### 7.2 Reader inventory
+
+The new shapes are:
+- a `purpose: 'dispute_ruling'` claim in `review_dispatch_claim`, which may be `COMPLETED` with `verdict: 'RULING'` or `'BLOCKED'`;
+- a dispute entry in state `SUPERSEDED`;
+- the new entry keys `arbiter_claim`, `history` and `superseded`;
+- the ruling evidence keys.
+
+A reader is classed **change** if it does any of the following:
+- (a) selects a claim by version, by state, or by Reviewer Task or session, and could take a ruling claim as a formal review;
+- (b) treats a dispute state other than `OPEN` as "no dispute" where blocking matters, or accepts states or keys from a closed set that would refuse or miscount the new ones;
+- (c) reads a ruling as a withdrawal without a version scope.
+
+Otherwise the reader is classed **no change**, with the reason given in the table.
+
+**Readers in the files read at `8c4eac1f`:**
+
+| Reader | Reads | Class | Reason | PR |
+|---|---|---|---|---|
+| `dispute_open_on` (`review_repair.py:72-80`) | disputes | change | `SUPERSEDED` must block (§3.5) | B1 |
+| `withdrawn_findings` (`review_repair.py:83-93`) | disputes | change | Version scope (§4 item 6). It reads only `RULED`, so `SUPERSEDED` needs no change | A1d |
+| `claim_reviewer` (`review_repair.py:125-140`) | claims | no change | A ruling claim's reviewer comes from its recorded `reviewer` (§2.2 step 12e). Formal claims are unchanged | none |
+| `_failed_event` (`review_repair.py:325-367`) | claims | change | Takes `max(version)` at the head (`:336-344`) | A1b |
+| `_review_gate` (`review_repair.py:508-581`) | disputes, through `withdrawn_findings` | change | Passes the packet's `version` (`:531`) | A1d |
+| `repair_review` dispute check (`review_repair.py:689-691`) | disputes, through `dispute_open_on` | change | Distinct code for `SUPERSEDED` | B1 |
+| `_auto_replay_claim` and repair counting (`review_repair.py:587-629`, `:712-733`, `:799-825`) | `review_repair_claims` | no change | Never reads `review_dispatch_claim` or `review_disputes` | none |
+| `run_high_debug` dispute check (`high_debug.py:1537-1541`) | disputes, through `dispute_open_on` | change | Distinct code for `SUPERSEDED` | B1 |
+| `_reserve_debug`, `_group_debug_used` (`high_debug.py:1361-1423`) | `high_debug` | no change | Never reads claims or disputes | none |
+| every function in `lineage_counts.py` | `review_repair_claims`, `high_debug`, `continues`, completion result heads | no change | Never reads claims or disputes (§3.5) | none |
+| `_dispute_task` (`task_submission_cli.py:2449-2460`) | disputes (shape only) | no change | Checks list shape only. Its abandoned refusal is reused (§3.5) | none |
+| `_dispute_append` (`task_submission_cli.py:2746-2770`) | disputes | change | Must refuse `DISPUTE_SUPERSEDED` | B1 |
+| `_dispute_fail_verdict` (`task_submission_cli.py:2720-2736`) | claims | change | Excludes ruling claims by text only (`:2726`) | A1b |
+| `dispute_rule` (`task_submission_cli.py:2798-2873`) | claims, disputes | change | Disputed-claim lookup by `purpose` (`:2833-2838`, A1b); `DISPUTE_SUPERSEDED` (B1); retired (A3b) | A1b, B1, A3b |
+| `_dispute_ruling_claim` (`task_submission_cli.py:2595-2646`) | claims | change | Uses the recorded `reviewer` and `arbiter_claim` (§2.2 step 12e) | A3 |
+| `_dispute_review_claims` (`task_submission_cli.py:2709-2717`) | claims | no change | Returns every claim of a PR (and head). Its callers filter, and they are listed above | none |
+| `_claude_review_claim_matches` (`task_submission_cli.py:3676-3696`), called by `run_task_complete` (`:8636-8656`) | claims | change | It accepts exactly one `COMPLETED` claim with the given Reviewer Task, PR, head and session. After A2b, a `COMPLETED` Claude ruling claim has that shape, so a completion naming the arbiter's Reviewer Task would pass this gate with a ruling. It must skip claims with `purpose`, so that such a completion fails closed with `REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT` (`:8648-8651`) | A1b |
+
+**The five named status and event readers.** They are not in this Task's read paths, so they were not read, and this note does not classify them. The table records only what the files that were read show about how each is called.
+
+| Reader | Known from the files read | Class |
+|---|---|---|
+| `tools/llmtool/llmtool/board_check.py` | Nothing | not classified: outside read scope |
+| `tools/llmtool/llmtool/task_status.py` | `task status` and `task brief` call `task_status(pm_session, limit, store)` as a read-only projection (`task_submission_cli.py:1093-1119`) | not classified: outside read scope |
+| `tools/llmtool/llmtool/chat_tui_status.py` | Nothing | not classified: outside read scope |
+| `tools/llmtool/llmtool/chat_tui_events.py` | Nothing | not classified: outside read scope |
+| `tools/llmtool/llmtool/github_events.py` | `task github-events` calls `poll(store, key, issues, since=..., github_get=...)` and reports comment events as `DISABLED_NO_TRUSTED_OWNER_SOURCE` (`task_submission_cli.py:8114-8121`) | not classified: outside read scope |
+
+**PR R0 (docs)** reads these five files and fills in the class, reason and PR for each, using rules (a)-(c) above. Its only file is this note.
+- A reader that shows a state should show `SUPERSEDED` as its own state, never as "no dispute".
+- A reader that shows a review outcome must not show a ruling claim as a formal verdict.
+- Any reader R0 classes as "change" gets its own PR (R1…Rn). If R0 finds no reader that needs a change, there are no R PRs.
+- The §7.1 gate holds A2 and B1 until R0 and every R PR have merged.
 
 ### Proposed module: `tools/llmtool/llmtool/dispute_arbiter.py`
 
@@ -653,7 +868,23 @@ Files:
     A `CLAIMED` → `COMPLETED` ruling claim needs `source.kind == 'CODEX_JSONL'` and `reviewer == 'codex-reviewer'`. So a Claude ruling must pass through `DISPATCHED` with its bound session. A formal claim keeps no exit from `DISPATCHED`.
   - **No settle for ruling claims.** The #1636 `UNKNOWN` → `DISPATCHED` branch (`:5519-5538`) also requires `'purpose' not in before`. A ruling claim is never settled from a Reviewer event or a GitHub comment.
   - **Dispute entries** (§2.6 items 2-3). These are the `ruling` evidence key set and the record-level binding (`_valid_review_dispute_ruling`, `:1477-1488`; `_validate_review_disputes`, `:1491-1535`), the optional `arbiter_claim` and `history` keys (`:1497-1499`), and the `OPEN` → `OPEN` step 7 change plus history extension (`_check_review_disputes_transition`, `:1538-1560`). New `RULED` writes of the legacy set stay accepted until A4.
-  - The terminal `SUPERSEDED` state and its `superseded` key, for B1.
+  - **`SUPERSEDED`, for B1 and B2** (§3.3, §3.4). `_check_review_disputes_transition` accepts `OPEN` → `SUPERSEDED` only when all of these hold:
+    - The write adds exactly `superseded` and one `SUPERSEDED` history event. Every other entry key is equal, and there is no `ruling`.
+    - `superseded` has exactly the keys of §3.3, strictly typed:
+      - `by_task` is 32 hex and is not this Task;
+      - `by_run` and `by_contract_digest` are non-empty strings, and the digest differs from `old_contract_digest`;
+      - `old_head` equals the entry's `head_sha`, and `new_head` is 40 hex and differs from it;
+      - `evidence_sha256` equals the recomputed digest.
+    - `arbiter` is `null` exactly when the entry has no `arbiter_claim`. Otherwise:
+      - its `reviewer_task` and `version` equal `arbiter_claim`;
+      - its `state` equals the state of that claim in the same record;
+      - its `claim_sha256` equals the recomputed digest of that claim;
+      - `moot_code` is `null` or one of `DISPUTE_STALE`, `DISPUTE_PR_NOT_OPEN`, `DISPUTE_VERDICT_NEWER`, `DISPUTE_NO_FAIL_VERDICT`. It must be non-null exactly when the claim is `COMPLETED` with `verdict: 'RULING'`.
+    - The entry's arbiter claim is not `CLAIMED`.
+
+    The store does not read the replacement record or the live head. B1 and B2 check those in the CLI.
+  - **Terminal entries.** The store refuses any change to a `RULED` or `SUPERSEDED` entry. It also refuses any change to a `purpose: 'dispute_ruling'` claim whose entry is `RULED` or `SUPERSEDED`.
+  - No change for abandoned records. A1 adds no write that is allowed on an abandoned Task (§3.5).
 - `tools/llmtool/tests/test_dispute_store_schema.py`.
 
 Tests. These go through the real `TaskStore` (`compare_and_update`, `get`) on a temporary store directory, with no mock of the store. Ids, sessions and digests are fixed placeholder shapes (for example a UUID of zeros with one digit, `'0' * 64`). There are no credential-shaped strings. After each refusal the test checks that the stored record is byte-equal to before.
@@ -689,7 +920,24 @@ Tests. These go through the real `TaskStore` (`compare_and_update`, `get`) on a 
 - **Formal unchanged:**
   - a formal claim still round-trips `CLAIMED` → `COMPLETED` with each of `PASS`/`FIX`/`FAIL`/`BLOCKED`, and `CLAIMED` → `DISPATCHED`;
   - the #1636 settle of a formal claim is still accepted exactly as today.
-- The store accepts `SUPERSEDED` only with a well-formed `superseded` dict and no `ruling` key, and refuses any change to a `RULED` or `SUPERSEDED` entry.
+- **Round trip, `SUPERSEDED`.** `OPEN` → `SUPERSEDED` is accepted and read back equal in five cases:
+  - an entry with no `arbiter_claim`;
+  - an arbiter claim that is `DISPATCHED`;
+  - an arbiter claim that is `UNKNOWN`;
+  - an arbiter claim that is `COMPLETED` `BLOCKED`, with `moot_code: null`;
+  - an arbiter claim that is `COMPLETED` `RULING`, with each of the four moot codes.
+- **Refusals, `SUPERSEDED`:**
+  - an arbiter claim that is `CLAIMED`;
+  - a `COMPLETED` `RULING` claim with `moot_code: null`, or a `moot_code` on any other claim;
+  - an `arbiter` snapshot whose state, version, Reviewer Task or `claim_sha256` differs from the claim;
+  - an `arbiter` value for an entry without `arbiter_claim`, or `null` for an entry with one;
+  - a wrong `evidence_sha256`;
+  - a missing or extra `superseded` key;
+  - `new_head == old_head`, or an `old_head` unequal to the entry's `head_sha`;
+  - a `ruling` key;
+  - no history event, or two;
+  - any other entry key changed.
+- **Terminal.** Every change to a `RULED` or `SUPERSEDED` entry is refused: state back to `OPEN`, `superseded` or `ruling` edited, a history event removed or added, `arbiter_claim` changed. A `DISPATCHED` → `COMPLETED` write on a ruling claim whose entry is `SUPERSEDED` is also refused. After each refusal the stored record is byte-equal to before.
 
 ### PR A1b: formal readers skip ruling claims (#2087)
 
@@ -697,7 +945,9 @@ Files:
 
 - `tools/llmtool/llmtool/review_repair.py`: `_failed_event` (`:336-344`) leaves out `purpose: 'dispute_ruling'` claims before taking `max(version)`.
 - `tools/llmtool/llmtool/review_dispatch.py`: the prior-claim branch (`:1231-1262`) refuses `REVIEW_DISPATCH_VERSION_USED` for a `dispute_ruling` claim and posts nothing.
-- `tools/llmtool/llmtool/task_submission_cli.py`: `_dispute_fail_verdict` (`:2724-2729`) and the disputed-claim lookup (`:2833-2836`) also exclude by `purpose`.
+- `tools/llmtool/llmtool/task_submission_cli.py`:
+  - `_dispute_fail_verdict` (`:2724-2729`) and the disputed-claim lookup (`:2833-2836`) also exclude by `purpose`;
+  - `_claude_review_claim_matches` (`:3676-3696`) leaves out claims with `purpose` before it counts matches (§7.2).
 - `tools/llmtool/tests/test_dispute_ruling_claim_readers.py`.
 
 Tests (claims are built in the test as plain records; no runtime is started):
@@ -705,10 +955,16 @@ Tests (claims are built in the test as plain records; no runtime is started):
 - With a FAIL claim at version N and a `dispute_ruling` claim at N+1 on the same head, `_failed_event` still returns the version-N verdict packet (injected `github_get` lists the version-N comment only). This holds for a `COMPLETED` ruling claim, a withheld one (`BLOCKED`, empty text) and an `UNKNOWN` one.
 - `dispatch_review` with the version of a `dispute_ruling` claim refuses `REVIEW_DISPATCH_VERSION_USED`, and the injected `comment_poster` is never called.
 - A `dispute_ruling` claim, with or without ruling text, is never picked as the disputed FAIL verdict.
+- `_claude_review_claim_matches` with the Reviewer Task, PR, head and session of a `COMPLETED` ruling claim returns `False`. The same arguments for a `COMPLETED` formal claim still return `True`, and with two matching formal claims it still returns `False`, as today.
 - Without any `dispute_ruling` claim, every reader returns exactly what it returns today (no check weakened).
-- Counting with an arbiter claim present never lowers any count.
+- **Counts equal.** With an arbiter claim present in each state, `lineage_counts`, `chain_review_repairs` and `chain_debug_used` return exactly the values they return without it (§3.5).
 - **Merge-gate readers** (`task_advance.py`, read at `c1ab1339`; tested here, not changed). With a formal PASS at version N, its `REVIEWER` event and a `dispute_ruling` claim at N+1 in each state, `_merge_pass_claim` (`:1167-1214`) never returns N+1 as a PASS, and returns `MERGE_NEWER_REVIEW_EXISTS` as today's newer-claim veto gives (`:1198-1206`). With a formal PASS at N+2, it returns N+2. `_review_outcomes` (`:2598-2659`) returns no outcome for the ruling claim (injected `github_get` lists a byte-equal ruling comment).
-- The PR description lists every reader of `review_dispatch_claim` found by grep, including merge-gate code. Each one is either changed and tested here or in A1c, or shown not to select by version. If a reader needs a fifth file, it gets its own PR before A2. The readers in `review_result.py` and `review_transcript.py` are already known and are covered by A1c.
+- The PR description lists every reader of `review_dispatch_claim` and `review_disputes` found by grep, including merge-gate code. Each one is either:
+  - classified in §7.2,
+  - changed and tested here or in A1c, or
+  - shown not to select by version, state or Reviewer Task.
+
+  If a reader needs a fifth file, it gets its own PR before A2 and B1, in the same way as the R PRs. The readers in `review_result.py` and `review_transcript.py` are already known and are covered by A1c.
 
 ### PR A1c: result and transcript readers refuse ruling claims (#2087)
 
@@ -751,7 +1007,7 @@ Files:
 
 - `tools/llmtool/llmtool/dispute_arbiter.py` (new): `render_ruling_prompt`, `parse_ruling`, `parse_codex_ruling`.
 - `tools/llmtool/llmtool/review_dispatch.py`: `dispatch_arbiter`, reusing `_preflight`, `_create_d6`, `_dispatch`, `_dispatch_codex` and `_bind_d6`. `_dispatch_codex` gains `parser=_parse_codex_review` (`review_dispatch.py:644-683`); every formal call is unchanged.
-- `tools/llmtool/llmtool/task_submission_cli.py`: `arbitrate` parser and adapter, steps 1-11a and 11b.
+- `tools/llmtool/llmtool/task_submission_cli.py`: `arbitrate` parser and adapter, steps 1-11a and 11b. Step 2 refuses `DISPUTE_SUPERSEDED` for a `SUPERSEDED` entry, so B1 is already in place. The post-launch write is one of step 11a, step 11b, or the `UNKNOWN` exception path. It re-reads the record and makes its CAS on that fresh read. If the read shows the Task abandoned, it writes nothing and reports `DISPUTE_TASK_ABANDONED` (§3.5).
 - `tools/llmtool/tests/test_dispute_arbitrate_launch.py`.
 
 A2 ships Codex end to end up to `COMPLETED`. A Claude arbiter claim rests at `DISPATCHED` and reports `ARBITER_PENDING` until A2b merges.
@@ -779,6 +1035,11 @@ Tests:
 - **No GitHub output source.** In steps 7-11, the only GitHub read is the one step 6 read of the PM's dispute-text comment (injected `github_get` called exactly once with that comment's path). `comment_lister` and `comment_poster` are never called.
 - A screen refusal (monkeypatched `_screen_text`) on the Codex ruling records `BLOCKED` with empty text, and the dispute stays `OPEN`.
 - The dispute text comment (injected `github_get`) that is edited, created after `opened_at`, or refused by a monkeypatched `_screen_text` refuses before any write, D6 or launch. A valid one has its digest on the stored claim, and the rendered prompt carries that exact text inside the untrusted fence.
+- **Supersede vs launch and Codex completion** (real `TaskStore`; B1 merged first):
+  - **During the run.** The monkeypatched Codex `subprocess.run` calls `supersede` before it returns. `supersede` refuses `DISPUTE_ARBITER_IN_FLIGHT` and writes nothing. Then step 11a writes `COMPLETED` once. A `supersede` after that refuses `DISPUTE_RULING_PENDING` (B1).
+  - **Supersede first.** The entry is `SUPERSEDED` before `arbitrate` runs. `arbitrate` refuses `DISPUTE_SUPERSEDED` at step 2: no claim, no D6, no launch, and the record is byte-equal.
+  - **Supersede between the read and step 7.** The injected `current_head` reader of step 2 writes `SUPERSEDED` through the real store. Step 7's CAS loses, and there is no D6 and no launch. A replay refuses `DISPUTE_SUPERSEDED`.
+- **Abandoned during the run.** The monkeypatched `subprocess.run` (Codex) or the injected `dispatch_session` (Claude) abandons the old Task through the real store before it returns. Step 11a, step 11b or the `UNKNOWN` path then writes nothing, and the claim stays `CLAIMED`. The call reports `DISPUTE_TASK_ABANDONED`, and a replay refuses `DISPUTE_TASK_ABANDONED` with no write.
 
 ### PR A2b: Claude ruling collection (#2087)
 
@@ -826,12 +1087,21 @@ Every refusal checks that the stored record is byte-equal to before, that the cl
 - **Screen.** A monkeypatched `_screen_text` refusal gives `COMPLETED` with `BLOCKED`, empty text, no `outcome` and the `source` digest. The result is `DISPUTE_RULING_WITHHELD`, and nothing is posted.
 - **Formal unchanged.** A formal Claude claim on the same fixtures still rests at `DISPATCHED` (the store refuses its `COMPLETED`), and `unposted_verdict` returns today's result for it.
 - **Collection is a claim-truth write (§2.4).** With a newer formal claim already at the head, a bound ended-session ruling still moves the claim `DISPATCHED` → `COMPLETED`. Step 12 does not exist until A3, so nothing is posted or ruled here. A3's race tests cover the step 12 refusal that follows.
+- **Supersede vs collection** (real `TaskStore`; B1 merged first):
+  - **Supersede wins.** The injected agents-listing `run` calls `supersede` (which goes on, because the claim is `DISPATCHED`) and then returns `ENDED`. C8's CAS loses and writes nothing. The claim is still `DISPATCHED`, and the entry is `SUPERSEDED` with `arbiter.state == 'DISPATCHED'`. A replay refuses `DISPUTE_SUPERSEDED` at step 2: `run` is not called again, and the transcript is not opened.
+  - **Collection wins.** C8 writes `COMPLETED` `RULING`. A `supersede` after that refuses `DISPUTE_RULING_PENDING` (B1). With a withheld result (`BLOCKED`), the `supersede` goes on.
+  - **Abandon between step 2 and C8.** The injected `run` abandons the old Task through the real store and returns `ENDED`. C8's CAS loses and writes nothing, and a replay refuses `DISPUTE_TASK_ABANDONED`.
 
 ### PR A3: step 12, freshness and race tests (#2087)
 
 Files:
 
-- `tools/llmtool/llmtool/task_submission_cli.py`: `_dispute_rule_verified`; step 12 (12a identity, `_ruling_current` with check N, F1/F2/F3, the `RULED` CAS with reload and re-evaluate); `_dispute_ruling_comment` gains the optional `review_version`; `ruling` evidence keys and digests.
+- `tools/llmtool/llmtool/task_submission_cli.py`:
+  - `_dispute_rule_verified`;
+  - step 12: 12a identity, F1/F2/F3, and the `RULED` CAS with reload and re-evaluate;
+  - F, written as two functions. `_ruling_current` reloads (§2.2 step 12b check 1) and refuses an abandoned record with `DISPUTE_TASK_ABANDONED` (§3.5). It then calls `_ruling_check(record, *, identity, arbiter_claim, claim_sha256, current_head)`, which runs checks 2-5 (live head, dispute state, arbiter claim, check N) on the record it is given and writes nothing. F behaves as §2.2 step 12b states. B2 calls `_ruling_check` on its own round's read;
+  - `_dispute_ruling_comment` gains the optional `review_version`;
+  - `ruling` evidence keys and digests.
 - `tools/llmtool/llmtool/review_dispatch.py`: `_find_posted_ruling`; `_post_under_lock` picks the matcher from the claim's recorded `purpose` at both match sites (`:1120-1122`, `:1163`); `_receipt_identity` adds `dispute` for ruling claims; the post result returns the comment id. `_find_posted_verdict` and formal receipts are not changed.
 - `tools/llmtool/tests/test_dispute_arbitrate_rule.py`.
 - `tools/llmtool/tests/test_dispute_arbitrate_race.py`.
@@ -887,7 +1157,10 @@ Tests, `test_dispute_arbitrate_race.py`. Each "newer verdict" case runs in three
 - **Fresh reads.** A counting wrapper around the injected `current_head` and around `TaskStore.get` (it calls the real method) shows one reload and one live head read at each of F1, F2 and every F3 round, and shows each head read comes after its reload.
 - The event-only form writes the `REVIEWER` event through whichever completion-event write path the real store accepts. Which path that is was not re-read here (UNKNOWN); the PR names it. It never bypasses a store check.
 - **Head move.** A head move found at F1, F2 or F3 refuses `DISPUTE_STALE` with no `RULED`. A move at F3 happens after the post; the comment stays and rules nothing.
-- **Dispute state changes during posting.** The injected `comment_poster` makes the entry `SUPERSEDED` (A1 schema, real store). F3 refuses `DISPUTE_SUPERSEDED`, and there is no `RULED`.
+- **Dispute state changes during posting.** The injected `comment_poster` makes the entry `SUPERSEDED` (A1 schema, real store, with a moot code, as the A1 store requires for a `COMPLETED` `RULING` claim). F3 refuses `DISPUTE_SUPERSEDED`, and there is no `RULED`. The entry, its `superseded` value and the `COMPLETED` arbiter claim are byte-equal to what the supersede wrote, and the posted comment rules nothing. A replay refuses `DISPUTE_SUPERSEDED` at step 2 and never calls the poster.
+- **Supersede after `RULED`.** After `RULED`, `supersede` refuses `DISPUTE_ALREADY_RULED`, and the record is byte-equal.
+- **Abandoned during posting.** The injected `comment_poster` abandons the Task through the real store. F3 refuses `DISPUTE_TASK_ABANDONED`, there is no `RULED`, and the entry stays `OPEN`.
+- **`_ruling_check` writes nothing.** On each F refusal case above, `_ruling_check` called directly on the same record raises the same code, and the store's record is byte-equal.
 
 ### PR A3b: retire manual `rule` (#2087)
 
@@ -895,11 +1168,12 @@ Files:
 
 - `tools/llmtool/llmtool/task_submission_cli.py`: `rule` refuses `DISPUTE_RULE_MANUAL_RETIRED` before reading any argument value; its options are removed (§2.5). `_dispute_ruling_comment` then always requires the versioned header.
 - `tools/llmtool/tests/test_review_dispute.py` (existing dispute tests, if present, updated for retirement only, with no check weakened). If that file has another name, the PR names it; UNKNOWN here.
+- `tools/llmtool/tests/test_dispute_supersede.py`: only the B1 tests that call `rule` change, to expect `DISPUTE_RULE_MANUAL_RETIRED`. The tests for `open` and `defer` stay as they are.
 
 Tests:
 
-- `rule` with any arguments refuses `DISPUTE_RULE_MANUAL_RETIRED` and writes nothing.
-- Every A3 test still passes unchanged (the PM runs both files).
+- `rule` with any arguments refuses `DISPUTE_RULE_MANUAL_RETIRED` and writes nothing, including on a `SUPERSEDED` entry.
+- Every A3 and B1 test still passes, with no change other than the one above (the PM runs all three files).
 
 ### PR A4: store refuses new legacy rulings (#2087)
 
@@ -914,36 +1188,113 @@ Tests (real `TaskStore`):
 - A stored entry already `RULED` with today's key set still validates and reads back.
 - The `arbitrate` write of A1's round trip is still accepted.
 
+### PR R0: classify the five status and event readers (docs)
+
+Files: this note only. R0 reads `board_check.py`, `task_status.py`, `chat_tui_status.py`, `chat_tui_events.py` and `github_events.py`, and fills in the second table of §7.2 with a class, a reason with file:line, and a PR. Tests: none (docs only). Each R1…Rn PR that follows changes one reader. Its tests show three things:
+- a ruling claim in each state is never shown or used as a formal verdict;
+- a `SUPERSEDED` entry is shown as `SUPERSEDED`, never as "no dispute";
+- without the new shapes, the reader's output is byte-equal to today's.
+
 ### PR B1: `supersede` (#2088)
+
+B1 merges after A1 and the R gate (§7.1), and before A2. Arbiter claims are built in its tests as A1-schema records written through the real store; no runtime is started.
 
 Files:
 
-- `tools/llmtool/llmtool/task_submission_cli.py`: `supersede` parser, adapter and transition.
-- `tools/llmtool/llmtool/review_repair.py`: `dispute_open_on` blocks on `SUPERSEDED`; codes `REPAIR_DISPUTE_SUPERSEDED`.
-- `tools/llmtool/llmtool/high_debug.py`: code `DEBUG_DISPUTE_SUPERSEDED` (the check at `:1540` already calls `dispute_open_on`).
+- `tools/llmtool/llmtool/task_submission_cli.py`:
+  - the `supersede` subparser (§3.1) and adapter, with `pm_caller.check_caller` on both Tasks;
+  - §3.2 items 1-7 with the B1 pending rule, the §3.3 write and the bounded rounds;
+  - `_dispute_append` and `dispute_rule` refuse `DISPUTE_SUPERSEDED` for a `SUPERSEDED` entry at the same (pr, finding, head);
+  - `_DISPUTE_ACTIONS` gains `supersede`.
+- `tools/llmtool/llmtool/review_repair.py`: `dispute_block_on`; `dispute_open_on` built on it; `repair_review` refuses `REPAIR_DISPUTE_SUPERSEDED` (§3.5).
+- `tools/llmtool/llmtool/high_debug.py`: `run_high_debug` refuses `DEBUG_DISPUTE_SUPERSEDED` at the existing check (`:1537-1541`).
 - `tools/llmtool/tests/test_dispute_supersede.py`.
 
-The `SUPERSEDED` store schema lands in A1 (§7 PR A1), so B1 does not touch `task_store.py`. If B1 finds that the store forbids the write on an abandoned old Task (§3.2 item 5), B1 refuses that case; any store change for it is a separate PR.
+B1 does not touch `task_store.py`: the `SUPERSEDED` schema lands in A1, and no write on an abandoned record is added (§3.5).
 
-Tests:
+Tests. They use the real `TaskStore` on a temporary directory. `pm_caller.check_caller` runs on PM sessions the test records, or is injected for the refusal cases. The test injects `task_completion.read_d6_registration` and `collect_git_snapshot` with fixed placeholder records. Ids, heads and digests are fixed placeholder shapes, such as 32-hex Task ids with one varied digit, `'a' * 40` and `'b' * 40` heads, and `'0' * 64` digests. No credential-shaped strings are used. Every "no write" result checks that both stored records are byte-equal to before.
 
-- Supersede by a valid direct successor with a new head writes `SUPERSEDED`, the evidence digest and one history event, and leaves the replacement record unchanged.
-- Each fail-closed case in §6 refuses with its code and writes nothing.
-- An identical replay returns without a write; a different one refuses.
-- After supersede, review repair and High Debug on the old head still refuse, `withdrawn_findings` is unchanged, and `open`/`defer`/`arbitrate` refuse `DISPUTE_SUPERSEDED`.
-- Counts and `continues` are unchanged.
-- A pending `COMPLETED` ruling refuses `DISPUTE_RULING_PENDING`.
-- Supersede racing arbitrate (CAS conflict injected) leaves exactly one terminal state.
+- **Success; unchanged replacement record.**
+  - A valid direct successor with a clean new head writes `SUPERSEDED`, the `superseded` value of §3.3 with the right `evidence_sha256`, and one history event.
+  - In the old record only `review_disputes` changed, and within it only this entry.
+  - The replacement record, including its `record_sha256`, is byte-equal to before. It has no `review_disputes` key added.
+- **Replay.** An identical call returns the recorded result with no write. A call whose replacement D6 head has moved refuses `DISPUTE_ALREADY_SUPERSEDED` with no write.
+- **Fail-closed cases.** Each case of §3.7 refuses with its own code and writes nothing. This includes three `OPEN` entries for one (pr, finding) on three heads: `--head` selects exactly one, and the other two stay `OPEN`.
+- **Arbiter claim states.**
+  - `CLAIMED` refuses `DISPUTE_ARBITER_IN_FLIGHT`.
+  - `COMPLETED` `RULING` refuses `DISPUTE_RULING_PENDING`.
+  - `DISPATCHED`, `UNKNOWN` and `COMPLETED` `BLOCKED` go on, with the `arbiter` snapshot equal to the claim. The claim is byte-equal before and after.
+- **Immutable history.** After `SUPERSEDED`:
+  - `open`, `defer` and `rule` on the same (pr, finding, head) refuse `DISPUTE_SUPERSEDED` with no write;
+  - a direct `compare_and_update` on the real store is refused if it sets the entry back to `OPEN`, edits `superseded`, adds or removes a history event, adds `ruling`, or changes the arbiter claim;
+  - `task abandon` of the old Task leaves `review_disputes` byte-equal;
+  - the `history` list is the earlier events plus exactly one `SUPERSEDED` event.
+- **Preserved old-head refusals.** On the old Task at the old head after `SUPERSEDED`:
+  - `repair_review` refuses `REPAIR_DISPUTE_SUPERSEDED` with no repair claim written, using an injected `github_get`, `current_head` and `dispatch_adapter`, where the adapter is never called;
+  - `run_high_debug` refuses `DEBUG_DISPUTE_SUPERSEDED` with no `high_debug` entry and no D6 create;
+  - `dispute_open_on` is `True` and `withdrawn_findings` is empty;
+  - a test-failure repair is not blocked, as today;
+  - with an `OPEN` and a `SUPERSEDED` entry at one head, and with a malformed list, the code is `REPAIR_DISPUTE_OPEN` / `DEBUG_DISPUTE_OPEN`, as today;
+  - without any `SUPERSEDED` entry, every caller returns exactly today's result.
+- **Replacement not blocked.** On the replacement Task at the new head, `dispute_open_on` is `False`. Its `repair_review` gets past the dispute check and goes on to its next existing check.
+- **Inherited counts.** The old Task holds `k` review repair claims (`k` from 1 to 3) and `m` used High Debug entries. The replacement holds none. The same values hold before the supersede, after it, and after the old Task is abandoned:
+  - `lineage_counts(store, replacement, base_family=..., include_successors=True)` gives `review_repairs == k` and the old heads in `review_heads`;
+  - `chain_review_repairs(store, replacement) == k`;
+  - `chain_debug_used` on the replacement is `m`;
+  - the old Task's own counts are equal.
+- **UNKNOWN-count refusal.** Each of these refuses `DISPUTE_CHAIN_UNKNOWN`, and both records are byte-equal:
+  - a fork, made by a second record written straight to the store that also continues the old Task;
+  - a malformed `review_repair_claims` value on the old Task;
+  - an unreadable predecessor of the old Task;
+  - a chain key that changes between the first read and the locked read.
+
+  On the same forked chain, `repair_review` on the replacement still treats its count as the limit, as today. A count is never 0 by doubt.
+- **Abandoned records.**
+  - An already abandoned old Task refuses `DISPUTE_TASK_ABANDONED`, and the entry stays `OPEN`.
+  - An abandoned replacement refuses `DISPUTE_REPLACEMENT_INVALID`.
+- **Races with completion and finalization.** The concurrent write is made through the real store from inside the injected `read_d6_registration`, which runs after the round's read and before its CAS. Each case checks the code, the stored record, and that exactly one terminal state (or none) results:
+  - the `CLAIMED` arbiter claim appended (step 7 shape): the next round refuses `DISPUTE_ARBITER_IN_FLIGHT`;
+  - the claim moved `DISPATCHED` → `COMPLETED` `RULING` (C8 shape): `DISPUTE_RULING_PENDING`;
+  - the claim moved `DISPATCHED` → `COMPLETED` `BLOCKED`: the next round goes on and writes `SUPERSEDED` once;
+  - `RULED` written with the `arbitrate` set: `DISPUTE_ALREADY_RULED`;
+  - the old Task abandoned: `DISPUTE_TASK_ABANDONED`;
+  - an unrelated field written: the next round writes `SUPERSEDED` once;
+  - three conflicts in a row: `DISPUTE_SUPERSEDE_CAS_CONFLICT` with no write;
+  - two `supersede` calls in two threads on the same entry: exactly one write, and the other call returns the recorded result.
+- **Supersede first, then completion.** With the entry `SUPERSEDED` over a `DISPATCHED` arbiter claim, the C8-shaped write `DISPATCHED` → `COMPLETED` through the real store is refused, and the claim stays `DISPATCHED`.
+- **CAS exception type.** The test pins the exception type the real store raises for a changed `record_sha256` (§3.3).
+
+### PR B2: the moot rule (#2088)
+
+B2 merges after A3 and B1.
+
+Files:
+
+- `tools/llmtool/llmtool/task_submission_cli.py`: for a `COMPLETED` `RULING` arbiter claim, `supersede` calls `_ruling_check` on its round's read and applies §3.4. A pass refuses `DISPUTE_RULING_PENDING`. A moot-set code writes `SUPERSEDED` with `moot_code`. Any other code refuses with that code.
+- `tools/llmtool/tests/test_dispute_supersede_moot.py`.
+
+Tests. They use the real `TaskStore`, an injected `current_head`, and injected `github_get`, `comment_lister` and `comment_poster`.
+- `comment_lister` and `comment_poster` are never called in any B2 test.
+- `github_get` is called only through the live head read.
+
+The cases:
+- **F passes:** `DISPUTE_RULING_PENDING`, no write. A following `arbitrate` rules as in A3, and a `supersede` after it refuses `DISPUTE_ALREADY_RULED`.
+- **Moot:** one test for each of the four codes. The moot condition is a head moved off `D.head_sha`, a closed or merged PR, a newer formal outcome written through the real store, or the disputed claim gone. The call writes `SUPERSEDED` with that `moot_code`, and the `COMPLETED` claim is byte-equal. A following `arbitrate` refuses `DISPUTE_SUPERSEDED` at step 2 and never calls the poster.
+- **Not moot:** an unreadable head (`DISPUTE_HEAD_UNKNOWN`) or a claim digest mismatch refuses with that code and writes nothing.
+- **Order.** A counting wrapper shows that the live head read comes after the round's `store.get`.
+- **B1 unchanged for other states:** every B1 arbiter-state test gives the same result.
 
 ### PR D1: rule-file text (docs)
 
-Files: `CLAUDE.md`, `AGENTS.md`, `skills/ai-team-delivery/pm-continuation.md`. These describe `arbitrate`, the retired `rule` and `supersede` after A3b and B1 merge. Tests: none (docs only). The existing doc-consistency checks, if any, run in CI.
+Files: `CLAUDE.md`, `AGENTS.md`, `skills/ai-team-delivery/pm-continuation.md`. These describe `arbitrate`, the retired `rule`, and `supersede` with its PM order (supersede, then abandon; §3.5), after A3b and B2 merge. Tests: none (docs only). The existing doc-consistency checks, if any, run in CI.
 
 ---
 
 ## 8. Open points for review
 
-Resolved by the O7 re-read at `e7418cf3`. These are no longer open:
+### 8.1 Resolved
+
+Resolved by the O7 re-read at `e7418cf3` (child 1/3) and `c1ab1339` (child 2/3). These are no longer open:
 
 - A Claude-route ruling cannot complete through `review_result.py`. That module reads stored results only for `COMPLETED` claims, and otherwise reads GitHub comments (`review_result.py:359-373`), which this design never uses for runtime output. Collection lives in `dispute_arbiter.py` (PR A2b). `review_result.py` only refuses ruling claims (PR A1c).
 - The readers of `review_dispatch_claim` in `review_result.py` and `review_transcript.py` are `_claim_for` (exact version, `:161-176`), `_completed_claim_result` (`:268-296`), `_settle_candidate` (`:182-214`) and `unposted_verdict` (`review_transcript.py:90-117`). PR A1c covers them.
@@ -958,14 +1309,36 @@ Resolved by the O7 re-read at `e7418cf3`. These are no longer open:
 - (O7 child 2/3, `c1ab1339`.) The merge-gate readers in `task_advance.py` are `_merge_pass_claim` (`:1167-1214`) and `_review_outcomes` (`:2598-2659`). Neither takes an outcome from a claim without a `REVIEWER` event at its version. A1b pins them (§4 item 10).
 - `'reviewer-' + 20 hex` matches `D6_TASK_ID` (`task_store.py:58`). The session shape fits `valid_review_dispute_session` (`:1470-1474`). Only its `_emitted_sensitive` part is open (below).
 
-Still open (outside the files read):
+Resolved by this child (O7 child 3/3, read at `8c4eac1f`):
 
-- Whether `task_store.py` allows the one `review_disputes` write on an abandoned Task (§3.2 item 5; #2088, not part of the arbiter flow). In the parts of `_update_record` that were read (`task_store.py:5294-5346`, `:5402-5609`), abandonment is refused only for specific writes (`:5334-5341`, `:5488-5489`), and `review_disputes` has no abandonment check (`:5474-5477`). The rest of the write path was not read. B1 pins it by test.
-- Whether `_emitted_sensitive` (`test_output_excerpts.py`) passes the generated Reviewer Task and runtime session ids (UNKNOWN; A3 pins it with fixed placeholder ids; a refusal fails closed).
-- Whether lineage counting counts a `dispute_ruling` claim as a review round (UNKNOWN; A1b pins it, never lowering a count).
-- Which merge-gate code, other than `_merge_pass_claim` and `_review_outcomes` in `task_advance.py` (read at `c1ab1339`, §4 item 10), reads `review_dispatch_claim` or `review_disputes` and selects by version (UNKNOWN; A1b and B1 must cover every reader before A2 and B1 merge).
-- Whether any reader outside `review_repair.py` treats a `RULED` `WITHDRAWN` entry as withdrawing a finding. In `llmtool/`, the only caller of `withdrawn_findings` found is `_review_gate` (`review_repair.py:531`). A1d's PR description lists a grep for other readers of `ruling.outcome`; any one found is version-scoped in its own PR before A3.
-- Whether every `REVIEWER` completion event carries an int `version`. Check N counts an event at the head without one as newer (fail-closed, §2.2 step 12b case e). If A3 finds that legitimate events lack it, that is reported, never silently skipped.
-- **A dispute made stale by a newer verdict at the same head.** It stays `OPEN` and blocks that head (§2.4). Supersede refuses while an arbiter claim is `COMPLETED` and not yet ruled (§3.2 item 2). B1 must decide, by Owner decision relayed by the PM, whether a `COMPLETED` arbiter claim that check N refuses counts as pending. Until then, the dispute stays blocked (fail-closed).
-- Whether a Reviewer D6 made by `_create_d6` records `result_sha` equal to its `--base-sha` (UNKNOWN; `d6_worktree_lifecycle.py` is out of scope; A2 pins it, and any lifecycle change is a separate PR).
-- `role_config.resolve_role('reviewer')` field names (`account`, `config_dir`, `source`, `provider`) are taken from their use at `review_transcript.py:97-100` and `review_dispatch.py:1284-1315`. `role_config.py` itself was not read. A2b uses them exactly as those call sites do.
+- **Lineage counting and the arbiter claim.** `lineage_counts.py` never reads `review_dispatch_claim` or `review_disputes` (§3.5). So a `dispute_ruling` claim is never counted as a review round, a repair, a failed head or a Debug, and supersede changes no count. This answers the last bullet of §4 item 10. A1b and B1 pin the counts as equal, not just "never lower".
+- **Abandoned old Task.** No dispute flow writes an abandoned record (§3.5). Supersede refuses `DISPUTE_TASK_ABANDONED`, as `_dispute_task` already does (`task_submission_cli.py:2455-2456`), and the `OPEN` entry blocks the old head exactly as `SUPERSEDED` would. No store exception is needed, so the question about the `task_store.py` write path is no longer needed. This replaces the §6 `supersede` bullet "abandoned old Task not writable (if B1 finds that)" (see §3.7).
+- **A `COMPLETED` ruling that check N refuses.** It is moot, not pending (§3.4, PR B2). B1 alone keeps the strict rule, so if the Owner declines the moot rule through the PM, B2 is simply not merged and nothing else changes. This closes the open point at the end of §2.4.
+- **Supersede races** with step 7, 11a, 11b, 11c C8 and 12e, with abandon, and with a second supersede: the §3.4 table. This details the §5 row "Race supersede vs arbitrate" and adds `DISPUTE_ARBITER_IN_FLIGHT`.
+- **Chain proof.** Supersede proves the chain with `chain_key` under the lock and with known `lineage_counts`. Any doubt refuses `DISPUTE_CHAIN_UNKNOWN` (§3.2 items 2 and 5). This extends the §5 row "Forged replacement".
+- **A further in-scope reader.** `_claude_review_claim_matches` (`task_submission_cli.py:3676-3696`), used by `run_task_complete` (`:8636-8656`), would accept a `COMPLETED` Claude ruling claim. It is changed in A1b (§7.2).
+- **Merge order.** The old line "B1 needs only A1" is replaced by §7.1. B1 also needs the R gate, and B2 needs A3.
+- **Citation update.** The `continues` lines cited in §1.5 have moved: `record-pm --continues` is now at `task_submission_cli.py:8049-8062` and the write at `:8091-8092`. `_contract` (`:535-542`) is unchanged.
+
+### 8.2 Not settled by this child: five readers (BLOCKED here)
+
+`board_check.py`, `task_status.py`, `chat_tui_status.py`, `chat_tui_events.py` and `github_events.py` are not in this Task's read paths. They were not read, and §7.2 does not classify them. This is the one point of the rollout that this note does not settle. The §7.1 gate keeps it from being skipped:
+- PR R0 classifies the five readers;
+- any change gets its own R PR;
+- A2 (the first arbiter claim) and B1 (the first `SUPERSEDED` entry) do not merge until R0 and every R PR have merged.
+
+The same gate covers any further reader that A1b's grep finds, including merge-gate code other than `_merge_pass_claim` and `_review_outcomes` in `task_advance.py`, and any reader of `ruling.outcome` outside `review_repair.py`. In `llmtool/`, the only caller of `withdrawn_findings` found is `_review_gate` (`review_repair.py:531`). A1d's PR description lists the grep, and any reader found is version-scoped in its own PR before A3.
+
+### 8.3 Pinned by test; fail-closed either way
+
+None of these points is foundational. Each has a stated outcome if the answer is "no", and that outcome refuses rather than allows:
+
+- Whether `_emitted_sensitive` (`test_output_excerpts.py`) passes the generated Reviewer Task and runtime session ids. A3 pins it with fixed placeholder ids. A refusal makes the ruling fail closed, and any change is its own reviewed PR that never removes the check.
+- Whether a Reviewer D6 made by `_create_d6` records `result_sha` equal to its `--base-sha` (`d6_worktree_lifecycle.py`, out of scope). A2 pins it. If not, the ruling is refused `DISPUTE_ARBITER_UNVERIFIED`, and any lifecycle change is a separate PR.
+- `role_config.resolve_role('reviewer')` field names (`account`, `config_dir`, `source`, `provider`). They are taken from their use at `review_transcript.py:97-100` and `review_dispatch.py:1284-1315`; `role_config.py` was not read. A2b uses them exactly as those call sites do. A mismatch refuses `ARBITER_ACCOUNT_CHANGED` or `REVIEWER_ACCOUNT_UNCONFIGURED`.
+- Whether every `REVIEWER` completion event carries an int `version`. Check N counts an event at the head without one as newer (§2.2 step 12b case e). If A3 finds that legitimate events lack it, that is reported, never silently skipped.
+- The exception type the store raises for a changed `record_sha256`. A3 (for `RULED`) and B1 (for `SUPERSEDED`) pin it with the real `TaskStore`. Any other exception reports `DISPUTE_RULE_WRITE_UNKNOWN` or `DISPUTE_SUPERSEDE_WRITE_UNKNOWN`, and the next call's fresh read decides.
+- The completion-event write path used by A3's event-only race form. The PR names it, and it never bypasses a store check.
+- The name of the existing dispute test file that A3b updates. The PR names it.
+- That `task abandon` keeps `review_disputes` byte-equal (`task_store.py`, not read). B1 pins it. If it does not, that is a store defect: it is reported, and B1 does not merge.
+- That `pm_caller.check_caller` (not read) refuses a caller that does not own a Task. B1 pins it for both Tasks, and a refusal writes nothing.
