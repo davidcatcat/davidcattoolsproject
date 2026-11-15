@@ -3913,6 +3913,32 @@ def _condition_execution(evidence, provider_profile, status):
     }
 
 
+def _route_failure_execution(exc, condition):
+    facts = getattr(exc, 'execution_facts', None)
+    if not (type(facts) is dict and
+            set(facts) == {'process_exit_code', 'stdout_sha256',
+                           'elapsed_ms', 'cleanup_status'} and
+            (facts['process_exit_code'] is None or
+             (type(facts['process_exit_code']) is int and
+              not isinstance(facts['process_exit_code'], bool))) and
+            (facts['stdout_sha256'] is None or
+             (type(facts['stdout_sha256']) is str and
+              re.fullmatch(r'[0-9a-f]{64}', facts['stdout_sha256']) is not None)) and
+            (type(facts['elapsed_ms']) is int and
+             not isinstance(facts['elapsed_ms'], bool) and
+             0 <= facts['elapsed_ms'] <= 86400000) and
+            facts['cleanup_status'] in ('CONFIRMED', 'UNKNOWN')):
+        return condition
+    base = dict(condition) if condition is not None else {
+        'status': 'BLOCKED', 'native_session_id': None, 'process_exit_code': None,
+        'stdout_sha256': None, 'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+        'usage_source': 'UNKNOWN', 'source_bytes': None, 'source_file_count': None,
+        'source_manifest_sha256': None,
+    }
+    base.update(facts)
+    return base
+
+
 def _direct_execution(result, *, status='SUCCEEDED', evidence=False):
     execution = {
         'status': status,
@@ -5526,11 +5552,12 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             developer['blocked_reason'] = exc.blocked_reason
         if exc.progress is not None:
             developer['progress'] = exc.progress
-        condition = (None if owner_gate_denied or developer.get('execution') is not None
-                     else _condition_execution(getattr(exc, 'provider_evidence', None),
-                                               'agy', 'BLOCKED'))
-        if condition is not None:
-            developer['execution'] = condition
+        if not (owner_gate_denied or developer.get('execution') is not None):
+            execution = _route_failure_execution(
+                exc, _condition_execution(getattr(exc, 'provider_evidence', None),
+                                          'agy', 'BLOCKED'))
+            if execution is not None:
+                developer['execution'] = execution
         store.update(task['task_id'], developer=developer)
         _print(_task_view(store.get(task['task_id'])))
         return 1
@@ -5997,10 +6024,11 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
                 'source_manifest_sha256': None},
                 getattr(result, 'provider_evidence', None), 'claude'), usage=usage)
         elif result is None and not owner_gate_denied:
-            condition = _condition_execution(getattr(exc, 'provider_evidence', None),
-                                             'claude', 'BLOCKED')
-            if condition is not None:
-                developer['execution'] = condition
+            execution = _route_failure_execution(
+                exc, _condition_execution(getattr(exc, 'provider_evidence', None),
+                                          'claude', 'BLOCKED'))
+            if execution is not None:
+                developer['execution'] = execution
         parsed_cli_result = getattr(route, 'parsed_cli_result', None)
         if (result is not None and error_code == 'CLAUDE_NO_CHANGES' and
                 type(parsed_cli_result) is dict):
