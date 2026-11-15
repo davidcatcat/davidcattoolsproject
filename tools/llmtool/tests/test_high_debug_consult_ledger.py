@@ -6,6 +6,7 @@ a provider or the network. The report digest is the SHA-256 of a fixed plain
 label; no test holds credential-shaped data.
 """
 import dataclasses
+import errno
 import hashlib
 import json
 import multiprocessing
@@ -104,6 +105,37 @@ class ConsultLedgerTest(unittest.TestCase):
                     proc.join()
         self.assertTrue(all(proc.exitcode == 0 for proc in procs))
         return outcomes
+
+    @staticmethod
+    def identity(path):
+        info = os.lstat(path)
+        return info.st_dev, info.st_ino
+
+    def fsync_fault(self, matches, fail_on=None):
+        """Patch os.fsync: calls whose fd ``matches(fstat)`` are recorded and may fail.
+
+        ``calls`` collects the fstat of every matching call. ``fail_on`` is the
+        set of 1-based matching calls that raise EIO; None fails every matching
+        call. Every call that does not fail is the real fsync.
+        """
+        real_fsync = os.fsync
+        calls = []
+
+        def fsync(fd):
+            info = os.fstat(fd)
+            if matches(info):
+                calls.append(info)
+                if fail_on is None or len(calls) in fail_on:
+                    raise OSError(errno.EIO, 'injected fsync failure')
+            return real_fsync(fd)
+
+        return mock.patch.object(consult.os, 'fsync', side_effect=fsync), calls
+
+    def directory_fsync_fault(self, path, fail_on=None):
+        target = self.identity(path)
+        return self.fsync_fault(
+            lambda info: stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == target,
+            fail_on)
 
     # reservation
 
@@ -623,6 +655,162 @@ class ConsultLedgerTest(unittest.TestCase):
                      now=NOW)
         self.assertEqual(self.load('wp-wp5.json')['state'], 'RESERVED')
         self.assertEqual(self.load('week-2026-W46-2.json')['state'], 'RESERVED')
+
+    # durability is fail-closed (security repair 2, Codex security v93)
+
+    def test_healthy_reserve_and_finish_sync_every_step(self):
+        patcher, calls = self.fsync_fault(lambda info: True, fail_on=set())
+        with patcher:
+            handle = self.reserve('wp5')
+        directories = [(i.st_dev, i.st_ino) for i in calls if stat.S_ISDIR(i.st_mode)]
+        # State root once (the ledger directory's name), ledger after the WP
+        # slot and after the full reservation; three slot files written.
+        self.assertEqual(directories.count(self.identity(self.base)), 1)
+        self.assertEqual(directories.count(self.identity(self.ledger)), 2)
+        self.assertEqual(sum(stat.S_ISREG(i.st_mode) for i in calls), 3)
+        patcher, calls = self.fsync_fault(lambda info: True, fail_on=set())
+        with patcher:
+            consult.finish(handle, consult.DONE, REPORT, now=NOW)
+        directories = [(i.st_dev, i.st_ino) for i in calls if stat.S_ISDIR(i.st_mode)]
+        self.assertEqual(directories, [self.identity(self.ledger)])
+        self.assertEqual(sum(stat.S_ISREG(i.st_mode) for i in calls), 2)
+        self.assertEqual(self.load('wp-wp5.json')['state'], 'DONE')
+
+    def test_ledger_fsync_failure_after_the_wp_slot_refuses_and_keeps_it(self):
+        self.make_ledger()
+        patcher, calls = self.directory_fsync_fault(self.ledger, fail_on={1})
+        with patcher:
+            error = self.refuses(consult.LEDGER_INVALID, self.reserve, 'wp5')
+        self.assertEqual(len(calls), 1)
+        self.assertIn('ledger directory not synced', str(error))
+        record = self.load('wp-wp5.json')
+        self.assertEqual((record['state'], record['week_slot']), ('RESERVED', None))
+        self.assertEqual(self.names('week-'), [])
+        self.assertEqual(self.names('.consult-'), [])
+        # Fail closed: the WP stays used; a healthy run for another WP passes.
+        self.refuses(consult.WP_USED, self.reserve, 'wp5')
+        self.assertEqual(self.reserve('other').week_slot, 1)
+
+    def test_ledger_fsync_failure_after_the_week_slot_refuses_and_keeps_both(self):
+        self.make_ledger()
+        patcher, calls = self.directory_fsync_fault(self.ledger, fail_on={2})
+        with patcher:
+            self.refuses(consult.LEDGER_INVALID, self.reserve, 'wp5')
+        self.assertEqual(len(calls), 2)
+        record = self.load('wp-wp5.json')
+        self.assertEqual((record['state'], record['week_slot']), ('RESERVED', 1))
+        self.assertEqual(self.load('week-2026-W46-1.json')['wp'], 'wp5')
+        self.assertEqual(self.names('.consult-'), [])
+        error = self.refuses(consult.WP_USED, self.reserve, 'wp5')
+        self.assertIn('week_slot=1', str(error))
+        self.assertEqual(self.reserve('other').week_slot, 2)
+
+    def test_state_root_fsync_failure_refuses_before_any_slot(self):
+        patcher, calls = self.directory_fsync_fault(self.base)
+        with patcher:
+            self.refuses(consult.LEDGER_INVALID, self.reserve, 'wp5')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.names(''), [])
+        self.assertEqual(self.reserve('wp5').week_slot, 1)
+
+    def test_slot_file_fsync_failure_refuses_in_reserve_and_finish(self):
+        patcher, calls = self.fsync_fault(lambda info: stat.S_ISREG(info.st_mode))
+        with patcher:
+            self.refuses(consult.LEDGER_INVALID, self.reserve, 'wp5')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.names(''), [])  # the temporary was removed
+        handle = self.reserve('wp5')
+        patcher, calls = self.fsync_fault(lambda info: stat.S_ISREG(info.st_mode))
+        with patcher:
+            self.refuses(consult.LEDGER_INVALID, consult.finish, handle, consult.DONE,
+                         REPORT, now=NOW)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.load('wp-wp5.json')['state'], 'RESERVED')
+        self.assertEqual(self.load('week-2026-W46-1.json')['state'], 'RESERVED')
+        self.assertEqual(self.names('.consult-'), [])
+
+    def test_ledger_fsync_failure_in_finish_refuses_also_on_a_repeat(self):
+        handle = self.reserve('wp5')
+        patcher, calls = self.directory_fsync_fault(self.ledger)
+        with patcher:
+            self.refuses(consult.LEDGER_INVALID, consult.finish, handle, consult.DONE,
+                         REPORT, now=NOW)
+            # Both slots now read DONE, yet a repeat still syncs and refuses.
+            self.refuses(consult.LEDGER_INVALID, consult.finish, handle, consult.DONE,
+                         REPORT, now=NOW)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.names(''), ['week-2026-W46-1.json', 'wp-wp5.json'])
+        # A healthy repeat completes.
+        consult.finish(handle, consult.DONE, REPORT, now=NOW)
+        for name in ('wp-wp5.json', 'week-2026-W46-1.json'):
+            self.assertEqual((self.load(name)['state'], self.load(name)['report_sha256']),
+                             ('DONE', REPORT))
+
+    def test_week_cap_after_the_wp_slot_refuses_ledger_invalid_when_not_durable(self):
+        for i in range(1, 11):
+            self.reserve('wp%02d' % i)
+        patcher, calls = self.directory_fsync_fault(self.ledger, fail_on={2})
+        with mock.patch.object(consult, '_week_has_free_slot', return_value=True), patcher:
+            self.refuses(consult.LEDGER_INVALID, self.reserve, 'late')
+        self.assertEqual(len(calls), 2)
+        self.assertIn('wp-late.json', self.names('wp-'))
+        self.assertEqual(len(self.names('week-')), 10)
+        self.assertEqual(self.names('.consult-'), [])
+        self.refuses(consult.WP_USED, self.reserve, 'late', NOW + timedelta(days=7))
+
+    def test_week_cap_failed_mark_write_error_refuses_and_keeps_the_wp_slot(self):
+        for i in range(1, 11):
+            self.reserve('wp%02d' % i)
+
+        def replace_fails(*args, **kwargs):
+            raise OSError(errno.EIO, 'injected replace failure')
+
+        with mock.patch.object(consult, '_week_has_free_slot', return_value=True), \
+                mock.patch.object(consult.os, 'replace', side_effect=replace_fails):
+            error = self.refuses(consult.LEDGER_INVALID, self.reserve, 'late')
+        self.assertIn('slot not updated', str(error))
+        record = self.load('wp-late.json')
+        self.assertEqual((record['state'], record['week_slot']), ('RESERVED', None))
+        self.assertEqual(self.names('.consult-'), [])
+        self.refuses(consult.WP_USED, self.reserve, 'late', NOW + timedelta(days=7))
+
+    def close_fault(self, matches):
+        """Patch os.close: the descriptor is really closed, then a match raises EIO."""
+        real_close = os.close
+        failures = []
+
+        def close(fd):
+            try:
+                info = os.fstat(fd)
+            except OSError:
+                info = None
+            real_close(fd)
+            if info is not None and matches(info):
+                failures.append(fd)
+                raise OSError(errno.EIO, 'injected close failure')
+
+        return mock.patch.object(consult.os, 'close', side_effect=close), failures
+
+    def test_ledger_directory_close_failure_refuses_and_keeps_both_slots(self):
+        self.make_ledger()
+        target = self.identity(self.ledger)
+        patcher, failures = self.close_fault(
+            lambda info: stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == target)
+        with patcher:
+            self.refuses(consult.LEDGER_INVALID, self.reserve, 'wp5')
+        self.assertEqual(len(failures), 1)
+        record = self.load('wp-wp5.json')
+        self.assertEqual((record['state'], record['week_slot']), ('RESERVED', 1))
+        self.assertEqual(self.names('week-'), ['week-2026-W46-1.json'])
+        self.refuses(consult.WP_USED, self.reserve, 'wp5')
+
+    def test_slot_file_close_failure_refuses_before_any_slot(self):
+        patcher, failures = self.close_fault(lambda info: stat.S_ISREG(info.st_mode))
+        with patcher:
+            self.refuses(consult.LEDGER_INVALID, self.reserve, 'wp5')
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(self.names(''), [])
+        self.assertEqual(self.reserve('wp5').week_slot, 1)
 
 
 if __name__ == '__main__':

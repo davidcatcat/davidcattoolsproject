@@ -33,6 +33,17 @@ LEDGER_INVALID. Create-once briefly holds its own temporary second name
 it. A reader that meets a second name waits a bounded time only when that
 name is such an in-ledger temporary on the same inode; any other second name
 is a planted hard link and refuses at once.
+
+Durability (security repair 2, Codex security v93): every durability step
+fails closed. Each slot file is fsynced before its name is linked or
+replaced; the ledger directory is fsynced after the WP slot is created, after
+the reservation is complete and after every finish (also a repeated one); the
+state root is fsynced on every ``reserve`` so the ledger directory's own name
+is durable. Any open, write, fsync, rename, link, unlink or close error of a
+slot file, a temporary name, the ledger directory or the state root refuses
+LEDGER_INVALID, so ``reserve`` and ``finish`` never return unless every step
+succeeded. Slots already created stay (never deleted). Only the removal of a
+temporary name on a path that is already refusing is best effort.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -117,6 +128,29 @@ def _refuse(code, detail=None):
     raise error from None
 
 
+def _close_all(*fds):
+    """Close every given descriptor (None is skipped); any close error refuses LEDGER_INVALID.
+
+    close(2) releases the descriptor even when it reports an error, so it is
+    never retried; every descriptor is closed before the refusal is raised.
+    """
+    failed = False
+    for fd in fds:
+        if fd is None:
+            continue
+        try:
+            os.close(fd)
+        except OSError:
+            failed = True
+    if failed:
+        _refuse(LEDGER_INVALID, 'descriptor not closed')
+
+
+def _close(fd):
+    """Close one ledger-owned descriptor; a close error refuses LEDGER_INVALID."""
+    _close_all(fd)
+
+
 def _root_text(value):
     """The text of a root argument; anything that is not a usable path refuses ARGUMENT_INVALID."""
     try:
@@ -187,11 +221,11 @@ def _open_walk(name, dir_fd):
     try:
         info = os.fstat(fd)
     except OSError:
-        os.close(fd)
+        _close(fd)
         _refuse(LEDGER_INVALID, 'path component unusable')
     if (not stat.S_ISDIR(info.st_mode) or info.st_ino != seen.st_ino or
             info.st_dev != seen.st_dev):
-        os.close(fd)
+        _close(fd)
         _refuse(LEDGER_INVALID, 'path component not a real directory')
     return fd, info
 
@@ -202,8 +236,14 @@ def _open_chain(path):
     for part in path.parts[1:]:
         try:
             child, info = _open_walk(part, fd)
-        finally:
-            os.close(fd)
+        except BaseException:
+            _close(fd)
+            raise
+        try:
+            _close(fd)
+        except BaseException:
+            _close(child)
+            raise
         fd = child
     return fd, info
 
@@ -230,12 +270,12 @@ def _confine(store):
             _refuse(LEDGER_INVALID, 'state root not private')
         if supplied:
             store_fd, store_info = _open_walk(store.name, state_fd)
-            os.close(store_fd)
+            _close(store_fd)
             if (store_info.st_uid != os.getuid() or
                     stat.S_IMODE(store_info.st_mode) != 0o700):
                 _refuse(LEDGER_INVALID, 'Task store root not private')
     except BaseException:
-        os.close(state_fd)
+        _close(state_fd)
         raise
     return state, state_fd
 
@@ -253,7 +293,7 @@ def ledger_directory(root=None):
     world-writable. Anything else refuses LEDGER_INVALID. Nothing is created.
     """
     state, state_fd = _confine(root)
-    os.close(state_fd)
+    _close(state_fd)
     return state / LEDGER_DIR
 
 
@@ -277,27 +317,61 @@ def _open_ledger(state_fd, *, create):
             os.fchmod(fd, 0o700)
         info = os.fstat(fd)
     except OSError:
-        os.close(fd)
+        _close(fd)
         _refuse(LEDGER_INVALID, 'ledger directory unusable')
     if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700 or
             info.st_uid != os.getuid()):
-        os.close(fd)
+        _close(fd)
         _refuse(LEDGER_INVALID, 'ledger directory not private')
     return fd
 
 
+def _sync_state_root(state_fd):
+    """fsync the state root so the ledger directory's own name is durable.
+
+    The walk descriptor may be ``O_PATH``, which cannot be fsynced, so the
+    same directory is opened read-only through it. Any error refuses
+    LEDGER_INVALID.
+    """
+    try:
+        fd = os.open('.', _LEDGER_FLAGS, dir_fd=state_fd)
+    except OSError:
+        _refuse(LEDGER_INVALID, 'state root not synced')
+    try:
+        os.fsync(fd)
+    except OSError:
+        _close(fd)
+        _refuse(LEDGER_INVALID, 'state root not synced')
+    _close(fd)
+
+
 @contextmanager
 def _ledger(store, *, create):
-    """Yield (ledger path, ledger fd) after every confinement check; closes the fd."""
+    """Yield (ledger path, ledger fd) after every confinement check; closes the fd.
+
+    With ``create`` the ledger directory is made if needed and the state root
+    is fsynced every time (another caller may have created the directory and
+    stopped before its own sync). A close error, also of the ledger
+    descriptor after the body, refuses LEDGER_INVALID.
+    """
     state, state_fd = _confine(store)
+    ledger_fd = None
     try:
         ledger_fd = _open_ledger(state_fd, create=create)
-    finally:
-        os.close(state_fd)
+        if create:
+            _sync_state_root(state_fd)
+    except BaseException:
+        _close_all(state_fd, ledger_fd)
+        raise
+    try:
+        _close(state_fd)
+    except BaseException:
+        _close(ledger_fd)
+        raise
     try:
         yield state / LEDGER_DIR, ledger_fd
     finally:
-        os.close(ledger_fd)
+        _close(ledger_fd)
 
 
 def iso_week(moment):
@@ -437,7 +511,7 @@ def _read_slot_once(dfd, name):
     except OSError:
         _refuse(LEDGER_INVALID, 'slot unreadable')
     finally:
-        os.close(fd)
+        _close(fd)
     raw = b''.join(chunks)
     if len(raw) > _RECORD_LIMIT:
         _refuse(LEDGER_INVALID, 'slot too large')
@@ -496,22 +570,40 @@ def _record_bytes(record):
 
 
 def _sync_directory(dfd):
-    """Best effort: make a created or replaced name durable before any launch."""
+    """Make every created, replaced or removed ledger name durable before any launch.
+
+    Fail closed: an fsync error of the ledger directory refuses LEDGER_INVALID,
+    so the caller never reports success for a slot change that may be lost.
+    """
     try:
         os.fsync(dfd)
     except OSError:
-        pass
+        _refuse(LEDGER_INVALID, 'ledger directory not synced')
 
 
 def _unlink_quietly(dfd, name):
+    """Best-effort removal of a temporary name, only on a path that already refuses."""
     try:
         os.unlink(name, dir_fd=dfd)
     except OSError:
         pass
 
 
+def _remove_temporary(dfd, name):
+    """Remove a create-once temporary name; an error refuses LEDGER_INVALID."""
+    try:
+        os.unlink(name, dir_fd=dfd)
+    except OSError:
+        _refuse(LEDGER_INVALID, 'temporary name not removed')
+
+
 def _write_temporary(dfd, record):
-    """Write ``record`` to a fresh private ``.consult-*`` name; returns (name, fstat)."""
+    """Write and fsync ``record`` under a fresh private ``.consult-*`` name; returns (name, fstat).
+
+    Any open, write, fsync or close error refuses LEDGER_INVALID (never
+    FileExistsError: a slot-exists signal only ever comes from the create-once
+    link itself) after a best-effort removal of the temporary name.
+    """
     for _ in range(16):
         name = _TEMP_PREFIX + secrets.token_hex(12)
         try:
@@ -519,23 +611,28 @@ def _write_temporary(dfd, record):
                          0o600, dir_fd=dfd)
         except FileExistsError:
             continue
+        except OSError:
+            _refuse(LEDGER_INVALID, 'slot not written')
         break
     else:
-        # A plain OSError, never FileExistsError: a slot-exists signal must
-        # only ever come from the create-once link itself.
-        raise OSError('no free temporary name')
+        _refuse(LEDGER_INVALID, 'no free temporary name')
     try:
-        os.fchmod(fd, 0o600)
-        view = memoryview(_record_bytes(record))
-        while view:
-            view = view[os.write(fd, view):]
-        os.fsync(fd)
-        info = os.fstat(fd)
+        try:
+            os.fchmod(fd, 0o600)
+            view = memoryview(_record_bytes(record))
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+            info = os.fstat(fd)
+        finally:
+            # A close error (for example a deferred write error) fails too.
+            os.close(fd)
+    except OSError:
+        _unlink_quietly(dfd, name)
+        _refuse(LEDGER_INVALID, 'slot not written')
     except BaseException:
-        os.close(fd)
         _unlink_quietly(dfd, name)
         raise
-    os.close(fd)
     return name, info
 
 
@@ -544,14 +641,24 @@ def _create_once(dfd, name, record):
 
     The temporary name is the only second link ever tolerated: once it is
     removed the new slot must be our inode with exactly one name, else the
-    slot stays (fail closed) and the call refuses LEDGER_INVALID.
+    slot stays (fail closed) and the call refuses LEDGER_INVALID. A temporary
+    name that cannot be removed refuses LEDGER_INVALID too, also when the slot
+    already existed.
     """
     temporary, created = _write_temporary(dfd, record)
     try:
         # A hard link is atomic and fails when the name already exists.
         os.link(temporary, name, src_dir_fd=dfd, dst_dir_fd=dfd)
-    finally:
+    except FileExistsError:
+        _remove_temporary(dfd, temporary)
+        raise
+    except OSError:
         _unlink_quietly(dfd, temporary)
+        _refuse(LEDGER_INVALID, 'slot not created')
+    except BaseException:
+        _unlink_quietly(dfd, temporary)
+        raise
+    _remove_temporary(dfd, temporary)
     try:
         info = os.stat(name, dir_fd=dfd, follow_symlinks=False)
     except OSError:
@@ -562,10 +669,16 @@ def _create_once(dfd, name, record):
 
 
 def _replace(dfd, name, record):
-    """Atomically replace slot ``name``; the name itself is never removed."""
+    """Atomically replace slot ``name``; the name itself is never removed.
+
+    Any error refuses LEDGER_INVALID; the caller syncs the ledger directory.
+    """
     temporary, _ = _write_temporary(dfd, record)
     try:
         os.replace(temporary, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+    except OSError:
+        _unlink_quietly(dfd, temporary)
+        _refuse(LEDGER_INVALID, 'slot not updated')
     except BaseException:
         _unlink_quietly(dfd, temporary)
         raise
@@ -613,7 +726,10 @@ def reserve(wp, *, now=None, root=None):
     this call found the week full), WEEK_CAP when the week has no free slot,
     LEDGER_INVALID for a bad ledger or root and ARGUMENT_INVALID for a bad
     ``wp``, ``now`` or ``root`` type. ``root`` is the Task store root, as for
-    the screen records; see ``ledger_directory`` for its confinement.
+    the screen records; see ``ledger_directory`` for its confinement. It
+    returns only after every slot write, file fsync and directory fsync
+    succeeded; any such error refuses LEDGER_INVALID and keeps every slot
+    already created.
     """
     if not _valid_wp(wp):
         _refuse(ARGUMENT_INVALID, 'wp must match [A-Za-z0-9._-]{1,64}')
@@ -653,12 +769,11 @@ def reserve(wp, *, now=None, root=None):
         n = _claim_week_slot(dfd, week, wp, stamp)
         if n is None:
             # Concurrent callers took the last week slots. Mark the WP slot
-            # FAILED (no launch, no report); if that write fails it stays
-            # RESERVED, which is closed too.
-            try:
-                _replace(dfd, wp_name, dict(record, state=FAILED, finished_at=stamp))
-            except OSError:
-                pass
+            # FAILED (no launch, no report) and make that durable. A write or
+            # sync error refuses LEDGER_INVALID instead; the slot then stays
+            # RESERVED or FAILED, which is closed either way.
+            _replace(dfd, wp_name, dict(record, state=FAILED, finished_at=stamp))
+            _sync_directory(dfd)
             _refuse(WEEK_CAP, 'week=%s limit=%d' % (week, WEEK_LIMIT))
         try:
             _replace(dfd, wp_name, dict(record, week_slot=n))
@@ -688,7 +803,9 @@ def finish(handle, status, report_sha256, *, now=None):
     repeated or interrupted finish completes; any other finished state refuses
     ARGUMENT_INVALID. The ledger is derived again from ``handle.root`` under
     the same confinement as ``reserve`` and must equal ``handle.directory``.
-    Slots are never deleted.
+    Slots are never deleted. It returns only after every write, file fsync and
+    ledger directory fsync succeeded (the directory is synced on a repeat
+    too); any such error refuses LEDGER_INVALID.
     """
     if not _valid_handle(handle):
         _refuse(ARGUMENT_INVALID, 'handle invalid')
@@ -728,5 +845,7 @@ def finish(handle, status, report_sha256, *, now=None):
                 _replace(dfd, name, record)
             except OSError:
                 _refuse(LEDGER_INVALID, 'slot not updated')
-        if pending:
-            _sync_directory(dfd)
+        # Always sync, also when nothing was pending: a repeat of a finish
+        # whose sync failed must not report success before the states are
+        # durable.
+        _sync_directory(dfd)
