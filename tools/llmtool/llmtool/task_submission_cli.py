@@ -49,6 +49,7 @@ from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, 
                                UnsupportedBoundary, check_route_model, for_platform,
                                load_route_config, resolve_route_max_diff_bytes,
                                resolve_route_timeout, run_route)
+from .developer_routes.base import _git_status_paths
 from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent_usage,
                                         cleanup_audit_copies)
 from .developer_routes.agy import (
@@ -7109,14 +7110,42 @@ _PRELAUNCH_REPAIR_REFUSALS = frozenset((
 ))
 
 
+# Post-run zero-work refusals allow-list (#2098 design #2113).
+# Non-zero-exit codes raised only after cleanup is CONFIRMED (opencode_direct_developer.py ~985-1005).
+_POST_RUN_NO_WORK_REFUSALS = frozenset((
+    ('opencode', 'DEVELOPER_OUTCOME_UNKNOWN', 'OPENCODE_PROVIDER_FAILED'),
+    ('opencode', 'DEVELOPER_OUTCOME_UNKNOWN', 'OPENCODE_RATE_LIMITED'),
+    ('opencode', 'DEVELOPER_OUTCOME_UNKNOWN', 'OPENCODE_FREE_LIMIT'),
+    ('opencode', 'DEVELOPER_OUTCOME_UNKNOWN', 'OPENCODE_OUTPUT_TRUNCATED'),
+))
+
+
+def _paths_overlap(status_paths, write_paths):
+    """Return True if any status path overlaps any write path.
+
+    An overlap occurs when a status path p and a write path w satisfy:
+    p == w, p starts with w.rstrip('/') + '/', or w starts with p.rstrip('/') + '/'.
+    """
+    if not status_paths or not write_paths:
+        return False
+    for p in status_paths:
+        p_prefix = p.rstrip('/') + '/'
+        for w in write_paths:
+            w_prefix = w.rstrip('/') + '/'
+            if p == w or p.startswith(w_prefix) or w.startswith(p_prefix):
+                return True
+    return False
+
+
 def _launched_run_did_no_work(developer, d6_unchanged=None):
     """True only when a launched run's record proves it did no work.
 
     It must have ended blocked or interrupted, with no artifact and confirmed
     cleanup. Real records carry no changed-file list and an empty artifact
-    alone proves nothing, so ``d6_unchanged(source_sha)`` must also confirm
-    that the D6 head still equals the run's recorded source SHA and that its
-    tree is clean. Anything missing, malformed or unknown does not prove that,
+    alone proves nothing, so ``d6_unchanged(source_sha, write_paths=...)``
+    must also confirm that the D6 head still equals the run's recorded source
+    SHA, that its tree is clean, and that no status path overlaps the run's
+    write paths. Anything missing, malformed or unknown does not prove that,
     so the run still counts.
     """
     if type(developer) is not dict:
@@ -7126,9 +7155,11 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
     if state == 'BLOCKED':
         ended = True
     elif state == 'DEVELOPER_OUTCOME_UNKNOWN':
-        ended = (type(error_code) is str and
+        ended = ((type(error_code) is str and
                  re.fullmatch(r'[A-Z0-9]+(?:_[A-Z0-9]+)*_(?:BLOCKED|INTERRUPTED)',
-                              error_code) is not None)
+                              error_code) is not None) or
+                 (developer.get('provider_profile'), state, error_code) in
+                 _POST_RUN_NO_WORK_REFUSALS)
     else:
         ended = False
     if not ended:
@@ -7149,8 +7180,12 @@ def _launched_run_did_no_work(developer, d6_unchanged=None):
             re.fullmatch(r'[0-9a-f]{40}', source_sha) is None or
             d6_unchanged is None):
         return False
+    write_paths = developer.get('write_paths')
+    if (type(write_paths) is not list or not write_paths or
+            any(type(p) is not str for p in write_paths)):
+        return False
     try:
-        return d6_unchanged(source_sha) is True
+        return d6_unchanged(source_sha, write_paths=tuple(write_paths)) is True
     except Exception:
         return False
 
@@ -7327,10 +7362,10 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
 
 
 def _d6_unchanged_probe(args, d6_binding):
-    """d6_unchanged(source_sha) for the delegated D6, evaluated lazily once."""
+    """d6_unchanged(source_sha, write_paths=None) for the delegated D6, evaluated lazily once."""
     d6_state = []
 
-    def d6_unchanged(source_sha):
+    def d6_unchanged(source_sha, write_paths=None):
         # Evaluated lazily: a run that changed nothing leaves the D6 head at
         # its source SHA with a clean tree. Any doubt means the run counts.
         if not d6_state:
@@ -7340,10 +7375,14 @@ def _d6_unchanged_probe(args, d6_binding):
                 registration, snapshot = binding
                 changed_paths, raw = task_completion._worktree_diff(
                     registration.root, snapshot.head)
-                d6_state.append((snapshot.head, not changed_paths and not raw))
+                status_paths = set(_git_status_paths(registration.root))
+                d6_state.append((snapshot.head, not changed_paths and not raw, status_paths))
             except Exception:
                 d6_state.append((None, False))
-        head, clean = d6_state[0]
+        head, clean = d6_state[0][:2]
+        status_paths = d6_state[0][2] if len(d6_state[0]) > 2 else set()
+        if write_paths is not None and _paths_overlap(status_paths, write_paths):
+            return False
         return head == source_sha and clean
 
     return d6_unchanged

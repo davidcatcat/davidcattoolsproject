@@ -201,17 +201,18 @@ class RouteFailureExecutionTests(unittest.TestCase):
             'artifact_sha256': None,
             'source_sha': 'c' * 40,
             'execution': execution,
+            'write_paths': ['out.txt'],
         }
-        self.assertTrue(_launched_run_did_no_work(dev, lambda sha: True))
+        self.assertTrue(_launched_run_did_no_work(dev, lambda sha, write_paths=None: True))
 
         # With cleanup UNKNOWN -> False
         exc_unknown = RouteError('CLAUDE_STATUS_FAILED')
         exc_unknown.execution_facts = dict(exc.execution_facts, cleanup_status='UNKNOWN')
         dev_unknown = dict(dev, execution=_route_failure_execution(exc_unknown, None))
-        self.assertFalse(_launched_run_did_no_work(dev_unknown, lambda sha: True))
+        self.assertFalse(_launched_run_did_no_work(dev_unknown, lambda sha, write_paths=None: True))
 
         # With d6_unchanged returning False -> False
-        self.assertFalse(_launched_run_did_no_work(dev, lambda sha: False))
+        self.assertFalse(_launched_run_did_no_work(dev, lambda sha, write_paths=None: False))
 
     def test_claude_route_wiring(self):
         case = test_claude_route_wiring.ClaudeRouteWiringTests(
