@@ -76,7 +76,9 @@ def confirm(prepared_id, *, task_id='task-a', run_id='run-a', session_id='sessio
         prepared_id, task_id, run_id, session_id, REPO_ROOT)
 
 
-def status_args(prepared_id, **changes):
+def status_args(prepared_id, /, **changes):
+    # prepared_id is positional-only so a 'prepared_id' override in changes
+    # is accepted and applied by args.update instead of raising TypeError.
     args = {'task_id': 'task-a', 'run_id': 'run-a', 'role': 'developer',
             'route': ROUTE, 'session_id': 'session-a',
             'prefix_sha256': PREFIX_DIGEST, 'pin_commit': PIN,
@@ -85,11 +87,11 @@ def status_args(prepared_id, **changes):
     return args
 
 
-def receipt_status(prepared_id, **changes):
+def receipt_status(prepared_id, /, **changes):
     return skill_ledger.card_receipt_status(**status_args(prepared_id, **changes))
 
 
-def preparation_status(prepared_id, **changes):
+def preparation_status(prepared_id, /, **changes):
     return skill_ledger.card_preparation_status(**status_args(prepared_id, **changes))
 
 
