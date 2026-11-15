@@ -124,6 +124,7 @@ Home LLM work grows by a ladder (Owner 2026-11-10, #120). The PM logs every call
 - Until T2 is stable (3 first-try SOLVED in a row at T2), no Task above T2.
 - One contiguous region per Task.
 - In agent mode (gw-agent), name the line ranges to read; never ask for a whole large file. Put new tests in a new file.
+- Keep gw-agent spec text ASCII-only. The home LLM has swapped CJK code points when copying text (#2094); `spec_preflight.py` refuses non-ASCII gw-agent fields (#2099). Write any non-ASCII test value as an escape.
 
 ## Invocation
 

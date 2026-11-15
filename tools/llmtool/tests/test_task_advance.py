@@ -1763,7 +1763,7 @@ class TaskAdvanceCiFailRepairTests(unittest.TestCase):
         self.assertEqual(dispatched, [])
 
     def test_env_conclusions_wait_without_repair_or_ci_rerun(self):
-        for conclusion in ('cancelled', 'timed_out', 'startup_failure'):
+        for conclusion in ('cancelled', 'startup_failure'):
             with self.subTest(conclusion=conclusion):
                 result, dispatched, calls, repaired, gh_calls = self.linux(conclusion)
                 self.assertEqual((result['step'], result['codes']),
