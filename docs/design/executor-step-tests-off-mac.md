@@ -2,7 +2,8 @@
 
 Status: 待實作（WP-1 to WP-5）. This change is design only; it contains no code.
 Status marks follow `CLAUDE.md`: `現行` = current behaviour, read from source at
-`e06a7903`; `待實作（WP-x）` = decided, ships with that work package (WP-n is
+`e06a7903` (the all-skip FAIL lines in 1.4, gap 6 and 4.3 were read at
+`223f4cf3`); `待實作（WP-x）` = decided, ships with that work package (WP-n is
 PR n in section 7); `待後續` = decided, out of scope for this plan.
 
 Source decision: an Owner decision on #1817, relayed by the PM: no local test
@@ -239,6 +240,29 @@ On EC2 or hosted Linux this module passes `passing_final`. If the receipt also
 lists a module that ran real tests, `ran_total > 0` and the receipt is PASS
 (F1). This was read from source; it has not been run here.
 
+When the TUI module is the **only** declared module, the result goes the other
+way:
+
+- Both producers start at `FAIL` and switch to `PASS` only when `ran > 0`
+  (`remote_test.py:81`, `:235`; `remote_test_receipt.py:450`, `:526-528`).
+- The module's exit code is 0 and its final passes `passing_final`, so it is
+  not added to `failures` (`remote_test.py:232-234`;
+  `remote_test_receipt.py:520-524`).
+- The receipt is therefore `FAIL` with `ran_total = 0`, `failures = []` and an
+  empty `failure_excerpt`, because `failed_outputs` is empty
+  (`remote_test.py:257`; `remote_test_receipt.py:550-551`).
+- `_remote_test_status` returns `FAIL` with excerpt `''`
+  (`task_advance.py:2146-2156`). `_pre_pr_remote_gate` holds with
+  `REMOTE_TEST_FAIL`, next `REPAIR_REVIEW` (`:2261-2263`), and
+  `_pre_review_action` sends it to `_remote_fail_action` (`:2355-2356`).
+
+A code repair cannot change this result (gap 6). A docs-only Task whose
+`read_paths` list `tools/llmtool/tests/test_chat_tui_pty.py` declares that
+module through `_task_path_modules` (`remote_test.py:300-310`) and so reaches
+this path. This note's own Task does that. Its repair dispatch at `223f4cf3`
+reports a remote-test failure with an empty excerpt. That receipt was not read
+here, so whether it has exactly this shape is UNKNOWN.
+
 ### 1.5 Gaps
 
 1. `_remote_test_status` accepts a PASS for any non-empty module subset.
@@ -253,12 +277,15 @@ lists a module that ran real tests, `ran_total > 0` and the receipt is PASS
 5. There is no per-module execution evidence. A module with `ran = 0,
    skipped = 1` inside a mixed PASS receipt is indistinguishable from one that
    executed (1.4, 0.5).
+6. A declared set in which nothing executed (for example only
+   `test_chat_tui_pty` on Linux) gives `FAIL` with `failures = []`. It goes to
+   the code-repair route, which cannot clear it (1.4).
 
 ## 2. Options
 
 - **(a) Recommended: the exact-head remote receipt is the executor test
   evidence.** This extends today's `REMOTE_RECEIPT` path to every Task and
-  closes gaps 1, 2, 4 and 5. There is no Mac run, no second EC2 run (the
+  closes gaps 1, 2, 4, 5 and 6. There is no Mac run, no second EC2 run (the
   pre-PR gate already runs one), and one source of test truth.
 - (b) The executor step calls `llmtool task remote-test` itself. It
   duplicates the pre-PR EC2 run, needs a pushed ref that may not exist yet,
@@ -334,13 +361,26 @@ An aggregate `ran_total > 0` is never enough on its own.
 | legacy receipt for `H` (no `module_results`) | `TEST_REMOTE_EVIDENCE_LEGACY` | `RUN_REMOTE_TEST`, once (section 5.3) |
 | an entry has `ran == 0` (any `skipped`, including class/module `SkipTest`) | `TEST_REMOTE_MODULE_NOT_EXECUTED` | stop for PM |
 | an entry has `ran > 0` and `skipped > 0` | `TEST_REMOTE_MODULE_SKIPPED` | stop for PM |
-| `FAIL` | `TEST_FAILED` (existing) | repair route (existing) |
+| `FAIL`, `failures == []`, one `final` per declared module and each passes `passing_final`, and an entry has `ran == 0` (legacy: `ran_total == 0`) | `TEST_REMOTE_MODULE_NOT_EXECUTED` | stop for PM, never repair |
+| any other `FAIL` | `TEST_FAILED` (existing) | repair route (existing) |
 | `TIMEOUT`, `SHA_MISMATCH` | existing `REMOTE_TEST_*` | `NEEDS_ATTENTION` (existing) |
 | unsupported registered test (4.1) | `TEST_REMOTE_MODULE_UNSUPPORTED` | stop for PM |
 | digest or binding invalid | `TEST_REMOTE_EVIDENCE_INVALID` | stop for PM |
 
 When one receipt triggers several conditions, `NOT_EXECUTED` takes precedence
-over `SKIPPED`. Every failing module is listed. `ADMISSION_DENIED`,
+over `SKIPPED`. Every failing module is listed.
+
+The `FAIL` row for code that never ran (gap 6) applies only when no module
+failed: no exit code was non-zero, every final passes and `failures` is empty.
+It also requires one `final` per declared module, so every module was
+launched. A setup-stage failure (`REMOTE_STAGE_FAILED`, `remote_test.py:241-243`)
+before or during the module loop has fewer finals, so it stays `TEST_FAILED`
+and keeps its repair route. When the row does apply, nothing failed, so a code
+repair has nothing to fix. A legacy
+receipt has no `module_results`, but `ran_total == 0` still proves that no
+module executed, so it gets the same code and is not re-run. Every outcome on
+this row is a stop and never a pass, so nothing is weakened. A `FAIL` in which
+any module is listed in `failures` stays `TEST_FAILED`. `ADMISSION_DENIED`,
 `UNAVAILABLE` and `UNKNOWN` outcomes never satisfy the gate.
 `MAC_EVIDENCE_REQUIRED` (`task_submission_cli.py:4017`) is replaced by the two
 module codes. Readers of that code outside the read scope are UNKNOWN: before
@@ -352,7 +392,8 @@ WP-4, the PM searches the repo for them.
   `tests/test_chat_tui*`, `tests/test_tui_*` and the helper
   `tests/tui_pty_driver.py`.
 - On Linux, `test_chat_tui_pty` gives `ran = 0, skipped = 1`, so the code is
-  `TEST_REMOTE_MODULE_NOT_EXECUTED` and the PM decides. No gate is lowered:
+  `TEST_REMOTE_MODULE_NOT_EXECUTED` and the PM decides. This holds whether the
+  receipt is a mixed `PASS` (1.4, F1) or the all-skip `FAIL` (1.4, gap 6). No gate is lowered:
   the result is a stop, never a PASS.
 - The required Mac CI check is not module evidence. It does not show which
   modules ran, and it stays a separate, unchanged gate.
@@ -419,7 +460,12 @@ WP-2 for hosted runs) stays digest-valid and stays readable for display
 (`_remote_test_receipt_summary`).
 
 - It never satisfies the executor gate.
-- For head `H`, the gate returns `TEST_REMOTE_EVIDENCE_LEGACY`, and
+- A legacy `FAIL` that meets the not-executed row in 4.3 (`failures == []`,
+  one passing final per module, `ran_total == 0`) gets
+  `TEST_REMOTE_MODULE_NOT_EXECUTED`
+  and is not re-run.
+- For any other legacy receipt for head `H`, the gate returns
+  `TEST_REMOTE_EVIDENCE_LEGACY`, and
   `task_advance` routes the result to `RUN_REMOTE_TEST` for `H` **once**. The
   script digest changed, so the reuse check at `remote_test.py:543-549` does
   not short-circuit.
@@ -461,6 +507,7 @@ The current split stays.
 | partial or extended module set | exact sorted equality (4.2 item 4) |
 | class/module `SkipTest` hidden in a mixed PASS | `ran > 0` per module, `TEST_REMOTE_MODULE_NOT_EXECUTED` |
 | partly skipped module | `skipped == 0` per module, `TEST_REMOTE_MODULE_SKIPPED` |
+| all-skip `FAIL` sent to a code repair that cannot clear it | not-executed `FAIL` row (4.3): stop for PM |
 | validator rejecting a valid `skipped > ran` receipt and masking the cause | no `skipped <= ran` rule (section 3) |
 | producer ahead of validator | WP-1 before WP-2 (5.2) |
 | legacy receipt read as module evidence | `TEST_REMOTE_EVIDENCE_LEGACY`, one fresh run, then stop |
@@ -555,6 +602,13 @@ Tests:
   `TEST_REMOTE_MODULE_NOT_EXECUTED`, failing module named;
 - **regression skip**: one module with `ran = 5, skipped = 2`, the others
   clean: `TEST_REMOTE_MODULE_SKIPPED`;
+- **regression all-skip FAIL** (gap 6): only `test_chat_tui_pty` declared,
+  `FAIL`, `ran_total = 0`, `failures = []`, final `OK (skipped=1)`, with and
+  without `module_results`: `TEST_REMOTE_MODULE_NOT_EXECUTED`, not
+  `TEST_FAILED` and not `TEST_REMOTE_EVIDENCE_LEGACY`;
+- a `FAIL` with a module in `failures`: `TEST_FAILED`;
+- a `FAIL` with `failures = []` and fewer finals than modules (setup stage
+  failed): `TEST_FAILED`;
 - a module with `ran = 0, skipped = 0`: `NOT_EXECUTED`;
 - both conditions in one receipt: `NOT_EXECUTED` with both modules listed;
 - every module `ran > 0, skipped = 0`, exact set, current head: PASS;
@@ -589,12 +643,17 @@ Changes:
 - `task_advance` maps the codes from 4.3 to their steps: `RUN_REMOTE_TEST`
   for missing, mismatch and legacy (once), and a stop for the module codes,
   `UNSUPPORTED` and `INVALID`.
+- `_pre_pr_remote_gate` (`task_advance.py:2261-2263`) and `_pre_review_action`
+  (`:2355-2356`) send a `FAIL` to `REPAIR_REVIEW` / `_remote_fail_action` only
+  when it is `TEST_FAILED`. A not-executed `FAIL` (gap 6) stops for the PM.
 
 Tests:
 
 - the committed completion with the F1 receipt stays `WAITING_EXECUTOR` with
   `TEST_REMOTE_MODULE_NOT_EXECUTED` (today it clears);
 - with the skip receipt: `TEST_REMOTE_MODULE_SKIPPED`;
+- a TUI-only all-skip `FAIL` (gap 6) neither dispatches a repair nor opens a
+  PR; both gates stop with `TEST_REMOTE_MODULE_NOT_EXECUTED`;
 - with a clean exact-set receipt it clears;
 - a subset PASS no longer clears `_pre_review_action`;
 - a legacy PASS gives one `RUN_REMOTE_TEST`, then a stop;
@@ -651,3 +710,7 @@ See 4.4. This is a separate plan after the PM answers.
   before dispatch.
 - The unittest class-skip accounting (`ran = 0, skipped = 1`) was read from
   source and reviewed reasoning. It has not been observed in a run here.
+- This note's Task declares `test_chat_tui_pty` in `read_paths`, so under
+  today's code its pre-PR remote test takes the gap 6 path (1.4). A doc edit
+  cannot change that result. Whether the Task keeps that read path is a PM
+  decision.
