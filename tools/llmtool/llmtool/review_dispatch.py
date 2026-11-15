@@ -42,6 +42,8 @@ REVIEW_FAILURE_REASONS = _D6_CREATE_FAILURE_REASONS | frozenset((
     'REVIEW_CLASSIFIER_REJECTED',
     # The review prompt was refused before any Reviewer session started.
     'REVIEW_PROMPT_REFUSED'))
+# #1909 item 1: fixed codes for a Reviewer session bind that failed after the session started; kept apart from REVIEW_FAILURE_REASONS (nothing-posted reasons).
+REVIEWER_BIND_FAILURE_REASONS = frozenset(('REVIEWER_SESSION_BIND_FAILED', 'REVIEWER_SESSION_BIND_TIMEOUT'))
 REVIEW_OUTPUT_WITHHELD = 'REVIEW_OUTPUT_WITHHELD'
 REVIEW_OUTPUT_ABSENT = 'REVIEW_OUTPUT_ABSENT'
 _REVIEW_REFUSALS_DIR = 'review-refusals'
@@ -1429,6 +1431,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         reason = getattr(exc, 'review_failure_reason', None)
         if reason in REVIEW_FAILURE_REASONS:
             unknown['failure_reason'] = reason
+        if type(exc) is RuntimeError and len(exc.args) == 1 and exc.args[0] in REVIEWER_BIND_FAILURE_REASONS:
+            unknown['bind_failure_reason'] = exc.args[0]
         mismatch = getattr(exc, 'review_binding_mismatch_keys', None)
         if reason == 'VERDICT_BINDING_MISMATCH' and type(mismatch) is tuple:
             # Keep only the fixed JSON key names; never a returned or expected value.
