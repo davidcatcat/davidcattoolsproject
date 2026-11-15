@@ -9,7 +9,7 @@ Use this only as a development-time dogfood workflow. It does not implement A11c
 production routing and does not grant execution, mutation, approval, retry, fallback,
 security sign-off, QA verdict, or merge authority.
 
-Research findings and benchmark history are preserved in [the 2026-11-03 history](../../docs/history/company-llm-delegation-research-20261103.md).
+Research findings and benchmark history are preserved in [the 2026-11-03 history](../../../docs/history/company-llm-delegation-research-20261103.md).
 
 Home LLM `gw` may act as an agent-mode Developer through `gw-agent` on real repository
 code; Developer choice, mode and scope are PM decisions under the standing Owner
@@ -32,7 +32,7 @@ at the lowest tier, a write outside allowed paths, a credential or audit finding
 
 ## Before delegation
 
-- **Web search for gw (Owner 2026-10-28, [AGENTS.md](../../AGENTS.md)):** gw has no tools of its own. The PM or a Developer may search the web for the Task and add the relevant, non-sensitive results to gw's context (`--context-stdin`), labelled as untrusted reference material with their source URLs. Keep the excerpt short. The data rules below apply to it.
+- **Web search for gw (Owner 2026-10-28, [AGENTS.md](../../../AGENTS.md)):** gw has no tools of its own. The PM or a Developer may search the web for the Task and add the relevant, non-sensitive results to gw's context (`--context-stdin`), labelled as untrusted reference material with their source URLs. Keep the excerpt short. The data rules below apply to it.
 
 - Work from the canonical Mac repository and identify the exact revision under test.
 - The gateway provider must already be configured and available. Use an explicit
@@ -50,7 +50,7 @@ at the lowest tier, a write outside allowed paths, a credential or audit finding
   lines, relevant file names and small necessary snippets. Do not send the whole
   repository or an entire CI log by default. **Do not infer token savings from this
   ordinary bounded-input mode**; the positive L01 result used a different large-input
-  benchmark pipeline described in the [L01 token-saving pipeline preconditions](../../docs/history/company-llm-delegation-research-20261103.md#l01-token-saving-pipeline-preconditions).
+  benchmark pipeline described in the [L01 token-saving pipeline preconditions](../../../docs/history/company-llm-delegation-research-20261103.md#l01-token-saving-pipeline-preconditions).
 - Preserve the original deterministic/raw evidence separately; the model output is a
   derived summary, not ground truth.
 
@@ -64,12 +64,12 @@ at the lowest tier, a write outside allowed paths, a credential or audit finding
 - **Gateway-only Phase 0 first.** A new or redesigned route must pass a pre-registered
   gateway-only reliability Phase 0 before any paired Codex benchmark.
 
-See the [C1B test-triage Worker history](../../docs/history/company-llm-delegation-research-20261103.md#c1b-test-triage-worker-sourcefake-only) for the full grant safeguards and the [token-savings benchmark history](../../docs/history/company-llm-delegation-research-20261103.md#token-savings-benchmark) for the benchmark gate.
+See the [C1B test-triage Worker history](../../../docs/history/company-llm-delegation-research-20261103.md#c1b-test-triage-worker-sourcefake-only) for the full grant safeguards and the [token-savings benchmark history](../../../docs/history/company-llm-delegation-research-20261103.md#token-savings-benchmark) for the benchmark gate.
 
 ## Availability classification
 
 This classification applies to the triage use above and to the home LLM `gw-agent` Developer
-route in [AGENTS.md](../../AGENTS.md). Check the four layers separately. Record each
+route in [AGENTS.md](../../../AGENTS.md). Check the four layers separately. Record each
 layer as `PASS`, `FAIL` or `UNKNOWN`, with its time and evidence:
 
 1. **TCP:** can a connection to the configured endpoint open? Example: a bounded
@@ -84,9 +84,9 @@ layer as `PASS`, `FAIL` or `UNKNOWN`, with its time and evidence:
 
 Do not infer a layer from an earlier layer, and do not infer it from network connection status
 (`scutil --nc list`). Use that list only as a hint for the Owner reminder in
-[WORKFLOW](../../tools/llmtool/WORKFLOW.md). A TCP `PASS` authorizes nothing. Layers
+[WORKFLOW](../../../tools/llmtool/WORKFLOW.md). A TCP `PASS` authorizes nothing. Layers
 2–4 require an llmtool call that the existing data-permission basis already covers,
-and C1B live calls also need the [Phase 0 grant safeguards](../../docs/history/company-llm-delegation-research-20261103.md#c1b-test-triage-worker-sourcefake-only).
+and C1B live calls also need the [Phase 0 grant safeguards](../../../docs/history/company-llm-delegation-research-20261103.md#c1b-test-triage-worker-sourcefake-only).
 Without that authorization the
 layer stays `UNKNOWN`. Never bypass a gate because TCP is reachable.
 
@@ -96,7 +96,7 @@ Use the smallest applicable llmtool runtime skill:
 
 - `test-triage` — bounded development aid for test failures. Do not call the ordinary
   runtime skill a validated token-saving route. The savings claim applies only when the
-  [L01 benchmark-pipeline preconditions](../../docs/history/company-llm-delegation-research-20261103.md#l01-token-saving-pipeline-preconditions) are reproduced.
+  [L01 benchmark-pipeline preconditions](../../../docs/history/company-llm-delegation-research-20261103.md#l01-token-saving-pipeline-preconditions) are reproduced.
 - `log-triage` — bounded development aid for log compression only; EXPERIMENTAL for
   token-saving/reliability claims.
 - `context-pack` — existing evidence-first Context Packet for general evidence

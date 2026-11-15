@@ -1,6 +1,6 @@
 # D6 task worktree lifecycle (normative)
 
-Owner D6 permits additional registered, task-scoped linked worktrees without the former two-root limit or per-task Owner approval ([D6 decision](../../docs/decisions/llmtool_dynamic_worktree_20261019.md)). This reference owns the current local registry, creation, handoff, retention and retirement gates. The canonical Integrator/native-acceptance checkout remains protected and is never disposable. D6 does not grant F2, provider egress, secret access, force operations, automatic merge or unrestricted filesystem authority. Native F1 acceptance runs only in the canonical checkout.
+Owner D6 permits additional registered, task-scoped linked worktrees without the former two-root limit or per-task Owner approval ([D6 decision](../../../docs/decisions/llmtool_dynamic_worktree_20261019.md)). This reference owns the current local registry, creation, handoff, retention and retirement gates. The canonical Integrator/native-acceptance checkout remains protected and is never disposable. D6 does not grant F2, provider egress, secret access, force operations, automatic merge or unrestricted filesystem authority. Native F1 acceptance runs only in the canonical checkout.
 
 ## Roots and registration
 
