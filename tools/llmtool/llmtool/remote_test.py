@@ -792,6 +792,8 @@ def run_incident_remote_test(incident_id, *, sha, modules=(), root=None,
     parsed = _validate_remote_receipt(stdout, sha=sha, modules=selected)
     if parsed is None:
         return finish('UNKNOWN', 'RECEIPT_INVALID')
+    # #2119 WP-1: keep the incident receipt shape unchanged (design section 5.2).
+    parsed.pop('module_results', None)
     screened = _screen_incident_receipt(parsed)
     if screened is None:
         return finish('UNKNOWN', INCIDENT_RECEIPT_SENSITIVE)
