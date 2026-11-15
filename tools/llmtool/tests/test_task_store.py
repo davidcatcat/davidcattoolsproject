@@ -5269,11 +5269,12 @@ class FileOpsTaskStoreTests(unittest.TestCase):
         validated = task_store_module._validate(base)
         self.assertEqual(validated['file_ops'], fops)
         rec = self._active_record()
-        rec['file_ops'] = fops
+        fops_rec = self._valid_file_ops(rec)
+        rec['file_ops'] = fops_rec
         created = self.store.create(rec)
-        self.assertEqual(created['file_ops'], fops)
+        self.assertEqual(created['file_ops'], fops_rec)
         loaded = self.store.get(created['task_id'])
-        self.assertEqual(loaded['file_ops'], fops)
+        self.assertEqual(loaded['file_ops'], fops_rec)
 
     def test_file_ops_validator_refuses_malformed_fields(self):
         base = self._active_record()
@@ -5301,7 +5302,7 @@ class FileOpsTaskStoreTests(unittest.TestCase):
                 self.assertEqual(caught.exception.task_store_error_code, 'TASK_FILE_OPS_INVALID')
 
         rec = self._active_record()
-        rec['file_ops'] = fops
+        rec['file_ops'] = self._valid_file_ops(rec)
         del rec['pm_provenance']
         rec['record_sha256'] = task_store_module._digest(rec)
         with self.assertRaises(LLMToolError) as caught:
