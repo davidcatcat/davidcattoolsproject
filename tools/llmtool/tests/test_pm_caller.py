@@ -14,6 +14,23 @@ from llmtool import task_submission_cli
 from llmtool.cli import parser_for_cli
 from llmtool.task_store import TaskStore, new_id
 
+# #2073 pattern: task_drive fails closed (RESTART_REQUIRED) when source_freshness.code_tree()
+# cannot read the package checkout, as on a non-git EC2 copy. Pin it for this module.
+_code_tree_patch = None
+
+
+def setUpModule():
+    global _code_tree_patch
+    _code_tree_patch = patch('llmtool.source_freshness.code_tree', return_value='d' * 64)
+    _code_tree_patch.start()
+
+
+def tearDownModule():
+    global _code_tree_patch
+    if _code_tree_patch is not None:
+        _code_tree_patch.stop()
+
+
 OWNER = '3f2b8c1e-4d5a-4b6c-8d7e-9f0a1b2c3d4e'
 OTHER = '7a6b5c4d-3e2f-4a1b-9c8d-7e6f5a4b3c2d'
 CODEX = '019a3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d'
