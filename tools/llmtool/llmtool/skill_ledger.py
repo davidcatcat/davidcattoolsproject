@@ -13,8 +13,9 @@ so callers must treat that result as outcome unknown. The ledger is limited to
 Role-card delivery (#1502 WP-F design 3.7): pin_dispatch() appends one
 immutable DISPATCH_PIN row per Task/run/route holding the authenticated main
 commit, read by the controller itself (task_completion.read_authenticated_main_sha)
-before the run's cards are built. record_card_delivery() is the only writer of
-CONTROLLER_DELIVERED: it takes no base commit or digests from its caller, reads
+before the run's cards are built. record_card_delivery() and, for the gate
+below, confirm_card_delivery() are the only writers of CONTROLLER_DELIVERED.
+record_card_delivery() takes no base commit or digests from its caller, reads
 the pin for the entry's Task/run/route, derives the cards, their sha256 and the
 prefix digest from that pinned commit and refuses unless they equal the pin and
 the caller's sent-prefix digest; record() refuses
@@ -23,6 +24,18 @@ A pin is never evidence. Rows written before this rule (no route) are not
 re-validated. record_not_delivered()
 appends a NOT_DELIVERED event with a fixed reason code; it is never verified
 evidence, check() ignores it and task_summary() reads it as UNVERIFIED.
+
+Delivery evidence gate (#1502 WP-F gate design 2.2-2.3, PR 1; not wired to
+any caller yet): prepare_card_delivery() runs the record_card_delivery()
+checks and appends a CARD_PREPARED row (level UNVERIFIED, so check() never
+verifies it) whose receipt_id is the prepared_id. confirm_card_delivery()
+takes every binding field from that prepared row, re-derives the cards from
+the pin and appends one CONTROLLER_DELIVERED row carrying the prepared_id; a
+repeat confirm refuses and appends nothing. card_receipt_status(),
+card_preparation_status() and not_delivered_status() are read-only verifiers
+returning SKILL_DELIVERY_* reasons: they append nothing and, like check(),
+may only repair a torn append under the lock. Receipts without a prepared_id
+(record_card_delivery() rows) never satisfy card_receipt_status().
 """
 
 import fcntl
@@ -49,6 +62,23 @@ _MAX_BYTES = 16 * 1024 * 1024
 CONTROLLER_DELIVERED = 'CONTROLLER_DELIVERED'
 NOT_DELIVERED = 'NOT_DELIVERED'
 DISPATCH_PIN = 'DISPATCH_PIN'
+CARD_PREPARED = 'CARD_PREPARED'
+# Verifier statuses and SKILL_DELIVERY_* reasons (#1502 WP-F gate design 2.3).
+# PREPARED and NOT_DELIVERED are match results, never delivery evidence.
+STATUS_VERIFIED = 'VERIFIED'
+STATUS_UNVERIFIED = 'UNVERIFIED'
+STATUS_PREPARED = 'PREPARED'
+DELIVERY_RECEIPT_MISSING = 'SKILL_DELIVERY_RECEIPT_MISSING'
+DELIVERY_PREPARATION_MISSING = 'SKILL_DELIVERY_PREPARATION_MISSING'
+DELIVERY_WRONG_RUN = 'SKILL_DELIVERY_WRONG_RUN'
+DELIVERY_WRONG_SESSION = 'SKILL_DELIVERY_WRONG_SESSION'
+DELIVERY_WRONG_ROLE = 'SKILL_DELIVERY_WRONG_ROLE'
+DELIVERY_DIGEST_MISMATCH = 'SKILL_DELIVERY_DIGEST_MISMATCH'
+DELIVERY_PIN_MISMATCH = 'SKILL_DELIVERY_PIN_MISMATCH'
+DELIVERY_REVOKED = 'SKILL_DELIVERY_REVOKED'
+DELIVERY_LEDGER_UNREADABLE = 'SKILL_DELIVERY_LEDGER_UNREADABLE'
+DELIVERY_ALREADY_CONFIRMED = 'SKILL_DELIVERY_ALREADY_CONFIRMED'
+DELIVERY_EXEMPTION_MISSING = 'SKILL_DELIVERY_EXEMPTION_MISSING'
 # Fixed reason codes for a route run that did not receive its role cards.
 NOT_DELIVERED_REASONS = frozenset((
     'ROUTE_NOT_SUPPORTED',  # the route has no rule-delivery field yet (gw-agent)
@@ -482,8 +512,8 @@ def record(entry, *, ttl_seconds=86400):
     """Append an observed delivery record; evidence level must be explicit.
 
     CONTROLLER_DELIVERED is refused here (CONTROLLER_DELIVERED_REFUSED): that
-    level is written only by record_card_delivery(), which derives the card
-    digests itself.
+    level is written only by record_card_delivery() and
+    confirm_card_delivery(), which derive the card digests themselves.
     """
     if type(entry) is dict and entry.get('evidence_level') == CONTROLLER_DELIVERED:
         _fail('CONTROLLER_DELIVERED_REFUSED')
@@ -873,4 +903,384 @@ def task_summary(task_id, roles, now=None):
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
+
+
+# ---------------------------------------------------------------------------
+# Delivery evidence gate: prepare, confirm and read-only verifiers
+# (#1502 WP-F gate design 2.2-2.3, PR 1). No caller is wired yet.
+# ---------------------------------------------------------------------------
+
+# Fields a CARD_PREPARED row binds besides the derived card digests.
+_PREPARED_BINDING_KEYS = _BINDING_FIELDS + ('route', 'base_commit', 'pin_id')
+# Fields confirm_card_delivery() re-derives from the pin and compares.
+_DERIVED_CARD_KEYS = ('manifest_sha256', 'cards', 'cards_sha256', 'prefix_size')
+# Verifier argument -> stored field and refusal reason, in reporting order.
+_STATUS_MISMATCH_ORDER = (
+    ('run_id', DELIVERY_WRONG_RUN),
+    ('role', DELIVERY_WRONG_ROLE),
+    ('route', DELIVERY_PIN_MISMATCH),  # the pin is keyed by Task/run/route
+    ('session_id', DELIVERY_WRONG_SESSION),
+    ('manifest_sha256', DELIVERY_DIGEST_MISMATCH),
+    ('base_commit', DELIVERY_PIN_MISMATCH),
+)
+_LEDGER_FAULT_CODES = frozenset(('LEDGER_UNREADABLE', 'CHAIN_BROKEN'))
+
+
+def _derive_pinned_cards(pin, route, repo_root):
+    """Derive the cards and prefix digest from a pin's commit.
+
+    Same derivation as record_card_delivery(): the Git reader is not
+    injectable and the pinned commit must still be on origin/main.
+    """
+    base_commit = pin['base_commit']
+    try:
+        built = skill_manifest.build_role_cards(
+            repo_root, base_commit, route, main_ref=skill_manifest.DEFAULT_MAIN_REF)
+    except skill_manifest.SkillManifestError as exc:
+        _fail(exc.code)
+    if type(built) is not dict or built.get('route') != route:
+        _fail('INVALID_ENTRY')
+    if built.get('commit') != base_commit:
+        _fail('PIN_MISMATCH')
+    try:
+        prefix = skill_manifest.role_card_prefix(built)
+    except skill_manifest.SkillManifestError as exc:
+        _fail(exc.code)
+    if type(prefix) is not str:
+        _fail('INVALID_ENTRY')
+    try:
+        cards = _card_digests([{'path': card['path'], 'sha256': card['sha256']}
+                               for card in built['cards']])
+        cards_sha256 = built['cards_sha256']
+        prefix_size = built['prefix_size']
+    except (KeyError, TypeError):
+        _fail('INVALID_ENTRY')
+    return {
+        'manifest_sha256': hashlib.sha256(prefix.encode('utf-8')).hexdigest(),
+        'route': route, 'base_commit': base_commit, 'pin_id': pin['receipt_id'],
+        'cards': cards, 'cards_sha256': cards_sha256, 'prefix_size': prefix_size,
+    }
+
+
+def _is_prepared_row(item):
+    """A well-formed CARD_PREPARED row whose prepared_id is its receipt_id."""
+    return (item.get('entry_type') == CARD_PREPARED and
+            item.get('evidence_level') == 'UNVERIFIED' and
+            type(item.get('receipt_id')) is str and bool(item['receipt_id']) and
+            item.get('prepared_id') == item['receipt_id'] and
+            all(type(item.get(key)) is str and bool(item[key])
+                for key in _PREPARED_BINDING_KEYS) and
+            _valid_route(item['route']))
+
+
+def _is_gate_receipt(item):
+    """A CONTROLLER_DELIVERED row written by confirm_card_delivery().
+
+    Rows without a prepared_id (record_card_delivery(), pre-gate rows) and
+    REVOCATION events copied from a receipt never qualify.
+    """
+    return ('entry_type' not in item and
+            item.get('evidence_level') == CONTROLLER_DELIVERED and
+            type(item.get('prepared_id')) is str and bool(item['prepared_id']) and
+            type(item.get('receipt_id')) is str and bool(item['receipt_id']))
+
+
+def _find_prepared(records, prepared_id, before=None):
+    """Return (index, row) of the CARD_PREPARED row for prepared_id, or (None, None)."""
+    limit = len(records) if before is None else before
+    for index in range(limit):
+        item = records[index]
+        if item.get('entry_type') == CARD_PREPARED and item.get('receipt_id') == prepared_id:
+            return index, item
+    return None, None
+
+
+def _pin_current(records, item):
+    """True only if the row's own DISPATCH_PIN is still first in the chain."""
+    try:
+        pin = _find_pin(records, item.get('task_id'), item.get('run_id'), item.get('route'))
+    except SkillLedgerError:
+        return False
+    return (pin is not None and pin['receipt_id'] == item.get('pin_id') and
+            pin['base_commit'] == item.get('base_commit'))
+
+
+def _refused(reason):
+    return {'status': STATUS_UNVERIFIED, 'reason': reason}
+
+
+def _status_mismatch(item, expected):
+    for key, reason in _STATUS_MISMATCH_ORDER:
+        if item.get(key) != expected[key]:
+            return reason
+    return None
+
+
+def _gate_locked_records(operation):
+    """_locked_records() with lock, read and chain faults as SKILL_DELIVERY_*."""
+    try:
+        return _locked_records(operation)
+    except SkillLedgerError as exc:
+        if exc.skill_ledger_code in _LEDGER_FAULT_CODES:
+            _fail(DELIVERY_LEDGER_UNREADABLE)
+        raise
+
+
+def _read_for_status(evaluate):
+    """Run evaluate(records) on the verified chain; never append.
+
+    Like check(), this may repair a torn append or a pending anchor intent
+    under the lock. Any lock, read or chain fault, or a malformed row, gives
+    SKILL_DELIVERY_LEDGER_UNREADABLE.
+    """
+    try:
+        path = _path()
+        lock_fd = _locked(path)
+    except SkillLedgerError:
+        return _refused(DELIVERY_LEDGER_UNREADABLE)
+    try:
+        try:
+            records = _read(path, recover_torn=True)
+            if not _chain(records) or not _recover_anchor(path, records):
+                return _refused(DELIVERY_LEDGER_UNREADABLE)
+            return evaluate(records)
+        except (SkillLedgerError, TypeError, ValueError, KeyError, AttributeError):
+            return _refused(DELIVERY_LEDGER_UNREADABLE)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def _status_args_valid(values):
+    return all(type(value) is str and value for value in values)
+
+
+def prepare_card_delivery(entry, repo_root, *, ttl_seconds=86400):
+    """Append a CARD_PREPARED row for one Developer run; return its prepared_id.
+
+    Runs the record_card_delivery() checks with the same refusal codes
+    (CALLER_DIGESTS_REFUSED, CALLER_BASE_REFUSED, INVALID_ENTRY,
+    DISPATCH_PIN_MISSING, ROLE_MISMATCH, PIN_MISMATCH,
+    MANIFEST_DIGEST_MISMATCH, SKILL_MANIFEST_*). ``entry`` holds every
+    binding field plus ``route``; ``session_id`` is the Task's
+    developer.session_id. ``evidence_level`` may be omitted; any value other
+    than UNVERIFIED is refused. The row stores the binding, the derived
+    prefix digest, the cards and the pin, at level UNVERIFIED: it is a
+    reservation, never delivery evidence, and check() never verifies it.
+    """
+    if type(entry) is not dict:
+        _fail('INVALID_ENTRY')
+    if any(key in entry for key in _CALLER_DIGEST_KEYS):
+        _fail('CALLER_DIGESTS_REFUSED')
+    if any(key in entry for key in _CALLER_PIN_KEYS):
+        _fail('CALLER_BASE_REFUSED')
+    if any(key not in _CARD_ENTRY_KEYS for key in entry):
+        _fail('INVALID_ENTRY')
+    if entry.get('evidence_level', 'UNVERIFIED') != 'UNVERIFIED':
+        _fail('INVALID_EVIDENCE_LEVEL')
+    value = _binding_value({**entry, 'evidence_level': 'UNVERIFIED'}, ttl_seconds)
+    route = entry.get('route')
+    if not _valid_route(route) or not isinstance(repo_root, (str, os.PathLike)):
+        _fail('INVALID_ENTRY')
+    if value['role'].lower() != 'developer':
+        _fail('ROLE_MISMATCH')
+    value = _stamped(value, ttl_seconds)
+    task_id, run_id = value['task_id'], value['run_id']
+    pin = _locked_records(lambda _path, records: _find_pin(records, task_id, run_id, route))
+    if pin is None:
+        _fail('DISPATCH_PIN_MISSING')
+    derived = _derive_pinned_cards(pin, route, repo_root)
+    if value['manifest_sha256'] != derived['manifest_sha256']:
+        _fail('MANIFEST_DIGEST_MISMATCH')
+    value.update(derived)
+    value.update(entry_type=CARD_PREPARED, prepared_id=value['receipt_id'])
+
+    def append(path, records):
+        current = _find_pin(records, task_id, run_id, route)
+        if (current is None or current['receipt_id'] != pin['receipt_id'] or
+                current['base_commit'] != pin['base_commit']):
+            _fail('PIN_MISMATCH')
+        return _append_locked(path, records, value)
+    return _locked_records(append)
+
+
+def _confirmable(records, prepared_id, task_id, run_id, session_id):
+    """Return the prepared row a confirm may use, or raise SKILL_DELIVERY_*."""
+    _, prepared = _find_prepared(records, prepared_id)
+    if prepared is None or not _is_prepared_row(prepared) or prepared['task_id'] != task_id:
+        _fail(DELIVERY_PREPARATION_MISSING)
+    if prepared['run_id'] != run_id:
+        _fail(DELIVERY_WRONG_RUN)
+    if prepared['session_id'] != session_id:
+        _fail(DELIVERY_WRONG_SESSION)
+    if prepared['role'].lower() != 'developer':
+        _fail(DELIVERY_WRONG_ROLE)
+    if _revoked(records, prepared_id):
+        _fail(DELIVERY_REVOKED)
+    # One confirm per prepared_id, whatever happened to an earlier receipt.
+    if any(_is_gate_receipt(item) and item['prepared_id'] == prepared_id
+           for item in records):
+        _fail(DELIVERY_ALREADY_CONFIRMED)
+    if not _pin_current(records, prepared):
+        _fail(DELIVERY_PIN_MISMATCH)
+    return dict(prepared)
+
+
+def confirm_card_delivery(prepared_id, task_id, run_id, session_id, repo_root, *,
+                          ttl_seconds=86400):
+    """Append the CONTROLLER_DELIVERED receipt for one prepared row.
+
+    Called once, at the route's delivery boundary. The caller supplies only
+    the prepared_id and the Task, run and session it expects; every other
+    binding field (agent, role, provider, model, repo, head, route, pin) comes
+    from the CARD_PREPARED row. The cards are re-derived from the pin and
+    must equal the prepared row (SKILL_DELIVERY_DIGEST_MISMATCH,
+    SKILL_DELIVERY_PIN_MISMATCH). Refusals: SKILL_DELIVERY_PREPARATION_MISSING
+    (no prepared row for this Task), _WRONG_RUN, _WRONG_SESSION, _WRONG_ROLE,
+    _REVOKED, _ALREADY_CONFIRMED (a repeat confirm; nothing is appended),
+    _LEDGER_UNREADABLE (lock, read or broken chain), plus INVALID_ENTRY and
+    SKILL_MANIFEST_* codes. An append can raise after its line persists;
+    callers must treat any raise as refused and never replay.
+    """
+    if (not _status_args_valid((prepared_id, task_id, run_id, session_id)) or
+            not isinstance(repo_root, (str, os.PathLike)) or
+            type(ttl_seconds) is not int or ttl_seconds <= 0):
+        _fail('INVALID_ENTRY')
+    try:
+        _canonical({'prepared_id': prepared_id, 'task_id': task_id,
+                    'run_id': run_id, 'session_id': session_id})
+    except (TypeError, ValueError, UnicodeError, OverflowError):
+        _fail('INVALID_ENTRY')
+    prepared = _gate_locked_records(lambda _path, records: _confirmable(
+        records, prepared_id, task_id, run_id, session_id))
+    pin = {'receipt_id': prepared['pin_id'], 'base_commit': prepared['base_commit']}
+    try:
+        derived = _derive_pinned_cards(pin, prepared['route'], repo_root)
+    except SkillLedgerError as exc:
+        if exc.skill_ledger_code == 'PIN_MISMATCH':
+            _fail(DELIVERY_PIN_MISMATCH)
+        raise
+    if any(derived[key] != prepared.get(key) for key in _DERIVED_CARD_KEYS):
+        _fail(DELIVERY_DIGEST_MISMATCH)
+    value = {key: prepared[key] for key in _BINDING_FIELDS}
+    value['evidence_level'] = CONTROLLER_DELIVERED
+    value = _stamped(value, ttl_seconds)
+    value.update(derived)
+    value['prepared_id'] = prepared_id
+
+    def append(path, records):
+        # Re-check under the append lock: a concurrent confirm, a revocation
+        # or a changed pin since the first read refuses.
+        current = _confirmable(records, prepared_id, task_id, run_id, session_id)
+        if current['entry_sha256'] != prepared['entry_sha256']:
+            _fail(DELIVERY_PREPARATION_MISSING)
+        return _append_locked(path, records, value)
+    return _gate_locked_records(append)
+
+
+def card_receipt_status(task_id, run_id, role, route, session_id, prefix_sha256,
+                        pin_commit, prepared_id):
+    """Read-only: is there a gate receipt for exactly this binding?
+
+    Returns {'status': 'VERIFIED', 'reason': None, 'receipt_id': ...} only for
+    a CONTROLLER_DELIVERED row written by confirm_card_delivery() that matches
+    every argument, is not revoked, follows its matching, unrevoked
+    CARD_PREPARED row and whose pin is still in the chain. Expiry is ignored
+    (design Q2). Otherwise {'status': 'UNVERIFIED', 'reason': code} with a
+    SKILL_DELIVERY_* code. Appends nothing.
+    """
+    supplied = (task_id, run_id, role, route, session_id, prefix_sha256,
+                pin_commit, prepared_id)
+    if not _status_args_valid(supplied):
+        return _refused(DELIVERY_RECEIPT_MISSING)
+    expected = {'run_id': run_id, 'role': role, 'route': route,
+                'session_id': session_id, 'manifest_sha256': prefix_sha256,
+                'base_commit': pin_commit}
+
+    def evaluate(records):
+        for index, item in enumerate(records):
+            if not (_is_gate_receipt(item) and item['prepared_id'] == prepared_id and
+                    item.get('task_id') == task_id):
+                continue
+            mismatch = _status_mismatch(item, expected)
+            if mismatch is not None:
+                return _refused(mismatch)
+            if _revoked(records, item['receipt_id']) or _revoked(records, prepared_id):
+                return _refused(DELIVERY_REVOKED)
+            _, prepared = _find_prepared(records, prepared_id, before=index)
+            if (prepared is None or not _is_prepared_row(prepared) or
+                    any(prepared.get(key) != item.get(key)
+                        for key in _PREPARED_BINDING_KEYS + _DERIVED_CARD_KEYS)):
+                return _refused(DELIVERY_PREPARATION_MISSING)
+            if not _pin_current(records, item):
+                return _refused(DELIVERY_PIN_MISMATCH)
+            return {'status': STATUS_VERIFIED, 'reason': None,
+                    'receipt_id': item['receipt_id']}
+        return _refused(DELIVERY_RECEIPT_MISSING)
+    return _read_for_status(evaluate)
+
+
+def card_preparation_status(task_id, run_id, role, route, session_id, prefix_sha256,
+                            pin_commit, prepared_id):
+    """Read-only: does the CARD_PREPARED row match this reservation?
+
+    Returns {'status': 'PREPARED', 'reason': None, 'prepared_id': ...} when
+    the prepared row matches every argument, is not revoked and its pin is
+    still in the chain. PREPARED is a reservation, never delivery evidence.
+    Otherwise {'status': 'UNVERIFIED', 'reason': code} with a SKILL_DELIVERY_*
+    code. Appends nothing.
+    """
+    supplied = (task_id, run_id, role, route, session_id, prefix_sha256,
+                pin_commit, prepared_id)
+    if not _status_args_valid(supplied):
+        return _refused(DELIVERY_PREPARATION_MISSING)
+    expected = {'run_id': run_id, 'role': role, 'route': route,
+                'session_id': session_id, 'manifest_sha256': prefix_sha256,
+                'base_commit': pin_commit}
+
+    def evaluate(records):
+        _, prepared = _find_prepared(records, prepared_id)
+        if (prepared is None or not _is_prepared_row(prepared) or
+                prepared['task_id'] != task_id):
+            return _refused(DELIVERY_PREPARATION_MISSING)
+        mismatch = _status_mismatch(prepared, expected)
+        if mismatch is not None:
+            return _refused(mismatch)
+        if _revoked(records, prepared_id):
+            return _refused(DELIVERY_REVOKED)
+        if not _pin_current(records, prepared):
+            return _refused(DELIVERY_PIN_MISMATCH)
+        return {'status': STATUS_PREPARED, 'reason': None, 'prepared_id': prepared_id}
+    return _read_for_status(evaluate)
+
+
+def not_delivered_status(task_id, run_id, role, route):
+    """Read-only: is there an unrevoked NOT_DELIVERED row for this run?
+
+    Returns {'status': 'NOT_DELIVERED', 'reason': None, 'receipt_id': ...,
+    'reason_code': ...} for a matching row; an exemption is metadata, never
+    evidence. Otherwise {'status': 'UNVERIFIED', 'reason':
+    SKILL_DELIVERY_EXEMPTION_MISSING, _REVOKED or _LEDGER_UNREADABLE}.
+    Appends nothing.
+    """
+    if not _status_args_valid((task_id, run_id, role, route)):
+        return _refused(DELIVERY_EXEMPTION_MISSING)
+
+    def evaluate(records):
+        revoked = False
+        for item in records:
+            if not (item.get('entry_type') == NOT_DELIVERED and
+                    item.get('task_id') == task_id and item.get('run_id') == run_id and
+                    item.get('role') == role and item.get('route') == route and
+                    item.get('evidence_level') == 'UNVERIFIED' and
+                    item.get('reason_code') in NOT_DELIVERED_REASONS and
+                    type(item.get('receipt_id')) is str and item['receipt_id']):
+                continue
+            if _revoked(records, item['receipt_id']):
+                revoked = True
+                continue
+            return {'status': NOT_DELIVERED, 'reason': None,
+                    'receipt_id': item['receipt_id'], 'reason_code': item['reason_code']}
+        return _refused(DELIVERY_REVOKED if revoked else DELIVERY_EXEMPTION_MISSING)
+    return _read_for_status(evaluate)
 
