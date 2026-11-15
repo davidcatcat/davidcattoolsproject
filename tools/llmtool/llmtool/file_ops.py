@@ -155,6 +155,12 @@ def parse_ops(value):
     return ops
 
 
+def ops_sha256(ops):
+    """Return the sha256 hex digest of canonicalized ops."""
+    canonical = json.dumps(parse_ops(ops), sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode('ascii')).hexdigest()
+
+
 # ---------------------------------------------------------------- git access
 
 def _git_env():
@@ -223,6 +229,14 @@ def _status(root):
     out = _git(root, ['status', '--porcelain=v1', '--untracked-files=all', '--no-renames', '-z'],
                PRECHECK_FAILED)
     return [(rec[:2], rec[3:]) for rec in out.split('\0') if rec]
+
+
+def status_sha256(root):
+    """Return the sha256 hex digest of git status in the resolved root."""
+    resolved = _resolve_root(root)
+    out = _git(resolved, ['status', '--porcelain=v1', '--untracked-files=all', '--no-renames', '-z'],
+               PRECHECK_FAILED)
+    return hashlib.sha256(out.encode('utf-8', 'surrogateescape')).hexdigest()
 
 
 def _ls_files(root):
