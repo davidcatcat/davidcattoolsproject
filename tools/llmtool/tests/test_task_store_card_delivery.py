@@ -10,6 +10,7 @@
 """
 
 import errno
+import hashlib
 import json
 import os
 import tempfile
@@ -19,40 +20,41 @@ from unittest import mock
 from llmtool import task_store
 from llmtool.task_store import TaskStore, TaskStoreConflict
 from llmtool.errors import LLMToolError
+from llmtool.task_verification import AcceptanceCriterion, CriterionKind, TaskContract
 
 
-def make_contract(task_id, run_id):
-    contract_raw = {
-        'task_id': task_id,
-        'goal': 'verify card delivery schema',
-        'acceptance': ['pass strict schema validation'],
-        'read_paths': ['tools/llmtool/llmtool/task_store.py'],
-        'write_paths': ['tools/llmtool/llmtool/task_store.py'],
-        'source_sha': '1' * 40,
-    }
-    contract = task_store.parse_task_contract(
-        json.dumps(contract_raw, ensure_ascii=True, separators=(',', ':'))
+def make_contract(task_id, run_id, request='Implement a small tested feature'):
+    request_sha = hashlib.sha256(request.encode('utf-8')).hexdigest()
+    contract = TaskContract(
+        schema_version=1,
+        task_id=task_id,
+        contract_version=1,
+        previous_digest=None,
+        goal='PM intake request sha256:' + request_sha,
+        authorized_scope=('pm-planning',),
+        forbidden_scope=(),
+        criteria=(
+            AcceptanceCriterion(
+                'pm_response',
+                CriterionKind.ARTIFACT,
+                'Record the PM reply or unavailable status.',
+            ),
+        ),
     )
-    binding = contract.binding(run_id)
-    binding_dict = {
-        'task_id': binding.task_id,
-        'run_id': binding.run_id,
-        'contract_digest': binding.contract_digest,
-        'task_contract_sha256': binding.task_contract_sha256,
-    }
-    return contract_raw, binding_dict
+    return contract.to_dict(), contract.binding(run_id).to_dict()
 
 
-def make_task_record(task_id, run_id, *, developer=None):
-    contract_raw, binding_dict = make_contract(task_id, run_id)
+def make_task_record(task_id, run_id, *, developer=None, request='Implement a small tested feature'):
+    request_sha = hashlib.sha256(request.encode('utf-8')).hexdigest()
+    contract_raw, binding_dict = make_contract(task_id, run_id, request=request)
     return {
         'schema_version': 2,
         'task_id': task_id,
         'run_id': run_id,
         'pm_session_id': 'pm-test-session-1',
-        'pm_provider_profile': 'claude',
-        'pm_provider_type': None,
-        'pm_model': None,
+        'pm_provider_profile': 'pm',
+        'pm_provider_type': 'codex-cli',
+        'pm_model': 'gpt-6-luna',
         'backend_session_semantics': 'EPHEMERAL_SINGLE_CALL',
         'native_session_id': None,
         'state': 'PM_PENDING',
@@ -60,13 +62,14 @@ def make_task_record(task_id, run_id, *, developer=None):
         'updated_at': '2026-11-16T00:00:00Z',
         'task_contract': contract_raw,
         'task_binding': binding_dict,
-        'request': None,
-        'request_sha256': None,
+        'request': request,
+        'request_sha256': request_sha,
         'response': None,
         'usage': None,
         'error_code': None,
         'developer': developer,
         'pm_assignment': None,
+        'record_sha256': None,
     }
 
 
@@ -137,7 +140,7 @@ def make_developer(
         dev['executor_task_id'] = 'd6-exec-test-1'
         dev['direct_result_callback'] = {'executor_task_id': 'd6-exec-test-1'}
         dev['max_tokens'] = None
-    elif provider_profile in ('agy', 'gw-agent'):
+    elif provider_profile in ('agy', 'gw-agent', 'codex'):
         dev['max_tokens'] = None
     if card_delivery is not None:
         dev['card_delivery'] = card_delivery
