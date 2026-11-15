@@ -5479,7 +5479,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             raise RouteError('AGY_D6_BINDING_CHANGED')
         changed_paths, raw = task_completion._worktree_diff(registration.root, snapshot.head)
         # #1815: the route cap from developer-routes.json (max_diff_bytes).
-        if len(raw) > resolve_route_max_diff_bytes("agy"):
+        # #2049: use the config bound at dispatch; a merge during the run must not change it.
+        if len(raw) > resolve_route_max_diff_bytes("agy", config=config):
             raise RouteError('AGY_OUTPUT_TOO_LARGE')
         if any(path not in write_paths for path in changed_paths):
             raise RouteError('AGY_WRITE_SCOPE_VIOLATION')
@@ -5960,7 +5961,8 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
                 raise RouteError('CLAUDE_NO_CHANGES') from None
             raise _ClaudeCommittedCarry()
         # #1815: the route cap from developer-routes.json (max_diff_bytes).
-        if len(raw) > resolve_route_max_diff_bytes("claude"):
+        # #2049: use the config bound at dispatch; a merge during the run must not change it.
+        if len(raw) > resolve_route_max_diff_bytes("claude", config=config):
             raise RouteError('CLAUDE_OUTPUT_TOO_LARGE')
         if any(path not in write_paths for path in changed_paths):
             raise RouteError('CLAUDE_WRITE_SCOPE_VIOLATION')
