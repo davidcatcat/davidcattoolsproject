@@ -345,7 +345,7 @@ def _validate_remote_receipt(raw, *, sha, modules):
         return None
     try:
         receipt = json.loads(raw.decode('utf-8'))
-    except (UnicodeDecodeError, ValueError):
+    except Exception:
         return None
     if (type(receipt) is not dict or
             set(receipt) not in _RECEIPT_SHAPES):
@@ -410,7 +410,7 @@ def _final_skipped(final):
 
 
 def _module_result_ok(entry, module, final):
-    if type(module) is not str or type(final) is not str:
+    if type(module) is not str or type(final) is not str or len(final) > 512:
         return False
     if type(entry) is not dict or set(entry) != _MODULE_RESULT_KEYS:
         return False
