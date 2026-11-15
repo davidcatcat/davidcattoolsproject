@@ -131,14 +131,30 @@ def _review_rules(repo_root):
 
 
 def _admit_review_model(reviewer_key, model):
-    """#1502 WP-E R1: return model only when the shared registry check admits it.
+    """#1502 WP-E R1 (#2027): return model only when the shared registry check admits it.
 
     Refuses with REVIEW_DISPATCH code ROLE_MODEL_NOT_ALLOWED; never a fallback.
     """
     try:
         return role_config.check_registry_model(reviewer_key, model)
-    except LLMToolError:
+    except LLMToolError as error:
+        if getattr(error, 'role_config_code', None) == role_config.ROUTE_CONFIG_UNAVAILABLE:
+            _refuse('ROUTE_CONFIG_UNAVAILABLE')
         _refuse('ROLE_MODEL_NOT_ALLOWED')
+
+
+def _resolve_reviewer_role(reviewer_key):
+    """#2027: resolve the role config for reviewer_key; tag review_dispatch_code on LLMToolError."""
+    try:
+        return role_config.resolve_role(
+            'reviewer' if reviewer_key == 'claude-reviewer' else 'codex-reviewer')
+    except LLMToolError as exc:
+        code = getattr(exc, 'role_config_code', None)
+        if code == role_config.ROUTE_CONFIG_UNAVAILABLE:
+            exc.review_dispatch_code = 'ROUTE_CONFIG_UNAVAILABLE'
+        elif code == role_config.ROLE_MODEL_NOT_ALLOWED:
+            exc.review_dispatch_code = 'ROLE_MODEL_NOT_ALLOWED'
+        raise
 
 
 def _policy(task, reviewer_key):
@@ -1258,15 +1274,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             'REVIEW_DISPATCH_VERSION_USED',
             f'Review version {version} is already used for PR {pr_number} '
             f'on another head; use version {next_version}.')
-    try:
-        reviewer_role = role_config.resolve_role(
-            'reviewer' if reviewer_key == 'claude-reviewer' else 'codex-reviewer')
-    except LLMToolError as exc:
-        # #1502 WP-E R1: the resolver's registry refusal (after precedence)
-        # also carries the dispatch code; nothing is claimed or launched.
-        if getattr(exc, 'role_config_code', None) == role_config.ROLE_MODEL_NOT_ALLOWED:
-            exc.review_dispatch_code = 'ROLE_MODEL_NOT_ALLOWED'
-        raise
+    reviewer_role = _resolve_reviewer_role(reviewer_key)
     config_dir = reviewer_role['config_dir'] if reviewer_role is not None else None
     # #1777 (CWE-863): the Claude Reviewer never runs under another provider's
     # account directory, whichever layer or alias resolved it. The resolver
