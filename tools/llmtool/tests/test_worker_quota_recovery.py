@@ -54,7 +54,8 @@ def _make_comment(
     body_extra='',
 ):
     body = marker + '\n' + worker + body_extra
-    created = created_at or '2026-11-15T14:00:00Z'
+    created = created_at if created_at is not None else wa._stamp(
+        datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=2))
     updated = updated_at or created
     return {
         'id': comment_id,
@@ -186,7 +187,7 @@ class RecordOwnerRecoveryTest(_StoreCase):
                 self.assertFalse(self.sidecar().exists())
 
     def test_invalid_worker_refuses_and_writes_nothing(self):
-        for bad_worker in ('codex-developer', 'company-gw', 'unknown-worker', 'other', '', None):
+        for bad_worker in ('codex-developer', 'company-gw', 'codex-reviewer', 'unknown-worker', 'other', '', None):
             with self.subTest(bad_worker=bad_worker):
                 with self.assertRaises(LLMToolError) as caught:
                     wa.record_owner_recovery(self.store, bad_worker, VALID_RELAY_URL)

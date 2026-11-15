@@ -183,7 +183,10 @@ def record_owner_recovery(store, worker, owner_relay_url, *, now=None, github_ge
     issue_number = match.group(1)
     comment_id = match.group(2)
 
-    before = store.get_worker_observations()[worker][QUOTA_LAYER]
+    observations = store.get_worker_observations()
+    if worker not in observations:
+        raise LLMToolError('WORKER_QUOTA_RECOVERY_WORKER_INVALID')
+    before = observations[worker][QUOTA_LAYER]
     if before.get('status') != 'FAIL':
         raise LLMToolError('WORKER_QUOTA_RECOVERY_NO_FAIL')
 
