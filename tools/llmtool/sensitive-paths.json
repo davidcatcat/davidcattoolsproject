@@ -12,6 +12,7 @@
     "tools/llmtool/scripts/d6_worktree_lifecycle.py",
     "tools/llmtool/scripts/ci_path_classes.py",
     "tools/llmtool/scripts/ci_mac_modules.py",
+    "tools/llmtool/scripts/ci_changed_paths.py",
     "tools/llmtool/llmtool/developer_routes/write_boundary.py",
     "tools/llmtool/llmtool/developer_routes/base.py",
     "tools/llmtool/llmtool/worker_dispatch.py",
