@@ -1084,6 +1084,16 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
     return 'CI_FAILED', [], result
 
 
+def _receipt_not_executed(receipt):
+    """Return True only when receipt is a FAIL with ran_total 0 and empty failures list."""
+    if type(receipt) is not dict:
+        return False
+    return (receipt.get('result') == 'FAIL' and
+            type(receipt.get('ran_total')) is int and
+            receipt['ran_total'] == 0 and
+            receipt.get('failures') == [])
+
+
 def _remote_test_receipt_summary(record, head):
     receipts = record.get('remote_test_receipts', []) if type(record) is dict else []
     if type(receipts) is not list:
@@ -1115,8 +1125,11 @@ def _remote_test_receipt_summary(record, head):
         hosted_run_id = (actions.get('run_id')
                          if type(actions) is dict and type(actions.get('run_id')) is int and actions['run_id'] > 0
                          else None)
+        summary_result = ('NOT_EXECUTED'
+                          if _receipt_not_executed(receipt)
+                          else receipt.get('result'))
         return {
-            'result': receipt.get('result'),
+            'result': summary_result,
             'modules': receipt.get('modules'),
             'ran_total': receipt.get('ran_total'),
             'elapsed_s': receipt.get('elapsed_s'),
@@ -2144,6 +2157,8 @@ def _remote_test_status(record, d6):
         if receipt['result'] in ('TIMEOUT', 'SHA_MISMATCH'):
             return receipt['result'], None, receipt
         if receipt['result'] == 'FAIL':
+            if _receipt_not_executed(receipt):
+                return 'NOT_EXECUTED', None, receipt
             excerpt = receipt.get('failure_excerpt')
             try:
                 valid_excerpt = (type(excerpt) is str and
@@ -2258,6 +2273,9 @@ def _pre_pr_remote_gate(record, store, executor_task, head, branch):
             ['PUBLISH_REMOTE_TEST_REFUSED', _refusal(exc, 'remote_test_code')], **identity)
     if status in ('PASS', 'ADMISSION_DENIED'):
         return status, None
+    if status == 'NOT_EXECUTED':
+        return status, _remote_test_hold('NEEDS_ATTENTION', ['TEST_REMOTE_MODULE_NOT_EXECUTED'],
+                                         record=fresh, **identity)
     if status == 'FAIL':
         return status, _remote_test_hold('RUN_REMOTE_TEST', ['REMOTE_TEST_FAIL'],
                                          record=fresh, next_step='REPAIR_REVIEW', **identity)
@@ -2352,6 +2370,8 @@ def _pre_review_action(record, d6, pr, related, result_head):
         return 'NEEDS_ATTENTION'
     if remote_status == 'SHA_MISMATCH':
         return 'NEEDS_ATTENTION'
+    if remote_status == 'NOT_EXECUTED':
+        return 'NEEDS_ATTENTION'
     if remote_status == 'FAIL':
         return _remote_fail_action(related, result_head)
     if remote_status not in ('PASS', 'ADMISSION_DENIED'):
@@ -2394,6 +2414,8 @@ def decide(record, d6, pr, related):
                 return 'PUBLISH'
             return 'NEEDS_ATTENTION'
         if remote_status == 'SHA_MISMATCH':
+            return 'NEEDS_ATTENTION'
+        if remote_status == 'NOT_EXECUTED':
             return 'NEEDS_ATTENTION'
         if remote_status == 'FAIL':
             return _remote_fail_action(related, result_head)
@@ -3642,8 +3664,12 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
         codes.append(step)
     elif step == 'NEEDS_ATTENTION':
         remote_status, _, _ = _remote_test_status(record, d6)
-        codes.append('REMOTE_TEST_' + remote_status if remote_status in
-                     ('TIMEOUT', 'SHA_MISMATCH') else 'NEEDS_ATTENTION')
+        if remote_status == 'NOT_EXECUTED':
+            codes.append('TEST_REMOTE_MODULE_NOT_EXECUTED')
+        elif remote_status in ('TIMEOUT', 'SHA_MISMATCH'):
+            codes.append('REMOTE_TEST_' + remote_status)
+        else:
+            codes.append('NEEDS_ATTENTION')
     elif step == 'PR_MERGED_NO_REVIEW':
         codes.append('PR_MERGED_NO_REVIEW')
     elif step in ('REVIEW_OUTCOME_UNKNOWN', 'REVIEW_UNUSABLE_STOPPED'):
