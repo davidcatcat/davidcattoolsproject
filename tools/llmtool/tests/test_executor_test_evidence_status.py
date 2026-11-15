@@ -143,6 +143,10 @@ class RemoteEvidenceStatusTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             ev.remote_evidence_status([], executor_task=EXEC, head=HEAD, expected=((), (), ()))
 
+    def test_other_legacy_fail_asks_for_a_fresh_run(self):
+        legacy = receipt('FAIL', AB, failures=['test_a'])
+        self.assertEqual(status(legacy)[:3], (ev.STEP_RUN, ev.EVIDENCE_LEGACY, ()))
+
 
 if __name__ == '__main__':
     unittest.main()

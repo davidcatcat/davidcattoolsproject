@@ -142,11 +142,11 @@ def remote_evidence_status(record, *, executor_task, head, expected):
     if result == 'FAIL' and _fail_never_ran(receipt, entries):
         listed = failing if entries is not None else tuple(sorted(modules))
         return STEP_STOP, MODULE_NOT_EXECUTED, listed, digest
+    if entries is None:
+        return STEP_RUN, EVIDENCE_LEGACY, (), digest
     if result == 'FAIL':
         failures = receipt.get('failures') if type(receipt.get('failures')) is list else []
         return STEP_REPAIR, TEST_FAILED, tuple(sorted(str(name) for name in failures)), digest
-    if entries is None:
-        return STEP_RUN, EVIDENCE_LEGACY, (), digest
     if not_run:
         return STEP_STOP, MODULE_NOT_EXECUTED, failing, digest
     if skipped:
