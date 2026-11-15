@@ -267,7 +267,7 @@ cleanup_stale()
 ended=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
 receipt={"result":result,"exit_code":code,"source_sha":sha,"tree":tree,"fetch_head":fetch,"modules":mods,"identity":{"uid":uid},"started_at":started,"ended_at":ended,"elapsed_s":round(time.monotonic()-begin,3),"ran_total":ran,"final":finals[-len(mods)*2:],"failures":failures[:10],"log_bytes":len(log),"log_sha256":hashlib.sha256(log).hexdigest(),"remote_log_path":log_path}
 if result!="PASS": receipt["failure_excerpt"]=failure_excerpt(failed_outputs,work or "<REMOTE_WORKDIR>",os.path.expanduser("~"))
-receipt["module_results"]=module_results[-len(mods)*2:]
+if module_results: receipt["module_results"]=module_results[-len(mods)*2:]
 raw=json.dumps(receipt,separators=(",",":"),sort_keys=True).encode()
 print(raw.decode() if len(raw)<=32768 else "{}")
 os.close(lock_fd)

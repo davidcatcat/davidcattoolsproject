@@ -62,7 +62,9 @@ class ScriptModuleResultTests(unittest.TestCase):
         self.assertIn('entry=module_result(mod,test_output,final)', script)
         self.assertIn('module_results.append(entry); ran+=entry["ran"]', script)
         self.assertIn('module_results=[]\ndef failure_excerpt', script)
-        self.assertIn('receipt["module_results"]=module_results[-len(mods)*2:]', script)
+        emit = 'if module_results: receipt["module_results"]=module_results[-len(mods)*2:]'
+        self.assertIn(emit, script)
+        self.assertNotIn('\nreceipt["module_results"]=', script)
         self.assertNotIn('ran+=int(re.search(rb"Ran', script)
 
 
