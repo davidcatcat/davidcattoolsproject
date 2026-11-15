@@ -2232,6 +2232,16 @@ class HighDebugNoPRTests(unittest.TestCase):
             })
         env_patch.start()
         self.addCleanup(env_patch.stop)
+        self.canonical_root = str(Path(root.name) / 'canonical')
+        self.trust_config = SimpleNamespace(canonical_root=self.canonical_root)
+        trust_patch = patch.object(high_debug.task_completion, '_trust_config',
+                                   return_value=self.trust_config)
+        trust_patch.start()
+        self.addCleanup(trust_patch.stop)
+        verify_patch = patch.object(high_debug.trust, 'verify_repository',
+                                    return_value=None)
+        verify_patch.start()
+        self.addCleanup(verify_patch.stop)
 
     def _repo(self):
         temporary = tempfile.TemporaryDirectory()
@@ -2248,6 +2258,7 @@ class HighDebugNoPRTests(unittest.TestCase):
 
     def test_issue_early_no_pr_run_without_completion(self):
         root = self._repo()
+        self.trust_config.canonical_root = str(root)
         store = _NoPRStore(completion=None)
         registration = SimpleNamespace(
             root=str(root),
@@ -2290,6 +2301,282 @@ class HighDebugNoPRTests(unittest.TestCase):
         self.assertEqual(self.poster.call_args[0][0], 42)
         self.assertIn('Issue: 42 (no PR)', prompts[0])
         self.assertNotIn('PR: 42', prompts[0])
+
+    def test_no_completion_uses_trusted_checkout_and_ignores_caller_repo_root_and_cwd(self):
+        trusted_root = '/safe/canonical/repo'
+        self.trust_config.canonical_root = trusted_root
+        attacker_cwd = '/attacker/evil/cwd'
+        attacker_root = '/attacker/evil/repo'
+        store = _NoPRStore(completion=None)
+
+        reg = SimpleNamespace(
+            root=trusted_root,
+            common_dir=os.path.join(trusted_root, '.git'),
+            result_sha='c' * 40,
+        )
+        recorded_common_dirs = []
+
+        def fake_read_registration(executor_task, common_dir, allowed_states=None):
+            recorded_common_dirs.append(common_dir)
+            return reg
+
+        created_d6_repo_roots = []
+
+        def fake_create_d6(*, task_id, base_sha, repo_root, executor_task, **kwargs):
+            created_d6_repo_roots.append(repo_root)
+            return trusted_root
+
+        parts = ['## ' + section + '\ntext\n' for section in high_debug.REPORT_SECTIONS[:-1]]
+        parts.append('## Outcome/cost\nRCA_CONFIRMED\n')
+        valid_report = '\n'.join(parts)
+
+        def fake_runner(*, prompt, cwd, output_path):
+            Path(output_path).write_text(valid_report, encoding='utf-8')
+            return subprocess.CompletedProcess([], 0, stdout=b'{"model":"gpt-6.1-sol"}\n', stderr=b'')
+
+        with patch.object(high_debug.os, 'getcwd', return_value=attacker_cwd), \
+             patch.object(high_debug.task_completion, 'collect_git_snapshot',
+                          return_value=SimpleNamespace(head='c' * 40)), \
+             patch.object(high_debug, '_d6_taken', return_value=False):
+            # 1. No completion with an attacker cwd and no repo_root
+            high_debug.run_high_debug(
+                store=store,
+                task_id='a' * 32,
+                executor_task='executor',
+                issue_number=42,
+                family='no-pr',
+                early_reason='pre-pr-failure',
+                runner=fake_runner,
+                create_d6=fake_create_d6,
+                read_registration=fake_read_registration,
+                repo_root=None,
+            )
+            self.assertEqual(recorded_common_dirs[-1], os.path.join(trusted_root, '.git'))
+            self.assertEqual(created_d6_repo_roots[-1], trusted_root)
+            self.assertEqual(self.poster.call_args[0][2], trusted_root)
+
+            # 2. An explicit attacker repo_root cannot redirect the registry or the repo_root used later
+            store2 = _NoPRStore(completion=None)
+            high_debug.run_high_debug(
+                store=store2,
+                task_id='b' * 32,
+                executor_task='executor',
+                issue_number=42,
+                family='no-pr',
+                early_reason='pre-pr-failure',
+                runner=fake_runner,
+                create_d6=fake_create_d6,
+                read_registration=fake_read_registration,
+                repo_root=attacker_root,
+            )
+            self.assertEqual(recorded_common_dirs[-1], os.path.join(trusted_root, '.git'))
+            self.assertNotEqual(recorded_common_dirs[-1], os.path.join(attacker_root, '.git'))
+            self.assertEqual(created_d6_repo_roots[-1], trusted_root)
+            self.assertNotEqual(created_d6_repo_roots[-1], attacker_root)
+            self.assertEqual(self.poster.call_args[0][2], trusted_root)
+
+    def test_trust_or_registry_raising_refuses_d6_unavailable_with_no_mutation(self):
+        # 1. trust config raising refuses before any registry read
+        store = _NoPRStore(completion=None)
+        runner_mock = unittest.mock.Mock()
+        create_d6_mock = unittest.mock.Mock()
+        read_reg_mock = unittest.mock.Mock()
+        self.poster.reset_mock()
+        with patch.object(high_debug.task_completion, '_trust_config',
+                          side_effect=LLMToolError('TRUST_CONFIG_FAILED')):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(
+                    store=store,
+                    task_id='a' * 32,
+                    executor_task='executor',
+                    issue_number=42,
+                    family='no-pr',
+                    early_reason='pre-pr-failure',
+                    runner=runner_mock,
+                    create_d6=create_d6_mock,
+                    read_registration=read_reg_mock,
+                )
+            self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_D6_UNAVAILABLE')
+            read_reg_mock.assert_not_called()
+            self.assertEqual(store.entries, [])
+            self.assertEqual(store.events, [])
+            runner_mock.assert_not_called()
+            create_d6_mock.assert_not_called()
+            self.poster.assert_not_called()
+
+        # 2. verify_repository raising refuses before any registry read
+        store = _NoPRStore(completion=None)
+        runner_mock = unittest.mock.Mock()
+        create_d6_mock = unittest.mock.Mock()
+        read_reg_mock = unittest.mock.Mock()
+        self.poster.reset_mock()
+        with patch.object(high_debug.trust, 'verify_repository',
+                          side_effect=LLMToolError('TRUST_REPOSITORY_INVALID')):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(
+                    store=store,
+                    task_id='a' * 32,
+                    executor_task='executor',
+                    issue_number=42,
+                    family='no-pr',
+                    early_reason='pre-pr-failure',
+                    runner=runner_mock,
+                    create_d6=create_d6_mock,
+                    read_registration=read_reg_mock,
+                )
+            self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_D6_UNAVAILABLE')
+            read_reg_mock.assert_not_called()
+            self.assertEqual(store.entries, [])
+            self.assertEqual(store.events, [])
+            runner_mock.assert_not_called()
+            create_d6_mock.assert_not_called()
+            self.poster.assert_not_called()
+
+        # 3. registry reader raising refuses
+        store = _NoPRStore(completion=None)
+        runner_mock = unittest.mock.Mock()
+        create_d6_mock = unittest.mock.Mock()
+        read_reg_mock = unittest.mock.Mock(side_effect=Exception('read failed'))
+        self.poster.reset_mock()
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.run_high_debug(
+                store=store,
+                task_id='a' * 32,
+                executor_task='executor',
+                issue_number=42,
+                family='no-pr',
+                early_reason='pre-pr-failure',
+                runner=runner_mock,
+                create_d6=create_d6_mock,
+                read_registration=read_reg_mock,
+            )
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_D6_UNAVAILABLE')
+        read_reg_mock.assert_called_once()
+        self.assertEqual(store.entries, [])
+        self.assertEqual(store.events, [])
+        runner_mock.assert_not_called()
+        create_d6_mock.assert_not_called()
+        self.poster.assert_not_called()
+
+        # 4. collect_git_snapshot raising refuses
+        store = _NoPRStore(completion=None)
+        runner_mock = unittest.mock.Mock()
+        create_d6_mock = unittest.mock.Mock()
+        reg = SimpleNamespace(root='/safe', common_dir='/safe/.git', result_sha='c' * 40)
+        read_reg_mock = unittest.mock.Mock(return_value=reg)
+        self.poster.reset_mock()
+        with patch.object(high_debug.task_completion, 'collect_git_snapshot',
+                          side_effect=Exception('snapshot failed')):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(
+                    store=store,
+                    task_id='a' * 32,
+                    executor_task='executor',
+                    issue_number=42,
+                    family='no-pr',
+                    early_reason='pre-pr-failure',
+                    runner=runner_mock,
+                    create_d6=create_d6_mock,
+                    read_registration=read_reg_mock,
+                )
+            self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_D6_UNAVAILABLE')
+            self.assertEqual(store.entries, [])
+            self.assertEqual(store.events, [])
+            runner_mock.assert_not_called()
+            create_d6_mock.assert_not_called()
+            self.poster.assert_not_called()
+
+    def test_mismatched_or_malformed_completion_refuses_without_fallback_reader(self):
+        cases = (
+            ('mismatched_executor', {'executor_task_id': 'other-executor', 'evidence': {'common_dir': '/fake/.git'}}),
+            ('non_dict_str', 'not-a-dict'),
+            ('non_dict_int', 12345),
+            ('non_dict_list', [{'key': 'val'}]),
+            ('empty_dict', {}),
+            ('evidence_missing', {'executor_task_id': 'executor'}),
+            ('evidence_none', {'executor_task_id': 'executor', 'evidence': None}),
+            ('evidence_str', {'executor_task_id': 'executor', 'evidence': 'not-a-dict'}),
+            ('evidence_list', {'executor_task_id': 'executor', 'evidence': ['/fake/.git']}),
+            ('common_dir_missing', {'executor_task_id': 'executor', 'evidence': {}}),
+            ('common_dir_none', {'executor_task_id': 'executor', 'evidence': {'common_dir': None}}),
+            ('common_dir_int', {'executor_task_id': 'executor', 'evidence': {'common_dir': 12345}}),
+            ('common_dir_list', {'executor_task_id': 'executor', 'evidence': {'common_dir': ['/fake/.git']}}),
+        )
+        for name, bad_completion in cases:
+            with self.subTest(case=name):
+                store = _NoPRStore(completion=bad_completion)
+                runner_mock = unittest.mock.Mock()
+                create_d6_mock = unittest.mock.Mock()
+                read_reg_mock = unittest.mock.Mock()
+                self.poster.reset_mock()
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug(
+                        store=store,
+                        task_id='a' * 32,
+                        executor_task='executor',
+                        issue_number=42,
+                        family='no-pr',
+                        early_reason='pre-pr-failure',
+                        runner=runner_mock,
+                        create_d6=create_d6_mock,
+                        read_registration=read_reg_mock,
+                    )
+                self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_D6_UNAVAILABLE')
+                read_reg_mock.assert_not_called()
+                self.assertEqual(store.entries, [])
+                self.assertEqual(store.events, [])
+                runner_mock.assert_not_called()
+                create_d6_mock.assert_not_called()
+                self.poster.assert_not_called()
+
+    def test_completion_none_positive_succeeds_through_trusted_lookup(self):
+        trusted_root = '/safe/canonical/repo'
+        self.trust_config.canonical_root = trusted_root
+        store = _NoPRStore(completion=None)
+        reg = SimpleNamespace(
+            root=trusted_root,
+            common_dir=os.path.join(trusted_root, '.git'),
+            result_sha='c' * 40,
+        )
+        read_reg_mock = unittest.mock.Mock(return_value=reg)
+        create_d6_mock = unittest.mock.Mock(return_value=trusted_root)
+        parts = ['## ' + section + '\ntext\n' for section in high_debug.REPORT_SECTIONS[:-1]]
+        parts.append('## Outcome/cost\nRCA_CONFIRMED\n')
+        valid_report = '\n'.join(parts)
+
+        def fake_runner(*, prompt, cwd, output_path):
+            Path(output_path).write_text(valid_report, encoding='utf-8')
+            return subprocess.CompletedProcess([], 0, stdout=b'{"model":"gpt-6.1-sol"}\n', stderr=b'')
+
+        self.poster.reset_mock()
+        with patch.object(high_debug.task_completion, 'collect_git_snapshot',
+                          return_value=SimpleNamespace(head='c' * 40)), \
+             patch.object(high_debug, '_d6_taken', return_value=False):
+            result = high_debug.run_high_debug(
+                store=store,
+                task_id='a' * 32,
+                executor_task='executor',
+                issue_number=42,
+                family='no-pr',
+                early_reason='pre-pr-failure',
+                runner=fake_runner,
+                create_d6=create_d6_mock,
+                read_registration=read_reg_mock,
+                repo_root=None,
+            )
+        self.assertEqual(len(store.entries), 1)
+        entry = store.entries[0]
+        self.assertIs(entry.get('no_pr'), True)
+        self.assertEqual(entry['status'], 'RCA_CONFIRMED')
+        self.assertEqual(entry['examined_sha'], 'c' * 40)
+        self.poster.assert_called_once()
+        self.assertEqual(self.poster.call_args[0][0], 42)
+        self.assertEqual(self.poster.call_args[0][2], trusted_root)
+        read_reg_mock.assert_called_once_with(
+            'executor',
+            os.path.join(trusted_root, '.git'),
+            allowed_states=high_debug.task_completion._D6_EVIDENCE_STATES,
+        )
 
     def test_argument_invalid_combinations_refuse_with_no_entry(self):
         cases = (

@@ -1543,19 +1543,12 @@ def run_high_debug(*, store, task_id, executor_task, pr_number=None,
             _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
         if not isinstance(head, str) or _HEX40.fullmatch(head) is None or snap.head != head:
             _refuse('HIGH_DEBUG_HEAD_MISMATCH')
-    elif issue_number is not None:
-        base_dir = repo_root
-        if not base_dir:
-            try:
-                base_dir = subprocess.run(
-                    ['git', 'rev-parse', '--show-toplevel'],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, check=True, timeout=10
-                ).stdout.decode('utf-8').strip()
-            except Exception:
-                base_dir = os.getcwd()
-        common_dir = os.path.realpath(os.path.join(base_dir, '.git'))
+    elif issue_number is not None and completion is None:
         try:
+            config = task_completion._trust_config()
+            trust.verify_repository(config)
+            common_dir = os.path.join(config.canonical_root, '.git')
+            repo_root = config.canonical_root
             reader = read_registration or task_completion.read_d6_registration
             registration = reader(executor_task, common_dir,
                                   allowed_states=task_completion._D6_EVIDENCE_STATES)
