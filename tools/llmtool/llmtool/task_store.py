@@ -1224,6 +1224,11 @@ def _known_review_failure_reason(value):
     return type(value) is str and value in REVIEW_FAILURE_REASONS
 
 
+def _known_bind_failure_reason(value):
+    from .review_dispatch import REVIEWER_BIND_FAILURE_REASONS
+    return type(value) is str and value in REVIEWER_BIND_FAILURE_REASONS
+
+
 _BINDING_MISMATCH_KEY_NAMES = frozenset(('task_id', 'run_id', 'head'))
 
 
@@ -2022,7 +2027,7 @@ def _validate(record, *, strict=True):
         for item in claims:
             if (type(item) is not dict or
                     set(item) - frozenset(('failure_reason', 'binding_mismatch_keys',
-                                           'rules_sha256')) not in (
+                                           'rules_sha256', 'bind_failure_reason')) not in (
                         _REVIEW_DISPATCH_CLAIM_FIELDS,
                         _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
                         _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
@@ -2030,6 +2035,11 @@ def _validate(record, *, strict=True):
                         frozenset(('review_result',))) or
                     ('failure_reason' in item and
                      not _known_review_failure_reason(item['failure_reason'])) or
+                    # #1909 item 1 (security v91): only an UNKNOWN claim, never with failure_reason.
+                    ('bind_failure_reason' in item and
+                     (not _known_bind_failure_reason(item['bind_failure_reason']) or
+                      item.get('state') != 'UNKNOWN' or
+                      'failure_reason' in item)) or
                     ('binding_mismatch_keys' in item and
                      not _valid_binding_mismatch_keys(item)) or
                     # #1502 WP-F: sha256 of the exact Reviewer rule prefix sent.
@@ -5515,6 +5525,7 @@ class TaskStore:
                                 allowed_claim_transition = (
                                     'failure_reason' not in before and
                                     'binding_mismatch_keys' not in before and
+                                    'bind_failure_reason' not in before and
                                     type(before.get('native_session_id')) is str and
                                     set(after) == set(before) and
                                     all(before.get(key) == after.get(key) for key in before

@@ -423,6 +423,10 @@ class CaptureStore:
         self.reads = 0
         self.developers = []
 
+    def task_ids(self):
+        # #1502 WP-D R2: the real chain gate scans the store at the claim.
+        return [self.task['task_id']] if 'task_id' in self.task else []
+
     def get(self, task_id):
         self.reads += 1
         return copy.deepcopy(self.task)
@@ -572,7 +576,7 @@ class DelegateTimeoutTests(unittest.TestCase):
         registration = SimpleNamespace(
             task_id='executor-task-1', trusted_agent_id='opencode-developer',
             session_ref=None, native_session_id=None, root='/d6', common_dir='/d6-common',
-            branch='task')
+            branch='task', source_sha='d' * 40)
         snapshot = SimpleNamespace(head='d' * 40)
         args = self.delegate_args(timeout=requested, acceptance=acceptance,
                                   read_path=['sample.py'], write_path=['sample.py'],

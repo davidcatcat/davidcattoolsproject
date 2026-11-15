@@ -6,14 +6,20 @@ bound by the High Debug arguments or by the repair packet.
 """
 
 import argparse
+import copy
 import hashlib
 import io
+import threading
+import time
 import unittest
 from contextlib import redirect_stderr
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from llmtool import config
+from llmtool import lineage_counts
 from llmtool import repair_policy
+from llmtool import task_store as task_store_module
 from llmtool import task_submission_cli
 from llmtool.errors import LLMToolError
 
@@ -183,11 +189,20 @@ def _no_high_debug(**overrides):
                  high_debug_family=None, **overrides)
 
 
+_REPOSITORY = {'slug': 'example/project', 'dispatch_issue': 289, 'dispatch_evidence_pr': 1}
+
+
 def _patch_trust_and_binding(test, binding=(None, SimpleNamespace(head=_HEAD))):
+    # The repository identity comes from owner trust, absent in a test HOME; the
+    # owner-ref check and the store's dispatch gate read it through worker_dispatch.
     for target, kwargs in (
             ((task_submission_cli.trust, 'load_trust'),
              {'return_value': SimpleNamespace(
                  repository={'slug': 'example/project'})}),
+            ((config, 'repository_config'),
+             {'return_value': dict(_REPOSITORY)}),
+            ((task_submission_cli.worker_dispatch, 'repository_config'),
+             {'return_value': dict(_REPOSITORY)}),
             ((task_submission_cli, '_delegate_d6_binding'),
              {'return_value': binding})):
         started = patch.object(*target, **kwargs)
@@ -1388,6 +1403,466 @@ class DelegateRequiresHighDebugTaskTests(unittest.TestCase):
                         task_submission_cli.run_task_delegate(args, store=store)
                     runner.assert_not_called()
                 self.assertEqual(store.writes, [])
+
+
+# #1502 WP-D phase 2 R2: the chain-wide gate at every route claim site.
+_SOURCE = 'c' * 40   # the delegated D6's registered source SHA
+_OTHER_D6 = 'other-d6'
+_ACCEPTANCE = ['Synthetic acceptance.']
+
+
+def _chain_store(*executors, current=None):
+    """Tasks 0x100.. that each continue the one before and ran once on their D6.
+
+    The delegated Task continues the last of them (when any) and has not run;
+    current holds extra fields for its record.
+    """
+    store = _Store(count=0)
+    previous = None
+    for number, executor in enumerate(executors):
+        task_id = _record_id(0x100 + number)
+        record = {'task_id': task_id, 'completion': {'executor_task_id': executor},
+                  'developer': {'state': 'DEVELOPER_RESPONDED',
+                                'created_at': '2026-11-04T00:00:00Z'}}
+        if previous is not None:
+            record['continues'] = previous
+        store.records[task_id] = record
+        previous = task_id
+    record = {'task_id': _CURRENT_TASK, 'developer': None, 'completion': None}
+    if previous is not None:
+        record['continues'] = previous
+    record.update(current or {})
+    store.records[_CURRENT_TASK] = record
+    return store
+
+
+def _binding(source=_SOURCE, agent='codex-developer'):
+    return (SimpleNamespace(task_id=_EXECUTOR_TASK, root='/d6', source_sha=source,
+                            trusted_agent_id=agent), SimpleNamespace(head=_HEAD))
+
+
+def _lock_patches(test, seconds=2):
+    started = patch.object(task_store_module, 'LINEAGE_LOCK_TIMEOUT_SECONDS', seconds)
+    started.start()
+    test.addCleanup(started.stop)
+
+
+def _assert_released(test, store):
+    # Every ID the store holds covers every chain key the gate could take.
+    try:
+        release = lineage_counts.acquire_chain_locks(store, sorted(store.records))
+    except LLMToolError as error:
+        test.fail(f'a chain lock is still held: {error}')
+    release()
+
+
+def _use_policy(test, **limits):
+    started = patch.object(task_submission_cli.repair_policy, 'load_policy',
+                           return_value=dict(_POLICY, **limits))
+    started.start()
+    test.addCleanup(started.stop)
+
+
+class ChainGateTests(unittest.TestCase):
+    """_delegate_chain_gate: chain count, root cause, continuation link, then claim."""
+
+    def setUp(self):
+        _patch_trust_and_binding(self, binding=_binding())
+        _lock_patches(self)
+        self.claims = []
+
+    def _claim(self):
+        self.claims.append(_CURRENT_TASK)
+        return 'CLAIMED'
+
+    def _gate(self, store, args=None, binding=None):
+        return task_submission_cli._delegate_chain_gate(
+            _no_high_debug() if args is None else args, store,
+            _binding() if binding is None else binding, self._claim)
+
+    def _refuses(self, store, code, args=None, binding=None):
+        before = copy.deepcopy(store.records)
+        with self.assertRaises(LLMToolError) as caught:
+            self._gate(store, args, binding)
+        self.assertRegex(str(caught.exception), code)
+        self.assertEqual(self.claims, [])
+        self.assertEqual(store.writes, [])
+        self.assertEqual(store.records, before)
+        _assert_released(self, store)
+        return caught.exception
+
+    def test_singleton_behaves_as_today(self):
+        for count in (0, 1):
+            store = _Store(count=count)
+            store.records[_CURRENT_TASK] = {'task_id': _CURRENT_TASK, 'developer': None,
+                                            'completion': None}
+            with self.subTest(count=count):
+                self.claims = []
+                self.assertEqual(self._gate(store), 'CLAIMED')
+                self.assertEqual(self.claims, [_CURRENT_TASK])
+                _assert_released(self, store)
+        store = _Store(count=_REVIEW_LIMIT)
+        store.records[_CURRENT_TASK] = {'task_id': _CURRENT_TASK, 'developer': None,
+                                        'completion': None}
+        self.claims = []
+        self._refuses(store, '^DELEGATE_REPAIR_LIMIT_REACHED$')
+
+    def test_chain_limit_across_two_d6s(self):
+        _use_policy(self, repair_max=1)
+        store = _chain_store(_OTHER_D6, _EXECUTOR_TASK)
+        # This D6 alone has one run: the per-D6 cap passes, the chain is full.
+        task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store, _binding())
+        self._refuses(store, '^DELEGATE_REPAIR_LIMIT_REACHED$')
+        self.assertEqual(self._gate(_chain_store(_OTHER_D6)), 'CLAIMED')
+
+    def test_full_chain_under_the_policy_limit(self):
+        store = _chain_store(*[_OTHER_D6] * _REVIEW_LIMIT)
+        task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store, _binding())
+        self._refuses(store, '^DELEGATE_REPAIR_LIMIT_REACHED$')
+        self._refuses(store, '^DELEGATE_REPAIR_LIMIT_REACHED$', args=_args())
+
+    def test_ec2_chain_limit(self):
+        _use_policy(self, test_fail_max=1)
+        store = _chain_store(_OTHER_D6, _EXECUTOR_TASK)
+        parent, earlier_repair = _record_id(0x100), _record_id(0x101)
+        store.records[parent]['review_repair_claims'] = [
+            _ec2_claim(earlier_repair), _ec2_claim(_CURRENT_TASK)]
+        # The parent's claims are on another D6, so the per-D6 cap sees no EC2 run.
+        task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store, _binding())
+        self._refuses(store, '^DELEGATE_REPAIR_LIMIT_REACHED$')
+        store.records[earlier_repair]['developer'] = None
+        self.assertEqual(self._gate(store), 'CLAIMED')
+
+    def test_root_cause_required_by_the_chain_count(self):
+        _use_policy(self, repair_max=2)
+        store = _chain_store(_OTHER_D6, 'third-d6')
+        store.records[_HIGH_DEBUG_TASK] = _diagnosis([_entry()])
+        task_submission_cli._check_delegate_repair_cap(_no_high_debug(), store, _binding())
+        self._refuses(store, '^DELEGATE_HIGH_DEBUG_TASK_REQUIRED$')
+        self.assertEqual(self._gate(store, _args()), 'CLAIMED')
+        # The newest assignment is taken over the chain: a later run on another
+        # D6 makes the High Debug stale.
+        self.claims = []
+        store.records[_record_id(0x101)]['developer']['created_at'] = '2026-11-04T00:00:02Z'
+        self._refuses(store, '^DELEGATE_HIGH_DEBUG_TASK_INVALID$', args=_args())
+
+    def test_unknown_view_refuses_count_unavailable(self):
+        unavailable = '^DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task '
+
+        def scan_fails():
+            raise OSError('scan failed')
+        cases = []
+        store = _chain_store(_OTHER_D6)
+        store.task_ids = scan_fails
+        cases.append(('task_ids raises', store, _CURRENT_TASK))
+        store = _chain_store(_OTHER_D6)
+        store.records[_record_id(0x1FF)] = {'task_id': _record_id(0x1FF),
+                                           'continues': _record_id(0x100)}
+        cases.append(('fork', store, _CURRENT_TASK))
+        store = _chain_store(_OTHER_D6)
+        store.records[_record_id(0x100)]['developer']['created_at'] = 'bad'
+        cases.append(('bad created_at', store, _record_id(0x100)))
+        store = _chain_store(_OTHER_D6)
+        store.records[_record_id(0x100)]['developer'] = 'unreadable'
+        cases.append(('malformed member', store, _record_id(0x100)))
+        store = _chain_store(_OTHER_D6)
+        store.records[_record_id(0x1FE)] = {'task_id': _record_id(0x1FE), 'completion': 'done'}
+        cases.append(('malformed completion', store, _CURRENT_TASK))
+        store = _chain_store(_OTHER_D6)
+        del store.records[_CURRENT_TASK]
+        cases.append(('missing delegated Task', store, _CURRENT_TASK))
+        for name, store, task_id in cases:
+            with self.subTest(case=name):
+                self._refuses(store, unavailable + task_id + '$')
+
+    def test_policy_or_lock_failure_refuses_count_unavailable(self):
+        unavailable = '^DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task ' + _CURRENT_TASK + '$'
+        store = _chain_store(_OTHER_D6)
+        with patch.object(task_submission_cli.repair_policy, 'load_policy',
+                          side_effect=LLMToolError('POLICY_INVALID')):
+            self._refuses(store, unavailable)
+        with patch.object(lineage_counts, 'acquire_chain_locks',
+                          side_effect=LLMToolError('LINEAGE_LOCK_BUSY')):
+            with self.assertRaisesRegex(LLMToolError, unavailable):
+                self._gate(store)
+        self.assertEqual(self.claims, [])
+        self.assertIsNone(store.records[_CURRENT_TASK]['developer'])
+        _assert_released(self, store)
+
+    def test_keys_changed_under_the_lock_refuse(self):
+        store = _chain_store(_OTHER_D6)
+        real = lineage_counts.acquire_chain_locks
+
+        def acquire_then_unlink(lock_store, keys):
+            release = real(lock_store, keys)
+            store.records[_CURRENT_TASK].pop('continues')   # the key is now the Task
+            return release
+        with patch.object(lineage_counts, 'acquire_chain_locks', acquire_then_unlink):
+            with self.assertRaisesRegex(
+                    LLMToolError,
+                    '^DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task ' + _CURRENT_TASK + '$'):
+                self._gate(store)
+        self.assertEqual(self.claims, [])
+        self.assertIsNone(store.records[_CURRENT_TASK]['developer'])
+        _assert_released(self, store)
+
+    def test_outside_result_head_refuses_with_no_bypass(self):
+        outside = '9' * 32
+        for chain in ((_OTHER_D6,), ()):
+            store = _chain_store(*chain)
+            store.records[outside] = {
+                'task_id': outside, 'completion': {
+                    'executor_task_id': 'unrelated-d6',
+                    'evidence': {'source_sha': '8' * 40, 'result_head': _SOURCE}}}
+            for args in (_no_high_debug(), _args()):
+                with self.subTest(chain=chain, args=args):
+                    error = self._refuses(store, '^CONTINUATION_LINK_REQUIRED$', args=args)
+                    self.assertEqual(error.continuation_link_reason,
+                                     'RESULT_HEAD_OUTSIDE_CHAIN')
+
+    def test_result_head_inside_the_chain_passes(self):
+        store = _chain_store(_OTHER_D6)
+        store.records[_record_id(0x100)]['completion']['evidence'] = {
+            'source_sha': '8' * 40, 'result_head': _SOURCE}
+        self.assertEqual(self._gate(store), 'CLAIMED')
+
+    def test_registration_without_a_source_refuses_in_doubt(self):
+        error = self._refuses(_chain_store(_OTHER_D6), '^CONTINUATION_LINK_REQUIRED$',
+                              binding=_binding(source=None))
+        self.assertEqual(error.continuation_link_reason, 'SCAN_IN_DOUBT')
+
+    def test_only_the_view_keys_are_locked(self):
+        store = _chain_store(_OTHER_D6)
+        store.records[_record_id(0x200)] = {'task_id': _record_id(0x200)}
+        store.records[_record_id(0x201)] = {'task_id': _record_id(0x201),
+                                           'continues': _record_id(0x200)}
+        with patch.object(lineage_counts, 'acquire_chain_locks',
+                          wraps=lineage_counts.acquire_chain_locks) as acquire:
+            self.assertEqual(self._gate(store), 'CLAIMED')
+        self.assertEqual([call.args[1] for call in acquire.call_args_list],
+                         [[_record_id(0x100)]])
+        _assert_released(self, store)
+
+    def test_claim_failure_propagates_and_releases(self):
+        class ClaimFailed(Exception):
+            pass
+
+        def claim():
+            raise ClaimFailed()
+        store = _chain_store(_OTHER_D6)
+        with self.assertRaises(ClaimFailed):
+            task_submission_cli._delegate_chain_gate(_no_high_debug(), store, _binding(), claim)
+        _assert_released(self, store)
+
+
+def _pm_fields(route, **overrides):
+    fields = {'schema_version': 2, 'state': 'PM_RESPONDED', 'run_id': 'd' * 32,
+              'response': 'Synthetic response.', 'request': 'Synthetic request.',
+              'task_binding': {}, 'pm_assignment': {
+                  'route': route, 'risk': 'LOW', 'acceptance': list(_ACCEPTANCE),
+                  'goal': 'Synthetic goal.'}}
+    fields.update(overrides)
+    return fields
+
+
+class OlderRefusalPrecedenceTests(unittest.TestCase):
+    """Every refusal that exists today still wins over a full chain."""
+
+    def setUp(self):
+        _patch_trust_and_binding(self, binding=_binding())
+        _lock_patches(self)
+        started = patch.object(task_submission_cli.task_completion, 'validate_task_binding')
+        started.start()
+        self.addCleanup(started.stop)
+
+    def _full_chain(self, route, executors=None, **overrides):
+        store = _chain_store(*(executors or [_OTHER_D6] * _REVIEW_LIMIT),
+                             current=_pm_fields(route, **overrides))
+        # The full chain alone refuses at the gate.
+        with self.assertRaisesRegex(LLMToolError, '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+            task_submission_cli._delegate_chain_gate(
+                _no_high_debug(), store, _binding(), lambda: self.fail('claimed'))
+        return store
+
+    def _older_wins(self, store, args, code):
+        before = copy.deepcopy(store.records)
+        with patch.object(task_submission_cli, '_delegate_chain_gate',
+                          wraps=task_submission_cli._delegate_chain_gate) as gate:
+            with self.assertRaisesRegex(LLMToolError, code):
+                task_submission_cli.run_task_delegate(args, store=store)
+        gate.assert_not_called()
+        self.assertEqual(store.writes, [])
+        self.assertEqual(store.records, before)
+
+    def _claude(self, **overrides):
+        return _no_high_debug(provider='claude', mode='direct', selection_source='PM',
+                              acceptance=list(_ACCEPTANCE), **overrides)
+
+    def _agy(self, **overrides):
+        return _no_high_debug(provider='agy', mode='direct', selection_source='PM',
+                              acceptance=list(_ACCEPTANCE), **overrides)
+
+    def test_m18_cap_before_agy_owner_ref(self):
+        # The per-D6 cap is full too, and still comes before the owner ref.
+        store = self._full_chain('agy', executors=[_EXECUTOR_TASK] * _REVIEW_LIMIT)
+        self._older_wins(store, self._agy(owner_ref='bad'),
+                         '^DELEGATE_REPAIR_LIMIT_REACHED$')
+
+    def test_agy_owner_ref_before_the_chain(self):
+        store = self._full_chain('agy')
+        self._older_wins(store, self._agy(owner_ref='bad'),
+                         '^--provider agy requires a valid --owner-ref')
+
+    def test_duplicate_dispatch_before_the_chain(self):
+        store = self._full_chain('claude')
+        store.records[_CURRENT_TASK]['developer'] = {
+            'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'claude',
+            'created_at': '2026-11-04T00:00:00Z'}
+        self._older_wins(store, self._claude(),
+                         '^developer assignment already exists; duplicate dispatch refused$')
+
+    def test_pm_response_before_the_chain(self):
+        store = self._full_chain('claude', state='PM_PENDING')
+        self._older_wins(store, self._claude(), '^task has no successful PM response$')
+
+    def test_d6_binding_before_the_chain(self):
+        store = self._full_chain('claude')
+        with patch.object(task_submission_cli, '_delegate_d6_binding',
+                          side_effect=LLMToolError('D6_SOURCE_BINDING_MISMATCH')):
+            self._older_wins(store, self._claude(), '^D6_SOURCE_BINDING_MISMATCH$')
+
+    def test_d6_agent_before_the_chain(self):
+        store = self._full_chain('claude')
+        self._older_wins(store, self._claude(), '^D6_CLAUDE_AGENT_REQUIRED$')
+
+    def test_background_route_refuses_in_the_parent_before_fork(self):
+        args = _no_high_debug(provider='codex', mode='direct', background=True,
+                              selection_source='PM', acceptance=list(_ACCEPTANCE))
+        for chain, refused in (([_OTHER_D6] * _REVIEW_LIMIT, True),
+                               ([_OTHER_D6], False)):
+            store = _chain_store(*chain, current=_pm_fields('codex'))
+            with self.subTest(refused=refused), \
+                    patch.object(task_submission_cli.worker_dispatch, 'evaluate',
+                                 return_value=SimpleNamespace(allowed=True)), \
+                    patch.object(task_submission_cli, '_run_background_delegate',
+                                 return_value=0) as background, \
+                    patch.object(task_submission_cli.os, 'fork') as fork:
+                if refused:
+                    with self.assertRaisesRegex(LLMToolError,
+                                                '^DELEGATE_REPAIR_LIMIT_REACHED$'):
+                        task_submission_cli.run_task_delegate(args, store=store)
+                    background.assert_not_called()
+                else:
+                    self.assertEqual(task_submission_cli.run_task_delegate(args, store=store), 0)
+                    background.assert_called_once()
+                fork.assert_not_called()
+            self.assertEqual(store.writes, [])
+            self.assertIsNone(store.records[_CURRENT_TASK]['developer'])
+            _assert_released(self, store)
+
+
+class ChainGateConcurrencyTests(unittest.TestCase):
+    """Two delegates of one chain cannot both spend its last repair slot."""
+
+    def setUp(self):
+        _use_policy(self, repair_max=1)
+        _lock_patches(self, seconds=5)
+
+    def _delegate(self, store, task_id, executor, claim, results, runs):
+        def run():
+            try:
+                task_submission_cli._delegate_chain_gate(
+                    _no_high_debug(task_id=task_id, executor_task=executor), store,
+                    _binding(), claim)
+            except LLMToolError as error:
+                results[task_id] = str(error)
+                return
+            except BaseException as error:   # surfaced by the assertions
+                results[task_id] = repr(error)
+                return
+            runs.append(task_id)   # the runner after the claim
+            results[task_id] = 'CLAIMED'
+        return threading.Thread(target=run, daemon=True)
+
+    @staticmethod
+    def _persist(store, task_id, executor, claims):
+        store.records[task_id].update(
+            developer={'state': 'DEVELOPER_PENDING', 'created_at': '2026-11-04T00:00:01Z'},
+            completion={'executor_task_id': executor})
+        claims.append(task_id)
+
+    def test_one_chain_two_d6s_one_slot(self):
+        first, second, third = _record_id(0x300), _record_id(0x301), _record_id(0x302)
+        store = _Store(count=0)
+        store.records[first] = {
+            'task_id': first, 'completion': {'executor_task_id': 'd6-a'},
+            'developer': {'state': 'DEVELOPER_RESPONDED', 'created_at': '2026-11-04T00:00:00Z'}}
+        store.records[second] = {'task_id': second, 'continues': first,
+                                 'developer': None, 'completion': None}
+        store.records[third] = {'task_id': third, 'continues': second,
+                                'developer': None, 'completion': None}
+        entered, go = threading.Event(), threading.Event()
+        claims, runs, results = [], [], {}
+
+        def claim_for(task_id, executor):
+            def claim():
+                entered.set()
+                go.wait(5)
+                self._persist(store, task_id, executor, claims)
+                return task_id
+            return claim
+        threads = [self._delegate(store, task_id, executor, claim_for(task_id, executor),
+                                  results, runs)
+                   for task_id, executor in ((second, 'd6-b'), (third, 'd6-c'))]
+        for thread in threads:
+            thread.start()
+        self.assertTrue(entered.wait(5))
+        time.sleep(0.3)   # an unlocked rival would enter its claim here
+        go.set()
+        for thread in threads:
+            thread.join(timeout=15)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(runs, claims)
+        self.assertEqual(sorted(results.values()),
+                         ['CLAIMED', 'DELEGATE_REPAIR_LIMIT_REACHED'])
+        loser = third if claims == [second] else second
+        self.assertIsNone(store.records[loser]['developer'])
+        _assert_released(self, store)
+
+    def test_unrelated_chains_both_pass(self):
+        store = _Store(count=0)
+        pairs = []
+        for base in (0x400, 0x500):
+            older, newer = _record_id(base), _record_id(base + 1)
+            store.records[older] = {
+                'task_id': older, 'completion': {'executor_task_id': f'd6-{base:x}'},
+                'developer': {'state': 'DEVELOPER_RESPONDED',
+                              'created_at': '2026-11-04T00:00:00Z'}}
+            store.records[newer] = {'task_id': newer, 'continues': older,
+                                    'developer': None, 'completion': None}
+            pairs.append((newer, f'd6-{base:x}-next'))
+        # Both claims must be inside the gate at once: a shared lock breaks the barrier.
+        barrier = threading.Barrier(2, timeout=5)
+        claims, runs, results = [], [], {}
+
+        def claim_for(task_id, executor):
+            def claim():
+                barrier.wait()
+                self._persist(store, task_id, executor, claims)
+                return task_id
+            return claim
+        threads = [self._delegate(store, task_id, executor, claim_for(task_id, executor),
+                                  results, runs) for task_id, executor in pairs]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(sorted(claims), sorted(task_id for task_id, _ in pairs))
+        self.assertEqual(sorted(runs), sorted(claims))
+        self.assertEqual(list(results.values()), ['CLAIMED', 'CLAIMED'])
+        _assert_released(self, store)
 
 
 if __name__ == '__main__':

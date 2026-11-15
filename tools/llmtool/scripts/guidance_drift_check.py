@@ -204,7 +204,10 @@ DEVELOPER_ROUTE = TimeoutPair(Obj(
 ))
 # Review/AI Debug role model registry (#1502 WP-E). The route loader checks
 # the exact role names; this schema checks shape only.
-ROLE_MODELS = Obj({"allowed_models": ListOf(Str(), min_items=1)})
+ROLE_MODELS = Obj(
+    {"allowed_models": ListOf(Str(), min_items=1)},
+    {"timeout": Int(1, ROUTE_TIMEOUT_CAP_SECONDS)},
+)
 WORKER_DISPATCH_ENTRY = Obj({
     "dispatch": OneOf(*sorted(DISPATCH_VALUES)),
     "decided_by": Str(),
@@ -237,7 +240,10 @@ RULE_SCHEMAS: dict[str, Any] = {
     }),
     "developer-routes.json": Obj(
         {"schema_version": Const(1), "routes": MapOf(DEVELOPER_ROUTE, min_items=1)},
-        {"roles": MapOf(ROLE_MODELS, min_items=1)},
+        {
+            "roles": MapOf(ROLE_MODELS, min_items=1),
+            "remote_test_timeout": Int(1, ROUTE_TIMEOUT_CAP_SECONDS),
+        },
     ),
     "policy.json": Obj({
         "schema_version": Const(1),

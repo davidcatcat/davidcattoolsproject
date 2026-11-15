@@ -63,6 +63,10 @@ class _Store:
         self.task = copy.deepcopy(task)
         self.writes = []
 
+    def task_ids(self):
+        # #1502 WP-D R2: the real chain gate scans the store at the claim.
+        return [self.task['task_id']]
+
     def get(self, _task_id):
         return copy.deepcopy(self.task)
 
@@ -104,7 +108,7 @@ class OpenCodeRouteWiringTests(unittest.TestCase):
         registration = SimpleNamespace(
             task_id='executor-d6', root='/registered/root', common_dir='/repo/.git',
             branch='task-branch', trusted_agent_id='opencode-developer',
-            session_ref='session-ref', native_session_id=None)
+            session_ref='session-ref', native_session_id=None, source_sha=_HEAD)
         snapshot = SimpleNamespace(root=registration.root, common_dir=registration.common_dir,
                                    branch=registration.branch, head=_HEAD)
         args = Namespace(task_id=_TASK_ID, provider='opencode', selection_source='PM',
