@@ -774,9 +774,21 @@ def _version(executable):
     return value
 
 
+def _fire_delivered(delivered_callback):
+    """Call delivered_callback once; its DirectOpenCodeError passes through."""
+    if delivered_callback is None:
+        return
+    try:
+        delivered_callback()
+    except DirectOpenCodeError:
+        raise
+    except Exception:
+        _reject('OPENCODE_DELIVERY_CALLBACK_FAILED')
+
+
 def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         dispatch_store=None, dispatch_task_id=None,
-        launch_callback=None,
+        launch_callback=None, delivered_callback=None,
         timeout_seconds=None, executable=None, model=MODEL,
         steps=DEFAULT_AGENT_STEPS):
     """Invoke one bounded OpenCode run in the existing D6 task worktree.
@@ -784,6 +796,15 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     timeout_seconds None uses the opencode route default_timeout; a given value
     must pass resolve_route_timeout (route max_timeout, hard cap 3600). A
     refusal raises the resolver code before any provider process starts.
+
+    delivered_callback (optional, no arguments) is called once at the delivery
+    boundary (#1502 WP-F design section 2.2 step 5): after os.write has
+    accepted every prompt byte and the stdin pipe has closed without error.
+    A write or close error, or a loop that ends before that point, refuses
+    with OPENCODE_PROMPT_DELIVERY_INCOMPLETE. A DirectOpenCodeError the
+    callback raises keeps its code; any other exception gives
+    OPENCODE_DELIVERY_CALLBACK_FAILED. Either way the process is stopped and
+    no result is returned.
     """
     validate_model(model)
     root = Path(root).resolve(strict=True)
@@ -795,6 +816,8 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         _screen_sources(root, read_paths)
     if not callable(prelaunch_validate):
         _reject('OPENCODE_D6_BINDING_CHANGED')
+    if delivered_callback is not None and not callable(delivered_callback):
+        _reject('OPENCODE_DELIVERY_CALLBACK_INVALID')
     if dispatch_store is None or type(dispatch_task_id) is not str:
         _reject('WORKER_DISPATCH_CONTEXT_UNAVAILABLE')
     timeout_seconds = resolved_timeout(timeout_seconds)
@@ -873,6 +896,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                     os.set_blocking(process.stdin.fileno(), False)
                     selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
                     offset = 0
+                    delivered = False
                     denial_line_start = 0
                     while selector.get_map():
                         lifecycle.check()
@@ -882,12 +906,28 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                         for key, _ in selector.select(min(remaining, 0.1)):
                             if key.data == 'stdin':
                                 try:
-                                    offset += os.write(key.fileobj.fileno(), payload[offset:offset + 8192])
-                                except (BrokenPipeError, OSError):
-                                    offset = len(payload)
+                                    written = os.write(key.fileobj.fileno(),
+                                                       payload[offset:offset + 8192])
+                                except (BlockingIOError, InterruptedError):
+                                    # Pipe full or interrupted: nothing accepted; retry.
+                                    continue
+                                except OSError:
+                                    # #1502 WP-F: a failed write (including
+                                    # BrokenPipeError) is never delivery.
+                                    _reject('OPENCODE_PROMPT_DELIVERY_INCOMPLETE')
+                                if type(written) is not int or written < 0:
+                                    _reject('OPENCODE_PROMPT_DELIVERY_INCOMPLETE')
+                                offset += written
                                 if offset >= len(payload):
                                     selector.unregister(key.fileobj)
-                                    key.fileobj.close()
+                                    try:
+                                        key.fileobj.close()
+                                    except OSError:
+                                        _reject('OPENCODE_PROMPT_DELIVERY_INCOMPLETE')
+                                    # Delivery boundary: the whole prompt is in
+                                    # the provider's own stdin pipe.
+                                    delivered = True
+                                    _fire_delivered(delivered_callback)
                                 continue
                             try:
                                 chunk = os.read(key.fileobj.fileno(), 8192)
@@ -915,6 +955,8 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                                     scan_from = end + 1
                                     if _has_structured_tool_denial(complete):
                                         _reject('TOOL_DENIED')
+                    if not delivered:
+                        _reject('OPENCODE_PROMPT_DELIVERY_INCOMPLETE')
                     _await_exit_without_reap(process, deadline=work_deadline)
                 finally:
                     if selector is not None:
