@@ -79,6 +79,13 @@ class ValidModuleResultsTests(unittest.TestCase):
                 bad = receipt('FAIL', [entry('test_a', ran, 'FAILED (errors=1)')])
                 self.assertFalse(rt.valid_module_results(bad))
 
+    def test_malformed_receipt_and_module_types_are_refused(self):
+        for bad in (None, 1, 'receipt', ['module_results']):
+            with self.subTest(receipt=bad):
+                self.assertFalse(rt.valid_module_results(bad))
+        nameless = receipt('PASS', [entry(None, 1, 'OK')], modules=(None,))
+        self.assertFalse(rt.valid_module_results(nameless))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -404,7 +404,9 @@ def _final_skipped(final):
 
 
 def _module_result_ok(entry, module, final):
-    if type(final) is not str or type(entry) is not dict or set(entry) != _MODULE_RESULT_KEYS:
+    if type(module) is not str or type(final) is not str:
+        return False
+    if type(entry) is not dict or set(entry) != _MODULE_RESULT_KEYS:
         return False
     ran, skipped = entry['ran'], entry['skipped']
     if type(ran) is not int or type(skipped) is not int or ran < 0 or skipped < 0:
@@ -425,6 +427,8 @@ def valid_module_results(receipt):
     PASS the entries cover every module and every final passes. The caller has
     already checked the other receipt fields.
     """
+    if type(receipt) is not dict:
+        return False
     if 'module_results' not in receipt:
         return True
     entries = receipt['module_results']
