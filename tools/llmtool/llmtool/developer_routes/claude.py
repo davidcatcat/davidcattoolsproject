@@ -100,9 +100,11 @@ class ClaudeRoute(DeveloperRoute):
             obj = json.loads(stdout.decode('utf-8'), object_pairs_hook=_unique_pairs,
                              parse_constant=_reject_constant)
         except (UnicodeError, ValueError, TypeError, RecursionError):
+            # #2158: a quota stderr with non-JSON stdout is a quota refusal, so
+            # worker_availability records it. Only the fixed code is kept; no
+            # stderr text is stored or returned.
             if _QUOTA.search(stderr.decode('utf-8', 'replace')):
-                return {'status': 'error', 'summary': '', 'session_id': None,
-                        'usage': None, 'raw': {}}
+                raise RouteError('CLAUDE_QUOTA_EXHAUSTED') from None
             raise RouteError('CLAUDE_OUTPUT_INVALID') from None
         if (type(obj) is not dict or obj.get('type') != 'result' or
                 type(obj.get('is_error')) is not bool or type(obj.get('subtype')) is not str or
@@ -180,8 +182,9 @@ class ClaudeRoute(DeveloperRoute):
     def provider_quota_reported(self, parsed):
         """Only a parsed Claude CLI JSON error result with api_error_status 429.
 
-        Stderr text, the synthetic stderr-fallback result and result text are
-        never evidence; quota_exhausted still classifies them as before.
+        Stderr text and result text are never evidence; quota_exhausted still
+        classifies them as before. A quota stderr with non-JSON stdout raises
+        CLAUDE_QUOTA_EXHAUSTED in parse_output (#2158), so it never reaches here.
         """
         raw = parsed.get('raw')
         return (type(raw) is dict and raw.get('type') == 'result' and
