@@ -5149,5 +5149,361 @@ class CompletionDocsOnlyAttributedPathsTests(unittest.TestCase):
         self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
 
 
+class FileOpsTaskStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve() / 'tasks'
+        self.store = TaskStore(self.root)
+        self.policy_path = worker_policy_fixture.install(self)
+
+    def _active_record(self):
+        task_id, run_id = new_id(), new_id()
+        req = 'Implement feature.'
+        contract = TaskContract(
+            schema_version=1, task_id=task_id, contract_version=1,
+            previous_digest=None, goal='Goal sha256: ' + hashlib.sha256(req.encode()).hexdigest(),
+            authorized_scope=('pm-planning',), forbidden_scope=(),
+            criteria=(AcceptanceCriterion('pm_response', CriterionKind.ARTIFACT, 'Artifact.'),),
+        )
+        resp = json.dumps({
+            'schema_version': 1, 'summary': 'Ready.',
+            'developer_assignment': {
+                'route': 'opencode', 'risk': 'LOW', 'goal': 'Do task.',
+                'acceptance': ['A test passes.'],
+            },
+        }, separators=(',', ':'))
+        return {
+            'schema_version': 2, 'task_id': task_id, 'run_id': run_id,
+            'pm_session_id': 'pm-' + new_id(),
+            'pm_provider_profile': 'active-pm-runtime',
+            'pm_provider_type': 'active-pm-runtime',
+            'pm_model': None,
+            'pm_route_binding': {'type': 'active-pm-runtime', 'model': None, 'base_url': None},
+            'backend_session_semantics': 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL',
+            'native_session_id': None,
+            'state': 'PM_RESPONDED',
+            'created_at': '2026-10-21T00:00:00Z',
+            'updated_at': '2026-10-21T00:00:00Z',
+            'task_contract': contract.to_dict(),
+            'task_binding': contract.binding(run_id).to_dict(),
+            'request': req,
+            'request_sha256': hashlib.sha256(req.encode()).hexdigest(),
+            'response': resp,
+            'usage': None,
+            'error_code': None,
+            'developer': None,
+            'pm_assignment': {
+                'schema_version': 1, 'route': 'opencode', 'risk': 'LOW',
+                'goal': 'Do task.', 'acceptance': ['A test passes.'],
+            },
+            'completion': None,
+            'pm_provenance': {
+                'source': 'ACTIVE_PM_RUNTIME', 'provider_invoked': False,
+                'native_session_id_status': 'UNAVAILABLE', 'usage_status': 'UNKNOWN',
+                'session_restored': False, 'automatic_callback': False,
+            },
+            'record_sha256': None,
+        }
+
+    def _valid_file_ops(self, base):
+        from llmtool import file_ops
+        ops = [{'op': 'delete', 'path': 'tools/sample.txt'}]
+        return {
+            'ops': ops,
+            'ops_sha256': file_ops.ops_sha256(ops),
+            'contract_digest': base['task_binding']['contract_digest'],
+        }
+
+    def _valid_evidence(self, base, file_ops_entry, **overrides):
+        val = {
+            'state': 'VERIFIED',
+            'isolate': False,
+            'task_id': base['task_id'],
+            'run_id': base['run_id'],
+            'executor_task': 'd6-task-1',
+            'root': '/worktree/root',
+            'branch': 'main',
+            'head': 'a' * 40,
+            'ops_sha256': file_ops_entry['ops_sha256'],
+            'plan_sha256': 'b' * 64,
+            'status_sha256': 'c' * 64,
+            'recorded_at': '2026-11-15T12:00:00Z',
+        }
+        val.update(overrides)
+        return val
+
+    def _valid_reservation(self, **overrides):
+        val = {
+            'executor_task': 'd6-task-1',
+            'reserved_at': '2026-11-15T12:00:00Z',
+        }
+        val.update(overrides)
+        return val
+
+    def test_ops_sha256_determinism(self):
+        from llmtool import file_ops
+        ops1 = [
+            {'op': 'delete', 'path': 'tools/delete_target.txt'},
+            {'op': 'move', 'from': 'tools/source.txt', 'to': 'tools/dest.txt'},
+        ]
+        digest1 = file_ops.ops_sha256(ops1)
+        digest2 = file_ops.ops_sha256(ops1)
+        self.assertEqual(digest1, digest2)
+        self.assertEqual(len(digest1), 64)
+        ops_json = json.dumps(ops1)
+        self.assertEqual(file_ops.ops_sha256(ops_json), digest1)
+        ops_permuted = [
+            {'path': 'tools/delete_target.txt', 'op': 'delete'},
+            {'to': 'tools/dest.txt', 'from': 'tools/source.txt', 'op': 'move'},
+        ]
+        self.assertEqual(file_ops.ops_sha256(ops_permuted), digest1)
+        ops_other = [{'op': 'delete', 'path': 'tools/other.txt'}]
+        self.assertNotEqual(file_ops.ops_sha256(ops_other), digest1)
+
+    def test_file_ops_validator_accepts_valid_synthetic_value(self):
+        base = self._active_record()
+        fops = self._valid_file_ops(base)
+        base['file_ops'] = fops
+        base['record_sha256'] = task_store_module._digest(base)
+        validated = task_store_module._validate(base)
+        self.assertEqual(validated['file_ops'], fops)
+        rec = self._active_record()
+        rec['file_ops'] = fops
+        created = self.store.create(rec)
+        self.assertEqual(created['file_ops'], fops)
+        loaded = self.store.get(created['task_id'])
+        self.assertEqual(loaded['file_ops'], fops)
+
+    def test_file_ops_validator_refuses_malformed_fields(self):
+        base = self._active_record()
+        fops = self._valid_file_ops(base)
+        malformed_cases = (
+            ('not a dict', 'not-a-dict'),
+            ('extra key', dict(fops, extra=1)),
+            ('missing ops', {'ops_sha256': fops['ops_sha256'], 'contract_digest': fops['contract_digest']}),
+            ('missing ops_sha256', {'ops': fops['ops'], 'contract_digest': fops['contract_digest']}),
+            ('missing contract_digest', {'ops': fops['ops'], 'ops_sha256': fops['ops_sha256']}),
+            ('ops not list', dict(fops, ops='delete')),
+            ('ops malformed list', dict(fops, ops=[{'op': 'invalid'}])),
+            ('ops unnormalized', dict(fops, ops=[{'op': 'delete', 'path': 'tools/sample.txt', 'extra': 1}])),
+            ('ops_sha256 wrong', dict(fops, ops_sha256='0' * 64)),
+            ('contract_digest not 64-hex', dict(fops, contract_digest='short')),
+            ('contract_digest mismatch', dict(fops, contract_digest='f' * 64)),
+        )
+        for label, bad_fops in malformed_cases:
+            with self.subTest(case=label):
+                rec = self._active_record()
+                rec['file_ops'] = bad_fops
+                rec['record_sha256'] = task_store_module._digest(rec)
+                with self.assertRaises(LLMToolError) as caught:
+                    task_store_module._validate(rec)
+                self.assertEqual(caught.exception.task_store_error_code, 'TASK_FILE_OPS_INVALID')
+
+        rec = self._active_record()
+        rec['file_ops'] = fops
+        del rec['pm_provenance']
+        rec['record_sha256'] = task_store_module._digest(rec)
+        with self.assertRaises(LLMToolError) as caught:
+            task_store_module._validate(rec)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_FILE_OPS_INVALID')
+
+    def test_file_ops_evidence_validator_accepts_valid_synthetic_value(self):
+        base = self._active_record()
+        fops = self._valid_file_ops(base)
+        base['file_ops'] = fops
+
+        ev_verified = self._valid_evidence(base, fops, state='VERIFIED', isolate=False,
+                                           status_sha256='c' * 64)
+        rec = dict(base, file_ops_evidence=ev_verified)
+        rec['record_sha256'] = task_store_module._digest(rec)
+        self.assertEqual(task_store_module._validate(rec)['file_ops_evidence'], ev_verified)
+
+        ev_failed = self._valid_evidence(base, fops, state='FAILED', isolate=True,
+                                        status_sha256=None)
+        rec = dict(base, file_ops_evidence=ev_failed)
+        rec['record_sha256'] = task_store_module._digest(rec)
+        self.assertEqual(task_store_module._validate(rec)['file_ops_evidence'], ev_failed)
+
+        ev_failed_status = self._valid_evidence(base, fops, state='FAILED', isolate=True,
+                                               status_sha256='d' * 64)
+        rec = dict(base, file_ops_evidence=ev_failed_status)
+        rec['record_sha256'] = task_store_module._digest(rec)
+        self.assertEqual(task_store_module._validate(rec)['file_ops_evidence'], ev_failed_status)
+
+        ev_64head = self._valid_evidence(base, fops, head='e' * 64)
+        rec = dict(base, file_ops_evidence=ev_64head)
+        rec['record_sha256'] = task_store_module._digest(rec)
+        self.assertEqual(task_store_module._validate(rec)['file_ops_evidence'], ev_64head)
+
+    def test_file_ops_evidence_validator_refuses_malformed_fields(self):
+        base = self._active_record()
+        fops = self._valid_file_ops(base)
+        base['file_ops'] = fops
+        ev = self._valid_evidence(base, fops)
+
+        malformed_cases = (
+            ('not a dict', 'evidence'),
+            ('extra key', dict(ev, extra=1)),
+            ('missing state', {k: v for k, v in ev.items() if k != 'state'}),
+            ('missing isolate', {k: v for k, v in ev.items() if k != 'isolate'}),
+            ('missing task_id', {k: v for k, v in ev.items() if k != 'task_id'}),
+            ('missing run_id', {k: v for k, v in ev.items() if k != 'run_id'}),
+            ('missing executor_task', {k: v for k, v in ev.items() if k != 'executor_task'}),
+            ('missing root', {k: v for k, v in ev.items() if k != 'root'}),
+            ('missing branch', {k: v for k, v in ev.items() if k != 'branch'}),
+            ('missing head', {k: v for k, v in ev.items() if k != 'head'}),
+            ('missing ops_sha256', {k: v for k, v in ev.items() if k != 'ops_sha256'}),
+            ('missing plan_sha256', {k: v for k, v in ev.items() if k != 'plan_sha256'}),
+            ('missing status_sha256', {k: v for k, v in ev.items() if k != 'status_sha256'}),
+            ('missing recorded_at', {k: v for k, v in ev.items() if k != 'recorded_at'}),
+            ('invalid state', dict(ev, state='UNKNOWN')),
+            ('VERIFIED with isolate True', dict(ev, state='VERIFIED', isolate=True)),
+            ('FAILED with isolate False', dict(ev, state='FAILED', isolate=False, status_sha256=None)),
+            ('isolate not bool', dict(ev, isolate=1)),
+            ('task_id mismatch', dict(ev, task_id='0' * 32)),
+            ('run_id mismatch', dict(ev, run_id='0' * 32)),
+            ('executor_task invalid', dict(ev, executor_task='-invalid-')),
+            ('executor_task empty', dict(ev, executor_task='')),
+            ('root not absolute', dict(ev, root='relative/path')),
+            ('root not str', dict(ev, root=123)),
+            ('root too long', dict(ev, root='/' + 'a' * 4096)),
+            ('branch not str', dict(ev, branch=123)),
+            ('branch empty', dict(ev, branch='')),
+            ('branch too long', dict(ev, branch='a' * 256)),
+            ('head invalid hex', dict(ev, head='not-a-hex')),
+            ('head 39 hex', dict(ev, head='a' * 39)),
+            ('head 65 hex', dict(ev, head='a' * 65)),
+            ('ops_sha256 mismatch', dict(ev, ops_sha256='0' * 64)),
+            ('plan_sha256 not 64-hex', dict(ev, plan_sha256='short')),
+            ('status_sha256 None when VERIFIED', dict(ev, state='VERIFIED', isolate=False, status_sha256=None)),
+            ('status_sha256 not 64-hex', dict(ev, status_sha256='short')),
+            ('status_sha256 not 64-hex when FAILED', dict(ev, state='FAILED', isolate=True, status_sha256='short')),
+            ('recorded_at invalid', dict(ev, recorded_at='invalid-date')),
+        )
+        for label, bad_ev in malformed_cases:
+            with self.subTest(case=label):
+                rec = dict(base, file_ops_evidence=bad_ev)
+                rec['record_sha256'] = task_store_module._digest(rec)
+                with self.assertRaises(LLMToolError) as caught:
+                    task_store_module._validate(rec)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_FILE_OPS_EVIDENCE_INVALID')
+
+        rec_without_fops = self._active_record()
+        rec_without_fops['file_ops_evidence'] = ev
+        rec_without_fops['record_sha256'] = task_store_module._digest(rec_without_fops)
+        with self.assertRaises(LLMToolError) as caught:
+            task_store_module._validate(rec_without_fops)
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'TASK_FILE_OPS_EVIDENCE_INVALID')
+
+    def test_file_ops_reservation_validator_accepts_valid_synthetic_value(self):
+        base = self._active_record()
+        fops = self._valid_file_ops(base)
+        base['file_ops'] = fops
+
+        res = self._valid_reservation()
+        rec = dict(base, file_ops_reservation=res)
+        rec['record_sha256'] = task_store_module._digest(rec)
+        self.assertEqual(task_store_module._validate(rec)['file_ops_reservation'], res)
+
+        ev = self._valid_evidence(base, fops, executor_task=res['executor_task'])
+        rec = dict(base, file_ops_reservation=res, file_ops_evidence=ev)
+        rec['record_sha256'] = task_store_module._digest(rec)
+        self.assertEqual(task_store_module._validate(rec)['file_ops_reservation'], res)
+
+    def test_file_ops_reservation_validator_refuses_malformed_fields(self):
+        base = self._active_record()
+        fops = self._valid_file_ops(base)
+        base['file_ops'] = fops
+        res = self._valid_reservation()
+
+        malformed_cases = (
+            ('not a dict', 'reservation'),
+            ('extra key', dict(res, extra=1)),
+            ('missing executor_task', {'reserved_at': res['reserved_at']}),
+            ('missing reserved_at', {'executor_task': res['executor_task']}),
+            ('executor_task invalid', dict(res, executor_task='-invalid-')),
+            ('executor_task uppercase', dict(res, executor_task='INVALID')),
+            ('executor_task empty', dict(res, executor_task='')),
+            ('reserved_at invalid UTC', dict(res, reserved_at='invalid-date')),
+        )
+        for label, bad_res in malformed_cases:
+            with self.subTest(case=label):
+                rec = dict(base, file_ops_reservation=bad_res)
+                rec['record_sha256'] = task_store_module._digest(rec)
+                with self.assertRaises(LLMToolError) as caught:
+                    task_store_module._validate(rec)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_FILE_OPS_RESERVATION_INVALID')
+
+        rec_without_fops = self._active_record()
+        rec_without_fops['file_ops_reservation'] = res
+        rec_without_fops['record_sha256'] = task_store_module._digest(rec_without_fops)
+        with self.assertRaises(LLMToolError) as caught:
+            task_store_module._validate(rec_without_fops)
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'TASK_FILE_OPS_RESERVATION_INVALID')
+
+        ev_different = self._valid_evidence(base, fops, executor_task='d6-task-other')
+        rec_diff = dict(base, file_ops_reservation=res, file_ops_evidence=ev_different)
+        rec_diff['record_sha256'] = task_store_module._digest(rec_diff)
+        with self.assertRaises(LLMToolError) as caught:
+            task_store_module._validate(rec_diff)
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'TASK_FILE_OPS_RESERVATION_INVALID')
+
+    def test_record_without_the_keys_still_validates(self):
+        base = self._active_record()
+        self.assertNotIn('file_ops', base)
+        self.assertNotIn('file_ops_evidence', base)
+        self.assertNotIn('file_ops_reservation', base)
+        base['record_sha256'] = task_store_module._digest(base)
+        validated = task_store_module._validate(base)
+        self.assertEqual(validated['task_id'], base['task_id'])
+        created = self.store.create(self._active_record())
+        self.assertNotIn('file_ops', created)
+        loaded = self.store.get(created['task_id'])
+        self.assertNotIn('file_ops', loaded)
+
+    def test_update_record_refuses_file_ops_and_untrusted_evidence_reservation(self):
+        base = self._active_record()
+        base['file_ops'] = self._valid_file_ops(base)
+        created = self.store.create(base)
+        task_id = created['task_id']
+        fops = self._valid_file_ops(base)
+        ev = self._valid_evidence(base, fops)
+        res = self._valid_reservation()
+
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.update(task_id, file_ops=fops)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_FILE_OPS_IMMUTABLE')
+
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.update(task_id, file_ops_evidence=ev)
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'TASK_FILE_OPS_EVIDENCE_FORBIDDEN')
+
+        with self.assertRaises(LLMToolError) as caught:
+            self.store._update(task_id, expected=None,
+                               changes={'file_ops_evidence': ev, 'response': 'New.'},
+                               trusted_file_ops_evidence=True)
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'TASK_FILE_OPS_EVIDENCE_FORBIDDEN')
+
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.update(task_id, file_ops_reservation=res)
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+
+        with self.assertRaises(LLMToolError) as caught:
+            self.store._update(task_id, expected=None,
+                               changes={'file_ops_reservation': res, 'response': 'New.'},
+                               trusted_file_ops_reservation=True)
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'TASK_FILE_OPS_RESERVATION_FORBIDDEN')
+
+
 if __name__ == '__main__':
     unittest.main()
