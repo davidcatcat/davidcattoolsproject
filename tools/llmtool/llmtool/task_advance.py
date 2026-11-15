@@ -864,6 +864,100 @@ def _test_family_used_up(record, number, head, store=None):
         test_fail_count=_test_fail_count(record, number, store), policy=policy) == 'STOPPED'
 
 
+def _mac_capacity_cancel(run, head, github_get):
+    """Classify whether a Mac CI failure is an infrastructure capacity cancel."""
+    if type(run) is not dict or type(head) is not str:
+        return None
+    details_url = run.get('details_url')
+    if type(details_url) is not str:
+        return None
+    match = re.search(r'/actions/runs/([0-9]+)/job/([0-9]+)\Z', details_url)
+    if not match:
+        return None
+    try:
+        run_id = int(match.group(1))
+        job_id = int(match.group(2))
+    except (ValueError, TypeError):
+        return None
+    if run_id < 1 or job_id < 1:
+        return None
+    try:
+        payload = github_get(f'actions/runs/{run_id}/jobs?per_page=100')
+    except Exception:
+        return None
+    if type(payload) is not dict:
+        return None
+    jobs = payload.get('jobs')
+    if type(jobs) is not list:
+        return None
+    total_count = payload.get('total_count')
+    if type(total_count) is not int or total_count != len(jobs) or total_count > 100 or total_count < 0:
+        return None
+    valid_conclusions = {
+        'success', 'failure', 'cancelled', 'skipped',
+        'timed_out', 'startup_failure', 'neutral', 'action_required',
+    }
+    for job in jobs:
+        if type(job) is not dict:
+            return None
+        name = job.get('name')
+        conclusion = job.get('conclusion')
+        head_sha = job.get('head_sha')
+        if type(name) is not str or type(conclusion) is not str or head_sha != head:
+            return None
+        if conclusion not in valid_conclusions:
+            return None
+    select_jobs = [j for j in jobs if j.get('name') == 'select']
+    if len(select_jobs) != 1:
+        return None
+    select_job = select_jobs[0]
+    mac_jobs = [j for j in jobs if j.get('name') == _MAC_CHECK]
+    if len(mac_jobs) != 1:
+        return None
+    mac_job = mac_jobs[0]
+    if mac_job.get('conclusion') != 'failure':
+        return None
+    steps = mac_job.get('steps')
+    if type(steps) is not list:
+        return None
+    for step in steps:
+        if type(step) is not dict:
+            return None
+    failed_steps = [s for s in steps if s.get('conclusion') == 'failure']
+    if len(failed_steps) != 1 or failed_steps[0].get('name') != 'Shard results':
+        return None
+    failed_jobs = [j for j in jobs if j.get('conclusion') == 'failure']
+    if len(failed_jobs) != 1 or failed_jobs[0] is not mac_job:
+        return None
+    cancel = {'cancelled', 'startup_failure', 'timed_out'}
+    select_conclusion = select_job.get('conclusion')
+    shard_jobs = [j for j in jobs if j.get('name', '').lower().startswith('shard')]
+    if select_conclusion in cancel:
+        pass
+    elif select_conclusion == 'success':
+        if not shard_jobs:
+            return None
+        if not all(j.get('conclusion') in cancel or j.get('conclusion') == 'skipped' for j in shard_jobs):
+            return None
+        if not any(j.get('conclusion') in cancel for j in shard_jobs):
+            return None
+    else:
+        return None
+    check_name = run.get('name')
+    check_run_id = run.get('id')
+    if type(check_name) is not str or type(check_run_id) is not int:
+        return None
+    evidence_jobs = {j['name'][:100]: j['conclusion'] for j in jobs[:100]}
+    evidence = {
+        'check': check_name,
+        'check_run_id': check_run_id,
+        'head': head,
+        'workflow_run_id': run_id,
+        'jobs': evidence_jobs,
+    }
+    return ('WAITING_ENV', ['CI_ENV_MAC_CAPACITY_CANCELLED'], evidence)
+
+
 def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, related,
                       run, fail_code, github_get, repair_review_call):
     """#1502 WP-D D11: route one completed exact-head required check that did not pass.
@@ -880,6 +974,10 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
                 {'check': run['name'], 'check_run_id': run['id'], 'head': head})
     if conclusion != 'failure':
         return None
+    if run.get('name') == _MAC_CHECK:
+        mac_capacity = _mac_capacity_cancel(run, head, github_get)
+        if mac_capacity is not None:
+            return mac_capacity
     action = _remote_fail_action(related, head)
     if action in ('WAITING_REPAIR', 'REPAIR_OUTCOME_UNKNOWN'):
         return action, [action], None
