@@ -1017,9 +1017,24 @@ def _resolve_debug_role(role):
         raise
 
 
+# #1815 T2b: Debug run timeout from the developer-routes.json role entry (default 1800, max 3600).
+def _debug_timeout(role):
+    """Return the configured run timeout for role; refuse before launch on bad config.
+
+    The refusal ROUTE_CONFIG_UNAVAILABLE is not a DEBUG_FALLBACK_CODES member,
+    so it never switches routes.
+    """
+    from .developer_routes import RouteError, role_timeout
+    try:
+        return role_timeout(role)
+    except RouteError:
+        _refuse('ROUTE_CONFIG_UNAVAILABLE')
+
+
 def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
     from . import codex_direct_developer
     model = _admit_debug_model('codex-debug', model)
+    timeout = _debug_timeout('codex-debug')
     argv = ['codex', 'exec', '--ignore-user-config', '--ignore-rules',
             '-m', model]
     for setting in _CODEX_SETTINGS + (
@@ -1030,12 +1045,13 @@ def _run_codex(*, prompt, cwd, output_path, model=_CODEX_MODEL):
     with tempfile.TemporaryDirectory(prefix='llmtool-high-debug-tmp-') as tmpdir:
         return subprocess.run(argv, input=prompt.encode('utf-8'), cwd=cwd,
             env=codex_direct_developer._environment(tmpdir), stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=False, timeout=1800)
+            stderr=subprocess.PIPE, check=False, timeout=timeout)
 
 
 def _run_claude(*, prompt, cwd, output_path, config_dir, model=_CLAUDE_MODEL):
     from .developer_routes.claude import ClaudeRoute
     model = _admit_debug_model('claude-debug', model)
+    timeout = _debug_timeout('claude-debug')
     route = ClaudeRoute({'executable': 'claude', 'config_dir': config_dir})
     argv = [
         'claude', '-p', '--output-format', 'json', '--model', model,
@@ -1047,7 +1063,7 @@ def _run_claude(*, prompt, cwd, output_path, config_dir, model=_CLAUDE_MODEL):
         return subprocess.run(
             argv, stdin=subprocess.DEVNULL, cwd=cwd,
             env=route.build_env(tmpdir), stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=False, timeout=1800)
+            stderr=subprocess.PIPE, check=False, timeout=timeout)
 
 
 def _d6_taken(repo_root, common_dir, d6):
