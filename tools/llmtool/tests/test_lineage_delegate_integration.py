@@ -6,6 +6,7 @@ A's result head refuses CONTINUATION_LINK_REQUIRED, and B cannot reserve an AI
 Debug once A used the chain's one. Standard library only; no network, Git or
 provider call.
 """
+import hashlib
 import json
 import os
 import tempfile
@@ -26,6 +27,22 @@ AT = '2026-11-15T00:00:00Z'
 REASON = 'Synthetic early reason.'
 ASSIGNMENT = {'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
               'goal': 'Synthetic integration goal.', 'acceptance': ['dispatch is bounded']}
+MODEL = 'synthetic-codex-model'
+ARTIFACT = ('diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n'
+            '@@ -1 +1 @@\n-Synthetic source.\n+Synthetic result.\n')
+
+
+def codex_dispatch_allowed():
+    """Patch the policy decision to the Owner ALLOWED one for a Codex DISPATCH.
+
+    The store's dispatch gate audits each Codex DISPATCH (the claim and the
+    move to DEVELOPER_DISPATCHING). The live worker-dispatch.json names the
+    real repository, not REPOSITORY, so for these synthetic writes only the
+    policy decision is patched; the audit and every other check still run.
+    """
+    allowed = worker_dispatch.PolicyDecision(
+        'codex-developer', True, 'OWNER_POLICY_ALLOWED', None)
+    return patch.object(worker_dispatch, 'evaluate', return_value=allowed)
 
 
 def debug_entry(status='RESERVED'):
@@ -106,25 +123,37 @@ class LineageDelegateIntegrationTests(unittest.TestCase):
                              'source_sha': source, 'result_head': None, 'pr_number': pr},
                 'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
                 'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None}
-            # The store's dispatch gate audits this claim as a Codex DISPATCH.
-            # The live worker-dispatch.json names the real repository, not
-            # REPOSITORY, so for this synthetic claim only the policy decision
-            # is the Owner ALLOWED one; the audit and every other check still run.
-            allowed = worker_dispatch.PolicyDecision(
-                'codex-developer', True, 'OWNER_POLICY_ALLOWED', None)
-            with patch.object(worker_dispatch, 'evaluate', return_value=allowed):
+            with codex_dispatch_allowed():
                 self.store.update(task_id, developer=developer, completion=completion)
             return 'CLAIMED'
         return task_submission_cli._delegate_chain_gate(args, self.store, binding, claim)
 
     def finish(self, task_id, head):
-        """Record the Developer result head, as a returned run leaves it."""
+        """Record the Developer result head, as the direct Codex route leaves it.
+
+        The route first binds its provider type and model (DEVELOPER_DISPATCHING,
+        an audited Codex DISPATCH), then records the diff artifact, a DONE
+        execution and the result head (DEVELOPER_RESPONDED). The store refuses a
+        RESPONDED record without a provider type or artifact.
+        """
         record = self.store.get(task_id)
+        dispatching = dict(record['developer'], state='DEVELOPER_DISPATCHING',
+                           provider_type='codex-cli', model=MODEL)
+        with codex_dispatch_allowed():
+            self.store.update(task_id, developer=dispatching)
+        responded = dict(
+            dispatching, state='DEVELOPER_RESPONDED', artifact=ARTIFACT,
+            artifact_sha256=hashlib.sha256(ARTIFACT.encode('utf-8')).hexdigest(),
+            error_code=None, usage=None,
+            execution={'status': 'DONE',
+                       'native_session_id': '00000000-0000-4000-8000-000000000001',
+                       'process_exit_code': 0, 'stdout_sha256': '3' * 64,
+                       'elapsed_ms': 1, 'cleanup_status': 'CONFIRMED',
+                       'usage_source': 'UNKNOWN', 'source_bytes': None,
+                       'source_file_count': None, 'source_manifest_sha256': None})
         completion = dict(record['completion'])
         completion['evidence'] = dict(completion['evidence'], result_head=head)
-        self.store.update(task_id, developer=dict(record['developer'],
-                                                  state='DEVELOPER_RESPONDED'),
-                          completion=completion)
+        self.store.update(task_id, developer=responded, completion=completion)
 
     def refused(self, call):
         with self.assertRaises(LLMToolError) as caught:
