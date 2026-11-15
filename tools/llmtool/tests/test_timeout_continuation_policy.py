@@ -51,6 +51,17 @@ class TimeoutContinuationPolicyTests(unittest.TestCase):
         self.assertIsNone(self.continue_after(0, GOOD))
         self.assertEqual(self.continue_after(1, GOOD), 'WORKER_TIMEOUT_CONTINUATION_LIMIT')
 
+    def test_policy_value_sets_the_limit(self):
+        for limit, prior, code in ((0, 0, 'WORKER_TIMEOUT_CONTINUATION_LIMIT'), (2, 1, None),
+                                   (2, 2, 'WORKER_TIMEOUT_CONTINUATION_LIMIT'), (3, 2, None)):
+            with self.subTest(limit=limit, prior=prior):
+                self.assertEqual(self.continue_after(
+                    prior, dict(GOOD, timeout_continuation_max=limit)), code)
+
+    def test_unreadable_policy_allows_none_with_its_own_code(self):
+        self.assertEqual(self.continue_after(0, LLMToolError('POLICY_INVALID')),
+                         'WORKER_TIMEOUT_CONTINUATION_POLICY_INVALID')
+
 
 if __name__ == '__main__':
     unittest.main()
