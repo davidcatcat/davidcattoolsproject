@@ -775,7 +775,7 @@ _LINUX_CHECK = 'check (Linux 3.14)'
 _MAC_CHECK = 'check (macOS 3.13)'
 # These conclusions say the CI environment stopped the check: wait uncounted,
 # never re-run or re-request CI (main PM open-item 1).
-_CI_ENV_CONCLUSIONS = ('cancelled', 'timed_out', 'startup_failure')
+_CI_ENV_CONCLUSIONS = ('cancelled', 'startup_failure')
 
 
 def _ci_excerpt(run):
@@ -1031,9 +1031,9 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
     if conclusion in _CI_ENV_CONCLUSIONS:
         return ('WAITING_ENV', ['CI_ENV_' + conclusion.upper()],
                 {'check': run['name'], 'check_run_id': run['id'], 'head': head})
-    if conclusion != 'failure':
+    if conclusion not in ('failure', 'timed_out'):
         return None
-    if run.get('name') == _MAC_CHECK:
+    if conclusion == 'failure' and run.get('name') == _MAC_CHECK:
         mac_capacity = _mac_capacity_cancel(run, head, github_get, number)
         if mac_capacity is not None:
             return mac_capacity
@@ -3313,7 +3313,7 @@ def _advance_step(*, task_id, store, guard, pr_number=None, integration_pr=None,
             if ci_code is not None:
                 codes.append(ci_code)
         if (step == 'CI_FAILED' and gate_latest.get('name') == _LINUX_CHECK and
-                gate_latest.get('conclusion') in ('failure', *_CI_ENV_CONCLUSIONS)):
+                gate_latest.get('conclusion') in ('failure', 'timed_out', *_CI_ENV_CONCLUSIONS)):
             # #1502 WP-D D11: route the newest exact-head Linux run before review.
             linux_run = _read_check_run(d6['result_head'], _LINUX_CHECK,
                                         gate_latest.get('id'), get)
