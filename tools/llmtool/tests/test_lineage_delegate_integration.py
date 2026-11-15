@@ -106,7 +106,14 @@ class LineageDelegateIntegrationTests(unittest.TestCase):
                              'source_sha': source, 'result_head': None, 'pr_number': pr},
                 'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
                 'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None}
-            self.store.update(task_id, developer=developer, completion=completion)
+            # The store's dispatch gate audits this claim as a Codex DISPATCH.
+            # The live worker-dispatch.json names the real repository, not
+            # REPOSITORY, so for this synthetic claim only the policy decision
+            # is the Owner ALLOWED one; the audit and every other check still run.
+            allowed = worker_dispatch.PolicyDecision(
+                'codex-developer', True, 'OWNER_POLICY_ALLOWED', None)
+            with patch.object(worker_dispatch, 'evaluate', return_value=allowed):
+                self.store.update(task_id, developer=developer, completion=completion)
             return 'CLAIMED'
         return task_submission_cli._delegate_chain_gate(args, self.store, binding, claim)
 

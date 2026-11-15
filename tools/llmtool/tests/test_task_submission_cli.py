@@ -84,6 +84,7 @@ def codex_developer_config():
     }
 
 
+import _chain_gate_fixture
 import review_trust_fixture
 import worker_policy_fixture
 
@@ -117,6 +118,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
                                  lambda args, store, d6_binding=None: None)
         cap_patch.start()
         self.addCleanup(cap_patch.stop)
+        # #1502 WP-D R2: like the per-D6 cap above, the chain-wide count is out
+        # of scope here (many Tasks share executor-task-1, and some stores are
+        # thin wrappers with no store scan); the claim passes through the gate.
+        # test_task_delegate_repair_cap and test_lineage_delegate_integration
+        # cover the gate.
+        _chain_gate_fixture.pass_through_chain_gate(self)
         rules_patch = patch('llmtool.review_dispatch._review_rules',
                             return_value=(RULES_PREFIX, RULES_SHA256))
         rules_patch.start()

@@ -33,6 +33,7 @@ from llmtool.providers.cli_lifecycle import CLIHostTermination, _Cancelled
 from llmtool import task_store
 
 
+import _chain_gate_fixture
 import review_trust_fixture
 
 
@@ -72,6 +73,11 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         not_delivered = patch.object(task_submission_cli.skill_ledger, 'record_not_delivered')
         self.record_not_delivered = not_delivered.start()
         self.addCleanup(not_delivered.stop)
+        # #1502 WP-D R2: these cases test route wiring on one-record fake stores
+        # without a store scan; the claim passes through the chain gate, which
+        # GwAgentRealStoreTests, test_task_delegate_repair_cap and
+        # test_lineage_delegate_integration run for real.
+        _chain_gate_fixture.pass_through_chain_gate(self)
 
     def test_gw_agent_endpoint_reads_the_gateway_profile_not_company_gw(self):
         profile = {'name': 'work', 'base_url': 'https://gateway.example', 'model': 'm1',

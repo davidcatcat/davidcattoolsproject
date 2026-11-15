@@ -1309,6 +1309,10 @@ class GwAgentDelegateDataClassTests(unittest.TestCase):
         class Store:
             root = '/unused-store-root'
 
+            def task_ids(self):
+                # #1502 WP-D R2: the real chain gate scans the store at the claim.
+                return [task['task_id']]
+
             def get(self, _task_id):
                 return copy.deepcopy(task)
 
@@ -1321,7 +1325,7 @@ class GwAgentDelegateDataClassTests(unittest.TestCase):
         registration = SimpleNamespace(
             task_id='executor-d6', root='/registered/d6', common_dir='/registered/.git',
             branch='feat/task', trusted_agent_id='agent', session_ref='session',
-            native_session_id=None)
+            native_session_id=None, source_sha='c' * 40)
         snapshot = SimpleNamespace(head='c' * 40)
         route_config = {'routes': {'gw-agent': {
             'allowed_data_classes': ['synthetic', 'public_repo'],
@@ -1330,7 +1334,7 @@ class GwAgentDelegateDataClassTests(unittest.TestCase):
                          egress_basis='Task authorized source files only.',
                          data_class=data_class, read_path=['source.py'],
                          write_path=['source.py'], acceptance=['source changes'],
-                         selection_source='PM', timeout=None)
+                         selection_source='PM', timeout=None, executor_task='executor-d6')
         cli = task_submission_cli
         with ExitStack() as stack:
             def patch(target, name, **kwargs):

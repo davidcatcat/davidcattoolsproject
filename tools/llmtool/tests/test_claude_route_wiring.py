@@ -129,6 +129,10 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                 self.writes = 0
                 self.d6_bindings = []
 
+            def task_ids(self):
+                # #1502 WP-D R2: the real chain gate scans the store at the claim.
+                return [task_id]
+
             def get(self, _task_id):
                 return dict(self.task)
 
@@ -150,8 +154,10 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         store = Store()
         snapshot = SimpleNamespace(root='/registered/root', common_dir='/repo/.git',
                                    branch='task-branch', head='d' * 40, clean=True)
+        # source_sha: the chain gate checks the continuation link on the D6 base.
         registration = SimpleNamespace(task_id=executor_id, root=snapshot.root,
             common_dir=snapshot.common_dir, branch=snapshot.branch, result_sha=snapshot.head,
+            source_sha=snapshot.head,
             trusted_agent_id=trusted_agent, session_ref='session-ref', native_session_id=None)
         result = SimpleNamespace(session_id='12345678-1234-4234-8234-123456789abc',
             exit_code=0, stdout_sha256='e' * 64, elapsed_ms=42,
