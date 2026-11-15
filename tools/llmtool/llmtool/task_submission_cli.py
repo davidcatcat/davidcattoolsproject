@@ -43,6 +43,7 @@ from .developer_output_normalize import _HUNK
 from . import role_config
 from . import skill_ledger
 from . import skill_manifest
+from . import source_freshness
 from . import trust
 from .developer_routes import (AgyRoute, ClaudeRoute, GwAgentRoute, RouteError, capture_snapshot,
                                UnsupportedBoundary, check_route_model, for_platform,
@@ -1066,6 +1067,9 @@ def add_task_submission_parsers(actions):
     repair.add_argument('--family', help='root-cause family key (default: pr-<N>)')
     repair.add_argument('--auto-review', action='store_true',
                         help='dispatch the next formal review after a successful repair')
+    repair.add_argument('--recover-claim', metavar='REPAIR_TASK_ID',
+                        help=('#1928: set this UNKNOWN review repair claim DISPATCHED after '
+                              'the E1-E5 evidence checks; dispatches nothing'))
     repair.add_argument('--pm-session',
                         help=('caller PM session (native UUID or pm- ID); must own '
                               'the Task; default: CLAUDE_CODE_SESSION_ID or '
@@ -2406,6 +2410,14 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
     if pending is not None:
         _print(pending)
         return 1
+    recover = getattr(args, 'recover_claim', None)
+    if recover is not None:
+        if getattr(args, 'auto_review', False) or getattr(args, 'family', None) is not None:
+            raise LLMToolError('--recover-claim takes no --auto-review or --family')
+        from .review_repair_recovery import recover_unknown_claim
+        return _print(recover_unknown_claim(
+            store=store, task_id=args.task_id, executor_task=args.executor_task,
+            pr_number=args.pr, repair_task_id=recover))
     from .review_repair import repair_review
     result = repair_review(
         store=store, task_id=args.task_id,
@@ -4720,9 +4732,20 @@ def _developer_card_prefix(task, registration, provider):
         raise LLMToolError(label + '_SKILL_PIN_FAILED: ' + code) from None
     if type(pinned) is not str or re.fullmatch(r'[0-9a-f]{40}', pinned) is None:
         raise LLMToolError(label + '_SKILL_PIN_FAILED: PIN_INVALID')
+    # #2029: a merge during dispatch can leave the authenticated pin newer than the local fetch.
+    task_completion.ensure_main_commit(registration.root, pinned)
     try:
-        built = skill_manifest.build_role_cards(
-            registration.root, pinned, route, main_ref=skill_manifest.DEFAULT_MAIN_REF)
+        try:
+            built = skill_manifest.build_role_cards(
+                registration.root, pinned, route, main_ref=skill_manifest.DEFAULT_MAIN_REF)
+        except skill_manifest.SkillManifestError as exc:
+            if exc.code in (skill_manifest.SKILL_MANIFEST_COMMIT_NOT_LOCAL,
+                            skill_manifest.SKILL_MANIFEST_COMMIT_NOT_ON_MAIN):
+                source_freshness._fetch_origin_main(registration.root)
+                built = skill_manifest.build_role_cards(
+                    registration.root, pinned, route, main_ref=skill_manifest.DEFAULT_MAIN_REF)
+            else:
+                raise
     except skill_manifest.SkillManifestError as exc:
         if exc.code == skill_manifest.SKILL_MANIFEST_PATH_MISSING:
             raise LLMToolError(label + '_ROLE_CARD_MISSING') from None
