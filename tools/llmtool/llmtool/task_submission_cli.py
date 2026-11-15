@@ -4900,12 +4900,13 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
         'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        store.d6_bind_compare_and_update(
-            task['task_id'], executor_task_id=registration.task_id,
-            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                      'completion': None},
-            developer=developer, completion=completion,
-        )
+        _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
+            store.d6_bind_compare_and_update(
+                task['task_id'], executor_task_id=registration.task_id,
+                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                          'completion': None},
+                developer=developer, completion=completion,
+            )))
     except TaskStoreConflict:
         raise LLMToolError(
             'developer assignment already exists; duplicate dispatch refused') from None
@@ -5386,10 +5387,11 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        store.d6_bind_compare_and_update(task['task_id'],
-            executor_task_id=registration.task_id,
-            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                      'completion': None}, developer=developer, completion=completion)
+        _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
+            store.d6_bind_compare_and_update(task['task_id'],
+                executor_task_id=registration.task_id,
+                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                          'completion': None}, developer=developer, completion=completion)))
     except TaskStoreConflict:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     owner_gate_denied = False
@@ -5857,10 +5859,11 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        store.d6_bind_compare_and_update(task['task_id'],
-            executor_task_id=registration.task_id,
-            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                      'completion': None}, developer=developer, completion=completion)
+        _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
+            store.d6_bind_compare_and_update(task['task_id'],
+                executor_task_id=registration.task_id,
+                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                          'completion': None}, developer=developer, completion=completion)))
     except TaskStoreConflict:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     owner_gate_denied = False
@@ -6186,10 +6189,11 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        claimed = store.d6_bind_compare_and_update(task['task_id'],
-            executor_task_id=registration.task_id,
-            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                      'completion': None}, developer=developer, completion=completion)
+        claimed = _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
+            store.d6_bind_compare_and_update(task['task_id'],
+                executor_task_id=registration.task_id,
+                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                          'completion': None}, developer=developer, completion=completion)))
     except TaskStoreConflict:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     expected_developer = copy.deepcopy(claimed['developer'])
@@ -6729,12 +6733,13 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        store.d6_bind_compare_and_update(task['task_id'],
-            executor_task_id=registration.task_id,
-            expected={'schema_version': 2, 'state': 'PM_RESPONDED',
-                      'developer': previous_developer,
-                      'completion': task.get('completion')},
-            developer=developer, completion=completion)
+        _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
+            store.d6_bind_compare_and_update(task['task_id'],
+                executor_task_id=registration.task_id,
+                expected={'schema_version': 2, 'state': 'PM_RESPONDED',
+                          'developer': previous_developer,
+                          'completion': task.get('completion')},
+                developer=developer, completion=completion)))
     except TaskStoreConflict:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
     except worker_dispatch.WorkerDispatchDenied as exc:
@@ -7238,7 +7243,35 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     new_ec2_ids = set()
     legacy_ec2_ids = set()
     newest_assignment = None
-    high_debug_task = getattr(args, 'high_debug_task', None)
+    d6_unchanged = _d6_unchanged_probe(args, d6_binding)
+
+    for task_id in task_ids:
+        if task_id == current_task_id:
+            continue
+        try:
+            record = store.get(task_id)
+        except Exception:
+            raise LLMToolError(
+                f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
+        completion = record.get('completion')
+        if (type(completion) is dict and
+                completion.get('executor_task_id') == executor_task):
+            _collect_ec2_repair_task_ids(record, new_ec2_ids, legacy_ec2_ids)
+            developer = record.get('developer')
+            # A sensitive output refusal on this D6 blocks every new dispatch
+            # until its rules and lines carry a stored disposition (#981).
+            _check_developer_screen_disposition(store, task_id, developer)
+            stamp = _repair_run_stamp(task_id, developer, d6_unchanged)
+            if stamp is None:
+                continue
+            counted.append(task_id)
+            newest_assignment = max(newest_assignment, stamp) if newest_assignment else stamp
+    _check_repair_limits(args, store, d6_binding, policy, current_task_id, counted,
+                         new_ec2_ids, legacy_ec2_ids, newest_assignment)
+
+
+def _d6_unchanged_probe(args, d6_binding):
+    """d6_unchanged(source_sha) for the delegated D6, evaluated lazily once."""
     d6_state = []
 
     def d6_unchanged(source_sha):
@@ -7257,63 +7290,61 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
         head, clean = d6_state[0]
         return head == source_sha and clean
 
-    for task_id in task_ids:
-        if task_id == current_task_id:
-            continue
-        try:
-            record = store.get(task_id)
-        except Exception:
-            raise LLMToolError(
-                f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
-        completion = record.get('completion')
-        if (type(completion) is dict and
-                completion.get('executor_task_id') == executor_task):
-            _collect_ec2_repair_task_ids(record, new_ec2_ids, legacy_ec2_ids)
-            developer = record.get('developer')
-            # A sensitive output refusal on this D6 blocks every new dispatch
-            # until its rules and lines carry a stored disposition (#981).
-            _check_developer_screen_disposition(store, task_id, developer)
-            if developer is None:
-                continue
-            if type(developer) is not dict:
-                raise LLMToolError(
-                    f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
-            refusal_key = (
-                developer.get('provider_profile'),
-                developer.get('state'),
-                developer.get('error_code'),
-            )
-            known_prelaunch_refusal = (
-                all(type(value) is str for value in refusal_key) and
-                refusal_key in _PRELAUNCH_REPAIR_REFUSALS
-            )
-            known_empty = all(
-                key in developer and developer[key] is None
-                for key in ('artifact', 'artifact_sha256', 'execution', 'usage')
-            )
-            changed_files_empty = (
-                'changed_files' not in developer or
-                (type(developer['changed_files']) is list and
-                 not developer['changed_files'])
-            )
-            if (known_prelaunch_refusal and known_empty and
-                    changed_files_empty and 'progress' not in developer):
-                continue
-            if _launched_run_did_no_work(developer, d6_unchanged):
-                continue
-            created_at = developer.get('created_at')
-            try:
-                stamp = datetime.strptime(created_at, '%Y-%m-%dT%H:%M:%SZ')
-                if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != created_at:
-                    raise ValueError
-            except (TypeError, ValueError):
-                raise LLMToolError(
-                    f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
-            counted.append(task_id)
-            newest_assignment = max(newest_assignment, stamp) if newest_assignment else stamp
+    return d6_unchanged
+
+
+def _repair_run_stamp(task_id, developer, d6_unchanged):
+    """The assignment time of a counted Developer run, or None for a skipped one.
+
+    Skipped: no Developer, a known prelaunch refusal, or a launched run whose
+    record proves it did no work. A malformed record or assignment time
+    refuses DELEGATE_REPAIR_COUNT_UNAVAILABLE.
+    """
+    if developer is None:
+        return None
+    if type(developer) is not dict:
+        raise LLMToolError(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
+    refusal_key = (
+        developer.get('provider_profile'),
+        developer.get('state'),
+        developer.get('error_code'),
+    )
+    known_prelaunch_refusal = (
+        all(type(value) is str for value in refusal_key) and
+        refusal_key in _PRELAUNCH_REPAIR_REFUSALS
+    )
+    known_empty = all(
+        key in developer and developer[key] is None
+        for key in ('artifact', 'artifact_sha256', 'execution', 'usage')
+    )
+    changed_files_empty = (
+        'changed_files' not in developer or
+        (type(developer['changed_files']) is list and
+         not developer['changed_files'])
+    )
+    if (known_prelaunch_refusal and known_empty and
+            changed_files_empty and 'progress' not in developer):
+        return None
+    if _launched_run_did_no_work(developer, d6_unchanged):
+        return None
+    created_at = developer.get('created_at')
+    try:
+        stamp = datetime.strptime(created_at, '%Y-%m-%dT%H:%M:%SZ')
+        if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != created_at:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise LLMToolError(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
+    return stamp
+
+
+def _check_repair_limits(args, store, d6_binding, policy, current_task_id, counted,
+                         new_ec2_ids, legacy_ec2_ids, newest_assignment):
+    """Apply the review and EC2 limits to counted runs, then repair #2's root cause."""
     if current_task_id in new_ec2_ids or current_task_id in legacy_ec2_ids:
-        # Prior EC2 repair runs on this D6, new and legacy. EC2 repairs
-        # never take the High Debug path.
+        # Prior EC2 repair runs, new and legacy. EC2 repairs never take the
+        # High Debug path.
         count = sum(1 for task_id in counted
                     if task_id in new_ec2_ids or task_id in legacy_ec2_ids)
         if count >= policy['test_fail_max']:
@@ -7328,6 +7359,13 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     if count < 2:
         # The original run and repair #1 need no root cause (D1).
         return
+    _check_repair_rca(args, store, d6_binding, newest_assignment)
+
+
+def _check_repair_rca(args, store, d6_binding, newest_assignment):
+    """Repair #2 and later need a confirmed root cause (packet or High Debug Task)."""
+    executor_task = getattr(args, 'executor_task', None)
+    high_debug_task = getattr(args, 'high_debug_task', None)
     packet = getattr(args, 'repair_packet', None)
     if type(packet) is dict and 'high_debug_report_sha256' in packet:
         _check_repair_packet_rca(packet, store, executor_task)
@@ -7413,6 +7451,97 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             f'the current D6 head {head_prefix}; examined SHA {examined_prefix}')
 
 
+def _delegate_chain_view(store, task_id, executor_task):
+    """(records, view) of the delegated Task's and its D6 Tasks' chains, or None."""
+    from . import lineage_counts
+    try:
+        records = lineage_counts.store_records(store)
+        if records is None:
+            return None
+        d6_ids = lineage_counts.d6_task_ids(records, executor_task)
+        if d6_ids is None:
+            return None
+        view = lineage_counts.delegate_chain(records, [task_id] + d6_ids)
+    except Exception:
+        return None
+    return None if view is None else (records, view)
+
+
+def _check_chain_repair_count(args, store, d6_binding, policy, view):
+    """The chain-wide Developer repair cap over every view member but the Task."""
+    task_id = getattr(args, 'task_id', None)
+    executor_task = getattr(args, 'executor_task', None)
+    same_d6 = _d6_unchanged_probe(args, d6_binding)
+    counted, new_ec2_ids, legacy_ec2_ids, newest_assignment = [], set(), set(), None
+    for member_id in sorted(view['members']):
+        if member_id == task_id:
+            continue
+        record = view['members'][member_id]
+        if type(record) is not dict:
+            raise LLMToolError(f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {member_id}')
+        _collect_ec2_repair_task_ids(record, new_ec2_ids, legacy_ec2_ids)
+        completion = record.get('completion')
+        on_d6 = (type(completion) is dict and
+                 completion.get('executor_task_id') == executor_task)
+        # A run on another D6 is never proved unchanged by this D6's tree.
+        stamp = _repair_run_stamp(member_id, record.get('developer'),
+                                  same_d6 if on_d6 else (lambda _source_sha: False))
+        if stamp is None:
+            continue
+        counted.append(member_id)
+        newest_assignment = max(newest_assignment, stamp) if newest_assignment else stamp
+    _check_repair_limits(args, store, d6_binding, policy, task_id, counted,
+                         new_ec2_ids, legacy_ec2_ids, newest_assignment)
+
+
+def _delegate_chain_gate(args, store, d6_binding, claim):
+    """#1502 WP-D R2: count the chain and write the claim under its chain locks.
+
+    Runs at each route's claim site, after every route refusal. Takes the
+    chain locks of the delegated Task's and its D6 Tasks' chains, recomputes
+    the view on fresh reads (changed keys are UNKNOWN), applies the
+    chain-wide repair cap (with repair #2's root cause) and
+    CONTINUATION_LINK_REQUIRED, then calls claim() and returns its result.
+    Any doubt refuses DELEGATE_REPAIR_COUNT_UNAVAILABLE before any write. The
+    locks are released on every path, before any provider call or fork.
+    """
+    from . import lineage_counts
+    task_id = getattr(args, 'task_id', None)
+    executor_task = getattr(args, 'executor_task', None)
+    unavailable = f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}'
+    try:
+        policy = repair_policy.load_policy()
+    except Exception:
+        raise LLMToolError(unavailable) from None
+    first = _delegate_chain_view(store, task_id, executor_task)
+    if first is None:
+        raise LLMToolError(unavailable)
+    keys = list(first[1]['keys'])
+    try:
+        release = lineage_counts.acquire_chain_locks(store, keys)
+    except Exception:
+        raise LLMToolError(unavailable) from None
+    try:
+        fresh = _delegate_chain_view(store, task_id, executor_task)
+        if fresh is None or list(fresh[1]['keys']) != keys:
+            raise LLMToolError(unavailable)
+        records, view = fresh
+        _check_chain_repair_count(args, store, d6_binding, policy, view)
+        registration = (d6_binding[0] if type(d6_binding) is tuple and len(d6_binding) == 2
+                        else None)
+        lineage_counts.check_continuation_link(
+            records, set(view['members']), getattr(registration, 'source_sha', None))
+        result = claim()
+    except BaseException:
+        try:
+            release()
+        except Exception:
+            pass   # the refusal or claim failure is the error the caller sees
+        raise
+    release()
+    return result
+
+
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
     if getattr(args, 'provider', None) == 'company-gw':
@@ -7489,6 +7618,9 @@ def run_task_delegate(args, *, store=None):
         if previous is None:
             _reject_claude_reserved_d6(registration)
         _check_delegate_repair_cap(args, store, (registration, _snapshot))
+        # #1502 WP-D R2: pre-check the chain in the parent, before the fork; the
+        # child's claim runs the gate again under the chain locks.
+        _delegate_chain_gate(args, store, (registration, _snapshot), lambda: None)
         return _run_background_delegate(
             args, provider=provider, store=store,
             d6_binding=(registration, _snapshot))
@@ -7615,12 +7747,13 @@ def run_task_delegate(args, *, store=None):
     # remains pending; this task cannot silently trigger a duplicate provider call.
     _check_delegate_repair_cap(args, store, (registration, snapshot))
     try:
-        store.d6_bind_compare_and_update(
-            task['task_id'], executor_task_id=registration.task_id,
-            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                      'completion': None},
-            developer=developer, completion=completion,
-        )
+        _delegate_chain_gate(args, store, (registration, snapshot), lambda: (
+            store.d6_bind_compare_and_update(
+                task['task_id'], executor_task_id=registration.task_id,
+                expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                          'completion': None},
+                developer=developer, completion=completion,
+            )))
     except TaskStoreConflict:
         raise LLMToolError(
             'developer assignment already exists; duplicate dispatch refused') from None
