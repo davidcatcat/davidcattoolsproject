@@ -76,6 +76,8 @@ When sibling job evidence is ambiguous, incomplete, or corrupted, `task_advance`
    - Behavior: Keeps today's `WAITING` (`WAITING_CI` with reason code `CI_JOB_CONCLUSION_UNKNOWN`).
    - Count impact: Does not spend the test-failure count; does not dispatch repair until a conclusive state is reached.
 
+Amendment (PM_DECIDE #1786 c6889125309): cases 1, 3 and 4, and a missing or unmatched details_url, keep today's counted CI_FAILED routing instead of WAITING; no exemption without positive evidence.
+
 ## 5. Out of scope
 
 To respect architectural boundaries and Owner authority, the following areas are strictly out of scope:

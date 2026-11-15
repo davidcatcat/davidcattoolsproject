@@ -864,6 +864,159 @@ def _test_family_used_up(record, number, head, store=None):
         test_fail_count=_test_fail_count(record, number, store), policy=policy) == 'STOPPED'
 
 
+_MAC_DETAILS_URL_RE = re.compile(r'/actions/runs/([0-9]+)/job/([0-9]+)\Z')
+_CANCEL_CONCLUSIONS = frozenset({'cancelled', 'startup_failure'})
+_ALLOWED_JOB_CONCLUSIONS = frozenset({
+    'success', 'failure', 'cancelled', 'skipped',
+    'timed_out', 'startup_failure', 'neutral', 'action_required'
+})
+
+
+def _mac_capacity_cancel(run, head, github_get, number=None):
+    """Classify a Mac CI failure as infrastructure capacity cancellation (#1786).
+
+    Accepted cancellation is interrupted CI evidence, not verified capacity
+    causation. Return ('WAITING_ENV', ['CI_ENV_MAC_CAPACITY_CANCELLED'],
+    evidence) when positive sibling-job evidence shows select or shards were
+    cancelled with no failed test job; otherwise return None (fail closed to
+    today's routing).
+    """
+    if type(run) is not dict or run.get('name') != _MAC_CHECK:
+        return None
+    if type(run.get('id')) is not int or run['id'] < 1:
+        return None
+    details_url = run.get('details_url')
+    if type(details_url) is not str:
+        return None
+    match = _MAC_DETAILS_URL_RE.search(details_url)
+    if not match:
+        return None
+    try:
+        run_id = int(match.group(1))
+        job_id = int(match.group(2))
+    except (ValueError, TypeError):
+        return None
+    if run_id < 1 or job_id < 1:
+        return None
+    if type(number) is not int or number < 1:
+        return None
+
+    # Trust 1: files, code = _pr_files(number, github_get); code not None -> None.
+    # Every entry must be a dict with a str 'filename'; if any 'filename' or str
+    # 'previous_filename' starts with '.github/' -> None.
+    files, code = _pr_files(number, github_get)
+    if code is not None or type(files) is not list:
+        return None
+    for entry in files:
+        if type(entry) is not dict:
+            return None
+        filename = entry.get('filename')
+        if type(filename) is not str or filename.startswith('.github/'):
+            return None
+        previous_filename = entry.get('previous_filename')
+        if type(previous_filename) is str and previous_filename.startswith('.github/'):
+            return None
+
+    # Trust 2: github_get(f'actions/runs/{run_id}') in try/except Exception -> must be
+    # a dict with head_sha == head and path == '.github/workflows/llmtool-mac-ci.yml';
+    # anything else -> None.
+    try:
+        workflow_run = github_get(f'actions/runs/{run_id}')
+    except Exception:
+        return None
+    if type(workflow_run) is not dict:
+        return None
+    if workflow_run.get('head_sha') != head or workflow_run.get('path') != '.github/workflows/llmtool-mac-ci.yml':
+        return None
+
+    try:
+        payload = github_get(f'actions/runs/{run_id}/jobs?per_page=100')
+    except Exception:
+        return None
+    if type(payload) is not dict:
+        return None
+    jobs = payload.get('jobs')
+    if type(jobs) is not list:
+        return None
+    total_count = payload.get('total_count')
+    if type(total_count) is not int or total_count != len(jobs) or total_count > 100 or total_count < 0:
+        return None
+    for job in jobs:
+        if type(job) is not dict:
+            return None
+        name = job.get('name')
+        conclusion = job.get('conclusion')
+        head_sha = job.get('head_sha')
+        if type(name) is not str or type(conclusion) is not str:
+            return None
+        if head_sha != head:
+            return None
+        if conclusion not in _ALLOWED_JOB_CONCLUSIONS:
+            return None
+
+    select_jobs = [j for j in jobs if j.get('name') == 'select']
+    if len(select_jobs) != 1:
+        return None
+    select_job = select_jobs[0]
+
+    mac_jobs = [j for j in jobs if j.get('name') == _MAC_CHECK]
+    if len(mac_jobs) != 1:
+        return None
+    mac_job = mac_jobs[0]
+    # Trust 3: the job id parsed from details_url must equal the int 'id' of the single
+    # job named _MAC_CHECK in the jobs list; mismatch or missing -> None.
+    mac_job_id = mac_job.get('id')
+    if type(mac_job_id) is not int or mac_job_id != job_id:
+        return None
+    if mac_job.get('conclusion') != 'failure':
+        return None
+
+    steps = mac_job.get('steps')
+    if type(steps) is not list:
+        return None
+    if any(type(s) is not dict for s in steps):
+        return None
+    failed_steps = [s for s in steps if s.get('conclusion') == 'failure']
+    if len(failed_steps) != 1 or failed_steps[0].get('name') != 'Shard results':
+        return None
+
+    failed_jobs = [j for j in jobs if j.get('conclusion') == 'failure']
+    if len(failed_jobs) != 1 or failed_jobs[0] is not mac_job:
+        return None
+
+    select_conclusion = select_job.get('conclusion')
+    shards_jobs = [j for j in jobs if j.get('name', '').startswith('shards')]
+
+    if select_conclusion == 'timed_out' or any(j.get('conclusion') == 'timed_out' for j in shards_jobs):
+        return None
+
+    is_capacity = False
+    if select_conclusion in _CANCEL_CONCLUSIONS:
+        is_capacity = True
+    elif select_conclusion == 'success':
+        if shards_jobs and all(
+            j.get('conclusion') in (_CANCEL_CONCLUSIONS | {'skipped'})
+            for j in shards_jobs
+        ) and any(
+            j.get('conclusion') in _CANCEL_CONCLUSIONS
+            for j in shards_jobs
+        ):
+            is_capacity = True
+
+    if not is_capacity:
+        return None
+
+    jobs_summary = {job['name'][:100]: job['conclusion'] for job in jobs[:100]}
+    evidence = {
+        'check': run['name'],
+        'check_run_id': run['id'],
+        'head': head,
+        'workflow_run_id': run_id,
+        'jobs': jobs_summary,
+    }
+    return ('WAITING_ENV', ['CI_ENV_MAC_CAPACITY_CANCELLED'], evidence)
+
+
 def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, related,
                       run, fail_code, github_get, repair_review_call):
     """#1502 WP-D D11: route one completed exact-head required check that did not pass.
@@ -880,6 +1033,10 @@ def _route_ci_failure(*, store, record, task_id, executor_task, number, d6, rela
                 {'check': run['name'], 'check_run_id': run['id'], 'head': head})
     if conclusion != 'failure':
         return None
+    if run.get('name') == _MAC_CHECK:
+        mac_capacity = _mac_capacity_cancel(run, head, github_get, number)
+        if mac_capacity is not None:
+            return mac_capacity
     action = _remote_fail_action(related, head)
     if action in ('WAITING_REPAIR', 'REPAIR_OUTCOME_UNKNOWN'):
         return action, [action], None
