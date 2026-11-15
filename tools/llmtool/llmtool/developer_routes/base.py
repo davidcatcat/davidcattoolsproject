@@ -51,8 +51,13 @@ def max_diff_bytes_ok(value: Any) -> bool:
 
 
 def max_task_paths_ok(value: Any) -> bool:
-    """Return True only for an int (not bool) with 1 <= value <= HARD_MAX_TASK_PATHS (#2157)."""
-    return type(value) is int and 1 <= value <= HARD_MAX_TASK_PATHS
+    """Return True only for the int DEFAULT_MAX_TASK_PATHS, not bool, for now (#2157).
+
+    _assignment_paths does not read max_task_paths yet, so any other value would
+    look like a limit that is not enforced. The wiring PR relaxes this check to
+    1..HARD_MAX_TASK_PATHS together with that enforcement.
+    """
+    return type(value) is int and value == DEFAULT_MAX_TASK_PATHS
 
 
 class RouteError(LLMToolError):
