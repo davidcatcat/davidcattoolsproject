@@ -35,6 +35,7 @@ TASK = '1' * 32
 TOKENS = {'prompt_tokens': 120, 'completion_tokens': 30, 'total_tokens': 150}
 REPORTED = 'CLI_REPORTED'
 QUOTA = {'condition': 'QUOTA_EXHAUSTED'}
+STEP_USAGE = {'basis': 'STEP_USAGE', 'accepted': True}
 REPO = {'slug': 'davidcatcat/davidcattoolsproject', 'dispatch_issue': 289,
         'dispatch_evidence_pr': 1}
 VALID_RELAY_URL = (
