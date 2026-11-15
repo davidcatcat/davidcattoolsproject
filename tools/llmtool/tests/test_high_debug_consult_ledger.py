@@ -5,6 +5,7 @@ the default state root (the default-root test injects ``default_root``), Git,
 a provider or the network. The report digest is the SHA-256 of a fixed plain
 label; no test holds credential-shaped data.
 """
+import dataclasses
 import hashlib
 import json
 import multiprocessing
@@ -288,6 +289,9 @@ class ConsultLedgerTest(unittest.TestCase):
     def test_hard_linked_slot_refuses_ledger_invalid(self):
         handle = self.reserve('real')
         os.link(self.ledger / 'wp-real.json', self.base / 'outside-alias.json')
+        pause = mock.patch.object(consult, '_settle_pause')
+        pauses = pause.start()
+        self.addCleanup(pause.stop)
         # A used WP whose slot carries a planted second name is invalid, not used.
         self.refuses(consult.LEDGER_INVALID, self.reserve, 'real')
         self.refuses(consult.LEDGER_INVALID, consult.finish, handle, consult.DONE, REPORT,
@@ -297,6 +301,26 @@ class ConsultLedgerTest(unittest.TestCase):
         os.link(self.ledger / 'week-2026-W46-1.json', self.base / 'week-alias.json')
         self.refuses(consult.LEDGER_INVALID, self.reserve, 'other')
         self.assertNotIn('wp-other.json', self.names('wp-'))
+        # A second name outside the ledger is never waited out: it refuses at once.
+        pauses.assert_not_called()
+
+    def test_lingering_in_ledger_temporary_name_refuses_after_the_bounded_wait(self):
+        self.reserve('stale')
+        os.link(self.ledger / 'wp-stale.json', self.ledger / '.consult-left-behind')
+        with mock.patch.object(consult, '_settle_pause') as pauses:
+            self.refuses(consult.LEDGER_INVALID, self.reserve, 'stale')
+        self.assertEqual(pauses.call_count, consult._SETTLE_TRIES)
+        self.assertEqual(self.load('wp-stale.json')['state'], 'RESERVED')
+
+    def test_hard_linked_temporary_name_of_another_inode_does_not_excuse_a_slot(self):
+        self.reserve('seed')
+        os.link(self.ledger / 'wp-seed.json', self.base / 'outside-alias.json')
+        # An unrelated in-ledger temporary (another inode) is no excuse either.
+        fd = os.open(self.ledger / '.consult-unrelated', os.O_WRONLY | os.O_CREAT, 0o600)
+        os.close(fd)
+        with mock.patch.object(consult, '_settle_pause') as pauses:
+            self.refuses(consult.LEDGER_INVALID, self.reserve, 'seed')
+        pauses.assert_not_called()
 
     def test_planted_hard_link_into_the_ledger_refuses_ledger_invalid(self):
         self.reserve('seed')
@@ -362,11 +386,11 @@ class ConsultLedgerTest(unittest.TestCase):
         self.refuses(consult.LEDGER_INVALID, consult.reserve, 'wp5', now=NOW,
                      root=link / 'tasks')
         self.assertFalse((state / consult.LEDGER_DIR).exists())
-        # A handle whose ledger path runs through a symlink refuses too.
+        # A handle whose root runs through a symlink refuses too.
         handle = self.reserve('wp5')
-        aliased = consult.Reservation('wp5', WEEK, handle.week_slot,
-                                      self.base / 'base-link' / consult.LEDGER_DIR)
         os.symlink(self.base, self.base / 'base-link')
+        aliased = dataclasses.replace(handle, root=self.base / 'base-link' / 'tasks',
+                                      directory=self.base / 'base-link' / consult.LEDGER_DIR)
         self.refuses(consult.LEDGER_INVALID, consult.finish, aliased, consult.DONE, REPORT,
                      now=NOW)
         self.assertEqual(self.load('wp-wp5.json')['state'], 'RESERVED')
@@ -386,6 +410,48 @@ class ConsultLedgerTest(unittest.TestCase):
         os.chmod(self.base, 0o700)
         self.assertFalse(self.ledger.exists())
         self.assertEqual(self.reserve('wp5').week_slot, 1)
+
+    def test_finish_rechecks_the_supplied_root_confinement(self):
+        handle = self.reserve('wp5')
+        self.addCleanup(os.chmod, self.root, 0o700)
+        os.chmod(self.root, 0o750)
+        self.refuses(consult.LEDGER_INVALID, consult.finish, handle, consult.DONE, REPORT,
+                     now=NOW)
+        os.chmod(self.root, 0o700)
+        self.assertEqual(self.load('wp-wp5.json')['state'], 'RESERVED')
+        consult.finish(handle, consult.DONE, REPORT, now=NOW)
+        self.assertEqual(self.load('wp-wp5.json')['state'], 'DONE')
+
+    def test_state_root_swapped_after_the_check_is_not_followed(self):
+        state = self.base / 'state'
+        (state / 'tasks').mkdir(mode=0o700, parents=True)
+        os.chmod(state, 0o700)
+        os.chmod(state / 'tasks', 0o700)
+        decoy = self.base / 'decoy'
+        (decoy / 'tasks').mkdir(mode=0o700, parents=True)
+        os.chmod(decoy, 0o700)
+        os.chmod(decoy / 'tasks', 0o700)
+        moved = self.base / 'state-moved'
+        real_confine = consult._confine
+
+        def confine_then_swap(store):
+            result = real_confine(store)
+            os.rename(state, moved)
+            os.symlink(decoy, state)
+            return result
+
+        with mock.patch.object(consult, '_confine', side_effect=confine_then_swap):
+            consult.reserve('wp5', now=NOW, root=state / 'tasks')
+        # Every write stayed in the checked directory, which now sits at ``moved``.
+        self.assertFalse((decoy / consult.LEDGER_DIR).exists())
+        self.assertTrue((moved / consult.LEDGER_DIR / 'wp-wp5.json').is_file())
+        self.assertTrue((moved / consult.LEDGER_DIR / 'week-2026-W46-1.json').is_file())
+
+    def test_platform_without_descriptor_calls_fails_closed(self):
+        with mock.patch.object(consult, '_PLATFORM_READY', False):
+            self.refuses(consult.LEDGER_INVALID, self.reserve, 'wp5')
+            self.refuses(consult.LEDGER_INVALID, consult.ledger_directory, self.root)
+        self.assertFalse(self.ledger.exists())
 
     def test_missing_or_non_directory_root_refuses(self):
         self.refuses(consult.LEDGER_INVALID, consult.reserve, 'wp5', now=NOW,
@@ -454,13 +520,19 @@ class ConsultLedgerTest(unittest.TestCase):
             (handle, consult.DONE, REPORT.upper()),
             (handle, consult.DONE, REPORT[:40]),
             (('wp5', WEEK, 1), consult.DONE, REPORT),
-            (consult.Reservation('wp5', WEEK, 0, handle.directory), consult.DONE, REPORT),
-            (consult.Reservation('../x', WEEK, 1, handle.directory), consult.DONE, REPORT),
-            (consult.Reservation('wp5', WEEK, 1, Path(consult.LEDGER_DIR)), consult.DONE,
+            (dataclasses.replace(handle, week_slot=0), consult.DONE, REPORT),
+            (dataclasses.replace(handle, wp='../x'), consult.DONE, REPORT),
+            (dataclasses.replace(handle, directory=Path(consult.LEDGER_DIR)), consult.DONE,
              REPORT),
-            (consult.Reservation('wp5', WEEK, 1, self.base), consult.DONE, REPORT),
-            (consult.Reservation('wp5', WEEK, 1, self.root / '..' / consult.LEDGER_DIR),
+            (dataclasses.replace(handle, directory=self.base), consult.DONE, REPORT),
+            (dataclasses.replace(handle, directory=self.root / '..' / consult.LEDGER_DIR),
              consult.DONE, REPORT),
+            # The root is re-derived: a relative, non-normalised or non-Path root
+            # refuses, and the directory must be the ledger of that root.
+            (dataclasses.replace(handle, root=Path('tasks')), consult.DONE, REPORT),
+            (dataclasses.replace(handle, root=self.root / '..' / 'tasks'), consult.DONE,
+             REPORT),
+            (dataclasses.replace(handle, root=str(self.root)), consult.DONE, REPORT),
         ]
         for args in bad_calls:
             with self.subTest(args=args[1:]):
@@ -471,10 +543,10 @@ class ConsultLedgerTest(unittest.TestCase):
     def test_finish_refuses_ledger_invalid_when_slots_disagree(self):
         handle = self.reserve('wp5')
         self.reserve('neighbour')
-        foreign = consult.Reservation('wp5', WEEK, 2, handle.directory)
+        foreign = dataclasses.replace(handle, week_slot=2)
         self.refuses(consult.LEDGER_INVALID, consult.finish, foreign, consult.DONE, REPORT,
                      now=NOW)
-        absent = consult.Reservation('wp5', WEEK, 5, handle.directory)
+        absent = dataclasses.replace(handle, week_slot=5)
         self.refuses(consult.LEDGER_INVALID, consult.finish, absent, consult.DONE, REPORT,
                      now=NOW)
         self.assertEqual(self.load('wp-wp5.json')['state'], 'RESERVED')
