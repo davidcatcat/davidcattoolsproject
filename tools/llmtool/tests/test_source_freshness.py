@@ -170,6 +170,7 @@ class SourceFreshnessTests(unittest.TestCase):
                                           str(Path(self.temp.name) / 'not-a-repo' /
                                               'tools/llmtool/llmtool/__init__.py'))
         self.package_patch.start()
+        self.addCleanup(self.package_patch.stop)
         self.assertEqual(freshness.source_freshness(), 'UNKNOWN')
         with self.assertRaises(LLMToolError) as caught:
             freshness.require_fresh_source()
