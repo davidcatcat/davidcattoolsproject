@@ -440,6 +440,13 @@ class IncidentRemoteTestTests(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertEqual(len(self.stored()[incident_store.REMOTE_TESTS]), 1)
 
+    def test_module_results_are_stripped_before_the_incident_screen(self):
+        entries = [dict(module='test_alpha', ran=3, skipped=0, final='OK')]
+        result = self.run_it(transport=self.transport(self.receipt(module_results=entries)))
+        self.assertEqual(result['result'], 'PASS')
+        [entry] = self.stored()[incident_store.REMOTE_TESTS]
+        self.assertNotIn('module_results', entry['receipt'])
+
 
 class IncidentStoreRemoteTestTests(unittest.TestCase):
     def setUp(self):
@@ -915,13 +922,6 @@ class IncidentStoreRemoteTestTests(unittest.TestCase):
         for test, module in cases.items():
             with self.subTest(test=test):
                 self.assertEqual(incident_store.failing_test_module(test), module)
-
-    def test_module_results_are_stripped_before_the_incident_screen(self):
-        entries = [dict(module='test_alpha', ran=3, skipped=0, final='OK')]
-        result = self.run_it(transport=self.transport(self.receipt(module_results=entries)))
-        self.assertEqual(result['result'], 'PASS')
-        [entry] = self.stored()[incident_store.REMOTE_TESTS]
-        self.assertNotIn('module_results', entry['receipt'])
 
 
 if __name__ == '__main__':
