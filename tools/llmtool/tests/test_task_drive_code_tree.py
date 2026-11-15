@@ -55,6 +55,48 @@ class TaskDriveCodeTreeTests(unittest.TestCase):
         self.assertEqual(result['result'], {'test': 'data'})
         self.assertEqual(len(calls), 1)
 
+    def test_none_tree_reader_at_start_stops_with_unknown(self):
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'RUN_REMOTE_TEST', 'codes': []},
+        ])
+        result = task_drive.drive(
+            task_id='t',
+            advance_call=advance,
+            code_tree_read=lambda: None,
+        )
+        self.assertEqual(result['task_id'], 't')
+        self.assertEqual(result['step'], 'RESTART_REQUIRED')
+        self.assertEqual(result['codes'], ['LLMTOOL_SOURCE_UNKNOWN'])
+        self.assertEqual(result['steps'], 0)
+        self.assertIsNone(result['result'])
+        self.assertEqual(len(calls), 0)
+
+    def test_known_then_none_tree_reader_stops_with_unknown_after_one_advance(self):
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'RUN_REMOTE_TEST', 'result': {'test': 'data'}, 'codes': []},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+        ])
+        read_counts = 0
+
+        def changing_reader():
+            nonlocal read_counts
+            read_counts += 1
+            if read_counts <= 2:
+                return 'a' * 40
+            return None
+
+        result = task_drive.drive(
+            task_id='t',
+            advance_call=advance,
+            code_tree_read=changing_reader,
+        )
+        self.assertEqual(result['task_id'], 't')
+        self.assertEqual(result['step'], 'RESTART_REQUIRED')
+        self.assertEqual(result['codes'], ['LLMTOOL_SOURCE_UNKNOWN'])
+        self.assertEqual(result['steps'], 1)
+        self.assertEqual(result['result'], {'test': 'data'})
+        self.assertEqual(len(calls), 1)
+
     @patch('llmtool.source_freshness.subprocess.run')
     def test_code_tree_filtering_and_digest(self, mock_run):
         pkg_id = '1' * 40
@@ -135,13 +177,13 @@ class TaskDriveCodeTreeTests(unittest.TestCase):
 
     @patch('llmtool.source_freshness.subprocess.run')
     def test_code_tree_synthetic_sha_and_error_handling(self, mock_run):
-        # returncode 0 and stdout 'c'*40 + '\n' returns 'c'*40
+        # stdout 'a' * 40 + '\n' (bare hex) returns None
         mock_run.side_effect = None
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout='c' * 40 + '\n',
+            stdout='a' * 40 + '\n',
         )
-        self.assertEqual(source_freshness.code_tree(), 'c' * 40)
+        self.assertIsNone(source_freshness.code_tree())
 
         # returncode 1 returns None
         mock_run.return_value = MagicMock(
@@ -159,4 +201,12 @@ class TaskDriveCodeTreeTests(unittest.TestCase):
 
         # run raising OSError returns None
         mock_run.side_effect = OSError('synthetic error')
+        self.assertIsNone(source_freshness.code_tree())
+
+    @patch('llmtool.source_freshness.subprocess.run')
+    def test_code_tree_bare_hex_returns_none(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='a' * 40 + '\n',
+        )
         self.assertIsNone(source_freshness.code_tree())

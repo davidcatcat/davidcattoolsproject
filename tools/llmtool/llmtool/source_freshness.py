@@ -139,9 +139,6 @@ def code_tree():
         )
         if proc.returncode != 0:
             return None
-        stripped = proc.stdout.strip()
-        if _SHA.match(stripped):
-            return stripped
         kept = []
         has_package_tree = False
         for line in proc.stdout.splitlines():

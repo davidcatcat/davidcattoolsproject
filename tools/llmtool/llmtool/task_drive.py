@@ -60,6 +60,15 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
     pause = time.sleep if sleep is None else sleep
     read_tree = source_freshness.code_tree if code_tree_read is None else code_tree_read
     start_tree = read_tree()
+    # #2027 security v91: an unknown code digest fails closed.
+    if start_tree is None:
+        return {
+            'task_id': task_id,
+            'step': 'RESTART_REQUIRED',
+            'result': None,
+            'codes': ['LLMTOOL_SOURCE_UNKNOWN'],
+            'steps': 0,
+        }
     max_pause = max(poll_seconds, _MAX_PAUSE_SECONDS)
     next_pause = poll_seconds
     # Keep an explicitly supplied PR authoritative for the whole drive. When
@@ -74,8 +83,16 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
     # Polls consume the bounded call budget so a permanently pending Task
     # cannot spin forever, but they do not count as completed workflow steps.
     while attempts < max_steps:
-        # #2027: a merge changed the llmtool code under this running drive; restart it.
-        if read_tree() != start_tree:
+        current = read_tree()
+        if current is None:
+            return {
+                'task_id': task_id,
+                'step': 'RESTART_REQUIRED',
+                'result': last_result.get('result') if type(last_result) is dict else None,
+                'codes': ['LLMTOOL_SOURCE_UNKNOWN'],
+                'steps': completed,
+            }
+        elif current != start_tree:
             return {
                 'task_id': task_id,
                 'step': 'RESTART_REQUIRED',
