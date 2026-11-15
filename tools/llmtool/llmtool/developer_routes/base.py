@@ -31,7 +31,7 @@ MAX_STDERR_BYTES = 64 * 1024
 # max_timeout per route). A route without registry limits keeps the former
 # fixed 600-second default and maximum. No route may exceed the hard cap.
 DEFAULT_TIMEOUT_SECONDS = 600
-HARD_TIMEOUT_CAP_SECONDS = 1800
+HARD_TIMEOUT_CAP_SECONDS = 3600
 MAX_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS
 TIMEOUT_KEYS = frozenset({'default_timeout', 'max_timeout'})
 DEFAULT_MAX_DIFF_BYTES = 64 * 1024
@@ -277,7 +277,7 @@ def resolve_route_timeout(route: Any, requested: Any = None, *,
 
     * TIMEOUT_INVALID: requested is not an int (bool and float included) or
       is below 1;
-    * TIMEOUT_OVER_HARD_CAP: requested is above 1800, for every route;
+    * TIMEOUT_OVER_HARD_CAP: requested is above 3600, for every route;
     * TIMEOUT_OVER_ROUTE_MAX: requested is above the route's max_timeout;
     * ROUTE_CONFIG_INVALID: unknown route name or invalid timeout limits.
     """

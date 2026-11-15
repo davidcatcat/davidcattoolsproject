@@ -29,8 +29,8 @@ def fixture_routes(models=FIXTURE_MODELS, roles=None):
                 "default_model": models[0],
                 "allowed_models": list(models),
                 "default_effort": "medium",
-                "default_timeout": 600,
-                "max_timeout": 1800,
+                "default_timeout": 1800,
+                "max_timeout": 3600,
             },
         },
     }
@@ -474,8 +474,9 @@ class RuleFileSchemaTests(unittest.TestCase):
         return self.findings_after("developer-routes.json", routes)
 
     def test_route_timeouts_valid_values_pass(self):
-        # #1815: 1 <= default_timeout <= max_timeout <= 1800.
-        for default, maximum in ((1, 1), (600, 600), (600, 1800), (1800, 1800), (1, 1800)):
+        # #1815: 1 <= default_timeout <= max_timeout <= 3600.
+        for default, maximum in ((1, 1), (600, 600), (600, 1800), (1800, 1800), (1, 1800),
+                                 (1800, 3600), (3600, 3600), (1, 3600)):
             with self.subTest(default=default, maximum=maximum):
                 self.assertEqual(
                     self.route_findings(default_timeout=default, max_timeout=maximum), [])
@@ -495,21 +496,21 @@ class RuleFileSchemaTests(unittest.TestCase):
         for key in ("default_timeout", "max_timeout"):
             for value in ("600", 600.0, 1.5, True, False, None, [600], {"s": 600}):
                 with self.subTest(key=key, value=value):
-                    self.assertIn(f"{prefix}.{key} must be an integer >= 1 and <= 1800",
+                    self.assertIn(f"{prefix}.{key} must be an integer >= 1 and <= 3600",
                                   self.route_findings(**{key: value}))
 
     def test_route_timeouts_out_of_range_fail(self):
         prefix = "tools/llmtool/developer-routes.json: RULE_SCHEMA $.routes.fixture"
         cases = [
-            ({"default_timeout": 0}, "default_timeout must be an integer >= 1 and <= 1800"),
-            ({"default_timeout": -5}, "default_timeout must be an integer >= 1 and <= 1800"),
-            ({"max_timeout": 0, "default_timeout": 0}, "max_timeout must be an integer >= 1 and <= 1800"),
-            ({"max_timeout": 1801}, "max_timeout must be an integer >= 1 and <= 1800"),
-            ({"default_timeout": 1801, "max_timeout": 1801},
-             "default_timeout must be an integer >= 1 and <= 1800"),
-            ({"default_timeout": 10 ** 9}, "default_timeout must be an integer >= 1 and <= 1800"),
+            ({"default_timeout": 0}, "default_timeout must be an integer >= 1 and <= 3600"),
+            ({"default_timeout": -5}, "default_timeout must be an integer >= 1 and <= 3600"),
+            ({"max_timeout": 0, "default_timeout": 0}, "max_timeout must be an integer >= 1 and <= 3600"),
+            ({"max_timeout": 3601}, "max_timeout must be an integer >= 1 and <= 3600"),
+            ({"default_timeout": 3601, "max_timeout": 3601},
+             "default_timeout must be an integer >= 1 and <= 3600"),
+            ({"default_timeout": 10 ** 9}, "default_timeout must be an integer >= 1 and <= 3600"),
             ({"default_timeout": 900, "max_timeout": 600}, "default_timeout must be <= max_timeout"),
-            ({"default_timeout": 1800, "max_timeout": 1}, "default_timeout must be <= max_timeout"),
+            ({"default_timeout": 3600, "max_timeout": 1}, "default_timeout must be <= max_timeout"),
         ]
         for changes, expected in cases:
             with self.subTest(changes=changes):
@@ -526,15 +527,15 @@ class RuleFileSchemaTests(unittest.TestCase):
         self.assertIn(f"{prefix}.default_timeout must be <= max_timeout", findings)
 
     def test_invalid_route_timeouts_make_model_allowlist_unavailable(self):
-        self.route_findings(max_timeout=1801)
+        self.route_findings(max_timeout=3601)
         self.assertEqual(guidance_drift_check._allowed_models(self.repo)[1],
                          ["tools/llmtool/developer-routes.json: MODEL_ALLOWLIST_UNAVAILABLE schema invalid"])
 
-    def test_timeout_cap_is_1800(self):
+    def test_timeout_cap_is_3600(self):
         # This test does not import the llmtool package; the match with
         # llmtool.developer_routes.HARD_TIMEOUT_CAP_SECONDS is checked in
         # test_developer_route_timeout.py, which already imports it.
-        self.assertEqual(guidance_drift_check.ROUTE_TIMEOUT_CAP_SECONDS, 1800)
+        self.assertEqual(guidance_drift_check.ROUTE_TIMEOUT_CAP_SECONDS, 3600)
 
     def test_real_routes_declare_timeouts(self):
         repository = Path(__file__).resolve().parents[3]
@@ -544,7 +545,7 @@ class RuleFileSchemaTests(unittest.TestCase):
             with self.subTest(route=name):
                 self.assertIs(type(entry["default_timeout"]), int)
                 self.assertIs(type(entry["max_timeout"]), int)
-                self.assertTrue(1 <= entry["default_timeout"] <= entry["max_timeout"] <= 1800)
+                self.assertTrue(1 <= entry["default_timeout"] <= entry["max_timeout"] <= 3600)
 
     def test_unreadable_duplicate_key_and_non_finite_rule_files_fail(self):
         cases = {

@@ -31,7 +31,7 @@ MODEL = 'opencode/deepseek-v4.1-flash-free#high'
 AGENT = 'llmtool-direct-developer'
 # #1815: each run's bound is resolve_route_timeout('opencode', requested) from
 # developer-routes.json; this is only the absolute ceiling no run may exceed.
-MAX_WALL_CLOCK_SECONDS = 1800
+MAX_WALL_CLOCK_SECONDS = 3600
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
 MAX_PROMPT_BYTES = 64 * 1024
@@ -782,7 +782,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     """Invoke one bounded OpenCode run in the existing D6 task worktree.
 
     timeout_seconds None uses the opencode route default_timeout; a given value
-    must pass resolve_route_timeout (route max_timeout, hard cap 1800). A
+    must pass resolve_route_timeout (route max_timeout, hard cap 3600). A
     refusal raises the resolver code before any provider process starts.
     """
     validate_model(model)

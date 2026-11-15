@@ -923,7 +923,7 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--timeout', type=int, default=None, metavar='SECONDS',
                           help=('Claude, OpenCode, AGY and gw-agent direct runs: wall-clock '
                                 'limit in seconds (default: the route default_timeout; at most '
-                                'the route max_timeout and never above 1800)'))
+                                'the route max_timeout and never above 3600)'))
     delegate.add_argument('--context-stdin', action='store_true',
                           help='codex text proposals only: read bounded, sensitive-screened context from stdin')
     delegate.add_argument('--pm-session',
