@@ -1611,21 +1611,36 @@ class TaskSubmissionCLITests(unittest.TestCase):
             parser.parse_args(base + ['--timeout', 'soon'])
 
     def test_delegate_refuses_bad_timeout_before_task_read_or_fork(self):
-        cases = (('agy', 601, 'TIMEOUT_OVER_ROUTE_MAX'),
-                 ('gw-agent', 1200, 'TIMEOUT_OVER_ROUTE_MAX'),
-                 ('claude', 1801, 'TIMEOUT_OVER_HARD_CAP'),
-                 ('opencode', 3600, 'TIMEOUT_OVER_HARD_CAP'),
-                 ('claude', 0, 'TIMEOUT_INVALID'),
-                 ('opencode', -5, 'TIMEOUT_INVALID'),
-                 ('codex', 600, 'TIMEOUT_ROUTE_UNSUPPORTED'))
-        for provider, timeout, code in cases:
+        import copy
+        from contextlib import nullcontext
+        from llmtool import developer_routes
+        shipped = developer_routes.load_route_config()
+
+        def short_route(route):
+            # Every shipped route has max_timeout 3600; a copy of the registry
+            # whose route has max_timeout 600 keeps the route-max refusal checked.
+            config = copy.deepcopy(shipped)
+            config['routes'][route].update(default_timeout=600, max_timeout=600)
+            return patch.object(developer_routes, 'load_route_config',
+                                side_effect=lambda *a, **k: copy.deepcopy(config))
+
+        # (provider, timeout, code, route whose registry max_timeout is 600).
+        cases = (('agy', 601, 'TIMEOUT_OVER_ROUTE_MAX', 'agy'),
+                 ('gw-agent', 1200, 'TIMEOUT_OVER_ROUTE_MAX', 'gw-agent'),
+                 ('claude', 3601, 'TIMEOUT_OVER_HARD_CAP', None),
+                 ('opencode', 7200, 'TIMEOUT_OVER_HARD_CAP', None),
+                 ('claude', 0, 'TIMEOUT_INVALID', None),
+                 ('opencode', -5, 'TIMEOUT_INVALID', None),
+                 ('codex', 600, 'TIMEOUT_ROUTE_UNSUPPORTED', None))
+        for provider, timeout, code, short in cases:
             for background in (False, True):
                 with self.subTest(provider=provider, timeout=timeout, background=background):
                     args = Namespace(task_id='a' * 32, provider=provider, mode='direct',
                                      background=background, timeout=timeout,
                                      selection_source='PM', acceptance=['bounded'])
                     # store=object(): any Task read would fail with AttributeError.
-                    with patch.object(os, 'fork') as fork, \
+                    with (short_route(short) if short else nullcontext()), \
+                            patch.object(os, 'fork') as fork, \
                             self.assertRaises(LLMToolError) as raised:
                         run_task_delegate(args, store=object())
                     self.assertTrue(str(raised.exception).startswith(code + ':'),
@@ -1633,17 +1648,36 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     fork.assert_not_called()
 
     def test_route_delegates_refuse_bad_timeout_before_task_read(self):
-        cases = ((submission_cli.run_task_claude_delegate, 1801, 'TIMEOUT_OVER_HARD_CAP'),
-                 (submission_cli.run_task_agy_delegate, 601, 'TIMEOUT_OVER_ROUTE_MAX'),
-                 (submission_cli.run_task_gw_agent_delegate, 601, 'TIMEOUT_OVER_ROUTE_MAX'),
-                 (submission_cli.run_task_opencode_delegate, True, 'TIMEOUT_INVALID'))
-        for delegate, timeout, code in cases:
+        import copy
+        from contextlib import nullcontext
+        from llmtool import developer_routes
+        shipped = developer_routes.load_route_config()
+
+        def short_route(route):
+            # Every shipped route has max_timeout 3600; a copy of the registry
+            # whose route has max_timeout 600 keeps the route-max refusal checked.
+            config = copy.deepcopy(shipped)
+            config['routes'][route].update(default_timeout=600, max_timeout=600)
+            return patch.object(developer_routes, 'load_route_config',
+                                side_effect=lambda *a, **k: copy.deepcopy(config))
+
+        # (delegate, timeout, code, route whose registry max_timeout is 600).
+        cases = ((submission_cli.run_task_claude_delegate, 3601,
+                  'TIMEOUT_OVER_HARD_CAP', None),
+                 (submission_cli.run_task_agy_delegate, 601,
+                  'TIMEOUT_OVER_ROUTE_MAX', 'agy'),
+                 (submission_cli.run_task_gw_agent_delegate, 601,
+                  'TIMEOUT_OVER_ROUTE_MAX', 'gw-agent'),
+                 (submission_cli.run_task_opencode_delegate, True,
+                  'TIMEOUT_INVALID', None))
+        for delegate, timeout, code, short in cases:
             with self.subTest(delegate=delegate.__name__):
                 args = Namespace(task_id='a' * 32, mode='direct', timeout=timeout,
                                  selection_source='PM', owner_ref=None,
                                  context_stdin=False, egress_basis='synthetic text',
                                  data_class='public')
-                with patch('llmtool.gw_agent_sessions.sweep_quietly'), \
+                with (short_route(short) if short else nullcontext()), \
+                        patch('llmtool.gw_agent_sessions.sweep_quietly'), \
                         self.assertRaises(LLMToolError) as raised:
                     delegate(args, store=object())
                 self.assertTrue(str(raised.exception).startswith(code + ':'),
@@ -1652,13 +1686,13 @@ class TaskSubmissionCLITests(unittest.TestCase):
     def test_route_timeout_helper_uses_route_limits(self):
         for route in submission_cli.TIMEOUT_ROUTES:
             with self.subTest(route=route):
-                self.assertEqual(submission_cli._delegate_timeout(Namespace(), route), 600)
+                self.assertEqual(submission_cli._delegate_timeout(Namespace(), route), 1800)
                 self.assertEqual(
-                    submission_cli._delegate_timeout(Namespace(timeout=None), route), 600)
+                    submission_cli._delegate_timeout(Namespace(timeout=None), route), 1800)
                 self.assertEqual(
                     submission_cli._delegate_timeout(Namespace(timeout=600), route), 600)
-        for route in ('claude', 'opencode'):
-            for requested in (1200, 1800):
+        for route in submission_cli.TIMEOUT_ROUTES:
+            for requested in (1200, 1800, 3600):
                 with self.subTest(route=route, requested=requested):
                     self.assertEqual(submission_cli._delegate_timeout(
                         Namespace(timeout=requested), route), requested)
@@ -1688,7 +1722,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(stored['developer']['state'], 'DEVELOPER_UNAVAILABLE')
 
     def test_opencode_delegate_without_timeout_uses_route_default(self):
-        self.assert_opencode_timeout_passed_and_recorded(None, 600)
+        self.assert_opencode_timeout_passed_and_recorded(None, 1800)
 
     def test_opencode_delegate_passes_and_records_1200(self):
         self.assert_opencode_timeout_passed_and_recorded(1200, 1200)

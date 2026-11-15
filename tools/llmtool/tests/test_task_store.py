@@ -1484,7 +1484,7 @@ class TaskStoreTests(unittest.TestCase):
             task['task_id'], expected={'developer': None},
             developer=self._developer_assignment())
         self.assertNotIn('timeout_seconds', saved['developer'])
-        for timeout in (1, 600, 1200, 1800):
+        for timeout in (1, 600, 1200, 1800, 3600):
             with self.subTest(timeout=timeout):
                 task = self._codex_dispatch_task()
                 self.store.create(task)
@@ -1511,7 +1511,7 @@ class TaskStoreTests(unittest.TestCase):
     def test_developer_timeout_seconds_rejects_invalid_values(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
-        for timeout in (0, -1, 1801, True, 600.0, '600', None):
+        for timeout in (0, -1, 3601, True, 600.0, '600', None):
             with self.subTest(timeout=timeout):
                 developer = dict(self._developer_assignment(), timeout_seconds=timeout)
                 with self.assertRaises(LLMToolError):
