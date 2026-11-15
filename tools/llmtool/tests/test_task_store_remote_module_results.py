@@ -1,7 +1,9 @@
 """#2119 design PR 1 store part: optional ``module_results`` on remote test receipts.
 
 TaskStore accepts the field with its own structural check and keeps checking
-receipts without it exactly as before. Every value here is a fixed, non-secret
+receipts without it exactly as before. The append tests use a real temporary
+TaskStore with a created Task, built the same way as
+test_task_store_hosted_receipt.py. Every value here is a fixed, non-secret
 fake (common-core.md section 4); digests are computed at run time.
 """
 
@@ -13,6 +15,17 @@ import unittest
 from pathlib import Path
 
 from llmtool import task_store
+from llmtool.task_submission_cli import _record as _task_record
+
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
 
 
 TASK_ID = '1' * 32
@@ -46,7 +59,12 @@ def _actions():
     }
 
 
-def _receipt(*, module_results=True, excerpt=False, actions=False):
+def _receipt(*, module_results=True, excerpt=False, actions=False, task=None):
+    """One sealed receipt; ``task`` binds it to a created Task's identifiers."""
+    task_id, run_id, pm_session = TASK_ID, RUN_ID, PM_SESSION
+    if task is not None:
+        task_id, run_id, pm_session = (
+            task['task_id'], task['run_id'], task['pm_session_id'])
     receipt = {
         'result': 'PASS', 'exit_code': 0, 'source_sha': SOURCE_SHA,
         'tree': 'b' * 40, 'fetch_head': SOURCE_SHA,
@@ -55,8 +73,8 @@ def _receipt(*, module_results=True, excerpt=False, actions=False):
         'elapsed_s': 5.0, 'ran_total': 7, 'final': ['OK', 'OK'], 'failures': [],
         'log_bytes': 128,
         'log_sha256': hashlib.sha256(b'synthetic remote test log').hexdigest(),
-        'remote_log_path': None, 'task_id': TASK_ID, 'run_id': RUN_ID,
-        'executor_task': 'rtshape-module-results', 'pm_session': PM_SESSION,
+        'remote_log_path': None, 'task_id': task_id, 'run_id': run_id,
+        'executor_task': 'rtshape-module-results', 'pm_session': pm_session,
         'command_digest': hashlib.sha256(b'synthetic remote test command').hexdigest(),
     }
     if excerpt:
@@ -181,11 +199,11 @@ class RecordValidationTest(unittest.TestCase):
 
 
 class AppendRemoteTestReceiptTest(unittest.TestCase):
-    """append_remote_test_receipt checks the shape before it reads the Task.
+    """append_remote_test_receipt against a real temporary TaskStore.
 
-    The store root does not exist, so a receipt that passes the shape check
-    reaches the Task read and gets task-not-found, while a refused receipt
-    fails REMOTE_TEST_RECEIPT_INVALID first and creates nothing.
+    setUp creates one valid Task the same way test_task_store_hosted_receipt.py
+    does, so an accepted receipt is written through the store's full record
+    validation and read back from disk.
     """
 
     def setUp(self):
@@ -193,46 +211,114 @@ class AppendRemoteTestReceiptTest(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name).resolve() / 'tasks'
         self.store = task_store.TaskStore(self.root)
+        self.task = self._task()
+        self.store.create(self.task)
+        self.task_id = self.task['task_id']
+
+    @staticmethod
+    def _task():
+        request = 'Bounded non-sensitive module results task.'
+        task_id, run_id = task_store.new_id(), task_store.new_id()
+        request_sha = hashlib.sha256(request.encode()).hexdigest()
+        task = _task_record(
+            task_id, run_id, 'pm-' + task_store.new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED', request_sha=request_sha)
+        task.update(
+            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                              'base_url': None},
+            response='PM returned a bounded task.', error_code=None,
+            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                           'goal': 'Produce a proposal diff.',
+                           'acceptance': ['the proposal is recorded']},
+        )
+        return task
+
+    def receipt(self, **kwargs):
+        return _receipt(task=self.task, **kwargs)
+
+    def reread(self):
+        """Read the Task back through a fresh store on the same root."""
+        return task_store.TaskStore(self.root).get(self.task_id)
+
+    def assert_appended(self, receipt, expected_receipts):
+        self.assertEqual(
+            self.store.append_remote_test_receipt(self.task_id, receipt), receipt)
+        saved = self.store.get(self.task_id)
+        self.assertEqual(saved['remote_test_receipts'], expected_receipts)
+        self.assertEqual(self.reread()['remote_test_receipts'], expected_receipts)
+        task_store._validate(saved)
+        task_store._validate_remote_test_receipts(saved)
+        return saved
 
     def assert_refused(self, receipt):
+        before = self.store.get(self.task_id)
         with self.assertRaises(task_store.LLMToolError) as caught:
-            self.store.append_remote_test_receipt(TASK_ID, receipt)
+            self.store.append_remote_test_receipt(self.task_id, receipt)
         self.assertNotIsInstance(caught.exception, task_store._TaskNotFound)
         self.assertEqual(caught.exception.task_store_error_code,
                          'REMOTE_TEST_RECEIPT_INVALID')
-        self.assertFalse(self.root.exists())
+        self.assertEqual(self.store.get(self.task_id), before)
+        self.assertEqual(self.reread(), before)
 
-    def assert_passes_shape_check(self, receipt):
-        with self.assertRaises(task_store._TaskNotFound):
-            self.store.append_remote_test_receipt(TASK_ID, receipt)
-        self.assertFalse(self.root.exists())
+    def test_receipt_with_module_results_persists_unchanged(self):
+        receipt = self.receipt()
+        expected = copy.deepcopy(receipt)
+        self.assertEqual(self.store.get(self.task_id).get('remote_test_receipts', []), [])
+        saved = self.assert_appended(receipt, [expected])
+        stored = saved['remote_test_receipts'][0]
+        self.assertEqual(stored, expected)
+        self.assertEqual(stored['module_results'], _module_results())
+        self.assertEqual(self.reread()['remote_test_receipts'][0]['module_results'],
+                         _module_results())
 
-    def test_receipt_with_module_results_passes_the_shape_check(self):
-        self.assert_passes_shape_check(_receipt())
+    def test_replaying_the_same_receipt_is_idempotent(self):
+        receipt = self.receipt()
+        self.assert_appended(receipt, [receipt])
+        self.assertEqual(
+            self.store.append_remote_test_receipt(self.task_id, copy.deepcopy(receipt)),
+            receipt)
+        self.assertEqual(self.reread()['remote_test_receipts'], [receipt])
 
-    def test_every_shape_with_module_results_passes_the_shape_check(self):
+    def test_every_shape_with_and_without_module_results_persists(self):
+        appended = []
         for excerpt in (False, True):
             for actions in (False, True):
-                with self.subTest(excerpt=excerpt, actions=actions):
-                    self.assert_passes_shape_check(
-                        _receipt(excerpt=excerpt, actions=actions))
+                for module_results in (False, True):
+                    with self.subTest(excerpt=excerpt, actions=actions,
+                                      module_results=module_results):
+                        receipt = self.receipt(module_results=module_results,
+                                               excerpt=excerpt, actions=actions)
+                        appended.append(copy.deepcopy(receipt))
+                        self.assert_appended(receipt, appended)
 
-    def test_legacy_receipt_without_module_results_passes_the_shape_check(self):
-        self.assert_passes_shape_check(_receipt(module_results=False))
+    def test_legacy_receipt_without_module_results_still_appends(self):
+        receipt = self.receipt(module_results=False)
+        self.assertNotIn('module_results', receipt)
+        saved = self.assert_appended(receipt, [receipt])
+        self.assertNotIn('module_results', saved['remote_test_receipts'][0])
 
-    def test_each_bad_entry_shape_is_refused(self):
+    def test_each_bad_entry_shape_is_refused_and_the_record_is_unchanged(self):
+        # A stored receipt with module_results makes "unchanged" non-trivial.
+        self.assert_appended(self.receipt(), [self.receipt()])
         for label, value in _bad_module_results().items():
             with self.subTest(label):
-                receipt = _receipt()
+                receipt = self.receipt()
                 receipt['module_results'] = value
                 self.assert_refused(_seal(receipt))
 
     def test_unknown_extra_top_level_field_is_refused(self):
         for module_results in (False, True):
             with self.subTest(module_results=module_results):
-                receipt = _receipt(module_results=module_results)
+                receipt = self.receipt(module_results=module_results)
                 receipt['extra_field'] = 'extra'
                 self.assert_refused(_seal(receipt))
+
+    def test_edited_module_results_breaks_the_receipt_digest(self):
+        receipt = self.receipt()
+        receipt['module_results'] = copy.deepcopy(receipt['module_results'])
+        receipt['module_results'][0]['ran'] = 5
+        self.assert_refused(receipt)
 
 
 if __name__ == '__main__':
