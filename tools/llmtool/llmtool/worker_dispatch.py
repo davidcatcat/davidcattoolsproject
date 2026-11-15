@@ -733,7 +733,13 @@ def _logical_timeout_attempts(audit):
     authorization_id) that it counts 0 still counts 1 here unless its own
     audit fields are valid, its decision is ALLOWED, and it is validated
     against its matching ALLOWED transition and binding: a forged, mis-bound,
-    malformed or BLOCKED adapter entry is a spent attempt (fail closed)."""
+    malformed or BLOCKED adapter entry is a spent attempt (fail closed).
+
+    An entry that role_timeout counts 0 only because its action is some other
+    string also counts 1 here unless that action is exactly one of the
+    supported AUDIT_ACTIONS: an unsupported action such as a near-miss
+    spelling of ROLE_TIMEOUT_RETRY is a spent attempt, while a valid unrelated
+    action (DISPATCH, REPAIR, ...) still counts 0. PR #2183 review v1 F1."""
     if type(audit) not in (list, tuple):
         return None
     total = 0
@@ -742,10 +748,13 @@ def _logical_timeout_attempts(audit):
             count = role_timeout.count_timeout_attempts([entry])
         except role_timeout.RoleTimeoutError:
             return None
-        if (count == 0 and isinstance(entry, Mapping) and
-                entry.get('action') in _TIMEOUT_ADAPTER_ACTIONS and
-                not _validated_timeout_adapter(audit, index)):
-            count = 1
+        if count == 0:
+            action = entry.get('action') if isinstance(entry, Mapping) else None
+            if type(action) is not str or action not in AUDIT_ACTIONS:
+                count = 1
+            elif (action in _TIMEOUT_ADAPTER_ACTIONS and
+                  not _validated_timeout_adapter(audit, index)):
+                count = 1
         total += count
     return total
 

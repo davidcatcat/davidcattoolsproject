@@ -854,6 +854,55 @@ class AdapterValidationCountTests(RoleTimeoutGateBase):
                                       if 'authorization_id' not in item]))
                 self.assert_spent(fragment, 2)
 
+    def test_unsupported_adapter_action_counts_spent(self):
+        """PR #2183 review v1 F1: an adapter whose action is changed to an
+        unsupported string is a spent attempt at limits 2 and 3, not a valid
+        unrelated action that counts 0."""
+
+        def with_action(make, action):
+            transition, adapter = make()
+            adapter['action'] = action
+            return [transition, adapter]
+
+        cases = {
+            'role adapter, ROLE_TIMEOUT_RETRY_BAD': with_action(
+                genuine_pair, 'ROLE_TIMEOUT_RETRY_BAD'),
+            'role adapter, lower-case action': with_action(
+                genuine_pair, 'role_timeout_retry'),
+            'role adapter, trailing space': with_action(genuine_pair, 'ROLE_TIMEOUT_RETRY '),
+            'role adapter, empty action': with_action(genuine_pair, ''),
+            'codex adapter, TIMEOUT_CONTINUATION_BAD': with_action(
+                codex_pair, 'TIMEOUT_CONTINUATION_BAD'),
+        }
+        for name, fragment in cases.items():
+            with self.subTest(case=name):
+                # role_timeout alone counts the renamed adapter 0; the gate does not.
+                self.assertEqual(role_timeout.count_timeout_attempts(fragment), 1)
+                self.assert_spent(fragment, 2)
+        lone = dict(role_entry(), action='NOT_A_DISPATCH_ACTION')
+        del lone['retry_phase']
+        self.assertEqual(role_timeout.count_timeout_attempts([lone]), 0)
+        self.assert_spent([lone], 1)
+
+    def test_valid_unrelated_actions_still_count_zero(self):
+        """PR #2183 review v1 F1: every supported non-timeout action still counts 0."""
+        unrelated = sorted(worker_dispatch.AUDIT_ACTIONS -
+                           {ACTION, role_timeout.TIMEOUT_CONTINUATION})
+        self.assertIn('DISPATCH', unrelated)
+        for action in unrelated:
+            for decision in (allowed('claude-developer'),
+                             blocked('claude-developer', 'OWNER_PAUSED')):
+                with self.subTest(action=action, decision=decision.allowed):
+                    entry = worker_dispatch.audit_entry(decision, action, binding=binding())
+                    self.assertEqual(self.count([entry]), 0)
+                    if action == 'COMMITTED_RESULT_CARRY':
+                        continue  # a carry refuses the retry by precondition, not count
+                    for limit in self.LIMITS:
+                        with self.subTest(limit=limit):
+                            audit = self.pairs(limit - 1) + [entry]
+                            self.assertEqual(self.count(audit), limit - 1)
+                            self.assert_cap(limit, audit, refused=False)
+
     def test_unreadable_audit_is_unknown(self):
         self.assertIsNone(self.count({'action': ACTION}))
         self.assertIsNone(self.count(None))
