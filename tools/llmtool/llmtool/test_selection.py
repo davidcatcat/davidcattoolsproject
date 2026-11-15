@@ -77,6 +77,7 @@ HIGH_RISK_PREFIXES = (
 HIGH_RISK_FILES = frozenset({
     # Selector and gate definitions must always receive the complete check.
     "tools/llmtool/scripts/ci_mac_modules.py",
+    "tools/llmtool/scripts/ci_changed_paths.py",
     "tools/llmtool/ci/mac-modules.txt",
     "tools/llmtool/llmtool/authorization_ledger.py",
     "tools/llmtool/llmtool/authorization_policy.py",
