@@ -69,6 +69,29 @@ def passing_final(line):
     return line.endswith("OK") or re.fullmatch(r"OK \(skipped=[1-9][0-9]{0,5}\)", line) is not None
 
 
+_LAST_RAN = re.compile(r"^Ran (\d+) tests? in ")
+_SKIPPED_COUNT = re.compile(r"skipped=(\d+)")
+
+
+def module_result(module, test_output, final):
+    """One module_results entry per #2119 design section 3. Not wired into main() yet.
+
+    ran comes from the last line matching 'Ran N tests in ', so earlier nested output
+    does not count; it is 0 when there is no such line. skipped comes from
+    'skipped=N' in final, or is 0. final is returned unchanged.
+    """
+    if isinstance(test_output, bytes):
+        test_output = test_output.decode("utf8", "replace")
+    ran = 0
+    for line in test_output.splitlines():
+        match = _LAST_RAN.match(line.strip())
+        if match:
+            ran = int(match.group(1))
+    found = _SKIPPED_COUNT.search(final)
+    skipped = int(found.group(1)) if found else 0
+    return {"module": module, "ran": ran, "skipped": skipped, "final": final}
+
+
 def failure_excerpt(outputs, work, home, *, screen=None):
     check_sensitive = screen_line if screen is None else screen
     if isinstance(home, str):
