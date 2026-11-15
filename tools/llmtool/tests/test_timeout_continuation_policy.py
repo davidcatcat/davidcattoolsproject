@@ -62,6 +62,22 @@ class TimeoutContinuationPolicyTests(unittest.TestCase):
         self.assertEqual(self.continue_after(0, LLMToolError('POLICY_INVALID')),
                          'WORKER_TIMEOUT_CONTINUATION_POLICY_INVALID')
 
+    def test_policy_file_bounds_the_value(self):
+        handle, path = tempfile.mkstemp(suffix='.json')
+        os.close(handle)
+        self.addCleanup(os.unlink, path)
+        for value, valid in ((0, True), (3, True), (4, False), (-1, False), (True, False),
+                             ('1', False)):
+            with self.subTest(value=value):
+                with open(path, 'w') as stream:
+                    json.dump(dict(GOOD, timeout_continuation_max=value), stream)
+                if valid:
+                    self.assertEqual(repair_policy.load_policy(path)['timeout_continuation_max'],
+                                     value)
+                else:
+                    with self.assertRaises(LLMToolError):
+                        repair_policy.load_policy(path)
+
 
 if __name__ == '__main__':
     unittest.main()
