@@ -11,6 +11,13 @@ those files at the source commit. A statement about any other file is marked
 UNVERIFIED: it was not read for this design and must be checked by the PR that
 touches it.
 
+Amendment 1 (docs only, PM decision c6902895888): section 3.5 replaces the
+timeout attempt counting rule with a monotone count, after four valid findings
+on PRs #2180, #2182 and #2183. Read for the amendment, at source commit
+70f9754a2f723b00297210968714e3b46cec5750: `tools/llmtool/llmtool/role_timeout.py`
+and `tools/llmtool/llmtool/worker_dispatch.py`. The worker_dispatch.py line
+numbers cited in this doc are the same at both commits.
+
 ## 1. Goal
 
 When a Developer run ends because its route hit its own time limit, and the
@@ -195,7 +202,7 @@ step, as it already does for the merge (task_drive.py lines 212-216).
    `POLICY_INVALID` or `NOT_TIMEOUT`. `limit` is the value of
    `timeout_continuation_max()`; `None` gives `POLICY_INVALID`. The used
    count is `count_timeout_attempts(record['dispatch_audit'])` (section
-   3.3): logical attempts, not audit entries. A clean timeout with a used
+   3.5): logical attempts, not audit entries. A clean timeout with a used
    count at or above `limit` gives `LIMIT`.
 2. Advance without the flag: when the Developer record classifies as a role
    timeout, advance makes no dispatch and returns:
@@ -244,7 +251,7 @@ With the default limit of 1: first timeout, one retry; second timeout,
 `STOPPED` with `ROLE_TIMEOUT_LIMIT` and a D4 notice. With limit 0 the first
 timeout stops the same way. With limit 2 or 3 the stop comes after exactly
 that many retries. This holds because each retry is counted once, although
-it writes two audit entries (section 3.3, counting rule).
+it writes two audit entries (section 3.5).
 
 ### 3.3 Cap and dispatch gate (worker_dispatch.py)
 
@@ -262,12 +269,16 @@ it writes two audit entries (section 3.3, counting rule).
     `WORKER_ROLE_TIMEOUT_RETRY_PRECONDITION`;
   - `timeout_continuation_max()` is `None`: refuse
     `WORKER_ROLE_TIMEOUT_RETRY_POLICY_INVALID`;
-  - count the logical timeout attempts already in this Task record (rule
-    below), for any worker key, any decision and any assignment. At or above
-    the limit: refuse `WORKER_ROLE_TIMEOUT_RETRY_LIMIT`. The Codex check at
-    lines 739-742 uses the same count, so a Codex continuation and a role
-    retry in one Task never exceed the limit together. This makes the Codex
-    check stricter in a Task that already used a role retry.
+  - count the logical timeout attempts already in this Task record
+    (section 3.5), for any worker key, any decision and any assignment. At or
+    above the limit: refuse `WORKER_ROLE_TIMEOUT_RETRY_LIMIT`. The Codex
+    check at lines 739-742 uses the same count, so a Codex continuation and a
+    role retry in one Task never exceed the limit together. This makes the
+    Codex check stricter in a Task that already used a role retry;
+  - a count that cannot be computed (`RoleTimeoutError`) refuses as if the
+    limit were used up: `WORKER_ROLE_TIMEOUT_RETRY_LIMIT`, and
+    `WORKER_TIMEOUT_CONTINUATION_LIMIT` in the Codex check. An unknown count
+    counts as used (`_used`, repair_policy.py lines 67-69).
 
 #### Counting logical attempts, not audit entries
 
@@ -282,7 +293,9 @@ retry twice: with limit 2 the second retry would be refused after only one
 retry, and limit 3 would allow only two. The cap therefore counts logical
 attempts, once each, through one pure helper,
 `role_timeout.count_timeout_attempts(audit)`, used by the classifier
-(section 3.2), the role retry check and the Codex check.
+(section 3.2), the role retry check and the Codex check. The counting rule is
+the monotone count of section 3.5; it replaces the per-entry table that stood
+here and that PR 1a implemented.
 
 Explicit attempt binding for the new action:
 
@@ -294,48 +307,24 @@ Explicit attempt binding for the new action:
   `retry_phase='TRANSITION'` and never with `authorization_id`.
 - `authorize_dispatch` writes the adapter entry with
   `retry_phase='ADAPTER'`, whether it is allowed or blocked, and whether or
-  not a transition was found.
+  not a transition was found. An adapter entry with no transition found has
+  no `authorization_id` and counts as its own attempt (section 3.5).
 - `_latest_transition_authorization` (lines 362-369), for this action only,
   also requires `retry_phase == 'TRANSITION'`, so an adapter entry can never
   be taken as a transition.
-
-Count rule, per audit entry (any decision, any worker key, any assignment):
-
-| Entry | Counts |
-| --- | --- |
-| `ROLE_TIMEOUT_RETRY`, `retry_phase` `TRANSITION`, no `authorization_id` | 1 |
-| `ROLE_TIMEOUT_RETRY`, `retry_phase` `ADAPTER` | 0 |
-| `ROLE_TIMEOUT_RETRY`, any other shape (phase missing or unknown, or `TRANSITION` with `authorization_id`) | 1 |
-| `TIMEOUT_CONTINUATION` without `authorization_id` (Codex transition entry) | 1 |
-| `TIMEOUT_CONTINUATION` with `authorization_id` (adapter entry) | 0 |
-| any other action | 0 |
-
-Why each row:
-
-- A transition entry is the logical attempt. It counts once whatever its
-  decision, so a BLOCKED transition still uses budget, as the Codex check
-  does today (any decision, lines 739-742). This keeps the intended
-  fail-closed treatment of blocked attempts: a gate refusal (for example a
-  PAUSED race inside the authoritative re-check) is not free to repeat.
-- An adapter entry is the second half of an attempt whose transition entry
-  already counted, or a refused launch with no transition at all (for
-  example `WORKER_DISPATCH_TRANSITION_NOT_FOUND`, line 424). In both cases
-  no new attempt is made, so it counts 0, allowed or blocked.
-- A shape that cannot be classified counts as one, never zero, in line with
-  the rule that an unknown count counts as used (`_used`, repair_policy.py
-  lines 67-69).
 - For `TIMEOUT_CONTINUATION`, no new field is added; the existing
-  `authorization_id` split is used. Whether the Codex adapter calls
-  `authorize_dispatch` with action `TIMEOUT_CONTINUATION` is UNVERIFIED
-  (the adapter was not read). If it does, today's Codex check has the same
-  double count and the helper fixes it; if it does not, the Codex count is
-  unchanged for a Task with no role retry. An adapter entry that found no
-  transition has no `authorization_id` (lines 417-418, 328-333) and so
-  counts 1 for this action: an over-count, which fails closed.
+  `authorization_id` split marks the adapter entry. Whether the Codex adapter
+  calls `authorize_dispatch` with action `TIMEOUT_CONTINUATION` is
+  UNVERIFIED (the adapter was not read). If it does, today's Codex check has
+  the same double count and the shared count fixes it.
 
-Result: with limit N (0 to 3, repair_policy.py line 21), exactly N retries
-are allowed per Task record, each leaving two entries, and the next timeout
-stops.
+Result: with limit N (0 to 3, repair_policy.py line 21), exactly N clean
+retries are allowed per Task record, each leaving two entries, and the next
+timeout stops. Abnormal launches can use budget earlier (section 3.5,
+fail-closed cost); they never give extra retries.
+
+Other gate rules:
+
 - `RECOVERY` (lines 776-792) refuses a record whose `error_code` is a role
   timeout code, with `WORKER_ROLE_TIMEOUT_NOT_RECOVERY`, so a timeout cannot
   get a second budget through recovery.
@@ -364,6 +353,200 @@ Any change, any mismatch, any missing field or any failed read is
 gw-agent run that applied some `apply_edit` calls and a Claude run that
 committed before the time limit.
 
+### 3.5 Monotone attempt count
+
+Amendment 1, PM decision c6902895888. This section replaces the per-entry
+count rule that PR 1a implemented (role_timeout.py `_entry_count`, lines
+99-115 at source 70f9754a2f723b00297210968714e3b46cec5750). The helper keeps
+its name, `role_timeout.count_timeout_attempts(entries)`, its input contract
+(a list or tuple, else `ROLE_TIMEOUT_AUDIT_INVALID`), and stays pure: no
+I/O, input not modified, and no import of worker_dispatch, task_store or
+task_advance.
+
+#### Invariant
+
+Adding, duplicating or altering any audit entry can never lower the logical
+attempt count of a Task record.
+
+Two parts hold the invariant together, and PR 1b delivers both:
+
+1. The count is monotone. It never falls when any entry is added at any
+   position, when any entry is duplicated, or when any entry is altered so
+   that it no longer carries a valid identity (a field removed, emptied,
+   retyped or malformed, or the action name changed to anything other than
+   an exact known name). Proof below; property tests in section 6.
+2. The store is append-only. The real TaskStore refuses every write that
+   alters, reorders, trims or removes an existing audit entry. This part is
+   needed because one kind of alteration cannot be caught by any count in
+   which a real retry counts once: rewriting one well-formed entry into
+   another well-formed entry, for example a lone transition entry rewritten
+   into the missing adapter half of another transition, or a timeout entry
+   rewritten into an exact unrelated action. The rewritten entry has exactly
+   the fields a real write would have, so the count cannot tell it apart; the
+   store must refuse the rewrite instead.
+
+#### Findings closed
+
+The PR 1a rule let an entry count 0 in four ways, so adding or altering an
+entry could lower the count:
+
+1. Unvalidated adapters. A `ROLE_TIMEOUT_RETRY` entry with `retry_phase`
+   `ADAPTER` counted 0 (role_timeout.py line 110) with no check that it had
+   an `authorization_id`, that a transition with that identity existed
+   earlier, or that its worker key, action and binding matched. Setting the
+   phase of one transition entry to `ADAPTER` removed one attempt.
+2. Missing adapter fields. A `TIMEOUT_CONTINUATION` entry counted 0 when it
+   had any non-empty str `authorization_id` (lines 94-96 and 114), with no
+   check of the 32-hex shape, `attempt_id`, `worker_key`, `decision` or the
+   three binding fields. An adapter-phase `ROLE_TIMEOUT_RETRY` entry counted
+   0 with all of them missing.
+3. Malformed action strings. Any `action` that was a str but not exactly one
+   of the two timeout names counted 0 (line 115), so a case change, padding,
+   a prefix or suffix, or an unknown name turned a counted entry into a free
+   one.
+4. Reused authorization_id. No identity was compared, so several adapter
+   entries carrying the same `authorization_id`, a Codex transition entry
+   given a copied `authorization_id`, or an `authorization_id` that names no
+   transition, each counted 0.
+
+#### Algorithm
+
+In words: attempts = the number of distinct authorization identities across
+`ROLE_TIMEOUT_RETRY` and `TIMEOUT_CONTINUATION` entries. A transition
+entry's identity is its `attempt_id`; an adapter entry's identity is its
+`authorization_id`, the `attempt_id` of the transition it claims. Any entry
+without a valid, unique, binding-matched identity counts as its own attempt.
+An adapter entry is never counted zero on its own: it adds nothing only when
+it completes the exact transition/adapter pair of an identity that its
+transition already counts. Unknown actions, including timeout-like names, and
+malformed entries count. Exact unrelated valid actions count zero.
+
+Precisely, in four steps.
+
+Step 1, class of each entry:
+
+- UNRELATED: a mapping whose `action` is a str exactly equal to one of
+  `DISPATCH`, `RETRY`, `REASSIGN`, `RECOVERY`, `REPAIR`, `REVIEWER_HANDOFF`,
+  `REVIEWER_RETRY` or `COMMITTED_RESULT_CARRY`: the worker_dispatch.py
+  `AUDIT_ACTIONS` (lines 49-53) without the two timeout actions. Counts 0.
+  No other field of the entry is read, and the entry takes no part in steps
+  2 and 3. role_timeout.py keeps its own frozen copy of this set, so it does
+  not import worker_dispatch; a test checks that the copy equals
+  `AUDIT_ACTIONS` minus `ROLE_TIMEOUT_RETRY` and `TIMEOUT_CONTINUATION`. A
+  new action added to `AUDIT_ACTIONS` without updating the copy counts 1
+  (fails closed) and fails that test.
+- TIMEOUT: a mapping whose `action` is exactly `ROLE_TIMEOUT_RETRY` or
+  `TIMEOUT_CONTINUATION`. Go to step 2.
+- OTHER: everything else. That is: not a mapping; `action` missing; `action`
+  not of type exactly str (a str subclass included, as in PR 1a); or a str
+  that is not exactly one of the names above. This covers timeout-like names
+  (lower case, leading or trailing space or newline, a prefix or suffix such
+  as `X_TIMEOUT_CONTINUATION`, or `TIMEOUT_RETRY`) and every other unknown
+  name. Counts 1. Every unknown name counts, not only timeout-like ones,
+  because "timeout-like" would be a pattern and a pattern can be missed. The
+  cost is an over-count only for names no writer produces: `audit_entry`
+  refuses any action outside `AUDIT_ACTIONS` (lines 307-308).
+
+Step 2, shape of each TIMEOUT entry. Common fields, all required:
+`attempt_id` and `assignment_id` 32 hex, `source_sha` 40 hex,
+`contract_digest` 64 hex, `worker_key` a non-empty str, and `decision`
+exactly `ALLOWED` or `BLOCKED`. "n hex" means type exactly str and a full
+match of `[0-9a-f]{n}`, the shapes `audit_entry` writes (lines 309-333).
+
+- TRANSITION: common fields valid; no `authorization_id` key; `retry_phase`
+  exactly `TRANSITION` for `ROLE_TIMEOUT_RETRY`, or no `retry_phase` key for
+  `TIMEOUT_CONTINUATION`. Identity: its `attempt_id`.
+- ADAPTER: common fields valid; `authorization_id` 32 hex and not equal to
+  the entry's own `attempt_id`; `retry_phase` exactly `ADAPTER` for
+  `ROLE_TIMEOUT_RETRY`, or no `retry_phase` key for `TIMEOUT_CONTINUATION`.
+  Identity: its `authorization_id`.
+- Any other TIMEOUT entry has no valid identity: a missing or malformed
+  field, an unknown phase, a phase that disagrees with the presence of
+  `authorization_id` (for example `TRANSITION` with `authorization_id`, or
+  `ADAPTER` without it), or any `retry_phase` on `TIMEOUT_CONTINUATION`. It
+  is treated as OTHER and counts 1.
+
+Step 3, completed identities. Identity `a` is completed when the audit holds
+both:
+
+- a qualifying transition: a TRANSITION entry with `attempt_id` `a` and
+  `decision` `ALLOWED`; and
+- a later ADAPTER entry (any decision) with `authorization_id` `a`, the same
+  `action`, the same `worker_key` (exact string, no alias mapping) and the
+  same `assignment_id`, `source_sha` and `contract_digest` as that
+  transition. "Later" means a higher index in the audit list; both writers
+  only append (lines 806 and 437-441).
+
+Step 4, count:
+
+    attempts = (number of TIMEOUT and OTHER entries)
+               - (number of completed identities)
+
+Read per entry: every TRANSITION, ADAPTER and OTHER entry counts 1, except
+that for each completed identity exactly one adapter entry counts 0. Unique
+identity therefore means: two transition entries never share one attempt
+(each counts 1, even with the same `attempt_id`), and an identity is
+completed at most once, so every further adapter entry for that identity
+counts 1. Which of several matching adapters is the free one does not change
+the number. The count is between 0 and the audit length, so at most
+`MAX_AUDIT_ENTRIES` (line 21).
+
+Writer outputs and their count (one Task record):
+
+| Entries written | Count |
+| --- | --- |
+| ALLOWED transition and its ALLOWED adapter (one full retry) | 1 |
+| BLOCKED transition (gate refusal) | 1 |
+| ALLOWED transition whose adapter never wrote | 1 |
+| ALLOWED transition and its adapter BLOCKED with `authorization_id` (for example `OWNER_PAUSED` from `evaluate` at line 419; the `authorization_id` is still written, lines 417-418 and 434-435) | 1 |
+| a further adapter for an identity already completed (`WORKER_DISPATCH_AUTHORIZATION_CONSUMED`, or a relaunch after that pause) | +1 each |
+| adapter with no transition found, so no `authorization_id` (`WORKER_DISPATCH_TRANSITION_NOT_FOUND`, line 424) | +1 each |
+
+Fail-closed cost: the last two rows counted 0 under the PR 1a rule and now
+count 1. A blocked or repeated adapter launch therefore uses budget. That is
+the price of "never zero on its own", and it errs to the safe side: the next
+timeout stops with `ROLE_TIMEOUT_LIMIT` and the PM decides.
+
+#### Proof of part 1
+
+Let N be the number of TIMEOUT and OTHER entries and P the number of
+completed identities, so the count is N - P. Each completed identity uses its
+own adapter entry, so P is at most the number of adapter entries and the
+count is never negative.
+
+- Adding one entry e at any position keeps the order of all other entries.
+  If e is UNRELATED nothing changes, because steps 2 and 3 read only TIMEOUT
+  entries. Otherwise N rises by 1. P rises by at most 1, because e carries at
+  most one identity and can complete only that one. P loses nothing, because
+  completion needs only that some entries exist in some order, and they all
+  still do. So the count does not fall. Duplication is adding a copy.
+- Removing one entry lowers N by at most 1 and never raises P, so it lowers
+  the count by at most 1.
+- Altering one entry is removing it and adding the result at the same
+  position. If the original was UNRELATED, the removal changes nothing and
+  the count does not fall. If the result is OTHER (no valid identity), it
+  adds exactly 1 and completes nothing, so the total change is 0 or +1. The
+  count can fall only when a counted entry becomes a well-formed entry that
+  adds nothing: an exact unrelated action, or an adapter or transition that
+  completes a pair. That is the rewrite that part 2 refuses in the store.
+
+#### Part 2: append-only audit in the TaskStore
+
+PR 1b makes the real TaskStore (`task_store.py`, not read for this design,
+UNVERIFIED) refuse, with one fixed code, any write whose `dispatch_audit` is
+not the stored audit unchanged followed by zero or more new entries. The rule
+covers every write path, including `append_dispatch_audit` (called at
+worker_dispatch.py lines 437-441) and the store write that carries the
+entries from `authorize_task_store_change` (line 806). A full audit
+(`MAX_AUDIT_ENTRIES`, line 21; lines 694-695) is refused, never trimmed.
+
+If the store already enforces this, PR 1b keeps the existing code and only
+adds the tests. Before adding it, PR 1b confirms that no existing writer
+rewrites, reorders, trims or drops earlier audit entries. The retired worker
+id is read through `stored_worker_id` (lines 28-43), which suggests no
+migration rewrites entries, but that is UNVERIFIED. If a writer does, PR 1b
+stops and returns BLOCKED; it does not change that writer.
+
 ## 4. Interaction with existing caps
 
 - D1 repairs: the retry is not a `REPAIR` audit action, does not call
@@ -385,9 +568,10 @@ committed before the time limit.
   `authorize_task_store_change` and `authorize_dispatch` still runs, so a
   race where the switch changes in between still refuses.
 - Audit size: a retry adds two entries (transition and adapter) but counts
-  as one logical attempt (section 3.3). The cap of 3 adds at most six
-  entries, far below `MAX_AUDIT_ENTRIES` (line 21); the existing limit check
-  (lines 694-695) still applies.
+  as one logical attempt (section 3.5). The cap of 3 adds at most six
+  entries for clean retries, far below `MAX_AUDIT_ENTRIES` (line 21); the
+  existing limit check (lines 694-695) still applies, and a full audit is
+  refused, never trimmed (section 3.5, part 2).
 - The GitHub quota stop (task_drive.py lines 29-44) and the code-tree stop
   (lines 86-102) are unchanged.
 
@@ -412,6 +596,11 @@ Dispatch gate refusals:
 - `WORKER_ROLE_TIMEOUT_RETRY_LIMIT`
 - `WORKER_ROLE_TIMEOUT_NOT_RECOVERY`
 
+TaskStore refusal (section 3.5, part 2):
+
+- `TASK_STORE_AUDIT_NOT_APPEND_ONLY` (proposed name; if the store already
+  refuses audit rewrites under another fixed code, that code is kept)
+
 Existing codes passed through unchanged: `OWNER_PAUSED`,
 `OWNER_ASSIGNMENT_REQUIRED`, `WORKER_POLICY_*`, the #2148 quota code
 (UNVERIFIED name), `GITHUB_QUOTA_LOW`, `LLMTOOL_SOURCE_CHANGED`,
@@ -424,20 +613,130 @@ password-, API-key-, token- or other credential-shaped strings. Policy,
 quota gate, D6 check, `evaluate` and advance are injected or monkeypatched;
 no test disables or weakens a production check.
 
-Attempt count (`role_timeout.count_timeout_attempts`, `audit_entry`):
+Attempt count (`role_timeout.count_timeout_attempts`, section 3.5;
+`audit_entry`):
 
-1. One full retry (an ALLOWED `TRANSITION` entry and its ALLOWED `ADAPTER`
-   entry) counts 1, not 2.
-2. A BLOCKED `TRANSITION` entry counts 1. A BLOCKED `ADAPTER` entry counts 0,
-   for each of `WORKER_DISPATCH_AUTHORIZATION_CONSUMED`,
-   `WORKER_DISPATCH_TRANSITION_NOT_FOUND` and `OWNER_PAUSED`.
-3. A `ROLE_TIMEOUT_RETRY` entry with no `retry_phase`, an unknown
-   `retry_phase`, or `TRANSITION` together with `authorization_id` counts 1.
-4. A `TIMEOUT_CONTINUATION` entry without `authorization_id` counts 1, one
-   with `authorization_id` counts 0; entries with any other action count 0.
+1. One full retry (an ALLOWED transition entry and its ALLOWED adapter
+   entry) counts 1, not 2, for both timeout actions; k full retries count k
+   for k = 0 to 3.
+2. A BLOCKED transition counts 1. An adapter BLOCKED `OWNER_PAUSED` after
+   its ALLOWED transition completes the pair (total 1). A
+   `WORKER_DISPATCH_AUTHORIZATION_CONSUMED` adapter and a
+   `WORKER_DISPATCH_TRANSITION_NOT_FOUND` adapter (no `authorization_id`)
+   each add 1.
+3. Shape: a `ROLE_TIMEOUT_RETRY` entry with no `retry_phase`, an unknown
+   `retry_phase`, `TRANSITION` with `authorization_id`, or `ADAPTER` without
+   it counts 1; a `TIMEOUT_CONTINUATION` entry with any `retry_phase` counts
+   1; an adapter whose `authorization_id` equals its own `attempt_id` counts
+   1.
+4. Pairing: an adapter completes a pair only with an earlier ALLOWED
+   transition of the same action, worker key and binding. An adapter before
+   its transition, after a BLOCKED transition, or with another action,
+   worker key (a retired alias included) or any one binding value counts 1.
+   Each of the eight exact unrelated actions counts 0 whatever its other
+   fields. The role_timeout copy of the unrelated set equals
+   `AUDIT_ACTIONS` minus `ROLE_TIMEOUT_RETRY` and `TIMEOUT_CONTINUATION`.
 5. `audit_entry` refuses `WORKER_DISPATCH_ACTION_INVALID` for
    `ROLE_TIMEOUT_RETRY` without `retry_phase`, for an unknown `retry_phase`
    value, and for `retry_phase` on any other action.
+
+Monotone count, property tests (section 3.5, part 1). The generator is the
+stdlib `random.Random` with fixed seeds and a fixed number of cases per seed,
+so every run checks the same cases and needs no new dependency (whether a
+property-test library is installed is UNVERIFIED and not needed). All ids,
+SHAs and digests are hex values the seeded generator makes at run time; the
+only literal strings are action names, phases, decisions and route worker
+keys. Audits hold 0 to 20 entries drawn from a mix of: well-formed
+transitions (both actions, both decisions); adapters naming an earlier
+transition, a later one, a BLOCKED one, a random id or their own
+`attempt_id`; repeated adapters for one identity; entries with each field
+missing or malformed; mangled action strings; non-mapping entries; and exact
+unrelated actions.
+
+P1. Addition: for every audit S and every candidate entry e, inserting e at
+    every position, the end included, gives a count >= count(S). In
+    particular count(S + [e]) >= count(S).
+P2. Duplication: copying any entry of S to any position never lowers the
+    count.
+P3. Field mutation: for every entry of S and every mutation in a fixed list,
+    the count never falls. The list: delete any key; set any field to None,
+    an int, an empty str or a list; make a hex value upper case, one
+    character shorter or longer, or non-hex; change the action's case, pad
+    it with a space or newline, add a prefix or suffix, or replace it with a
+    timeout-like unknown name; set an unknown `retry_phase`; set
+    `authorization_id` to the entry's own `attempt_id`; set `decision` to an
+    unknown value. Also: altering an exact unrelated entry into any
+    candidate entry never lowers the count. Scope, as in section 3.5 part 1:
+    the assertion covers every mutation whose result has no valid identity,
+    and every mutation that changes only fields the count does not read
+    (for example `reason_code`, `policy_sha256`, `at`). The test classifies
+    each result with the step 1 and step 2 rules before it asserts. A
+    mutation that turns an entry into a well-formed entry of
+    another class or identity (for example deleting a stray `retry_phase`
+    from a malformed `TIMEOUT_CONTINUATION` adapter, or deleting the
+    `authorization_id` of a `TIMEOUT_CONTINUATION` adapter, which leaves a
+    well-formed transition) is a rewrite: it is excluded here and refused by
+    the store (S2).
+P4. Exactness: for audits built only from simulated writer sequences (full
+    retries, BLOCKED transitions, PAUSED, CONSUMED and NOT_FOUND adapters,
+    transitions whose adapter never wrote), the count equals the table in
+    section 3.5.
+P5. Bounds: the count is between 0 and the audit length; an audit of only
+    unrelated entries counts 0; the input is not modified.
+
+Regressions for the four findings (section 3.5), each at limit 2 and at
+limit 3 (call the limit L). Each runs in two forms, and each asserts both the
+count and the gate: the next `ROLE_TIMEOUT_RETRY` transition is refused
+`WORKER_ROLE_TIMEOUT_RETRY_LIMIT` (and a `TIMEOUT_CONTINUATION` transition
+`WORKER_TIMEOUT_CONTINUATION_LIMIT`), with the policy limit injected.
+
+- Added form: L - 1 full genuine retries plus the finding's entry. Positive
+  control: the L - 1 retries alone count L - 1 and the next transition is
+  allowed. With the finding's entry the count is at least L and the next
+  transition is refused.
+- Altered form: L full genuine retries with one entry altered as the finding
+  describes. The count stays at least L and the next transition is refused.
+  Under the PR 1a rule both forms gave L - 1 and allowed one more retry.
+
+R1. Unvalidated adapters. Added: an `ADAPTER`-phase entry with no
+    `authorization_id`; an adapter naming no transition, a BLOCKED
+    transition, a later transition, or a transition of another worker key,
+    action or binding. Altered: one transition's `retry_phase` set to
+    `ADAPTER`.
+R2. Missing adapter fields. Added: an adapter of each timeout action with,
+    in turn, `authorization_id`, `attempt_id`, `worker_key`, `decision`,
+    `assignment_id`, `source_sha` and `contract_digest` missing or malformed.
+    Altered: a genuine adapter with each of those fields removed in turn.
+R3. Malformed action strings. Added: an entry whose action is lower case,
+    padded with a space or newline, prefixed, suffixed, a timeout-like
+    unknown name, not a str, or missing. Altered: one transition's action
+    changed in each of those ways. Negative control: an added exact `RETRY`,
+    `REVIEWER_RETRY` or `DISPATCH` entry leaves the count at L - 1 and the
+    next transition allowed.
+R4. Reused authorization_id. Added: a second adapter (ALLOWED and BLOCKED)
+    reusing the `authorization_id` of the first retry; an adapter whose
+    `authorization_id` equals its own `attempt_id`. Altered: a Codex
+    transition given the `authorization_id` of a completed pair; a
+    `ROLE_TIMEOUT_RETRY` transition given one while keeping phase
+    `TRANSITION`.
+
+TaskStore persistence (section 3.5, part 2), through the real TaskStore in a
+temporary directory. The store is not mocked; only policy, `evaluate`, the
+quota gate and the D6 check are injected.
+
+S1. Two full role retries are written through the store's real transition
+    path and `authorize_dispatch` (`append_dispatch_audit`). A new store
+    instance on the same files reads the record back: count 2. At limit 2
+    the third transition is refused `WORKER_ROLE_TIMEOUT_RETRY_LIMIT`, its
+    BLOCKED entry is persisted, and the count then reads 3.
+S2. The store refuses, with its fixed code (section 5), a write that
+    changes any field of an existing audit entry (including a lone
+    transition rewritten into another transition's adapter half, and a
+    timeout entry rewritten into `DISPATCH`), reorders entries, removes an
+    entry or trims the audit. The stored record is unchanged afterwards. A
+    write that keeps the stored audit as its prefix and appends is accepted.
+S3. Restart: a new store instance on the same path gives the same count and
+    the same refusal; no attempt counter lives outside the stored audit.
 
 Classifier (`role_timeout.classify`):
 
@@ -483,11 +782,14 @@ Dispatch gate (`worker_dispatch`):
     `WORKER_ROLE_TIMEOUT_NOT_RECOVERY`.
 22. `authorize_dispatch(action='ROLE_TIMEOUT_RETRY')` passes once, writes
     `retry_phase` `ADAPTER` with the transition's `authorization_id`, and
-    then refuses `WORKER_DISPATCH_AUTHORIZATION_CONSUMED`.
+    then refuses `WORKER_DISPATCH_AUTHORIZATION_CONSUMED`; that refused
+    entry adds 1 to the count.
 23. A hand-built ALLOWED `ROLE_TIMEOUT_RETRY` entry with `retry_phase`
     `ADAPTER` and no `authorization_id` is never returned by
     `_latest_transition_authorization`, so it cannot authorize a launch.
-24. Existing Codex continuation tests still pass unchanged.
+24. Existing Codex continuation tests still pass unchanged. If one fails
+    only because the new count counts a hand-built entry that the old check
+    did not, PR 1b stops and reports it; it does not edit that test to pass.
 
 Advance:
 
@@ -523,24 +825,40 @@ Drive:
 
 ## 7. PR split
 
-Three small PRs, in order. Each is reviewed and merged before the next.
+Four small PRs, in order. Each is reviewed and merged before the next.
 
-PR 1: classifier and dispatch gate (not wired).
-- `tools/llmtool/llmtool/role_timeout.py` (new): route code table,
-  `count_timeout_attempts` and `classify`, pure.
-- `tools/llmtool/llmtool/worker_dispatch.py`: `ROLE_TIMEOUT_RETRY` action,
-  the `retry_phase` keyword in `audit_entry`, the phase in
+PR 1a (delivered): pure classifier and attempt count, not wired.
+- `tools/llmtool/llmtool/role_timeout.py` (new): the confirmed route code
+  table, `classify(route, error_code)` and `count_timeout_attempts` under the
+  per-entry rule that section 3.5 now supersedes. Merged as #2178.
+
+PR 1b: monotone count, dispatch gate and append-only audit (not wired to
+advance or drive).
+- `tools/llmtool/llmtool/role_timeout.py`: replace `_entry_count` and the
+  body of `count_timeout_attempts` with the section 3.5 algorithm. Same
+  name, same input contract, same `ROLE_TIMEOUT_AUDIT_INVALID` refusal. Add
+  the frozen set of unrelated action names. The module stays pure, with no
+  import of worker_dispatch, task_store or task_advance.
+- `tools/llmtool/llmtool/worker_dispatch.py`: the `ROLE_TIMEOUT_RETRY`
+  action, the `retry_phase` keyword in `audit_entry`, the phase in
   `authorize_task_store_change` and `authorize_dispatch`, the phase check in
   `_latest_transition_authorization`, the `task_store_attempts` branch, the
-  checks and the shared logical count (also used by the Codex check), the
-  `RECOVERY` refusal.
-- The TaskStore module only if it validates audit entry keys and refuses
-  `retry_phase` (UNVERIFIED; name it in the PR if touched).
-- Tests: new count, classifier and dispatch-gate test files under
-  `tools/llmtool/tests/` (exact names follow the existing convention,
-  UNVERIFIED). Tests 1-24.
-- Before coding, confirm the four route timeout code strings and the
-  execution fields from the adapters; record them in this doc.
+  checks of section 3.3, the shared count from
+  `role_timeout.count_timeout_attempts` (it also replaces the per-worker
+  count of the Codex check at lines 739-742), the refusal when the count
+  cannot be computed, and the `RECOVERY` refusal.
+- `tools/llmtool/llmtool/task_store.py` (path UNVERIFIED, not read for this
+  design): the append-only audit rule of section 3.5 part 2, on every write
+  path, with its fixed code (section 5), unless the store already enforces
+  it; and acceptance of the `retry_phase` key if the store validates audit
+  entry keys.
+- Tests: new count, property, regression, dispatch-gate and TaskStore test
+  files under `tools/llmtool/tests/` (exact names follow the existing
+  convention, UNVERIFIED). Tests 1-24, P1-P5, R1-R4 and S1-S3.
+- Stop and return BLOCKED, rather than work around it, if an existing writer
+  rewrites, reorders, trims or drops earlier audit entries, or if an
+  existing test fails only because the new count counts a hand-built entry
+  that the old rule did not (test 24).
 
 PR 2: advance step.
 - `tools/llmtool/llmtool/task_advance.py` (path from the import at
@@ -559,8 +877,14 @@ PR 3: drive wiring.
 
 ## 8. Open points
 
-- Exact timeout code strings and execution fields per route (UNVERIFIED,
-  PR 1 confirms before code).
+- Timeout code strings: PR 1a confirmed them from the route adapters
+  (role_timeout.py lines 7-38). The `claude` and `gw-agent` route names
+  behind them stay UNVERIFIED until the PR that wires the module reads those
+  adapters (role_timeout.py lines 26-32). The execution fields per route stay
+  UNVERIFIED.
+- Whether the TaskStore already refuses audit rewrites, and whether any
+  existing writer rewrites, trims or drops audit entries (UNVERIFIED, PR 1b
+  confirms; section 3.5 part 2).
 - Location and code of the #2148 worker quota gate and of the D4 notice
   path (UNVERIFIED, PR 2 confirms).
 - Whether the current `policy.json` sets `timeout_continuation_max`
