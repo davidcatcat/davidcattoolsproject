@@ -36,7 +36,8 @@ MAX_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS
 TIMEOUT_KEYS = frozenset({'default_timeout', 'max_timeout'})
 DEFAULT_MAX_DIFF_BYTES = 64 * 1024
 MIN_MAX_DIFF_BYTES = 1024
-HARD_MAX_DIFF_BYTES = 16 * 1024 * 1024
+# #1815: the TaskStore artifact limit (task_store.MAX_ARTIFACT_BYTES).
+HARD_MAX_DIFF_BYTES = 512 * 1024
 ROUTE_LIMIT_KEYS = TIMEOUT_KEYS | {'max_diff_bytes'}
 
 

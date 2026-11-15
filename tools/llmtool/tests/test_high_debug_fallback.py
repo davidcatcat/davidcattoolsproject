@@ -16,9 +16,16 @@ def refusal(code):
 
 class _Store:
     def __init__(self):
-        self.entries, self.events = [], []
+        self.entries, self.events, self.served = [], [], set()
+
+    def task_ids(self):
+        return sorted(self.served)
+
+    def finalize_high_debug(self, _task_id, index, entry):
+        self.entries[index] = entry
 
     def get(self, task_id):
+        self.served.add(task_id)
         return {'task_id': task_id, 'run_id': 'b' * 32,
                 'review_repair_claims': [{'family': 'family', 'pr': 17}] * 2,
                 'completion': {'executor_task_id': 'executor',
