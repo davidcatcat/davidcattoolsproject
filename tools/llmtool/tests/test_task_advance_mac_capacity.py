@@ -7,6 +7,7 @@ from llmtool import task_advance
 HEAD = 'a' * 40
 WORKFLOW_RUN_ID = 101
 JOB_ID = 202
+NUMBER = 17
 DETAILS_URL = f'https://example.test/actions/runs/{WORKFLOW_RUN_ID}/job/{JOB_ID}'
 MAC_CHECK = 'check (macOS 3.13)'
 
@@ -34,18 +35,44 @@ def _make_run(run_id=1, name=MAC_CHECK, conclusion='failure', details_url=DETAIL
     return run
 
 
-def _make_job(name, conclusion='success', steps=None, head=HEAD):
+def _make_job(name, conclusion='success', steps=None, head=HEAD, job_id=JOB_ID):
     job = {
         'name': name,
         'conclusion': conclusion,
         'head_sha': head,
     }
+    if job_id is not None:
+        job['id'] = job_id
     if steps is not None:
         job['steps'] = steps
     return job
 
 
-def _call_route(run, github_get, repair_calls):
+def _make_fake_github_get(jobs_payload, files=None, workflow_run=None, number=NUMBER):
+    if files is None:
+        files = [{'filename': 'tools/llmtool/llmtool/task_advance.py'}]
+    if workflow_run is None:
+        workflow_run = {'head_sha': HEAD, 'path': '.github/workflows/llmtool-mac-ci.yml'}
+
+    def fake_github_get(path):
+        if path == f'pulls/{number}/files?per_page=100':
+            if isinstance(files, Exception):
+                raise files
+            return files
+        if path == f'actions/runs/{WORKFLOW_RUN_ID}':
+            if isinstance(workflow_run, Exception):
+                raise workflow_run
+            return workflow_run
+        if path == f'actions/runs/{WORKFLOW_RUN_ID}/jobs?per_page=100':
+            if isinstance(jobs_payload, Exception):
+                raise jobs_payload
+            return jobs_payload
+        raise AssertionError(f'Unexpected github_get path: {path}')
+
+    return fake_github_get
+
+
+def _call_route(run, github_get, repair_calls, number=NUMBER):
     record = {
         'task_id': '1' * 32,
         'run_id': '2' * 32,
@@ -59,7 +86,7 @@ def _call_route(run, github_get, repair_calls):
         record=record,
         task_id=record['task_id'],
         executor_task='exec-1',
-        number=17,
+        number=number,
         d6=d6,
         related=related,
         run=run,
@@ -83,13 +110,10 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
             mac_job,
         ]
         payload = {'total_count': len(jobs), 'jobs': jobs}
-
-        def fake_github_get(path):
-            self.assertEqual(path, f'actions/runs/{WORKFLOW_RUN_ID}/jobs?per_page=100')
-            return payload
+        fake_github_get = _make_fake_github_get(payload)
 
         # Direct call to _mac_capacity_cancel
-        direct_result = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get)
+        direct_result = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
         self.assertIsNotNone(direct_result)
         step, codes, evidence = direct_result
         self.assertEqual(step, 'WAITING_ENV')
@@ -112,7 +136,7 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
             mac_job,
         ]
         payload = {'total_count': len(jobs), 'jobs': jobs}
-        fake_github_get = lambda _path: payload
+        fake_github_get = _make_fake_github_get(payload)
 
         repair_calls = []
         route_result = _call_route(run, fake_github_get, repair_calls)
@@ -135,7 +159,7 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
             mac_job,
         ]
         payload = {'total_count': len(jobs), 'jobs': jobs}
-        fake_github_get = lambda _path: payload
+        fake_github_get = _make_fake_github_get(payload)
 
         repair_calls = []
         route_result = _call_route(run, fake_github_get, repair_calls)
@@ -157,9 +181,9 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
             mac_job,
         ]
         payload = {'total_count': len(jobs), 'jobs': jobs}
-        fake_github_get = lambda _path: payload
+        fake_github_get = _make_fake_github_get(payload)
 
-        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get)
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
         self.assertIsNone(direct)
 
         repair_calls = []
@@ -179,9 +203,9 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
             mac_job,
         ]
         payload = {'total_count': len(jobs), 'jobs': jobs}
-        fake_github_get = lambda _path: payload
+        fake_github_get = _make_fake_github_get(payload)
 
-        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get)
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
         self.assertIsNone(direct)
 
         repair_calls = []
@@ -201,9 +225,9 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
             mac_job,
         ]
         payload = {'total_count': len(jobs), 'jobs': jobs}
-        fake_github_get = lambda _path: payload
+        fake_github_get = _make_fake_github_get(payload)
 
-        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get)
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
         self.assertIsNone(direct)
 
         repair_calls = []
@@ -221,9 +245,9 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
             mac_job,
         ]
         payload = {'total_count': len(jobs), 'jobs': jobs}
-        fake_github_get = lambda _path: payload
+        fake_github_get = _make_fake_github_get(payload)
 
-        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get)
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
         self.assertIsNone(direct)
 
         repair_calls = []
@@ -241,9 +265,9 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
             mac_job,
         ]
         payload = {'total_count': len(jobs), 'jobs': jobs}
-        fake_github_get = lambda _path: payload
+        fake_github_get = _make_fake_github_get(payload)
 
-        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get)
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
         self.assertIsNone(direct)
 
         repair_calls = []
@@ -261,9 +285,9 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
             mac_job,
         ]
         payload = {'total_count': len(jobs), 'jobs': jobs}
-        fake_github_get = lambda _path: payload
+        fake_github_get = _make_fake_github_get(payload)
 
-        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get)
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
         self.assertIsNone(direct)
 
         repair_calls = []
@@ -281,9 +305,9 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
             mac_job,
         ]
         payload = {'total_count': 99, 'jobs': jobs}
-        fake_github_get = lambda _path: payload
+        fake_github_get = _make_fake_github_get(payload)
 
-        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get)
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
         self.assertIsNone(direct)
 
         repair_calls = []
@@ -293,15 +317,13 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
 
     def test_none_jobs_read_error(self):
         run = _make_run()
+        fake_github_get = _make_fake_github_get(jobs_payload=RuntimeError('read failed'))
 
-        def error_github_get(_path):
-            raise RuntimeError('read failed')
-
-        direct = task_advance._mac_capacity_cancel(run, HEAD, error_github_get)
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
         self.assertIsNone(direct)
 
         repair_calls = []
-        route_result = _call_route(run, error_github_get, repair_calls)
+        route_result = _call_route(run, fake_github_get, repair_calls)
         self.assertEqual(len(repair_calls), 1)
         self.assertEqual(route_result[0], 'CI_FAILED')
 
@@ -309,7 +331,7 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
         run = _make_run(details_url=None)
         fake_github_get = lambda _path: {}
 
-        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get)
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
         self.assertIsNone(direct)
 
         repair_calls = []
@@ -321,7 +343,7 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
         run = _make_run(name='check (Linux 3.14)')
         fake_github_get = lambda _path: {}
 
-        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get)
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
         self.assertIsNone(direct)
 
         repair_calls = []
@@ -341,9 +363,9 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
             mac_job,
         ]
         payload = {'total_count': len(jobs), 'jobs': jobs}
-        fake_github_get = lambda _path: payload
+        fake_github_get = _make_fake_github_get(payload)
 
-        result = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get)
+        result = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
         self.assertIsNotNone(result)
         _step, _codes, evidence = result
 
@@ -371,6 +393,130 @@ class TestTaskAdvanceMacCapacity(unittest.TestCase):
                 for sub_key, sub_value in value.items():
                     self.assertNotIn('://', str(sub_key))
                     self.assertNotIn('://', str(sub_value))
+
+    def test_none_pr_changes_mac_workflow(self):
+        run = _make_run()
+        mac_job = _make_job(MAC_CHECK, conclusion='failure', steps=[
+            {'name': 'Shard results', 'conclusion': 'failure'},
+        ])
+        jobs = [
+            _make_job('select', conclusion='cancelled'),
+            mac_job,
+        ]
+        payload = {'total_count': len(jobs), 'jobs': jobs}
+        files = [{'filename': '.github/workflows/llmtool-mac-ci.yml'}]
+        fake_github_get = _make_fake_github_get(payload, files=files)
+
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
+        self.assertIsNone(direct)
+
+        repair_calls = []
+        route_result = _call_route(run, fake_github_get, repair_calls)
+        self.assertEqual(len(repair_calls), 1)
+        self.assertEqual(route_result[0], 'CI_FAILED')
+
+    def test_none_pr_renames_from_github_directory(self):
+        run = _make_run()
+        mac_job = _make_job(MAC_CHECK, conclusion='failure', steps=[
+            {'name': 'Shard results', 'conclusion': 'failure'},
+        ])
+        jobs = [
+            _make_job('select', conclusion='cancelled'),
+            mac_job,
+        ]
+        payload = {'total_count': len(jobs), 'jobs': jobs}
+        files = [{'filename': 'tools/moved.py', 'previous_filename': '.github/workflows/old.yml'}]
+        fake_github_get = _make_fake_github_get(payload, files=files)
+
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
+        self.assertIsNone(direct)
+
+        repair_calls = []
+        route_result = _call_route(run, fake_github_get, repair_calls)
+        self.assertEqual(len(repair_calls), 1)
+        self.assertEqual(route_result[0], 'CI_FAILED')
+
+    def test_none_pr_files_unreadable(self):
+        run = _make_run()
+        mac_job = _make_job(MAC_CHECK, conclusion='failure', steps=[
+            {'name': 'Shard results', 'conclusion': 'failure'},
+        ])
+        jobs = [
+            _make_job('select', conclusion='cancelled'),
+            mac_job,
+        ]
+        payload = {'total_count': len(jobs), 'jobs': jobs}
+        fake_github_get = _make_fake_github_get(payload, files=RuntimeError('files unreadable'))
+
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
+        self.assertIsNone(direct)
+
+        repair_calls = []
+        route_result = _call_route(run, fake_github_get, repair_calls)
+        self.assertEqual(len(repair_calls), 1)
+        self.assertEqual(route_result[0], 'CI_FAILED')
+
+    def test_none_workflow_run_path_differs(self):
+        run = _make_run()
+        mac_job = _make_job(MAC_CHECK, conclusion='failure', steps=[
+            {'name': 'Shard results', 'conclusion': 'failure'},
+        ])
+        jobs = [
+            _make_job('select', conclusion='cancelled'),
+            mac_job,
+        ]
+        payload = {'total_count': len(jobs), 'jobs': jobs}
+        workflow_run = {'head_sha': HEAD, 'path': '.github/workflows/other.yml'}
+        fake_github_get = _make_fake_github_get(payload, workflow_run=workflow_run)
+
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
+        self.assertIsNone(direct)
+
+        repair_calls = []
+        route_result = _call_route(run, fake_github_get, repair_calls)
+        self.assertEqual(len(repair_calls), 1)
+        self.assertEqual(route_result[0], 'CI_FAILED')
+
+    def test_none_workflow_run_head_sha_differs(self):
+        run = _make_run()
+        mac_job = _make_job(MAC_CHECK, conclusion='failure', steps=[
+            {'name': 'Shard results', 'conclusion': 'failure'},
+        ])
+        jobs = [
+            _make_job('select', conclusion='cancelled'),
+            mac_job,
+        ]
+        payload = {'total_count': len(jobs), 'jobs': jobs}
+        workflow_run = {'head_sha': 'b' * 40, 'path': '.github/workflows/llmtool-mac-ci.yml'}
+        fake_github_get = _make_fake_github_get(payload, workflow_run=workflow_run)
+
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
+        self.assertIsNone(direct)
+
+        repair_calls = []
+        route_result = _call_route(run, fake_github_get, repair_calls)
+        self.assertEqual(len(repair_calls), 1)
+        self.assertEqual(route_result[0], 'CI_FAILED')
+
+    def test_none_details_url_job_id_differs_from_check_job_id(self):
+        run = _make_run()
+        mac_job = _make_job(MAC_CHECK, conclusion='failure', steps=[
+            {'name': 'Shard results', 'conclusion': 'failure'},
+        ], job_id=999)
+        jobs = [
+            _make_job('select', conclusion='cancelled'),
+            mac_job,
+        ]
+        payload = {'total_count': len(jobs), 'jobs': jobs}
+        fake_github_get = _make_fake_github_get(payload)
+
+        direct = task_advance._mac_capacity_cancel(run, HEAD, fake_github_get, NUMBER)
+        self.assertIsNone(direct)
+
+        repair_calls = []
+        route_result = _call_route(run, fake_github_get, repair_calls)
+        self.assertEqual(len(repair_calls), 1)
+        self.assertEqual(route_result[0], 'CI_FAILED')
 
 
 if __name__ == '__main__':
