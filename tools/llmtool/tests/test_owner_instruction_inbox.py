@@ -674,6 +674,69 @@ class TransitionTests(InboxTestCase):
                 self.assertCode(NOT_FOUND, func, *args)
 
 
+class LiveCapRevokeTests(InboxTestCase):
+    """F1 (codex-reviewer v1): ACKED -> REVOKE_REQUESTED needs live room."""
+
+    def setUp(self):
+        super().setUp()
+        self.init()
+
+    def fill(self, count, start=2):
+        return [self.add(update_id=start + number, now=NOW)
+                for number in range(count)]
+
+    def test_acked_target_at_live_cap_is_full_without_change(self):
+        target = self.add(update_id=1, now=NOW)
+        oi.ack(self.path, target['code'], NOW)
+        live = self.fill(20)
+        before = self.read_doc()
+        self.assertNoWrite(self.assertCode, FULL, oi.revoke, self.path, 'ops',
+                           target['code'], NOW)
+        self.assertEqual(self.read_doc(), before)
+        self.assertEqual(len(oi.peek(self.path, NOW)), 20)
+        self.assertEqual(oi.status(self.path, 'ops', NOW, code=target['code']),
+                         [{'code': target['code'], 'state': ACKED}])
+        oi.ack(self.path, live[0]['code'], NOW)
+        self.assertEqual(oi.revoke(self.path, 'ops', target['code'], NOW),
+                         {'code': target['code'], 'state': REQUESTED})
+        doc = self.read_doc()
+        self.assertEqual([item['state'] for item in doc['entries']].count(
+            REQUESTED), 1)
+        self.assertEqual(oi.status(self.path, 'ops', NOW, code=target['code']),
+                         [{'code': target['code'], 'state': REQUESTED}])
+
+    def test_expired_live_entries_make_room_for_the_request(self):
+        target = self.add(update_id=1, now=NOW)
+        oi.ack(self.path, target['code'], NOW)
+        self.fill(20)
+        later = NOW + DAY
+        self.assertEqual(oi.revoke(self.path, 'ops', target['code'], later),
+                         {'code': target['code'], 'state': REQUESTED})
+        states = [item['state'] for item in self.read_doc()['entries']]
+        self.assertEqual(states.count(REQUESTED), 1)
+        self.assertEqual(states.count(EXPIRED), 20)
+
+    def test_lowering_revokes_work_at_cap_and_repeat_stays_inert(self):
+        entries = [self.add(update_id=number + 1, now=NOW)
+                   for number in range(20)]
+        self.assertEqual(oi.revoke(self.path, 'ops', entries[0]['code'], NOW),
+                         {'code': entries[0]['code'], 'state': REVOKED})
+        self.add(update_id=21, now=NOW)
+        oi.mark_seen(self.path, entries[1]['code'], NOW)
+        self.assertEqual(oi.revoke(self.path, 'ops', entries[1]['code'], NOW),
+                         {'code': entries[1]['code'], 'state': REVOKED})
+        self.add(update_id=22, now=NOW)
+        oi.ack(self.path, entries[2]['code'], NOW)
+        self.assertEqual(oi.revoke(self.path, 'ops', entries[2]['code'], NOW),
+                         {'code': entries[2]['code'], 'state': REQUESTED})
+        self.assertEqual(
+            self.assertNoWrite(oi.revoke, self.path, 'ops',
+                               entries[2]['code'], NOW),
+            {'code': entries[2]['code'], 'state': REQUESTED})
+        states = [item['state'] for item in self.read_doc()['entries']]
+        self.assertEqual(states.count(REQUESTED), 1)
+
+
 class ReadTests(InboxTestCase):
 
     def setUp(self):

@@ -563,6 +563,11 @@ def revoke(path, alias, code, now):
         if entry['state'] in (QUEUED, SEEN, EXPIRED):
             entry['state'] = REVOKED
         elif entry['state'] == ACKED:
+            # F1 (codex-reviewer v1): REVOKE_REQUESTED is live, so this branch
+            # may raise the live count by one; refuse before any mutation.
+            live = sum(1 for item in state['entries']
+                       if item['state'] in _LIVE)
+            _require(live < MAX_UNACKED, FULL)
             entry['state'] = REVOKE_REQUESTED
         else:
             return _result(code, entry)
