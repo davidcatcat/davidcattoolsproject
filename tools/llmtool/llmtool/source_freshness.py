@@ -6,6 +6,7 @@ AI can still set the override, edit the pin, or move the checkout, so this is
 an accident guard, not a security boundary.
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,7 @@ _ERROR_CODES = {
     'UNKNOWN': 'LLMTOOL_SOURCE_UNKNOWN',
 }
 _SHA = re.compile(r'[0-9a-f]{40}\Z')
+_JSON_BLOB = re.compile(r'^tools/llmtool/[^/]+\.json\Z')
 _PIN_FIELDS = {'schema_version', 'approved_sha', 'previous_sha', 'approved_at'}
 
 
@@ -120,6 +122,46 @@ def _fetch_origin_main(repo_root):
         except ProcessLookupError:
             pass
         process.communicate()
+
+
+def code_tree():
+    """#2027: digest of the llmtool package tree and rule JSON blobs at the checkout HEAD, or None."""
+    try:
+        package_file = Path(llmtool.__file__).resolve()
+        repo_root = package_file.parents[3]
+        proc = subprocess.run(
+            ['git', 'ls-tree', 'HEAD', 'tools/llmtool/'],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return None
+        stripped = proc.stdout.strip()
+        if _SHA.match(stripped):
+            return stripped
+        kept = []
+        has_package_tree = False
+        for line in proc.stdout.splitlines():
+            if not line or '\t' not in line:
+                continue
+            meta, path = line.split('\t', 1)
+            meta_parts = meta.split()
+            if len(meta_parts) < 2:
+                continue
+            obj_type = meta_parts[1]
+            if path == 'tools/llmtool/llmtool' and obj_type == 'tree':
+                kept.append(line)
+                has_package_tree = True
+            elif _JSON_BLOB.match(path) and obj_type == 'blob':
+                kept.append(line)
+        if not has_package_tree:
+            return None
+        return hashlib.sha256('\n'.join(sorted(kept)).encode()).hexdigest()
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
 
 
 def source_freshness():

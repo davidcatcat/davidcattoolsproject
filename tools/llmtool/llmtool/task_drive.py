@@ -3,6 +3,7 @@
 import time
 
 from . import github_quota
+from . import source_freshness
 from . import task_advance
 
 
@@ -45,7 +46,8 @@ def _quota_stop(task_id, read_quota, last_result, completed):
 
 def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
           advance_call=None, label_mac_ci_call=None,
-          quota_read=github_quota.read, sleep=None, **adapters):
+          quota_read=github_quota.read, sleep=None, code_tree_read=None,
+          **adapters):
     """Drive foreground steps; stop without polling if the initial Developer is unfinished."""
     if type(max_steps) is not int or max_steps < 1:
         raise ValueError('max_steps must be a positive integer')
@@ -56,6 +58,8 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
                     if label_mac_ci_call is None else label_mac_ci_call)
     read_quota = github_quota.read if quota_read is None else quota_read
     pause = time.sleep if sleep is None else sleep
+    read_tree = source_freshness.code_tree if code_tree_read is None else code_tree_read
+    start_tree = read_tree()
     max_pause = max(poll_seconds, _MAX_PAUSE_SECONDS)
     next_pause = poll_seconds
     # Keep an explicitly supplied PR authoritative for the whole drive. When
@@ -70,6 +74,15 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
     # Polls consume the bounded call budget so a permanently pending Task
     # cannot spin forever, but they do not count as completed workflow steps.
     while attempts < max_steps:
+        # #2027: a merge changed the llmtool code under this running drive; restart it.
+        if read_tree() != start_tree:
+            return {
+                'task_id': task_id,
+                'step': 'RESTART_REQUIRED',
+                'result': last_result.get('result') if type(last_result) is dict else None,
+                'codes': ['LLMTOOL_SOURCE_CHANGED'],
+                'steps': completed,
+            }
         if mac_ci_pending:
             advance_adapters = dict(adapters)
             advance_adapters['pr_number'] = pr_number
